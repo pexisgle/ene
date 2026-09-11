@@ -50,8 +50,6 @@ pub trait CredentialStore: Send + Sync {
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError>;
 
-    fn delete(&self, cred: &CredentialRef) -> Result<(), CredentialTechnicalError>;
-
     /// Existence is non-secret metadata.
     fn contains(&self, cred: &CredentialRef) -> bool;
 }
@@ -130,15 +128,6 @@ impl CredentialStore for MemoryCredentialStore {
             });
         };
         Ok(f(bearer))
-    }
-
-    fn delete(&self, cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
-        let mut entries = match self.entries.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        entries.remove(cred);
-        Ok(())
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {
@@ -242,16 +231,6 @@ impl CredentialStore for EnvCredentialStore {
             });
         };
         Ok(f(bearer))
-    }
-
-    fn delete(&self, _cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
-        // The environment cannot be mutated by this store: reporting success
-        // would claim a deletion that did not happen. Revocation is ref-side,
-        // by removing the `CredentialRef` from the `CredentialRefRepository`.
-        Err(CredentialTechnicalError::StorageUnavailable {
-            reason: "environment credentials cannot be deleted; remove the credential ref"
-                .to_owned(),
-        })
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {

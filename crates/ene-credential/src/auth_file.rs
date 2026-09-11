@@ -23,7 +23,7 @@ use crate::secret::SecretValue;
 /// cannot live only in the serving process's memory. This store keeps one
 /// entry per paired device in a protected file shared across processes and
 /// restarts. Reads are read-through on every call: nothing is cached, so a
-/// verifier always observes the latest persisted rotation or revocation.
+/// verifier always observes the latest persisted rotation.
 /// Authentication stays per-connection-once, so the extra file read costs
 /// correctness nothing it cannot afford.
 ///
@@ -228,26 +228,6 @@ impl FileDeviceAuthStore {
             return Ok(false);
         };
         Ok(verify_pairing_proof(text, nonce, proof_hex))
-    }
-
-    /// Revokes `device` by deleting its entry from the protected file.
-    ///
-    /// This is the durable half of device revocation: once the atomic
-    /// rewrite completes, no process loading through this store will verify
-    /// proofs for the device again. Deleting an unknown device — or deleting
-    /// while the file is missing — succeeds without writing anything.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// file cannot be read (including a malformed existing file) or the
-    /// atomic rewrite fails.
-    pub fn delete_for(&self, device: &DeviceId) -> Result<(), CredentialTechnicalError> {
-        let mut entries = self.read_entries()?;
-        if entries.remove(&device_key(device)).is_none() {
-            return Ok(());
-        }
-        self.write_entries(&entries)
     }
 
     fn read_entries(&self) -> Result<BTreeMap<String, StoredDeviceAuth>, CredentialTechnicalError> {

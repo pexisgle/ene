@@ -1,6 +1,8 @@
 //! Non-secret credential registry: the validated [`CredentialRef`], the
-//! persistence boundary for refs, and the register and availability
-//! operations over them.
+//! persistence boundary for refs, and resolution of the usable ones.
+//!
+//! Usable refs are written through the credential-registration intent plus
+//! the Host-local approval path; this module owns the read side.
 
 use crate::CredentialTechnicalError;
 use crate::scrub::CredentialSetRevision;
@@ -69,56 +71,15 @@ impl CredentialRef {
     }
 }
 
-/// Command registering a credential ref in the registry.
+/// Persistence boundary for the usable credential refs.
 ///
-/// There is intentionally no secret field: the bearer is provisioned through
-/// the Host-local protected path directly into the [`CredentialStore`], never
-/// through this command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegisterCredentialCommand {
-    pub provider: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegisterOutcome {
-    Registered(CredentialRef),
-    InvalidProvider,
-    InvalidLabel,
-    /// A ref already exists; the stored ref was left untouched (no overwrite).
-    AlreadyExists(CredentialRef),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialAvailability {
-    /// True only when the ref is known to the registry and the store holds
-    /// its bearer.
-    pub present: bool,
-    /// The known ref, if the registry knows it.
-    pub credential: Option<CredentialRef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CredentialNotify {
-    /// The bearer no longer works; the owner must reauthenticate.
-    NeedsReauthentication(CredentialRef),
-    /// The credential was revoked and its ref removed.
-    Revoked(CredentialRef),
-}
-
+/// The trait is read-only: refs become usable through the credential
+/// registration intent and the Host-local approval write, not here.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait CredentialRefRepository: Send + Sync {
-    async fn save_ref(&self, cred: CredentialRef) -> Result<(), CredentialTechnicalError>;
-
-    async fn load_ref(
-        &self,
-        provider: &str,
-        label: &str,
-    ) -> Result<Option<CredentialRef>, CredentialTechnicalError>;
-
     async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError>;
 }
 
@@ -137,47 +98,6 @@ pub trait CredentialSetRepository: Send + Sync {
     /// Loads the current credential-set revision.
     async fn current_set_revision(&self)
     -> Result<CredentialSetRevision, CredentialTechnicalError>;
-}
-
-/// Registers a credential ref, never overwriting an existing one.
-///
-/// The provider and label must satisfy [`CredentialRef::new`]: a provider that
-/// is blank or contains `:` yields [`RegisterOutcome::InvalidProvider`], and an
-/// empty label yields [`RegisterOutcome::InvalidLabel`], both without touching
-/// the repository. When a ref already exists for `(provider, label)`, the
-/// stored ref is returned in [`RegisterOutcome::AlreadyExists`] and no write
-/// occurs.
-pub async fn register(
-    cmd: RegisterCredentialCommand,
-    repo: &impl CredentialRefRepository,
-) -> Result<RegisterOutcome, CredentialTechnicalError> {
-    let cred = match CredentialRef::new(cmd.provider, cmd.label) {
-        Ok(cred) => cred,
-        Err(CredentialRefError::InvalidProvider) => {
-            return Ok(RegisterOutcome::InvalidProvider);
-        }
-        Err(CredentialRefError::InvalidLabel) => return Ok(RegisterOutcome::InvalidLabel),
-    };
-    if let Some(existing) = repo.load_ref(cred.provider(), cred.label()).await? {
-        return Ok(RegisterOutcome::AlreadyExists(existing));
-    }
-    repo.save_ref(cred.clone()).await?;
-    Ok(RegisterOutcome::Registered(cred))
-}
-
-/// Combines registry knowledge with store presence into one availability
-/// fact: [`CredentialStore::contains`] supplies store presence, and the
-/// credential is available only when both agree.
-pub fn credential_availability(
-    cred: &CredentialRef,
-    repo_known: bool,
-    store: &impl CredentialStore,
-) -> CredentialAvailability {
-    let present = repo_known && store.contains(cred);
-    CredentialAvailability {
-        present,
-        credential: repo_known.then(|| cred.clone()),
-    }
 }
 
 /// Resolves a credential id to a registered, bearer-backed ref for `provider`.

@@ -2,60 +2,16 @@ use crate::CredentialTechnicalError;
 use crate::auth_file::FileDeviceAuthStore;
 use crate::pairing::DeviceId;
 use crate::registry::{
-    CredentialRef, CredentialRefError, RegisterCredentialCommand, RegisterOutcome,
-    credential_availability, register,
+    CredentialRef, CredentialRefError, CredentialRefRepository, available_credential,
 };
 use crate::secret::{CredentialStore, MemoryCredentialStore};
 use ene_primitive::RawId;
-use std::collections::HashMap;
-use tokio::sync::Mutex;
 
-struct FakeRepo {
-    refs: Mutex<HashMap<(String, String), CredentialRef>>,
-    saves: Mutex<u64>,
-}
+struct FakeRepo(Vec<CredentialRef>);
 
-impl FakeRepo {
-    fn new() -> Self {
-        Self {
-            refs: Mutex::new(HashMap::new()),
-            saves: Mutex::new(0),
-        }
-    }
-
-    async fn save_count(&self) -> u64 {
-        *self.saves.lock().await
-    }
-}
-
-impl crate::registry::CredentialRefRepository for FakeRepo {
-    async fn save_ref(&self, cred: CredentialRef) -> Result<(), CredentialTechnicalError> {
-        let mut refs = self.refs.lock().await;
-        refs.insert((cred.provider().to_owned(), cred.label().to_owned()), cred);
-        let mut saves = self.saves.lock().await;
-        *saves += 1;
-        Ok(())
-    }
-
-    async fn load_ref(
-        &self,
-        provider: &str,
-        label: &str,
-    ) -> Result<Option<CredentialRef>, CredentialTechnicalError> {
-        let refs = self.refs.lock().await;
-        Ok(refs.get(&(provider.to_owned(), label.to_owned())).cloned())
-    }
-
+impl CredentialRefRepository for FakeRepo {
     async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError> {
-        let refs = self.refs.lock().await;
-        Ok(refs.values().cloned().collect())
-    }
-}
-
-fn command() -> RegisterCredentialCommand {
-    RegisterCredentialCommand {
-        provider: "acme".to_owned(),
-        label: "main".to_owned(),
+        Ok(self.0.clone())
     }
 }
 
@@ -64,50 +20,28 @@ fn acme_main() -> CredentialRef {
 }
 
 #[tokio::test]
-async fn register_persists_a_new_ref() {
-    let repo = FakeRepo::new();
-    let outcome = register(command(), &repo).await;
-    assert!(matches!(outcome, Ok(RegisterOutcome::Registered(_))));
-    assert_eq!(repo.save_count().await, 1);
-}
-
-#[tokio::test]
-async fn register_rejects_grammar_violations_without_writing() {
-    let repo = FakeRepo::new();
-    for (provider, label, expected) in [
-        ("   ", "main", RegisterOutcome::InvalidProvider),
-        ("acme:bad", "main", RegisterOutcome::InvalidProvider),
-        ("acme", "", RegisterOutcome::InvalidLabel),
-    ] {
-        let cmd = RegisterCredentialCommand {
-            provider: provider.to_owned(),
-            label: label.to_owned(),
-        };
-        let outcome = register(cmd, &repo)
-            .await
-            .expect("register answers an outcome");
-        assert_eq!(outcome, expected, "pair {provider:?}:{label:?}");
-    }
-    assert_eq!(repo.save_count().await, 0);
-}
-
-#[tokio::test]
-async fn re_register_returns_the_existing_ref_without_overwriting() {
-    let repo = FakeRepo::new();
-    let first_outcome = register(command(), &repo).await;
-    let RegisterOutcome::Registered(first) =
-        first_outcome.expect("register succeeds with a valid command")
-    else {
-        panic!("a fresh provider:label registers");
-    };
-    let second_outcome = register(command(), &repo).await;
-    let RegisterOutcome::AlreadyExists(existing) =
-        second_outcome.expect("re-register answers an outcome")
-    else {
-        panic!("the same provider:label already exists");
-    };
-    assert_eq!(existing, first);
-    assert_eq!(repo.save_count().await, 1);
+async fn availability_requires_both_registry_and_store() {
+    let store = MemoryCredentialStore::new();
+    let cred = acme_main();
+    let registry = FakeRepo(vec![cred.clone()]);
+    let missing = available_credential("acme", &cred.id(), &registry, &store).await;
+    assert_eq!(missing, Ok(None), "a ref without a bearer is unavailable");
+    let absent_registry = FakeRepo(Vec::new());
+    store.insert(cred.clone(), "bearer-token");
+    let store_only = available_credential("acme", &cred.id(), &absent_registry, &store).await;
+    assert_eq!(
+        store_only,
+        Ok(None),
+        "a bearer without a usable ref is unavailable"
+    );
+    let both = available_credential("acme", &cred.id(), &registry, &store).await;
+    assert_eq!(both, Ok(Some(cred.clone())), "both sides must agree");
+    let wrong_provider = available_credential("other", &cred.id(), &registry, &store).await;
+    assert_eq!(
+        wrong_provider,
+        Ok(None),
+        "a different provider never resolves"
+    );
 }
 
 #[test]
@@ -130,26 +64,6 @@ fn credential_ref_grammar_is_fixed() {
         CredentialRef::new("acme", ""),
         Err(CredentialRefError::InvalidLabel)
     );
-}
-
-#[test]
-fn availability_requires_both_registry_and_store() {
-    let store = MemoryCredentialStore::new();
-    let cred = acme_main();
-    let missing = credential_availability(&cred, false, &store);
-    assert!(!missing.present);
-    assert_eq!(missing.credential, None);
-    store.insert(cred.clone(), "bearer-token");
-    let store_only = credential_availability(&cred, false, &store);
-    assert!(!store_only.present);
-    let both = credential_availability(&cred, true, &store);
-    assert!(both.present);
-    assert_eq!(both.credential, Some(cred.clone()));
-    let removed = store.delete(&cred);
-    assert!(removed.is_ok());
-    let after_delete = credential_availability(&cred, true, &store);
-    assert!(!after_delete.present);
-    assert_eq!(after_delete.credential, Some(cred));
 }
 
 #[test]
@@ -403,33 +317,6 @@ fn device_auth_saved_file_is_owner_only() {
     let meta = std::fs::metadata(&path);
     let meta = meta.unwrap();
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-}
-
-#[test]
-fn device_auth_delete_removes_only_the_target() {
-    let temp = fresh_tempdir();
-    let path = temp.path().join("device-auth.json");
-    let store = open_device_auth_store(&path);
-    let first = DeviceId(RawId::new());
-    let second = DeviceId(RawId::new());
-    assert!(store.save_secret(&first, "phone", "first-secret").is_ok());
-    assert!(
-        store
-            .save_secret(&second, "tablet", "second-secret")
-            .is_ok()
-    );
-    assert!(store.delete_for(&first).is_ok());
-    let missing = store.load_secret(&first);
-    assert!(matches!(missing, Ok(None)));
-    let kept = store.load_secret(&second);
-    let secret = kept.unwrap().unwrap();
-    assert_eq!(secret.bytes(), "second-secret".as_bytes());
-    assert!(store.delete_for(&first).is_ok());
-    assert!(store.delete_for(&DeviceId(RawId::new())).is_ok());
-    let absent = temp.path().join("absent.json");
-    let absent_store = open_device_auth_store(&absent);
-    assert!(absent_store.delete_for(&first).is_ok());
-    assert!(!absent.exists(), "delete must not create the file");
 }
 
 #[test]
