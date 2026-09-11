@@ -2,7 +2,7 @@ use crate::Store;
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
     HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
-    ReportStatusTransition, RoundIntentMark, UndeliveredRef, UndeliveredRepository,
+    ReportStatusTransition, RoundIntentMark, UndeliveredRepository,
 };
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
@@ -305,19 +305,6 @@ async fn undelivered_register_mark_and_stale_mark() {
         stale,
         Ok(ReportStatusTransition::StaleSource),
         "repeat mark on a moved row must be stale"
-    );
-    let missing = UndeliveredRef {
-        id: RawId::new(),
-        companion,
-        source_message: RawId::new(),
-        status: ReportStatus::Pending,
-        round: RawId::new(),
-        presence_generation: generation,
-    };
-    let absent = store.register_if_parent_durable(missing).await;
-    assert!(
-        matches!(absent, Ok(false)),
-        "register without a durable parent must decline"
     );
 }
 
@@ -639,14 +626,9 @@ async fn usage_insert_preserves_null_tokens() {
 }
 
 #[tokio::test]
-async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_local_id_uniqueness() {
+async fn local_id_is_correspondence_metadata_not_a_replay_key() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
-    let absent = store.lookup_local_id(companion, "send-1").await;
-    assert!(
-        matches!(absent, Ok(None)),
-        "unknown local id must find nothing"
-    );
     let first = store
         .append_message(history_command_with_ids(
             companion,
@@ -679,12 +661,16 @@ async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_loc
         first_outcome, second_outcome,
         "local id repeats must mint distinct messages"
     );
-    let found = store.lookup_local_id(companion, "send-1").await;
-    let item = found.unwrap().unwrap();
-    assert_eq!(item.local_id.as_deref(), Some("send-1"));
-    assert_eq!(item.command_id, None);
-    let count = history_row_count(&store, companion);
-    assert_eq!(count, Some(2), "both local id repeats must persist");
+    let loaded = store.load_timeline(companion, None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 2, "both local id repeats must persist");
+    assert!(
+        timeline
+            .iter()
+            .all(|item| item.local_id.as_deref() == Some("send-1")),
+        "local id must round-trip as correspondence metadata"
+    );
+    assert!(timeline.iter().all(|item| item.command_id.is_none()));
 }
 
 #[tokio::test]
@@ -983,10 +969,6 @@ async fn lookup_command_roundtrip_returns_both_ids() {
         matches!(missing, Ok(None)),
         "unknown command must find nothing"
     );
-    let by_local = store.lookup_local_id(companion, "send-9").await;
-    let same = by_local.unwrap().unwrap();
-    assert_eq!(same.id, message);
-    assert_eq!(same.command_id, Some(command));
     let loaded = store.load_timeline(companion, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
@@ -1025,8 +1007,7 @@ CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
 CREATE UNIQUE INDEX idx_history_message_companion_local ON history_message (companion_id, local_id);
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (2);",
+PRAGMA user_version = 2;",
             );
         assert!(shaped.is_ok(), "v2 shape must apply");
         let seeded_companion = conn.execute(
@@ -1076,9 +1057,6 @@ INSERT INTO _schema_version (version) VALUES (2);",
         timeline[0].incarnation, None,
         "pre-opaque rows carry no incarnation"
     );
-    let by_local = store.lookup_local_id(companion, "legacy-1").await;
-    let legacy = by_local.unwrap().unwrap();
-    assert_eq!(legacy.id, message_id);
     let missing = store
         .lookup_command(companion, &CommandId(RawId::new()))
         .await;
@@ -1090,9 +1068,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get::<_, i64>(0)
-    });
+    let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(11)),
         "migration must record version 11"
@@ -1249,11 +1225,6 @@ async fn history_wire_projection_and_incarnation_roundtrip() {
         Some((7, 11)),
         "timeline must echo the stored incarnation"
     );
-    let by_local_none = store.lookup_local_id(companion, "missing").await;
-    assert!(
-        matches!(by_local_none, Ok(None)),
-        "unrelated correspondence lookup must miss"
-    );
 }
 
 #[tokio::test]
@@ -1283,8 +1254,7 @@ CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (4);",
+PRAGMA user_version = 4;",
             );
         assert!(shaped.is_ok(), "v4 shape must apply");
         let seeded = conn.execute(
@@ -1307,13 +1277,11 @@ INSERT INTO _schema_version (version) VALUES (4);",
     );
 }
 
-/// Reads the singleton without running migrations.
+/// Reads the file's `user_version` without running migrations.
 fn read_schema_version(path: &std::path::Path) -> Option<i64> {
     let conn = rusqlite::Connection::open(path).ok()?;
-    conn.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get(0)
-    })
-    .ok()
+    conn.query_row("PRAGMA user_version", (), |row| row.get(0))
+        .ok()
 }
 
 fn table_columns(path: &std::path::Path, table: &str) -> Vec<String> {
@@ -1357,8 +1325,7 @@ CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (4);",
+PRAGMA user_version = 4;",
         );
         assert!(shaped.is_ok(), "v4 shape must apply");
         // One paired row so the backfill UPDATE below has a row to trip
@@ -1453,9 +1420,7 @@ async fn migration_v3_reopen_keeps_pairing_state() {
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get::<_, i64>(0)
-    });
+    let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(11)),
         "reopened database must record schema version 11"
@@ -2263,9 +2228,7 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get::<_, i64>(0)
-    });
+    let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(11)),
         "reopened database must record schema version 11"
@@ -2443,10 +2406,12 @@ async fn learning_new_memory_keeps_summary_grounds_and_current_row() {
         })
     );
 
-    let current = store.load_current_memory(memory).await.unwrap();
-    let Some(current) = current else {
-        panic!("the committed memory must be current");
-    };
+    let memories = store
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "the committed memory must be current");
+    let current = &memories[0];
     assert_eq!(current.content, "owner likes jasmine tea");
     assert_eq!(current.scope, LearningScope::companion(companion));
     assert_eq!(current.importance, Importance::clamped(4));
@@ -2513,7 +2478,14 @@ async fn learning_reused_summary_identity_with_a_different_payload_is_refused() 
             summary: evidence.id,
         })
     );
-    assert_eq!(store.load_current_memory(second).await, Ok(None));
+    assert!(
+        store
+            .list_memory_revisions(second)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the refused change must leave no current row"
+    );
     let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
     assert_eq!(stored.content, "owner likes jasmine tea");
 }
@@ -2627,9 +2599,13 @@ async fn learning_update_appends_a_revision_and_keeps_the_previous_one() {
             revision: MemoryRevision::from_u64(2),
         })
     );
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert_eq!(current.content, "owner lives in Osaka");
-    assert_eq!(current.revision, MemoryRevision::from_u64(2));
+    let memories = store
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "the memory must be current");
+    assert_eq!(memories[0].content, "owner lives in Osaka");
+    assert_eq!(memories[0].revision, MemoryRevision::from_u64(2));
 
     let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions.len(), 2, "the old revision is kept");
@@ -2695,12 +2671,12 @@ async fn learning_stale_update_is_rejected_without_overwriting() {
             current: MemoryRevision::from_u64(2),
         })
     );
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(
-        current.content, "owner switched to the day shift",
+        revisions[1].content, "owner switched to the day shift",
         "the stale result must not overwrite the newer recognition"
     );
-    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 2);
+    assert_eq!(revisions.len(), 2);
 }
 
 #[tokio::test]
@@ -2799,15 +2775,10 @@ async fn learning_forgetting_suppresses_recall_and_keeps_content_and_revisions()
         forgotten,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert!(current.recall_suppressed, "recall is suppressed");
-    assert_eq!(
-        current.content, "owner was worried about the launch",
-        "normal forgetting never deletes content"
-    );
     let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions.len(), 2, "revision history is kept");
     assert_eq!(revisions[0].content, "owner was worried about the launch");
+    assert!(revisions[1].recall_suppressed, "recall is suppressed");
     assert_eq!(revisions[1].change, ChangeKind::Forgotten);
 
     // A later reinforcement clears the suppression without deleting it.
@@ -2830,9 +2801,9 @@ async fn learning_forgetting_suppresses_recall_and_keeps_content_and_revisions()
         remembered,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert!(!current.recall_suppressed);
-    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 3);
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    assert!(!revisions[2].recall_suppressed);
+    assert_eq!(revisions.len(), 3);
 }
 
 #[tokio::test]
@@ -2914,11 +2885,12 @@ async fn learning_memory_survives_reopen() {
     drop(store);
 
     let reopened = Store::open(&path).await.unwrap();
-    let current = reopened.load_current_memory(memory).await.unwrap();
-    let Some(current) = current else {
-        panic!("memory must survive reopen");
-    };
-    assert_eq!(current.content, "owner prefers morning conversations");
+    let memories = reopened
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "memory must survive reopen");
+    assert_eq!(memories[0].content, "owner prefers morning conversations");
     let revisions = reopened.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions.len(), 1);
     assert_eq!(revisions[0].summary, Some(evidence.id));
@@ -2938,8 +2910,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
         // A realistic v8 database carries the v7 attempt table the v10
         // migration alters; only the v9 learning group is still missing.
         conn.execute_batch(
-            "CREATE TABLE _schema_version (version INTEGER NOT NULL);
-             INSERT INTO _schema_version (version) VALUES (8);
+            "PRAGMA user_version = 8;
              CREATE TABLE inference_attempt (
                ticket TEXT PRIMARY KEY,
                consent_id TEXT NOT NULL,
@@ -2952,8 +2923,8 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    let opened = store.load_current_memory(MemoryId::generate()).await;
-    assert_eq!(opened, Ok(None), "migrated schema answers reads");
+    let opened = store.list_current_memories(RawId::new(), None, 10).await;
+    assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
         Some(11),
@@ -2980,8 +2951,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
-            "CREATE TABLE _schema_version (version INTEGER NOT NULL);
-             INSERT INTO _schema_version (version) VALUES (9);
+            "PRAGMA user_version = 9;
              CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
              INSERT INTO consent_record VALUES ('consent-1', 1, 'openai', 'gpt-x', 'openai:main');
              CREATE TABLE inference_attempt (
@@ -3075,8 +3045,6 @@ async fn approval_sweep_redacts_history_and_learning_content() {
     let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].text, "the key is [credential]");
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert_eq!(current.content, "owner key [credential]");
     let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions[0].content, "owner key [credential]");
     let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
@@ -3215,7 +3183,13 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
         Ok(MemoryChangeOutcome::StaleCredentialSet),
         "a stale credential-set premise must refuse the Learning commit"
     );
-    assert_eq!(writer.load_current_memory(memory).await, Ok(None));
+    assert!(
+        writer
+            .list_current_memories(companion, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
     assert!(
         writer
@@ -3372,7 +3346,13 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
         })
         .await;
     assert_eq!(stale, Ok(MemoryChangeOutcome::StaleCredentialSet));
-    assert_eq!(writer.load_current_memory(memory).await, Ok(None));
+    assert!(
+        writer
+            .list_current_memories(companion, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
     assert!(
         writer

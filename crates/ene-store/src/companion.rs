@@ -37,11 +37,7 @@ const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang
 
 const SQL_SELECT_RECENT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2";
 
-const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
-
 const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
-
-const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
@@ -338,38 +334,6 @@ impl HistoryRepository for Store {
         run_blocking(move || append_history(&conn, &cmd, register_unpresented)).await
     }
 
-    async fn lookup_local_id(
-        &self,
-        companion: CompanionId,
-        local_id: &str,
-    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        let local_id = local_id.to_owned();
-        run_blocking(move || {
-            let key = encode_id(companion.as_raw());
-            let guard = lock_shared(&conn);
-            // Correspondence lookup for matching an input to its ack; durable
-            // replay keys on `command_id` instead (see `lookup_command`).
-            let found: Option<HistoryRow> = guard
-                .query_row(
-                    SQL_SELECT_HISTORY_BY_LOCAL_ID,
-                    params![key, local_id],
-                    HistoryRow::from_row,
-                )
-                .optional()
-                .map_err(|error| companion_unavailable(error.to_string()))?;
-            match found {
-                Some(row) => {
-                    let message =
-                        decode_history_message(companion, row).map_err(companion_unavailable)?;
-                    Ok(Some(message))
-                }
-                None => Ok(None),
-            }
-        })
-        .await
-    }
-
     async fn lookup_command(
         &self,
         companion: CompanionId,
@@ -474,51 +438,6 @@ impl HistoryRepository for Store {
 }
 
 impl UndeliveredRepository for Store {
-    async fn register_if_parent_durable(
-        &self,
-        entry: UndeliveredRef,
-    ) -> Result<bool, UndeliveredTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let id_text = encode_id(entry.id);
-            let companion_text = encode_id(entry.companion.as_raw());
-            let source_text = encode_id(entry.source_message);
-            let round_text = encode_id(entry.round);
-            let status_text = encode_report_status(entry.status);
-            let generation_raw =
-                encode_u64(entry.presence_generation.as_u64()).map_err(undelivered_unavailable)?;
-            let now_text = WallClockWithTz::now().to_rfc3339();
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            let parent: Option<i64> = tx
-                .query_row(SQL_FIND_HISTORY, params![source_text], |row| row.get(0))
-                .optional()
-                .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            if parent.is_none() {
-                return Ok(false);
-            }
-            tx.execute(
-                SQL_INSERT_UNDELIVERED,
-                params![
-                    id_text,
-                    companion_text,
-                    source_text,
-                    status_text,
-                    round_text,
-                    generation_raw,
-                    now_text
-                ],
-            )
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            tx.commit()
-                .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            Ok(true)
-        })
-        .await
-    }
-
     async fn compare_and_mark_reported(
         &self,
         id: RawId,

@@ -727,17 +727,12 @@ mod tests {
             panic!("the new memory must apply");
         };
         assert_eq!(revision, MemoryRevision::initial());
-        let stored = repository
-            .load_current_memory(memory)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.content, "The owner likes jasmine tea.");
-        assert_eq!(stored.scope, LearningScope::companion(companion));
-        assert_eq!(stored.importance.as_u8(), 4);
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        assert_eq!(revisions[0].content, "The owner likes jasmine tea.");
+        assert_eq!(revisions[0].scope, LearningScope::companion(companion));
+        assert_eq!(revisions[0].importance.as_u8(), 4);
         let evidence = repository.load_summary(summary).await.unwrap().unwrap();
         assert_eq!(evidence.content, "The owner likes jasmine tea.");
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
         assert_eq!(revisions[0].summary, Some(summary));
         assert_eq!(revisions[0].change, crate::memory::ChangeKind::Initial);
     }
@@ -1051,12 +1046,7 @@ mod consolidation_tests {
         assert_eq!(revisions[0].content, "owner likes tea");
         assert_eq!(revisions[1].change, ChangeKind::Reinforced);
         assert_eq!(
-            repository
-                .load_current_memory(memory)
-                .await
-                .unwrap()
-                .unwrap()
-                .revision,
+            revisions.last().unwrap().revision,
             MemoryRevision::from_u64(2)
         );
     }
@@ -1068,14 +1058,12 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let current = repository
-            .load_current_memory(memory)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(current.content, "owner prefers jasmine tea in the morning");
         let revisions = repository.list_memory_revisions(memory).await.unwrap();
         assert_eq!(revisions.len(), 2);
+        assert_eq!(
+            revisions[1].content,
+            "owner prefers jasmine tea in the morning"
+        );
         assert_eq!(
             revisions[0].content, "owner likes tea",
             "the earlier recognition is not rewritten"
@@ -1113,16 +1101,6 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let current = repository
-            .load_current_memory(memory)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(current.recall_suppressed, "recall is suppressed");
-        assert_eq!(
-            current.content, "owner likes tea",
-            "normal forgetting never deletes content"
-        );
         let revisions = repository.list_memory_revisions(memory).await.unwrap();
         assert_eq!(revisions.len(), 2);
         assert_eq!(revisions[0].content, "owner likes tea");
@@ -1140,13 +1118,9 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let current = repository
-            .load_current_memory(memory)
-            .await
-            .unwrap()
-            .unwrap();
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
         assert_eq!(
-            current.importance.as_u8(),
+            revisions.last().unwrap().importance.as_u8(),
             crate::Importance::default().as_u8(),
             "an omitted importance does not reset the stored one"
         );
@@ -1174,24 +1148,13 @@ mod consolidation_tests {
             changes.as_slice(),
             [FormationChange::Rejected { .. }]
         ));
-        let current = repository
-            .load_current_memory(memory)
-            .await
-            .unwrap()
-            .unwrap();
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
         assert_eq!(
-            current.content, "advanced by another formation",
+            revisions.last().unwrap().content,
+            "advanced by another formation",
             "the newer recognition is untouched"
         );
-        assert_eq!(
-            repository
-                .list_memory_revisions(memory)
-                .await
-                .unwrap()
-                .len(),
-            2,
-            "the stale change leaves no revision"
-        );
+        assert_eq!(revisions.len(), 2, "the stale change leaves no revision");
     }
 
     /// Asserts one undecidable answer leaves current Memory, revisions, and
@@ -1225,20 +1188,12 @@ mod consolidation_tests {
             "no Summary evidence may be stored: {answer}"
         );
         if let Some((memory, revision)) = target {
-            let current = repository
-                .load_current_memory(memory)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(current.revision, revision, "no revision may advance");
+            let revisions = repository.list_memory_revisions(memory).await.unwrap();
+            assert_eq!(revisions.len(), 1, "no partial revision may remain");
             assert_eq!(
-                repository
-                    .list_memory_revisions(memory)
-                    .await
-                    .unwrap()
-                    .len(),
-                1,
-                "no partial revision may remain"
+                revisions.last().unwrap().revision,
+                revision,
+                "no revision may advance"
             );
         }
     }
@@ -1406,14 +1361,9 @@ mod consolidation_tests {
             21,
             "correcting the old memory must not create a duplicate"
         );
-        let current = repository
-            .load_current_memory(memory)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(current.content, "The owner's dog is named Momo");
-        assert_eq!(current.revision, MemoryRevision::from_u64(2));
         let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        assert_eq!(revisions[1].content, "The owner's dog is named Momo");
+        assert_eq!(revisions[1].revision, MemoryRevision::from_u64(2));
         assert_eq!(
             revisions[0].content, "The owner's dog is named Pochi",
             "the earlier recognition stays"

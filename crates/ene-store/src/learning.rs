@@ -34,13 +34,15 @@ const SQL_INSERT_MEMORY_REVISION: &str = "INSERT INTO learning_memory_revision (
 
 const SQL_INSERT_SUMMARY_IGNORE: &str = "INSERT OR IGNORE INTO learning_summary (summary_id, companion_id, content, source_kind, source_start, source_end, formed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
-const SQL_SELECT_CURRENT: &str = "SELECT memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at FROM learning_memory WHERE memory_id = ?1";
-
 const SQL_LIST_CURRENT: &str = "SELECT memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at FROM learning_memory WHERE companion_id = ?1 AND (?2 IS NULL OR rowid < (SELECT rowid FROM learning_memory WHERE memory_id = ?2)) ORDER BY rowid DESC LIMIT ?3";
 
 const SQL_LIST_REVISIONS: &str = "SELECT memory_id, revision, companion_id, content, importance, temporal, recall_suppressed, change_kind, summary_id, at FROM learning_memory_revision WHERE memory_id = ?1 ORDER BY revision ASC";
 
 const SQL_SELECT_SUMMARY: &str = "SELECT summary_id, companion_id, content, source_kind, source_start, source_end, formed_at FROM learning_summary WHERE summary_id = ?1";
+
+/// The only Experience source kind this stage stores; an unknown stored value
+/// is an unreadable row and is rejected on read.
+const SOURCE_KIND_DIALOGUE: &str = "dialogue";
 
 fn learning_unavailable(reason: impl core::fmt::Display) -> LearningTechnicalError {
     LearningTechnicalError::StorageUnavailable {
@@ -150,7 +152,7 @@ fn insert_summary(
             encode_id(summary.id.as_raw()),
             encode_id(summary.scope.companion_id()),
             summary.content,
-            encode_source_kind(summary.source.kind),
+            SOURCE_KIND_DIALOGUE,
             encode_id(summary.source.start),
             encode_id(summary.source.end),
             summary.formed_at.to_rfc3339(),
@@ -325,33 +327,20 @@ fn decode_revision(raw: RawRevision) -> Result<MemoryRevisionRecord, LearningTec
 }
 
 fn decode_summary(raw: RawSummary) -> Result<SummaryRecord, LearningTechnicalError> {
+    if raw.source_kind != SOURCE_KIND_DIALOGUE {
+        return Err(learning_unavailable("unknown experience source kind"));
+    }
     Ok(SummaryRecord {
         id: SummaryId::from_raw(decode_id(&raw.summary).map_err(learning_unavailable)?),
         scope: LearningScope::companion(decode_id(&raw.companion).map_err(learning_unavailable)?),
         content: raw.content,
         source: SourceRangeRef {
-            kind: decode_source_kind(&raw.source_kind)?,
+            kind: ExperienceSourceKind::Dialogue,
             start: decode_id(&raw.source_start).map_err(learning_unavailable)?,
             end: decode_id(&raw.source_end).map_err(learning_unavailable)?,
         },
         formed_at: decode_clock(&raw.formed_at)?,
     })
-}
-
-fn load_current_sync(
-    conn: &Mutex<Connection>,
-    memory: MemoryId,
-) -> Result<Option<Memory>, LearningTechnicalError> {
-    let guard = lock_shared(conn);
-    let row = guard
-        .query_row(
-            SQL_SELECT_CURRENT,
-            params![encode_id(memory.as_raw())],
-            raw_memory_row,
-        )
-        .optional()
-        .map_err(learning_unavailable)?;
-    row.map(decode_memory).transpose()
 }
 
 fn list_current_sync(
@@ -523,19 +512,6 @@ fn decode_change(text: &str) -> Result<ChangeKind, LearningTechnicalError> {
     }
 }
 
-fn encode_source_kind(kind: ExperienceSourceKind) -> &'static str {
-    match kind {
-        ExperienceSourceKind::Dialogue => "dialogue",
-    }
-}
-
-fn decode_source_kind(text: &str) -> Result<ExperienceSourceKind, LearningTechnicalError> {
-    match text {
-        "dialogue" => Ok(ExperienceSourceKind::Dialogue),
-        _ => Err(learning_unavailable("unknown experience source kind")),
-    }
-}
-
 impl LearningRepository for Store {
     async fn commit_memory_change(
         &self,
@@ -543,14 +519,6 @@ impl LearningRepository for Store {
     ) -> Result<MemoryChangeOutcome, LearningTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || commit_change_sync(&conn, commit)).await
-    }
-
-    async fn load_current_memory(
-        &self,
-        memory: MemoryId,
-    ) -> Result<Option<Memory>, LearningTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || load_current_sync(&conn, memory)).await
     }
 
     async fn list_current_memories(
