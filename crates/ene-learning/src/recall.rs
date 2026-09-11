@@ -10,8 +10,6 @@
 
 use ene_primitive::RawId;
 
-use crate::identity::MemoryId;
-use crate::memory::Importance;
 use crate::repository::{LearningRepository, LearningTechnicalError};
 
 /// Most current memories one recall reads before ranking.
@@ -31,8 +29,6 @@ pub struct RecallQuery {
 /// One recalled Memory, projected for use in a context.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecalledMemory {
-    pub id: MemoryId,
-    pub importance: Importance,
     /// Recognition text; redacted from [`core::fmt::Debug`].
     pub content: String,
 }
@@ -41,8 +37,6 @@ impl core::fmt::Debug for RecalledMemory {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("RecalledMemory")
-            .field("id", &self.id)
-            .field("importance", &self.importance)
             .field("content", &"[redacted]")
             .finish()
     }
@@ -81,8 +75,6 @@ pub async fn recall(
         .into_iter()
         .take(query.limit)
         .map(|(_, memory)| RecalledMemory {
-            id: memory.id,
-            importance: memory.importance,
             content: memory.content,
         })
         .collect())
@@ -205,8 +197,6 @@ mod tests {
     #[test]
     fn recalled_memory_debug_redacts_content() {
         let memory = crate::recall::RecalledMemory {
-            id: crate::identity::MemoryId::generate(),
-            importance: crate::Importance::default(),
             content: String::from("probe-recall-content"),
         };
         let rendered = format!("{memory:?}");
