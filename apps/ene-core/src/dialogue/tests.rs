@@ -171,7 +171,11 @@ fn view_request_frame(connection: ConnectionWireId) -> ene_plugin_ipc::WireFrame
     stamped(frame, connection)
 }
 
-fn view_page_request_frame(connection: ConnectionWireId, after: &str) -> ene_plugin_ipc::WireFrame {
+/// A view request naming only the `memory` section.
+fn memory_request_frame(
+    connection: ConnectionWireId,
+    after: Option<&str>,
+) -> ene_plugin_ipc::WireFrame {
     let frame = ene_plugin_ipc::WireFrame {
         envelope: new_outgoing_envelope(
             ProtocolVersion::V1,
@@ -180,10 +184,14 @@ fn view_page_request_frame(connection: ConnectionWireId, after: &str) -> ene_plu
         ),
         payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
             sections: vec![String::from("memory")],
-            memory_after: Some(after.to_owned()),
+            memory_after: after.map(str::to_owned),
         }),
     };
     stamped(frame, connection)
+}
+
+fn view_page_request_frame(connection: ConnectionWireId, after: &str) -> ene_plugin_ipc::WireFrame {
+    memory_request_frame(connection, Some(after))
 }
 
 /// The memory section body of one view answer.
@@ -3520,4 +3528,90 @@ async fn memory_view_cursor_pages_older_memories_and_rejects_invalid_ids() {
         )
         .await;
     assert_eq!(memory_body(&invalid), "invalid cursor");
+}
+
+/// A `memory`-only view reads no setup state, so an unreadable configured
+/// credential cannot hide the Memory section.
+#[tokio::test]
+async fn memory_only_view_renders_when_setup_state_is_unreadable() {
+    use ene_companion::CompanionRepository as _;
+    use ene_credential::{
+        CredentialRefRepository as _, CredentialSetRepository as _, EnvCredentialStore,
+    };
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_permission::{CapabilityKind, ConsentRecord, ConsentRepository as _, ConsentRevision};
+    use ene_primitive::WallClockWithTz;
+
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    // Every bearer lookup fails: the setup sections cannot resolve presence.
+    let companion_store = EnvCredentialStore::from_lookup(|_| None);
+    let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the open must succeed");
+    handle
+        .store
+        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
+        .await
+        .expect("the ref must register");
+    let saved = handle
+        .store
+        .compare_and_save(
+            None,
+            ConsentRecord {
+                capability: CapabilityKind::Dialogue,
+                id: String::from("consent-1"),
+                rev: ConsentRevision::from_u64(1),
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                credential_id: String::from("openai:main"),
+            },
+        )
+        .await;
+    assert!(saved.is_ok(), "the consent fixture must save: {saved:?}");
+
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let premise = handle
+        .store
+        .current_set_revision()
+        .await
+        .expect("the credential-set revision must read");
+    let committed = handle
+        .store
+        .commit_memory_change(MemoryChangeCommit {
+            summary: None,
+            secret_premise: Some(premise),
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope: LearningScope::companion(companion.as_raw()),
+                content: String::from("renders without setup state"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        })
+        .await;
+    assert!(matches!(
+        committed,
+        Ok(ene_learning::MemoryChangeOutcome::Committed { .. })
+    ));
+
+    let live = live_input("client-memory-only");
+    let requested = handle
+        .handle_frame(
+            memory_request_frame(live.connection_id, None),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    assert!(
+        memory_body(&requested).contains("renders without setup state"),
+        "the Memory section must render despite the unreadable credential"
+    );
 }

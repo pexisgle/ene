@@ -50,7 +50,10 @@
 //! Views never carry secrets: sections report provider, model, consent
 //! revision, and credential presence only. A store failure behind a view
 //! answers zero sections under the `"unavailable"` mark (documented gap: there
-//! is no error DTO on the view path).
+//! is no error DTO on the view path). A request that names only `memory` reads
+//! no setup state, so it still renders while consent or credential state is
+//! unreadable; its mark stays `"unavailable"` because it named no management
+//! revision to build on.
 //!
 //! Rationale is fingerprint material only: the inlet never acts on the
 //! intent `rationale`, but its origin and quote ride the replay fingerprint
@@ -656,85 +659,96 @@ impl HostHandle {
     /// credential presence plus the bearer-source note — never secrets. Each
     /// capability owns its section and consent revision; the mark carries
     /// both segments so a consent write is checked against the capability it
-    /// names.
+    /// names. Setup state is read only for sections that report it; a
+    /// `memory`-only request renders Memory without touching the consent or
+    /// credential stores.
     pub(crate) async fn build_view(
         &self,
         wanted: &[String],
         memory_after: Option<&str>,
     ) -> ManagementView {
-        let dialogue = match self.store.load_current(CapabilityKind::Dialogue).await {
-            Ok(record) => record,
-            Err(_) => return unavailable_view(),
+        let wants = |name: &str| wanted.is_empty() || wanted.iter().any(|section| section == name);
+        let mut sections = Vec::new();
+        // A request that names only `memory` reads no setup state, so a
+        // consent or credential-store failure cannot hide the Memory section.
+        // Its mark stays unavailable because no management revision was read.
+        let wants_setup = wanted.is_empty() || wanted.iter().any(|name| name != "memory");
+        let mark = if wants_setup {
+            let dialogue = match self.store.load_current(CapabilityKind::Dialogue).await {
+                Ok(record) => record,
+                Err(_) => return unavailable_view(),
+            };
+            let learning = match self.store.load_current(CapabilityKind::Learning).await {
+                Ok(record) => record,
+                Err(_) => return unavailable_view(),
+            };
+            let Some(dialogue_present) = self.credential_present(dialogue.as_ref()).await else {
+                return unavailable_view();
+            };
+            let Some(learning_present) = self.credential_present(learning.as_ref()).await else {
+                return unavailable_view();
+            };
+            let source = match &self.cred_store {
+                CredStore::Env(_) => "env-sourced",
+                CredStore::Memory(_) => "memory",
+            };
+            let (provider_text, model_text, consent_text) = match &dialogue {
+                Some(record) => (
+                    record.provider.clone(),
+                    record.model.clone(),
+                    format!("rev {}", record.rev.as_u64()),
+                ),
+                None => (
+                    String::from("unconfigured"),
+                    String::from("unconfigured"),
+                    String::from("none"),
+                ),
+            };
+            let learning_text = match &learning {
+                Some(record) => format!(
+                    "provider={} model={} consent=rev {} credential={}",
+                    record.provider,
+                    record.model,
+                    record.rev.as_u64(),
+                    presence_text(learning_present, source),
+                ),
+                None => String::from("unconfigured"),
+            };
+            for (kind, title, body) in [
+                ("provider", "Provider", provider_text),
+                ("model", "Model", model_text),
+                ("consent", "Consent", consent_text),
+                (
+                    "credential",
+                    "Credential",
+                    presence_text(dialogue_present, source),
+                ),
+                ("learning", "Learning", learning_text),
+            ] {
+                if wants(kind) {
+                    sections.push(ViewSection {
+                        kind: kind.to_string(),
+                        title: title.to_string(),
+                        body,
+                    });
+                }
+            }
+            consent_view_mark(
+                dialogue.as_ref().map(|record| record.rev.as_u64()),
+                learning.as_ref().map(|record| record.rev.as_u64()),
+            )
+        } else {
+            String::from("unavailable")
         };
-        let learning = match self.store.load_current(CapabilityKind::Learning).await {
-            Ok(record) => record,
-            Err(_) => return unavailable_view(),
-        };
-        let Some(dialogue_present) = self.credential_present(dialogue.as_ref()).await else {
-            return unavailable_view();
-        };
-        let Some(learning_present) = self.credential_present(learning.as_ref()).await else {
-            return unavailable_view();
-        };
-        let source = match &self.cred_store {
-            CredStore::Env(_) => "env-sourced",
-            CredStore::Memory(_) => "memory",
-        };
-        let (provider_text, model_text, consent_text) = match &dialogue {
-            Some(record) => (
-                record.provider.clone(),
-                record.model.clone(),
-                format!("rev {}", record.rev.as_u64()),
-            ),
-            None => (
-                String::from("unconfigured"),
-                String::from("unconfigured"),
-                String::from("none"),
-            ),
-        };
-        let learning_text = match &learning {
-            Some(record) => format!(
-                "provider={} model={} consent=rev {} credential={}",
-                record.provider,
-                record.model,
-                record.rev.as_u64(),
-                presence_text(learning_present, source),
-            ),
-            None => String::from("unconfigured"),
-        };
-        let mark_text = consent_view_mark(
-            dialogue.as_ref().map(|record| record.rev.as_u64()),
-            learning.as_ref().map(|record| record.rev.as_u64()),
-        );
-        let mut candidates = vec![
-            ("provider", "Provider", provider_text),
-            ("model", "Model", model_text),
-            ("consent", "Consent", consent_text),
-            (
-                "credential",
-                "Credential",
-                presence_text(dialogue_present, source),
-            ),
-            ("learning", "Learning", learning_text),
-        ];
-        if wanted.is_empty() || wanted.iter().any(|name| name == "memory") {
-            candidates.push((
-                "memory",
-                "Memory",
-                self.render_memory_view(memory_after).await,
-            ));
+        if wants("memory") {
+            sections.push(ViewSection {
+                kind: String::from("memory"),
+                title: String::from("Memory"),
+                body: self.render_memory_view(memory_after).await,
+            });
         }
-        let sections = candidates
-            .into_iter()
-            .filter(|(kind, _, _)| wanted.is_empty() || wanted.iter().any(|name| name == kind))
-            .map(|(kind, title, body)| ViewSection {
-                kind: kind.to_string(),
-                title: title.to_string(),
-                body,
-            })
-            .collect();
         ManagementView {
-            mark: ViewMarkWire(mark_text),
+            mark: ViewMarkWire(mark),
             sections,
         }
     }
@@ -786,15 +800,17 @@ impl HostHandle {
         };
         let has_more = memories.len() > MEMORY_PAGE_SIZE as usize;
         memories.truncate(MEMORY_PAGE_SIZE as usize);
-        if memories.is_empty() {
+        let Some(first) = memories.first() else {
             return if after.is_some() {
                 String::from("no older memories")
             } else {
                 String::from("(none)")
             };
-        }
+        };
         let mut body = String::new();
+        let mut last_id = first.id;
         for memory in &memories {
+            last_id = memory.id;
             body.push_str(&render_memory(memory));
             match self.store.list_memory_revisions(memory.id).await {
                 Ok(revisions) => {
@@ -818,10 +834,7 @@ impl HostHandle {
         if has_more {
             // The cursor is the last rendered id, so the next page starts at
             // the first older memory and cannot skip or repeat a row.
-            let next = memories.last().map(|memory| memory.id.as_raw().as_uuid());
-            if let Some(next) = next {
-                body.push_str(&format!("next: {next}\n"));
-            }
+            body.push_str(&format!("next: {}\n", last_id.as_raw().as_uuid()));
         }
         body.trim_end().to_owned()
     }
