@@ -248,6 +248,23 @@ fn main() -> Result<(), CliError> {
     }
 }
 
+/// Builds the multi-threaded `Tokio` runtime the store-backed tasks run on
+/// and blocks on `task`.
+///
+/// A runtime that cannot be built is a [`CoreError::Store`] failure: the
+/// runtime is the async substrate of the store-backed Host, and no narrower
+/// variant names it.
+fn block_on<F>(task: F) -> Result<(), CoreError>
+where
+    F: std::future::Future<Output = Result<(), CoreError>>,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?
+        .block_on(task)
+}
+
 /// Prints what `approve-device --descriptor` would accept, one descriptor per
 /// line. Empty output (exit 0) means nothing is pending.
 ///
@@ -257,11 +274,7 @@ fn main() -> Result<(), CliError> {
 /// state cannot be opened.
 fn list_pending_devices(data_dir: &Path) -> Result<(), CoreError> {
     use std::io::Write as _;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
-    runtime.block_on(async {
+    block_on(async {
         let handle = HostHandle::open(data_dir).await?;
         let mut pending = handle.pending_devices().await?;
         pending.sort();
@@ -278,25 +291,22 @@ fn list_pending_devices(data_dir: &Path) -> Result<(), CoreError> {
     })
 }
 
-/// Builds the multi-threaded `Tokio` runtime the listener and the store tasks
-/// run on. A runtime that cannot be built is a [`CoreError::Store`] failure:
-/// the runtime is the async substrate of the store-backed Host, and no
-/// narrower variant names it.
+/// `Stage 2` listener entry: binds the Host on the resolved data directory.
 ///
 /// # Errors
 ///
 /// Returns [`CoreError::Store`] when the runtime cannot be built and the
 /// [`serve::serve`] error otherwise.
 fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
-    runtime.block_on(serve::serve(data_dir))
+    block_on(serve::serve(data_dir))
 }
 
 /// An unknown descriptor fails with the pending descriptor set so the Owner
 /// can retry with the exact value; descriptors are display strings only.
+///
+/// The one-time pairing secret prints once to this Host-local console, the
+/// trusted inlet, and nowhere else; the operator provisions it into the
+/// client's protected device file.
 ///
 /// # Errors
 ///
@@ -304,11 +314,29 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
 /// cannot be opened, and [`CoreError::Approve`] when the descriptor is
 /// unknown (listing the pending descriptors) or the approval write fails.
 fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
-    runtime.block_on(approve_device_async(data_dir, descriptor))
+    use std::io::Write as _;
+    block_on(async {
+        let handle = HostHandle::open(data_dir).await?;
+        if let Some((_, secret)) = handle.approve_device(descriptor).await? {
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
+                CoreError::Store(format!(
+                    "approved, but the secret could not be shown: {error}"
+                ))
+            })?;
+            stdout.flush().map_err(|error| {
+                CoreError::Store(format!(
+                    "approved, but the secret could not be shown: {error}"
+                ))
+            })?;
+            return Ok(());
+        }
+        let pending = handle.pending_devices().await?;
+        Err(CoreError::Approve(format!(
+            "unknown device descriptor {descriptor:?}; pending: [{pending}]",
+            pending = pending.join(", ")
+        )))
+    })
 }
 
 /// Unknown pairs fail with the pending set so the Owner can retry exactly.
@@ -319,56 +347,17 @@ fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError
 /// state cannot be opened, and [`CoreError::Approve`] when the pair is
 /// unknown.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
-    runtime.block_on(approve_credential_async(data_dir, provider, label))
-}
-
-/// Split from [`run_approve_credential`] so the async body stays runtime-free.
-async fn approve_credential_async(
-    data_dir: &Path,
-    provider: &str,
-    label: &str,
-) -> Result<(), CoreError> {
-    let handle = HostHandle::open(data_dir).await?;
-    if handle.approve_credential(provider, label).await? {
-        return Ok(());
-    }
-    let pending = handle.pending_credentials().await?;
-    Err(CoreError::Approve(format!(
-        "unknown credential {provider}:{label}; pending: [{pending}]",
-        pending = pending.join(", ")
-    )))
-}
-
-/// Split from [`run_approve_device`] so the async body stays runtime-free.
-/// The one-time pairing secret prints once to this Host-local console, the
-/// trusted inlet, and nowhere else; the operator provisions it into the
-/// client's protected device file.
-async fn approve_device_async(data_dir: &Path, descriptor: &str) -> Result<(), CoreError> {
-    use std::io::Write as _;
-    let handle = HostHandle::open(data_dir).await?;
-    if let Some((_, secret)) = handle.approve_device(descriptor).await? {
-        let mut stdout = std::io::stdout().lock();
-        writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
-            CoreError::Store(format!(
-                "approved, but the secret could not be shown: {error}"
-            ))
-        })?;
-        stdout.flush().map_err(|error| {
-            CoreError::Store(format!(
-                "approved, but the secret could not be shown: {error}"
-            ))
-        })?;
-        return Ok(());
-    }
-    let pending = handle.pending_devices().await?;
-    Err(CoreError::Approve(format!(
-        "unknown device descriptor {descriptor:?}; pending: [{pending}]",
-        pending = pending.join(", ")
-    )))
+    block_on(async {
+        let handle = HostHandle::open(data_dir).await?;
+        if handle.approve_credential(provider, label).await? {
+            return Ok(());
+        }
+        let pending = handle.pending_credentials().await?;
+        Err(CoreError::Approve(format!(
+            "unknown credential {provider}:{label}; pending: [{pending}]",
+            pending = pending.join(", ")
+        )))
+    })
 }
 
 #[cfg(test)]
