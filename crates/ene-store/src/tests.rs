@@ -2,7 +2,7 @@ use crate::Store;
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
     HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
-    ReportStatusTransition, RoundIntentMark, UndeliveredRef, UndeliveredRepository,
+    ReportStatusTransition, RoundIntentMark, UndeliveredRepository,
 };
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
@@ -305,19 +305,6 @@ async fn undelivered_register_mark_and_stale_mark() {
         stale,
         Ok(ReportStatusTransition::StaleSource),
         "repeat mark on a moved row must be stale"
-    );
-    let missing = UndeliveredRef {
-        id: RawId::new(),
-        companion,
-        source_message: RawId::new(),
-        status: ReportStatus::Pending,
-        round: RawId::new(),
-        presence_generation: generation,
-    };
-    let absent = store.register_if_parent_durable(missing).await;
-    assert!(
-        matches!(absent, Ok(false)),
-        "register without a durable parent must decline"
     );
 }
 
@@ -639,14 +626,9 @@ async fn usage_insert_preserves_null_tokens() {
 }
 
 #[tokio::test]
-async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_local_id_uniqueness() {
+async fn local_id_is_correspondence_metadata_not_a_replay_key() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
-    let absent = store.lookup_local_id(companion, "send-1").await;
-    assert!(
-        matches!(absent, Ok(None)),
-        "unknown local id must find nothing"
-    );
     let first = store
         .append_message(history_command_with_ids(
             companion,
@@ -679,12 +661,16 @@ async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_loc
         first_outcome, second_outcome,
         "local id repeats must mint distinct messages"
     );
-    let found = store.lookup_local_id(companion, "send-1").await;
-    let item = found.unwrap().unwrap();
-    assert_eq!(item.local_id.as_deref(), Some("send-1"));
-    assert_eq!(item.command_id, None);
-    let count = history_row_count(&store, companion);
-    assert_eq!(count, Some(2), "both local id repeats must persist");
+    let loaded = store.load_timeline(companion, None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 2, "both local id repeats must persist");
+    assert!(
+        timeline
+            .iter()
+            .all(|item| item.local_id.as_deref() == Some("send-1")),
+        "local id must round-trip as correspondence metadata"
+    );
+    assert!(timeline.iter().all(|item| item.command_id.is_none()));
 }
 
 #[tokio::test]
@@ -983,10 +969,6 @@ async fn lookup_command_roundtrip_returns_both_ids() {
         matches!(missing, Ok(None)),
         "unknown command must find nothing"
     );
-    let by_local = store.lookup_local_id(companion, "send-9").await;
-    let same = by_local.unwrap().unwrap();
-    assert_eq!(same.id, message);
-    assert_eq!(same.command_id, Some(command));
     let loaded = store.load_timeline(companion, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
@@ -1076,9 +1058,6 @@ INSERT INTO _schema_version (version) VALUES (2);",
         timeline[0].incarnation, None,
         "pre-opaque rows carry no incarnation"
     );
-    let by_local = store.lookup_local_id(companion, "legacy-1").await;
-    let legacy = by_local.unwrap().unwrap();
-    assert_eq!(legacy.id, message_id);
     let missing = store
         .lookup_command(companion, &CommandId(RawId::new()))
         .await;
@@ -1248,11 +1227,6 @@ async fn history_wire_projection_and_incarnation_roundtrip() {
         timeline[0].incarnation,
         Some((7, 11)),
         "timeline must echo the stored incarnation"
-    );
-    let by_local_none = store.lookup_local_id(companion, "missing").await;
-    assert!(
-        matches!(by_local_none, Ok(None)),
-        "unrelated correspondence lookup must miss"
     );
 }
 

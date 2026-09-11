@@ -494,18 +494,6 @@ pub trait HistoryRepository {
         limit: u64,
     ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError>;
 
-    /// Looks up one previously accepted message by caller-supplied local id.
-    ///
-    /// Correspondence lookup for matching an input to its ack. Command-scoped
-    /// replay uses [`HistoryRepository::lookup_command`]; stream outcomes are
-    /// not replayed through either lookup — a caller that needs missed stream
-    /// items recovers via `HistoryRequest`.
-    async fn lookup_local_id(
-        &self,
-        companion: CompanionId,
-        local_id: &str,
-    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError>;
-
     /// Looks up one previously accepted message by command id.
     ///
     /// The replay path calls this before appending: when a record exists the
@@ -530,15 +518,6 @@ pub trait HistoryRepository {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait UndeliveredRepository {
-    /// Registers `entry` when its parent message is durable.
-    ///
-    /// Returns `true` when the entry was registered and `false` when the
-    /// parent was not durable and nothing was registered.
-    async fn register_if_parent_durable(
-        &self,
-        entry: UndeliveredRef,
-    ) -> Result<bool, UndeliveredTechnicalError>;
-
     /// Compares `expected` against the current [`ReportStatus`] and, on
     /// match, applies `mark` in one atomic per-row compare.
     ///

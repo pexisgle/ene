@@ -489,9 +489,8 @@ pub(crate) fn decode_attribution(
 }
 
 /// Named fields keep column order in exactly one place:
-/// [`HistoryRow::from_row`]. All three readers
-/// (`lookup_local_id`, `lookup_command`, `load_timeline`) share the column
-/// order through that constructor.
+/// [`HistoryRow::from_row`]. All readers (`lookup_command`, `load_timeline`,
+/// `load_recent_timeline`) share the column order through that constructor.
 pub(crate) struct HistoryRow {
     message_text: String,
     round_text: String,
