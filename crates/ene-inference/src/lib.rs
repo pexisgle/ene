@@ -8,19 +8,15 @@
 //! [`AdmissionRequest::authorize`] runs the single-use
 //! [`ene_permission::check_live_authorization`] /
 //! [`ene_permission::EvaluationTracker::consume`] decision, and
-//! [`dispatch_authorized`] claims the attempt, calls [`send`], re-checks
-//! adoption, and records usage. [`ResolvedRoute`] is built inside
-//! `dispatch_authorized` from an [`AuthorizedInference`], so no caller
-//! assembles permission or credential premises by hand.
+//! [`dispatch_authorized`] claims the attempt, calls the provider
+//! transport, re-checks adoption, and records usage. The provider request
+//! is built inside `dispatch_authorized` from an [`AuthorizedInference`],
+//! so no caller assembles permission or credential premises by hand. The
+//! input cap is checked before the durable attempt claim; callers arrive
+//! with an already-admitted use.
 //!
-//! [`send`] remains the transport-facing gate under that boundary: it
-//! checks route/candidate agreement, then calls the transport. The input
-//! cap is checked earlier by [`dispatch_authorized`], before the durable
-//! attempt claim. Direct callers must already hold an admitted use; the
-//! boundary entry points are the normal path.
-//!
-//! Body text is redacted from [`core::fmt::Debug`]: [`RequestInferenceCommand`]
-//! hides `input_text`, and [`InferenceResultArrival`] hides `output_text`.
+//! Body text is redacted from [`core::fmt::Debug`]: [`ProviderRequest`]
+//! hides `input`, and [`InferenceResultArrival`] hides `output_text`.
 //! Usage token counts are [`Option`]s with [`UsageSource::Unknown`], never
 //! zero, when the provider reports nothing.
 
@@ -46,93 +42,35 @@ pub const MAX_INPUT_CHARS: usize = 8_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceTicketId(pub RawId);
 
-/// Provider route and consent premise for one inference use.
-///
-/// Built inside [`dispatch_authorized`] from an [`AuthorizedInference`];
-/// the route agreement check (against the candidate) is [`send`]'s job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedRoute {
-    /// Provider name; must exactly equal the candidate's `provider_ref`.
-    pub provider: String,
-    /// Model name; must exactly equal the candidate's `model`.
-    pub model: String,
-    /// Credential the provider call will be billed against.
-    pub credential: CredentialRef,
-    /// Consent premise the use was admitted under, as `(consent id, revision)`.
-    pub consent: (String, ConsentRevision),
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct RequestInferenceCommand {
-    pub ticket: InferenceTicketId,
-    /// The authorized candidate; its fingerprint must match the evaluation id.
-    pub candidate: InferenceUseCandidate,
-    /// Admitted single-use authorization for this candidate.
-    pub authorization: PermissionEvaluationId,
-    /// Route premise built by [`dispatch_authorized`].
-    pub route: ResolvedRoute,
-    /// Round body text; [`core::fmt::Debug`] redacts this.
-    pub input_text: String,
-}
-
-impl core::fmt::Debug for RequestInferenceCommand {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RequestInferenceCommand")
-            .field("ticket", &self.ticket)
-            .field("candidate", &self.candidate)
-            .field("authorization", &self.authorization)
-            .field("route", &self.route)
-            .field("input_text", &"<redacted>")
-            .finish()
-    }
-}
-
-/// Outcome of an inference dispatch attempt.
-///
-/// State and data travel in the same variant: a completion always carries
-/// its arrival, and a refusal never does. Unrepresentable pairings such as
-/// "completed without arrival" cannot be constructed, so callers never
-/// re-check arrival presence after matching the outcome. Technical
-/// failures stay outside in the surrounding `Result`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchResult {
-    /// The provider call completed; carries the full arrival.
-    Completed(InferenceResultArrival),
-    /// Nothing was sent; the reason names the failing gate.
-    NotSent(NotSentReason),
-}
-
 /// Why an inference use was not sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotSentReason {
-    /// Route and candidate disagree, or the route consent premise failed.
-    ConsentMismatch,
     /// The evaluation id was unknown, already consumed, or bound to a
     /// different fingerprint.
     ///
-    /// Produced by admission, never by [`send`].
+    /// Produced by admission, never by dispatch.
     EvaluationConsumed,
     /// No complete setup premise: no consent is recorded, the consent
     /// references an unregistered credential, or the bearer is missing.
     ///
-    /// Produced by admission, never by [`send`].
+    /// Produced by admission, never by dispatch.
     SetupIncomplete,
     /// The stored consent moved away from the premise the use was admitted
     /// under, before the attempt claim or before adoption.
     ConsentStale,
     /// The live-authorization allowlist refused the use.
     ///
-    /// Produced by admission, never by [`send`].
+    /// Produced by admission, never by dispatch.
     NotInAllowlist,
-    /// `input_text` exceeds [`MAX_INPUT_CHARS`].
+    /// The input exceeds [`MAX_INPUT_CHARS`].
     OverLimit,
 }
 
 /// Reference to a completed inference result.
 ///
 /// Kept for boundary projections that name a completion without carrying
-/// its body; [`send`] itself returns the arrival inline via
-/// [`DispatchResult::Completed`].
+/// its body; dispatch returns the arrival inline via
+/// [`InferenceDispatchOutcome::Completed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceResultRef {
     pub ticket: InferenceTicketId,
@@ -319,69 +257,6 @@ pub trait InferenceAttemptRepository: Send + Sync {
         &self,
         attempt: InferenceAttempt,
     ) -> Result<AttemptBeginOutcome, InferenceTechnicalError>;
-}
-
-/// Dispatches one authorized inference use.
-///
-/// Transport-facing gate under the [`InferenceExecutor`] boundary:
-/// [`dispatch_authorized`] is the normal caller and reaches this function
-/// only after admission consumed the single-use id, the attempt claim
-/// committed, and the input cap passed. This function performs no
-/// authorization bookkeeping itself: a call reaching it has already burned
-/// its id, so the same authorization value presented twice sends twice.
-///
-/// Gates, in order:
-///
-/// 1. Route provider/model must exactly equal the candidate's; otherwise
-///    [`NotSentReason::ConsentMismatch`].
-/// 2. `route_consent_match` (the attempt claim's verdict that the route
-///    consent premise matched stored consent) must hold; otherwise
-///    [`NotSentReason::ConsentMismatch`].
-/// 3. Otherwise the transport runs. Transport errors propagate as
-///    [`Err`]; a response with no usage maps to [`None`] counts with
-///    [`UsageSource::Unknown`], never zero.
-pub async fn send(
-    cmd: RequestInferenceCommand,
-    route_consent_match: bool,
-    transport: &impl ProviderTransport,
-) -> Result<DispatchResult, InferenceTechnicalError> {
-    if cmd.route.provider != cmd.candidate.provider_ref || cmd.route.model != cmd.candidate.model {
-        return Ok(DispatchResult::NotSent(NotSentReason::ConsentMismatch));
-    }
-    if !route_consent_match {
-        return Ok(DispatchResult::NotSent(NotSentReason::ConsentMismatch));
-    }
-    let response = transport
-        .complete(ProviderRequest {
-            model: cmd.route.model.clone(),
-            credential: cmd.route.credential.clone(),
-            input: cmd.input_text.clone(),
-        })
-        .await?;
-    let usage = match response.usage {
-        Some(raw) => UsageFact {
-            ticket: cmd.ticket,
-            provider: cmd.route.provider.clone(),
-            model: cmd.route.model.clone(),
-            input_tokens: Some(raw.input_tokens),
-            output_tokens: Some(raw.output_tokens),
-            source: UsageSource::Reported,
-        },
-        None => UsageFact {
-            ticket: cmd.ticket,
-            provider: cmd.route.provider.clone(),
-            model: cmd.route.model.clone(),
-            input_tokens: None,
-            output_tokens: None,
-            source: UsageSource::Unknown,
-        },
-    };
-    let arrival = InferenceResultArrival {
-        ticket: cmd.ticket,
-        output_text: response.text,
-        usage,
-    };
-    Ok(DispatchResult::Completed(arrival))
 }
 
 /// Admission resolves consent and credential premises, then runs the
@@ -660,18 +535,7 @@ pub async fn dispatch_authorized(
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
     let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
     let credential_set = prompt.credential_set;
-    let command = RequestInferenceCommand {
-        ticket,
-        candidate: authorized.candidate,
-        authorization: authorized.authorization,
-        route: ResolvedRoute {
-            provider: provider.clone(),
-            model: model.clone(),
-            credential: authorized.credential,
-            consent: (consent_id.clone(), consent_rev),
-        },
-        input_text: prompt.text,
-    };
+    let credential = authorized.credential;
     // The claim is the linearization point: it reads, compares, and inserts
     // in one short transaction, so a stale consent or a stale credential-set
     // premise fails here before any byte leaves. A store failure is
@@ -695,23 +559,51 @@ pub async fn dispatch_authorized(
         }
         Err(error) => return Err(error),
     }
-    // The attempt claim is the determination `send` relies on; the route
-    // and candidate were built from the same consent premise.
-    match send(command, true, transport).await {
+    let response = match transport
+        .complete(ProviderRequest {
+            model: model.clone(),
+            credential,
+            input: prompt.text,
+        })
+        .await
+    {
+        Ok(response) => response,
         Err(error) => {
+            // The attempt is claimed, so the call may have run: record the
+            // uncertain usage before propagating the technical failure.
             record_usage_decision(usage, unknown_usage(ticket, &provider, &model)).await;
-            Err(error)
+            return Err(error);
         }
-        Ok(DispatchResult::NotSent(reason)) => Ok(InferenceDispatchOutcome::NotSent(reason)),
-        Ok(DispatchResult::Completed(arrival)) => {
-            // Accounting follows the attempt, so the reported fact is
-            // recorded before the adoption read: an adoption read failure
-            // must not discard what the provider already spent.
-            record_usage_decision(usage, arrival.usage.clone()).await;
-            let adopted = consent_matches(consent, capability, &consent_id, consent_rev).await?;
-            Ok(InferenceDispatchOutcome::Completed { arrival, adopted })
-        }
-    }
+    };
+    let fact = match response.usage {
+        Some(raw) => UsageFact {
+            ticket,
+            provider: provider.clone(),
+            model: model.clone(),
+            input_tokens: Some(raw.input_tokens),
+            output_tokens: Some(raw.output_tokens),
+            source: UsageSource::Reported,
+        },
+        None => UsageFact {
+            ticket,
+            provider,
+            model,
+            input_tokens: None,
+            output_tokens: None,
+            source: UsageSource::Unknown,
+        },
+    };
+    let arrival = InferenceResultArrival {
+        ticket,
+        output_text: response.text,
+        usage: fact,
+    };
+    // Accounting follows the attempt, so the reported fact is recorded
+    // before the adoption read: an adoption read failure must not discard
+    // what the provider already spent.
+    record_usage_decision(usage, arrival.usage.clone()).await;
+    let adopted = consent_matches(consent, capability, &consent_id, consent_rev).await?;
+    Ok(InferenceDispatchOutcome::Completed { arrival, adopted })
 }
 
 /// Loads the current consent and checks it still names exactly `id` at `rev`.
@@ -837,176 +729,16 @@ pub mod fake {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::fake::{FakeFailure, FakeProviderTransport};
-    use super::{
-        DispatchResult, InferenceResultArrival, InferenceTicketId, NotSentReason, RawUsage,
-        RequestInferenceCommand, ResolvedRoute, UsageSource, send,
-    };
-    use ene_credential::CredentialRef;
-    use ene_permission::{
-        CapabilityKind, ConsentRevision, ConsumerKind, InferenceUseCandidate,
-        PermissionEvaluationId, PurposeKind,
-    };
-    use ene_primitive::RawId;
-
-    fn candidate() -> InferenceUseCandidate {
-        InferenceUseCandidate {
-            consumer: ConsumerKind::CompanionDialogue,
-            capability: CapabilityKind::Dialogue,
-            provider_ref: "acme".to_owned(),
-            model: "dialogue-1".to_owned(),
-            purpose: PurposeKind::DialogueResponse,
-        }
-    }
-
-    fn route() -> ResolvedRoute {
-        ResolvedRoute {
-            provider: "acme".to_owned(),
-            model: "dialogue-1".to_owned(),
-            credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
-            consent: ("consent-1".to_owned(), ConsentRevision::from_u64(3)),
-        }
-    }
-
-    fn command(input_text: &str) -> RequestInferenceCommand {
-        RequestInferenceCommand {
-            ticket: InferenceTicketId(RawId::new()),
-            candidate: candidate(),
-            authorization: PermissionEvaluationId(RawId::new()),
-            route: route(),
-            input_text: input_text.to_owned(),
-        }
-    }
-
-    #[tokio::test]
-    async fn success_maps_reported_usage() {
-        let cmd = command("hello");
-        let ticket = cmd.ticket;
-        let transport = FakeProviderTransport::new(
-            "hi there".to_owned(),
-            Some(RawUsage {
-                input_tokens: 4,
-                output_tokens: 2,
-            }),
-        );
-        let result = send(cmd, true, &transport)
-            .await
-            .expect("inference dispatch answers an outcome");
-        let DispatchResult::Completed(arrival) = result else {
-            panic!("a successful provider call completes");
-        };
-        assert_eq!(arrival.ticket, ticket);
-        assert_eq!(arrival.output_text, "hi there");
-        assert_eq!(arrival.usage.input_tokens, Some(4));
-        assert_eq!(arrival.usage.output_tokens, Some(2));
-        assert_eq!(arrival.usage.source, UsageSource::Reported);
-    }
-
-    #[tokio::test]
-    async fn missing_usage_maps_to_unknown_not_zero() {
-        let cmd = command("hello");
-        let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &transport)
-            .await
-            .expect("inference dispatch answers an outcome");
-        let DispatchResult::Completed(arrival) = result else {
-            panic!("a successful provider call completes");
-        };
-        assert_eq!(arrival.usage.input_tokens, None);
-        assert_eq!(arrival.usage.output_tokens, None);
-        assert_eq!(arrival.usage.source, UsageSource::Unknown);
-    }
-
-    #[tokio::test]
-    async fn route_mismatch_is_not_sent() {
-        let cmd = RequestInferenceCommand {
-            ticket: InferenceTicketId(RawId::new()),
-            candidate: candidate(),
-            authorization: PermissionEvaluationId(RawId::new()),
-            route: ResolvedRoute {
-                model: "other-model".to_owned(),
-                ..route()
-            },
-            input_text: "hello".to_owned(),
-        };
-        let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &transport)
-            .await
-            .expect("inference dispatch answers an outcome");
-        assert_eq!(
-            result,
-            DispatchResult::NotSent(NotSentReason::ConsentMismatch)
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_consent_premise_is_not_sent() {
-        let cmd = command("hello");
-        let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, false, &transport)
-            .await
-            .expect("inference dispatch answers an outcome");
-        assert_eq!(
-            result,
-            DispatchResult::NotSent(NotSentReason::ConsentMismatch)
-        );
-    }
-
-    #[tokio::test]
-    async fn transport_failure_is_a_technical_error() {
-        let cmd = command("hello");
-        let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
-        let result = send(cmd, true, &transport).await;
-        assert!(matches!(
-            result,
-            Err(super::InferenceTechnicalError::ProviderTransportFailed(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn lost_response_is_a_technical_error() {
-        let cmd = command("hello");
-        let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
-        let result = send(cmd, true, &transport).await;
-        assert!(matches!(
-            result,
-            Err(super::InferenceTechnicalError::ResponseLost)
-        ));
-    }
-
-    #[test]
-    fn debug_redacts_body_text() {
-        let cmd = command("harbor-sunset-body-probe");
-        let rendered = format!("{cmd:?}");
-        assert!(!rendered.contains("harbor-sunset-body-probe"));
-        let arrival = InferenceResultArrival {
-            ticket: cmd.ticket,
-            output_text: "harbor-sunset-output-probe".to_owned(),
-            usage: super::UsageFact {
-                ticket: cmd.ticket,
-                provider: "acme".to_owned(),
-                model: "dialogue-1".to_owned(),
-                input_tokens: None,
-                output_tokens: None,
-                source: UsageSource::Unknown,
-            },
-        };
-        let rendered_arrival = format!("{arrival:?}");
-        assert!(!rendered_arrival.contains("harbor-sunset-output-probe"));
-    }
-}
-
-#[cfg(test)]
 mod dispatch_tests {
     use std::sync::Mutex;
 
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
         AttemptBeginOutcome, AuthorizedInference, InferenceAttempt, InferenceAttemptRepository,
-        InferenceDispatchOutcome, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
-        NotSentReason, PermissionEvaluationId, ProviderRequest, ProviderResponse,
-        ProviderTransport, RawUsage, UsageFact, UsageRepository, UsageSource, dispatch_authorized,
+        InferenceDispatchOutcome, InferenceResultArrival, InferenceTechnicalError,
+        InferenceTicketId, MAX_INPUT_CHARS, NotSentReason, PermissionEvaluationId, ProviderRequest,
+        ProviderResponse, ProviderTransport, RawUsage, UsageFact, UsageRepository, UsageSource,
+        dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -1272,15 +1004,81 @@ mod dispatch_tests {
         )
         .await
         .expect("dispatch answers an outcome");
-        let InferenceDispatchOutcome::Completed { adopted, .. } = outcome else {
+        let InferenceDispatchOutcome::Completed { arrival, adopted } = outcome else {
             panic!("a provider success completes");
         };
         assert!(!adopted, "the moved consent refuses adoption");
+        assert_eq!(arrival.output_text, "hi there");
+        assert_eq!(arrival.usage.source, UsageSource::Reported);
         let facts = usage.0.lock().expect("usage capture lock");
         assert_eq!(facts.len(), 1, "the reported fact is kept");
-        assert_eq!(facts[0].source, UsageSource::Reported);
         assert_eq!(facts[0].input_tokens, Some(4));
         assert_eq!(facts[0].output_tokens, Some(2));
+    }
+
+    #[tokio::test]
+    async fn missing_usage_maps_to_unknown_not_zero() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("hi there"), None);
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let InferenceDispatchOutcome::Completed { arrival, .. } = outcome else {
+            panic!("a provider success completes");
+        };
+        assert_eq!(arrival.output_text, "hi there");
+        assert_eq!(arrival.usage.input_tokens, None);
+        assert_eq!(arrival.usage.output_tokens, None);
+        assert_eq!(arrival.usage.source, UsageSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn lost_response_records_unknown_counts() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await;
+        assert!(matches!(result, Err(InferenceTechnicalError::ResponseLost)));
+        assert_eq!(
+            usage.0.lock().expect("usage capture lock").len(),
+            1,
+            "a lost response may have run, so it records an unknown fact"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_output_text() {
+        let ticket = InferenceTicketId(RawId::new());
+        let arrival = InferenceResultArrival {
+            ticket,
+            output_text: String::from("harbor-sunset-output-probe"),
+            usage: UsageFact {
+                ticket,
+                provider: String::from("acme"),
+                model: String::from("dialogue-1"),
+                input_tokens: None,
+                output_tokens: None,
+                source: UsageSource::Unknown,
+            },
+        };
+        let rendered = format!("{arrival:?}");
+        assert!(!rendered.contains("harbor-sunset-output-probe"));
     }
 }
 
