@@ -66,16 +66,6 @@ pub enum NotSentReason {
     OverLimit,
 }
 
-/// Reference to a completed inference result.
-///
-/// Kept for boundary projections that name a completion without carrying
-/// its body; dispatch returns the arrival inline via
-/// [`InferenceDispatchOutcome::Completed`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct InferenceResultRef {
-    pub ticket: InferenceTicketId,
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub struct InferenceResultArrival {
     pub ticket: InferenceTicketId,
@@ -98,7 +88,6 @@ impl core::fmt::Debug for InferenceResultArrival {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UsageSource {
     Reported,
-    Estimated,
     /// No counts are known; token fields must be [`None`], never zero.
     Unknown,
 }
@@ -113,15 +102,6 @@ pub struct UsageFact {
     /// Output tokens, or [`None`] when unknown (never zero-as-unknown).
     pub output_tokens: Option<u64>,
     pub source: UsageSource,
-}
-
-/// Certainty of an inference attempt, for Host-side bookkeeping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InferenceCertainty {
-    Completed,
-    ProviderFailed,
-    /// The call may have run but the response was lost.
-    ResponseLost,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -309,7 +289,7 @@ impl AdmissionRequest {
                 }
             }
             LiveAuthorizationDecision::Deny(code) => Admission::Declined(not_sent_for_deny(code)),
-            LiveAuthorizationDecision::NeedsRevalidation(_) => {
+            LiveAuthorizationDecision::NeedsRevalidation => {
                 Admission::Declined(NotSentReason::ConsentStale)
             }
         }
@@ -650,7 +630,7 @@ async fn record_usage_decision(usage: &impl UsageRepository, fact: UsageFact) {
 
 fn not_sent_for_deny(code: DenyCode) -> NotSentReason {
     match code {
-        DenyCode::ConsentStale | DenyCode::Superseded => NotSentReason::ConsentStale,
+        DenyCode::ConsentStale => NotSentReason::ConsentStale,
         DenyCode::NotInAllowlist => NotSentReason::NotInAllowlist,
     }
 }
