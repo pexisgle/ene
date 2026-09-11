@@ -343,6 +343,69 @@ fn decode_summary(raw: RawSummary) -> Result<SummaryRecord, LearningTechnicalErr
     })
 }
 
+/// Recall candidate arms: newest, most important, and lexical matches, each
+/// capped by `limit`; suppression is excluded before any cap applies. The
+/// caller receives candidates in newest-first order with duplicates removed.
+fn recall_candidates_sync(
+    conn: &Mutex<Connection>,
+    companion: RawId,
+    terms: &[String],
+    limit: u64,
+) -> Result<Vec<Memory>, LearningTechnicalError> {
+    let cap = encode_limit(limit)?;
+    let companion_text = encode_id(companion);
+    let columns = "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at, rowid AS insertion_order";
+    let base = format!(
+        "SELECT {columns} FROM learning_memory WHERE companion_id = ?1 AND recall_suppressed = 0"
+    );
+    let mut sql = format!(
+        "SELECT * FROM ({base} ORDER BY rowid DESC LIMIT ?2) \
+         UNION ALL SELECT * FROM ({base} ORDER BY importance DESC, rowid DESC LIMIT ?2)"
+    );
+    let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(companion_text), Box::new(cap)];
+    if !terms.is_empty() {
+        let predicates = terms
+            .iter()
+            .enumerate()
+            .map(|(position, _)| format!("instr(lower(content), ?{}) > 0", position + 3))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        sql.push_str(&format!(
+            " UNION ALL SELECT * FROM ({base} AND ({predicates}) LIMIT ?2)"
+        ));
+        for term in terms {
+            values.push(Box::new(term.clone()));
+        }
+    }
+    let guard = lock_shared(conn);
+    let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;
+    let rows = statement
+        .query_map(
+            rusqlite::params_from_iter(
+                values
+                    .iter()
+                    .map(|value| value.as_ref() as &dyn rusqlite::ToSql),
+            ),
+            |row| Ok((raw_memory_row(row)?, row.get::<_, i64>(8)?)),
+        )
+        .map_err(learning_unavailable)?;
+    let mut candidates: Vec<(i64, Memory)> = Vec::new();
+    for row in rows {
+        let (raw, insertion_order) = row.map_err(learning_unavailable)?;
+        let memory = decode_memory(raw)?;
+        if !candidates
+            .iter()
+            .any(|(_, existing)| existing.id == memory.id)
+        {
+            candidates.push((insertion_order, memory));
+        }
+    }
+    // Newest first, so the caller's stable ranking keeps recency as its
+    // final tie-break.
+    candidates.sort_by_key(|(insertion_order, _)| std::cmp::Reverse(*insertion_order));
+    Ok(candidates.into_iter().map(|(_, memory)| memory).collect())
+}
+
 fn list_current_sync(
     conn: &Mutex<Connection>,
     companion: RawId,
@@ -556,6 +619,17 @@ impl LearningRepository for Store {
     ) -> Result<Vec<Memory>, LearningTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || list_current_sync(&conn, companion, after, limit)).await
+    }
+
+    async fn recall_candidates(
+        &self,
+        companion: RawId,
+        terms: &[String],
+        limit: u64,
+    ) -> Result<Vec<Memory>, LearningTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        let terms = terms.to_vec();
+        run_blocking(move || recall_candidates_sync(&conn, companion, &terms, limit)).await
     }
 
     async fn list_memory_revisions(

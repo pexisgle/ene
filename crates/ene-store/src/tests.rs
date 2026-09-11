@@ -2540,6 +2540,86 @@ async fn memory_revision_pages_and_summary_batches_are_bounded() {
     assert!(store.load_summaries(&[]).await.unwrap().is_empty());
 }
 
+/// Recall candidate retrieval is a bounded multi-arm query: an old relevant
+/// memory is reachable past any newest window, suppressed rows never become
+/// candidates, and each arm caps the rows read.
+#[tokio::test]
+async fn recall_candidates_are_bounded_and_reach_old_relevant_rows() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let old = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: old },
+                "The owner likes jasmine tea.",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    for index in 0..300 {
+        let id = MemoryId::generate();
+        let outcome = store
+            .commit_memory_change(commit(
+                None,
+                learning_change(
+                    companion,
+                    MemoryTarget::New { id },
+                    &format!("filler memory {index}"),
+                    ChangeKind::Initial,
+                    false,
+                ),
+            ))
+            .await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    }
+    let suppressed = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: suppressed },
+                "suppressed jasmine note",
+                ChangeKind::Initial,
+                true,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates.len() <= 9,
+        "three arms of at most three rows each, got {}",
+        candidates.len()
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|memory| memory.content.contains("jasmine tea")),
+        "the oldest relevant memory must be a candidate"
+    );
+    assert!(
+        candidates.iter().all(|memory| !memory.recall_suppressed),
+        "suppressed rows never consume candidate slots"
+    );
+
+    let generic = store.recall_candidates(companion, &[], 3).await.unwrap();
+    assert!(
+        generic.len() <= 9 && !generic.is_empty(),
+        "an empty query still answers bounded background, got {}",
+        generic.len()
+    );
+}
+
 #[tokio::test]
 async fn learning_reused_summary_identity_with_a_different_payload_is_refused() {
     let store = open_memory().await.unwrap();

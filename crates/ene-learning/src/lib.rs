@@ -38,7 +38,7 @@ pub use formation::{
 };
 pub use identity::{ExperienceSourceKind, MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
 pub use memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};
-pub use recall::{RECALL_SCAN_LIMIT, RecallQuery, RecalledMemory, recall};
+pub use recall::{RECALL_CANDIDATE_LIMIT, RecallQuery, RecalledMemory, recall};
 pub use repository::{
     LearningRepository, LearningTechnicalError, MemoryChange, MemoryChangeCommit,
     MemoryChangeOutcome, MemoryTarget,
