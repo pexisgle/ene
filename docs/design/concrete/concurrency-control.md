@@ -103,7 +103,7 @@ Ene は単一 Host 上の非同期 system であり、並行の源泉は Host �
 | SD-Undelivered | per `undelivered_id`（＋登録時の親原子） | 報告状況 `Pending→Summarized→Presented/Unknown` の更新。会話由来は History append と同一原子、Task 由来は Task durable 後の別 transaction 原子登録 | 異なる undelivered 間の報告。同一物の読取・要約生成（commit 前） | PR AU1a/AU1b/AU8。送信だけで `Presented` にしない（durable-after-confirmed） |
 | SD-Deletion | per `DeletionOperationId`＋sweep | operation＋`erasure_condition` の先行 durable、参加者集約・残存検証、検索 token の除去 / 復元不能化、全域完了の原子確定。token と完了 marker を同じ durable commit にできない間は `finalizing` を維持 | 参加者の局所処理・検証そのもの。対象外の通常活動。異なる operation 間 | PR AU9。durable-before-enforce。局所返却で hold を解除しない。token が復元可能な状態を全域完了にしない。全 domain の lock ではない |
 | SD-Restore | singleton `restore_generation_state` の switch 瞬間のみ | staging 検証後の `restore_generation` bump＋正本 pointer switch の原子確定 | staging 作業、live mutation（switch 瞬間を除く）、異なる時点の backup 作成、derived 再構築 | PR AU11。switch 前は復元前正常が正本、switch 後は復元内容が正本。第三の混合を作らない。switch 全期間の read 停止はしない（第12節） |
-| SD-RuleConsent | per `RuleId` / `AssignmentId` / `DevicePermission` / `SandboxException` | 本文・解釈・scope・同意 revision の更新、Undo 対応の付記 | 評価（読取＋判断）そのもの。異なる rule / assignment 間 | 評価時は保存 Allow を再利用しない。更新と評価を同一更新にしない |
+| SD-RuleConsent | per Rule identity / `AssignmentId` / `DevicePermission` / `SandboxException` | 本文・解釈・scope・同意 revision の更新、Undo 対応の付記 | 評価（読取＋判断）そのもの。異なる rule / assignment 間 | 評価時は保存 Allow を再利用しない。更新と評価を同一更新にしない |
 | SD-CompanionLife | per `CompanionId` の lifecycle | Running / Stopped / Deleted（tombstone 最小）の遷移、新規禁止 hold の先行 | 異なる Companion の lifecycle。各 owner の局所削除・検証作業 | PR AU13。単一 global transaction にしない。各 owner の局所 durable の集約 |
 
 明示的に serialization **しない**もの：inference 実行、外部作用の継続、Provider session、embedding / index rebuild、routing 文脈生成、要約生成、表示・集計、Observer Capture・候補検知、backup file copy（marking 前）、restore staging 検証。これらは premise 付きで開始し、commit 時に compare する（第5節）。
@@ -145,7 +145,7 @@ CI 第6節の述語を concurrency の commit 境界へ落としたものであ�
 | 消去区間の受入・生成・再保存 | 到着・生成情報の `(source 関係, 取得・生成時点, sweep 以前・区間内の別)` × `(operation, sweep, valid_interval)` × 保持者の局所検証。完了後は旧 provenance linkage × 完了 operation の scope | 区間内再到着・再生成は消去対象。実行中処理による再保存をしない。完了後の旧 provenance 遅延物も再保存しない |
 | 復元後の利用 | 利用の `(restore generation 前提, assignment/consent revision, Credential 照合, 依拠 Rule revision)` × 現在の `(restore_generation, 現 store, 現制約, 復元後保留)` | 旧 live・旧同意・旧 assignment だけで自動利用・自動処理を開始しない |
 | 権限・Rule 解釈の採用 | 過去 Allow・復元 Rule・context 内許可文・cache 判定 × 現在の `(rule revision, 同意, device, cap, 失効・停止・帰属・消去・復元保留)` | 制御を変更しない |
-| 費用・資源の継続判断 | 消費の `(用途・送信先対応, 報告/推定/不明/処理中の別)` × 現在 cap・資源・不明の扱い。並列は予約＋commit の原子照合 | 処理中・遅延・不明をゼロにしない。並列で同一残額を使い切れる扱いにしない |
+| 費用・資源の継続判断 | 消費の `(用途・送信先対応, 報告/不明/処理中の別)` × 現在 cap・資源・不明の扱い。並列は予約＋commit の原子照合 | 処理中・遅延・不明をゼロにしない。並列で同一残額を使い切れる扱いにしない |
 | Character 適用 | `(character_id, expected_character_revision)` × 現在適用関係 × `OwnerSelectionRef` | 未確認部品を更新済みにしない |
 | 全域完了の確定 | 各 participant の局所完了・検証・未完了・失敗 × 機械的残存検証 × 区間内再到着の取込み × 本文非再保存 × 検索 token の除去 / 復元不能化 | 未確認・検証失敗・pending / unreachable・token 残存を成功に読み替えない。token が復元可能なら `finalizing` の未完了として扱う |
 
@@ -263,12 +263,12 @@ COMMIT;
 
 ```
 state: Reserved(処理中・上限引き当て) → Committed(確定) / Released(解放)
-       + Reported / Estimated / Unknown の区別を別 field に保持する
+       + Reported / Unknown の区別を別 field に保持する
 ```
 
 - **reservation（開始時、短い `Immediate` tx）。** `usage_fact_*` に `Reserved` 行を insert し、同一 tx 内で `cap_limit`＋関連 `usage_fact_*`（`Reserved + Committed + Unknown` の合計。`Released` を除く）を読み取って cap 照合する。上限超過・不明で継続不可なら ROLLBACK し、開始しない。予約量は推定上限（upper bound）とし、過小予約による超過をしない。
 - **実行（lock なし）。** 予約後の inference・Tool 実行は並列に行う。予約保持を理由に他 request を block しない。失効・停止・保留が発生したら best-effort で停止する。
-- **commit（確定時、短い tx）。** 実績（報告値 / 推定 / 不明の別）を `Reserved` 行に原子更新するか、差分を `Committed` として確定し、余剰を `Released` する。遅延 usage 報告は元の `usage_id`・attempt・task・assignment 対応へ帰属させ、現在 cap の再評価材料にする。未報告・処理中・不明をゼロ化・リセットしない（Companion 削除・Agent 終了・移動・cache clear・log 整理でも reset しない）。
+- **commit（確定時、短い tx）。** 実績（報告値 / 不明の別）を `Reserved` 行に原子更新するか、差分を `Committed` として確定し、余剰を `Released` する。遅延 usage 報告は元の `usage_id`・attempt・task・assignment 対応へ帰属させ、現在 cap の再評価材料にする。未報告・処理中・不明をゼロ化・リセットしない（Companion 削除・Agent 終了・移動・cache clear・log 整理でも reset しない）。
 - **release（Cancel・失敗・失効時、短い tx）。** 未使用予約を `Released` にし、上限を回復させる。既に生じた外部消費・不明消費は release しない（事実として残す）。
 - **孤立予約の recovery。** Host crash / Agent 停止で所有 in-flight を失った `Reserved` は、当該利用 owner の再評価が元 reservation に対して IB K-G `CommitUsageCommand(actual = 不明)` を呼び、SD-Cap の短 transaction で `Reserved` を照合して `Committed / Unknown` へ確定する。再評価の重複は二重計上せず、確定済み報告を不明へ巻き戻さない。引当を release・ゼロ化せず不明として cap 集計に一度だけ含め、後着報告は元利用対応への更新として再評価する。不明・孤立理由は費用管理面へ示す（PR §6.2）。
 - **revocation during use。** 失効は新規予約の deny と実行中の best-effort 停止にとどめ、既確定消費の事後的取消にしない。別実行経路・Task Agent による迂回をしない。
@@ -293,7 +293,7 @@ state: Reserved(処理中・上限引き当て) → Committed(確定) / Released
 - **同一 Companion への二重 active 禁止。** `presence_attribution` の `(companion_id, generation, active_client)` を Host canonical とし、同時に二つの `Present` を成立させない。simultaneous summon は CAS の先勝ちのみ成立させ、後着は不受理・再評価へ戻す。Client 側 lock だけに依存しない。
 - **move。** 切替区間は `旧 / 移行中 / 新 / active なし / 停止中 / 復旧待ち` を区別し、移行中は新旧いずれでも Client 依存の新規開始をしない。旧 in-flight は安全な区切りまで継続し、旧作用の別 Client 自動継続をしない。
 - **disconnect。** 一時的な到達不能は帰属 durable を即時破棄せず、到達性・排他性が確認不能な間は新規開始をしない。通常切断・process 終了が確定したら、`ene-presence` が利用可能な Host PC Client（IPC §10.1 の Host 確定 SameMachine、live 認証・device 許可・排他性を再照合）へ SD-Presence の CAS で `旧→移行中→新` と遷移し、候補なし・確認不能なら `NoActive` とする（`DisconnectFallback`）。Host 側 Client を自動起動せず、通常切断を `RecoveryWait` にしない。検知から切断確定への timeout 等は Freedom。Client 依存 Action の停止は best-effort とし、停止不能・既知作用・不明を残す。
-- **reconnect。** `ClientPresenceClaim.claimed_generation` × 現在 `generation` × 現接続・可用性 × 現在許可・停止・保留を照合する。古い一時 state・旧承認・判定 copy・解決済み経路だけでは成立させない。確認不能を現在と推定しない。旧 round の入力・未提示出力を新 round へ付け替えない。
+- **reconnect。** Client の `claimed_generation` × 現在 `generation` × 現接続・可用性 × 現在許可・停止・保留を照合する。古い一時 state・旧承認・判定 copy・解決済み経路だけでは成立させない。確認不能を現在と推定しない。旧 round の入力・未提示出力を新 round へ付け替えない。
 - 通常切断後は再接続だけで fallback / `NoActive` を元 Client へ戻さない。呼出し・事前指示・通常の自発判断を必要とする。`ReconnectRecovery` は Host restart の `RecoveryWait` と復旧先に対する確認だけに使う。
 - **Host restart restoration。** `presence_attribution`＋hint・復旧先（非現在）＋現接続・許可・排他性の live 確認で再構成する。Running presence は現確認ができれば復元前 Client へ自動復元し、できなければ active なしにする。Stopped に移動・復旧しない。復旧は presence のみであり、Task・Action の再開権限にしない。
 - **Stop。** Stop は帰属解除として保持し（hint と区別）、Stop 競合では Stop が勝つ。接続回復だけで Resume・再配置しない。
@@ -449,12 +449,12 @@ publication guard の具体実装は固定しない。process 内の lock / in-p
 | Task 化・委任・steering・結果統合 | `(task_id, expected_task_revision)`、目的・steering 前提、委任 scope 写し、Workspace 有効性、Cancel 対象。発話 record と Task 反映内容と未反映・待機の区別 |
 | Action 要求・試行・停止・結果 | `ActionAttemptRef`（試行・Task revision 前提・委任・Workspace・実対象・操作種別・依拠 Permission evaluation）、`PermissionEvaluationRef`、実対象解決の前提、費用・停止・保留・消去・復元条件の写し、把握された作用・確定度・根拠対応、retry 時の `prior_attempt` 対応 |
 | Permission 判断の依頼・回答 | 判断対象（主体・委任・Task・Workspace・目的・実対象・操作・送信先・data・作用・費用 risk）、依拠 Owner 意図・Rule の対応（`(rule_id, rule_revision)`、`assignment_consent` revision、device、cap）、重要変化の有無。判断記録と生きた許可の区別 |
-| Provider 実送信（初回・fallback・再送・補助・継続の各々） | 論理選択範囲、解決済み consumer / Capability assignment、実送信先・data・用途・取扱い・費用の同意対応、認証用途・制限・保留・利用量、元要求・範囲の対応、報告 / 推定 / 不明 / 処理中の別、予約 `usage_id` |
-| Client 依存活動の開始・継続 | `PresenceAttribution`（個体・状態・active・generation）、`ClientPresenceClaim.claimed_generation`、`ConversationRound`、旧・新・移行中・active なし・停止・復旧待ちの区別、現接続・可用性 |
+| Provider 実送信（初回・fallback・再送・補助・継続の各々） | 論理選択範囲、解決済み consumer / Capability assignment、実送信先・data・用途・取扱い・費用の同意対応、認証用途・制限・保留・利用量、元要求・範囲の対応、報告 / 不明 / 処理中の別、予約 `usage_id` |
+| Client 依存活動の開始・継続 | `PresenceAttribution`（個体・状態・active・generation）、`claimed_generation`（Client 主張の写し）、`ConversationRound`、旧・新・移行中・active なし・停止・復旧待ちの区別、現接続・可用性 |
 | Observer routing | `RoutingContextRef`（source・target・目的・制約・選択前提）、起源 Client・取得時点・候補対応、`PresenceGeneration`、消去・失効条件 |
 | Learning・Summary・根拠 | `SummaryGroundsRef`、`(learning_id, learning_revision)`、source 範囲・取得時点、scope・制約、訂正と状況変化の別、消去条件 |
 | 消去・保持・backup・復元 | `DeletionOperationRef`・`ErasureConditionRef`（目的・範囲・影響・除外・要確認、参加者・未完了・検証・hold、検索 token の最終消去 / `finalizing`）、backup 時点・参照・除外・保護・結果、`RestoreGeneration`・保留・一括有効化対応、Audit 順序・保持 |
-| 利用量・費用 | 用途・送信先の対応、報告 / 推定 / 不明 / 処理中の別、cap・資源の現在条件、予約 `usage_id` |
+| 利用量・費用 | 用途・送信先の対応、報告 / 不明 / 処理中の別、cap・資源の現在条件、予約 `usage_id` |
 | Character 適用 | `(character_id, expected_character_revision)`、`OwnerSelectionRef`、適用部品群 |
 
 - **acceptance result の表現。** commit 結果は少なくとも `Accepted / StalePremise / HoldActive / Denied / NeedsReevaluation / AdoptedToOriginalOnly（遅延物の元記録化）` を区別できること。これは concurrency compare の結果であり、各 domain の lifecycle 状態（Task 状態・presence 状態・確定度・全域 operation 状態）を潰した共通 `Status` enum ではない。共通 lifecycle 状態 machine を新設しない（CI §2.1）。
