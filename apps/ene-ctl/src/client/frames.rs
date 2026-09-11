@@ -132,8 +132,7 @@ pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> Wire
     )
 }
 
-/// Speaks [`ProtocolVersion::V1`], claims no optional features (text is the
-/// baseline, not a capability), and carries the display platform string.
+/// Speaks [`ProtocolVersion::V1`] and carries the display platform string.
 /// `connect` passes the paired device the paired-sender contract requires;
 /// pre-pairing callers (and tests) pass [`None`].
 pub fn capability_frame(
@@ -144,7 +143,6 @@ pub fn capability_frame(
     frame_for(
         WirePayload::CapabilityAdvertise(CapabilityAdvertise {
             supported_protocol: vec![ProtocolVersion::V1],
-            features: Vec::new(),
             platform: String::from(platform),
         }),
         WireSender {

@@ -86,13 +86,12 @@ impl HostHandle {
     /// When no advertised version shares the v1 major, the reply is a single
     /// terminal [`DisconnectNotice`] (the connection closes after it is
     /// written; there is no `IncompatibleProtocol` DTO in `ene-api`).
-    /// Otherwise the reply carries the negotiated terms (version v1 and every
-    /// advertised feature kind as receipt, never as permission) plus a fresh
-    /// [`AuthChallenge`] whose nonce is recorded pending for this connection:
-    /// the Client answers with an [`AuthProof`] proving possession of its
-    /// pairing secret. Re-advertising replaces the pending nonce, so only the
-    /// latest challenge can be answered. Capability frames never attach
-    /// presence: attach happens only on the submit path, so a
+    /// Otherwise the reply carries the negotiated terms (version v1) plus a
+    /// fresh [`AuthChallenge`] whose nonce is recorded pending for this
+    /// connection: the Client answers with an [`AuthProof`] proving possession
+    /// of its pairing secret. Re-advertising replaces the pending nonce, so
+    /// only the latest challenge can be answered. Capability frames never
+    /// attach presence: attach happens only on the submit path, so a
     /// negotiating-but-never-submitting peer leaves attribution untouched.
     pub(super) fn advertise(
         &self,
@@ -114,14 +113,8 @@ impl HostHandle {
                 WirePayload::DisconnectNotice(notice),
             )];
         }
-        let accepted = advertise
-            .features
-            .iter()
-            .map(|feature| feature.kind)
-            .collect();
         let negotiated = NegotiatedConnection {
             version: ProtocolVersion::V1,
-            accepted_features: accepted,
         };
         let nonce = Uuid::new_v4().as_hyphenated().to_string();
         lock_map(&self.pending_nonces).insert(conn_key(&live.connection_id), nonce.clone());
@@ -261,7 +254,6 @@ fn attribution_to_wire(
             )
         }),
         generation: attribution.generation.as_u64(),
-        move_reason: None,
     }
 }
 

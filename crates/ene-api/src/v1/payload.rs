@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, DisconnectNotice,
-    NegotiatedConnection, PairingRequest, PairingResult, ReconnectHello, RecoveryInvite,
+    NegotiatedConnection, PairingRequest, PairingResult,
 };
 use super::management::{
     ManagementIntent, ManagementOutcome, ManagementView, ManagementViewRequest,
@@ -31,8 +31,6 @@ pub enum WirePayload {
     AuthResult(AuthResult),
     CapabilityAdvertise(CapabilityAdvertise),
     NegotiatedConnection(NegotiatedConnection),
-    ReconnectHello(ReconnectHello),
-    RecoveryInvite(RecoveryInvite),
     DisconnectNotice(DisconnectNotice),
     SubmitTextInput(SubmitTextInput),
     RoundIntakeOutcome(RoundIntakeOutcomeWire),
@@ -64,8 +62,6 @@ impl WirePayload {
             Self::AuthResult(_) => "AuthResult",
             Self::CapabilityAdvertise(_) => "CapabilityAdvertise",
             Self::NegotiatedConnection(_) => "NegotiatedConnection",
-            Self::ReconnectHello(_) => "ReconnectHello",
-            Self::RecoveryInvite(_) => "RecoveryInvite",
             Self::DisconnectNotice(_) => "DisconnectNotice",
             Self::SubmitTextInput(_) => "SubmitTextInput",
             Self::RoundIntakeOutcome(_) => "RoundIntakeOutcome",

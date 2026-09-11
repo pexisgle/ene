@@ -68,58 +68,19 @@ pub enum AuthResult {
     },
 }
 
-/// Client capability kinds a Client may advertise (IPC §8). Text needs no
-/// flag: it is the baseline, not a capability. Claim never equals
-/// permission; the Host checks availability separately.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ClientFeatureKind {
-    Body2D,
-    VoiceDuplex,
-    ScreenCapture,
-    ComputerUse,
-    Notification,
-    TrayIntegration,
-}
-
-/// Per-feature detail (codecs, limits) and structured platform/limits
-/// descriptors are Stage 2 negotiation scope; Stage 1 carries the display
-/// platform string only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ClientFeature {
-    pub kind: ClientFeatureKind,
-    /// Whether the Client claims it right now. Claim is not proof.
-    pub available: bool,
-}
-
 /// Connection-time capability advertisement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAdvertise {
     pub supported_protocol: Vec<ProtocolVersion>,
-    pub features: Vec<ClientFeature>,
     /// OS/device description, display only. Never permission evidence.
     pub platform: String,
 }
 
-/// Host-selected connection terms. Stored per connection; version and
-/// accepted features never mix with restore or presence generations.
+/// Host-selected connection terms. Stored per connection; the version never
+/// mixes with restore or presence generations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NegotiatedConnection {
     pub version: ProtocolVersion,
-    /// Receipt, not permission.
-    pub accepted_features: Vec<ClientFeatureKind>,
-}
-
-/// Reconnect declaration with fresh authentication. Never a state-restore
-/// request: old connections, streams, tickets, and rounds are not inherited.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ReconnectHello;
-
-/// Post-restart recovery invitation toward the pre-restart Client.
-/// Asking for confirmation, not establishing presence.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RecoveryInvite {
-    /// Display hint for the Owner. Never presence evidence.
-    pub hint: String,
 }
 
 /// Observed disconnection fact, either direction. Never an instant durable

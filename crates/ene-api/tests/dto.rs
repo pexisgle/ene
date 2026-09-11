@@ -61,7 +61,6 @@ fn handshake_roundtrip() {
     });
     roundtrip(&CapabilityAdvertise {
         supported_protocol: [ProtocolVersion::V1].to_vec(),
-        features: [].to_vec(),
         platform: String::from("linux"),
     });
 }
@@ -97,7 +96,6 @@ fn presence_and_management_roundtrip() {
         state: PresenceStateWire::NoActive,
         active_client: Some(ClientWireRef(String::from("client-1"))),
         generation: 2,
-        move_reason: None,
     });
     roundtrip(&ManagementIntent {
         intent_id: CommandWireId(Uuid::new_v4()),
@@ -129,7 +127,7 @@ fn payload_enum_roundtrip() {
 
 #[test]
 fn unknown_fields_are_ignored_not_rejected() {
-    let text = r#"{"protocol":{"major":1,"minor":0},"message_id":"12345678-1234-5678-1234-567812345678","correlation":{"request_id":null,"command_id":null,"stream_id":null,"reply_to":null,"causation_span":null},"sender":{"device_id":null,"incarnation_id":{"counter":0,"random":0},"connection_id":null},"observed":{"presence_generation_view":null,"round_view":null,"ticket_view":null},"message_type":"Ping","from_future_version_field":"ignored"}"#;
+    let text = r#"{"protocol":{"major":1,"minor":0},"message_id":"12345678-1234-5678-1234-567812345678","correlation":{"request_id":null,"command_id":null,"reply_to":null},"sender":{"device_id":null,"incarnation_id":{"counter":0,"random":0},"connection_id":null},"observed":{"presence_generation_view":null,"round_view":null},"message_type":"Ping","from_future_version_field":"ignored"}"#;
     let parsed: Result<WireEnvelope, _> = serde_json::from_str(text);
     assert!(parsed.is_ok(), "unknown fields must be ignored: {parsed:?}");
 }
