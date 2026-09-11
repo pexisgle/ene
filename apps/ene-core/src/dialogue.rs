@@ -55,9 +55,9 @@ use ene_api::v1::refs::RevalidationReasonWire;
 use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
 use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
-    ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryRole as HistoryRoleWire,
-    HistoryView, PresentationStatus, RoundIntakeOutcomeWire, StreamClose, SubmitTextInput,
-    TextStreamClose, TextStreamFrameWire, TextStreamOpen,
+    ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryResponse,
+    HistoryRole as HistoryRoleWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
+    SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
 use ene_companion::dialogue::{
     AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification, begin_turn,
@@ -779,67 +779,85 @@ impl HostHandle {
     }
 
     /// Items map oldest-first with Host-filtered display facts only, never
-    /// undelivered reporting. An unparseable `since` bound is ignored (display
-    /// filtering only, never currentness evidence); a store failure answers an
-    /// empty view, which is the documented `Stage 2` gap (there is no error
-    /// DTO on this path, and leaving the request unanswered would be worse).
+    /// undelivered reporting. A successful read may be empty; empty is
+    /// distinct from `Unavailable` (the read failed), `InvalidRequest`
+    /// (malformed `since`), and `StaleCompanion` (the projection rotated).
+    /// Failure payloads stay operation-level and never echo a body, secret,
+    /// or backend error.
     pub(crate) async fn answer_history(
         &self,
         frame: &WireFrame,
         request: &HistoryRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        // The same companion mapping as submits: an unknown ref answers an
-        // empty view, the documented `Stage 2` gap for this path.
-        let Ok(Some(companion)) = self.resolve_companion(&request.companion.0).await else {
-            return vec![empty_history(frame, live)];
+        let response = self.read_history(request).await;
+        vec![outgoing_frame(
+            frame,
+            live,
+            WirePayload::HistoryResponse(response),
+        )]
+    }
+
+    async fn read_history(&self, request: &HistoryRequest) -> HistoryResponse {
+        // The same companion mapping as submits: an unknown ref means the
+        // Client's projection rotated, and it recovers by re-reading
+        // presence, never by treating the timeline as empty.
+        let companion = match self.resolve_companion(&request.companion.0).await {
+            Err(_) => return HistoryResponse::Unavailable,
+            Ok(None) => return HistoryResponse::StaleCompanion,
+            Ok(Some(companion)) => companion,
         };
-        let since = request
-            .since
-            .as_deref()
-            .and_then(|bound| WallClockWithTz::parse_rfc3339(bound).ok());
+        // A malformed bound is never silently widened to "no bound".
+        let since = match request.since.as_deref() {
+            None => None,
+            Some(bound) => match WallClockWithTz::parse_rfc3339(bound) {
+                Ok(parsed) => Some(parsed),
+                Err(_) => return HistoryResponse::InvalidRequest,
+            },
+        };
         // A round-scoped request resolves the stored projection durably, so
         // an old round stays addressable after a restart dropped the
-        // transient wire map. An unresolvable projection answers nothing:
-        // falling back to the whole timeline would silently widen the read.
+        // transient wire map. A well-formed projection with no stored items
+        // is an empty result; only an unreadable store is `Unavailable`.
         let round = match &request.round {
             None => None,
             Some(wire) => match self.store.round_for_stored_wire(companion, &wire.0).await {
                 Ok(Some(round)) => Some(round),
-                Ok(None) | Err(_) => return vec![empty_history(frame, live)],
+                Ok(None) => return HistoryResponse::Items(Vec::new()),
+                Err(_) => return HistoryResponse::Unavailable,
             },
         };
-        let items = self
+        match self
             .store
             .load_timeline(companion, since, round, request.limit)
             .await
-            .unwrap_or_default();
-        let view_items = items
-            .iter()
-            .map(|item| HistoryItem {
-                // The stored projection travels verbatim so views agree with
-                // accept acks, including after a restart. Pre-opaque rows
-                // fall back to the transient map, then to the legacy domain
-                // rendering (continuity for pre-release rows only).
-                round: RoundWireId(
-                    item.round_wire
-                        .clone()
-                        .or_else(|| self.wire_for_round_value(item.round))
-                        .unwrap_or_else(|| item.round.as_uuid().to_string()),
-                ),
-                role: match item.role {
-                    HistoryRole::Owner => HistoryRoleWire::Owner,
-                    HistoryRole::Companion => HistoryRoleWire::Companion,
-                },
-                text: item.text.clone(),
-                at: item.at.to_rfc3339(),
-            })
-            .collect();
-        vec![outgoing_frame(
-            frame,
-            live,
-            WirePayload::HistoryView(HistoryView { items: view_items }),
-        )]
+        {
+            Ok(items) => HistoryResponse::Items(
+                items
+                    .iter()
+                    .map(|item| HistoryItem {
+                        // The stored projection travels verbatim so views
+                        // agree with accept acks, including after a restart.
+                        // Pre-opaque rows fall back to the transient map,
+                        // then to the legacy domain rendering (continuity
+                        // for pre-release rows only).
+                        round: RoundWireId(
+                            item.round_wire
+                                .clone()
+                                .or_else(|| self.wire_for_round_value(item.round))
+                                .unwrap_or_else(|| item.round.as_uuid().to_string()),
+                        ),
+                        role: match item.role {
+                            HistoryRole::Owner => HistoryRoleWire::Owner,
+                            HistoryRole::Companion => HistoryRoleWire::Companion,
+                        },
+                        text: item.text.clone(),
+                        at: item.at.to_rfc3339(),
+                    })
+                    .collect(),
+            ),
+            Err(_) => HistoryResponse::Unavailable,
+        }
     }
 
     fn wire_for_round_value(&self, round: RawId) -> Option<String> {
@@ -1107,14 +1125,6 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         )
         .await
     }
-}
-
-fn empty_history(frame: &WireFrame, live: &LiveInput) -> WireFrame {
-    outgoing_frame(
-        frame,
-        live,
-        WirePayload::HistoryView(HistoryView { items: Vec::new() }),
-    )
 }
 
 #[cfg(test)]

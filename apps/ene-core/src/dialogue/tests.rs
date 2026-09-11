@@ -13,8 +13,8 @@ use ene_api::v1::refs::{
 };
 use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
-    ConfirmPresentationWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
-    SubmitTextInput, TextBodyWire,
+    ConfirmPresentationWire, HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire,
+    StreamClose, SubmitTextInput, TextBodyWire,
 };
 use ene_credential::{CredentialRef, MemoryCredentialStore};
 use ene_inference::ProviderTransport;
@@ -836,11 +836,12 @@ async fn full_dialogue_round_streams_and_restores() {
         )
         .await;
     assert_eq!(restored.len(), 1, "history answers once");
-    let view = restored.first().unwrap();
-    let WirePayload::HistoryView(view) = &view.payload else {
+    let restored_frame = restored.first().unwrap();
+    let WirePayload::HistoryResponse(HistoryResponse::Items(items)) = &restored_frame.payload
+    else {
         return;
     };
-    assert_eq!(view.items.len(), 2, "owner input plus reply restore");
+    assert_eq!(items.len(), 2, "owner input plus reply restore");
     let replayed = handle.handle_frame(frame, live.clone(), &transport).await;
     assert_eq!(replayed.len(), 1, "a command replay answers once");
     let replay = replayed.first().unwrap();
@@ -861,11 +862,11 @@ async fn full_dialogue_round_streams_and_restores() {
             &transport,
         )
         .await;
-    let second = again.first().unwrap();
-    let WirePayload::HistoryView(second) = &second.payload else {
+    let second_frame = again.first().unwrap();
+    let WirePayload::HistoryResponse(HistoryResponse::Items(second)) = &second_frame.payload else {
         return;
     };
-    assert_eq!(second.items.len(), 2, "the replay appends nothing durable");
+    assert_eq!(second.len(), 2, "the replay appends nothing durable");
 }
 
 #[tokio::test]
@@ -946,10 +947,12 @@ async fn history_round_scope_resolves_the_stored_projection() -> Result<(), Stri
             &transport,
         )
         .await;
-    let WirePayload::HistoryView(scoped) = &scoped.first().unwrap().payload else {
-        return Err(String::from("round history must answer a view"));
+    let WirePayload::HistoryResponse(HistoryResponse::Items(scoped)) =
+        &scoped.first().unwrap().payload
+    else {
+        return Err(String::from("round history must answer items"));
     };
-    let texts: Vec<&str> = scoped.items.iter().map(|item| item.text.as_str()).collect();
+    let texts: Vec<&str> = scoped.iter().map(|item| item.text.as_str()).collect();
     assert_eq!(
         texts,
         vec!["old one", "old two"],
@@ -969,12 +972,93 @@ async fn history_round_scope_resolves_the_stored_projection() -> Result<(), Stri
             &transport,
         )
         .await;
-    let WirePayload::HistoryView(unknown) = &unknown.first().unwrap().payload else {
-        return Err(String::from("unknown round must still answer a view"));
+    let WirePayload::HistoryResponse(HistoryResponse::Items(unknown)) =
+        &unknown.first().unwrap().payload
+    else {
+        return Err(String::from("unknown round must still answer items"));
     };
     assert!(
-        unknown.items.is_empty(),
+        unknown.is_empty(),
         "an unresolvable projection answers nothing, never the whole timeline"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_read_distinguishes_failure_from_empty() -> Result<(), String> {
+    let transport = ok_transport();
+    let live = live_input("client-a");
+    let (handle, dir) = round_test_handle("dlg-history-outcomes", &live, &transport).await?;
+
+    // A read with no rows is a successful empty result.
+    let empty = handle
+        .handle_frame(
+            history_frame(handle.companion_wire(), live.connection_id),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let WirePayload::HistoryResponse(HistoryResponse::Items(items)) =
+        &empty.first().unwrap().payload
+    else {
+        return Err(String::from("an empty read must answer items"));
+    };
+    assert!(items.is_empty(), "no rows is success, not a failure");
+
+    // A malformed bound is an invalid request, never silently widened.
+    let invalid = handle
+        .handle_frame(
+            history_frame_filtered(
+                handle.companion_wire(),
+                live.connection_id,
+                Some(String::from("yesterday")),
+                10,
+                None,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(
+        invalid.first().unwrap().payload,
+        WirePayload::HistoryResponse(HistoryResponse::InvalidRequest),
+        "a malformed since bound must be named, not ignored"
+    );
+
+    // A rotated projection reports staleness instead of an empty timeline.
+    let stale = handle
+        .handle_frame(
+            history_frame_filtered(
+                "rotated-companion-projection",
+                live.connection_id,
+                None,
+                10,
+                None,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(
+        stale.first().unwrap().payload,
+        WirePayload::HistoryResponse(HistoryResponse::StaleCompanion),
+        "an unknown projection must ask for revalidation"
+    );
+
+    // An unreadable durable store is its own outcome, not empty history.
+    let corrupted = std::fs::write(dir.path().join("app.db"), vec![0x5A_u8; 8192]);
+    assert!(corrupted.is_ok(), "the test must corrupt the store file");
+    let unavailable = handle
+        .handle_frame(
+            history_frame(handle.companion_wire(), live.connection_id),
+            live,
+            &transport,
+        )
+        .await;
+    assert_eq!(
+        unavailable.first().unwrap().payload,
+        WirePayload::HistoryResponse(HistoryResponse::Unavailable),
+        "a store failure must be reported as unavailable"
     );
     Ok(())
 }
@@ -1459,14 +1543,10 @@ async fn replay_after_restart_replays_from_durable_wire() -> Result<(), String> 
     let Some(view_frame) = restored.first() else {
         return Err(String::from("history must answer"));
     };
-    let WirePayload::HistoryView(view) = &view_frame.payload else {
-        return Err(String::from("history must answer with a view"));
+    let WirePayload::HistoryResponse(HistoryResponse::Items(items)) = &view_frame.payload else {
+        return Err(String::from("history must answer items"));
     };
-    assert_eq!(
-        view.items.len(),
-        2,
-        "the restart replay appends nothing durable"
-    );
+    assert_eq!(items.len(), 2, "the restart replay appends nothing durable");
     Ok(())
 }
 
