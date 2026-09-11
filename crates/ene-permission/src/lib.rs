@@ -511,10 +511,14 @@ pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Opti
         if let Some(state) = segment.strip_prefix(&qualified) {
             return parse_consent_state(state);
         }
+        // Stage 2 marks name the dialogue capability implicitly. An
+        // unparseable legacy-shaped segment is skipped, not treated as the
+        // answer, so a later well-formed segment can still match.
         if capability == CapabilityKind::Dialogue
             && let Some(state) = segment.strip_prefix("consent-")
+            && let Some(parsed) = parse_consent_state(state)
         {
-            return parse_consent_state(state);
+            return Some(parsed);
         }
     }
     None
@@ -1041,6 +1045,17 @@ mod tests {
         assert_eq!(
             parse_consent_mark("consent-none", CapabilityKind::Learning),
             None
+        );
+        // A learning segment before the dialogue segment must not short
+        // circuit the search for the dialogue segment.
+        let reordered = "consent-learning-rev-4;consent-dialogue-rev-3";
+        assert_eq!(
+            parse_consent_mark(reordered, CapabilityKind::Dialogue),
+            Some(Some(3))
+        );
+        assert_eq!(
+            parse_consent_mark(reordered, CapabilityKind::Learning),
+            Some(Some(4))
         );
     }
 
