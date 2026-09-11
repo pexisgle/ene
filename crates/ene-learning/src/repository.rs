@@ -177,6 +177,21 @@ pub trait LearningRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<MemoryRevisionRecord>, LearningTechnicalError>;
 
+    /// Retrieves bounded recall candidates for one companion.
+    ///
+    /// Returns current, non-suppressed memories that are among the newest
+    /// `limit` rows, among the most important `limit` rows, or match one of
+    /// `terms`, with each arm capped by `limit`. Suppression is excluded
+    /// before the caps apply, so suppressed rows never consume candidate
+    /// slots. The caller ranks the returned candidates; the retrieval
+    /// carries no persisted score and does not decide canonical importance.
+    async fn recall_candidates(
+        &self,
+        companion: RawId,
+        terms: &[String],
+        limit: u64,
+    ) -> Result<Vec<Memory>, LearningTechnicalError>;
+
     /// Loads the Summaries named by `ids` in one bounded batch.
     ///
     /// Duplicate ids are read once, and ids with no stored Summary are

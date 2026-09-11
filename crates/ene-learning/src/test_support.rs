@@ -22,6 +22,7 @@ pub(crate) struct FakeLearningRepository {
     memories: Mutex<Vec<Memory>>,
     revisions: Mutex<Vec<MemoryRevisionRecord>>,
     summaries: Mutex<Vec<SummaryRecord>>,
+    recall_calls: Mutex<Vec<(Vec<String>, u64)>>,
 }
 
 impl FakeLearningRepository {
@@ -35,6 +36,11 @@ impl FakeLearningRepository {
 
     pub(crate) fn summaries(&self) -> Vec<SummaryRecord> {
         self.summaries.lock().expect("fake summary lock").clone()
+    }
+
+    /// Terms and limits observed by [`LearningRepository::recall_candidates`].
+    pub(crate) fn recall_calls(&self) -> Vec<(Vec<String>, u64)> {
+        self.recall_calls.lock().expect("fake recall lock").clone()
     }
 }
 
@@ -152,6 +158,62 @@ impl LearningRepository for FakeLearningRepository {
             None => scoped.take(cap).cloned().collect(),
         };
         Ok(page)
+    }
+
+    async fn recall_candidates(
+        &self,
+        companion: RawId,
+        terms: &[String],
+        limit: u64,
+    ) -> Result<Vec<Memory>, LearningTechnicalError> {
+        self.recall_calls
+            .lock()
+            .expect("fake recall lock")
+            .push((terms.to_vec(), limit));
+        let cap = usize::try_from(limit).unwrap_or(usize::MAX);
+        let memories = self.memories.lock().expect("fake memory lock");
+        let active: Vec<(usize, &Memory)> = memories
+            .iter()
+            .enumerate()
+            .filter(|(_, memory)| {
+                memory.scope == LearningScope::companion(companion) && !memory.recall_suppressed
+            })
+            .collect();
+        let mut chosen: Vec<(usize, Memory)> = Vec::new();
+        let mut note = |index: usize, memory: &Memory| {
+            if !chosen.iter().any(|(existing, _)| *existing == index) {
+                chosen.push((index, memory.clone()));
+            }
+        };
+        for (index, memory) in active.iter().rev().take(cap) {
+            note(*index, memory);
+        }
+        let mut by_importance = active.clone();
+        by_importance.sort_by(|left, right| {
+            right
+                .1
+                .importance
+                .cmp(&left.1.importance)
+                .then(right.0.cmp(&left.0))
+        });
+        for (index, memory) in by_importance.into_iter().take(cap) {
+            note(index, memory);
+        }
+        let mut lexical = 0_usize;
+        for (index, memory) in &active {
+            if lexical == cap {
+                break;
+            }
+            if terms
+                .iter()
+                .any(|term| memory.content.to_lowercase().contains(term.as_str()))
+            {
+                note(*index, memory);
+                lexical += 1;
+            }
+        }
+        chosen.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
+        Ok(chosen.into_iter().map(|(_, memory)| memory).collect())
     }
 
     async fn list_memory_revisions(
