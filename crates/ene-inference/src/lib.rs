@@ -309,9 +309,7 @@ impl AdmissionRequest {
                     Admission::Declined(NotSentReason::EvaluationConsumed)
                 }
             }
-            LiveAuthorizationDecision::Deny(reason) => {
-                Admission::Declined(not_sent_for_deny(reason.code))
-            }
+            LiveAuthorizationDecision::Deny(code) => Admission::Declined(not_sent_for_deny(code)),
             LiveAuthorizationDecision::NeedsRevalidation(_) => {
                 Admission::Declined(NotSentReason::ConsentStale)
             }
