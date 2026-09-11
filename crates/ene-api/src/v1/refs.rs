@@ -87,7 +87,7 @@ string_wire_ref!(
 );
 string_wire_ref!(
     ClientLocalId,
-    "Client-local correspondence ID (e.g. matching an input to its ack). Monotonic within the Client; never Host-canonical."
+    "Client-local correspondence ID (e.g. matching an input to its ack). Fresh and unique within the Client; never Host-canonical."
 );
 string_wire_ref!(
     TextLangWire,
