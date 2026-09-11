@@ -1,15 +1,18 @@
 //! `OpenAI` Responses API transport for inference dispatch.
 //!
-//! [`OpenAiResponsesTransport`] posts one `{"model", "input", "stream":
-//! false, "store": false}` body per [`ProviderTransport::complete`] call.
+//! [`OpenAiResponsesTransport`] posts one
+//! `{"model", "input", "stream": true, "store": false}` body per
+//! [`ProviderTransport::complete_streaming`] call and parses the server-sent
+//! event stream, forwarding text deltas as they arrive;
+//! [`ProviderTransport::complete`] keeps the non-streaming JSON path.
 //! Key material never rests on the transport: each call borrows the bearer inside
 //! [`CredentialStore::with_bearer`] and only the owned [`reqwest::Request`]
 //! escapes the closure. Error strings carry status classes only, never URLs,
-//! keys, or bodies. There is no retry, no streaming, and no model fallback.
+//! keys, or bodies. There is no retry and no model fallback.
 //!
-//! [`ProviderTransport::complete`] performs HTTPS I/O, so integration tests
-//! cover it through [`crate::fake::FakeProviderTransport`]; the pure
-//! `parse_response()` mapping below carries the unit tests.
+//! Both paths perform HTTPS I/O, so integration tests cover them through
+//! transport fakes; the pure `parse_response()` and `StreamAssembler`
+//! mappings below carry the unit tests.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -95,6 +98,20 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
     {
         Box::pin(self.complete_inner(req))
     }
+
+    /// Runs one Responses API completion with `"stream": true`, forwarding
+    /// each `response.output_text.delta` as it arrives.
+    ///
+    /// The returned response still carries the full assembled text and usage,
+    /// so adoption, durable History, and display remain separate facts.
+    fn complete_streaming<'a>(
+        &'a self,
+        req: ProviderRequest,
+        on_delta: &'a mut (dyn FnMut(&str) + Send),
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + 'a>>
+    {
+        Box::pin(self.complete_streaming_inner(req, on_delta))
+    }
 }
 
 impl<S: CredentialStore> OpenAiResponsesTransport<S> {
@@ -104,7 +121,7 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
     ) -> Result<ProviderResponse, InferenceTechnicalError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{base}/v1/responses");
-        let body = responses_body(&req.model, &req.input);
+        let body = responses_body(&req.model, &req.input, false);
         let build = self
             .store
             .with_bearer(&req.credential, |key| {
@@ -147,6 +164,153 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
         };
         parse_response(status, body)
     }
+
+    /// Streaming sibling of [`Self::complete_inner`]: status errors fall back
+    /// to the same status-class mapping (an error body is not an event
+    /// stream), while a 2xx body is parsed as server-sent events.
+    async fn complete_streaming_inner(
+        &self,
+        req: ProviderRequest,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<ProviderResponse, InferenceTechnicalError> {
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{base}/v1/responses");
+        let body = responses_body(&req.model, &req.input, true);
+        let build = self
+            .store
+            .with_bearer(&req.credential, |key| {
+                self.http
+                    .post(url.as_str())
+                    .bearer_auth(key)
+                    .json(&body)
+                    .build()
+            })
+            .map_err(|CredentialTechnicalError::StorageUnavailable { reason }| {
+                InferenceTechnicalError::ProviderTransportFailed(format!(
+                    "credential unavailable: {reason}"
+                ))
+            })?;
+        let request = build.map_err(|_| {
+            InferenceTechnicalError::ProviderTransportFailed("build provider request".to_owned())
+        })?;
+        let mut response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|err| io_error(&err, "send failed"))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            // Status-class errors take priority over stream shape: an error
+            // body is JSON, not events, and must report its status.
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|err| io_error(&err, "read failed"))?;
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            return parse_response(status, body);
+        }
+
+        let mut assembler = StreamAssembler::default();
+        let mut pending = Vec::<u8>::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|err| io_error(&err, "read failed"))?
+        {
+            pending.extend_from_slice(&chunk);
+            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                let raw: Vec<u8> = pending.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&raw);
+                assembler.feed_line(line.trim_end_matches(['\r', '\n']), on_delta)?;
+            }
+        }
+        assembler.finish()
+    }
+}
+
+/// Incremental parser for the Responses API event stream.
+///
+/// Only the events this stage consumes are interpreted: text deltas,
+/// completion with usage, and bounded failure events. Unknown event types are
+/// ignored (forward compatibility), while malformed JSON or a missing
+/// completion is a decode failure, never a silent success. Error strings
+/// carry the event class only, never provider body text.
+#[derive(Default)]
+struct StreamAssembler {
+    text: String,
+    usage: Option<RawUsage>,
+    completed: bool,
+}
+
+impl StreamAssembler {
+    fn feed_line(
+        &mut self,
+        line: &str,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<(), InferenceTechnicalError> {
+        let Some(data) = line.strip_prefix("data:") else {
+            return Ok(());
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(());
+        }
+        let event: serde_json::Value = serde_json::from_str(data).map_err(|_| {
+            InferenceTechnicalError::ProviderTransportFailed("decode provider stream".to_owned())
+        })?;
+        match event.get("type").and_then(|kind| kind.as_str()) {
+            Some("response.output_text.delta") => {
+                if let Some(delta) = event.get("delta").and_then(|delta| delta.as_str()) {
+                    on_delta(delta);
+                    self.text.push_str(delta);
+                }
+            }
+            Some("response.completed") => {
+                self.usage = event
+                    .get("response")
+                    .and_then(|response| response.get("usage"))
+                    .and_then(|usage| serde_json::from_value::<UsageObj>(usage.clone()).ok())
+                    .and_then(UsageObj::into_raw);
+                self.completed = true;
+            }
+            Some("response.incomplete") => {
+                let reason = event
+                    .get("response")
+                    .and_then(|response| response.get("incomplete_details"))
+                    .and_then(|details| details.get("reason"))
+                    .and_then(|reason| reason.as_str())
+                    .unwrap_or("unknown");
+                return Err(InferenceTechnicalError::ProviderTransportFailed(format!(
+                    "provider response incomplete: {reason}"
+                )));
+            }
+            Some("response.failed") => {
+                return Err(InferenceTechnicalError::ProviderTransportFailed(
+                    "provider response failed".to_owned(),
+                ));
+            }
+            Some("error") => {
+                return Err(InferenceTechnicalError::ProviderTransportFailed(
+                    "provider stream error".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<ProviderResponse, InferenceTechnicalError> {
+        if !self.completed {
+            return Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider stream ended before completion".to_owned(),
+            ));
+        }
+        Ok(ProviderResponse {
+            text: self.text,
+            usage: self.usage,
+        })
+    }
 }
 
 /// History lives durably on the local side, which never needs server-side
@@ -154,11 +318,11 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
 /// retain conversation text provider-side for no reason. This is a
 /// storage-scope boundary, not a no-logging promise: it disables the
 /// Responses application-state store, nothing more.
-fn responses_body(model: &str, input: &str) -> serde_json::Value {
+fn responses_body(model: &str, input: &str, stream: bool) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "input": input,
-        "stream": false,
+        "stream": stream,
         "store": false,
     })
 }
@@ -215,6 +379,20 @@ struct UsageObj {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+}
+
+impl UsageObj {
+    /// Both counts or none: partial usage is [`None`] (unknown), never a
+    /// zero-as-unknown fact.
+    fn into_raw(self) -> Option<RawUsage> {
+        match (self.input_tokens, self.output_tokens) {
+            (Some(input_tokens), Some(output_tokens)) => Some(RawUsage {
+                input_tokens,
+                output_tokens,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Maps one HTTP completion (`status` plus decoded JSON `body`) to a
@@ -298,16 +476,7 @@ fn parse_response(
             }
         }
     }
-    let usage =
-        decoded
-            .usage
-            .and_then(|counts| match (counts.input_tokens, counts.output_tokens) {
-                (Some(input_tokens), Some(output_tokens)) => Some(RawUsage {
-                    input_tokens,
-                    output_tokens,
-                }),
-                _ => None,
-            });
+    let usage = decoded.usage.and_then(UsageObj::into_raw);
     Ok(ProviderResponse { text, usage })
 }
 
@@ -386,7 +555,7 @@ mod tests {
 
     #[test]
     fn request_body_disables_server_side_storage() {
-        let body = super::responses_body("gpt-test", "hello");
+        let body = super::responses_body("gpt-test", "hello", false);
         assert_eq!(
             body.get("store"),
             Some(&serde_json::Value::Bool(false)),
@@ -571,6 +740,111 @@ mod tests {
             panic!("unexpected variant");
         };
         assert!(reason.contains("decode"));
+    }
+
+    #[test]
+    fn streaming_body_requests_incremental_output() {
+        let body = super::responses_body("gpt-test", "hello", true);
+        assert_eq!(
+            body.get("stream"),
+            Some(&serde_json::Value::Bool(true)),
+            "the streaming transport must request server-sent events: {body}"
+        );
+        assert_eq!(body.get("store"), Some(&serde_json::Value::Bool(false)));
+    }
+
+    #[test]
+    fn stream_assembler_emits_deltas_in_order_and_reports_usage() {
+        let mut assembler = super::StreamAssembler::default();
+        let mut deltas = Vec::new();
+        let mut on_delta = |delta: &str| deltas.push(delta.to_owned());
+        for line in [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}",
+            "event: response.output_text.delta",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
+        ] {
+            assembler
+                .feed_line(line, &mut on_delta)
+                .expect("a known event must parse");
+        }
+        assert_eq!(deltas, vec!["Hel", "lo"]);
+        let response = assembler.finish().expect("the stream completed");
+        assert_eq!(response.text, "Hello");
+        assert_eq!(
+            response.usage,
+            Some(crate::RawUsage {
+                input_tokens: 7,
+                output_tokens: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn stream_assembler_treats_missing_completion_as_failure() {
+        let mut assembler = super::StreamAssembler::default();
+        let mut on_delta = |_delta: &str| {};
+        assembler
+            .feed_line(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+                &mut on_delta,
+            )
+            .expect("the delta parses");
+        let result = assembler.finish();
+        assert!(matches!(
+            result,
+            Err(InferenceTechnicalError::ProviderTransportFailed(_))
+        ));
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
+        };
+        assert!(reason.contains("completion"), "got {reason:?}");
+    }
+
+    #[test]
+    fn stream_assembler_maps_failure_events_without_body_text() {
+        for (line, marker) in [
+            (
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}",
+                "incomplete",
+            ),
+            ("data: {\"type\":\"response.failed\"}", "failed"),
+            (
+                "data: {\"type\":\"error\",\"message\":\"secret body text\"}",
+                "error",
+            ),
+        ] {
+            let mut assembler = super::StreamAssembler::default();
+            let mut on_delta = |_delta: &str| {};
+            let result = assembler.feed_line(line, &mut on_delta);
+            let InferenceTechnicalError::ProviderTransportFailed(reason) =
+                result.expect_err("failure events must fail")
+            else {
+                panic!("unexpected variant");
+            };
+            assert!(reason.contains(marker), "got {reason:?}");
+            assert!(
+                !reason.contains("secret body text"),
+                "failure reasons must not echo provider body text: {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_assembler_ignores_unknown_events_and_malformed_lines() {
+        let mut assembler = super::StreamAssembler::default();
+        let mut deltas = Vec::new();
+        let mut on_delta = |delta: &str| deltas.push(delta.to_owned());
+        assembler
+            .feed_line("event: response.output_text.delta", &mut on_delta)
+            .expect("a non-data line is ignored");
+        assembler
+            .feed_line(
+                "data: {\"type\":\"response.future_event\",\"x\":1}",
+                &mut on_delta,
+            )
+            .expect("an unknown event is ignored");
+        assert!(deltas.is_empty());
     }
 
     #[test]

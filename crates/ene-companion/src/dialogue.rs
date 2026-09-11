@@ -281,15 +281,18 @@ pub async fn begin_turn(
 /// never-sent or technical outcome closes the stream interrupted; usage
 /// accounting is already decided inside the inference boundary. An adopted
 /// reply appends with its undelivered registration in the same atomic
-/// section; any other reply outcome is interrupted. After that durable
-/// append, the Experience premise is pinned for the post-response Learning
-/// pass.
+/// section; any other reply outcome is interrupted. Provider deltas are
+/// forwarded through `on_delta` as they arrive; display is never a durable
+/// adoption, so an interrupted stream leaves partial display and no reply.
+/// After the durable append, the Experience premise is pinned for the
+/// post-response Learning pass.
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
     learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
+    on_delta: &mut (dyn FnMut(&str) + Send),
 ) -> DialogueOutcome {
     let DialogueTurn {
         input,
@@ -312,7 +315,7 @@ pub async fn finish_turn(
     else {
         return DialogueOutcome::Interrupted;
     };
-    match inference.dispatch(authorized, prompt).await {
+    match inference.dispatch(authorized, prompt, on_delta).await {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
@@ -506,7 +509,11 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
     async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
         match self.inference.admit_learning().await {
             Ok(Admission::Admitted(authorized)) => {
-                match self.inference.dispatch(*authorized, prompt).await {
+                match self
+                    .inference
+                    .dispatch(*authorized, prompt, &mut |_delta: &str| {})
+                    .await
+                {
                     Ok(InferenceDispatchOutcome::Completed {
                         arrival,
                         adopted: true,

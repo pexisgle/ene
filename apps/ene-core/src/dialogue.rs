@@ -92,33 +92,9 @@ use ene_store::Store;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
-    CredStore, HostHandle, LiveInput, device_client, outgoing_frame, reject_frame, unpaired_close,
+    CredStore, FrameSink, HostHandle, LiveInput, device_client, outgoing_frame, reject_frame,
+    unpaired_close,
 };
-
-/// Maximum stream chunk size in Unicode scalar values.
-///
-/// Chunks never split a code point, at the cost of byte-uneven frames.
-pub const CHUNK_CHARS: usize = 200;
-
-/// Always returns at least one chunk: empty text yields one empty delta so
-/// every stream carries a final frame (a frame without `is_final` never
-/// completes anything, and an empty stream would leave completion ambiguous).
-#[must_use]
-pub fn chunk_text(text: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut count = 0_usize;
-    for next in text.chars() {
-        if count == CHUNK_CHARS {
-            chunks.push(std::mem::take(&mut current));
-            count = 0;
-        }
-        current.push(next);
-        count += 1;
-    }
-    chunks.push(current);
-    chunks
-}
 
 /// Garbage maps to [`None`] (no replay key) rather than rejection: a
 /// malformed key only degrades that sender's own idempotency, and every
@@ -219,20 +195,6 @@ fn close_frame(
     )
 }
 
-fn interrupted_frames(
-    frame: &WireFrame,
-    live: &LiveInput,
-    round: &RoundWireId,
-    generation: u64,
-) -> Vec<WireFrame> {
-    let stream = StreamWireId(RawId::new().as_uuid());
-    vec![
-        accept_frame(frame, live, round),
-        open_frame(frame, live, &stream, round, generation),
-        close_frame(frame, live, &stream, StreamClose::Interrupted),
-    ]
-}
-
 fn stale_frame_with(
     frame: &WireFrame,
     live: &LiveInput,
@@ -284,39 +246,6 @@ fn admission_reason(reason: NotSentReason) -> &'static str {
         NotSentReason::EvaluationConsumed => "evaluation-consumed",
         NotSentReason::OverLimit => "unknown-reason",
     }
-}
-
-fn completed_frames(
-    frame: &WireFrame,
-    live: &LiveInput,
-    round: &RoundWireId,
-    generation: u64,
-    text: &str,
-) -> Vec<WireFrame> {
-    let stream = StreamWireId(RawId::new().as_uuid());
-    let mut responses = vec![
-        accept_frame(frame, live, round),
-        open_frame(frame, live, &stream, round, generation),
-    ];
-    for (position, delta) in chunk_text(text).iter().enumerate() {
-        responses.push(outgoing_frame(
-            frame,
-            live,
-            WirePayload::TextStreamFrame(TextStreamFrameWire {
-                stream,
-                seq: position as u64,
-                delta: delta.clone(),
-                is_final: false,
-            }),
-        ));
-    }
-    if let Some(last) = responses.last_mut()
-        && let WirePayload::TextStreamFrame(closing) = &mut last.payload
-    {
-        closing.is_final = true;
-    }
-    responses.push(close_frame(frame, live, &stream, StreamClose::Completed));
-    responses
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,39 +353,47 @@ impl HostHandle {
         submit: &SubmitTextInput,
         live: &LiveInput,
         transport: &impl ProviderTransport,
-    ) -> Vec<WireFrame> {
+        sink: &mut dyn FrameSink,
+    ) {
         let Some(device_wire) = live.paired_device.clone() else {
-            return vec![unpaired_close(frame, live)];
+            sink.emit(unpaired_close(frame, live));
+            return;
         };
         let client = device_client(&device_wire);
         // The companion ref resolves through the handle mapping, never
         // assumed or derived: an unknown ref (a projection rotated by a
         // restart) revalidates so the Client relearns from presence.
         let companion = match self.resolve_companion(&submit.companion.0).await {
-            Err(_) => return vec![held_frame(frame, live)],
+            Err(_) => {
+                sink.emit(held_frame(frame, live));
+                return;
+            }
             Ok(None) => {
-                return vec![revalidate_frame(
+                sink.emit(revalidate_frame(
                     frame,
                     live,
                     intake_reason(&RevalidationReason::UnknownCompanion),
-                )];
+                ));
+                return;
             }
             Ok(Some(companion)) => companion,
         };
         let Ok(Some(mut attribution)) = self.store.load_attribution(companion.as_raw()).await
         else {
-            return vec![held_frame(frame, live)];
+            sink.emit(held_frame(frame, live));
+            return;
         };
         let companion_key = companion.as_raw().as_uuid().to_string();
         // Idempotency keys are mandatory: a command without one cannot be
         // replayed safely, so it is declined before any state changes
         // (before attach, before maps, before appends).
         let Some(command) = command_id_for(&frame.envelope) else {
-            return vec![revalidate_frame(
+            sink.emit(revalidate_frame(
                 frame,
                 live,
                 intake_reason(&RevalidationReason::MissingCommandId),
-            )];
+            ));
+            return;
         };
         // Canonical round premise first: the two carriers must agree before
         // anything else is judged, so a contradictory frame is declined
@@ -464,13 +401,14 @@ impl HostHandle {
         let Some(round_premise) =
             canonical_round_premise(submit, frame.envelope.observed.round_view.as_ref())
         else {
-            return vec![self.stale_frame(
+            sink.emit(self.stale_frame(
                 frame,
                 live,
                 &live.client_ref,
                 &companion_key,
                 attribution.generation.as_u64(),
-            )];
+            ));
+            return;
         };
         // Registered credentials never reach durable History or a model
         // prompt: the owner input is redacted before any durable decision
@@ -482,7 +420,8 @@ impl HostHandle {
             store: &self.cred_store,
         };
         let Ok(scrubbed) = scrubber.scrub(&submit.body.text).await else {
-            return vec![held_frame(frame, live)];
+            sink.emit(held_frame(frame, live));
+            return;
         };
         let credential_set = scrubbed.credential_set;
         let text = scrubbed.text;
@@ -515,23 +454,30 @@ impl HostHandle {
         // maps its verdict to frames.
         match classify_replay(&self.store, companion, &command, incoming_fingerprint).await {
             ReplayClassification::Replay { round, round_wire } => {
-                return self.replay_frames(
+                for response in self.replay_frames(
                     frame,
                     live,
                     round,
                     round_wire,
                     attribution.generation.as_u64(),
-                );
+                ) {
+                    sink.emit(response);
+                }
+                return;
             }
             ReplayClassification::Conflict => {
-                return vec![reject_frame(
+                sink.emit(reject_frame(
                     frame,
                     live,
                     RejectKind::ConflictingCommand,
                     command_conflict_detail(&command),
-                )];
+                ));
+                return;
             }
-            ReplayClassification::Held => return vec![held_frame(frame, live)],
+            ReplayClassification::Held => {
+                sink.emit(held_frame(frame, live));
+                return;
+            }
             ReplayClassification::None => {}
         }
         // The winner's intake premise below carries the fresh generation from
@@ -540,16 +486,18 @@ impl HostHandle {
         let mut attached_generation: Option<PresenceGeneration> = None;
         if attribution.state == PresenceState::NoActive {
             let Some(viewed) = frame.envelope.observed.presence_generation_view else {
-                return vec![revalidate_frame(frame, live, "missing-generation-view")];
+                sink.emit(revalidate_frame(frame, live, "missing-generation-view"));
+                return;
             };
             if viewed != attribution.generation.as_u64() {
-                return vec![self.stale_frame(
+                sink.emit(self.stale_frame(
                     frame,
                     live,
                     &live.client_ref,
                     &companion_key,
                     attribution.generation.as_u64(),
-                )];
+                ));
+                return;
             }
             match self
                 .attach_presence(&device_wire, live.connection_live, attribution.generation)
@@ -562,21 +510,26 @@ impl HostHandle {
                 AttachOutcome::Raced => {
                     let Ok(Some(current)) = self.store.load_attribution(companion.as_raw()).await
                     else {
-                        return vec![held_frame(frame, live)];
+                        sink.emit(held_frame(frame, live));
+                        return;
                     };
                     if matches!(
                         current.state,
                         PresenceState::InTransition | PresenceState::RecoveryWait
                     ) {
-                        return vec![held_frame(frame, live)];
+                        sink.emit(held_frame(frame, live));
+                        return;
                     }
-                    return vec![self.stale_frame(
-                        frame,
-                        live,
-                        &live.client_ref,
-                        &companion_key,
-                        current.generation.as_u64(),
-                    )];
+                    {
+                        sink.emit(self.stale_frame(
+                            frame,
+                            live,
+                            &live.client_ref,
+                            &companion_key,
+                            current.generation.as_u64(),
+                        ));
+                        return;
+                    };
                 }
             }
         }
@@ -585,13 +538,14 @@ impl HostHandle {
             RoundPremise::Existing(reference) => match self.round_for(reference) {
                 Some(round) => Some(round),
                 None => {
-                    return vec![self.stale_frame(
+                    sink.emit(self.stale_frame(
                         frame,
                         live,
                         &live.client_ref,
                         &companion_key,
                         attribution.generation.as_u64(),
-                    )];
+                    ));
+                    return;
                 }
             },
         };
@@ -604,7 +558,8 @@ impl HostHandle {
             requested.map_or(RoundIntent::Auto, RoundIntent::Existing)
         };
         let Ok(lifecycle) = self.store.load_lifecycle(companion).await else {
-            return vec![held_frame(frame, live)];
+            sink.emit(held_frame(frame, live));
+            return;
         };
         let premise = IntakePremise {
             candidate: SubmitClientInputCandidate {
@@ -639,17 +594,22 @@ impl HostHandle {
         let accepted = match check_intake(premise) {
             RoundIntakeOutcome::AcceptedForRound { round } => round,
             RoundIntakeOutcome::StaleRound { .. } => {
-                return vec![self.stale_frame(
+                sink.emit(self.stale_frame(
                     frame,
                     live,
                     &live.client_ref,
                     &companion_key,
                     attribution.generation.as_u64(),
-                )];
+                ));
+                return;
             }
-            RoundIntakeOutcome::HeldForTransition => return vec![held_frame(frame, live)],
+            RoundIntakeOutcome::HeldForTransition => {
+                sink.emit(held_frame(frame, live));
+                return;
+            }
             RoundIntakeOutcome::NeedsRevalidation { reason } => {
-                return vec![revalidate_frame(frame, live, intake_reason(&reason))];
+                sink.emit(revalidate_frame(frame, live, intake_reason(&reason)));
+                return;
             }
         };
         // The companion owns the accepted-turn order: admission precedes the
@@ -691,8 +651,44 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
-                match finish_turn(turn, &self.store, &executor, &self.store, &scrubber).await {
-                    DialogueOutcome::Completed { text, experience } => {
+                // The owner row is durable: emit acceptance and the stream
+                // opening now, before the provider call, so the Client
+                // observes durable input acceptance as its own early fact
+                // instead of waiting for provider completion.
+                let stream = StreamWireId(RawId::new().as_uuid());
+                sink.emit(accept_frame(frame, live, &round_wire));
+                sink.emit(open_frame(
+                    frame,
+                    live,
+                    &stream,
+                    &round_wire,
+                    generation_number,
+                ));
+                let mut seq = 0_u64;
+                let mut on_delta = |delta: &str| {
+                    sink.emit(outgoing_frame(
+                        frame,
+                        live,
+                        WirePayload::TextStreamFrame(TextStreamFrameWire {
+                            stream,
+                            seq,
+                            delta: delta.to_owned(),
+                            is_final: false,
+                        }),
+                    ));
+                    seq += 1;
+                };
+                let outcome = finish_turn(
+                    turn,
+                    &self.store,
+                    &executor,
+                    &self.store,
+                    &scrubber,
+                    &mut on_delta,
+                )
+                .await;
+                match outcome {
+                    DialogueOutcome::Completed { experience, .. } => {
                         // The durable reply is the client-visible completion:
                         // the formation pass is queued and runs after the
                         // response is handed off, never before it (design
@@ -702,37 +698,55 @@ impl HostHandle {
                         if let Some(experience) = experience {
                             self.queue_learning_formation(*experience);
                         }
-                        completed_frames(frame, live, &round_wire, generation_number, &text)
+                        // The final empty frame closes the displayed delta
+                        // sequence; the close states completion separately.
+                        sink.emit(outgoing_frame(
+                            frame,
+                            live,
+                            WirePayload::TextStreamFrame(TextStreamFrameWire {
+                                stream,
+                                seq,
+                                delta: String::new(),
+                                is_final: true,
+                            }),
+                        ));
+                        sink.emit(close_frame(frame, live, &stream, StreamClose::Completed));
                     }
                     DialogueOutcome::Interrupted => {
-                        interrupted_frames(frame, live, &round_wire, generation_number)
+                        sink.emit(close_frame(frame, live, &stream, StreamClose::Interrupted));
                     }
                 }
             }
             DialogueBegin::Replayed { round, round_wire } => {
-                self.replay_frames(frame, live, round, round_wire, generation_number)
+                for response in
+                    self.replay_frames(frame, live, round, round_wire, generation_number)
+                {
+                    sink.emit(response);
+                }
             }
             DialogueBegin::StaleExpected { current } => {
-                vec![stale_frame_with(frame, live, None, current.as_u64())]
+                sink.emit(stale_frame_with(frame, live, None, current.as_u64()));
             }
-            DialogueBegin::StaleConsent => vec![revalidate_frame(frame, live, "consent-stale")],
+            DialogueBegin::StaleConsent => {
+                sink.emit(revalidate_frame(frame, live, "consent-stale"));
+            }
             DialogueBegin::StaleCredentialSet => {
                 // The input may carry a newly registered value; hold so the
                 // Client retries and the Host re-scrubs under the new set.
-                vec![held_frame(frame, live)]
+                sink.emit(held_frame(frame, live));
             }
-            DialogueBegin::Conflict => vec![reject_frame(
+            DialogueBegin::Conflict => sink.emit(reject_frame(
                 frame,
                 live,
                 RejectKind::ConflictingCommand,
                 command_conflict_detail(&command),
-            )],
-            DialogueBegin::Held => vec![held_frame(frame, live)],
+            )),
+            DialogueBegin::Held => sink.emit(held_frame(frame, live)),
             DialogueBegin::HeldByLifecycle(_) => {
-                vec![revalidate_frame(frame, live, "stopped-companion")]
+                sink.emit(revalidate_frame(frame, live, "stopped-companion"));
             }
             DialogueBegin::Declined(reason) => {
-                vec![revalidate_frame(frame, live, admission_reason(reason))]
+                sink.emit(revalidate_frame(frame, live, admission_reason(reason)));
             }
         }
     }
@@ -1085,10 +1099,12 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         &self,
         authorized: AuthorizedInference,
         prompt: ScrubbedText,
+        on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
         ene_inference::dispatch_authorized(
             authorized,
             prompt,
+            on_delta,
             self.store,
             self.store,
             self.store,

@@ -177,6 +177,27 @@ pub trait ProviderTransport: Send + Sync {
         &self,
         req: ProviderRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>;
+
+    /// Runs one completion, forwarding incremental output to `on_delta`.
+    ///
+    /// Deltas are delivered in provider order and the returned response
+    /// carries the full text for adoption and History. The default fallback
+    /// is explicit: a transport without incremental support completes
+    /// synchronously and forwards the whole text as one delta at the end, so
+    /// callers always observe at least one delta and never a fabricated
+    /// early one.
+    fn complete_streaming<'a>(
+        &'a self,
+        req: ProviderRequest,
+        on_delta: &'a mut (dyn FnMut(&str) + Send),
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let response = self.complete(req).await?;
+            on_delta(&response.text);
+            Ok(response)
+        })
+    }
 }
 
 #[expect(
@@ -470,10 +491,15 @@ pub trait InferenceExecutor: Send + Sync {
 
     /// Claims the attempt, calls the provider, records usage, and reports
     /// whether adoption consent survived the await.
+    ///
+    /// `on_delta` receives provider deltas in order while the call runs; the
+    /// returned arrival carries the full text for adoption, so display and
+    /// durable adoption stay separate facts.
     async fn dispatch(
         &self,
         authorized: AuthorizedInference,
         prompt: ScrubbedText,
+        on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
@@ -494,6 +520,7 @@ pub trait InferenceExecutor: Send + Sync {
 pub async fn dispatch_authorized(
     authorized: AuthorizedInference,
     prompt: ScrubbedText,
+    on_delta: &mut (dyn FnMut(&str) + Send),
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
@@ -532,11 +559,14 @@ pub async fn dispatch_authorized(
         Err(error) => return Err(error),
     }
     let response = match transport
-        .complete(ProviderRequest {
-            model: model.clone(),
-            credential,
-            input: prompt.text,
-        })
+        .complete_streaming(
+            ProviderRequest {
+                model: model.clone(),
+                credential,
+                input: prompt.text,
+            },
+            on_delta,
+        )
         .await
     {
         Ok(response) => response,
@@ -866,6 +896,7 @@ mod dispatch_tests {
         let result = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut |_delta: &str| {},
             &consent,
             &StartedAttempts,
             &usage,
@@ -889,6 +920,7 @@ mod dispatch_tests {
         let result = dispatch_authorized(
             authorized(),
             prompt("x".repeat(MAX_INPUT_CHARS + 1)),
+            &mut |_delta: &str| {},
             &consent,
             &attempts,
             &usage,
@@ -919,6 +951,7 @@ mod dispatch_tests {
         let outcome = dispatch_authorized(
             authorized(),
             prompt("the key is sk-new"),
+            &mut |_delta: &str| {},
             &consent,
             &StaleAttempts,
             &usage,
@@ -954,6 +987,7 @@ mod dispatch_tests {
         let outcome = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut |_delta: &str| {},
             &consent,
             &StartedAttempts,
             &usage,
@@ -981,6 +1015,7 @@ mod dispatch_tests {
         let outcome = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut |_delta: &str| {},
             &consent,
             &StartedAttempts,
             &usage,
@@ -1005,6 +1040,7 @@ mod dispatch_tests {
         let result = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut |_delta: &str| {},
             &consent,
             &StartedAttempts,
             &usage,

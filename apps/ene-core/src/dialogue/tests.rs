@@ -1,4 +1,4 @@
-use super::{AttachOutcome, CHUNK_CHARS, chunk_text};
+use super::AttachOutcome;
 use crate::serve::{CredStore, HostHandle, LiveInput, device_client};
 use crate::test_support::{live_input, memory_handle_with};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
@@ -445,38 +445,6 @@ async fn assign_learning(
     )
 }
 
-#[test]
-fn empty_text_yields_one_empty_chunk() {
-    assert_eq!(chunk_text(""), vec![String::new()]);
-}
-
-#[test]
-fn chunk_boundaries_hold_at_200_chars() {
-    let full: String = "a".repeat(CHUNK_CHARS);
-    assert_eq!(chunk_text(&full), vec![full]);
-    let over: String = "a".repeat(CHUNK_CHARS + 1);
-    let chunks = chunk_text(&over);
-    assert_eq!(chunks.len(), 2, "one char over fills two chunks");
-    let first = chunks.first().unwrap();
-    assert_eq!(first.chars().count(), CHUNK_CHARS);
-    let second = chunks.get(1).unwrap();
-    assert_eq!(second, "a");
-}
-
-#[test]
-fn multibyte_text_never_splits_a_code_point() {
-    let emoji: String = "😀".repeat(250);
-    let chunks = chunk_text(&emoji);
-    assert_eq!(chunks.len(), 2, "250 emoji fill two 200-char chunks");
-    assert!(
-        chunks
-            .iter()
-            .all(|chunk| chunk.chars().count() <= CHUNK_CHARS),
-        "every chunk respects the bound"
-    );
-    assert_eq!(chunks.concat(), emoji, "reassembly preserves the text");
-}
-
 #[tokio::test]
 async fn submit_without_setup_needs_revalidation() {
     use ene_companion::CompanionRepository as _;
@@ -741,8 +709,8 @@ async fn full_dialogue_round_streams_and_restores() {
         .await;
     assert_eq!(
         responses.len(),
-        4,
-        "the winning attach accepts with open, one frame, close, got {responses:?}"
+        5,
+        "the winning attach emits accept, open, one delta, the final marker, close, got {responses:?}"
     );
     for response in &responses {
         assert_eq!(
@@ -771,11 +739,19 @@ async fn full_dialogue_round_streams_and_restores() {
     assert!(
         matches!(
             &stream_frame.payload,
-            WirePayload::TextStreamFrame(frame) if frame.is_final && frame.seq == 0
+            WirePayload::TextStreamFrame(frame) if !frame.is_final && frame.seq == 0
         ),
-        "the single frame is final at seq zero"
+        "the fallback delta arrives at seq zero"
     );
-    let closed = responses.get(3).unwrap();
+    let final_frame = responses.get(3).unwrap();
+    assert!(
+        matches!(
+            &final_frame.payload,
+            WirePayload::TextStreamFrame(frame) if frame.is_final && frame.seq == 1 && frame.delta.is_empty()
+        ),
+        "the final marker closes the delta sequence"
+    );
+    let closed = responses.get(4).unwrap();
     assert!(
         matches!(
             &closed.payload,
@@ -3645,5 +3621,328 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
     assert!(
         memory_body(&requested).contains("renders without setup state"),
         "the Memory section must render despite the unreadable credential"
+    );
+}
+
+/// Test sink that forwards host frames through a channel, standing in for
+/// the connection loop.
+struct ChannelFrameSink {
+    tx: tokio::sync::mpsc::UnboundedSender<ene_plugin_ipc::WireFrame>,
+}
+
+impl crate::serve::FrameSink for ChannelFrameSink {
+    fn emit(&mut self, frame: ene_plugin_ipc::WireFrame) {
+        if self.tx.send(frame).is_err() {
+            // The test dropped the receiver; nothing to forward to.
+        }
+    }
+}
+
+/// Streaming provider that emits deltas and pauses after the first one until
+/// released, so a test can observe delivery before completion.
+struct GatedStreamingTransport {
+    deltas: Vec<String>,
+    release: tokio::sync::Notify,
+    completed: std::sync::atomic::AtomicBool,
+}
+
+impl GatedStreamingTransport {
+    fn new(deltas: &[&str]) -> Self {
+        Self {
+            deltas: deltas.iter().map(|delta| (*delta).to_owned()).collect(),
+            release: tokio::sync::Notify::new(),
+            completed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    async fn release(&self) {
+        self.release.notify_one();
+    }
+
+    fn completed(&self) -> bool {
+        self.completed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ProviderTransport for GatedStreamingTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let text = self.deltas.concat();
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        on_delta: &'a mut (dyn FnMut(&str) + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            for (index, delta) in self.deltas.iter().enumerate() {
+                on_delta(delta);
+                if index == 0 && self.deltas.len() > 1 {
+                    self.release.notified().await;
+                }
+            }
+            self.completed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ene_inference::ProviderResponse {
+                text: self.deltas.concat(),
+                usage: None,
+            })
+        })
+    }
+}
+
+/// A provider that emits one delta and then fails: display happened, durable
+/// adoption did not.
+struct FailingStreamingTransport;
+
+impl ProviderTransport for FailingStreamingTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Err(ene_inference::InferenceTechnicalError::ProviderTransportFailed("down".to_owned()))
+        })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        on_delta: &'a mut (dyn FnMut(&str) + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            on_delta("Hel");
+            Err(ene_inference::InferenceTechnicalError::ProviderTransportFailed("down".to_owned()))
+        })
+    }
+}
+
+/// Acceptance and the first delta reach the sink before the provider call
+/// completes, `seq` stays monotonic without gaps, and completion is reported
+/// only after the durable reply exists.
+#[tokio::test]
+async fn streaming_emits_accept_and_first_delta_before_provider_completion() {
+    let transport = GatedStreamingTransport::new(&["Hel", "lo"]);
+    let live = live_input("client-stream");
+    let (handle, _dir) = round_test_handle("dlg-stream", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream",
+        "hi",
+        live.connection_id,
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut sink = ChannelFrameSink { tx: tx.clone() };
+    let mut host = Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink));
+
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut host => panic!("the provider completed before the early frames"),
+            maybe = rx.recv() => early.push(maybe.expect("frames must arrive")),
+        }
+    }
+    assert!(
+        matches!(
+            &early[0].payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        ),
+        "the first frame is the durable acceptance"
+    );
+    assert!(
+        matches!(&early[1].payload, WirePayload::TextStreamOpen(_)),
+        "the stream opens before deltas"
+    );
+    let WirePayload::TextStreamFrame(first) = &early[2].payload else {
+        panic!("the third frame is the first delta");
+    };
+    assert_eq!(first.delta, "Hel");
+    assert_eq!(first.seq, 0);
+    assert!(
+        !transport.completed(),
+        "the first delta must arrive while the provider call is still pending"
+    );
+
+    transport.release().await;
+    host.await;
+    drop(sink);
+    drop(tx);
+    let mut frames = early;
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+
+    let mut sequences = Vec::new();
+    let mut final_seen = false;
+    let mut close = None;
+    for frame in &frames {
+        match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => {
+                sequences.push(delta.seq);
+                if delta.is_final {
+                    final_seen = true;
+                    assert!(
+                        delta.delta.is_empty(),
+                        "the final frame only closes the sequence"
+                    );
+                }
+            }
+            WirePayload::TextStreamClose(status) => close = Some(status.status),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        sequences,
+        vec![0, 1, 2],
+        "delta sequence numbers are monotonic and gap-free"
+    );
+    assert!(final_seen, "completion carries a final frame");
+    assert_eq!(close, Some(StreamClose::Completed));
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        2,
+        "the owner input and the adopted reply are durable"
+    );
+}
+
+/// A provider failure after a displayed delta closes the stream interrupted
+/// and never adopts or stores the partial text.
+#[tokio::test]
+async fn streaming_error_after_a_delta_closes_interrupted_without_adoption() {
+    let transport = FailingStreamingTransport;
+    let live = live_input("client-stream-fail");
+    let (handle, _dir) = round_test_handle("dlg-stream-fail", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream-fail",
+        "hi",
+        live.connection_id,
+    );
+    let frames = handle.handle_frame(frame, live.clone(), &transport).await;
+    let payloads: Vec<&WirePayload> = frames.iter().map(|frame| &frame.payload).collect();
+    assert!(
+        matches!(
+            payloads.first(),
+            Some(WirePayload::RoundIntakeOutcome(
+                RoundIntakeOutcomeWire::AcceptedForRound { .. }
+            ))
+        ),
+        "acceptance precedes the failure"
+    );
+    let displayed: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        displayed,
+        vec!["Hel"],
+        "the partial display is the actually delivered range"
+    );
+    assert!(
+        matches!(
+            frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the stream closes interrupted, never completed"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        1,
+        "the owner input is durable but the reply is not adopted"
+    );
+}
+
+/// A transport without incremental support falls back to one delta carrying
+/// the whole text, delivered only when the completion returns.
+#[tokio::test]
+async fn non_streaming_provider_delivers_the_full_text_as_one_delta() {
+    let transport = FakeProviderTransport::new(String::from("all at once"), None);
+    let live = live_input("client-stream-fallback");
+    let (handle, _dir) = round_test_handle("dlg-stream-fallback", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream-fallback",
+        "hi",
+        live.connection_id,
+    );
+    let frames = handle.handle_frame(frame, live.clone(), &transport).await;
+    let deltas: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) if !delta.is_final => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["all at once"],
+        "the fallback delivers the whole text exactly once"
+    );
+    assert!(
+        matches!(
+            frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+        ),
+        "the fallback still completes"
     );
 }
