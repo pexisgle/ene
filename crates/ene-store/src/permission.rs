@@ -24,9 +24,8 @@ fn current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> 
     consent_mark(capability, current.map(|record| record.rev.as_u64()))
 }
 
-/// Shared by [`ConsentRepository::compare_and_save`] and the intent-atomic
-/// variant so the premise check and the write cannot drift apart between
-/// the two entry points. The row is selected and written under the record's
+/// Used by the intent-atomic assign so the premise check and the write
+/// cannot drift apart. The row is selected and written under the record's
 /// own capability, so a dialogue assignment can never overwrite or borrow
 /// the learning assignment.
 fn compare_and_save_row(
@@ -86,30 +85,6 @@ impl ConsentRepository for Store {
         run_blocking(move || {
             let guard = lock_shared(&conn);
             select_consent(&guard, capability).map_err(permission_unavailable)
-        })
-        .await
-    }
-
-    async fn compare_and_save(
-        &self,
-        expected: Option<(String, ConsentRevision)>,
-        record: ConsentRecord,
-    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            let outcome = compare_and_save_row(
-                &tx,
-                expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
-                &record,
-            )
-            .map_err(permission_unavailable)?;
-            tx.commit()
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            Ok(outcome)
         })
         .await
     }

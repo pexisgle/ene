@@ -225,12 +225,14 @@ pub enum ConsentCommitOutcome {
     StaleCurrent { current: Option<ConsentRecord> },
 }
 
-/// Persistence boundary for the current consent record.
+/// Read boundary for the current consent record.
 ///
-/// Writes use compare-and-save: the caller passes the consent view its
-/// intent was built on, and the store commits only when that view is still
-/// current. This closes the lost-update window where two intents read the
-/// same revision and the second silently overwrites the first.
+/// This trait loads; writes go through
+/// [`IntentOutcomeRepository::assign_with_intent`], which commits only when
+/// the caller's base-view expectation still matches and records the decision
+/// atomically with the write. That closes the lost-update window where two
+/// intents read the same revision and the second silently overwrites the
+/// first.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
@@ -245,25 +247,6 @@ pub trait ConsentRepository: Send + Sync {
         &self,
         capability: CapabilityKind,
     ) -> Result<Option<ConsentRecord>, PermissionTechnicalError>;
-
-    /// Commits `record` iff `expected` still matches the stored view for the
-    /// capability carried by `record`.
-    ///
-    /// `expected` comes from the intent's base-view mark as parsed by the
-    /// caller: a `consent-{capability}-rev-N` mark carries
-    /// `Some((consent id, revision))` and a `consent-{capability}-none` mark
-    /// carries `None`.
-    ///
-    /// `None` with an existing row returns `StaleCurrent` and never
-    /// overwrites; `Some((id, rev))` with a missing row or a differing id or
-    /// revision returns `StaleCurrent`; a match stores `record` and returns
-    /// `Committed`. Callers map `StaleCurrent` to `StaleBaseView` at ingress,
-    /// re-read, and retry.
-    async fn compare_and_save(
-        &self,
-        expected: Option<(String, ConsentRevision)>,
-        record: ConsentRecord,
-    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
 }
 
 /// Durable intent replay for management intents.
