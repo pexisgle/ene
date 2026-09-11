@@ -75,6 +75,21 @@ pub fn missing_secret_guidance() -> String {
     )
 }
 
+/// The stored device file exists but is unusable. Distinct from
+/// [`missing_secret_guidance`]: re-running the first-run flow without
+/// reprovisioning cannot help, because the file must be replaced by a fresh
+/// proven secret.
+#[must_use]
+pub fn unreadable_device_file_guidance() -> String {
+    format!(
+        "the stored client device file is unreadable or malformed; approve \
+         the device again on the Host-local trusted surface, then re-run \
+         ene-ctl once with {} set to the fresh secret (the file is replaced \
+         only after the proof succeeds)",
+        device::BOOTSTRAP_SECRET_ENV,
+    )
+}
+
 /// Echoing the Host reason is safe: it is operational by DTO contract, never
 /// a secret or body copy.
 #[must_use]

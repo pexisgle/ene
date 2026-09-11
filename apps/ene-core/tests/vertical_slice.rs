@@ -1043,6 +1043,124 @@ async fn pair_via_binaries(
     Some(secret)
 }
 
+/// The client device file is commit-on-acceptance and atomically replaced:
+/// a wrong bootstrap secret must not replace a working file, a malformed
+/// file is reported as degraded state instead of the first-run path, and a
+/// proven secret repairs it.
+#[tokio::test]
+async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
+    let temp = tempfile::TempDir::new();
+    let temp = temp.unwrap();
+    let dir = temp.path().to_path_buf();
+    let binaries = (workspace_binary("ene-ctl"), workspace_binary("ene-core"));
+    assert!(
+        binaries.0.is_some() && binaries.1.is_some(),
+        "both binaries must be built"
+    );
+    let (Some(ctl), Some(core)) = binaries else {
+        return;
+    };
+    let Some(config) = write_test_config(&dir) else {
+        return;
+    };
+    let server = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")]);
+    assert!(server.is_some(), "serve must spawn");
+    let _server = server;
+    assert!(wait_for_socket(&dir).await, "listener must bind");
+
+    let Some(secret) = pair_via_binaries(&ctl, &core, &config).await else {
+        return;
+    };
+    let device_file = ene_ctl::device::device_file_path(&dir);
+    let provisioned = std::fs::read(&device_file).unwrap_or_default();
+    assert!(
+        !provisioned.is_empty(),
+        "provisioning must write the device file"
+    );
+
+    // A wrong bootstrap secret is rejected at authentication, and the
+    // working file survives byte-for-byte.
+    let wrong = run_cli(
+        &ctl,
+        &["--config", &config, "status"],
+        &[("ENE_PAIRING_SECRET", "wrong-bootstrap-secret")],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(wrong, Some((2, _, _))),
+        "a rejected rotation must be a retryable outcome, got {wrong:?}"
+    );
+    assert!(
+        std::fs::read(&device_file).unwrap_or_default() == provisioned,
+        "a rejected bootstrap must not replace the working device file"
+    );
+
+    // The file still holds a usable secret.
+    let still_valid = run_cli(
+        &ctl,
+        &["--config", &config, "status"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(still_valid, Some((0, _, _))),
+        "a rejected rotation must not poison the file, got {still_valid:?}"
+    );
+
+    // A malformed file is degraded state: the client reports recovery
+    // guidance instead of taking the first-run path silently.
+    let wrote = std::fs::write(&device_file, b"{not json");
+    assert!(wrote.is_ok(), "the malformed fixture must write");
+    let malformed = run_cli(
+        &ctl,
+        &["--config", &config, "status"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    let Some((2, _, stderr)) = malformed else {
+        panic!("a malformed device file must be a retryable outcome");
+    };
+    assert!(
+        stderr.contains("unreadable or malformed"),
+        "the degraded state must be named, got {stderr:?}"
+    );
+    assert!(
+        stderr.contains("ENE_PAIRING_SECRET"),
+        "the guidance must name the provisioning inlet, got {stderr:?}"
+    );
+
+    // A proven secret repairs the file only after acceptance.
+    let repaired = run_cli(
+        &ctl,
+        &["--config", &config, "status"],
+        &[("ENE_PAIRING_SECRET", secret.as_str())],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(repaired, Some((0, _, _))),
+        "a proven bootstrap must repair the file, got {repaired:?}"
+    );
+    assert!(
+        std::fs::read(&device_file).unwrap_or_default() != b"{not json",
+        "repair must publish a complete document"
+    );
+    let after_repair = run_cli(
+        &ctl,
+        &["--config", &config, "status"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(after_repair, Some((0, _, _))),
+        "the repaired file must authenticate, got {after_repair:?}"
+    );
+}
+
 #[tokio::test]
 async fn binaries_drive_send_stream_history_and_restart() {
     let temp = tempfile::TempDir::new();
