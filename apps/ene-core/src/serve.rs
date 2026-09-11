@@ -97,16 +97,10 @@ pub use lifecycle::serve;
 /// staleness are domain outcomes on the wire, never this error.
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    #[error(transparent)]
-    Config(#[from] ene_config::typed::ConfigError),
     #[error("store unavailable: {0}")]
     Store(String),
     #[error("bind failed: {0}")]
     Bind(String),
-    #[error("codec failed: {0}")]
-    Codec(String),
-    #[error("handshake failed: {0}")]
-    Handshake(String),
     #[error("inference failed: {0}")]
     Inference(String),
     /// Unknown descriptors list the pending descriptors so the Owner can
