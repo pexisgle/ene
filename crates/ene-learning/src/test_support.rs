@@ -11,10 +11,10 @@ use std::sync::Mutex;
 use ene_primitive::RawId;
 
 use crate::{
-    LearningInference, LearningInferenceError, LearningRepository, LearningScope,
-    LearningTechnicalError, Memory, MemoryChange, MemoryChangeCommit, MemoryChangeOutcome,
-    MemoryId, MemoryRevision, MemoryRevisionRecord, MemoryTarget, SecretScrubber, SummaryId,
-    SummaryRecord,
+    CredentialSetRevision, LearningInference, LearningInferenceError, LearningRepository,
+    LearningScope, LearningTechnicalError, Memory, MemoryChange, MemoryChangeCommit,
+    MemoryChangeOutcome, MemoryId, MemoryRevision, MemoryRevisionRecord, MemoryTarget,
+    ScrubbedText, SecretScrubber, SummaryId, SummaryRecord,
 };
 
 #[derive(Default)]
@@ -222,8 +222,11 @@ impl ScriptedInference {
     reason = "in-test fake; async matches the inference port"
 )]
 impl LearningInference for ScriptedInference {
-    async fn infer(&self, prompt: String) -> Result<String, LearningInferenceError> {
-        self.prompts.lock().expect("fake prompt lock").push(prompt);
+    async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
+        self.prompts
+            .lock()
+            .expect("fake prompt lock")
+            .push(prompt.text);
         self.answers
             .lock()
             .expect("fake answer lock")
@@ -251,8 +254,11 @@ impl ReplacingScrubber {
     reason = "in-test fake; async matches the scrubber contract"
 )]
 impl SecretScrubber for ReplacingScrubber {
-    async fn scrub(&self, text: &str) -> Result<String, crate::SecretScrubError> {
-        Ok(text.replace(&self.from, &self.to))
+    async fn scrub(&self, text: &str) -> Result<ScrubbedText, crate::SecretScrubError> {
+        Ok(ScrubbedText {
+            text: text.replace(&self.from, &self.to),
+            credential_set: CredentialSetRevision::initial(),
+        })
     }
 }
 
@@ -265,7 +271,7 @@ pub(crate) struct FailingScrubber;
     reason = "in-test fake; async matches the scrubber contract"
 )]
 impl SecretScrubber for FailingScrubber {
-    async fn scrub(&self, _text: &str) -> Result<String, crate::SecretScrubError> {
+    async fn scrub(&self, _text: &str) -> Result<ScrubbedText, crate::SecretScrubError> {
         Err(crate::SecretScrubError::RegistryUnavailable)
     }
 }

@@ -29,7 +29,9 @@ pub mod provider;
 use std::future::Future;
 use std::pin::Pin;
 
-use ene_credential::{CredentialRef, CredentialRefRepository, CredentialStore};
+use ene_credential::{
+    CredentialRef, CredentialRefRepository, CredentialSetRevision, CredentialStore, ScrubbedText,
+};
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRepository, ConsentRevision,
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
@@ -280,6 +282,10 @@ pub struct InferenceAttempt {
     /// travels together (never a bare revision), so exhaustion stays visible
     /// at the boundary.
     pub expected_consent: (String, ConsentRevision),
+    /// Credential-set premise the prompt was scrubbed under. The claim
+    /// compares it against the durable set in the same transaction, so a
+    /// prompt that predates a credential registration is never sent.
+    pub expected_credential_set: CredentialSetRevision,
     pub provider: String,
     pub model: String,
 }
@@ -620,7 +626,7 @@ pub trait InferenceExecutor: Send + Sync {
     async fn dispatch(
         &self,
         authorized: AuthorizedInference,
-        input_text: String,
+        prompt: ScrubbedText,
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
@@ -629,28 +635,31 @@ pub trait InferenceExecutor: Send + Sync {
 ///
 /// The input cap is checked here, before the durable attempt claim: an
 /// over-limit request is a never-sent refusal and must not leave an attempt
-/// row behind. From the successful claim onward, every path either records
-/// usage (uncertain or reported) or reports stale before any provider I/O.
-/// A technical provider failure records an unknown-usage fact before
-/// propagating: the attempt may have run. A completed call records its
-/// reported counts whether or not the reply is adopted; an adoption read
+/// row behind. The prompt's credential-set premise is compared in the same
+/// claim transaction, so a prompt scrubbed before a credential became
+/// registered is never sent. From the successful claim onward, every path
+/// either records usage (uncertain or reported) or reports stale before any
+/// provider I/O. A technical provider failure records an unknown-usage fact
+/// before propagating: the attempt may have run. A completed call records
+/// its reported counts whether or not the reply is adopted; an adoption read
 /// failure still records the reported counts before propagating the storage
 /// error.
 pub async fn dispatch_authorized(
     authorized: AuthorizedInference,
-    input_text: String,
+    prompt: ScrubbedText,
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
     transport: &impl ProviderTransport,
 ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
-    if input_text.chars().count() > MAX_INPUT_CHARS {
+    if prompt.text.chars().count() > MAX_INPUT_CHARS {
         return Ok(InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit));
     }
     let ticket = authorized.ticket;
     let capability = authorized.candidate.capability;
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
     let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
+    let credential_set = prompt.credential_set;
     let command = RequestInferenceCommand {
         ticket,
         candidate: authorized.candidate,
@@ -661,16 +670,18 @@ pub async fn dispatch_authorized(
             credential: authorized.credential,
             consent: (consent_id.clone(), consent_rev),
         },
-        input_text,
+        input_text: prompt.text,
     };
     // The claim is the linearization point: it reads, compares, and inserts
-    // in one short transaction, so a stale consent fails here before any
-    // byte leaves. A store failure is infrastructure, never a refusal.
+    // in one short transaction, so a stale consent or a stale credential-set
+    // premise fails here before any byte leaves. A store failure is
+    // infrastructure, never a refusal.
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
             capability,
             expected_consent: (consent_id.clone(), consent_rev),
+            expected_credential_set: credential_set,
             provider: provider.clone(),
             model: model.clone(),
         })
@@ -994,10 +1005,10 @@ mod dispatch_tests {
     use super::{
         AttemptBeginOutcome, AuthorizedInference, InferenceAttempt, InferenceAttemptRepository,
         InferenceDispatchOutcome, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
-        NotSentReason, PermissionEvaluationId, RawUsage, UsageFact, UsageRepository, UsageSource,
-        dispatch_authorized,
+        NotSentReason, PermissionEvaluationId, ProviderRequest, ProviderResponse,
+        ProviderTransport, RawUsage, UsageFact, UsageRepository, UsageSource, dispatch_authorized,
     };
-    use ene_credential::CredentialRef;
+    use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
         CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
         ConsumerKind, InferenceUseCandidate, PermissionTechnicalError, PurposeKind,
@@ -1078,6 +1089,47 @@ mod dispatch_tests {
         }
     }
 
+    /// An attempt repository whose claim always answers stale, modelling a
+    /// credential-set move between scrub and send.
+    struct StaleAttempts;
+
+    impl InferenceAttemptRepository for StaleAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::Stale)
+        }
+    }
+
+    /// Transport that counts calls without performing I/O.
+    struct CountingTransport(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ProviderTransport for CountingTransport {
+        fn complete(
+            &self,
+            _req: ProviderRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(ProviderResponse {
+                    text: String::new(),
+                    usage: None,
+                })
+            })
+        }
+    }
+
     struct CapturedUsage(Mutex<Vec<UsageFact>>);
 
     impl UsageRepository for CapturedUsage {
@@ -1088,6 +1140,13 @@ mod dispatch_tests {
         async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError> {
             self.0.lock().expect("usage capture lock").push(fact);
             Ok(())
+        }
+    }
+
+    fn prompt(text: impl Into<String>) -> ScrubbedText {
+        ScrubbedText {
+            text: text.into(),
+            credential_set: CredentialSetRevision::initial(),
         }
     }
 
@@ -1117,7 +1176,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
         let result = dispatch_authorized(
             authorized(),
-            String::from("hello"),
+            prompt("hello"),
             &consent,
             &StartedAttempts,
             &usage,
@@ -1140,7 +1199,7 @@ mod dispatch_tests {
         let attempts = RecordingAttempts(Mutex::new(0));
         let result = dispatch_authorized(
             authorized(),
-            "x".repeat(MAX_INPUT_CHARS + 1),
+            prompt("x".repeat(MAX_INPUT_CHARS + 1)),
             &consent,
             &attempts,
             &usage,
@@ -1163,6 +1222,34 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
+    async fn stale_credential_set_never_calls_the_provider() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("the key is sk-new"),
+            &consent,
+            &StaleAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::ConsentStale)
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a stale credential-set premise must not reach the provider"
+        );
+        assert!(usage.0.lock().expect("usage capture lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn completed_records_reported_counts_even_when_adoption_moves() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
         // Only the adoption read remains: a different revision there models
@@ -1177,7 +1264,7 @@ mod dispatch_tests {
         );
         let outcome = dispatch_authorized(
             authorized(),
-            String::from("hello"),
+            prompt("hello"),
             &consent,
             &StartedAttempts,
             &usage,

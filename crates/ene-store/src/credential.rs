@@ -20,6 +20,8 @@ use crate::run_blocking;
 
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
 
+pub(crate) const SQL_SELECT_SET_REV: &str = "SELECT rev FROM credential_set WHERE id = 1";
+
 const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_ref ORDER BY id ASC";
 
 const SQL_SELECT_PAIRED_BY_DESCRIPTOR: &str =
@@ -74,38 +76,147 @@ impl Store {
     /// # Errors
     ///
     /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// transaction cannot run or commit; the caller must then not make the
-    /// credential usable.
+    /// transaction cannot run or commit.
     pub fn redact_registered_secret(&self, bearer: &str) -> Result<(), CredentialTechnicalError> {
         if bearer.is_empty() {
             // An empty pattern matches every position; there is nothing
             // meaningful to redact and no safe rewrite.
             return Ok(());
         }
-        // Table and column names are compile-time constants; the bearer
-        // travels only as a bound parameter.
-        const TARGETS: &[(&str, &str)] = &[
-            ("history_message", "body"),
-            ("learning_summary", "content"),
-            ("learning_memory", "content"),
-            ("learning_memory_revision", "content"),
-            ("management_intent", "rationale_quote"),
-        ];
         let mut guard = lock_shared(&self.conn);
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        for (table, column) in TARGETS {
-            let sql = format!(
-                "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
-                 WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
-            );
-            tx.execute(&sql, params![bearer, REDACTED_CREDENTIAL])
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-        }
+        sweep_registered_secret(&tx, bearer)?;
         tx.commit()
             .map_err(|error| credential_unavailable(error.to_string()))?;
         Ok(())
+    }
+
+    /// Approves one credential pair atomically: sweeps existing content,
+    /// makes the ref usable, and bumps the credential-set revision.
+    ///
+    /// One `Immediate` transaction owns all three effects, so a scrub premise
+    /// taken before the commit is either covered by the sweep (content lands
+    /// before) or refused by the revision (content lands after). The caller
+    /// runs this while the bearer is borrowed inside
+    /// [`ene_credential::CredentialStore::with_bearer`], so the value never
+    /// leaves that scope. Returns `true` when the pair is usable after the
+    /// call. Unknown pairs return `false` (the sweep still ran); a blank pair
+    /// returns `false` without touching state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// transaction cannot run or commit; the caller must then not make the
+    /// credential usable.
+    pub fn approve_credential_with_sweep(
+        &self,
+        provider: &str,
+        label: &str,
+        bearer: &str,
+    ) -> Result<bool, CredentialTechnicalError> {
+        if credential_pair_is_blank(provider, label) {
+            return Ok(false);
+        }
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        sweep_registered_secret(&tx, bearer)?;
+        let pending: Option<(String, String, String)> = tx
+            .query_row(
+                SQL_SELECT_CREDENTIAL_PENDING,
+                params![provider, label],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let usable: Option<(String, String, String)> = tx
+            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let mut approved = usable.is_some();
+        if pending.is_some() {
+            tx.execute(SQL_DELETE_CREDENTIAL_PENDING, params![provider, label])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.execute(
+                SQL_UPSERT_CREDENTIAL,
+                params![format!("{provider}:{label}"), provider, label],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+            bump_credential_set_rev(&tx)?;
+            approved = true;
+        }
+        tx.commit()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(approved)
+    }
+}
+
+/// Table and column pairs holding quarantined plaintext content.
+const SWEEP_TARGETS: &[(&str, &str)] = &[
+    ("history_message", "body"),
+    ("learning_summary", "content"),
+    ("learning_memory", "content"),
+    ("learning_memory_revision", "content"),
+    ("management_intent", "rationale_quote"),
+];
+
+/// Sweeps `bearer` out of durable content inside the caller's transaction.
+fn sweep_registered_secret(
+    tx: &rusqlite::Transaction<'_>,
+    bearer: &str,
+) -> Result<(), CredentialTechnicalError> {
+    if bearer.is_empty() {
+        return Ok(());
+    }
+    // Table and column names are compile-time constants; the bearer travels
+    // only as a bound parameter.
+    for (table, column) in SWEEP_TARGETS {
+        let sql = format!(
+            "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
+             WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
+        );
+        tx.execute(&sql, params![bearer, REDACTED_CREDENTIAL])
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Advances the credential-set revision inside the caller's transaction.
+fn bump_credential_set_rev(tx: &rusqlite::Transaction<'_>) -> Result<(), CredentialTechnicalError> {
+    let current: i64 = tx
+        .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
+    tx.execute(
+        "UPDATE credential_set SET rev = ?1 WHERE id = 1",
+        params![next],
+    )
+    .map_err(|error| credential_unavailable(error.to_string()))?;
+    Ok(())
+}
+
+impl ene_credential::CredentialSetRepository for Store {
+    async fn current_set_revision(
+        &self,
+    ) -> Result<ene_credential::CredentialSetRevision, CredentialTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let raw: i64 = guard
+                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let value = u64::try_from(raw)
+                .map_err(|_| credential_unavailable("credential set revision out of range"))?;
+            Ok(ene_credential::CredentialSetRevision::from_u64(value))
+        })
+        .await
     }
 }
 
@@ -113,12 +224,19 @@ impl CredentialRefRepository for Store {
     async fn save_ref(&self, cred: CredentialRef) -> Result<(), CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            let guard = lock_shared(&conn);
-            guard
-                .execute(
-                    SQL_UPSERT_CREDENTIAL,
-                    params![cred.id(), cred.provider(), cred.label()],
-                )
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.execute(
+                SQL_UPSERT_CREDENTIAL,
+                params![cred.id(), cred.provider(), cred.label()],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+            // A ref becoming registered changes the credential set; every
+            // scrub premise older than this must fail its commit.
+            bump_credential_set_rev(&tx)?;
+            tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(())
         })
@@ -474,6 +592,9 @@ impl CredentialApprovalRepository for Store {
                     params![format!("{provider}:{label}"), provider, label,],
                 )
                 .map_err(|error| credential_unavailable(error.to_string()))?;
+                // A ref becoming usable changes the credential set; every
+                // scrub premise older than this must fail its commit.
+                bump_credential_set_rev(&tx)?;
                 tx.commit()
                     .map_err(|error| credential_unavailable(error.to_string()))?;
                 return Ok(true);

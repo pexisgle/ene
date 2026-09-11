@@ -53,7 +53,7 @@
 //! - [`HostHandle`] methods take `&self`: every lock guard is dropped before
 //!   the next await, and no handle-wide async lock spans provider I/O.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
@@ -267,13 +267,15 @@ pub struct HostHandle {
     /// acceptance. Each nonce is consumed on first proof regardless of
     /// outcome, so a captured proof cannot replay.
     pub(crate) pending_nonces: StdMutex<HashMap<String, String>>,
-    /// In-memory, coalescing queue of companions whose completed reply
-    /// awaits a Learning formation pass.
+    /// In-memory, best-effort queue of pinned Experience premises whose
+    /// completed replies await a Learning formation pass.
     ///
-    /// See [`crate::dialogue`]: the pass is post-response work, never a
-    /// condition of the client-visible completion, and a crash simply drops
-    /// the queued derived update instead of replaying an old pass.
-    pub(crate) learning_queue: StdMutex<HashSet<CompanionId>>,
+    /// Each item carries its own source range, transcript, and Client / round
+    /// / continuity correspondence, pinned at reply completion. See
+    /// [`crate::dialogue`]: the pass is post-response work, never a condition
+    /// of the client-visible completion, and a crash simply drops the queued
+    /// derived update instead of replaying an old pass.
+    pub(crate) learning_queue: StdMutex<VecDeque<ene_learning::ExperienceCandidate>>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.
     pub(crate) learning_worker: AsyncMutex<()>,
@@ -339,7 +341,7 @@ impl HostHandle {
             cred_store,
             auth_store,
             pending_nonces: StdMutex::new(HashMap::new()),
-            learning_queue: StdMutex::new(HashSet::new()),
+            learning_queue: StdMutex::new(VecDeque::new()),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
         })
@@ -597,10 +599,12 @@ impl HostHandle {
     /// created (usable marker); re-approval is idempotent. Unknown pairs
     /// return `Ok(false)` so the caller can list pendings.
     ///
-    /// The approval first sweeps every plaintext occurrence of the bearer
-    /// out of durable content: the value must not be readable before it
-    /// becomes a registered credential, including any string that was stored
-    /// before registration. A missing or unreadable bearer holds the
+    /// Approval is one atomic store commit: every plaintext occurrence of
+    /// the bearer in durable content is swept, the usable ref is created,
+    /// and the credential-set revision advances together. A scrub premise
+    /// taken before the commit is therefore either covered by the sweep or
+    /// refused by the revision, so a value stored before registration cannot
+    /// survive as raw content. A missing or unreadable bearer holds the
     /// approval, because absence of the value cannot be proven and the
     /// credential must not become usable unprotected.
     ///
@@ -613,23 +617,15 @@ impl HostHandle {
             return Ok(false);
         };
         match self.cred_store.with_bearer(&credential, |bearer| {
-            self.store.redact_registered_secret(bearer)
+            self.store
+                .approve_credential_with_sweep(provider, label, bearer)
         }) {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err(CoreError::Store(error.to_string())),
-            Err(_) => {
-                return Err(CoreError::Store(String::from(
-                    "credential bearer is not readable; provision the secret before approving",
-                )));
-            }
+            Ok(Ok(approved)) => Ok(approved),
+            Ok(Err(error)) => Err(CoreError::Store(error.to_string())),
+            Err(_) => Err(CoreError::Store(String::from(
+                "credential bearer is not readable; provision the secret before approving",
+            ))),
         }
-        // One atomic store call: the pending drain and the usable-ref insert
-        // share a transaction, so a crash cannot strand an approval with no
-        // usable marker. The usable ref id follows the `provider:label`
-        // convention both sides already use for assignment.
-        CredentialApprovalRepository::approve_pending(&self.store, provider, label)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))
     }
 
     pub async fn pending_credentials(&self) -> Result<Vec<String>, CoreError> {

@@ -17,6 +17,8 @@ use ene_primitive::{RawId, WallClockWithTz};
 use serde::Deserialize;
 use thiserror::Error;
 
+use ene_credential::{ScrubbedText, SecretScrubError, SecretScrubber};
+
 use crate::identity::{MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
 use crate::memory::{ChangeKind, Importance, Memory, TemporalMeaning};
 use crate::repository::{
@@ -80,6 +82,23 @@ impl core::fmt::Debug for ExperienceTurn {
     }
 }
 
+/// Stage 3 dialogue correspondence of one Experience.
+///
+/// Carries the parts of the `ProposeExperienceCandidate` boundary a dialogue
+/// formation needs and that an in-memory queue must not lose while the pass
+/// is pending: the Client and round the turn belonged to, and the presence
+/// generation anchoring continuity within one Host run. Cross-domain
+/// identities stay opaque [`RawId`]s and are never converted here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExperienceCorrespondence {
+    /// Client that accepted the round, when known.
+    pub client: Option<RawId>,
+    /// Round the completed turn belonged to, when known.
+    pub round: Option<RawId>,
+    /// Presence generation at acceptance; continuity within one Host run.
+    pub generation: Option<u64>,
+}
+
 /// One experience proposed for formation.
 ///
 /// `source` references the retained History the transcript was read from; the
@@ -92,6 +111,9 @@ pub struct ExperienceCandidate {
     pub source: SourceRangeRef,
     pub transcript: Vec<ExperienceTurn>,
     pub at: WallClockWithTz,
+    /// Client / round / continuity correspondence confirmed when the
+    /// Experience was proposed.
+    pub correspondence: ExperienceCorrespondence,
 }
 
 /// One change the formation applied or rejected.
@@ -134,15 +156,17 @@ pub enum FormationDecision {
 
 /// The model boundary used to judge one Experience.
 ///
-/// Kept as a port so this crate does not depend on inference, permission, or
-/// credential crates: the Host supplies an implementation through the
-/// inference boundary with its own consumer and purpose.
+/// Kept as a port so this crate does not depend on inference or permission
+/// crates: the Host supplies an implementation through the inference boundary
+/// with its own consumer and purpose. The prompt carries the credential-set
+/// premise it was scrubbed under, so the send claim can refuse a prompt that
+/// predates a credential registration.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract style uses native async fn; Send bounds settle with the Host adapter"
 )]
 pub trait LearningInference: Send + Sync {
-    async fn infer(&self, prompt: String) -> Result<String, LearningInferenceError>;
+    async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -156,41 +180,6 @@ pub enum LearningInferenceError {
         /// Provider-class cause. Never prompt or output text.
         reason: String,
     },
-}
-
-/// Failure to prove that registered secret values are absent from text.
-///
-/// Scrubbing fails closed: when the registry cannot be read or a registered
-/// value cannot be resolved, the text must not reach a model prompt or
-/// durable storage. This is never "no secret was found".
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum SecretScrubError {
-    /// The credential registry could not be listed.
-    #[error("credential registry unavailable")]
-    RegistryUnavailable,
-    /// A registered credential's value could not be read.
-    #[error("registered credential value unavailable")]
-    SecretUnavailable,
-}
-
-/// Redaction of registered secret values.
-///
-/// The Host owns the credential boundary; this crate only requires that a
-/// value never reaches a prompt or a durable Learning row. Implementations
-/// must return text with secret occurrences removed and must not expose the
-/// secret itself.
-#[expect(
-    async_fn_in_trait,
-    reason = "Stage 2 contract style uses native async fn; Send bounds settle with the Host adapter"
-)]
-pub trait SecretScrubber: Send + Sync {
-    /// Returns `text` with every registered secret occurrence replaced.
-    ///
-    /// # Errors
-    ///
-    /// [`SecretScrubError`] when absence cannot be proven for every
-    /// registered credential; the caller must not use the original text.
-    async fn scrub(&self, text: &str) -> Result<String, SecretScrubError>;
 }
 
 /// Forms one Experience: judge it, then commit Summary evidence and the
@@ -237,31 +226,43 @@ pub async fn form_experience(
         .scrub(&summary_text)
         .await
         .map_err(secret_boundary_failure)?;
-    if summary_text.trim().is_empty() || answer.memories.is_empty() {
+    if summary_text.text.trim().is_empty() || answer.memories.is_empty() {
         return Ok(FormationDecision::DeclinedAsNoEndValue);
     }
     let summary_id = SummaryId::generate();
     let summary = SummaryRecord {
         id: summary_id,
         scope,
-        content: summary_text.trim().to_owned(),
+        content: summary_text.text.trim().to_owned(),
         source: candidate.source,
         formed_at: candidate.at,
     };
 
-    let mut changes = Vec::new();
+    // Scrub every offered content before the first commit, so one premise
+    // covers each durable piece this pass is about to write. A credential
+    // registration between two pieces would otherwise let an earlier piece
+    // carry the newly registered value into storage.
+    let mut prepared = Vec::new();
     for proposed in answer.memories.into_iter().take(MAX_FORMED_MEMORIES) {
-        let Some(content) = proposed.content else {
+        let Some(content) = proposed.content.as_deref() else {
             continue;
         };
         let content = scrubber
-            .scrub(&content)
+            .scrub(content)
             .await
             .map_err(secret_boundary_failure)?;
-        let content = content.trim().to_owned();
-        if content.is_empty() {
+        if content.text.trim().is_empty() {
             continue;
         }
+        prepared.push((proposed, content));
+    }
+    let secret_premise = ScrubbedText::oldest_premise(
+        std::iter::once(&summary_text).chain(prepared.iter().map(|(_, content)| content)),
+    );
+
+    let mut changes = Vec::new();
+    for (proposed, content) in prepared {
+        let content = content.text.trim().to_owned();
         let memory = MemoryId::generate();
         let importance = Importance::clamped(
             proposed
@@ -272,6 +273,7 @@ pub async fn form_experience(
         let outcome = repository
             .commit_memory_change(MemoryChangeCommit {
                 summary: Some(summary.clone()),
+                secret_premise,
                 change: MemoryChange {
                     target: MemoryTarget::New { id: memory },
                     scope,
@@ -308,6 +310,15 @@ pub async fn form_experience(
                 memory,
                 reason: ChangeRejection::RevisionExhausted,
             },
+            MemoryChangeOutcome::StaleCredentialSet => {
+                // The set moved after the scrub: the prepared content may
+                // carry the newly registered value. Refuse the whole pass
+                // instead of writing raw text; already committed pieces are
+                // covered by the approval sweep.
+                return Err(LearningTechnicalError::SecretBoundaryUnavailable {
+                    reason: String::from("credential set moved during formation"),
+                });
+            }
         });
     }
     if changes.is_empty() {
@@ -323,8 +334,9 @@ async fn build_prompt(
     existing: &[Memory],
     candidate: &ExperienceCandidate,
     scrubber: &impl SecretScrubber,
-) -> Result<String, LearningTechnicalError> {
+) -> Result<ScrubbedText, LearningTechnicalError> {
     let mut prompt = String::from(PROMPT_PREAMBLE);
+    let mut premises = Vec::new();
     prompt.push_str("\n\nExisting memories:\n");
     if existing.is_empty() {
         prompt.push_str("(none)\n");
@@ -334,8 +346,9 @@ async fn build_prompt(
                 .scrub(&memory.content)
                 .await
                 .map_err(secret_boundary_failure)?;
+            premises.push(content.credential_set);
             prompt.push_str("- ");
-            prompt.push_str(&content);
+            prompt.push_str(&content.text);
             prompt.push('\n');
         }
     }
@@ -345,16 +358,32 @@ async fn build_prompt(
             .scrub(&turn.text)
             .await
             .map_err(secret_boundary_failure)?;
+        premises.push(text.credential_set);
         prompt.push_str(match turn.role {
             ExperienceRole::Owner => "Owner: ",
             ExperienceRole::Companion => "Companion: ",
         });
-        prompt.push_str(&text);
+        prompt.push_str(&text.text);
         prompt.push('\n');
     }
     prompt.push('\n');
     prompt.push_str(PROMPT_SCHEMA);
-    Ok(prompt)
+    let credential_set = match premises.into_iter().min() {
+        Some(revision) => revision,
+        // No scrubbed piece exists (empty transcript); still bind the prompt
+        // to a current premise by scrubbing an empty string.
+        None => {
+            scrubber
+                .scrub("")
+                .await
+                .map_err(secret_boundary_failure)?
+                .credential_set
+        }
+    };
+    Ok(ScrubbedText {
+        text: prompt,
+        credential_set,
+    })
 }
 
 fn secret_boundary_failure(error: SecretScrubError) -> LearningTechnicalError {
@@ -405,8 +434,8 @@ mod tests {
     use ene_primitive::{RawId, WallClockWithTz};
 
     use crate::formation::{
-        ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationChange, FormationDecision,
-        LearningInferenceError, form_experience,
+        ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
+        FormationChange, FormationDecision, LearningInferenceError, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::repository::{LearningRepository, LearningTechnicalError};
@@ -434,6 +463,7 @@ mod tests {
                 })
                 .collect(),
             at: WallClockWithTz::now(),
+            correspondence: ExperienceCorrespondence::default(),
         }
     }
 
@@ -629,6 +659,7 @@ mod tests {
         let repository = FakeLearningRepository::new();
         let seeded = crate::repository::MemoryChangeCommit {
             summary: None,
+            secret_premise: None,
             change: crate::repository::MemoryChange {
                 target: crate::repository::MemoryTarget::New {
                     id: crate::identity::MemoryId::generate(),
@@ -675,6 +706,7 @@ mod tests {
         // holds it.
         let seeded = crate::repository::MemoryChangeCommit {
             summary: None,
+            secret_premise: None,
             change: crate::repository::MemoryChange {
                 target: crate::repository::MemoryTarget::New {
                     id: crate::identity::MemoryId::generate(),

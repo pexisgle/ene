@@ -5,8 +5,8 @@ use ene_companion::{
     ReportStatusTransition, RoundIntentMark, UndeliveredRef, UndeliveredRepository,
 };
 use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, DeviceId,
-    DevicePairingRepository, DevicePairingStatus,
+    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
+    CredentialSetRevision, DeviceId, DevicePairingRepository, DevicePairingStatus,
 };
 use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
 use ene_learning::{
@@ -46,6 +46,7 @@ fn history_command(
         at: fixture_clock(),
         expected_generation: generation,
         expected_consent: None,
+        expected_credential_set: None,
         command_id: None,
         round_wire: Some(RawId::new().as_uuid().to_string()),
         round_intent: None,
@@ -72,6 +73,7 @@ fn history_command_with_ids(
         at: fixture_clock(),
         expected_generation: generation,
         expected_consent: None,
+        expected_credential_set: None,
         command_id,
         round_wire: Some(RawId::new().as_uuid().to_string()),
         round_intent: command_id.map(|_| RoundIntentMark::Auto),
@@ -1091,8 +1093,8 @@ INSERT INTO _schema_version (version) VALUES (2);",
         row.get::<_, i64>(0)
     });
     assert!(
-        matches!(version, Ok(10)),
-        "migration must record version 10"
+        matches!(version, Ok(11)),
+        "migration must record version 11"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1403,7 +1405,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(10),
+        Some(11),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1454,8 +1456,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
         row.get::<_, i64>(0)
     });
     assert!(
-        matches!(version, Ok(10)),
-        "reopened database must record schema version 10"
+        matches!(version, Ok(11)),
+        "reopened database must record schema version 11"
     );
 }
 
@@ -2065,6 +2067,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
     let claim = |ticket: InferenceTicketId, rev: u64| InferenceAttempt {
         ticket,
         capability: CapabilityKind::Dialogue,
+        expected_credential_set: CredentialSetRevision::initial(),
         expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(rev)),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
@@ -2263,8 +2266,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
         row.get::<_, i64>(0)
     });
     assert!(
-        matches!(version, Ok(10)),
-        "reopened database must record schema version 10"
+        matches!(version, Ok(11)),
+        "reopened database must record schema version 11"
     );
 }
 
@@ -2406,7 +2409,11 @@ fn learning_change(
 }
 
 fn commit(summary: Option<SummaryRecord>, change: MemoryChange) -> MemoryChangeCommit {
-    MemoryChangeCommit { summary, change }
+    MemoryChangeCommit {
+        summary,
+        secret_premise: None,
+        change,
+    }
 }
 
 #[tokio::test]
@@ -2933,7 +2940,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(None), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(10),
+        Some(11),
         "migration advances the schema version"
     );
     assert!(
@@ -2973,7 +2980,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(10));
+    assert_eq!(read_schema_version(&path), Some(11));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
@@ -2990,6 +2997,15 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
     assert!(
         table_columns(&path, "consent_record").contains(&String::from("capability")),
         "the rebuilt consent table is capability-scoped"
+    );
+    assert!(
+        !table_columns(&path, "credential_set").is_empty(),
+        "the credential-set revision table is created"
+    );
+    assert_eq!(
+        store.current_set_revision().await,
+        Ok(CredentialSetRevision::initial()),
+        "an existing environment starts before any registered credential"
     );
 }
 
@@ -3039,6 +3055,147 @@ async fn redact_registered_secret_sweeps_history_and_learning_content() {
     assert_eq!(revisions[0].content, "owner key [credential]");
     let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
     assert_eq!(stored.content, "evidence mentions [credential]");
+}
+
+#[tokio::test]
+async fn stale_credential_set_refuses_history_append_after_approval() {
+    // Two connections model two Host processes sharing one SQLite file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("race.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let Some((companion, generation)) = running_companion(&writer).await else {
+        panic!("the running companion must resolve");
+    };
+    // The writer scrubs its row under the current set premise.
+    let premise = writer.current_set_revision().await.unwrap();
+    // The approver concurrently sweeps + registers + bumps in one commit.
+    assert!(matches!(
+        approver
+            .request_approval(String::from("acme"), String::from("main"))
+            .await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-new"),
+        Ok(true)
+    ));
+    // The writer's prepared row carries a value that just became registered;
+    // the stale premise refuses it.
+    let mut cmd = history_command(companion, generation, "the key is sk-new");
+    cmd.expected_credential_set = Some(premise);
+    let appended = writer.append_message(cmd).await;
+    assert_eq!(
+        appended,
+        Ok(HistoryAppendOutcome::StaleCredentialSet),
+        "a stale credential-set premise must refuse the raw append"
+    );
+    let timeline = writer.load_timeline(companion, None, 10).await.unwrap();
+    assert!(
+        timeline.iter().all(|item| !item.text.contains("sk-new")),
+        "no raw bearer may land in History: {timeline:?}"
+    );
+}
+
+#[tokio::test]
+async fn stale_credential_set_refuses_memory_commit_after_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("race-learning.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let companion = RawId::new();
+    let premise = writer.current_set_revision().await.unwrap();
+    assert!(matches!(
+        approver
+            .request_approval(String::from("acme"), String::from("main"))
+            .await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-new"),
+        Ok(true)
+    ));
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "evidence says sk-new");
+    let outcome = writer
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(evidence.clone()),
+            secret_premise: Some(premise),
+            change: learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner key sk-new",
+                ChangeKind::Initial,
+                false,
+            ),
+        })
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(MemoryChangeOutcome::StaleCredentialSet),
+        "a stale credential-set premise must refuse the Learning commit"
+    );
+    assert_eq!(writer.load_current_memory(memory).await, Ok(None));
+    assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
+    assert!(
+        writer
+            .list_memory_revisions(memory)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn stale_credential_set_refuses_attempt_claim_after_approval() {
+    use ene_inference::{
+        AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("race-send.db");
+    let sender = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let seeded = sender
+        .compare_and_save(
+            None,
+            ConsentRecord {
+                capability: CapabilityKind::Dialogue,
+                id: String::from("consent-1"),
+                rev: ConsentRevision::from_u64(1),
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                credential_id: String::from("openai:main"),
+            },
+        )
+        .await;
+    assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
+    let premise = sender.current_set_revision().await.unwrap();
+    assert!(matches!(
+        approver
+            .request_approval(String::from("openai"), String::from("main"))
+            .await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        approver.approve_credential_with_sweep("openai", "main", "sk-new"),
+        Ok(true)
+    ));
+    let claim = sender
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            capability: CapabilityKind::Dialogue,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: premise,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+        })
+        .await;
+    assert_eq!(
+        claim,
+        Ok(AttemptBeginOutcome::Stale),
+        "a stale credential-set premise must refuse the send claim"
+    );
 }
 
 #[tokio::test]

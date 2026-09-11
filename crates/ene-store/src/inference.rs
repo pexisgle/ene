@@ -12,6 +12,7 @@ use crate::codec::{
     SQL_SELECT_CONSENT, decode_u64, encode_id, encode_optional_count, encode_u64,
     encode_usage_source, inference_unavailable, lock_shared,
 };
+use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
 
 const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consent_id, consent_rev, provider, model, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
@@ -51,6 +52,16 @@ impl InferenceAttemptRepository for Store {
                         .is_ok_and(|value| value == attempt.expected_consent.1.as_u64())
             });
             if !current_matches {
+                return Ok(AttemptBeginOutcome::Stale);
+            }
+            // The credential-set premise rides the same claim transaction:
+            // a prompt scrubbed before a credential became registered must
+            // not reach the provider, even though the consent still holds.
+            let stored_set: i64 = tx
+                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            let current_set = decode_u64(stored_set).map_err(inference_unavailable)?;
+            if current_set != attempt.expected_credential_set.as_u64() {
                 return Ok(AttemptBeginOutcome::Stale);
             }
             let started_text = WallClockWithTz::now().to_rfc3339();

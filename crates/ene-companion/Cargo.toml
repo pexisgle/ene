@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 ene-primitive = { path = "../ene-primitive" }
 ene-presence = { path = "../ene-presence" }
+ene-credential = { path = "../ene-credential" }
 ene-inference = { path = "../ene-inference" }
 ene-learning = { path = "../ene-learning" }
 thiserror.workspace = true

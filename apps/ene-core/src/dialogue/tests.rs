@@ -2654,6 +2654,113 @@ async fn learning_latency_never_delays_the_client_visible_completion() {
     worker.await.unwrap();
 }
 
+/// The queue carries the Experience premise pinned at reply completion, so a
+/// delayed worker cannot silently widen the pass to later turns. Coalescing
+/// is not used: every completed turn keeps its own source range and
+/// correspondence.
+#[tokio::test]
+async fn queued_experience_keeps_its_completion_premise() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let transport = LearningAwareTransport::new("noted", None);
+    let live = live_input("client-premise");
+    let setup = round_test_handle("dlg-premise", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &transport).await);
+
+    for (round, local, text) in [
+        (0_u64, "local-premise-1", "first turn"),
+        (1_u64, "local-premise-2", "second turn"),
+    ] {
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(round),
+            None,
+            local,
+            text,
+            live.connection_id,
+        );
+        let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+        assert_stream_completed(&responses);
+    }
+
+    let queued = handle.pending_learning_premises();
+    assert_eq!(queued.len(), 2, "one pinned premise per completed turn");
+    let expected_client = device_client(&live.client_ref).as_raw();
+    for premise in &queued {
+        assert_eq!(
+            premise.source.kind,
+            ene_learning::ExperienceSourceKind::Dialogue
+        );
+        assert_eq!(
+            premise.correspondence.client,
+            Some(expected_client),
+            "the Client correspondence survives the queue"
+        );
+        assert!(
+            premise.correspondence.round.is_some() && premise.correspondence.generation.is_some(),
+            "round and continuity survive the queue: {premise:?}"
+        );
+    }
+    let (first, second) = (&queued[0], &queued[1]);
+    assert_ne!(
+        (first.source.start, first.source.end),
+        (second.source.start, second.source.end),
+        "each turn keeps its own source boundary"
+    );
+
+    // A later turn lands durably before the worker drains. It must not be
+    // folded into either pinned premise.
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    handle
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("later turn must not leak"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .unwrap();
+
+    handle.run_pending_learning(&transport).await;
+    let prompts: Vec<String> = transport
+        .inputs()
+        .into_iter()
+        .filter(|input| input.contains("learning formation pass"))
+        .collect();
+    assert_eq!(prompts.len(), 2, "one formation call per pinned premise");
+    assert!(
+        prompts[0].contains("first turn") && !prompts[0].contains("later turn must not leak"),
+        "the first premise must not absorb the later turn: {}",
+        prompts[0]
+    );
+    assert!(
+        prompts[1].contains("second turn") && !prompts[1].contains("later turn must not leak"),
+        "the second premise must not absorb the later turn: {}",
+        prompts[1]
+    );
+}
+
 /// A string already stored before the credential became registered must be
 /// redacted when the Owner approves the credential: registration establishes
 /// the non-exposure contract over existing durable state, not just over
@@ -2707,6 +2814,7 @@ async fn approving_a_credential_redacts_its_prior_occurrences() {
             at: WallClockWithTz::now(),
             expected_generation: generation,
             expected_consent: None,
+            expected_credential_set: None,
             command_id: None,
             round_wire: None,
             round_intent: None,

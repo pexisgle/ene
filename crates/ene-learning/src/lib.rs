@@ -28,10 +28,12 @@ mod summary;
 #[cfg(test)]
 mod test_support;
 
+#[doc(no_inline)]
+pub use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
 pub use formation::{
-    ChangeRejection, ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationChange,
-    FormationDecision, LearningInference, LearningInferenceError, MAX_FORMATION_TURNS,
-    MAX_FORMED_MEMORIES, SecretScrubError, SecretScrubber, form_experience,
+    ChangeRejection, ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
+    FormationChange, FormationDecision, LearningInference, LearningInferenceError,
+    MAX_FORMATION_TURNS, MAX_FORMED_MEMORIES, form_experience,
 };
 pub use identity::{ExperienceSourceKind, MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
 pub use memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};

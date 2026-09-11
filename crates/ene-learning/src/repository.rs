@@ -6,6 +6,7 @@
 //! recognition. Stale and missing outcomes are domain outcomes on the `Ok`
 //! side, never technical errors.
 
+use ene_credential::CredentialSetRevision;
 use ene_primitive::{RawId, WallClockWithTz};
 use thiserror::Error;
 
@@ -94,6 +95,13 @@ pub struct MemoryChangeCommit {
     /// Inserted once when first supplied and reused verbatim by later changes
     /// of the same formation; carries no authority beyond evidence.
     pub summary: Option<SummaryRecord>,
+    /// Credential-set premise the committed content was scrubbed under.
+    ///
+    /// The implementation compares it against the current durable set inside
+    /// the commit transaction; [`MemoryChangeOutcome::StaleCredentialSet`]
+    /// refuses content scrubbed before a credential became registered.
+    /// [`None`] skips the check (tests and non-content commits).
+    pub secret_premise: Option<CredentialSetRevision>,
     pub change: MemoryChange,
 }
 
@@ -118,6 +126,11 @@ pub enum MemoryChangeOutcome {
     AlreadyExists { memory: MemoryId },
     /// The target ran out of distinct revisions; nothing was written.
     RevisionExhausted { memory: MemoryId },
+    /// The credential set moved past `secret_premise`; nothing was written.
+    ///
+    /// The caller must not retry the same content: it may carry the newly
+    /// registered value and needs a fresh scrub and currentness premise.
+    StaleCredentialSet,
 }
 
 /// Durable Learning boundary.

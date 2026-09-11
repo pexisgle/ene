@@ -3,6 +3,7 @@
 //! operations over them.
 
 use crate::CredentialTechnicalError;
+use crate::scrub::CredentialSetRevision;
 use crate::secret::CredentialStore;
 
 /// Non-secret handle naming one stored credential.
@@ -119,6 +120,22 @@ pub trait CredentialRefRepository: Send + Sync {
     ) -> Result<Option<CredentialRef>, CredentialTechnicalError>;
 
     async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError>;
+}
+
+/// Durable identity of the registered credential set.
+///
+/// Separate from [`CredentialRefRepository`] because readers that only need
+/// the set's currentness (secret scrubbers, writers validating a scrub
+/// premise) must not gain the ref-management surface. The revision bumps
+/// atomically with a usable ref becoming registered.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait CredentialSetRepository: Send + Sync {
+    /// Loads the current credential-set revision.
+    async fn current_set_revision(&self)
+    -> Result<CredentialSetRevision, CredentialTechnicalError>;
 }
 
 /// Registers a credential ref, never overwriting an existing one.
