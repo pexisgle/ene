@@ -78,14 +78,6 @@ string_wire_ref!(
     "Opaque round reference, Host-issued. Old rounds are never rebound to new ones."
 );
 string_wire_ref!(
-    TicketWireId,
-    "Opaque ticket reference (capture and similar), Host-issued. Echo only."
-);
-string_wire_ref!(
-    SpanWireId,
-    "Diagnostic/tracing span reference. Never authority, never ordering evidence."
-);
-string_wire_ref!(
     ClientLocalId,
     "Client-local correspondence ID (e.g. matching an input to its ack). Monotonic within the Client; never Host-canonical."
 );

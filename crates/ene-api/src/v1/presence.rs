@@ -24,19 +24,6 @@ pub enum PresenceStateWire {
     RecoveryWait,
 }
 
-/// Why a transition or recovery fact exists. Client-proposable reasons are a
-/// subset; Host-only reasons never travel Client to Host (IPC §12.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MoveReasonWire {
-    OwnerSummon,
-    PriorInstruction,
-    SpontaneousNeed,
-    /// Host fallback after a confirmed normal disconnect, or `NoActive`.
-    DisconnectFallback,
-    /// Host-restart `RecoveryWait` only.
-    ReconnectRecovery,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PresenceAttributionWire {
     pub companion: CompanionWireRef,
@@ -44,7 +31,4 @@ pub struct PresenceAttributionWire {
     pub active_client: Option<ClientWireRef>,
     /// Presence generation this fact belongs to.
     pub generation: u64,
-    /// Transition or recovery reason. [`None`] for initial states, Stop,
-    /// and plain facts without a transition.
-    pub move_reason: Option<MoveReasonWire>,
 }

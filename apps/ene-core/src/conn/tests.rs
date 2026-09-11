@@ -486,7 +486,6 @@ async fn redelivery_keeps_the_connection_serving() {
     let capability = framed(
         WirePayload::CapabilityAdvertise(CapabilityAdvertise {
             supported_protocol: vec![ProtocolVersion::V1],
-            features: Vec::new(),
             platform: String::from("test"),
         }),
         incarnation,
@@ -561,7 +560,6 @@ async fn paired_connection_drops_a_frame_without_a_device_claim() {
         ),
         payload: WirePayload::CapabilityAdvertise(CapabilityAdvertise {
             supported_protocol: vec![ProtocolVersion::V1],
-            features: Vec::new(),
             platform: String::from("test"),
         }),
     };

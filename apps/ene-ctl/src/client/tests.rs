@@ -74,7 +74,7 @@ fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
 }
 
 #[test]
-fn capability_frame_claims_no_features_and_threads_device() -> Result<(), String> {
+fn capability_frame_speaks_v1_and_threads_device() -> Result<(), String> {
     let sender_device = ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4());
     let frame = capability_frame("linux-x86_64", incarnation(), Some(sender_device));
     let WirePayload::CapabilityAdvertise(advertise) = &frame.payload else {
@@ -85,10 +85,6 @@ fn capability_frame_claims_no_features_and_threads_device() -> Result<(), String
     assert!(
         advertise.supported_protocol == vec![ProtocolVersion::V1],
         "capability speaks V1"
-    );
-    assert!(
-        advertise.features.is_empty(),
-        "text is the baseline, not a claimed feature"
     );
     assert!(
         advertise.platform == "linux-x86_64",
@@ -136,7 +132,6 @@ fn presence_fact(generation: u64) -> PresenceAttributionWire {
         state: PresenceStateWire::Present,
         active_client: None,
         generation,
-        move_reason: None,
     }
 }
 
