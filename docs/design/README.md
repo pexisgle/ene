@@ -38,4 +38,4 @@ ene の内部設計の正本。巨大な summary ではなく、目的から各 
 - SO: [State Ownership](architecture/state-ownership.md)
 - DR-01〜12: [Dependency Rules](architecture/dependency-rules.md)
 - RF-01〜08: [Runtime Flows](architecture/runtime-flows.md)
-- CC-01〜07: [Cross-cutting Design](architecture/cross-cutting.md)（CC）
+- CC-01〜07: [Cross-cutting Design](architecture/cross-cutting.md)
