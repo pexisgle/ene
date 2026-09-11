@@ -321,7 +321,8 @@ impl HostHandle {
     ///
     /// [`CoreError::Store`] as in [`HostHandle::open`], plus when the
     /// device-auth file cannot be opened (unreadable, malformed, or wrongly
-    /// permissioned), or when the startup credential sweep cannot commit.
+    /// permissioned), or when a registered credential value cannot be read
+    /// and the startup sweep therefore cannot complete.
     pub async fn open_with_cred_store(
         data_dir: &Path,
         cred_store: CredStore,
@@ -356,10 +357,10 @@ impl HostHandle {
 
     /// Sweeps every registered pinned value and advances the revision once.
     ///
-    /// Runs before the handle serves anything. A ref whose value is
-    /// unreadable is skipped but still covered by the revision advance: it
-    /// cannot be used, so it cannot leak, and no premise from before the
-    /// boundary survives.
+    /// Runs before the handle serves anything. Every registered value must be
+    /// readable: an unreadable value fails the open instead of skipping the
+    /// sweep, because absence of the value cannot be proven and the Host must
+    /// not serve content that may still hold it in plaintext.
     async fn sweep_registered_values(&self) -> Result<(), CoreError> {
         let refs = self
             .store

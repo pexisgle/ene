@@ -2997,6 +2997,113 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
     ));
 }
 
+/// A Stage 2 environment can hold a registered CredentialRef together with
+/// plaintext History stored before the scrub boundary. If the registered
+/// value cannot be read at startup, the Host must not open at all: skipping
+/// the sweep while advancing the revision would serve the plaintext under a
+/// fresh set. With the value readable, the same startup must redact it and
+/// advance the revision before serving.
+#[tokio::test]
+async fn startup_with_an_unreadable_registered_value_never_opens() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_credential::{CredentialRefRepository as _, CredentialSetRepository as _};
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
+    let readable = MemoryCredentialStore::new();
+    readable.insert(credential.clone(), "test-bearer");
+    let first = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(readable))
+        .await
+        .expect("the first open must succeed");
+    first
+        .store
+        .save_ref(credential.clone())
+        .await
+        .expect("the ref must register");
+    let companion = first.store.ensure_running_companion().await.unwrap();
+    let generation = first
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    first
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("the legacy key is test-bearer"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .expect("the legacy row must commit");
+    let old_revision = first.store.current_set_revision().await.unwrap();
+    drop(first);
+
+    // The registered ref is unreadable: the open must fail closed instead of
+    // sweeping nothing and advancing past the boundary.
+    let missing = HostHandle::open_with_cred_store(
+        dir.path(),
+        CredStore::Memory(MemoryCredentialStore::new()),
+    )
+    .await;
+    assert!(
+        missing.is_err(),
+        "an unreadable registered value must keep the Host closed"
+    );
+
+    // The failed open leaves both the revision and the plaintext untouched.
+    let store = ene_store::Store::open(&dir.path().join("app.db"))
+        .await
+        .expect("the durable store stays readable");
+    assert_eq!(
+        store.current_set_revision().await,
+        Ok(old_revision),
+        "a failed open must not advance the credential-set revision"
+    );
+    let timeline = store.load_timeline(companion, None, 10).await.unwrap();
+    let legacy = timeline
+        .iter()
+        .find(|item| item.text.contains("legacy key"))
+        .expect("the legacy row is still held");
+    assert_eq!(legacy.text, "the legacy key is test-bearer");
+    drop(store);
+
+    // With the value readable the startup sweep completes before serving.
+    let present = MemoryCredentialStore::new();
+    present.insert(credential, "test-bearer");
+    let reopened = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(present))
+        .await
+        .expect("a readable registered value lets the Host open");
+    assert!(
+        reopened.store.current_set_revision().await.unwrap() > old_revision,
+        "the successful startup boundary advances the revision"
+    );
+    let timeline = reopened
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let swept = timeline
+        .iter()
+        .find(|item| item.text.contains("legacy key"))
+        .expect("the swept row is still present");
+    assert_eq!(swept.text, "the legacy key is [credential]");
+}
+
 /// A running Host never re-reads the environment: the value is pinned when
 /// the store is constructed, so an external change is adopted only by the
 /// next start, where the sweep and revision advance bracket the new value.

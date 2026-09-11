@@ -232,15 +232,23 @@ impl CredentialSetRepository for Store {
 }
 
 impl Store {
-    /// Sweeps every readable registered value and advances the revision once.
+    /// Sweeps every registered value and advances the revision once.
     ///
     /// The Host startup and explicit update boundaries call this before any
     /// use: one short `Immediate` transaction replaces plaintext occurrences
     /// of the pinned values in durable content and advances the revision
     /// together, so a crash cannot leave the sweep and the generation apart.
-    /// A ref whose value is unreadable is skipped; the sweep then still
-    /// advances the revision so no premise from before the boundary survives.
-    /// An empty registry changes nothing.
+    /// Every registered value must be readable: one unreadable value fails the
+    /// whole boundary and rolls the transaction back, because replacing an
+    /// unverifiable value cannot be proven and advancing past it would serve
+    /// content prepared under an unknown set. An empty registry changes
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when a
+    /// registered value cannot be read, the replacement cannot run, or the
+    /// transaction cannot commit.
     pub fn sweep_registered_values<S: CredentialStore>(
         &self,
         refs: &[CredentialRef],
@@ -254,13 +262,10 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| credential_unavailable(error.to_string()))?;
         for cred in refs {
-            // An unreadable value is unavailable anyway; the boundary still
-            // advances the revision below.
-            if let Ok(swept) =
-                values.with_bearer(cred, |bearer| sweep_registered_secret(&tx, bearer))
-            {
-                swept?;
-            }
+            // Fail closed before the revision advance: a value that cannot be
+            // read cannot be swept, and `?` drops `tx` without committing, so
+            // earlier replacements in this boundary roll back too.
+            values.with_bearer(cred, |bearer| sweep_registered_secret(&tx, bearer))??;
         }
         advance_credential_set(&tx)?;
         tx.commit()

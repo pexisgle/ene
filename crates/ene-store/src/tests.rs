@@ -7,6 +7,7 @@ use ene_companion::{
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
     CredentialSetRevision, DeviceId, DevicePairingRepository, DevicePairingStatus,
+    MemoryCredentialStore,
 };
 use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
 use ene_learning::{
@@ -3056,6 +3057,60 @@ async fn redact_registered_secret_sweeps_history_and_learning_content() {
     assert_eq!(revisions[0].content, "owner key [credential]");
     let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
     assert_eq!(stored.content, "evidence mentions [credential]");
+}
+
+#[tokio::test]
+async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
+    let store = open_memory().await.unwrap();
+    let Some((companion, generation)) = running_companion(&store).await else {
+        panic!("the running companion must resolve");
+    };
+    store
+        .append_message(history_command(
+            companion,
+            generation,
+            "the old key is sk-legacy",
+        ))
+        .await
+        .unwrap();
+    let readable = CredentialRef::new("openai", "main").unwrap();
+    let unreadable = CredentialRef::new("openai", "other").unwrap();
+    store.save_ref(readable.clone()).await.unwrap();
+    store.save_ref(unreadable.clone()).await.unwrap();
+    let premise = store.current_set_revision().await.unwrap();
+
+    // `readable` sweeps first inside the transaction, then `unreadable`
+    // fails: the whole boundary must roll back, not keep a partial sweep or
+    // a revision advance.
+    let values = MemoryCredentialStore::new();
+    values.insert(readable.clone(), "sk-legacy");
+    assert!(
+        store
+            .sweep_registered_values(&[readable.clone(), unreadable], &values)
+            .is_err(),
+        "an unreadable registered value must fail the startup boundary"
+    );
+    assert_eq!(
+        store.current_set_revision().await,
+        Ok(premise),
+        "a failed sweep must not advance the credential-set revision"
+    );
+    let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
+    assert_eq!(
+        timeline[0].text, "the old key is sk-legacy",
+        "a failed sweep must leave the earlier replacement rolled back"
+    );
+
+    // With every value readable the same boundary sweeps and advances.
+    store
+        .sweep_registered_values(&[readable], &values)
+        .expect("a readable boundary must complete");
+    assert!(
+        store.current_set_revision().await.unwrap() > premise,
+        "the successful boundary advances the revision"
+    );
+    let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
+    assert_eq!(timeline[0].text, "the old key is [credential]");
 }
 
 #[tokio::test]
