@@ -863,12 +863,12 @@ impl HostHandle {
     /// worker judges exactly that Experience; it never reads a later History
     /// window and silently folds newer turns into an older pass.
     fn queue_learning_formation(&self, experience: ExperienceCandidate) {
-        lock_learning_queue(&self.learning_queue).push_back(experience);
+        crate::lock_unpoison(&self.learning_queue).push_back(experience);
     }
 
     /// Whether a queued formation pass is waiting.
     pub(crate) fn has_pending_learning(&self) -> bool {
-        !lock_learning_queue(&self.learning_queue).is_empty()
+        !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
 
     /// The queued Experience premises, in completion order.
@@ -877,7 +877,7 @@ impl HostHandle {
     /// boundary and transcript, not just a companion id.
     #[cfg(test)]
     pub(crate) fn pending_learning_premises(&self) -> Vec<ExperienceCandidate> {
-        lock_learning_queue(&self.learning_queue)
+        crate::lock_unpoison(&self.learning_queue)
             .iter()
             .cloned()
             .collect()
@@ -897,7 +897,7 @@ impl HostHandle {
         let _serialized = self.learning_worker.lock().await;
         loop {
             let next = {
-                let mut queue = lock_learning_queue(&self.learning_queue);
+                let mut queue = crate::lock_unpoison(&self.learning_queue);
                 queue.pop_front()
             };
             let Some(experience) = next else {
@@ -928,15 +928,6 @@ impl HostHandle {
                 .await,
             );
         }
-    }
-}
-
-fn lock_learning_queue(
-    queue: &std::sync::Mutex<std::collections::VecDeque<ExperienceCandidate>>,
-) -> std::sync::MutexGuard<'_, std::collections::VecDeque<ExperienceCandidate>> {
-    match queue.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 

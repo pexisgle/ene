@@ -55,7 +55,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::{Mutex as StdMutex, MutexGuard};
+use std::sync::Mutex as StdMutex;
 
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::NegotiatedConnection;
@@ -205,18 +205,6 @@ pub(crate) fn device_client(device_wire: &str) -> ClientId {
 /// keys match across the Host/connection boundary by construction.
 pub(crate) fn conn_key(id: &ConnectionWireId) -> String {
     id.0.as_hyphenated().to_string()
-}
-
-/// Locks a Host map mutex, recovering from poisoning.
-///
-/// Poisoning only follows a panic inside a critical section; sections here
-/// run plain map operations that never panic while holding the guard, so
-/// recovery preserves the committed state.
-fn lock_map<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 /// `Stage 2` Host handle: durable store, evaluation tracker, and Host maps.
@@ -505,7 +493,7 @@ impl HostHandle {
     }
 
     pub(crate) fn round_for(&self, wire: &str) -> Option<RoundId> {
-        lock_map(&self.rounds).get(wire).copied()
+        crate::lock_unpoison(&self.rounds).get(wire).copied()
     }
 
     pub(crate) fn open_round_for(
@@ -513,13 +501,13 @@ impl HostHandle {
         client_ref: &str,
         companion_key: &str,
     ) -> Option<OpenRound> {
-        lock_map(&self.open_rounds)
+        crate::lock_unpoison(&self.open_rounds)
             .get(&(client_ref.to_string(), companion_key.to_string()))
             .copied()
     }
 
     pub(crate) fn record_open_round(&self, client_ref: &str, companion_key: &str, open: OpenRound) {
-        lock_map(&self.open_rounds)
+        crate::lock_unpoison(&self.open_rounds)
             .insert((client_ref.to_string(), companion_key.to_string()), open);
     }
 
@@ -530,7 +518,7 @@ impl HostHandle {
     /// [`HistoryRequest`](ene_api::v1::round::HistoryRequest), never through
     /// rebinding).
     pub(crate) fn wire_for_round(&self, round: &RoundId) -> Option<String> {
-        let maps = lock_map(&self.rounds);
+        let maps = crate::lock_unpoison(&self.rounds);
         maps.iter()
             .find(|(_, mapped)| mapped.as_raw() == round.as_raw())
             .map(|(wire, _)| wire.clone())
@@ -550,7 +538,7 @@ impl HostHandle {
     /// a racing issuer may already have reused the wire for its own
     /// accepted round, and a removal would break the same invariant.
     pub(crate) fn round_wire_or_mint(&self, round: &RoundId) -> RoundWireId {
-        let mut maps = lock_map(&self.rounds);
+        let mut maps = crate::lock_unpoison(&self.rounds);
         if let Some((wire, _)) = maps
             .iter()
             .find(|(_, mapped)| mapped.as_raw() == round.as_raw())
