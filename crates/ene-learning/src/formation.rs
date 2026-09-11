@@ -99,11 +99,17 @@ pub enum ExperienceRole {
 ///
 /// The text is source material for this formation only; it is never stored by
 /// this crate. It is redacted from [`core::fmt::Debug`] because it may quote
-/// owner speech.
+/// owner speech; `at` is displayable provenance, not a secret.
+///
+/// `at` is the source message's recorded wall-clock time with its creation
+/// offset, kept so a relative date in the text stays bound to when it was
+/// said. [`None`] means the source has no recorded time: the formation never
+/// invents one, and the prompt renders the turn without a timestamp.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ExperienceTurn {
     pub role: ExperienceRole,
     pub text: String,
+    pub at: Option<WallClockWithTz>,
 }
 
 impl core::fmt::Debug for ExperienceTurn {
@@ -112,6 +118,7 @@ impl core::fmt::Debug for ExperienceTurn {
             .debug_struct("ExperienceTurn")
             .field("role", &self.role)
             .field("text", &"[redacted]")
+            .field("at", &self.at)
             .finish()
     }
 }
@@ -344,9 +351,15 @@ async fn build_prompt(
             .map_err(secret_boundary_failure)?;
         premises.push(text.credential_set);
         prompt.push_str(match turn.role {
-            ExperienceRole::Owner => "Owner: ",
-            ExperienceRole::Companion => "Companion: ",
+            ExperienceRole::Owner => "Owner",
+            ExperienceRole::Companion => "Companion",
         });
+        // The source time stays attached to the turn it belongs to; an
+        // unknown time is omitted rather than guessed from the others.
+        if let Some(at) = turn.at {
+            prompt.push_str(&format!(" [{}]", at.to_rfc3339()));
+        }
+        prompt.push_str(": ");
         prompt.push_str(&text.text);
         prompt.push('\n');
     }
@@ -626,6 +639,7 @@ mod tests {
                         _ => ExperienceRole::Companion,
                     },
                     text: (*text).to_owned(),
+                    at: None,
                 })
                 .collect(),
             at: WallClockWithTz::now(),
@@ -762,6 +776,63 @@ mod tests {
                 memory.content
             );
         }
+    }
+
+    #[tokio::test]
+    async fn formation_prompt_keeps_each_turns_source_time() {
+        let repository = FakeLearningRepository::new();
+        let inference = ScriptedInference::new(vec![Ok(String::from(
+            r#"{"summary": "A deadline was mentioned.", "memories": []}"#,
+        ))]);
+        let scrubber = ReplacingScrubber::new("sk-secret", "[credential]");
+        let candidate = ExperienceCandidate {
+            companion: RawId::new(),
+            source: SourceRangeRef {
+                kind: ExperienceSourceKind::Dialogue,
+                start: RawId::new(),
+                end: RawId::new(),
+            },
+            transcript: vec![
+                ExperienceTurn {
+                    role: ExperienceRole::Owner,
+                    text: String::from("明日提出する"),
+                    at: Some(
+                        WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00+09:00")
+                            .expect("fixture timestamp"),
+                    ),
+                },
+                ExperienceTurn {
+                    role: ExperienceRole::Companion,
+                    text: String::from("了解した"),
+                    at: Some(
+                        WallClockWithTz::parse_rfc3339("2026-09-12T00:30:00-05:00")
+                            .expect("fixture timestamp"),
+                    ),
+                },
+                ExperienceTurn {
+                    role: ExperienceRole::Owner,
+                    text: String::from("追記: 変更なし"),
+                    at: None,
+                },
+            ],
+            at: WallClockWithTz::now(),
+        };
+        let _ = form_experience(&repository, &inference, &scrubber, candidate)
+            .await
+            .unwrap();
+        let prompt = &inference.prompts()[0];
+        assert!(
+            prompt.contains("Owner [2026-09-12T10:00:00+09:00]: 明日提出する"),
+            "each turn keeps its own offset-qualified source time: {prompt}"
+        );
+        assert!(
+            prompt.contains("Companion [2026-09-12T00:30:00-05:00]: 了解した"),
+            "a different offset stays visible on its own turn: {prompt}"
+        );
+        assert!(
+            prompt.contains("Owner: 追記: 変更なし"),
+            "a turn without a recorded time renders without a guessed one: {prompt}"
+        );
     }
 
     #[tokio::test]
@@ -932,6 +1003,7 @@ mod consolidation_tests {
             transcript: vec![ExperienceTurn {
                 role: ExperienceRole::Owner,
                 text: text.to_owned(),
+                at: None,
             }],
             at: WallClockWithTz::now(),
         }
