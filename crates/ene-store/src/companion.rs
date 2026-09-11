@@ -14,10 +14,10 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
-    HistoryRow, SQL_SELECT_ATTRIBUTION, SQL_SELECT_CONSENT, companion_unavailable,
-    decode_history_message, decode_id, decode_lifecycle, decode_report_status, decode_u64,
-    encode_id, encode_lifecycle, encode_presence_state, encode_report_status, encode_role,
-    encode_round_intent, encode_u64, lock_shared, undelivered_unavailable,
+    HistoryRow, companion_unavailable, decode_history_message, decode_id, decode_lifecycle,
+    decode_report_status, decode_u64, encode_id, encode_lifecycle, encode_presence_state,
+    encode_report_status, encode_role, encode_round_intent, encode_u64, lock_shared,
+    select_attribution, select_consent, undelivered_unavailable,
 };
 use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
@@ -110,39 +110,28 @@ fn append_history(
     if lifecycle != CompanionLifecycle::Running {
         return Ok((HistoryAppendOutcome::HeldByLifecycle { lifecycle }, None));
     }
-    let stored_generation: Option<i64> = tx
-        .query_row(SQL_SELECT_ATTRIBUTION, params![companion_text], |row| {
-            row.get(2)
-        })
-        .optional()
-        .map_err(|error| companion_unavailable(error.to_string()))?;
-    let Some(generation_raw) = stored_generation else {
+    let Some(current) = select_attribution(&tx, &companion_text).map_err(companion_unavailable)?
+    else {
         return Err(companion_unavailable(String::from(
             "missing presence attribution",
         )));
     };
-    let current_number = decode_u64(generation_raw).map_err(companion_unavailable)?;
-    if current_number != cmd.expected_generation.as_u64() {
+    if current.generation.as_u64() != cmd.expected_generation.as_u64() {
         return Ok((
             HistoryAppendOutcome::StaleExpected {
-                current: PresenceGeneration::from_u64(current_number),
+                current: current.generation,
             },
             None,
         ));
     }
+    let generation_raw = encode_u64(current.generation.as_u64()).map_err(companion_unavailable)?;
     if let Some((expected_id, expected_rev)) = cmd.expected_consent.as_ref() {
         // History appends are dialogue turns: the premise names the dialogue
         // consent only, never a learning assignment.
-        let stored: Option<(String, i64)> = tx
-            .query_row(
-                SQL_SELECT_CONSENT,
-                params![CapabilityKind::Dialogue.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
-            id == expected_id && decode_u64(*rev).is_ok_and(|value| value == *expected_rev)
+        let current =
+            select_consent(&tx, CapabilityKind::Dialogue).map_err(companion_unavailable)?;
+        let current_matches = current.as_ref().is_some_and(|record| {
+            record.id == *expected_id && record.rev.as_u64() == *expected_rev
         });
         if !current_matches {
             return Ok((HistoryAppendOutcome::StaleConsent, None));
@@ -248,7 +237,7 @@ fn append_history(
             source_message: message,
             status: ReportStatus::Pending,
             round: cmd.round,
-            presence_generation: PresenceGeneration::from_u64(current_number),
+            presence_generation: current.generation,
         });
     }
     tx.commit()

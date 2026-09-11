@@ -6,12 +6,12 @@ use ene_presence::{
     PresenceTechnicalError, ThinMoveReason,
 };
 use ene_primitive::{RawId, WallClockWithTz};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
-    SQL_SELECT_ATTRIBUTION, decode_attribution, encode_id, encode_move_reason,
-    encode_presence_state, encode_u64, lock_shared, presence_unavailable,
+    encode_id, encode_move_reason, encode_presence_state, encode_u64, lock_shared,
+    presence_unavailable, select_attribution,
 };
 use crate::run_blocking;
 
@@ -28,25 +28,7 @@ impl PresenceRepository for Store {
         run_blocking(move || {
             let key = encode_id(companion);
             let guard = lock_shared(&conn);
-            let found: Option<(String, Option<String>, i64)> = guard
-                .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| presence_unavailable(error.to_string()))?;
-            match found {
-                Some((state_text, active_text, generation_raw)) => {
-                    let fact = decode_attribution(
-                        companion,
-                        &state_text,
-                        active_text.as_deref(),
-                        generation_raw,
-                    )
-                    .map_err(presence_unavailable)?;
-                    Ok(Some(fact))
-                }
-                None => Ok(None),
-            }
+            select_attribution(&guard, &key).map_err(presence_unavailable)
         })
         .await
     }
@@ -68,24 +50,11 @@ impl PresenceRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| presence_unavailable(error.to_string()))?;
-            let found: Option<(String, Option<String>, i64)> = tx
-                .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| presence_unavailable(error.to_string()))?;
-            let Some((state_text, active_text, generation_raw)) = found else {
+            let Some(current) = select_attribution(&tx, &key).map_err(presence_unavailable)? else {
                 return Ok(MoveDecision::DeniedByConstraint {
                     reason: String::from("unknown companion"),
                 });
             };
-            let current = decode_attribution(
-                companion,
-                &state_text,
-                active_text.as_deref(),
-                generation_raw,
-            )
-            .map_err(presence_unavailable)?;
             if current.generation != expected.expected_generation
                 || current.state != expected.expected_state
                 || current.active_client != expected.expected_active
@@ -98,6 +67,8 @@ impl PresenceRepository for Store {
                 });
             };
             let next_raw = encode_u64(next_generation.as_u64()).map_err(presence_unavailable)?;
+            let current_raw =
+                encode_u64(current.generation.as_u64()).map_err(presence_unavailable)?;
             tx.execute(
                 SQL_UPDATE_ATTRIBUTION,
                 params![
@@ -114,7 +85,7 @@ impl PresenceRepository for Store {
                     key,
                     encode_presence_state(current.state),
                     encode_presence_state(PresenceState::InTransition),
-                    generation_raw,
+                    current_raw,
                     next_raw,
                     reason_text,
                     now_text
@@ -149,24 +120,11 @@ impl PresenceRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| presence_unavailable(error.to_string()))?;
-            let found: Option<(String, Option<String>, i64)> = tx
-                .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| presence_unavailable(error.to_string()))?;
-            let Some((state_text, active_text, generation_raw)) = found else {
+            let Some(current) = select_attribution(&tx, &key).map_err(presence_unavailable)? else {
                 return Err(presence_unavailable(String::from(
                     "missing presence attribution",
                 )));
             };
-            let current = decode_attribution(
-                companion,
-                &state_text,
-                active_text.as_deref(),
-                generation_raw,
-            )
-            .map_err(presence_unavailable)?;
             // Idempotent: only an `InTransition` row at the transitioning
             // generation moves; anything else reads back unchanged.
             if current.generation != transitioning_generation
@@ -190,12 +148,14 @@ impl PresenceRepository for Store {
             } else {
                 (PresenceState::NoActive, None, None)
             };
+            let current_raw =
+                encode_u64(current.generation.as_u64()).map_err(presence_unavailable)?;
             tx.execute(
                 SQL_UPDATE_ATTRIBUTION,
                 params![
                     encode_presence_state(target_state),
                     target_text,
-                    generation_raw,
+                    current_raw,
                     key
                 ],
             )
@@ -206,8 +166,8 @@ impl PresenceRepository for Store {
                     key,
                     encode_presence_state(PresenceState::InTransition),
                     encode_presence_state(target_state),
-                    generation_raw,
-                    generation_raw,
+                    current_raw,
+                    current_raw,
                     confirm_reason,
                     now_text
                 ],
