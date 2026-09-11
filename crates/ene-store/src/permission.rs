@@ -371,20 +371,19 @@ impl IntentOutcomeRepository for Store {
                 ),
                 None => None,
             };
-            let matches = current.as_ref().is_some_and(|stored| {
-                stored.provider == provider
-                    && stored.model == model
-                    && stored.credential_id == credential_id
-            });
-            if !matches {
-                return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
-                    current,
-                }));
-            }
-            let Some(record) = current else {
-                return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
-                    current: None,
-                }));
+            let record = match current {
+                Some(record)
+                    if record.provider == provider
+                        && record.model == model
+                        && record.credential_id == credential_id =>
+                {
+                    record
+                }
+                current => {
+                    return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
+                        current,
+                    }));
+                }
             };
             let snapshot = IntentOutcome::StoredAsRuleView {
                 revision: record.rev.as_u64().to_string(),
