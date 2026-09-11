@@ -291,7 +291,6 @@ impl AdmissionRequest {
         let query = CheckLiveAuthorizationQuery {
             candidate: self.candidate.clone(),
             expected_consent: Some((self.consent.id.clone(), self.consent.rev)),
-            setup_complete: true,
         };
         match check_live_authorization(&query, Some(&self.consent), tracker) {
             LiveAuthorizationDecision::AllowForThisUse(authorization) => {
@@ -651,7 +650,6 @@ async fn record_usage_decision(usage: &impl UsageRepository, fact: UsageFact) {
 
 fn not_sent_for_deny(code: DenyCode) -> NotSentReason {
     match code {
-        DenyCode::SetupIncomplete => NotSentReason::SetupIncomplete,
         DenyCode::ConsentStale | DenyCode::Superseded => NotSentReason::ConsentStale,
         DenyCode::NotInAllowlist => NotSentReason::NotInAllowlist,
     }
