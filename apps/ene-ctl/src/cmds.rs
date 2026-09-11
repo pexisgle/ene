@@ -81,8 +81,11 @@ pub enum Command {
         limit: u64,
     },
     /// Read-only Memory view: current recognition, scope, temporal meaning,
-    /// importance, grounds, and past revisions.
-    Memory,
+    /// importance, grounds, and past revisions. `after` continues from the
+    /// `next:` id of the previous page.
+    Memory {
+        after: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,12 +217,28 @@ fn parse_status(args: &[String]) -> Result<Command, CliError> {
 }
 
 fn parse_memory(args: &[String]) -> Result<Command, CliError> {
-    if let Some(extra) = args.first() {
-        return Err(CliError::Usage(format!(
-            "unknown argument: {extra}\n{USAGE}"
-        )));
+    let mut after: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--after" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(CliError::Usage(format!(
+                        "missing value for --after\n{USAGE}"
+                    )));
+                };
+                after = Some(value.clone());
+                index += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument: {other}\n{USAGE}"
+                )));
+            }
+        }
     }
-    Ok(Command::Memory)
+    Ok(Command::Memory { after })
 }
 
 /// A word starting with `--` is never treated as text; such input is a usage
@@ -339,6 +358,7 @@ pub fn setup_view_request() -> ManagementViewRequest {
             .iter()
             .map(|section| (*section).to_string())
             .collect(),
+        memory_after: None,
     }
 }
 
@@ -350,13 +370,16 @@ pub fn status_view_request() -> ManagementViewRequest {
             .iter()
             .map(|section| (*section).to_string())
             .collect(),
+        memory_after: None,
     }
 }
 
-/// Requests only the read-only Memory section.
-pub fn memory_view_request() -> ManagementViewRequest {
+/// Requests only the read-only Memory section, optionally continuing after
+/// the `next:` id of a previous page.
+pub fn memory_view_request(after: Option<&str>) -> ManagementViewRequest {
     ManagementViewRequest {
         sections: vec![HOST_MEMORY_SECTION.to_string()],
+        memory_after: after.map(str::to_owned),
     }
 }
 
@@ -760,8 +783,20 @@ mod tests {
     fn memory_parses_without_operands() {
         let command = (parse_command(&args(&["memory"]))).expect("memory");
         assert!(
-            command == Command::Memory,
+            command == Command::Memory { after: None },
             "memory must parse, got {command:?}"
+        );
+    }
+
+    #[test]
+    fn memory_after_parses_as_the_page_cursor() {
+        let command =
+            (parse_command(&args(&["memory", "--after", "memory-1"]))).expect("memory --after");
+        assert_eq!(
+            command,
+            Command::Memory {
+                after: Some(String::from("memory-1"))
+            }
         );
     }
 
@@ -770,6 +805,10 @@ mod tests {
         assert_usage(
             parse_command(&args(&["memory", "edit", "1"])),
             "memory with operand",
+        );
+        assert_usage(
+            parse_command(&args(&["memory", "--after"])),
+            "memory with missing cursor",
         );
     }
 
@@ -1141,10 +1180,17 @@ mod tests {
             status.sections == setup.sections,
             "status requests the same Host sections: {status:?}"
         );
-        let memory = memory_view_request();
+        let memory = memory_view_request(None);
         assert!(
-            memory.sections == vec![HOST_MEMORY_SECTION.to_string()],
+            memory.sections == vec![HOST_MEMORY_SECTION.to_string()]
+                && memory.memory_after.is_none(),
             "memory requests exactly the read-only Memory section: {memory:?}"
+        );
+        let paged = memory_view_request(Some("memory-1"));
+        assert_eq!(
+            paged.memory_after,
+            Some(String::from("memory-1")),
+            "the page cursor rides the typed request field"
         );
         let history = history_request("companion-1", 7);
         assert!(

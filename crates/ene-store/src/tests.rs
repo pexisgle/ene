@@ -2861,7 +2861,10 @@ async fn learning_list_current_is_companion_scoped_and_newest_first() {
             .await;
         assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
     }
-    let listed = store.list_current_memories(companion, 10).await.unwrap();
+    let listed = store
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
     assert_eq!(listed.len(), 2, "only this companion's memories");
     assert_eq!(listed[0].id, second, "newest insert first");
     assert_eq!(listed[1].id, first);
@@ -2870,6 +2873,18 @@ async fn learning_list_current_is_companion_scoped_and_newest_first() {
             .iter()
             .all(|memory| memory.scope == LearningScope::companion(companion))
     );
+    // The cursor starts strictly after the named Memory and stays scoped.
+    let older = store
+        .list_current_memories(companion, Some(second), 10)
+        .await
+        .unwrap();
+    assert_eq!(older.len(), 1, "the cursor pages past the named Memory");
+    assert_eq!(older[0].id, first);
+    let unknown = store
+        .list_current_memories(companion, Some(MemoryId::generate()), 10)
+        .await
+        .unwrap();
+    assert!(unknown.is_empty(), "an unknown cursor yields no page");
 }
 
 #[tokio::test]

@@ -165,9 +165,46 @@ fn view_request_frame(connection: ConnectionWireId) -> ene_plugin_ipc::WireFrame
         ),
         payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
             sections: Vec::new(),
+            memory_after: None,
         }),
     };
     stamped(frame, connection)
+}
+
+fn view_page_request_frame(connection: ConnectionWireId, after: &str) -> ene_plugin_ipc::WireFrame {
+    let frame = ene_plugin_ipc::WireFrame {
+        envelope: new_outgoing_envelope(
+            ProtocolVersion::V1,
+            sender(),
+            WireMessageType(String::from("ManagementViewRequest")),
+        ),
+        payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
+            sections: vec![String::from("memory")],
+            memory_after: Some(after.to_owned()),
+        }),
+    };
+    stamped(frame, connection)
+}
+
+/// The memory section body of one view answer.
+fn memory_body(frames: &[ene_plugin_ipc::WireFrame]) -> String {
+    let Some(frame) = frames.first() else {
+        panic!("the view must answer");
+    };
+    let WirePayload::ManagementView(view) = &frame.payload else {
+        panic!("a view request answers a view, got {:?}", frame.payload);
+    };
+    view.sections
+        .iter()
+        .find(|section| section.kind == "memory")
+        .map(|section| section.body.clone())
+        .unwrap_or_default()
+}
+
+fn memory_lines(body: &str) -> usize {
+    body.lines()
+        .filter(|line| line.starts_with("memory "))
+        .count()
 }
 
 fn ok_transport() -> FakeProviderTransport {
@@ -2504,7 +2541,7 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     let companion = handle.store.ensure_running_companion().await.unwrap();
     let memories = handle
         .store
-        .list_current_memories(companion.as_raw(), 10)
+        .list_current_memories(companion.as_raw(), None, 10)
         .await
         .unwrap();
     assert_eq!(memories.len(), 1, "one compressed memory is formed");
@@ -2644,7 +2681,7 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
 
     let memories = handle
         .store
-        .list_current_memories(companion.as_raw(), 10)
+        .list_current_memories(companion.as_raw(), None, 10)
         .await
         .unwrap();
     assert_eq!(memories.len(), 1);
@@ -3398,4 +3435,89 @@ async fn memory_view_renders_current_recognition_grounds_and_revisions() {
         memory.body
     );
     assert!(memory.body.contains("The owner prefers coffee now."));
+}
+
+/// A page cursor drives the read-only Memory view, and untrusted cursor text
+/// is refused instead of interpreted.
+#[tokio::test]
+async fn memory_view_cursor_pages_older_memories_and_rejects_invalid_ids() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-memory-page");
+    let transport = ok_transport();
+    let setup = round_test_handle("dlg-memory-page", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let scope = LearningScope::companion(companion.as_raw());
+    for index in 0..21 {
+        let outcome = handle
+            .store
+            .commit_memory_change(MemoryChangeCommit {
+                summary: None,
+                secret_premise: None,
+                change: MemoryChange {
+                    target: MemoryTarget::New {
+                        id: MemoryId::generate(),
+                    },
+                    scope,
+                    content: format!("paged memory {index}"),
+                    importance: Importance::default(),
+                    temporal: TemporalMeaning::Enduring,
+                    change: ChangeKind::Initial,
+                    recall_suppressed: false,
+                    at: WallClockWithTz::now(),
+                },
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ene_learning::MemoryChangeOutcome::Committed { .. }
+        ));
+    }
+
+    // The first page is capped and points at the next older page.
+    let requested = handle
+        .handle_frame(
+            view_request_frame(live.connection_id),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert_eq!(memory_lines(&body), 20, "the page is capped");
+    let cursor = body
+        .lines()
+        .find_map(|line| line.strip_prefix("next: "))
+        .expect("older memories remain")
+        .to_owned();
+
+    // The next page holds the remaining memory and ends the traversal.
+    let paged = handle
+        .handle_frame(
+            view_page_request_frame(live.connection_id, &cursor),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let body = memory_body(&paged);
+    assert_eq!(memory_lines(&body), 1, "the older memory is reachable");
+    assert!(body.contains("paged memory 0"), "{body}");
+    assert!(!body.contains("next: "), "the last page stops");
+
+    // Cursor text is client input; anything that is not one of our ids is
+    // refused instead of being interpreted.
+    let invalid = handle
+        .handle_frame(
+            view_page_request_frame(live.connection_id, "not-a-memory"),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(memory_body(&invalid), "invalid cursor");
 }

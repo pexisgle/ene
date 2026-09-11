@@ -70,7 +70,9 @@ use ene_credential::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
     available_credential,
 };
-use ene_learning::{ChangeKind, LearningRepository, Memory, MemoryRevisionRecord, TemporalMeaning};
+use ene_learning::{
+    ChangeKind, LearningRepository, Memory, MemoryId, MemoryRevisionRecord, TemporalMeaning,
+};
 use ene_permission::{
     AssignConsentIntent, AssignConsentResolution, CapabilityKind, ConsentRecord, ConsentRepository,
     IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
@@ -345,7 +347,7 @@ impl HostHandle {
     ) -> Vec<WireFrame> {
         let target = intent.target.0.as_str();
         if target == SETUP_SHOW_TARGET {
-            let view = self.build_view(&[]).await;
+            let view = self.build_view(&[], None).await;
             return vec![view_frame(frame, live, view)];
         }
         if target == SETUP_COMPLETE_TARGET {
@@ -636,14 +638,17 @@ impl HostHandle {
 
     /// An empty section list selects every known section (`provider`,
     /// `model`, `consent`, `credential`, `memory`); otherwise only requested
-    /// known sections render and unknown names are skipped.
+    /// known sections render and unknown names are skipped. `memory_after`
+    /// continues the `memory` section from a previous page.
     pub(crate) async fn answer_view(
         &self,
         frame: &WireFrame,
         request: &ManagementViewRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let view = self.build_view(&request.sections).await;
+        let view = self
+            .build_view(&request.sections, request.memory_after.as_deref())
+            .await;
         vec![view_frame(frame, live, view)]
     }
 
@@ -652,7 +657,11 @@ impl HostHandle {
     /// capability owns its section and consent revision; the mark carries
     /// both segments so a consent write is checked against the capability it
     /// names.
-    pub(crate) async fn build_view(&self, wanted: &[String]) -> ManagementView {
+    pub(crate) async fn build_view(
+        &self,
+        wanted: &[String],
+        memory_after: Option<&str>,
+    ) -> ManagementView {
         let dialogue = match self.store.load_current(CapabilityKind::Dialogue).await {
             Ok(record) => record,
             Err(_) => return unavailable_view(),
@@ -709,7 +718,11 @@ impl HostHandle {
             ("learning", "Learning", learning_text),
         ];
         if wanted.is_empty() || wanted.iter().any(|name| name == "memory") {
-            candidates.push(("memory", "Memory", self.render_memory_view().await));
+            candidates.push((
+                "memory",
+                "Memory",
+                self.render_memory_view(memory_after).await,
+            ));
         }
         let sections = candidates
             .into_iter()
@@ -747,23 +760,38 @@ impl HostHandle {
 
     /// Read-only projection of current Memory and its change history.
     ///
-    /// Shows content, scope, temporal meaning, importance, recall state, the
-    /// evidence Summary behind each revision, and every revision. There is no
-    /// write path here: corrections and changes arrive as Experience through
-    /// Learning, never by editing a Memory row.
-    async fn render_memory_view(&self) -> String {
+    /// Renders one page of [`MEMORY_PAGE_SIZE`] current memories, newest
+    /// first, continuing strictly after `after` when a previous page named it.
+    /// While older memories remain the body ends with `next: <id>`, so every
+    /// memory is reachable by feeding that id back as the page cursor. There
+    /// is no write path here: corrections and changes arrive as Experience
+    /// through Learning, never by editing a Memory row.
+    async fn render_memory_view(&self, after: Option<&str>) -> String {
         let Ok(companion) = self.store.ensure_running_companion().await else {
             return String::from("unavailable");
         };
-        let Ok(memories) = self
+        let cursor = match after {
+            Some(raw) => match uuid::Uuid::parse_str(raw) {
+                Ok(id) => Some(MemoryId::from_raw(RawId::from_uuid(id))),
+                Err(_) => return String::from("invalid cursor"),
+            },
+            None => None,
+        };
+        let Ok(mut memories) = self
             .store
-            .list_current_memories(companion.as_raw(), MEMORY_VIEW_LIMIT)
+            .list_current_memories(companion.as_raw(), cursor, MEMORY_PAGE_SIZE + 1)
             .await
         else {
             return String::from("unavailable");
         };
+        let has_more = memories.len() > MEMORY_PAGE_SIZE as usize;
+        memories.truncate(MEMORY_PAGE_SIZE as usize);
         if memories.is_empty() {
-            return String::from("(none)");
+            return if after.is_some() {
+                String::from("no older memories")
+            } else {
+                String::from("(none)")
+            };
         }
         let mut body = String::new();
         for memory in &memories {
@@ -787,6 +815,14 @@ impl HostHandle {
             }
             body.push('\n');
         }
+        if has_more {
+            // The cursor is the last rendered id, so the next page starts at
+            // the first older memory and cannot skip or repeat a row.
+            let next = memories.last().map(|memory| memory.id.as_raw().as_uuid());
+            if let Some(next) = next {
+                body.push_str(&format!("next: {next}\n"));
+            }
+        }
         body.trim_end().to_owned()
     }
 }
@@ -799,8 +835,8 @@ fn presence_text(present: bool, source: &str) -> String {
     }
 }
 
-/// Current memories rendered by one management view.
-const MEMORY_VIEW_LIMIT: u64 = 20;
+/// Current memories rendered by one management view page.
+const MEMORY_PAGE_SIZE: u64 = 20;
 
 fn short_id(id: RawId) -> String {
     id.as_uuid()

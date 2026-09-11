@@ -1322,9 +1322,14 @@ impl ene_inference::ProviderTransport for Stage3Transport {
 
 /// The read-only memory section body from one management view answer.
 async fn memory_view(client: &mut Client) -> String {
+    memory_view_after(client, None).await
+}
+
+/// The memory section body after a page cursor.
+async fn memory_view_after(client: &mut Client, after: Option<&str>) -> String {
     let answer = ask(
         client,
-        WirePayload::ManagementViewRequest(cmds::memory_view_request()),
+        WirePayload::ManagementViewRequest(cmds::memory_view_request(after)),
         "memory view",
     )
     .await;
@@ -1336,6 +1341,13 @@ async fn memory_view(client: &mut Client) -> String {
         .find(|section| section.kind == "memory")
         .map(|section| section.body.clone())
         .unwrap_or_default()
+}
+
+/// The `next:` page cursor of a memory section body, when older memories
+/// remain.
+fn next_memory_cursor(body: &str) -> Option<String> {
+    body.lines()
+        .find_map(|line| line.strip_prefix("next: ").map(str::to_owned))
 }
 
 fn memory_count(body: &str) -> usize {
@@ -1375,6 +1387,11 @@ async fn stage3_send(
 async fn stage3_view(dir: &std::path::Path) -> String {
     let mut client = stage3_client(dir).await;
     memory_view(&mut client).await
+}
+
+async fn stage3_view_after(dir: &std::path::Path, after: Option<&str>) -> String {
+    let mut client = stage3_client(dir).await;
+    memory_view_after(&mut client, after).await
 }
 
 /// Assigns the learning capability explicitly on the production path.
@@ -1528,7 +1545,7 @@ async fn stage3_conversation_formation_restart_and_recall() {
     // either provider prompt, even when the owner asks to remember it and
     // the answers echo it.
     transport.push_learning(
-        r#"{"summary": "The owner shared a key: sk-test-only.", "memories": [{"action": "create", "content": "The owner's key is sk-test-only.", "importance": 5}]}"#,
+        r#"{"summary": "The owner shared a key: sk-test-only.", "memories": [{"action": "create", "content": "The owner's key is sk-test-only.", "importance": 5, "temporal": "enduring"}]}"#,
     );
     let sent = stage3_send(&dir, "remember my key sk-test-only").await;
     assert!(sent.is_ok());
@@ -1617,6 +1634,104 @@ async fn stage3_conversation_formation_restart_and_recall() {
         !recalled.contains("coffee"),
         "suppressed memory is not recalled: {recalled}"
     );
+
+    server.abort();
+}
+
+/// Stage 3 management read model: a companion with more memories than one
+/// page must remain fully reachable. Five formations of five creates each
+/// produce twenty-five memories; the view pages twenty at a time and ends a
+/// page with the cursor that reads the next one, so an old memory's current
+/// recognition, revisions, and grounds stay reachable from the management
+/// surface alone.
+#[tokio::test]
+async fn stage3_management_view_reaches_memories_beyond_the_first_page() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let handle = open_host(&dir).await.unwrap();
+    let transport = Arc::new(Stage3Transport::new(FAKE_TEXT));
+    let server = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
+
+    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(
+        matches!(pending, Err(CliError::ServerOutcome(_))),
+        "first pairing must pend"
+    );
+    let approver = open_host(&dir).await.unwrap();
+    let provisioned = approve_and_provision(&dir, &approver).await;
+    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
+    let mut client = stage3_client(&dir).await;
+    let setup = setup_flow(&mut client, &approver).await;
+    assert!(setup.is_ok(), "setup must complete: {setup:?}");
+    drop(client);
+    let assigned = stage3_assign_learning(&dir).await;
+    assert!(
+        assigned.is_ok(),
+        "learning assignment must store: {assigned:?}"
+    );
+
+    // Twenty-five memories, five per formation pass.
+    for batch in 0..5 {
+        let creates: Vec<String> = (0..5)
+            .map(|index| {
+                format!(
+                    "{{\"action\": \"create\", \"content\": \"batch {batch} memory {index}\", \"importance\": 3, \"temporal\": \"enduring\"}}"
+                )
+            })
+            .collect();
+        transport.push_learning(&format!(
+            "{{\"summary\": \"Batch {batch} of durable memories.\", \"memories\": [{}]}}",
+            creates.join(", ")
+        ));
+        let sent = stage3_send(&dir, &format!("remember batch {batch}")).await;
+        assert!(sent.is_ok(), "batch {batch} must complete: {sent:?}");
+        transport.wait_learning().await;
+    }
+    // One formation commits its changes in order, so the last memory of the
+    // last batch becoming durable proves every earlier commit landed.
+    let _ = stage3_wait_for_memory(&dir, "batch 4 memory 4").await;
+
+    let first = stage3_view_after(&dir, None).await;
+    assert_eq!(memory_count(&first), 20, "the first page is capped");
+    let cursor = next_memory_cursor(&first).expect("older memories remain");
+    let second = stage3_view_after(&dir, Some(&cursor)).await;
+    assert_eq!(
+        memory_count(&second),
+        5,
+        "the older memories fill the next page"
+    );
+    assert!(
+        next_memory_cursor(&second).is_none(),
+        "the last page offers no cursor"
+    );
+    assert!(
+        second.contains("batch 0 memory 0"),
+        "the oldest memory is reachable: {second}"
+    );
+    assert_eq!(
+        second.matches("rev1 initial").count(),
+        5,
+        "every older memory shows its first revision: {second}"
+    );
+    assert_eq!(
+        second.matches("grounds summary").count(),
+        5,
+        "every older memory shows its grounds: {second}"
+    );
+    for batch in 0..5 {
+        for index in 0..5 {
+            let content = format!("batch {batch} memory {index}");
+            assert!(
+                first.contains(&content) || second.contains(&content),
+                "every memory is reachable: {content}"
+            );
+        }
+    }
 
     server.abort();
 }
