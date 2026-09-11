@@ -127,8 +127,10 @@ fn insert_summary(
     summary: &SummaryRecord,
 ) -> Result<(), LearningTechnicalError> {
     // Reused verbatim when several changes of one formation share it; the id
-    // identifies the evidence, so a repeated insert is a no-op, not an
-    // overwrite.
+    // identifies the evidence, so a repeated insert is a no-op only while the
+    // stored payload equals the offered one. A different payload under the
+    // same identity would silently rebind the evidence, so it is refused and
+    // the caller's transaction (including this insert) rolls back.
     tx.execute(
         SQL_INSERT_SUMMARY_IGNORE,
         params![
@@ -142,6 +144,30 @@ fn insert_summary(
         ],
     )
     .map_err(learning_unavailable)?;
+    let stored = tx
+        .query_row(
+            SQL_SELECT_SUMMARY,
+            params![encode_id(summary.id.as_raw())],
+            |row| {
+                Ok(RawSummary {
+                    summary: row.get(0)?,
+                    companion: row.get(1)?,
+                    content: row.get(2)?,
+                    source_kind: row.get(3)?,
+                    source_start: row.get(4)?,
+                    source_end: row.get(5)?,
+                    formed_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(learning_unavailable)?
+        .ok_or_else(|| learning_unavailable("summary vanished after insert"))?;
+    if decode_summary(stored)? != *summary {
+        return Err(LearningTechnicalError::SummaryIdentityConflict {
+            summary: summary.id,
+        });
+    }
     Ok(())
 }
 

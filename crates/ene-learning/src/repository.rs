@@ -25,6 +25,18 @@ pub enum LearningTechnicalError {
         /// Backend-supplied cause. Never Memory or Summary content.
         reason: String,
     },
+    /// A commit reused a Summary identity with a different payload.
+    ///
+    /// Summary identity names one piece of evidence. Several changes of one
+    /// formation deliberately share the same record, but a caller that offers
+    /// the same id with different content, scope, source, or formation time is
+    /// asking to silently rebind that evidence. Nothing is written; a changed
+    /// payload needs a fresh identity.
+    #[error("summary identity conflicts with the stored evidence")]
+    SummaryIdentityConflict {
+        /// The reused identity; carries no content.
+        summary: SummaryId,
+    },
 }
 
 /// Which Memory one change targets.

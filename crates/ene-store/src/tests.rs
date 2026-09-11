@@ -10,9 +10,9 @@ use ene_credential::{
 };
 use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
 use ene_learning::{
-    ChangeKind, ExperienceSourceKind, Importance, LearningRepository, LearningScope, MemoryChange,
-    MemoryChangeCommit, MemoryChangeOutcome, MemoryId, MemoryRevision, MemoryTarget,
-    SourceRangeRef, SummaryId, SummaryRecord, TemporalMeaning,
+    ChangeKind, ExperienceSourceKind, Importance, LearningRepository, LearningScope,
+    LearningTechnicalError, MemoryChange, MemoryChangeCommit, MemoryChangeOutcome, MemoryId,
+    MemoryRevision, MemoryTarget, SourceRangeRef, SummaryId, SummaryRecord, TemporalMeaning,
 };
 use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
 use ene_presence::{
@@ -2439,6 +2439,125 @@ async fn learning_new_memory_keeps_summary_grounds_and_current_row() {
     assert_eq!(stored_evidence.content, "owner likes jasmine tea");
     assert_eq!(stored_evidence.source.kind, ExperienceSourceKind::Dialogue);
     assert_eq!(stored_evidence.scope, LearningScope::companion(companion));
+}
+
+#[tokio::test]
+async fn learning_reused_summary_identity_with_a_different_payload_is_refused() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "owner likes jasmine tea");
+    let committed = store
+        .commit_memory_change(commit(
+            Some(evidence.clone()),
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner likes jasmine tea",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(
+        committed,
+        Ok(MemoryChangeOutcome::Committed { .. })
+    ));
+
+    // Same identity, different payload: the evidence must not be rebound and
+    // the refused change must leave no current row behind.
+    let second = MemoryId::generate();
+    let mut conflicting = evidence.clone();
+    conflicting.content = String::from("evidence that never happened");
+    let refused = store
+        .commit_memory_change(commit(
+            Some(conflicting),
+            learning_change(
+                companion,
+                MemoryTarget::New { id: second },
+                "a recognition grounded on the conflicting payload",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(
+        refused,
+        Err(LearningTechnicalError::SummaryIdentityConflict {
+            summary: evidence.id,
+        })
+    );
+    assert_eq!(store.load_current_memory(second).await, Ok(None));
+    let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
+    assert_eq!(stored.content, "owner likes jasmine tea");
+}
+
+#[tokio::test]
+async fn learning_stale_change_leaves_no_orphan_summary() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let seeded = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner lives in Tokyo",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(seeded, Ok(MemoryChangeOutcome::Committed { .. })));
+    let advance = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "owner lives in Osaka",
+                ChangeKind::ChangedSince,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(advance, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    // A formation judged from the now-old revision: its change and its new
+    // Summary evidence both roll back, so no orphaned grounds remain.
+    let evidence = learning_summary(companion, "stale evidence");
+    let stale = store
+        .commit_memory_change(commit(
+            Some(evidence.clone()),
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "stale recognition",
+                ChangeKind::Reinforced,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(
+        stale,
+        Ok(MemoryChangeOutcome::StaleTarget {
+            memory,
+            current: MemoryRevision::from_u64(2),
+        })
+    );
+    assert_eq!(
+        store.load_summary(evidence.id).await,
+        Ok(None),
+        "a rejected change must not strand its Summary"
+    );
+    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 2);
 }
 
 #[tokio::test]
