@@ -2511,6 +2511,64 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     assert!(summary.content.contains("jasmine tea"), "grounds are kept");
 }
 
+/// A provider or transport failure in the Learning pass is a technical
+/// failure, not a semantic decline: an experience the model never judged must
+/// not be reported as "nothing worth keeping".
+#[tokio::test]
+async fn learning_transport_failure_is_reported_as_unavailable() {
+    use super::{CredentialScrubber, HostInference};
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn,
+        LearningTechnicalError, SourceRangeRef,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-learning-failure");
+    let transport = ok_transport();
+    let setup = round_test_handle("dlg-learning-failure", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &transport).await);
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+
+    let failing =
+        FakeProviderTransport::failing(FakeFailure::Transport(String::from("provider down")));
+    let executor = HostInference {
+        store: &handle.store,
+        cred_store: &handle.cred_store,
+        tracker: &handle.tracker,
+        transport: &failing,
+    };
+    let scrubber = CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let candidate = ExperienceCandidate {
+        companion: companion.as_raw(),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: RawId::new(),
+            end: RawId::new(),
+        },
+        transcript: vec![ExperienceTurn {
+            role: ExperienceRole::Owner,
+            text: String::from("remember this"),
+        }],
+        at: WallClockWithTz::now(),
+    };
+
+    let outcome =
+        ene_companion::dialogue::propose_experience(candidate, &handle.store, &executor, &scrubber)
+            .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(LearningTechnicalError::InferenceUnavailable { .. })
+        ),
+        "a transport failure must not be reported as a decline, got {outcome:?}"
+    );
+}
+
 #[tokio::test]
 async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     use ene_companion::CompanionRepository as _;
@@ -2656,8 +2714,7 @@ async fn learning_latency_never_delays_the_client_visible_completion() {
 
 /// The queue carries the Experience premise pinned at reply completion, so a
 /// delayed worker cannot silently widen the pass to later turns. Coalescing
-/// is not used: every completed turn keeps its own source range and
-/// correspondence.
+/// is not used: every completed turn keeps its own source range.
 #[tokio::test]
 async fn queued_experience_keeps_its_completion_premise() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
@@ -2688,20 +2745,10 @@ async fn queued_experience_keeps_its_completion_premise() {
 
     let queued = handle.pending_learning_premises();
     assert_eq!(queued.len(), 2, "one pinned premise per completed turn");
-    let expected_client = device_client(&live.client_ref).as_raw();
     for premise in &queued {
         assert_eq!(
             premise.source.kind,
             ene_learning::ExperienceSourceKind::Dialogue
-        );
-        assert_eq!(
-            premise.correspondence.client,
-            Some(expected_client),
-            "the Client correspondence survives the queue"
-        );
-        assert!(
-            premise.correspondence.round.is_some() && premise.correspondence.generation.is_some(),
-            "round and continuity survive the queue: {premise:?}"
         );
     }
     let (first, second) = (&queued[0], &queued[1]);

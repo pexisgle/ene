@@ -3012,7 +3012,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
 }
 
 #[tokio::test]
-async fn redact_registered_secret_sweeps_history_and_learning_content() {
+async fn approval_sweep_redacts_history_and_learning_content() {
     let store = open_memory().await.unwrap();
     let Some((companion, generation)) = running_companion(&store).await else {
         panic!("the running companion must resolve");
@@ -3043,10 +3043,19 @@ async fn redact_registered_secret_sweeps_history_and_learning_content() {
         committed,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
+    assert!(matches!(
+        store
+            .request_approval(String::from("openai"), String::from("main"))
+            .await,
+        Ok(true)
+    ));
 
-    store
-        .redact_registered_secret("sk-test-only")
-        .expect("the sweep must commit");
+    assert!(
+        store
+            .approve_credential_with_sweep("openai", "main", "sk-test-only")
+            .expect("the approval sweep must commit"),
+        "the approval makes the pair usable"
+    );
 
     let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
     assert_eq!(timeline.len(), 1);

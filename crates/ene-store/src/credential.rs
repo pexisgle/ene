@@ -63,37 +63,6 @@ fn fresh_pairing_secret() -> String {
 }
 
 impl Store {
-    /// Replaces every plaintext occurrence of `bearer` with
-    /// [`REDACTED_CREDENTIAL`] across durable content stores.
-    ///
-    /// Called from the Host's credential approval while the bearer is
-    /// borrowed inside [`ene_credential::CredentialStore::with_bearer`], so
-    /// the value never leaves that scope. Synchronous and short-lived by
-    /// design: the caller already holds a synchronous bearer scope, and the
-    /// work is bounded by the stored content of the listed columns. An
-    /// unreadable store fails closed with
-    /// [`CredentialTechnicalError::StorageUnavailable`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// transaction cannot run or commit.
-    pub fn redact_registered_secret(&self, bearer: &str) -> Result<(), CredentialTechnicalError> {
-        if bearer.is_empty() {
-            // An empty pattern matches every position; there is nothing
-            // meaningful to redact and no safe rewrite.
-            return Ok(());
-        }
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        sweep_registered_secret(&tx, bearer)?;
-        tx.commit()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(())
-    }
-
     /// Approves one credential pair atomically: sweeps existing content,
     /// makes the ref usable, and bumps the credential-set revision.
     ///

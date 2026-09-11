@@ -62,46 +62,41 @@ impl LearningRepository for FakeLearningRepository {
         let outcome = match change.target {
             MemoryTarget::New { id } => {
                 if memories.iter().any(|memory| memory.id == id) {
-                    Some(MemoryChangeOutcome::AlreadyExists { memory: id })
+                    MemoryChangeOutcome::AlreadyExists { memory: id }
                 } else {
                     let revision = MemoryRevision::initial();
                     memories.push(memory_of(id, revision, &change));
-                    Some(MemoryChangeOutcome::Committed {
+                    MemoryChangeOutcome::Committed {
                         memory: id,
                         revision,
-                    })
+                    }
                 }
             }
             MemoryTarget::Existing {
                 id,
                 expected_revision,
             } => match memories.iter_mut().find(|memory| memory.id == id) {
-                None => Some(MemoryChangeOutcome::MissingTarget { memory: id }),
+                None => MemoryChangeOutcome::MissingTarget { memory: id },
                 Some(current) if current.scope != change.scope => {
-                    Some(MemoryChangeOutcome::ScopeMismatch { memory: id })
+                    MemoryChangeOutcome::ScopeMismatch { memory: id }
                 }
                 Some(current) if current.revision != expected_revision => {
-                    Some(MemoryChangeOutcome::StaleTarget {
+                    MemoryChangeOutcome::StaleTarget {
                         memory: id,
                         current: current.revision,
-                    })
+                    }
                 }
                 Some(current) => match current.revision.checked_next() {
-                    None => Some(MemoryChangeOutcome::RevisionExhausted { memory: id }),
+                    None => MemoryChangeOutcome::RevisionExhausted { memory: id },
                     Some(next) => {
                         *current = memory_of(id, next, &change);
-                        Some(MemoryChangeOutcome::Committed {
+                        MemoryChangeOutcome::Committed {
                             memory: id,
                             revision: next,
-                        })
+                        }
                     }
                 },
             },
-        };
-        let Some(outcome) = outcome else {
-            return Err(LearningTechnicalError::StorageUnavailable {
-                reason: String::from("fake repository has no outcome"),
-            });
         };
         if let MemoryChangeOutcome::Committed { memory, revision } = outcome {
             if let Some(summary) = &commit.summary {
