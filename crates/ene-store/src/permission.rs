@@ -319,11 +319,7 @@ impl IntentOutcomeRepository for Store {
                 {
                     record
                 }
-                current => {
-                    return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
-                        current,
-                    }));
-                }
+                _ => return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss)),
             };
             let snapshot = IntentOutcome::StoredAsRuleView {
                 revision: consent_mark(capability, Some(record.rev.as_u64())),
