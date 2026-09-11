@@ -217,8 +217,6 @@ struct ProposeExperienceCandidate {
     source_kind: ExperienceSourceKind, // 対話 / Task / Tool / Observation / 交流の区別
     task_ref: Option<TaskRef>,       // Task 由来なら revision 前提
     delegation: Option<DelegationId>,
-    client_round: Option<ConversationRoundRef>, // Client 依存なら取得 Client・round・候補
-    continuity: ContinuityRef,       // 停止前後・再起動前後・restore 前後の継続関係
     intended_use: IntendedUse,       // 返答 / Learning候補 / routing / Permission解釈 / Task判断の別
     // Raw 本文・詳細 payload の複製を要求しない。参照で辿れること。
 }
@@ -231,8 +229,9 @@ enum FormationDecision {
 }
 ```
 
+- Client・round・presence generation の correspondence は current stage の Experience formation が消費しないため interface に含めない。必要 stage で再導入する。
 - 開始：個体調整・作業。判断：認識・学習（保存価値・形成・更新・統合・想起必要性）。Task 限り情報の Learning 化は別判断。
-- 失ってはならないもの：由来の区別、対象 Companion・Task・委任との関係、Client 依存なら取得 Client・round・観測候補との関係、継続関係、期待する利用先。
+- 失ってはならないもの：由来の区別、対象 Companion・Task・委任との関係、期待する利用先。
 - Learning と Task を統合しない。応答完了と全 Learning 更新完了を同一条件にしない。
 
 ### H-C 会話による訂正（個体調整 → 認識・学習）
@@ -1446,9 +1445,9 @@ crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定め
 1. 入出力・提示が `SubmitClientInputCandidate(companion, client, claimed_generation, round)` を個体調整へ渡す。Client message だけで presence は成立しない。個体調整は X-B の `RoundIntakeOutcome` を経て現在 round として受理する。旧 round なら `StaleRound` として元 round へ対応付け、新 round へ付け替えない。
 2. 個体調整は用途（返答）と論理的 context を定め、認識・学習へ `LearningQuery(purpose=返答, scope_need, constraints)` で利用可能な理解を問い合わせる。取得成功は後続の送信許可ではない。
 3. 応答のための推論は `RequestInferenceCommand(ticket, consumer=CompanionReasoning, logical_context, resolved_route, credential_availability, cost_premise, hold)` で admission と attempt claim の前提確定（K-B の single-use authorization を含む）を経て送信する。同意不足・cap・保留・帰属・消去条件の不一致は `NotSent` として不足・判断待ちへ戻す。
-4. 応答後、個体調整・作業は `ProposeExperienceCandidate(experiencer, source_range, source_kind=対話, client_round, continuity, intended_use=Learning候補)` を認識・学習へ渡す。Raw 複製を要求しない。
+4. 応答後、個体調整・作業は `ProposeExperienceCandidate(experiencer, source_range, source_kind=対話, intended_use=Learning候補)` を認識・学習へ渡す。Raw 複製を要求しない。
 5. 認識・学習は `FormationDecision` を確定する。保存価値がなければ終了し、全件保存しない。形成する場合は `SummaryGroundsRef` を対応付け、Memory 等の必要な状態だけを形成・変更する。応答完了と全 Learning 更新完了を同一条件にしない。
-6. 失われないこと：由来の区別、対象 Companion・Task・委任との関係、取得 Client・round・候補との関係、継続関係、期待する利用先（返答と Learning 候補の別）。到着順が新しい＝根拠が新しいにしない。
+6. 失われないこと：由来の区別、対象 Companion・Task・委任との関係、期待する利用先（返答と Learning 候補の別）。到着順が新しい＝根拠が新しいにしない。
 
 ### V-2 Task creation → Task Agent → steering → result（H-A・K-H・K-K）
 
