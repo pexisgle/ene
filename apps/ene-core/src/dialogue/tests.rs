@@ -2615,8 +2615,8 @@ async fn learning_transport_failure_is_reported_as_unavailable() {
     use super::{CredentialScrubber, HostInference};
     use ene_companion::CompanionRepository as _;
     use ene_learning::{
-        ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceSourceKind,
-        ExperienceTurn, LearningTechnicalError, SourceRangeRef,
+        ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn,
+        LearningTechnicalError, SourceRangeRef,
     };
     use ene_primitive::WallClockWithTz;
 
@@ -2651,7 +2651,6 @@ async fn learning_transport_failure_is_reported_as_unavailable() {
             text: String::from("remember this"),
         }],
         at: WallClockWithTz::now(),
-        correspondence: ExperienceCorrespondence::default(),
     };
 
     let outcome =
@@ -2812,7 +2811,7 @@ async fn learning_latency_never_delays_the_client_visible_completion() {
 /// The queue carries the Experience premise pinned at reply completion, so a
 /// delayed worker cannot silently widen the pass to later turns. Coalescing
 /// is not used: every completed turn keeps its own source range and
-/// correspondence.
+/// transcript.
 #[tokio::test]
 async fn queued_experience_keeps_its_completion_premise() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
@@ -2843,20 +2842,10 @@ async fn queued_experience_keeps_its_completion_premise() {
 
     let queued = handle.pending_learning_premises();
     assert_eq!(queued.len(), 2, "one pinned premise per completed turn");
-    let expected_client = device_client(&live.client_ref).as_raw();
     for premise in &queued {
         assert_eq!(
             premise.source.kind,
             ene_learning::ExperienceSourceKind::Dialogue
-        );
-        assert_eq!(
-            premise.correspondence.client,
-            Some(expected_client),
-            "the Client correspondence survives the queue"
-        );
-        assert!(
-            premise.correspondence.round.is_some() && premise.correspondence.generation.is_some(),
-            "round and continuity survive the queue: {premise:?}"
         );
     }
     let (first, second) = (&queued[0], &queued[1]);
