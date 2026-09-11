@@ -194,35 +194,11 @@ impl HostHandle {
             )];
         };
         // Durable replay first: an exact retry replays its stored snapshot.
-        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
-        match self.store.lookup_intent_outcome(&intent_key).await {
-            Err(_) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::HeldByOperation,
-                )];
-            }
-            Ok(Some(stored))
-                if Self::intent_matches(&stored, intent, Self::INTENT_KIND_REGISTER) =>
-            {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    Self::replayed_outcome(&stored.outcome),
-                )];
-            }
-            Ok(Some(_)) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::NeedsClarification,
-                )];
-            }
-            Ok(None) => {}
+        if let Some(answer) = self
+            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_REGISTER)
+            .await
+        {
+            return answer;
         }
         // One durable determination owned by `ene-credential`: the pending
         // insert (or usable recheck) and the replay row share a transaction,
@@ -260,6 +236,7 @@ impl HostHandle {
             }
             Ok(RegistrationApply::AlreadyDecided) => {
                 // Lost a cross-process race: answer from the journal winner.
+                let intent_key = intent.intent_id.0.as_hyphenated().to_string();
                 match self.store.lookup_intent_outcome(&intent_key).await {
                     Ok(Some(stored)) if stored.fingerprint == fingerprint => vec![outcome_frame(
                         frame,
@@ -339,6 +316,47 @@ impl HostHandle {
             IntentOutcome::StaleBaseView { current } => ManagementOutcome::StaleBaseView {
                 current: ViewMarkWire(current.clone()),
             },
+        }
+    }
+
+    /// Durable intent replay first (§18.2): the stored snapshot precedes
+    /// every premise read, so a past-success exact retry reaches its prior
+    /// outcome even after state moved on.
+    ///
+    /// A hit with the same fingerprint answers verbatim (never re-executed);
+    /// a hit with different content clarifies instead of adopting the new
+    /// meaning; an unreadable journal holds. A miss returns [`None`] so the
+    /// caller falls through to the owner-side execution.
+    async fn replay_or_hold(
+        &self,
+        frame: &WireFrame,
+        live: &LiveInput,
+        intent: &ManagementIntent,
+        kind: &str,
+    ) -> Option<Vec<WireFrame>> {
+        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
+        match self.store.lookup_intent_outcome(&intent_key).await {
+            Err(_) => Some(vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::HeldByOperation,
+            )]),
+            Ok(Some(stored)) if Self::intent_matches(&stored, intent, kind) => {
+                Some(vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    Self::replayed_outcome(&stored.outcome),
+                )])
+            }
+            Ok(Some(_)) => Some(vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::NeedsClarification,
+            )]),
+            Ok(None) => None,
         }
     }
 
@@ -440,39 +458,14 @@ impl HostHandle {
             model,
             credential_id,
         } = target;
-        // Durable intent replay first (§18.2): the stored snapshot precedes
-        // every premise read, so a past-success exact retry reaches its prior
-        // outcome even after credential state moved on. A hit with the same
-        // fingerprint answers verbatim (never re-executed); a hit with
-        // different content clarifies instead of adopting the new meaning.
-        // A miss falls through to the owner-side assignment.
-        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
-        match self.store.lookup_intent_outcome(&intent_key).await {
-            Err(_) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::HeldByOperation,
-                )];
-            }
-            Ok(Some(stored)) if Self::intent_matches(&stored, intent, Self::INTENT_KIND_ASSIGN) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    Self::replayed_outcome(&stored.outcome),
-                )];
-            }
-            Ok(Some(_)) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::NeedsClarification,
-                )];
-            }
-            Ok(None) => {}
+        // Durable intent replay first (§18.2): a past-success exact retry
+        // reaches its prior outcome; a miss falls through to the owner-side
+        // assignment.
+        if let Some(answer) = self
+            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_ASSIGN)
+            .await
+        {
+            return answer;
         }
         // Credential availability is a credential-owned premise: the Host
         // only crosses owners, it never combines their judgments.
@@ -540,35 +533,11 @@ impl HostHandle {
     ) -> Vec<WireFrame> {
         // Durable replay first: the stored snapshot precedes any currentness
         // check, so an exact retry replays its prior outcome.
-        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
-        match self.store.lookup_intent_outcome(&intent_key).await {
-            Err(_) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::HeldByOperation,
-                )];
-            }
-            Ok(Some(stored))
-                if Self::intent_matches(&stored, intent, Self::INTENT_KIND_COMPLETE) =>
-            {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    Self::replayed_outcome(&stored.outcome),
-                )];
-            }
-            Ok(Some(_)) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::NeedsClarification,
-                )];
-            }
-            Ok(None) => {}
+        if let Some(answer) = self
+            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_COMPLETE)
+            .await
+        {
+            return answer;
         }
         // Bearer premise for the atomic claim below: the credential owner
         // resolves registered-and-backed availability; the transaction
