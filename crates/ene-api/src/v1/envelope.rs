@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::refs::{
-    ClientIncarnationId, ConnectionWireId, DeviceWireId, RoundWireId, SpanWireId, TicketWireId,
-    WireMessageId, WireMessageType,
+    ClientIncarnationId, ConnectionWireId, DeviceWireId, RoundWireId, WireMessageId,
+    WireMessageType,
 };
-use super::refs::{CommandWireId, RequestWireId, StreamWireId};
+use super::refs::{CommandWireId, RequestWireId};
 
 /// Major marks the semantic-compatibility boundary; minor covers
 /// backwards-compatible additions (IPC §7.2).
@@ -37,17 +37,15 @@ impl ProtocolVersion {
     }
 }
 
-/// Request/response, command/ack, and stream correspondence (IPC §6).
-/// Every slot is optional because different patterns use different slots:
-/// a stream frame carries no request ID, a fact carries none at all.
+/// Request/response and command/ack correspondence (IPC §6). Every slot is
+/// optional because different patterns use different slots: a fact carries
+/// none at all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WireCorrelation {
     pub request_id: Option<RequestWireId>,
     pub command_id: Option<CommandWireId>,
-    pub stream_id: Option<StreamWireId>,
     /// Message this message answers, for transport pairing.
     pub reply_to: Option<WireMessageId>,
-    pub causation_span: Option<SpanWireId>,
 }
 
 /// Who sent the message: device, incarnation, connection (IPC §11).
@@ -79,7 +77,6 @@ pub struct ObservedMarks {
     /// adopted one side over the other. The Host never rebinds an old
     /// round from this field.
     pub round_view: Option<RoundWireId>,
-    pub ticket_view: Option<TicketWireId>,
 }
 
 /// `message_type` names the payload shape for routing; an unknown value is
@@ -106,15 +103,12 @@ pub fn new_outgoing_envelope(
         correlation: WireCorrelation {
             request_id: None,
             command_id: None,
-            stream_id: None,
             reply_to: None,
-            causation_span: None,
         },
         sender,
         observed: ObservedMarks {
             presence_generation_view: None,
             round_view: None,
-            ticket_view: None,
         },
         message_type,
     }

@@ -73,7 +73,6 @@ fn advertise_frame(protocol: ProtocolVersion) -> super::WireFrame {
         ),
         payload: WirePayload::CapabilityAdvertise(CapabilityAdvertise {
             supported_protocol: vec![protocol],
-            features: Vec::new(),
             platform: String::from("test"),
         }),
     }
@@ -870,7 +869,6 @@ async fn negotiated_version_is_fixed_per_connection() {
     let negotiated = LiveInput {
         negotiated: Some(NegotiatedConnection {
             version: ProtocolVersion::V1,
-            accepted_features: Vec::new(),
         }),
         ..paired_input("device-1")
     };
