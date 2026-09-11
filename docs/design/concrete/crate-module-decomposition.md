@@ -134,7 +134,7 @@ plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由で�
 | `ActionAttemptId`・`ActionAttemptRef`・`ActionCertainty`・`PermissionEvaluationId`・`PermissionEvaluationRef` | `ene-action`（attempt・certainty）、`ene-permission`（evaluation の意味。attempt と混同しない） | 試行・判断記録・Task 達成を同一視しない。retry は新 `AttemptId` とする |
 | `RuleId`・`RuleRevision`・`AssignmentConsentId`・`CapId`・`ReservationId`・`CurrentPermissionBoundary`（照合材料） | `ene-permission` | 保存 Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定を生きた許可にしない |
 | `CredentialRef`（非秘密） | `ene-credential` | 秘密値本体（E）は OS store 側。`SecretValue` を pub にしない。参照を持つことは利用可能ではない |
-| `ClientId`・`RoundId`・`PresenceGeneration`・`PresenceAttribution`・`ClientPresenceClaim`・`RelocationHint` | `ene-presence`（帰属・世代）、`ene-presentation`（round 実際。authority は分離） | presence・Host 継続・接続・許可を分離する。Client 主張を authority にしない |
+| `ClientId`・`RoundId`・`PresenceGeneration`・`PresenceAttribution`・`RelocationHint` | `ene-presence`（帰属・世代）、`ene-presentation`（round 実際。authority は分離） | presence・Host 継続・接続・許可を分離する。Client 主張を authority にしない |
 | `ObservationCandidateId`・`RoutingContextRef`（派生） | `ene-observer` | 新正本・新 scope・包括共有にしない。元 owner の制約と専用 assignment 同意を変換後も適用する |
 | `DeletionOperationId`・`DeletionSweepGeneration`・`DeletionOperationRef`・`ErasureConditionRef`・`BackupPointId`・`RestoreGeneration`・`RestoreRef`・`HoldConditionRef` | `ene-preservation` | `DeletionOperationRef` の完了は全域確定であり、各 domain の意味変更は各 owner が行う。検索 token は操作期間のみ保持し、除去・復元不能化を確認してから全域完了を確定する |
 

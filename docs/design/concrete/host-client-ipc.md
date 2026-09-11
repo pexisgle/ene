@@ -421,7 +421,6 @@ enum MoveOutcome {
     Transitioning { new_generation: u64 },
     RejectedStalePresence { current_generation: u64 },
     DeniedByConstraint { reason: DenyReasonWire },
-    HeldForSafeClosure,
 }
 ```
 
@@ -841,7 +840,7 @@ transport error と domain rejection を区別する。domain rejection は `Ok`
 | wire reject | command identity conflict / prior result unavailable | `CommandReplayRejectWire::CommandIdConflict`・`AlreadyProcessed` | current authenticated sender epoch の marker と fingerprint を照合して domain mapping 前に返す。`CommandIdConflict` は同じ ID の別内容を副作用なしに拒否する。`AlreadyProcessed` は exact prior outcome を保持しない非 identity-minting command に限る。新 ID への黙った再送を誘発しない |
 | domain reject | stale generation / connection / incarnation | `StaleConnection`・`StaleIncarnation`・`StalePresence`・`StaleRound`・`StaleTicket`・`StaleStream` | 現在への不採用。元 round・元 attempt・元 ticket への対応付けに留める。新 round・新 attempt への付け替えをしない |
 | domain reject | no current presence | `NoCurrentPresence` | 新規開始しない。判断待ち・保留へ戻す |
-| domain reject | denied / held | `DeniedByConstraint`・`DeniedByHold`・`HeldForTransition`・`HeldForSafeClosure` | 実行せず待機・判断待ちにする。黙って queue・replay しない |
+| domain reject | denied / held | `DeniedByConstraint`・`DeniedByHold`・`HeldForTransition` | 実行せず待機・判断待ちにする。黙って queue・replay しない |
 | domain reject | capability missing | `UnsupportedCapability`・`InsufficientCapability` | 利用前に不足を示す。本文削減で黙って解消しない |
 | domain reject | deletion no longer current | `DeletionSuperseded{ current_operation }` | 旧 operation の結果を全域完了に採用しない |
 | domain reject | needs revalidation | `NeedsRevalidation{ reason }` | 現在条件の再照合へ戻す |

@@ -293,7 +293,7 @@ state: Reserved(処理中・上限引き当て) → Committed(確定) / Released
 - **同一 Companion への二重 active 禁止。** `presence_attribution` の `(companion_id, generation, active_client)` を Host canonical とし、同時に二つの `Present` を成立させない。simultaneous summon は CAS の先勝ちのみ成立させ、後着は不受理・再評価へ戻す。Client 側 lock だけに依存しない。
 - **move。** 切替区間は `旧 / 移行中 / 新 / active なし / 停止中 / 復旧待ち` を区別し、移行中は新旧いずれでも Client 依存の新規開始をしない。旧 in-flight は安全な区切りまで継続し、旧作用の別 Client 自動継続をしない。
 - **disconnect。** 一時的な到達不能は帰属 durable を即時破棄せず、到達性・排他性が確認不能な間は新規開始をしない。通常切断・process 終了が確定したら、`ene-presence` が利用可能な Host PC Client（IPC §10.1 の Host 確定 SameMachine、live 認証・device 許可・排他性を再照合）へ SD-Presence の CAS で `旧→移行中→新` と遷移し、候補なし・確認不能なら `NoActive` とする（`DisconnectFallback`）。Host 側 Client を自動起動せず、通常切断を `RecoveryWait` にしない。検知から切断確定への timeout 等は Freedom。Client 依存 Action の停止は best-effort とし、停止不能・既知作用・不明を残す。
-- **reconnect。** `ClientPresenceClaim.claimed_generation` × 現在 `generation` × 現接続・可用性 × 現在許可・停止・保留を照合する。古い一時 state・旧承認・判定 copy・解決済み経路だけでは成立させない。確認不能を現在と推定しない。旧 round の入力・未提示出力を新 round へ付け替えない。
+- **reconnect。** Client の `claimed_generation` × 現在 `generation` × 現接続・可用性 × 現在許可・停止・保留を照合する。古い一時 state・旧承認・判定 copy・解決済み経路だけでは成立させない。確認不能を現在と推定しない。旧 round の入力・未提示出力を新 round へ付け替えない。
 - 通常切断後は再接続だけで fallback / `NoActive` を元 Client へ戻さない。呼出し・事前指示・通常の自発判断を必要とする。`ReconnectRecovery` は Host restart の `RecoveryWait` と復旧先に対する確認だけに使う。
 - **Host restart restoration。** `presence_attribution`＋hint・復旧先（非現在）＋現接続・許可・排他性の live 確認で再構成する。Running presence は現確認ができれば復元前 Client へ自動復元し、できなければ active なしにする。Stopped に移動・復旧しない。復旧は presence のみであり、Task・Action の再開権限にしない。
 - **Stop。** Stop は帰属解除として保持し（hint と区別）、Stop 競合では Stop が勝つ。接続回復だけで Resume・再配置しない。
@@ -450,7 +450,7 @@ publication guard の具体実装は固定しない。process 内の lock / in-p
 | Action 要求・試行・停止・結果 | `ActionAttemptRef`（試行・Task revision 前提・委任・Workspace・実対象・操作種別・依拠 Permission evaluation）、`PermissionEvaluationRef`、実対象解決の前提、費用・停止・保留・消去・復元条件の写し、把握された作用・確定度・根拠対応、retry 時の `prior_attempt` 対応 |
 | Permission 判断の依頼・回答 | 判断対象（主体・委任・Task・Workspace・目的・実対象・操作・送信先・data・作用・費用 risk）、依拠 Owner 意図・Rule の対応（`(rule_id, rule_revision)`、`assignment_consent` revision、device、cap）、重要変化の有無。判断記録と生きた許可の区別 |
 | Provider 実送信（初回・fallback・再送・補助・継続の各々） | 論理選択範囲、解決済み consumer / Capability assignment、実送信先・data・用途・取扱い・費用の同意対応、認証用途・制限・保留・利用量、元要求・範囲の対応、報告 / 推定 / 不明 / 処理中の別、予約 `usage_id` |
-| Client 依存活動の開始・継続 | `PresenceAttribution`（個体・状態・active・generation）、`ClientPresenceClaim.claimed_generation`、`ConversationRound`、旧・新・移行中・active なし・停止・復旧待ちの区別、現接続・可用性 |
+| Client 依存活動の開始・継続 | `PresenceAttribution`（個体・状態・active・generation）、`claimed_generation`（Client 主張の写し）、`ConversationRound`、旧・新・移行中・active なし・停止・復旧待ちの区別、現接続・可用性 |
 | Observer routing | `RoutingContextRef`（source・target・目的・制約・選択前提）、起源 Client・取得時点・候補対応、`PresenceGeneration`、消去・失効条件 |
 | Learning・Summary・根拠 | `SummaryGroundsRef`、`(learning_id, learning_revision)`、source 範囲・取得時点、scope・制約、訂正と状況変化の別、消去条件 |
 | 消去・保持・backup・復元 | `DeletionOperationRef`・`ErasureConditionRef`（目的・範囲・影響・除外・要確認、参加者・未完了・検証・hold、検索 token の最終消去 / `finalizing`）、backup 時点・参照・除外・保護・結果、`RestoreGeneration`・保留・一括有効化対応、Audit 順序・保持 |

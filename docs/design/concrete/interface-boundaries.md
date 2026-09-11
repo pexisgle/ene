@@ -679,7 +679,6 @@ enum MoveDecision {
     TransitioningToNew(PresenceGeneration), // 旧→移行中→新の durable 遷移を開始
     RejectedAsStalePresence(StalePresenceRef), // expected generation / state 不一致
     DeniedByConstraint,              // pairing・device・停止・保留等
-    HeldForSafeClosure,              // 安全な区切り待ち（Task 全体終了を条件にしない）
 }
 
 struct PresenceAttributionFact {
@@ -1125,7 +1124,7 @@ fn request_action(cmd: ExecuteActionCommand)
 | 推論・fallback | `InferenceUseOutcome`、`FallbackDecision` | SentAndCompleted / SentButCompletionPending / NotSent / InsufficientCapability / AllowedAsApprovedFallback / DeniedAsUnapprovedRoute |
 | 予約・確定・解放 | `ReservationOutcome` | Reserved / DeniedByCap / HeldForUnknownCost / NeedsRevalidation |
 | Action 開始・確定 | `ActionStartOutcome`、`LateArrivalHandling` | StartedAsAttempt / Denied / AskOwner / StalePremise / HeldByGlobalHold / RecordedToOriginal / KeptUnknownWithDupRisk / SuppressedByErasure |
-| presence・round | `MoveDecision`、`RoundIntakeOutcome` | TransitioningToNew / RejectedAsStalePresence / DeniedByConstraint / HeldForSafeClosure / AcceptedForRound / StaleRound / HeldForTransition |
+| presence・round | `MoveDecision`、`RoundIntakeOutcome` | TransitioningToNew / RejectedAsStalePresence / DeniedByConstraint / AcceptedForRound / StaleRound / HeldForTransition |
 | routing | `RoutingDecision` | RoutedTo / SuppressedByControl / StaleCandidate |
 | Character 適用・import | `CharacterApplicationOutcome`、`SkillImportOutcome` | AppliedAs / StaleRevision / DeniedProhibitedPart / NeedsOwnerSelection / ImportedAsCompanionOrGlobal / RejectedByScopeRule / RejectedByValidation |
 | 削除・検証・完了 | `ParticipantCompletionFact`、`RemainderVerification`、`GlobalDeletionCompletion` | 局所処理・検証・未完了・失敗・未確認範囲の別 / NoRemainderMechanically / RemainderFound / UnreachableScope / GloballyCompleted / HeldPending / FailedVerification |

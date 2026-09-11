@@ -335,15 +335,6 @@ enum PresenceState {
     RecoveryWait,   // 再起動復旧待ち。active なし。
 }
 
-/// Client 側の一時的な主張。presence の authority ではない。
-struct ClientPresenceClaim {
-    companion: CompanionId,
-    client: ClientId,
-    claimed_generation: PresenceGeneration,
-    round: Option<RoundId>,
-    candidate_or_trial: Option<ObservationCandidateOrTrialRef>,
-}
-
 /// 再配置 hint・再起動前復旧先。記録だけで presence にならない。
 struct RelocationHint {
     companion: CompanionId,
@@ -352,6 +343,7 @@ struct RelocationHint {
 }
 ```
 
+- Client 側の一時的な主張（`claimed_generation`・round・候補）は `SubmitClientInputCandidate`（IB X-B）が担い、presence 型として別に持たない。
 - `PresenceGeneration` の一致だけでは不十分であり、現接続・機能可用性・権限・制約・停止・保留も第6節の述語で照合する。確認不能を現在と推定しない。
 - hint・復旧先の保持は接続・存在が行うが、現在性の確認なしに復活させない（SO §4.15）。
 
@@ -465,7 +457,7 @@ mechanism を選ぶ前に、「何と何を比較すれば現在として受け�
 | Task 達成の受入 | 到着結果の `(attempt, Task revision 前提, 目的)` × 現在の `(Task revision, 目的・steering 前提)` | 旧目的の結果を新目的の達成に自動採用しない。元 Action / Task への記録と現在 Task への採用を分ける。 |
 | 結果の Learning / Summary 化 | 到着結果の `(source 範囲, 取得時点, 依拠 revision)` × 現在の `(Memory revision, scope, 制約)` | 遅延形成が現在を無条件上書きしない。到着順を根拠の新旧にしない。 |
 | Permission / Rule 解釈の採用 | モデル `許可`・引用・過去 Allow・復元 Rule・文脈内許可文・cache 判定 × 現在の `(Rule revision, 同意, device, cap, 失効・停止・帰属・消去・復元保留)` | 制御を変更しない。将来 Rule は解釈結果・適用範囲の表示・保存・Undo を経る。 |
-| Client 依存活動の開始・継続 | `ClientPresenceClaim.claimed_generation` × `PresenceAttribution.generation` × 現接続・機能可用性 × 現在許可・停止・保留 | 確認不能なら継続しない。旧一時 state・旧承認・判定 copy・解決済み経路だけで成立させない。 |
+| Client 依存活動の開始・継続 | `claimed_generation`（`SubmitClientInputCandidate`）× `PresenceAttribution.generation` × 現接続・機能可用性 × 現在許可・停止・保留 | 確認不能なら継続しない。旧一時 state・旧承認・判定 copy・解決済み経路だけで成立させない。 |
 | 切替区間の活動 | 旧 presence / 移行中 / 新 presence / active なし / 停止中 / 復旧待ちの区別 × 新旧いずれの帰属か | 移行中は新旧いずれも Client 依存の新規開始をしない。旧 in-flight は安全な区切りまで、旧作用の別 Client 自動継続をしない。 |
 | 消去区間の受入・生成・再保存 | 到着・生成・処理中情報の `(source 関係, 取得・生成時点, sweep 以前・区間内の別)` × `ErasureConditionRef.valid_interval` × 保持者の局所検証 | 区間内再到着・再生成は消去対象。実行中処理による再保存をしない。完了していないのに完了と表示しない。 |
 | 復元後の利用 | 利用の `(restore generation 前提, assignment / consent revision, Credential 照合, 依拠 Rule revision)` × 現在の `(RestoreGeneration, 現 Credential store, 現制約, 復元後保留)` | 旧 live・旧同意・旧 assignment だけで自動利用・自動処理を開始しない。一括有効化後も現在条件を守る。 |
@@ -563,7 +555,7 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 | Task 化・委任・steering・結果統合 | 意図・目的・steering 前提・Workspace 条件・Cancel 対象と進捗・結果・待機・反映不可理由・代替の対応。発話 record と Task 反映内容と未反映・待機の区別。 |
 | Action 要求・試行・停止・結果 | `ActionAttemptRef`（試行・Task・委任・Workspace・実対象・操作種別・依拠 Permission）、`PermissionEvaluationRef`、実対象解決の前提、費用・停止・保留・消去・復元条件の写し、把握された作用・確定度・根拠対応。 |
 | Permission 判断の依頼・回答 | 判断対象（主体・委任・Task・Workspace・目的・実対象・操作・送信先・data・作用・費用 risk）、依拠 Owner 意図・Rule の対応、重要変化の有無、現在の有効性の確定（権限・制約が行う）。判断記録と生きた許可の区別。 |
-| presence・round・入出力 | `PresenceAttribution`（個体・状態・active・generation）、`ClientPresenceClaim`、`ConversationRound`、旧・新・移行中・active なし・停止・復旧待ちの区別。生成≠提示、送信≠報告の区別。 |
+| presence・round・入出力 | `PresenceAttribution`（個体・状態・active・generation）、`SubmitClientInputCandidate`、`ConversationRound`、旧・新・移行中・active なし・停止・復旧待ちの区別。生成≠提示、送信≠報告の区別。 |
 | Observer routing | `RoutingContextRef`（source・target・目的・制約・選択前提）、起源 Client・取得時点・候補対応。混合文の無条件配送をしない。対象 Companion の利用可能 content・背景だけを渡す。 |
 | Learning・Summary・根拠 | `SummaryGroundsRef`、訂正と状況変化の別、過去の時間的有効性、scope・制約。旧 Summary を訂正後 Memory の代わりにしない。 |
 | 消去・保持・backup・復元 | `DeletionOperationRef`・`ErasureConditionRef`（目的・範囲・影響・除外・要確認、参加者・未完了・検証・hold）、backup 時点・参照・除外・保護・結果、Restore 世代・保留・一括有効化対応、Audit 順序・保持、Debug 対象・内容・期限。完了根拠に本文・秘密を残さない。 |
