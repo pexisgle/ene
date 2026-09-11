@@ -224,22 +224,38 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
             let view = request_view(session, cmds::setup_view_request()).await?;
             emit(&cmds::render_view(&view))
         }
-        cmds::SetupMode::Assign { provider, model } => {
+        cmds::SetupMode::Assign {
+            provider,
+            model,
+            learning,
+        } => {
             let view = request_view(session, cmds::setup_view_request()).await?;
             let base = BaseViewMark(view.mark.0.clone());
             let credential =
                 cmds::credential_intent(CommandWireId(uuid::Uuid::new_v4()), &base, &provider);
             apply_intent(session, credential).await?;
+            let capability = if learning {
+                cmds::CAPABILITY_LEARNING
+            } else {
+                cmds::CAPABILITY_DIALOGUE
+            };
             let assignment = cmds::assignment_intent(
                 CommandWireId(uuid::Uuid::new_v4()),
                 &base,
+                capability,
                 &provider,
                 &model,
             );
             apply_intent(session, assignment).await?;
-            emit(&format!(
-                "setup complete: provider={provider} model={model}"
-            ))
+            if learning {
+                emit(&format!(
+                    "learning assignment stored: provider={provider} model={model}"
+                ))
+            } else {
+                emit(&format!(
+                    "setup complete: provider={provider} model={model}"
+                ))
+            }
         }
     }
 }

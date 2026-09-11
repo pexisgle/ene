@@ -54,7 +54,8 @@ pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 /// selects the same four). The contract test below asserts these names
 /// against that documented Host set, so a Host rename fails the test instead
 /// of silently fetching nothing.
-pub const HOST_SETUP_SECTIONS: &[&str] = &["provider", "model", "consent", "credential"];
+pub const HOST_SETUP_SECTIONS: &[&str] =
+    &["provider", "model", "consent", "credential", "learning"];
 
 /// Only provider the setup flow knows how to assign yet.
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
@@ -85,6 +86,10 @@ pub enum SetupMode {
         provider: String,
         /// Passed through to the assignment record verbatim.
         model: String,
+        /// Assign the route to the learning capability instead of the
+        /// dialogue capability. Consent is per capability, so the Owner makes
+        /// this choice explicitly.
+        learning: bool,
     },
 }
 
@@ -118,6 +123,7 @@ pub fn parse_command(words: &[String]) -> Result<Command, CliError> {
 
 fn parse_setup(args: &[String]) -> Result<SetupMode, CliError> {
     let mut show = false;
+    let mut learning = false;
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
     let mut index = 0;
@@ -125,6 +131,10 @@ fn parse_setup(args: &[String]) -> Result<SetupMode, CliError> {
         match args[index].as_str() {
             "--show" => {
                 show = true;
+                index += 1;
+            }
+            "--learning" => {
+                learning = true;
                 index += 1;
             }
             "--provider" => {
@@ -155,7 +165,7 @@ fn parse_setup(args: &[String]) -> Result<SetupMode, CliError> {
         }
     }
     if show {
-        if provider.is_some() || model.is_some() {
+        if provider.is_some() || model.is_some() || learning {
             return Err(CliError::Usage(format!(
                 "setup --show takes no other flags\n{USAGE}"
             )));
@@ -175,6 +185,7 @@ fn parse_setup(args: &[String]) -> Result<SetupMode, CliError> {
             Ok(SetupMode::Assign {
                 provider: name,
                 model: model_name,
+                learning,
             })
         }
         (None, None) => Err(CliError::Usage(format!(
@@ -379,10 +390,16 @@ pub fn credential_id_for(provider: &str) -> String {
     format!("{provider}:{SETUP_CREDENTIAL_LABEL}")
 }
 
-/// `"consent:<provider>:<model>:<credential-id>"` via the shared
+/// Wire name of the dialogue capability in the shared consent grammar.
+pub const CAPABILITY_DIALOGUE: &str = "dialogue";
+
+/// Wire name of the learning capability in the shared consent grammar.
+pub const CAPABILITY_LEARNING: &str = "learning";
+
+/// `"consent:<capability>:<provider>:<model>:<credential-id>"` via the shared
 /// [`consent_target`] grammar (never re-invented here).
-pub fn consent_target_for(provider: &str, model: &str) -> ManagementTargetWire {
-    consent_target(provider, model, &credential_id_for(provider))
+pub fn consent_target_for(capability: &str, provider: &str, model: &str) -> ManagementTargetWire {
+    consent_target(capability, provider, model, &credential_id_for(provider))
 }
 
 /// The Host sources the key from its own environment over the Host-local
@@ -406,17 +423,19 @@ pub fn credential_intent(
 }
 
 /// Provenance-only rationale (origin, no quote): assignment parameters travel
-/// in the consent target, never in the quote.
+/// in the consent target, never in the quote. The capability is explicit so a
+/// dialogue assignment can never stand in for learning.
 pub fn assignment_intent(
     intent_id: CommandWireId,
     base: &BaseViewMark,
+    capability: &str,
     provider: &str,
     model: &str,
 ) -> ManagementIntent {
     ManagementIntent {
         intent_id,
         kind: ManagementIntentKind::ManageRuleConsentCap,
-        target: consent_target_for(provider, model),
+        target: consent_target_for(capability, provider, model),
         base_view: base.clone(),
         rationale: IntentRationaleWire {
             origin: RationaleOrigin::ManagementSurface,
@@ -542,14 +561,14 @@ mod tests {
     use ene_api::v1::refs::{RevalidationReasonWire, RoundWireId};
     use ene_api::v1::round::{HistoryItem, HistoryRole, HistoryView, RoundIntakeOutcomeWire};
 
-    use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
     use super::{
-        DEFAULT_HISTORY_LIMIT, HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent,
-        consent_target_for, credential_id_for, credential_intent, credential_target_for,
-        describe_intake, describe_management, history_request, new_local_id, parse_command,
-        render_history, render_round_history, render_view, setup_view_request, status_view_request,
-        submit_input,
+        CAPABILITY_DIALOGUE, CAPABILITY_LEARNING, DEFAULT_HISTORY_LIMIT, HOST_SETUP_SECTIONS,
+        SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for, credential_id_for,
+        credential_intent, credential_target_for, describe_intake, describe_management,
+        history_request, new_local_id, parse_command, render_history, render_round_history,
+        render_view, setup_view_request, status_view_request, submit_input,
     };
+    use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_string()).collect()
@@ -597,10 +616,35 @@ mod tests {
                     == Command::Setup(SetupMode::Assign {
                         provider: String::from("openai"),
                         model: String::from("gpt-x"),
+                        learning: false,
                     }),
                 "flag order must not matter, got {command:?}"
             );
         }
+    }
+
+    #[test]
+    fn setup_learning_assignment_parses_explicitly() {
+        let command = (parse_command(&args(&[
+            "setup",
+            "--learning",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-x",
+        ])))
+        .expect("learning assign");
+        let Command::Setup(SetupMode::Assign {
+            provider,
+            model,
+            learning,
+        }) = command
+        else {
+            panic!("setup --learning must select an assignment");
+        };
+        assert!(learning, "the learning capability must be explicit");
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "gpt-x");
     }
 
     #[test]
@@ -1037,7 +1081,7 @@ mod tests {
 
     #[test]
     fn request_builders_use_the_bootstrap_companion() {
-        let documented = ["provider", "model", "consent", "credential"];
+        let documented = ["provider", "model", "consent", "credential", "learning"];
         assert!(
             HOST_SETUP_SECTIONS == documented,
             "the requested sections must match the documented Host set: {HOST_SETUP_SECTIONS:?}"
@@ -1049,12 +1093,12 @@ mod tests {
                     .iter()
                     .map(|section| (*section).to_string())
                     .collect::<Vec<String>>(),
-            "setup --show requests the four Host sections: {setup:?}"
+            "setup --show requests the Host sections: {setup:?}"
         );
         let status = status_view_request();
         assert!(
             status.sections == setup.sections,
-            "status requests the same four Host sections: {status:?}"
+            "status requests the same Host sections: {status:?}"
         );
         let history = history_request("companion-1", 7);
         assert!(
@@ -1105,8 +1149,14 @@ mod tests {
             "credential id names the registry ref the register step creates"
         );
         assert!(
-            consent_target_for("openai", "gpt-x").0 == "consent:openai:gpt-x:openai:main",
-            "consent target spells the shared grammar over that credential id"
+            consent_target_for(CAPABILITY_DIALOGUE, "openai", "gpt-x").0
+                == "consent:dialogue:openai:gpt-x:openai:main",
+            "dialogue consent target spells the shared grammar over that credential id"
+        );
+        assert!(
+            consent_target_for(CAPABILITY_LEARNING, "openai", "gpt-x").0
+                == "consent:learning:openai:gpt-x:openai:main",
+            "learning consent target is capability-distinct"
         );
         // Roundtrip through the shared parsers: the builders never bypass
         // Host-side validation.
@@ -1116,13 +1166,17 @@ mod tests {
             "credential target must parse as (provider, label)"
         );
         assert!(
-            ene_api::v1::management::parse_consent_target(&consent_target_for("openai", "gpt-x"))
-                == Some((
-                    String::from("openai"),
-                    String::from("gpt-x"),
-                    String::from("openai:main"),
-                )),
-            "consent target must parse as (provider, model, credential-id)"
+            ene_api::v1::management::parse_consent_target(&consent_target_for(
+                CAPABILITY_DIALOGUE,
+                "openai",
+                "gpt-x"
+            )) == Some((
+                String::from("dialogue"),
+                String::from("openai"),
+                String::from("gpt-x"),
+                String::from("openai:main"),
+            )),
+            "consent target must parse as (capability, provider, model, credential-id)"
         );
     }
 
@@ -1148,16 +1202,28 @@ mod tests {
         let assignment = assignment_intent(
             CommandWireId(uuid::Uuid::new_v4()),
             &base,
+            CAPABILITY_DIALOGUE,
             SETUP_PROVIDER_OPENAI,
             "gpt-x",
         );
         assert!(
             assignment.kind == ManagementIntentKind::ManageRuleConsentCap
-                && assignment.target.0 == "consent:openai:gpt-x:openai:main"
+                && assignment.target.0 == "consent:dialogue:openai:gpt-x:openai:main"
                 && assignment.base_view == base
                 && assignment.rationale.origin == RationaleOrigin::ManagementSurface
                 && assignment.rationale.quote.is_none(),
             "assignment intent carries the consent target and no quote: {assignment:?}"
+        );
+        let learning = assignment_intent(
+            CommandWireId(uuid::Uuid::new_v4()),
+            &base,
+            CAPABILITY_LEARNING,
+            SETUP_PROVIDER_OPENAI,
+            "gpt-x",
+        );
+        assert!(
+            learning.target.0 == "consent:learning:openai:gpt-x:openai:main",
+            "learning assignment names its own capability: {learning:?}"
         );
     }
 

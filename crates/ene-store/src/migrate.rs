@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
-const CURRENT_VERSION: u64 = 9;
+const CURRENT_VERSION: u64 = 10;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -215,6 +215,30 @@ at TEXT NOT NULL,
 PRIMARY KEY (memory_id, revision)
 );
 ";
+/// Capability-scopes the consent assignment and the inference attempt.
+///
+/// Stage 2 kept one logical consent row; every capability now has its own
+/// row, and the duplicate question is capability-scoped too. The rebuild
+/// moves the existing Stage 2 row to the dialogue capability, so an old
+/// environment's dialogue assignment keeps working while learning stays
+/// unassigned until the Owner assigns it. `inference_attempt.capability`
+/// lets the claim read the row for the capability it was admitted under.
+const MIGRATION_V10: &str = "
+CREATE TABLE consent_record_capability (
+capability TEXT PRIMARY KEY,
+id TEXT NOT NULL,
+rev INTEGER NOT NULL,
+provider TEXT NOT NULL,
+model TEXT NOT NULL,
+credential_id TEXT NOT NULL
+);
+INSERT INTO consent_record_capability (capability, id, rev, provider, model, credential_id)
+SELECT 'dialogue', id, rev, provider, model, credential_id FROM consent_record;
+DROP TABLE consent_record;
+ALTER TABLE consent_record_capability RENAME TO consent_record;
+ALTER TABLE inference_attempt ADD COLUMN capability TEXT NOT NULL DEFAULT 'dialogue';
+";
+
 /// Atomic: pending migrations and the version bump commit together in one
 /// transaction, so a crash mid-migration rolls back to the pre-migration
 /// state and the next open retries from scratch. The commit is the sole
@@ -271,6 +295,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 9 {
         tx.execute_batch(MIGRATION_V9)
+            .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 10 {
+        tx.execute_batch(MIGRATION_V10)
             .map_err(|error| error.to_string())?;
     }
     let current =

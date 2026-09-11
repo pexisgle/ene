@@ -272,6 +272,10 @@ pub trait UsageRepository: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceAttempt {
     pub ticket: InferenceTicketId,
+    /// Capability the attempt was admitted under. The claim reads exactly
+    /// this capability's consent row, so a dialogue attempt can never be
+    /// validated against learning consent or vice versa.
+    pub capability: CapabilityKind,
     /// Consent premise the attempt relies on, as an `(id, rev)` pair that
     /// travels together (never a bare revision), so exhaustion stays visible
     /// at the boundary.
@@ -505,13 +509,11 @@ async fn prepare_admission(
     capability: CapabilityKind,
     purpose: PurposeKind,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
-    let record =
-        consent
-            .load_current()
-            .await
-            .map_err(|_| InferenceTechnicalError::StorageUnavailable {
-                reason: String::from("load consent"),
-            })?;
+    let record = consent.load_current(capability).await.map_err(|_| {
+        InferenceTechnicalError::StorageUnavailable {
+            reason: String::from("load consent"),
+        }
+    })?;
     let Some(record) = record else {
         return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
     };
@@ -646,6 +648,7 @@ pub async fn dispatch_authorized(
         return Ok(InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit));
     }
     let ticket = authorized.ticket;
+    let capability = authorized.candidate.capability;
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
     let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
     let command = RequestInferenceCommand {
@@ -666,6 +669,7 @@ pub async fn dispatch_authorized(
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
+            capability,
             expected_consent: (consent_id.clone(), consent_rev),
             provider: provider.clone(),
             model: model.clone(),
@@ -693,7 +697,7 @@ pub async fn dispatch_authorized(
             // recorded before the adoption read: an adoption read failure
             // must not discard what the provider already spent.
             record_usage_decision(usage, arrival.usage.clone()).await;
-            let adopted = consent_matches(consent, &consent_id, consent_rev).await?;
+            let adopted = consent_matches(consent, capability, &consent_id, consent_rev).await?;
             Ok(InferenceDispatchOutcome::Completed { arrival, adopted })
         }
     }
@@ -706,16 +710,15 @@ pub async fn dispatch_authorized(
 /// "unreadable".
 async fn consent_matches(
     consent: &impl ConsentRepository,
+    capability: CapabilityKind,
     id: &str,
     revision: ConsentRevision,
 ) -> Result<bool, InferenceTechnicalError> {
-    let current =
-        consent
-            .load_current()
-            .await
-            .map_err(|_| InferenceTechnicalError::StorageUnavailable {
-                reason: String::from("load consent"),
-            })?;
+    let current = consent.load_current(capability).await.map_err(|_| {
+        InferenceTechnicalError::StorageUnavailable {
+            reason: String::from("load consent"),
+        }
+    })?;
     let Some(current) = current else {
         return Ok(false);
     };
@@ -1003,6 +1006,7 @@ mod dispatch_tests {
 
     fn record(revision: u64) -> ConsentRecord {
         ConsentRecord {
+            capability: CapabilityKind::Dialogue,
             id: String::from("consent-1"),
             rev: ConsentRevision::from_u64(revision),
             provider: String::from("acme"),
@@ -1018,8 +1022,14 @@ mod dispatch_tests {
             clippy::unused_async_trait_impl,
             reason = "in-test fake; async matches the repository contract"
         )]
-        async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
-            Ok(self.0.clone())
+        async fn load_current(
+            &self,
+            capability: CapabilityKind,
+        ) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+            Ok(self
+                .0
+                .clone()
+                .filter(|consent| consent.capability == capability))
         }
 
         #[expect(
@@ -1197,12 +1207,13 @@ mod admission_tests {
         CredentialRef, CredentialRefRepository, CredentialTechnicalError, MemoryCredentialStore,
     };
     use ene_permission::{
-        ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+        CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
         PermissionTechnicalError,
     };
 
-    fn record() -> ConsentRecord {
+    fn record_for(capability: CapabilityKind) -> ConsentRecord {
         ConsentRecord {
+            capability,
             id: String::from("consent-1"),
             rev: ConsentRevision::from_u64(1),
             provider: String::from("acme"),
@@ -1218,8 +1229,14 @@ mod admission_tests {
             clippy::unused_async_trait_impl,
             reason = "in-test fake; async matches the repository contract"
         )]
-        async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
-            Ok(self.0.clone())
+        async fn load_current(
+            &self,
+            capability: CapabilityKind,
+        ) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+            Ok(self
+                .0
+                .clone()
+                .filter(|consent| consent.capability == capability))
         }
 
         #[expect(
@@ -1279,9 +1296,9 @@ mod admission_tests {
     }
 
     #[tokio::test]
-    async fn learning_admission_resolves_the_shared_provider_assignment() {
+    async fn learning_admission_resolves_the_learning_assignment() {
         let (credential_store, credential) = provisioned();
-        let consent = FixedConsent(Some(record()));
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Learning)));
         let refs = FixedRefs(vec![credential]);
         let prepared = prepare_learning_admission(&consent, &refs, &credential_store).await;
         let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
@@ -1295,9 +1312,24 @@ mod admission_tests {
     }
 
     #[tokio::test]
+    async fn dialogue_consent_does_not_prepare_a_learning_admission() {
+        // Same provider, model, credential, and bearer: only the capability
+        // differs, and capability-scoped consent must not be borrowed.
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
+        let refs = FixedRefs(vec![credential]);
+        let prepared = prepare_learning_admission(&consent, &refs, &credential_store).await;
+        assert_eq!(
+            prepared,
+            Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
+            "a dialogue assignment never authorizes learning formation"
+        );
+    }
+
+    #[tokio::test]
     async fn dialogue_admission_still_resolves_its_own_consumer() {
         let (credential_store, credential) = provisioned();
-        let consent = FixedConsent(Some(record()));
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
         let refs = FixedRefs(vec![credential]);
         let prepared = prepare_dialogue_admission(&consent, &refs, &credential_store).await;
         let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
@@ -1328,9 +1360,12 @@ mod admission_tests {
         let credential_store = MemoryCredentialStore::new();
         let credential = CredentialRef::new("acme", "main").expect("valid test fixture");
         let refs = FixedRefs(vec![credential]);
-        let prepared =
-            prepare_learning_admission(&FixedConsent(Some(record())), &refs, &credential_store)
-                .await;
+        let prepared = prepare_learning_admission(
+            &FixedConsent(Some(record_for(CapabilityKind::Learning))),
+            &refs,
+            &credential_store,
+        )
+        .await;
         assert_eq!(
             prepared,
             Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
@@ -1359,7 +1394,10 @@ mod admission_tests {
             clippy::unused_async_trait_impl,
             reason = "in-test fake; async matches the repository contract"
         )]
-        async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+        async fn load_current(
+            &self,
+            _capability: CapabilityKind,
+        ) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
             Err(PermissionTechnicalError::StorageUnavailable {
                 reason: String::from("consent store down"),
             })

@@ -14,7 +14,9 @@ use ene_learning::{
     LearningTechnicalError, MemoryChange, MemoryChangeCommit, MemoryChangeOutcome, MemoryId,
     MemoryRevision, MemoryTarget, SourceRangeRef, SummaryId, SummaryRecord, TemporalMeaning,
 };
-use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
+use ene_permission::{
+    CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+};
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
     PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
@@ -448,6 +450,7 @@ async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
 
 fn consent_record(id: &str, rev: u64) -> ConsentRecord {
     ConsentRecord {
+        capability: CapabilityKind::Dialogue,
         id: String::from(id),
         rev: ConsentRevision::from_u64(rev),
         provider: String::from("acme"),
@@ -459,7 +462,7 @@ fn consent_record(id: &str, rev: u64) -> ConsentRecord {
 #[tokio::test]
 async fn consent_compare_and_save_commit_and_stale_matrix() {
     let store = open_memory().await.unwrap();
-    let empty = store.load_current().await;
+    let empty = store.load_current(CapabilityKind::Dialogue).await;
     assert!(matches!(empty, Ok(None)), "fresh store holds no consent");
     let first = consent_record("consent-1", 3);
     let committed = store.compare_and_save(None, first.clone()).await;
@@ -470,7 +473,7 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
         ),
         "empty store with no expectation must commit"
     );
-    let loaded = store.load_current().await;
+    let loaded = store.load_current(CapabilityKind::Dialogue).await;
     assert!(matches!(loaded, Ok(Some(ref current)) if *current == first));
     let intruder = consent_record("consent-9", 1);
     let unexpected = store.compare_and_save(None, intruder).await;
@@ -523,7 +526,7 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
         ),
         "id mismatch must be stale"
     );
-    let kept = store.load_current().await;
+    let kept = store.load_current(CapabilityKind::Dialogue).await;
     assert!(
         matches!(kept, Ok(Some(ref current)) if *current == next),
         "stale attempts must leave the stored row untouched"
@@ -547,7 +550,7 @@ async fn consent_compare_and_save_expected_but_empty_is_stale() {
         ),
         "an expectation against an empty store must be stale"
     );
-    let empty = store.load_current().await;
+    let empty = store.load_current(CapabilityKind::Dialogue).await;
     assert!(matches!(empty, Ok(None)), "stale save must store nothing");
 }
 
@@ -1087,7 +1090,10 @@ INSERT INTO _schema_version (version) VALUES (2);",
     let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
         row.get::<_, i64>(0)
     });
-    assert!(matches!(version, Ok(9)), "migration must record version 9");
+    assert!(
+        matches!(version, Ok(10)),
+        "migration must record version 10"
+    );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
             (),
@@ -1397,7 +1403,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(9),
+        Some(10),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1448,8 +1454,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
         row.get::<_, i64>(0)
     });
     assert!(
-        matches!(version, Ok(9)),
-        "reopened database must record schema version 9"
+        matches!(version, Ok(10)),
+        "reopened database must record schema version 10"
     );
 }
 
@@ -1551,13 +1557,13 @@ async fn intent_outcome_roundtrips_and_refreshes() {
             fingerprint: IntentFingerprint {
                 intent_id: String::from("intent-1"),
                 kind: String::from("assign"),
-                target: String::from("consent:openai:dialogue-1:openai:main"),
+                target: String::from("consent:dialogue:openai:dialogue-1:openai:main"),
                 base: String::from("consent-none"),
                 rationale_origin: String::from("management-surface"),
                 rationale_quote: None,
             },
             outcome: IntentOutcome::StoredAsRuleView {
-                revision: String::from("1"),
+                revision: String::from("consent-dialogue-rev-1"),
             },
         }
     }
@@ -1593,7 +1599,7 @@ async fn intent_outcome_roundtrips_and_refreshes() {
         "the original row must survive, got {found:?}"
     );
     let mut other = record();
-    other.fingerprint.target = String::from("consent:openai:other:openai:main");
+    other.fingerprint.target = String::from("consent:dialogue:openai:other:openai:main");
     other.outcome = IntentOutcome::HeldByOperation;
     let conflicted = store.record_intent_outcome(other).await;
     assert!(
@@ -1622,13 +1628,13 @@ async fn assign_with_intent_commits_marker_atomically() {
             fingerprint: IntentFingerprint {
                 intent_id: String::from("assign-1"),
                 kind: String::from("assign"),
-                target: String::from("consent:openai:dialogue-1:openai:main"),
+                target: String::from("consent:dialogue:openai:dialogue-1:openai:main"),
                 base: String::from("consent-none"),
                 rationale_origin: String::from("management-surface"),
                 rationale_quote: None,
             },
             outcome: IntentOutcome::StoredAsRuleView {
-                revision: String::from("1"),
+                revision: String::from("consent-dialogue-rev-1"),
             },
         }
     }
@@ -1638,6 +1644,7 @@ async fn assign_with_intent_commits_marker_atomically() {
         .assign_with_intent(
             None,
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-1"),
                 rev: ConsentRevision::from_u64(1),
                 provider: String::from("openai"),
@@ -1665,6 +1672,7 @@ async fn assign_with_intent_commits_marker_atomically() {
         .assign_with_intent(
             None,
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-1"),
                 rev: ConsentRevision::from_u64(2),
                 provider: String::from("openai"),
@@ -1693,7 +1701,7 @@ async fn assign_with_intent_commits_marker_atomically() {
             Ok(Some(ref stored))
                 if stored.outcome
                     == IntentOutcome::StaleBaseView {
-                        current: String::from("consent-rev-1"),
+                        current: String::from("consent-dialogue-rev-1"),
                     }
         ),
         "stale assign must leave its stale snapshot, got {stale_row:?}"
@@ -1704,6 +1712,7 @@ async fn assign_with_intent_commits_marker_atomically() {
         .assign_with_intent(
             None,
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-9"),
                 rev: ConsentRevision::from_u64(9),
                 provider: String::from("other"),
@@ -1724,6 +1733,7 @@ async fn assign_with_intent_commits_marker_atomically() {
         .assign_with_intent(
             None,
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-9"),
                 rev: ConsentRevision::from_u64(9),
                 provider: String::from("other"),
@@ -1731,7 +1741,7 @@ async fn assign_with_intent_commits_marker_atomically() {
                 credential_id: String::from("other"),
             },
             IntentFingerprint {
-                target: String::from("consent:openai:changed:openai:main"),
+                target: String::from("consent:dialogue:openai:changed:openai:main"),
                 ..intent().fingerprint
             },
         )
@@ -1748,7 +1758,7 @@ async fn assign_with_intent_commits_marker_atomically() {
         matches!(preserved, Ok(Some(ref stored)) if *stored == intent()),
         "conflict must not rewrite the row, got {preserved:?}"
     );
-    let timeline = store.load_current().await;
+    let timeline = store.load_current(CapabilityKind::Dialogue).await;
     assert!(
         matches!(
             timeline,
@@ -1777,7 +1787,7 @@ async fn concurrent_same_id_assigns_fork_nothing() {
         let fingerprint = IntentFingerprint {
             intent_id: String::from("race-1"),
             kind: String::from("assign"),
-            target: String::from("consent:openai:dialogue-1:openai:main"),
+            target: String::from("consent:dialogue:openai:dialogue-1:openai:main"),
             base: String::from("consent-none"),
             rationale_origin: String::from("management-surface"),
             rationale_quote: None,
@@ -1787,6 +1797,7 @@ async fn concurrent_same_id_assigns_fork_nothing() {
                 .assign_with_intent(
                     None,
                     ConsentRecord {
+                        capability: CapabilityKind::Dialogue,
                         id: String::from("consent-1"),
                         rev: ConsentRevision::from_u64(1),
                         provider: String::from("openai"),
@@ -1870,6 +1881,7 @@ async fn complete_with_intent_decides_atomically() {
         .compare_and_save(
             None,
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-1"),
                 rev: ConsentRevision::from_u64(1),
                 provider: String::from("openai"),
@@ -1922,7 +1934,7 @@ async fn complete_with_intent_decides_atomically() {
             stale,
             Ok(IntentResolution::Decided(ref decided)) if decided.outcome
                 == IntentOutcome::StaleBaseView {
-                    current: String::from("consent-rev-1"),
+                    current: String::from("consent-dialogue-rev-1"),
                 }
         ),
         "moved base must report stale with the current mark, got {stale:?}"
@@ -1930,7 +1942,7 @@ async fn complete_with_intent_decides_atomically() {
     let found = store.lookup_intent_outcome("c-3").await;
     assert!(
         matches!(found, Ok(Some(ref stored)) if stored.outcome == IntentOutcome::StaleBaseView {
-            current: String::from("consent-rev-1"),
+            current: String::from("consent-dialogue-rev-1"),
         }),
         "the stale decision must leave its replay row"
     );
@@ -1947,7 +1959,7 @@ async fn shortcut_with_intent_hits_atomically() {
         IntentFingerprint {
             intent_id: id.to_owned(),
             kind: String::from("assign"),
-            target: String::from("consent:openai:dialogue-1:openai:main"),
+            target: String::from("consent:dialogue:openai:dialogue-1:openai:main"),
             base: String::from("consent-rev-1"),
             rationale_origin: String::from("management-surface"),
             rationale_quote: None,
@@ -1959,6 +1971,7 @@ async fn shortcut_with_intent_hits_atomically() {
         .compare_and_save(
             None,
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-1"),
                 rev: ConsentRevision::from_u64(1),
                 provider: String::from("openai"),
@@ -1973,6 +1986,7 @@ async fn shortcut_with_intent_hits_atomically() {
     );
     let hit = store
         .shortcut_with_intent(
+            CapabilityKind::Dialogue,
             String::from("openai"),
             String::from("dialogue-1"),
             String::from("openai:main"),
@@ -1993,13 +2007,14 @@ async fn shortcut_with_intent_hits_atomically() {
             Ok(Some(ref stored))
                 if stored.outcome
                     == IntentOutcome::StoredAsRuleView {
-                        revision: String::from("1"),
+                        revision: String::from("consent-dialogue-rev-1"),
                     }
         ),
         "the hit must leave its snapshot, got {found:?}"
     );
     let miss = store
         .shortcut_with_intent(
+            CapabilityKind::Dialogue,
             String::from("openai"),
             String::from("dialogue-9"),
             String::from("openai:main"),
@@ -2034,6 +2049,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
         .compare_and_save(
             None,
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-1"),
                 rev: ConsentRevision::from_u64(1),
                 provider: String::from("openai"),
@@ -2048,6 +2064,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
     );
     let claim = |ticket: InferenceTicketId, rev: u64| InferenceAttempt {
         ticket,
+        capability: CapabilityKind::Dialogue,
         expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(rev)),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
@@ -2067,6 +2084,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
         .compare_and_save(
             Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
             ConsentRecord {
+                capability: CapabilityKind::Dialogue,
                 id: String::from("consent-1"),
                 rev: ConsentRevision::from_u64(2),
                 provider: String::from("openai"),
@@ -2245,8 +2263,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
         row.get::<_, i64>(0)
     });
     assert!(
-        matches!(version, Ok(9)),
-        "reopened database must record schema version 9"
+        matches!(version, Ok(10)),
+        "reopened database must record schema version 10"
     );
 }
 
@@ -2894,9 +2912,19 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     let path = dir.path().join("legacy.db");
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        // A realistic v8 database carries the v7 attempt table the v10
+        // migration alters; only the v9 learning group is still missing.
         conn.execute_batch(
             "CREATE TABLE _schema_version (version INTEGER NOT NULL);
-             INSERT INTO _schema_version (version) VALUES (8);",
+             INSERT INTO _schema_version (version) VALUES (8);
+             CREATE TABLE inference_attempt (
+               ticket TEXT PRIMARY KEY,
+               consent_id TEXT NOT NULL,
+               consent_rev INTEGER NOT NULL,
+               provider TEXT NOT NULL,
+               model TEXT NOT NULL,
+               started_at TEXT NOT NULL
+             );",
         )
         .unwrap();
     }
@@ -2905,7 +2933,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(None), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(9),
+        Some(10),
         "migration advances the schema version"
     );
     assert!(
@@ -2919,5 +2947,48 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert!(
         !table_columns(&path, "learning_summary").is_empty(),
         "learning_summary is created"
+    );
+}
+
+#[tokio::test]
+async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _schema_version (version INTEGER NOT NULL);
+             INSERT INTO _schema_version (version) VALUES (9);
+             CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
+             INSERT INTO consent_record VALUES ('consent-1', 1, 'openai', 'gpt-x', 'openai:main');
+             CREATE TABLE inference_attempt (
+               ticket TEXT PRIMARY KEY,
+               consent_id TEXT NOT NULL,
+               consent_rev INTEGER NOT NULL,
+               provider TEXT NOT NULL,
+               model TEXT NOT NULL,
+               started_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).await.unwrap();
+    assert_eq!(read_schema_version(&path), Some(10));
+    let dialogue = store
+        .load_current(CapabilityKind::Dialogue)
+        .await
+        .unwrap()
+        .expect("the Stage 2 row must survive as the dialogue assignment");
+    assert_eq!(dialogue.id, "consent-1");
+    assert_eq!(dialogue.capability, CapabilityKind::Dialogue);
+    assert_eq!(dialogue.provider, "openai");
+    assert_eq!(
+        store.load_current(CapabilityKind::Learning).await,
+        Ok(None),
+        "an existing environment starts with learning unassigned"
+    );
+    assert!(
+        table_columns(&path, "consent_record").contains(&String::from("capability")),
+        "the rebuilt consent table is capability-scoped"
     );
 }

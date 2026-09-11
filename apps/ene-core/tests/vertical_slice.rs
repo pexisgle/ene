@@ -177,6 +177,7 @@ async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), St
         WirePayload::ManagementIntent(cmds::assignment_intent(
             CommandWireId(uuid::Uuid::new_v4()),
             &BaseViewMark(mark),
+            cmds::CAPABILITY_DIALOGUE,
             "openai",
             MODEL,
         )),

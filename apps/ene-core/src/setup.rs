@@ -67,9 +67,9 @@ use ene_credential::{
     available_credential,
 };
 use ene_permission::{
-    AssignConsentIntent, AssignConsentResolution, ConsentRepository, IntentFingerprint,
-    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution, assign_consent,
-    consent_mark_rev,
+    AssignConsentIntent, AssignConsentResolution, CapabilityKind, ConsentRecord, ConsentRepository,
+    IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
+    IntentResolution, assign_consent, consent_view_mark,
 };
 use ene_plugin_ipc::WireFrame;
 
@@ -91,6 +91,17 @@ fn outcome_frame(
 
 fn view_frame(frame: &WireFrame, live: &LiveInput, view: ManagementView) -> WireFrame {
     outgoing_frame(frame, live, WirePayload::ManagementView(view))
+}
+
+/// One parsed consent assignment target: capability plus route.
+///
+/// Keeps the assignment parameters grouped so the capability can never be
+/// separated from the route it authorizes at the call boundary.
+struct ConsentTarget {
+    capability: CapabilityKind,
+    provider: String,
+    model: String,
+    credential_id: String,
 }
 
 impl HostHandle {
@@ -334,7 +345,9 @@ impl HostHandle {
         if target == SETUP_COMPLETE_TARGET {
             return self.complete_setup(frame, intent, live).await;
         }
-        let Some((provider, model, credential_id)) = parse_consent_target(&intent.target) else {
+        let Some((capability, provider, model, credential_id)) =
+            parse_consent_target(&intent.target)
+        else {
             // Malformed targets decide Clarify like any other outcome: the
             // row closes the hole where a retry could otherwise swap in a
             // valid target under the same id and reach assign. Recorded
@@ -351,8 +364,28 @@ impl HostHandle {
                 .await,
             )];
         };
-        self.assign_consent(frame, intent, &provider, &model, &credential_id, live)
-            .await
+        let Some(capability) = CapabilityKind::from_name(&capability) else {
+            // Unknown capabilities are outside the closed world; a retry
+            // under the same id observes the same clarification.
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_ASSIGN,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )];
+        };
+        let target = ConsentTarget {
+            capability,
+            provider,
+            model,
+            credential_id,
+        };
+        self.assign_consent(frame, intent, &target, live).await
     }
 
     /// Durable-before-visible: a store failure answers
@@ -387,11 +420,15 @@ impl HostHandle {
         &self,
         frame: &WireFrame,
         intent: &ManagementIntent,
-        provider: &str,
-        model: &str,
-        credential_id: &str,
+        target: &ConsentTarget,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
+        let ConsentTarget {
+            capability,
+            provider,
+            model,
+            credential_id,
+        } = target;
         // Durable intent replay first (§18.2): the stored snapshot precedes
         // every premise read, so a past-success exact retry reaches its prior
         // outcome even after credential state moved on. A hit with the same
@@ -448,8 +485,10 @@ impl HostHandle {
             }
         };
         // The consent owner decides the route: mark parsing, stale faces,
-        // same-route shortcut, revision bump, and the atomic commit.
+        // same-route shortcut, revision bump, and the atomic commit, all
+        // scoped to the capability the target names.
         let premises = AssignConsentIntent {
+            capability: *capability,
             provider: provider.to_string(),
             model: model.to_string(),
             credential_id: credential_id.to_string(),
@@ -523,7 +562,7 @@ impl HostHandle {
         // Bearer premise for the atomic claim below: the credential owner
         // resolves registered-and-backed availability; the transaction
         // decides completion. Unreadable stores hold.
-        let bearer_present = match self.store.load_current().await {
+        let bearer_present = match self.store.load_current(CapabilityKind::Dialogue).await {
             Err(_) => {
                 return vec![outcome_frame(
                     frame,
@@ -603,30 +642,30 @@ impl HostHandle {
     }
 
     /// Bodies carry display facts only — provider, model, consent revision,
-    /// credential presence plus the bearer-source note — never secrets. The
-    /// mark mirrors the consent revision so consent writes can check
-    /// `base_view` staleness against it.
+    /// credential presence plus the bearer-source note — never secrets. Each
+    /// capability owns its section and consent revision; the mark carries
+    /// both segments so a consent write is checked against the capability it
+    /// names.
     pub(crate) async fn build_view(&self, wanted: &[String]) -> ManagementView {
-        let Ok(current) = self.store.load_current().await else {
+        let dialogue = match self.store.load_current(CapabilityKind::Dialogue).await {
+            Ok(record) => record,
+            Err(_) => return unavailable_view(),
+        };
+        let learning = match self.store.load_current(CapabilityKind::Learning).await {
+            Ok(record) => record,
+            Err(_) => return unavailable_view(),
+        };
+        let Some(dialogue_present) = self.credential_present(dialogue.as_ref()).await else {
             return unavailable_view();
         };
-        let credential_present = match &current {
-            Some(record) => {
-                match available_credential(
-                    &record.provider,
-                    &record.credential_id,
-                    &self.store,
-                    &self.cred_store,
-                )
-                .await
-                {
-                    Ok(found) => found.is_some(),
-                    Err(_) => return unavailable_view(),
-                }
-            }
-            None => false,
+        let Some(learning_present) = self.credential_present(learning.as_ref()).await else {
+            return unavailable_view();
         };
-        let (provider_text, model_text, consent_text) = match &current {
+        let source = match &self.cred_store {
+            CredStore::Env(_) => "env-sourced",
+            CredStore::Memory(_) => "memory",
+        };
+        let (provider_text, model_text, consent_text) = match &dialogue {
             Some(record) => (
                 record.provider.clone(),
                 record.model.clone(),
@@ -638,21 +677,30 @@ impl HostHandle {
                 String::from("none"),
             ),
         };
-        let mark_text = consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64()));
-        let source = match &self.cred_store {
-            CredStore::Env(_) => "env-sourced",
-            CredStore::Memory(_) => "memory",
+        let learning_text = match &learning {
+            Some(record) => format!(
+                "provider={} model={} consent=rev {} credential={}",
+                record.provider,
+                record.model,
+                record.rev.as_u64(),
+                presence_text(learning_present, source),
+            ),
+            None => String::from("unconfigured"),
         };
-        let credential_text = if credential_present {
-            format!("present ({source})")
-        } else {
-            String::from("absent")
-        };
+        let mark_text = consent_view_mark(
+            dialogue.as_ref().map(|record| record.rev.as_u64()),
+            learning.as_ref().map(|record| record.rev.as_u64()),
+        );
         let candidates = [
             ("provider", "Provider", provider_text),
             ("model", "Model", model_text),
             ("consent", "Consent", consent_text),
-            ("credential", "Credential", credential_text),
+            (
+                "credential",
+                "Credential",
+                presence_text(dialogue_present, source),
+            ),
+            ("learning", "Learning", learning_text),
         ];
         let sections = candidates
             .into_iter()
@@ -667,6 +715,33 @@ impl HostHandle {
             mark: ViewMarkWire(mark_text),
             sections,
         }
+    }
+
+    /// Credential presence for one consent route, `None` when the premise
+    /// cannot be resolved (the caller answers an unavailable view).
+    async fn credential_present(&self, record: Option<&ConsentRecord>) -> Option<bool> {
+        let Some(record) = record else {
+            return Some(false);
+        };
+        match available_credential(
+            &record.provider,
+            &record.credential_id,
+            &self.store,
+            &self.cred_store,
+        )
+        .await
+        {
+            Ok(found) => Some(found.is_some()),
+            Err(_) => None,
+        }
+    }
+}
+
+fn presence_text(present: bool, source: &str) -> String {
+    if present {
+        format!("present ({source})")
+    } else {
+        String::from("absent")
     }
 }
 
