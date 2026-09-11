@@ -222,7 +222,8 @@ struct ProposeExperienceCandidate {
 }
 
 enum FormationDecision {
-    FormedAs(Vec<(LearningId, LearningRevision)>), // 形成・変更した状態（Summary 対応付き）
+    Formed { summary: SummaryId },   // Summary evidence を保存し、少なくとも1件の変更を適用した
+    NoChangesApplied,                // compare-before-commit 敗北・対象欠落・scope 不一致・既存・revision 枯渇など。何も保存していない
     DeferredForContext,              // 文脈不足で保留（再提出は新 Experience 扱いにしない）
     DeclinedAsNoEndValue,            // 保存価値なし（全件保存を要求しない）
     HeldByErasureOrConstraint(HoldConditionRef), // 消去区間・保存禁止・非共有で制限
@@ -373,14 +374,13 @@ struct ProposeControlChangeCommand {
 
 enum ControlChangeDecision {
     AppliedAsOneTimeApproval,        // 現在の明確な依頼の一回限りの承認
-    StoredAsRule(RuleRevision),      // 解釈・適用範囲表示・Undo 付き
     NeedsClarification,              // 曖昧・矛盾・過度に広い・重大
     DeniedByBoundary,                // 永続 Deny・Always ask・Capability 境界の黙上書きに当たる
 }
 ```
 
 - 開始：入出力・提示＋個体調整・作業（意図供給）。判断：権限・制約。LLM 出力・Learning・Character・Skill・外部 content は材料であり、Owner 由来の管理意図との対応なしに control plane を変更できない。Rule 保存自体は Action の trigger にしない。
-- Rule store の identity 型（`RuleId`）は rule store 導入 stage で再導入する。
+- Rule store の identity 型（`RuleId`）・`StoredAsRule` decision・K-B の `rule_revision` expected 欄は rule store 導入 stage で再導入する。
 
 ### K-B 現在の利用可否の照合（live authorization check）
 
@@ -394,7 +394,6 @@ struct CheckLiveAuthorizationQuery {
     delegation: Option<DelegationId>,
     workspace: Option<WorkspaceAssocId>,
     presence: Option<PresenceCheckRef>, // Client 依存なら claimed generation＋現接続前提
-    rule_revision: Option<RuleRevisionExpectation>, // 依拠 Rule の expected revision
     consent_revision: Option<ConsentRevisionExpectation>,
     cap_context: CapCheckContextRef, // 費用・資源・並列・反復の上限照合用
     hold_context: HoldCheckContextRef, // 失効・停止・消去・復元保留の照合用
@@ -465,31 +464,42 @@ struct ResolvedRouteCandidate {
 最初の送信・再送・補助推論・継続的な送受信の各継続部分もそれぞれ実際の利用として成立させる。fallback（K-F）は Stage 16（Multi-provider / fallback / full cost cap）で再導入する。
 
 ```rust
-struct RequestInferenceCommand {
-    ticket: InferenceTicketRef,      // 長時間処理の durable 対応（第12節）。新規なら発行要求
-    consumer: UsageConsumer,
-    logical_context: LogicalContextRef, // 利用元が定めた用途と論理的 context（正本ではない）
-    resolved_route: ResolvedRouteCandidate, // 解決済み経路（写し）
-    credential_availability: CredentialAvailabilityRef, // 現在の認証用途・制限
-    cost_premise: CostPremiseRef,    // 予約対応（K-G）
-    hold_context: HoldCheckContextRef,
+struct AdmissionRequest {
+    candidate: InferenceUseCandidate, // consumer・用途・論理 context・capability の対応（写し）
+    // consent / credential premise は admission が読む確定材料。
+    // 秘密値・permission 内部を利用元へ返さない。
 }
 
-enum InferenceUseOutcome {
-    SentAndCompleted(InferenceResultArrival),
-    SentButCompletionPending(InferenceTicketRef), // 長時間・継続部分。completion は別 interface
-    NotSent(NeedsRevalidationRef),   // 同意・cap・保留・帰属・消去条件の不一致
-    InsufficientCapability(CapabilityGapRef),
+enum Admission {
+    Admitted(Box<AuthorizedInference>), // 確定済み前提（ticket・consent premise・provider/model・candidate）
+    Declined(NotSentReason),            // 前提不足・失効・allowlist 外。送信前に落下し副作用を残さない
+}
+
+struct InferenceAttempt {
+    ticket: InferenceTicketRef,
+    capability: CapabilityKind,
+    expected_consent: ConsentPremise,               // (id, rev) を組で運ぶ
+    expected_credential_set: CredentialSetRevision, // prompt が scrub された credential set
+    provider: ProviderRouteRef,
+    model: ProviderRouteRef,
+}
+
+enum InferenceDispatchOutcome {
+    Completed {
+        arrival: InferenceResultArrival,
+        adopted: bool, // await 後の adoption consent が成立したか
+    },
+    NotSent(NotSentReason), // 送信前に拒否。usage fact を残さない
 }
 
 struct InferenceResultArrival {
     ticket: InferenceTicketRef,      // 元要求・範囲との対応
-    result_ref: InferenceOutputRef,  // 送信表現・Provider 側 context・戻り結果と元要求・情報範囲の対応
-    usage_fact: UsageFactRef,        // 報告 / 不明の区別付き
+    output_text: ProviderOutputRef,  // 送信表現・Provider 側 context・戻り結果と元要求・情報範囲の対応
+    usage: UsageFactRef,             // 報告 / 不明の区別付き
 }
 ```
 
-- 送信手順：admission が現在の consent revision・credential premise・K-B の single-use authorization を確定し、attempt claim が保存 consent との一致を確定してから送信する。送信時点で `resolved_route` と candidate、consent revision を再照合しない（admission / claim との二重 gate を作らない）。
+- 送信手順：admission が現在の consent / credential premise と K-B の single-use authorization を確定して `Admission` を返し、attempt claim が保存 consent・credential set との一致を単一 transaction で確定してから `ProviderTransport` で送信する。input cap は claim 前、prompt の credential-set premise は claim と同一 transaction で照合する。claim 後の provider I/O は lock なし並列に行い、送信時点で権限・route を再 gate しない（admission / claim との二重 gate を作らない）。await 後の adoption consent 不成立は結果の採用だけを止め、usage 記録は attempt に従う。
 - setup completeness（consent 記録・credential 登録・bearer の有無）の判定は admission が唯一の owner であり、不足は `NotSent` として送信前に処理する。permission の live check は consent 状態だけを判定する。
 - 参照できたことと送れることの区別、解決済み送信先の包括許可化の禁止、同意不足の本文削減による黙解消の禁止。Prompt cache・session は最適化に限る。判定用推論にも自身の割当同意・認証用途・費用制限を適用する。
 
@@ -533,7 +543,7 @@ enum ReservationOutcome {
 
 struct CommitUsageCommand {
     reservation: ReservationId,
-    actual: UsageActualRef,          // 報告値 / 推定 / 不明の別
+    actual: UsageActualRef,          // 報告値 / 不明の別（推定は provider 実測が入る stage で再導入）
 }
 
 struct ReleaseUsageCommand {
@@ -1066,7 +1076,7 @@ struct ManagementOperationCommand {
 | K-B live check | ● Task/Rule/consent の expected revision | ○ presence/restore/sweep タグ | ● 実行主体・委任・Task・Workspace | ● 目的・対象・操作・data・送信先・費用 | ○ attempt 前提 | — | ● 失効・停止・cap・保留 |
 | K-C 秘密利用 | ○ `CredentialRef`（非秘密）＋用途 | — | ● 接続・用途 | ● 認証用途の制限 | ○ 操作種別 | ○ 認証成功/失敗・再認証要否 | ● 失効・保留 |
 | K-D/E/F 推論 | ○ consent expected revision | ○ restore/sweep タグ | ● consumer・Capability | ● 用途・data・送信先・取扱い・費用 | ○ ticket | ○ 不足・失敗・利用量 | ● 禁止・cap・保留・消去 |
-| K-G 予約 | ○ `CapId`＋帰属 | — | ● consumer・用途・送信先 | ● 上限・引当量 | ○ reservation | ○ 報告/推定/不明/処理中 | ● cap・不明 |
+| K-G 予約 | ○ `CapId`＋帰属 | — | ● consumer・用途・送信先 | ● 上限・引当量 | ○ reservation | ○ 報告/不明/処理中 | ● cap・不明 |
 | K-H Action開始 | ● Task revision・Rule/consent expected | ● presence＋restore＋sweep（該当分） | ● 主体・委任・Task・Workspace | ● 目的・実対象・操作・data・送信先・費用 | ● relied evaluation＋reservation | —（開始時点） | ● 失効・停止・cap・保留・消去・復元 |
 | K-H 結果確定 | ● `attempt`＋expected certainty | ○ 世代タグ | ● Task・委任 | ● 対象・作用の対応 | ● prior_unknown | ● Confirmed/Unknown | ● Cancel・再実行条件 |
 | X-A 移動 | ● `(CompanionId, expected_generation+state)` | ● `PresenceGeneration` | ● 対象個体・移動元先 | ● 移動理由 | ○ round 閉鎖対応 | ○ 到達性・排他性 | ● pairing・device・停止・保留 |
@@ -1110,7 +1120,7 @@ fn request_action(cmd: ExecuteActionCommand)
 | Experience・訂正・scope | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | Formed / Deferred / Declined / Corrected / KeptAsCompanion / DeniedByExplicitConstraint / StaleTarget / HeldByErasure |
 | Permission live check | `LiveAuthorizationDecision` | AllowForThisUse / Deny / AskOwner / WaitForCondition / NeedsRevalidation |
 | 秘密利用 | `AuthenticatedUseOutcome` | UsedWithinScope / NeedsReauthentication / DeniedByConstraint / StaleReference |
-| 推論・fallback | `InferenceUseOutcome`、`FallbackDecision` | SentAndCompleted / SentButCompletionPending / NotSent / InsufficientCapability / AllowedAsApprovedFallback / DeniedAsUnapprovedRoute |
+| 推論・fallback | `InferenceDispatchOutcome`、`FallbackDecision` | Completed / NotSent / AllowedAsApprovedFallback / DeniedAsUnapprovedRoute |
 | 予約・確定・解放 | `ReservationOutcome` | Reserved / DeniedByCap / HeldForUnknownCost / NeedsRevalidation |
 | Action 開始・確定 | `ActionStartOutcome`、`LateArrivalHandling` | StartedAsAttempt / Denied / AskOwner / StalePremise / HeldByGlobalHold / RecordedToOriginal / KeptUnknownWithDupRisk / SuppressedByErasure |
 | presence・round | `MoveDecision`、`RoundIntakeOutcome` | TransitioningToNew / RejectedAsStalePresence / DeniedByConstraint / AcceptedForRound / StaleRound / HeldForTransition |
@@ -1139,7 +1149,7 @@ fn request_action(cmd: ExecuteActionCommand)
 
 | 長時間処理 | request（開始） | completion / result（到着） | 戻れる対応（durable） |
 |---|---|---|---|
-| 推論（単発・継続・fallback・再送） | `RequestInferenceCommand`（ticket 発行・予約・admission の前提確定） | `InferenceResultArrival`（ticket→結果・利用量） | `(ticket, consumer, Task/委任対応, 用途, revision/generation 前提, provenance)`。PR Group F/I、CI §6.4 の世代タグ |
+| 推論（単発・継続・fallback・再送） | `AdmissionRequest` / `AuthorizedInference` → attempt claim（ticket 発行・予約・admission の前提確定） | `InferenceResultArrival`（ticket→結果・利用量） | `(ticket, consumer, Task/委任対応, 用途, revision/generation 前提, provenance)`。PR Group F/I、CI §6.4 の世代タグ |
 | Task 委任・Task Agent | `CreateDelegationCommand`（expected revision の atomic compare） | `TaskAgentResultArrival`（delegation→現在 Task の受入） | `(delegation, TaskRef 前提, scope 写し, attempt 対応, 目的)`。PR Group D、CI §5.3 |
 | Action 試行・外部 Tool・Computer Use | `ExecuteActionCommand`（開始前 atomic compare）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（per-attempt CAS）＋ `LateArrivalAttribution`（遅延帰属） | `(attempt, Task revision 前提, 実対象・操作, 依拠 Permission, presence/restore 世代, prior_unknown)`。PR Group E |
 | Backup 作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点・参照・未完了の対応が揃って成功） | `(backup_point, 対象時点・参照対応・除外・未完了状況)`。PR Group J |
@@ -1446,7 +1456,7 @@ crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定め
 
 1. 入出力・提示が `SubmitClientInputCandidate(companion, client, claimed_generation, round)` を個体調整へ渡す。Client message だけで presence は成立しない。個体調整は X-B の `RoundIntakeOutcome` を経て現在 round として受理する。旧 round なら `StaleRound` として元 round へ対応付け、新 round へ付け替えない。
 2. 個体調整は用途（返答）と論理的 context を定め、認識・学習へ `LearningQuery(purpose=返答, scope_need, constraints)` で利用可能な理解を問い合わせる。取得成功は後続の送信許可ではない。
-3. 応答のための推論は `RequestInferenceCommand(ticket, consumer=CompanionReasoning, logical_context, resolved_route, credential_availability, cost_premise, hold)` で admission と attempt claim の前提確定（K-B の single-use authorization を含む）を経て送信する。同意不足・cap・保留・帰属・消去条件の不一致は `NotSent` として不足・判断待ちへ戻す。
+3. 応答のための推論は `AdmissionRequest(consumer=CompanionReasoning, 用途, 論理 context)` の authorize と attempt claim で前提を確定し（K-B の single-use authorization を含む）、`ProviderTransport` へ送信する。同意不足・cap・保留・帰属・消去条件の不一致は `NotSent` として不足・判断待ちへ戻す。
 4. 応答後、個体調整・作業は `ProposeExperienceCandidate(experiencer, source_range, source_kind=対話, intended_use=Learning候補)` を認識・学習へ渡す。Raw 複製を要求しない。
 5. 認識・学習は `FormationDecision` を確定する。保存価値がなければ終了し、全件保存しない。形成する場合は `SummaryGroundsRef` を対応付け、Memory 等の必要な状態だけを形成・変更する。応答完了と全 Learning 更新完了を同一条件にしない。
 6. 失われないこと：由来の区別、対象 Companion・Task・委任との関係、期待する利用先（返答と Learning 候補の別）。到着順が新しい＝根拠が新しいにしない。
@@ -1474,9 +1484,9 @@ crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定め
 1. 利用元は用途と論理的 context を定め、推論は `ResolveAssignmentQuery(consumer, capability, current_consent)` で経路を解決する。解決済み経路は派生結果であり、設定・同意変更後も以前の選択を有効とする根拠にしない。
 2. 各利用 owner は `ReserveUsageCommand(consumer, cap, upper_bound, attribution)` で予約する。同一 transaction 内で `cap_limit`＋関連 `usage_fact_*`（Reserved＋Committed＋Unknown の合計）を読み取って cap 照合する（SD-Cap）。上限超過・不明で継続不可なら開始しない。
 3. 予約後の inference・Tool 実行は lock なし並列に行う。他 request を block しない。失効・停止・保留が発生したら best-effort 停止する。
-4. 確定時は `CommitUsageCommand(reservation, actual=報告/推定/不明の別)` で原子更新し、余剰を解放する。遅延 usage 報告は元の `usage_id`・attempt・task・assignment 対応へ帰属させる。未報告・処理中・不明をゼロ化・リセットしない（Agent 終了・移動・cache clear・log 整理でも reset しない）。
+4. 確定時は `CommitUsageCommand(reservation, actual=報告/不明の別)` で原子更新し、余剰を解放する。遅延 usage 報告は元の `usage_id`・attempt・task・assignment 対応へ帰属させる。未報告・処理中・不明をゼロ化・リセットしない（Agent 終了・移動・cache clear・log 整理でも reset しない）。
 5. Observer 検知は対象 Client・専用 assignment の一つの利用として扱い、個体数分の重複計上をしない。delivery 後の個体推論は別の実利用として同じ全体 cap へ含める。
-6. 失われないこと：報告値・推定・不明・処理中の区別、consumer・用途・送信先の対応、同一残額の独立使い切りの防止、cap・不明での data 保持のままの停止・判断待ち。
+6. 失われないこと：報告値・不明・処理中の区別、consumer・用途・送信先の対応、同一残額の独立使い切りの防止、cap・不明での data 保持のままの停止・判断待ち。
 
 ### V-5 Client summon → move → stale old Client input（X-A・X-B・X-F）
 

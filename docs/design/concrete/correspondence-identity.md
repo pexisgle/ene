@@ -297,7 +297,7 @@ struct DevicePermissionRef { /* per-device 制御状態の対応 */ }
 struct SandboxExceptionRef { /* 特定 Local MCP の隔離外例外の対応。Plugin へ流用しない */ }
 struct UsageAttributionRef {
     consumer: UsageConsumer, // CompanionReasoning(CompanionId) | ObserverDedicated | ...
-    // 報告値 / 推定 / 不明 / 処理中を区別する。未報告・処理中・不明をゼロにしない。
+    // 報告値 / 不明 / 処理中を区別する。未報告・処理中・不明をゼロにしない。
 }
 
 /// 現在の許可の確定は権限・制約が行う。本 struct は照合材料である。
@@ -460,7 +460,7 @@ mechanism を選ぶ前に、「何と何を比較すれば現在として受け�
 | 切替区間の活動 | 旧 presence / 移行中 / 新 presence / active なし / 停止中 / 復旧待ちの区別 × 新旧いずれの帰属か | 移行中は新旧いずれも Client 依存の新規開始をしない。旧 in-flight は安全な区切りまで、旧作用の別 Client 自動継続をしない。 |
 | 消去区間の受入・生成・再保存 | 到着・生成・処理中情報の `(source 関係, 取得・生成時点, sweep 以前・区間内の別)` × `ErasureConditionRef.valid_interval` × 保持者の局所検証 | 区間内再到着・再生成は消去対象。実行中処理による再保存をしない。完了していないのに完了と表示しない。 |
 | 復元後の利用 | 利用の `(restore generation 前提, assignment / consent revision, Credential 照合, 依拠 Rule revision)` × 現在の `(RestoreGeneration, 現 Credential store, 現制約, 復元後保留)` | 旧 live・旧同意・旧 assignment だけで自動利用・自動処理を開始しない。一括有効化後も現在条件を守る。 |
-| 費用・資源の継続判断 | 消費の `(用途・送信先の対応, 報告・推定・不明・処理中の別)` × 現在の cap・資源・不明の扱い | 処理中・遅延・不明をゼロにしない。並列要求で同一残額を独立に使い切れる扱いにしない。cap・不明で安全継続不可なら data 保持のまま停止・判断待ちにする。 |
+| 費用・資源の継続判断 | 消費の `(用途・送信先の対応, 報告・不明・処理中の別)` × 現在の cap・資源・不明の扱い | 処理中・遅延・不明をゼロにしない。並列要求で同一残額を独立に使い切れる扱いにしない。cap・不明で安全継続不可なら data 保持のまま停止・判断待ちにする。 |
 
 ### 6.3 試行・重複・不明の扱い
 
@@ -490,7 +490,7 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 | Task・委任・context・Workspace・Schedule | `(TaskId, TaskRevision, 目的・担当・進捗・待機・結果・未完了・次の判断)`、`(DelegationId, TaskRef, 委任元・範囲・進捗・待機・停止・受領)`、`TaskContextRef`（由来・取得時点・目的・有効性）、Workspace 関連付け・保存先・待機、Schedule 設定・timezone・初期入力・回到達対応・各回 Task | 途中 Task は保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする。Agent 終了・担当削除で Task record を消さない。 |
 | Action の把握された作用・不明・停止結果 | `(ActionAttemptId, Task・委任対応, 実対象・操作種別, 確定度, 根拠対応, hold)` | buffer 寿命を越えて保持する。不明を未実行に戻さない。 |
 | Learning・Summary・根拠・scope | Summary＋`SummaryGroundsRef`、Memory 現在・重要度・scope・過去 revision・履歴、Skill 有効 revision・過去 revision・原本対応・実行結果対応、Relationship 現在・保持過去・根拠、Companion State（継続に要る状態・一時の時間意味・保持根拠） | 派生物（embedding / index / query 派生 / cache / session / 経路 / 表示集計）は独立復元対象にしない。古派生から権限・状態を復活させない。 |
-| 権限・制約・同意・cap・利用量 | Rule 本文・解釈・scope・`RuleRevision`・Undo 対応、Permission 判断記録（生きた許可ではない）、assignment 同意・fallback 順序・device・禁止・非共有・cap、利用量（報告・推定・不明・処理中の別） | 過去 Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定を現在許可として復活させない。cap 用の利用量事実は cache clear・log 整理・Agent 終了・移動で reset しない。 |
+| 権限・制約・同意・cap・利用量 | Rule 本文・解釈・scope・`RuleRevision`・Undo 対応、Permission 判断記録（生きた許可ではない）、assignment 同意・fallback 順序・device・禁止・非共有・cap、利用量（報告・不明・処理中の別） | 過去 Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定を現在許可として復活させない。cap 用の利用量事実は cache clear・log 整理・Agent 終了・移動で reset しない。 |
 | Credential | 現在 store（値・用途・参照・有効性・登録・更新・失効） | backup に secret を含めない。Restore で巻き戻さない。現在 store を維持し旧 context 参照だけで認証・再実行を示唆しない。 |
 | 接続・帰属・hint・復旧先 | 個体別帰属 record・現接続・最終接続管理 record、`PresenceGeneration`、hint・復旧先（非現在の参照として） | 現在接続を古い保存値から再成立させない。Running presence は現接続・許可・排他の確認ができれば復元前 Client へ自動復元し、できなければ active なしにする。Stopped に移動・復旧しない。 |
 | 観測・自発性・一般設定 | Owner 観測・自発性・一般設定、Host 自動起動選択（日常利用の意味） | OS への適用効果・全域操作参加は別 owner。 |
@@ -550,7 +550,7 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 | 受け渡し | 必須情報 |
 |---|---|
 | Context 参照・選択・変換 | §8.1 の要求・情報単位・token・不足理由。変換では依存元と制限の引継ぎ、分離できた範囲の限定。モデル自己申告だけでの依存外しをしない。 |
-| Provider 実送信 | 論理選択範囲、解決済み consumer / Capability assignment、実送信先・data・用途・取扱い・費用の同意対応、認証用途・制限・保留・利用量、元要求・範囲の対応。費用の報告・推定・不明・処理中の別。 |
+| Provider 実送信 | 論理選択範囲、解決済み consumer / Capability assignment、実送信先・data・用途・取扱い・費用の同意対応、認証用途・制限・保留・利用量、元要求・範囲の対応。費用の報告・不明・処理中の別。 |
 | Task 化・委任・steering・結果統合 | 意図・目的・steering 前提・Workspace 条件・Cancel 対象と進捗・結果・待機・反映不可理由・代替の対応。発話 record と Task 反映内容と未反映・待機の区別。 |
 | Action 要求・試行・停止・結果 | `ActionAttemptRef`（試行・Task・委任・Workspace・実対象・操作種別・依拠 Permission）、`PermissionEvaluationRef`、実対象解決の前提、費用・停止・保留・消去・復元条件の写し、把握された作用・確定度・根拠対応。 |
 | Permission 判断の依頼・回答 | 判断対象（主体・委任・Task・Workspace・目的・実対象・操作・送信先・data・作用・費用 risk）、依拠 Owner 意図・Rule の対応、重要変化の有無、現在の有効性の確定（権限・制約が行う）。判断記録と生きた許可の区別。 |
@@ -558,7 +558,7 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 | Observer routing | `RoutingContextRef`（source・target・目的・制約・選択前提）、起源 Client・取得時点・候補対応。混合文の無条件配送をしない。対象 Companion の利用可能 content・背景だけを渡す。 |
 | Learning・Summary・根拠 | `SummaryGroundsRef`、訂正と状況変化の別、過去の時間的有効性、scope・制約。旧 Summary を訂正後 Memory の代わりにしない。 |
 | 消去・保持・backup・復元 | `DeletionOperationRef`・`ErasureConditionRef`（目的・範囲・影響・除外・要確認、参加者・未完了・検証・hold）、backup 時点・参照・除外・保護・結果、Restore 世代・保留・一括有効化対応、Audit 順序・保持、Debug 対象・内容・期限。完了根拠に本文・秘密を残さない。 |
-| 利用量・費用 | 用途・送信先の対応、報告・推定・不明・処理中の別、cap・資源の現在条件。未報告・処理中・不明のゼロ化をしない。 |
+| 利用量・費用 | 用途・送信先の対応、報告・不明・処理中の別、cap・資源の現在条件。未報告・処理中・不明のゼロ化をしない。 |
 
 ## 9. 検証
 

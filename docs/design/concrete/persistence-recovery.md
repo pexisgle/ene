@@ -73,7 +73,7 @@
 | Memory・Skill・Relationship・State（認識・学習） | 各現在認識・有効 revision・scope・重要度・由来（Memory 主要知識、Skill 有効手順、Relationship 主体別解釈、State 一時/持続の区別） | 各過去 revision・変更経緯・利用根拠（誤訂正 vs 時間変化の区別を保つ） | 訂正・scope 変更の未完了・消去参加の未完了・再形成防止 hold | embedding / index / similarity / score・表示集計 | L の一時 buffer 的側面・検索中 context | — |
 | Action 試行・作用・確定度（実行・拡張） | —（試行は履歴であり現在値ではない。確定度は D3 として保全） | Action attempt record（attempt・Task/委任対応・実対象・操作種別・依拠 Permission・段階・確定度・根拠対応） | 確定度 Unknown の粘着保持・hold・停止要求と停止結果・retry 前提（prior unknown 対応） | 作用報告の表示用派生 | 実行中 buffer・Tool 実行 buffer | 外部作用そのもの（外部所有）・外部 process 内部 |
 | Rule・Permission・同意・禁止・上限（権限・制約） | Rule 本文・解釈・scope・現在 revision・Undo 対応・assignment 同意（Provider/model・送信先・data・用途・取扱い・費用・fallback 順序・Observer 専用含む）・device 許可・sandbox 外例外・保存禁止・非共有・cap 定義 | Rule revision 履歴・Permission 判断記録（生きた許可ではない）・同意変更履歴 | Owner 判断待ち・失効・停止・保留・消去・復元保留との照合結果（現在の利用可否は評価時に導出し、Allow copy を正本にしない）・新規禁止と停止要求の結合の未完了 | 解決済み割当経路・有効 Provider 経路・費用集計 | 推論中 context | — |
-| 利用量・費用（推論 + 各利用 owner） | cap 定義（権限・制約）。利用事実は各 owner の原記録として D2 | 利用事実（報告・推定・不明・処理中の別、consumer・用途・送信先対応） | 処理中・未報告・不明消費の保全（ゼロ化・リセットしない） | 費用集計・表示集計・cached token 表示 | 集計 cache（一時） | Provider 請求確定値（外部報告） |
+| 利用量・費用（推論 + 各利用 owner） | cap 定義（権限・制約）。利用事実は各 owner の原記録として D2 | 利用事実（報告・不明・処理中の別、consumer・用途・送信先対応） | 処理中・未報告・不明消費の保全（ゼロ化・リセットしない） | 費用集計・表示集計・cached token 表示 | 集計 cache（一時） | Provider 請求確定値（外部報告） |
 | Credential（認証秘密） | 非秘密の用途・参照元・有効性・登録・更新・失効の対応（DB 側参照） | 登録・更新・失効の対応履歴（非秘密のみ）・認証失敗・再認証必要性の事実 | 再認証待ち・失効の未完了 | — | — | 秘密値本体（OS credential store 等の分離保管。DB / Backup / Audit / log / Debug へ流さない） |
 | Provider 登録・能力・割当解決（推論） | 非秘密の登録・能力観測（最終観測は D1 だが現在性の確認なしに利用しない） | 能力観測の履歴・利用量の原記録 | 能力不足・接続失敗の未完了・fallback の未完了 | 解決済み経路・Prompt cache・Provider session・一時 context | 推論 session・cache・圧縮 context | Provider 側 session・cache・保有 copy（外部） |
 | 接続・帰属・hint・復旧先（接続・存在） | 個体別帰属 record（state + active_client + presence generation）・hint・復旧先（非現在の参照）・最終接続管理 record | 帰属遷移 log・接続の観測事実の履歴 | 切替区間（旧/移行中/新/active なし/停止中/復旧待ち）の未完了・排他性未確認の保留 | 存在人数・routing 対象の導出値 | 現在接続の live 性（到達性）・切断検知の一時状態 | Client 固有の接続材料の秘密部分（Client / credential-store 側。DB へ流さない） |
@@ -183,7 +183,7 @@ retry・再送・fallback・再委任は新しい `attempt_id` とする。重�
 | `sandbox_exception` | `exception_id` | 特定 Local MCP・command・由来・既知 access・risk・失う強制境界・保存・失効・重要変更時の再確認状態。Plugin へ流用しない | D1 | — | 隔離例外として読む。包括承認にしない |
 | `control_constraint` | `constraint_id` | Owner の明示的な保存禁止・非共有の適用対象・範囲。Learning scope 意味と区別する | D1 | — | 各利用箇所で迂回不能に適用する |
 | `cap_limit` | `cap_id` | Provider 別・全体の費用・資源・反復・並列等の上限定義 | D1 | — | 現在可否の上限として読む |
-| `usage_fact_provider`（owner: 推論） | `usage_id` | consumer（Companion/Observer 専用/Task 等）・報告/推定/不明/処理中の別・量・CORR→attempt/task/assignment・報告時点 | D2+D3 | Companion 削除で費用 log を削除・使用量をリセットしない。targeted deletion で該当情報を参加させる（消去を消費リセットにしない） | cap 評価の入力として読む。未報告・処理中・不明をゼロにしない |
+| `usage_fact_provider`（owner: 推論） | `usage_id` | consumer（Companion/Observer 専用/Task 等）・報告/不明/処理中の別・量・CORR→attempt/task/assignment・報告時点 | D2+D3 | Companion 削除で費用 log を削除・使用量をリセットしない。targeted deletion で該当情報を参加させる（消去を消費リセットにしない） | cap 評価の入力として読む。未報告・処理中・不明をゼロにしない |
 | `usage_fact_task`（owner: 作業） / `usage_fact_action`（owner: 実行・拡張） / `usage_fact_storage`（owner: 保全・消去） | `usage_id` | 同上（委任稼働・Action 実行・保存量等の各事実） | D2+D3 | 同上 | 同上 |
 
 「現在の利用可否」は保存された行ではなく、保存条件＋活動状態＋委任＋帰属＋利用量＋失効＋保留等を照合した評価時に導出する。
@@ -363,7 +363,7 @@ derived の生成・保持・破棄を行う責務が、元 state との対応�
 
 Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の未完了を保全し、外部作用が Host と同時に消えると推定しない。一時 buffer の消失は成功・完了の根拠にしない。
 
-再起動時、および Agent 停止で所有 in-flight を失った `Reserved` は、当該利用 owner の再評価経路が元の reservation・利用対応を読み、IB K-G `CommitUsageCommand(actual = 不明)` で `Committed / Unknown` に確定する（CCT §9.2）。release・ゼロ化せず、cap 集計に引き続き含める。不明消費と孤立理由を費用管理面で報告値・推定値と区別して示し、安全継続不能なら停止・Owner 判断待ちとする。具体的な Owner の扱い・表示方式はこの非ゼロ化契約内の Freedom とする。
+再起動時、および Agent 停止で所有 in-flight を失った `Reserved` は、当該利用 owner の再評価経路が元の reservation・利用対応を読み、IB K-G `CommitUsageCommand(actual = 不明)` で `Committed / Unknown` に確定する（CCT §9.2）。release・ゼロ化せず、cap 集計に引き続き含める。不明消費と孤立理由を費用管理面で報告値と区別して示し、安全継続不能なら停止・Owner 判断待ちとする。具体的な Owner の扱い・表示方式はこの非ゼロ化契約内の Freedom とする。
 
 ### 6.3 再開してよいもの / 復旧するだけで自動実行してはいけないもの
 
@@ -381,7 +381,7 @@ Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の
 | Conversation / History 記録と Learning 形成 | History 原 record・活動 record・Summary・Memory revision・根拠対応・scope・保存禁止・非共有・消去条件 | History append と未伝達登録（該当時）は同一 durable transaction で原子にする（§7.2 AU1）。Learning 形成は別 transaction とし、History durable 後に認識・学習が現在認識・根拠へ照合して採否を決める。到着順を根拠の新旧にしない | 会話受付・History・Learning 更新完了を同一条件にしない。全状態の同時更新を要求しない |
 | Task / delegation / steering | Task 現在・Task revision・Task context entry・Workspace 関連付け・委任 scope・steering 前提・Permission 現在条件 | Task 作成時は task + revision + 初期 context + 関連付けを原子にし、commit 前は委任・実行から不可視にする（durable-before-visible）。steering は新 revision + 新 context の原子 forward とし、旧目的の結果を新目的に自動採用しない。委任は `expected_task_revision` の atomic compare を満たして作成する | Task 達成判断（作業）と作用確定度（実行・拡張）と許可確定（権限・制約）を同一 transaction にしない。attempt 確定後に Task が別途読み取って達成を更新する |
 | Action attempt / effect / outcome | attempt・Task revision 前提・委任 scope・実対象・操作種別・依拠 Permission・段階・確定度・根拠・hold・presence/restore generation | attempt insert は Task revision 前提・委任有効性・実対象解決・現在許可の照合を満たして原子にする。確定度 `Unknown→Confirmed` は新 evidence との原子更新とし、owner 以外は独立更新しない。retry は `prior_attempt` 対応付きの新 row とし旧 row を上書きしない | Task 側の確定度独立更新をしない。Agent 申告を証拠にしない。Task 達成・報告は別受入とする |
-| Permission / usage / cap | Rule revision・同意 revision・device・cap 定義・利用事実（報告/推定/不明/処理中の別）・失効・停止・保留 | 評価時は保存 Allow・委任時 copy・事前判定・復元 Rule・context 内許可文・cache 判定を現在許可として再利用しない。並列消費は同一 SQLite transaction 内で利用事実の atomic insert + cap 照合を行い、同一残額の独立使い切りを許さない（mechanism 共有であり owner 統合ではない）。処理中・不明をゼロにしない | 利用事実の原記録は各 owner に残し、権限・制約は可否だけを管理する。Task・推論側に独立許可・使用実績の正本を作らない |
+| Permission / usage / cap | Rule revision・同意 revision・device・cap 定義・利用事実（報告/不明/処理中の別）・失効・停止・保留 | 評価時は保存 Allow・委任時 copy・事前判定・復元 Rule・context 内許可文・cache 判定を現在許可として再利用しない。並列消費は同一 SQLite transaction 内で利用事実の atomic insert + cap 照合を行い、同一残額の独立使い切りを許さない（mechanism 共有であり owner 統合ではない）。処理中・不明をゼロにしない | 利用事実の原記録は各 owner に残し、権限・制約は可否だけを管理する。Task・推論側に独立許可・使用実績の正本を作らない |
 | presence attribution / generation | 帰属 state・active_client・presence generation・現接続・許可・排他性・hint・復旧先 | 帰属切替は `expected_generation + expected_state` の atomic compare による `旧→移行中→新` の durable 遷移とし、新旧いずれも新規開始しない区間を保つ。hint・復旧先の更新と帰属成立を同一視しない。現在接続を古い保存値から再成立させない | 帰属成立（接続・存在）と移動必要性（個体調整）と許可確定（権限・制約）を同一更新にしない。live 到達性は DB 外の確認であり DB atomic に含めない |
 | undelivered 登録 / delivery 確定 | History / Task 元 record・未伝達必要内容・報告状況・提示状況・帰属・消去条件 | 会話由来の登録は History append と原子にする。Task 由来の登録は Task 結果 durable 後の別 transaction で `undelivered` を原子に登録し、Task durable→未伝達可視の順序を保つ（Task と未伝達を単一 transaction にしない。共有 SQLite transaction は mechanism 共有として許すが、Task 達成と報告管理の owner を統合しない）。delivery 確定（Presented）は実際の提示確認（入出力・提示→個体調整）を受けてから durable 更新し、送信だけで確定しない（durable-after-confirmed） | 接続・表示 copy 送信・Task 完了を報告完了にしない。報告済みを承認・再開にしない |
 | Targeted Deletion 進行 | 削除 operation・sweep・消去条件・有効区間・完了境界・参加者局所結果・hold・再保存防止・検索 token の復元不能化 | operation + erasure_condition の durable を参加開始より先行させる（durable-before-enforce）。各参加者の局所完了・検証は durable 化してから coordinator へ返し、返却で hold を解除しない。全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たした後、検索 token を除去または復元不能化し、その成立を確認してから全域完了を原子に確定する。token の最終消去と完了 marker を同じ durable commit に含められない場合、その間は `finalizing` の未完了状態を維持する | 全 domain の通常意味変更権・単一 transaction・無制限 access を coordinator に与えない。対象外の通常活動の一律停止を必須にしない |
@@ -445,7 +445,7 @@ Restore の実行確認・復元後の一括有効化、および Full Reset の
 
 | 扱い | 対象 |
 |---|---|
-| 含める（durable の対応を復旧可能な形で） | Character 静的構成・revision・適用関係対応（外部 Package 原本は除く）、Companion 同一性・活動状態・適用済み構成（削除済み個体の私的 state は backup 時点に存在しないものとして扱い、残存 historical record は含める）、History・非会話活動記録・evidence・未伝達（原 record と報告状況を分け、表示 copy 送信を報告済みにしない対応を保つ）、Summary・根拠関係・Memory 現在・過去 revision・Skill 有効・過去 revision・原本対応・実行結果対応・Relationship・State と保持根拠（共有根拠の利用関係を保ち Global 本文から私的根拠全文への access 拡大を作らない）、Task・Task context・委任対応・Action 試行・確定度・停止結果、Workspace 関連付け（外部実体は辿って収集しない）、Schedule 設定・作成時 tz・初期入力・発生対応・各回 Task 対応、Rule・Permission 判断記録・assignment 同意（Observer 専用含む）・fallback・device・保存禁止・非共有・cap 等の制御条件の記録、Provider 非秘密登録・能力情報・MCP・Plugin 非秘密受入設定、利用量・費用の記録（報告/推定/不明の区別を含む。現在消費の正本として扱わない条件は §6 に従う）、Credential の用途・参照元（非秘密のみ）、Audit 追記順・保持、保持方針・操作状況・backup 設定と作成結果のうち復旧可能な対応に必要な範囲 |
+| 含める（durable の対応を復旧可能な形で） | Character 静的構成・revision・適用関係対応（外部 Package 原本は除く）、Companion 同一性・活動状態・適用済み構成（削除済み個体の私的 state は backup 時点に存在しないものとして扱い、残存 historical record は含める）、History・非会話活動記録・evidence・未伝達（原 record と報告状況を分け、表示 copy 送信を報告済みにしない対応を保つ）、Summary・根拠関係・Memory 現在・過去 revision・Skill 有効・過去 revision・原本対応・実行結果対応・Relationship・State と保持根拠（共有根拠の利用関係を保ち Global 本文から私的根拠全文への access 拡大を作らない）、Task・Task context・委任対応・Action 試行・確定度・停止結果、Workspace 関連付け（外部実体は辿って収集しない）、Schedule 設定・作成時 tz・初期入力・発生対応・各回 Task 対応、Rule・Permission 判断記録・assignment 同意（Observer 専用含む）・fallback・device・保存禁止・非共有・cap 等の制御条件の記録、Provider 非秘密登録・能力情報・MCP・Plugin 非秘密受入設定、利用量・費用の記録（報告/不明の区別を含む。現在消費の正本として扱わない条件は §6 に従う）、Credential の用途・参照元（非秘密のみ）、Audit 追記順・保持、保持方針・操作状況・backup 設定と作成結果のうち復旧可能な対応に必要な範囲 |
 | 含めない（rebuild / transient / external / secret） | 派生物（embedding・index・query 派生・Prompt cache・Provider session・有効経路・次回表示・集計表示等）、一時 data（Raw・詳細 payload・内部推論・Client 表示 copy・入力途中・audio buffer・観測候補・推論中 context・MCP Apps 表示等。ただし受理済み指示・作業記録・未伝達・作用不明まで失ってよいわけではなく Host 正本の範囲で復元する）、Credential 等の secret・外部 Workspace 実体・Provider/MCP 側固有状態・保有 copy・外部 Package 原本・export 済み copy、Client 接続材料の secret 部分 |
 | 作成成功の条件 | 各部の copy 出力成功だけを成功にしない。対象時点・参照・必要な履歴と未完了状況の対応が揃って初めて成功とする。実行中の不明がある場合、最後の正常記録が外部最新とは限らないことを保ち、不明を未実行へ戻して正常 copy と偽らない |
 
@@ -515,7 +515,7 @@ concurrency mechanism そのものは [Concurrency Control](concurrency-control.
 | 消去区間の受入・生成・再保存 | 到着・生成情報の `(source 関係, 取得・生成時点)` × `(operation, sweep, valid_interval)` × 保持者の局所検証 | 区間内再到着・再生成は消去対象とする。実行中処理による再保存をしない |
 | 復元後の利用 | 利用の `(restore generation 前提, assignment/consent revision, Credential 照合, 依拠 Rule revision)` × 現在の `(restore_generation, 現 store, 現制約, 復元後保留)` | 旧 live・旧同意・旧 assignment だけで自動利用・自動処理を開始しない |
 | 権限・Rule 解釈の採用 | 過去 Allow・復元 Rule・context 内許可文・cache 判定 × 現在の `(rule revision, 同意, device, cap, 失効・停止・帰属・消去・復元保留)` | 制御を変更しない。将来 Rule は解釈・表示・保存・Undo を経る |
-| 費用・資源の継続判断 | 消費の `(用途・送信先対応, 報告/推定/不明/処理中の別)` × 現在 cap・資源・不明の扱い | 処理中・遅延・不明をゼロにしない。並列で同一残額を使い切れる扱いにしない |
+| 費用・資源の継続判断 | 消費の `(用途・送信先対応, 報告/不明/処理中の別)` × 現在 cap・資源・不明の扱い | 処理中・遅延・不明をゼロにしない。並列で同一残額を使い切れる扱いにしない |
 | Character 適用 | `(character_id, expected_character_revision)` × 現在適用関係 × `OwnerSelectionRef` | 未確認部品を更新済みにしない。適用禁止種別を適用しない |
 | 全域完了の確定 | 各 `participant` の局所完了・検証・未完了・失敗 × 機械的残存検証 × 区間内再到着の取込み × 本文非再保存 × 検索 token の除去・復元不能化 | 未確認・検証失敗・pending/unreachable・token 残存を成功に読み替えない。局所完了の集合だけを全域完了にしない |
 
