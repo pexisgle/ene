@@ -109,6 +109,7 @@ fn history_frame() -> super::WireFrame {
             companion: CompanionWireRef(String::from("companion-echo")),
             since: None,
             limit: 10,
+            round: None,
         }),
     }
 }

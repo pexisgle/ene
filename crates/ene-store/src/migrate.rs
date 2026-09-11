@@ -1,6 +1,8 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: u64 = 11;
+use ene_primitive::WallClockWithTz;
+
+const CURRENT_VERSION: u64 = 12;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -254,6 +256,52 @@ rev INTEGER NOT NULL
 INSERT OR IGNORE INTO credential_set (id, rev) VALUES (1, 0);
 ";
 
+/// Adds the canonical UTC timestamp projection that orders and range-filters
+/// history inside SQL: fixed-width `Z` renderings compare lexically exactly
+/// like the instants they represent, regardless of the creation offsets kept
+/// in `at`. The stored `at` stays the display/provenance rendering (offset
+/// included); `at_utc` is query material only. Existing rows are backfilled
+/// in Rust because SQLite's date functions would lose nanosecond precision.
+const MIGRATION_V12: &str = "
+ALTER TABLE history_message ADD COLUMN at_utc TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_history_message_companion_at ON history_message (companion_id, at_utc);
+";
+
+/// Backfills [`MIGRATION_V12`]'s `at_utc` for rows written before it.
+///
+/// Runs inside the migration transaction: a stored timestamp that cannot be
+/// parsed fails the migration instead of leaving a row invisible to `since`
+/// filters. The table is read once into memory; history is already bounded
+/// by retention in this stage.
+fn backfill_history_at_utc(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    let rows = {
+        let mut statement = tx
+            .prepare("SELECT message_id, at FROM history_message WHERE at_utc IS NULL")
+            .map_err(|error| error.to_string())?;
+        let mapped = statement
+            .query_map((), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|error| error.to_string())?);
+        }
+        rows
+    };
+    for (message_id, at) in rows {
+        let canonical = WallClockWithTz::parse_rfc3339(&at)
+            .map_err(|_| String::from("history timestamp cannot be normalized"))?
+            .to_rfc3339_utc();
+        tx.execute(
+            "UPDATE history_message SET at_utc = ?2 WHERE message_id = ?1",
+            rusqlite::params![message_id, canonical],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// Atomic: pending migrations and the version bump commit together in one
 /// transaction, so a crash mid-migration rolls back to the pre-migration
 /// state and the next open retries from scratch. The commit is the sole
@@ -312,6 +360,11 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     if stored_version < 11 {
         tx.execute_batch(MIGRATION_V11)
             .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 12 {
+        tx.execute_batch(MIGRATION_V12)
+            .map_err(|error| error.to_string())?;
+        backfill_history_at_utc(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

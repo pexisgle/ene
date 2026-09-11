@@ -31,9 +31,12 @@ const SQL_SELECT_LIFECYCLE: &str = "SELECT lifecycle FROM companion WHERE compan
 
 const SQL_INSERT_ATTRIBUTION: &str = "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)";
 
-const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
 
-const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
+const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND (?2 IS NULL OR round_id = ?2) AND (?3 IS NULL OR at_utc >= ?3) ORDER BY rowid ASC LIMIT ?4";
+
+const SQL_SELECT_ROUND_BY_WIRE: &str =
+    "SELECT round_id FROM history_message WHERE companion_id = ?1 AND round_wire = ?2 LIMIT 1";
 
 const SQL_SELECT_RECENT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2";
 
@@ -79,6 +82,7 @@ fn append_history(
     let round_text = encode_id(cmd.round);
     let role_text = encode_role(cmd.role);
     let at_text = cmd.at.to_rfc3339();
+    let at_utc = cmd.at.to_rfc3339_utc();
     let undelivered = RawId::new();
     let undelivered_text = encode_id(undelivered);
     let now_text = WallClockWithTz::now().to_rfc3339();
@@ -201,6 +205,7 @@ fn append_history(
             cmd.text,
             cmd.lang,
             at_text,
+            at_utc,
             generation_raw,
             command_text.as_deref(),
             cmd.local_id.as_deref(),
@@ -312,6 +317,39 @@ impl CompanionRepository for Store {
     }
 }
 
+impl Store {
+    /// Resolves one stored round wire projection to its domain round.
+    ///
+    /// The round wire is Host-minted and stored with every appended message
+    /// of that round, so a round stays addressable after a restart drops the
+    /// transient in-memory wire map. An unknown projection answers `Ok(None)`;
+    /// storage failures stay errors.
+    pub async fn round_for_stored_wire(
+        &self,
+        companion: CompanionId,
+        wire: &str,
+    ) -> Result<Option<RawId>, CompanionTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        let companion_text = encode_id(companion.as_raw());
+        let wire = wire.to_owned();
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let found: Option<String> = guard
+                .query_row(
+                    SQL_SELECT_ROUND_BY_WIRE,
+                    params![companion_text, wire],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            found
+                .map(|text| decode_id(&text).map_err(companion_unavailable))
+                .transpose()
+        })
+        .await
+    }
+}
+
 impl HistoryRepository for Store {
     async fn append_message(
         &self,
@@ -371,35 +409,37 @@ impl HistoryRepository for Store {
         &self,
         companion: CompanionId,
         since: Option<WallClockWithTz>,
+        round: Option<RawId>,
         limit: u64,
     ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let key = encode_id(companion.as_raw());
+            let round_text = round.map(encode_id);
+            // The canonical UTC rendering orders and compares exactly like
+            // the instant, unlike the offset-preserving display text.
+            let since_text = since.map(|bound| bound.to_rfc3339_utc());
+            // SQLite takes a signed limit; a larger request saturates instead
+            // of failing, and zero asks for no rows.
+            let cap = i64::try_from(limit).unwrap_or(i64::MAX);
             let guard = lock_shared(&conn);
             let mut query = guard
                 .prepare(SQL_SELECT_TIMELINE)
                 .map_err(|error| companion_unavailable(error.to_string()))?;
             let rows = query
-                .query_map(params![key], HistoryRow::from_row)
+                .query_map(
+                    params![key, round_text, since_text, cap],
+                    HistoryRow::from_row,
+                )
                 .map_err(|error| companion_unavailable(error.to_string()))?;
+            // The query already applied the round, since, and limit bounds,
+            // so exactly the returned rows are decoded.
             let mut timeline = Vec::new();
             for row in rows {
                 let row = row.map_err(|error| companion_unavailable(error.to_string()))?;
-                let message =
-                    decode_history_message(companion, row).map_err(companion_unavailable)?;
-                if let Some(lower) = since
-                    && message.at.as_datetime() < lower.as_datetime()
-                {
-                    continue;
-                }
-                timeline.push(message);
+                timeline
+                    .push(decode_history_message(companion, row).map_err(companion_unavailable)?);
             }
-            let cap = match usize::try_from(limit) {
-                Ok(value) => value,
-                Err(_) => usize::MAX,
-            };
-            timeline.truncate(cap);
             Ok(timeline)
         })
         .await

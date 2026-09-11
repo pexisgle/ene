@@ -136,11 +136,12 @@ async fn run_command(
         }
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
         cmds::Command::Watch { round } => {
-            let view = request_history(&mut session, cmds::DEFAULT_HISTORY_LIMIT).await?;
+            let view =
+                request_history(&mut session, Some(&round), cmds::DEFAULT_HISTORY_LIMIT).await?;
             emit(&cmds::render_round_history(&view, &round))
         }
         cmds::Command::History { limit } => {
-            let view = request_history(&mut session, limit).await?;
+            let view = request_history(&mut session, None, limit).await?;
             emit(&cmds::render_history(&view))
         }
         cmds::Command::Memory { after } => {
@@ -183,13 +184,16 @@ async fn request_view(
 
 async fn request_history(
     session: &mut client::Client,
+    round: Option<&str>,
     limit: u64,
 ) -> Result<ene_api::v1::round::HistoryView, CliError> {
     let companion = session.companion_ref();
+    let request = match round {
+        Some(round) => cmds::round_history_request(&companion, round, limit),
+        None => cmds::history_request(&companion, limit),
+    };
     match session
-        .request(WirePayload::HistoryRequest(cmds::history_request(
-            &companion, limit,
-        )))
+        .request(WirePayload::HistoryRequest(request))
         .await?
     {
         WirePayload::HistoryView(view) => Ok(view),
