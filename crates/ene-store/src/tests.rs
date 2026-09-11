@@ -1007,8 +1007,7 @@ CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
 CREATE UNIQUE INDEX idx_history_message_companion_local ON history_message (companion_id, local_id);
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (2);",
+PRAGMA user_version = 2;",
             );
         assert!(shaped.is_ok(), "v2 shape must apply");
         let seeded_companion = conn.execute(
@@ -1069,9 +1068,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get::<_, i64>(0)
-    });
+    let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(11)),
         "migration must record version 11"
@@ -1257,8 +1254,7 @@ CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (4);",
+PRAGMA user_version = 4;",
             );
         assert!(shaped.is_ok(), "v4 shape must apply");
         let seeded = conn.execute(
@@ -1281,13 +1277,11 @@ INSERT INTO _schema_version (version) VALUES (4);",
     );
 }
 
-/// Reads the singleton without running migrations.
+/// Reads the file's `user_version` without running migrations.
 fn read_schema_version(path: &std::path::Path) -> Option<i64> {
     let conn = rusqlite::Connection::open(path).ok()?;
-    conn.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get(0)
-    })
-    .ok()
+    conn.query_row("PRAGMA user_version", (), |row| row.get(0))
+        .ok()
 }
 
 fn table_columns(path: &std::path::Path, table: &str) -> Vec<String> {
@@ -1331,8 +1325,7 @@ CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (4);",
+PRAGMA user_version = 4;",
         );
         assert!(shaped.is_ok(), "v4 shape must apply");
         // One paired row so the backfill UPDATE below has a row to trip
@@ -1427,9 +1420,7 @@ async fn migration_v3_reopen_keeps_pairing_state() {
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get::<_, i64>(0)
-    });
+    let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(11)),
         "reopened database must record schema version 11"
@@ -2237,9 +2228,7 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-        row.get::<_, i64>(0)
-    });
+    let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(11)),
         "reopened database must record schema version 11"
@@ -2921,8 +2910,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
         // A realistic v8 database carries the v7 attempt table the v10
         // migration alters; only the v9 learning group is still missing.
         conn.execute_batch(
-            "CREATE TABLE _schema_version (version INTEGER NOT NULL);
-             INSERT INTO _schema_version (version) VALUES (8);
+            "PRAGMA user_version = 8;
              CREATE TABLE inference_attempt (
                ticket TEXT PRIMARY KEY,
                consent_id TEXT NOT NULL,
@@ -2963,8 +2951,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
-            "CREATE TABLE _schema_version (version INTEGER NOT NULL);
-             INSERT INTO _schema_version (version) VALUES (9);
+            "PRAGMA user_version = 9;
              CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
              INSERT INTO consent_record VALUES ('consent-1', 1, 'openai', 'gpt-x', 'openai:main');
              CREATE TABLE inference_attempt (

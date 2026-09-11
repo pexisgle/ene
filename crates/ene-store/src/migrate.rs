@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior};
 
 const CURRENT_VERSION: u64 = 11;
 
@@ -263,18 +263,11 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
-    tx.execute_batch("CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER NOT NULL)")
+    let stored: i64 = tx
+        .query_row("PRAGMA user_version", (), |row| row.get(0))
         .map_err(|error| error.to_string())?;
-    let stored: Option<i64> = tx
-        .query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let stored_version = match stored {
-        Some(raw) => u64::try_from(raw).map_err(|_| String::from("schema version out of range"))?,
-        None => 0,
-    };
+    let stored_version =
+        u64::try_from(stored).map_err(|_| String::from("schema version out of range"))?;
     if stored_version > CURRENT_VERSION {
         return Err(String::from("schema version newer than supported"));
     }
@@ -322,19 +315,8 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;
-    if stored.is_none() {
-        tx.execute(
-            "INSERT INTO _schema_version (version) VALUES (?1)",
-            rusqlite::params![current],
-        )
+    tx.pragma_update(None, "user_version", current)
         .map_err(|error| error.to_string())?;
-    } else if stored_version < CURRENT_VERSION {
-        tx.execute(
-            "UPDATE _schema_version SET version = ?1",
-            rusqlite::params![current],
-        )
-        .map_err(|error| error.to_string())?;
-    }
     tx.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
