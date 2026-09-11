@@ -32,6 +32,10 @@ impl FakeLearningRepository {
     pub(crate) fn current(&self) -> Vec<Memory> {
         self.memories.lock().expect("fake memory lock").clone()
     }
+
+    pub(crate) fn summaries(&self) -> Vec<SummaryRecord> {
+        self.summaries.lock().expect("fake summary lock").clone()
+    }
 }
 
 #[expect(
@@ -268,5 +272,93 @@ pub(crate) struct FailingScrubber;
 impl SecretScrubber for FailingScrubber {
     async fn scrub(&self, _text: &str) -> Result<ScrubbedText, crate::SecretScrubError> {
         Err(crate::SecretScrubError::RegistryUnavailable)
+    }
+}
+
+/// Seeds one memory directly, for tests that need an existing target.
+pub(crate) async fn seed_memory(
+    repository: &FakeLearningRepository,
+    companion: RawId,
+    content: &str,
+) -> (MemoryId, MemoryRevision) {
+    let id = MemoryId::generate();
+    let outcome = repository
+        .commit_memory_change(MemoryChangeCommit {
+            summary: None,
+            secret_premise: None,
+            change: MemoryChange {
+                target: MemoryTarget::New { id },
+                scope: LearningScope::companion(companion),
+                content: content.to_owned(),
+                importance: crate::Importance::default(),
+                temporal: crate::TemporalMeaning::Enduring,
+                change: crate::ChangeKind::Initial,
+                recall_suppressed: false,
+                at: ene_primitive::WallClockWithTz::now(),
+            },
+        })
+        .await
+        .expect("the seeded memory must commit");
+    let MemoryChangeOutcome::Committed { revision, .. } = outcome else {
+        panic!("the seed must commit");
+    };
+    (id, revision)
+}
+
+/// An inference whose answer races a concurrent change to `advance` before
+/// the formation commits, so the expected revision read for the prompt is
+/// already stale.
+pub(crate) struct RacingInference<'a> {
+    repository: &'a FakeLearningRepository,
+    companion: RawId,
+    advance: MemoryId,
+    expected: MemoryRevision,
+    content: String,
+    answer: String,
+}
+
+impl<'a> RacingInference<'a> {
+    pub(crate) fn new(
+        repository: &'a FakeLearningRepository,
+        companion: RawId,
+        advance: MemoryId,
+        expected: MemoryRevision,
+        answer: &str,
+    ) -> Self {
+        Self {
+            repository,
+            companion,
+            advance,
+            expected,
+            content: String::from("advanced by another formation"),
+            answer: answer.to_owned(),
+        }
+    }
+}
+
+impl LearningInference for RacingInference<'_> {
+    async fn infer(&self, _prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
+        drop(
+            self.repository
+                .commit_memory_change(MemoryChangeCommit {
+                    summary: None,
+                    secret_premise: None,
+                    change: MemoryChange {
+                        target: MemoryTarget::Existing {
+                            id: self.advance,
+                            expected_revision: self.expected,
+                        },
+                        scope: LearningScope::companion(self.companion),
+                        content: self.content.clone(),
+                        importance: crate::Importance::default(),
+                        temporal: crate::TemporalMeaning::Enduring,
+                        change: crate::ChangeKind::Reinforced,
+                        recall_suppressed: false,
+                        at: ene_primitive::WallClockWithTz::now(),
+                    },
+                })
+                .await,
+        );
+        Ok(self.answer.clone())
     }
 }

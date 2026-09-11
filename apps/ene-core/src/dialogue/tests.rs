@@ -2464,7 +2464,7 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     let transport = LearningAwareTransport::new(
         "noted",
         Some(
-            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
+            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"action": "create", "content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
         ),
     );
     let live = live_input("client-formation");
@@ -2580,7 +2580,7 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     let transport = LearningAwareTransport::new(
         "noted",
         Some(
-            r#"{"summary": "The owner shared test-bearer.", "memories": [{"content": "The owner's key is test-bearer.", "importance": 5}]}"#,
+            r#"{"summary": "The owner shared test-bearer.", "memories": [{"action": "create", "content": "The owner's key is test-bearer.", "importance": 5, "temporal": "enduring"}]}"#,
         ),
     );
     let live = live_input("client-secret");
