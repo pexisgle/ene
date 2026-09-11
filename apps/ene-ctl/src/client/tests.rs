@@ -5,14 +5,14 @@ use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
+use ene_api::v1::refs::{BaseViewMark, CommandWireId, WireMessageId};
 use ene_api::v1::refs::{ClientIncarnationId, CompanionWireRef, RoundWireId};
-use ene_api::v1::refs::{CommandWireId, WireMessageId};
 use ene_plugin_ipc::WireFrame;
 
 use super::frames::{
-    auth_rejected_guidance, capability_frame, frame_for, frame_for_session,
+    PreparedRequest, auth_rejected_guidance, capability_frame, frame_for, frame_for_session,
     missing_secret_guidance, new_incarnation, pairing_frame, pending_guidance, proof_frame,
-    retry_frame, stamp_request,
+    retry_frame,
 };
 use super::session::{AuthDecision, DEFERRED_CAP, SessionState, decide_auth, stale_generation_of};
 use super::{platform_display, socket_path};
@@ -275,33 +275,63 @@ fn answer_payload() -> WirePayload {
 }
 
 #[test]
-fn request_stamps_a_fresh_command_id_per_send() -> Result<(), String> {
+fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), String> {
     let sender = WireSender {
         device_id: None,
         incarnation_id: incarnation(),
         connection_id: None,
     };
-    let mut first = frame_for(answer_payload(), sender);
-    let mut second = frame_for(answer_payload(), sender);
+    // A pure request/response payload pairs by `request_id` only.
+    let request = PreparedRequest::new(answer_payload());
+    let request_frame = request.frame(sender, Some(6));
     assert!(
-        first.envelope.correlation.command_id.is_none(),
-        "builders stamp no command ID by themselves"
+        request_frame.envelope.correlation.command_id.is_none(),
+        "a pure request must carry no command identity"
     );
-    let first_id = stamp_request(&mut first);
-    stamp_request(&mut second);
     assert!(
-        first_id == first.envelope.message_id,
-        "the stamp reports the echoed message ID"
+        request_frame.envelope.correlation.request_id.is_some(),
+        "a pure request still pairs its response with a fresh request ID"
     );
+    // A management intent keeps one canonical identity: the envelope reuses
+    // the payload's `intent_id`, never a second minted command ID.
+    let intent_id = CommandWireId(uuid::Uuid::new_v4());
+    let intent =
+        crate::cmds::credential_intent(intent_id, &BaseViewMark(String::from("mark-1")), "openai");
+    let prepared_intent = PreparedRequest::new(WirePayload::ManagementIntent(intent));
+    let intent_frame = prepared_intent.frame(sender, None);
+    assert_eq!(
+        intent_frame.envelope.correlation.command_id,
+        Some(intent_id),
+        "the envelope command ID is the payload's intent ID, not a second one"
+    );
+    let WirePayload::ManagementIntent(carried) = &intent_frame.payload else {
+        return Err(String::from("intent preparation must keep the payload"));
+    };
+    assert_eq!(
+        carried.intent_id, intent_id,
+        "the envelope and the payload carry one identity"
+    );
+    // A text input mints a fresh command ID per prepared send.
+    let submit = || {
+        WirePayload::SubmitTextInput(crate::cmds::submit_input(
+            "companion-1",
+            None,
+            false,
+            String::from("hi"),
+            String::from("en"),
+        ))
+    };
+    let first = PreparedRequest::new(submit()).frame(sender, Some(3));
+    let second = PreparedRequest::new(submit()).frame(sender, Some(3));
     let (Some(first_command), Some(second_command)) = (
         first.envelope.correlation.command_id,
         second.envelope.correlation.command_id,
     ) else {
-        return Err(String::from("stamped requests must carry command ids"));
+        return Err(String::from("prepared text inputs must carry command ids"));
     };
     assert!(
         first_command != second_command,
-        "every send mints a fresh command ID: {first_command:?} vs {second_command:?}"
+        "every prepared command mints a fresh command ID: {first_command:?} vs {second_command:?}"
     );
     assert!(
         first.envelope.correlation.request_id.is_some(),
@@ -336,13 +366,12 @@ fn session_echoes_the_learned_companion_projection() {
 }
 
 #[test]
-fn retry_frame_reuses_command_with_fresh_transport_ids() {
+fn prepared_retry_reuses_command_with_fresh_transport_ids() {
     let sender = WireSender {
         device_id: None,
         incarnation_id: incarnation(),
         connection_id: None,
     };
-    let command = CommandWireId(uuid::Uuid::new_v4());
     let input = || {
         WirePayload::SubmitTextInput(crate::cmds::submit_input(
             "companion-1",
@@ -352,13 +381,12 @@ fn retry_frame_reuses_command_with_fresh_transport_ids() {
             String::from("en"),
         ))
     };
-    let first = retry_frame(input(), sender, Some(3), command);
-    let second = retry_frame(input(), sender, Some(3), command);
-    assert_eq!(
-        first.envelope.correlation.command_id,
-        Some(command),
-        "retry reuses the logical command ID"
-    );
+    let prepared = PreparedRequest::new(input());
+    let first = prepared.frame(sender, Some(3));
+    let Some(command) = first.envelope.correlation.command_id else {
+        panic!("a prepared text input must carry a command identity");
+    };
+    let second = prepared.frame(sender, Some(3));
     assert_eq!(
         second.envelope.correlation.command_id,
         Some(command),
@@ -369,13 +397,25 @@ fn retry_frame_reuses_command_with_fresh_transport_ids() {
         "retries pair transport-fresh"
     );
     assert!(
-        first.envelope.correlation.request_id.is_some(),
-        "retries carry request IDs"
+        first.envelope.correlation.request_id != second.envelope.correlation.request_id,
+        "retries mint a fresh request ID per attempt"
     );
     assert_eq!(
         first.envelope.observed.presence_generation_view,
         second.envelope.observed.presence_generation_view,
         "retries preserve the observed premise"
+    );
+    // The raw builder keeps the same contract for a caller-minted command.
+    let raw = retry_frame(input(), sender, Some(3), command);
+    assert_eq!(
+        raw.envelope.correlation.command_id,
+        Some(command),
+        "retry_frame keeps the caller's command identity"
+    );
+    assert!(
+        raw.envelope.message_id != first.envelope.message_id
+            && raw.envelope.message_id != second.envelope.message_id,
+        "retry_frame stays transport-fresh"
     );
 }
 
