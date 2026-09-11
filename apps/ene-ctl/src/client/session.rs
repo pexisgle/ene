@@ -12,7 +12,7 @@ use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
 use ene_plugin_ipc::WireFrame;
 
-use super::frames::{auth_rejected_guidance, payload_kind};
+use super::frames::auth_rejected_guidance;
 
 /// Beyond this cap the oldest queued frame is discarded to make room, never
 /// the newest, so a chatty or hostile Host cannot grow the session without
@@ -70,22 +70,8 @@ impl core::fmt::Debug for SessionState {
 }
 
 impl SessionState {
-    pub fn new() -> Self {
-        Self {
-            generation: None,
-            companion: None,
-            connection_id: None,
-            pairing_secret: None,
-            deferred: VecDeque::new(),
-        }
-    }
-
     pub fn generation(&self) -> Option<u64> {
         self.generation
-    }
-
-    pub fn connection_id(&self) -> Option<ConnectionWireId> {
-        self.connection_id
     }
 
     pub fn set_connection(&mut self, connection_id: ConnectionWireId) {
@@ -107,7 +93,7 @@ impl SessionState {
     /// projection supersede what the session held, so later sends echo the
     /// Host's current mapping instead of guessing.
     pub fn observe_presence(&mut self, fact: &PresenceAttributionWire) {
-        self.generation = Some(presence_generation_of_fact(fact));
+        self.generation = Some(fact.generation);
         self.companion = Some(fact.companion.0.clone());
     }
 
@@ -127,10 +113,6 @@ impl SessionState {
         self.generation = Some(current);
     }
 
-    pub fn deferred_len(&self) -> usize {
-        self.deferred.len()
-    }
-
     pub fn push_deferred(&mut self, frame: WireFrame) {
         if self.deferred.len() >= DEFERRED_CAP {
             let _ = self.deferred.pop_front();
@@ -145,12 +127,6 @@ impl SessionState {
         let position = find_deferred_reply(&self.deferred, own)?;
         self.deferred.remove(position).map(|frame| frame.payload)
     }
-}
-
-/// Free function so the frame loop and the session update stay testable
-/// without a socket.
-pub fn presence_generation_of_fact(fact: &PresenceAttributionWire) -> u64 {
-    fact.generation
 }
 
 pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
@@ -271,7 +247,7 @@ pub fn decide_auth(payload: &WirePayload) -> AuthDecision {
         unexpected => AuthDecision::Unexpected {
             message: format!(
                 "unexpected {} during authentication; expected AuthResult",
-                payload_kind(unexpected)
+                unexpected.message_type()
             ),
         },
     }

@@ -70,7 +70,6 @@ pub mod frames;
 pub mod session;
 mod transport;
 
-pub use frames::payload_kind;
 pub use transport::Client;
 
 /// Pure: the caller decides whether the directory or socket must exist;
