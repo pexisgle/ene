@@ -40,9 +40,8 @@
 //! [`session::SessionState`] and reading continues; any other non-fact frame
 //! is pushed to the deferred queue (cap [`session::DEFERRED_CAP`],
 //! oldest-drop) and reading continues — mismatches are never returned as
-//! answers and never silently dropped. The pure [`session::select_answer`]
-//! holds that decision over a deferred queue plus a frame script; the socket
-//! loop is its streaming form.
+//! answers and never silently dropped. [`session::decide_frame`] is the pure
+//! per-frame step of that loop; the deferred queue holds the rest.
 //!
 //! A still-pending pairing answers
 //! [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation):
