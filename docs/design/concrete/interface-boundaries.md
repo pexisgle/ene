@@ -710,21 +710,9 @@ enum RoundIntakeOutcome {
     HeldForTransition,               // 切替区間の新規開始禁止
     NeedsRevalidation(NeedsRevalidationRef),
 }
-
-struct RoundClosureFact {
-    companion: CompanionId,
-    client: ClientId,
-    round: RoundId,
-    closure_scope: ClosureScopeRef,  // 安全な区切りに必要な対象範囲
-    undelivered_link: Option<UndeliveredRef>, // 未提示出力の未伝達管理への接続
-}
-
-struct ConfirmPresentationObservation {
-    round: RoundId,
-    presented_or_unknown: PresentationStatus, // Presented | Unknown（送信≠報告完了）
-}
 ```
 
+- `RoundClosureFact` / `ConfirmPresentationObservation`（presentation crate の outcome 型）は current stage で producer / consumer がなく、必要 stage で再導入する。提示確認は wire `PresentationStatus` から `PresentationMark`（round と presented / unknown）への ingress で行い、送信≠報告完了を維持する。
 - 会話の意味・History は個体調整、round の実際・提示・区切りは入出力・提示、帰属成立は接続・存在。旧 round の入力・生成途中・未提示を新 round へ付け替えない。生成済み＝提示済みにしない。Voice に話者認証済みの意味を足さない。
 - wire の新規 round 開始要求（IPC §13.1 の `SubmitTextInput.round = None`）は入出力・提示が現在条件の照合と round 発行を行ってから、本 interface の `RoundId` を満たす。Client や ingress mapping が domain identity を発行せず、旧 round の拒否を新規開始へ自動読替えしない。
 
@@ -1156,7 +1144,7 @@ fn request_action(cmd: ExecuteActionCommand)
 | Backup 作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点・参照・未完了の対応が揃って成功） | `(backup_point, 対象時点・参照対応・除外・未完了状況)`。PR Group J |
 | Restore | `RequestRestoreCommand` → `StagedRestoreCandidate`（隔離検証） | `SwitchRestoreDecision`（generation bump＋switch）→ `BulkEnableAfterRestoreCommand` | `(restore, backup_point, RestoreGeneration, hold, Credential 照合)`。PR Group J |
 | Targeted Deletion | `RequestTargetedDeletionCommand` → `DeletionScopeDecision` | `DemandLocalErasureCommand` → `ParticipantCompletionFact` → `VerifyRemainderQuery` → `GlobalDeletionCompletion` | `(operation, sweep, valid_interval, participant 対応, hold)`。PR Group J、CI §5.9 |
-| 未伝達報告 | `RegisterUndeliveredFact`（親原子で登録） | `RequestUndeliveredSummaryQuery` → `UndeliveredSummaryFact` → `ConfirmPresentationObservation`（提示確認後のみ確定） | `(undelivered_id, source 対応, 報告状況, round・世代対応)`。PR Group B |
+| 未伝達報告 | `RegisterUndeliveredFact`（親原子で登録） | `RequestUndeliveredSummaryQuery` → `UndeliveredSummaryFact` → `PresentationMark`（提示確認後のみ確定） | `(undelivered_id, source 対応, 報告状況, round・世代対応)`。PR Group B |
 | Character 適用供給 | `GetCharacterRevisionQuery`（供給） | `ProposeCharacterApplicationCandidate`（Owner 選択付き提案→確定） | `(character, revision, parts, OwnerSelectionRef)`。PR Group A/B |
 
 completion 側では元の identity / revision / generation / attempt / operation / provenance へ戻れる。遅延物は `attempt → task revision → 現在 Task` の順に辿り、記録（元へ残す）と semantic 更新・次実行・提示（現在の受入）を分ける（CI §6.3）。Cancel・失効・steering・移動・削除・復元後の到着物は元の Action / Task へ記録し、旧承認の解除・旧結果の新目的採用・後続の自動開始をしない。
@@ -1366,7 +1354,7 @@ trait UndeliveredRepository {
         &self,
         id: UndeliveredId,
         expected: ReportStatus,
-        observation: ConfirmPresentationObservation,
+        mark: PresentationMark,      // 提示 round と presented / unknown の観測
     ) -> Result<ReportStatusTransition, UndeliveredTechnicalError>;
 }
 ```
@@ -1398,7 +1386,7 @@ IPC wire schema は [Host↔Client IPC](host-client-ipc.md) が定める。本�
 
 | 区分 | interface | 越境するもの・理由 |
 |---|---|---|
-| remote-capable（Host↔Client） | X-B round 受付・提示・区切り（`SubmitClientInputCandidate` / `RoundClosureFact` / `ConfirmPresentationObservation`） | Client は入力・表示の一時表現だけを持ち、Host 正本を持たない。Client message は candidate であり、Host の現在帰属・許可・保留との照合が必要。未送信操作の自動 queue・Client copy による Host 上書きをしない |
+| remote-capable（Host↔Client） | X-B round 受付・提示・区切り（`SubmitClientInputCandidate` / `RoundIntakeOutcome` / 提示確認の `PresentationMark`） | Client は入力・表示の一時表現だけを持ち、Host 正本を持たない。Client message は candidate であり、Host の現在帰属・許可・保留との照合が必要。未送信操作の自動 queue・Client copy による Host 上書きをしない |
 | remote-capable | X-A 移動・復帰（`RequestMoveCommand` / `PresenceAttributionFact`） | 呼出し・移動意図は Client から届くが、成立は Host の帰属記録。hint・復旧先だけで presence を成立させない |
 | remote-capable | X-H 未伝達の次 Client 報告（`UndeliveredSummaryFact`） | 次 Client での要約報告は Host の元記録・利用制限・削除状況へ照合した派生表現。接続・表示 copy 送信だけで報告完了にしない |
 | remote-capable | X-D eligibility 通知の一部（`NotifyPresenceChangeFact` の Client 向け表示） | 観測状態・対象範囲の説明可能性のため。Raw・候補・routing 用 data・私的 context は送らない |
@@ -1493,7 +1481,7 @@ crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定め
 
 1. 個体調整は移動意図（Owner 呼出し・事前指示・文脈上の自発）を `RequestMoveCommand(companion, from, to, reason, expected_generation, expected_state, round_closure)` で接続・存在へ渡す。移動の必要性と成立は別。
 2. 接続・存在は `expected_generation＋expected_state` の CAS で `旧→移行中→新` の durable 遷移を確定する（SD-Presence）。simultaneous summon は先勝ちのみ成立させ、後着は不受理・再評価へ戻す。移行中は新旧いずれも Client 依存の新規開始をしない。
-3. 旧 Client の旧入力・未提示出力は `StaleRound` として元 round・元帰属・元試行へ対応付け、新 round へ付け替えない。旧生成済み未提示出力は `RoundClosureFact(undelivered_link)` で未伝達管理へ接続し、次 Client で現在の結果・利用制限に基づいて要約報告する。
+3. 旧 Client の旧入力・未提示出力は `StaleRound` として元 round・元帰属・元試行へ対応付け、新 round へ付け替えない。旧生成済み未提示出力は未伝達管理へ接続し、次 Client で現在の結果・利用制限に基づいて要約報告する。
 4. 新 Client の入力は新しい round・試行だけを許す。成立前の新 Client 入力で新 presence を成立させず、旧 round 継続として実行しない。再接続した Client の古い一時 state だけで現在 presence・Permission・実行再開を成立させない。
 5. 失われないこと：presence・Host 継続・接続・許可の区別、切替区間の区別、二重 presence の禁止、安全な区切り、旧作用の別 Client 自動継続の禁止。
 

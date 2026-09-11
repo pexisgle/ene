@@ -697,7 +697,7 @@ struct TextStreamFrameWire {
 struct ConfirmPresentationWire {
     round: RoundWireId,
     stream: Option<StreamWireId>,
-    status: PresentationStatusWire,
+    status: PresentationStatus,
     detail: Option<String>,
 }
 
@@ -795,7 +795,7 @@ DTO → Host domain command への変換点（Host ingress mapping。判断は�
 | wire DTO | mapping 先（domain premise） | 判断 owner |
 |---|---|---|
 | `SubmitTextInput` | §13.1 に従い入出力・提示が None を新規 `RoundId` へ解決した後、`SubmitClientInputCandidate{ companion, client, claimed_generation, round }`（IB X-B） | 入出力・提示（round 発行）＋個体調整（受理）＋接続・存在（帰属照合） |
-| `ConfirmPresentation` | `ConfirmPresentationObservation`（IB X-B） | 入出力・提示＋個体調整 |
+| `ConfirmPresentation` | 提示 round の未伝達報告状況の更新（提示 round と presented / unknown。wire `Failed` は presented=false = unknown として粘着） | 個体調整（報告状況）＋入出力・提示 |
 | `MoveIntent` | `RequestMoveCommand`（IB X-A） | 接続・存在 |
 | `CaptureFrame` | `PublishObservationCandidate` の Client 由来部分（IB X-E） | 共有観測 |
 | `ActionReceiptAck`・`EffectReport` | `ReportEffectFact` の Client 由来部分（IB K-H） | 実行・拡張 |
