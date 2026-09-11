@@ -183,7 +183,7 @@ pub struct CheckLiveAuthorizationQuery {
 pub enum LiveAuthorizationDecision {
     /// Allowed for exactly one use under the carried evaluation id.
     AllowForThisUse(PermissionEvaluationId),
-    Deny(DenyReason),
+    Deny(DenyCode),
     /// The caller's consent view is stale; re-read and retry.
     ///
     /// Ask-owner and wait-for-condition variants are deliberately absent:
@@ -191,12 +191,7 @@ pub enum LiveAuthorizationDecision {
     NeedsRevalidation(RevalidationNeed),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DenyReason {
-    pub code: DenyCode,
-    pub detail: String,
-}
-
+/// Why one live-authorization query was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DenyCode {
     SetupIncomplete,
@@ -600,10 +595,7 @@ pub fn check_live_authorization(
     tracker: &mut EvaluationTracker,
 ) -> LiveAuthorizationDecision {
     if !query.setup_complete {
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::SetupIncomplete,
-            detail: "setup has not completed".to_owned(),
-        });
+        return LiveAuthorizationDecision::Deny(DenyCode::SetupIncomplete);
     }
     let in_allowlist = matches!(
         (
@@ -622,25 +614,13 @@ pub fn check_live_authorization(
         )
     );
     if !in_allowlist {
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::NotInAllowlist,
-            detail: "consumer, capability, and purpose are outside the closed world".to_owned(),
-        });
+        return LiveAuthorizationDecision::Deny(DenyCode::NotInAllowlist);
     }
     let Some(record) = current else {
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::ConsentStale,
-            detail: "no current consent is stored".to_owned(),
-        });
+        return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
     };
-    let capability_covered = record.capability == query.candidate.capability;
-    if !capability_covered {
-        let stored = record.capability.as_str();
-        let wanted = query.candidate.capability.as_str();
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::ConsentStale,
-            detail: format!("stored {stored} consent does not cover the {wanted} capability"),
-        });
+    if record.capability != query.candidate.capability {
+        return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
     }
     let current_view = (record.id.clone(), record.rev);
     let stale_view = query.expected_consent.as_ref() != Some(&current_view);
@@ -650,12 +630,7 @@ pub fn check_live_authorization(
         });
     }
     if query.candidate.provider_ref != record.provider || query.candidate.model != record.model {
-        let provider = query.candidate.provider_ref.as_str();
-        let model = query.candidate.model.as_str();
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::ConsentStale,
-            detail: format!("candidate route {provider}/{model} is not covered by current consent"),
-        });
+        return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
     }
     let id = tracker.mint(&query.candidate);
     LiveAuthorizationDecision::AllowForThisUse(id)
@@ -768,10 +743,10 @@ mod tests {
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(reason) = decision else {
+        let LiveAuthorizationDecision::Deny(code) = decision else {
             return;
         };
-        assert_eq!(reason.code, DenyCode::SetupIncomplete);
+        assert_eq!(code, DenyCode::SetupIncomplete);
     }
 
     #[test]
@@ -821,10 +796,10 @@ mod tests {
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(reason) = decision else {
+        let LiveAuthorizationDecision::Deny(code) = decision else {
             return;
         };
-        assert_eq!(reason.code, DenyCode::ConsentStale);
+        assert_eq!(code, DenyCode::ConsentStale);
     }
 
     #[test]
@@ -834,10 +809,10 @@ mod tests {
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, None, &mut tracker);
         assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(reason) = decision else {
+        let LiveAuthorizationDecision::Deny(code) = decision else {
             return;
         };
-        assert_eq!(reason.code, DenyCode::ConsentStale);
+        assert_eq!(code, DenyCode::ConsentStale);
     }
 
     #[test]
@@ -907,8 +882,7 @@ mod tests {
         assert!(
             matches!(
                 decision,
-                LiveAuthorizationDecision::Deny(ref reason)
-                    if reason.code == DenyCode::ConsentStale
+                LiveAuthorizationDecision::Deny(code) if code == DenyCode::ConsentStale
             ),
             "a dialogue consent must not authorize learning, got {decision:?}"
         );
@@ -945,8 +919,7 @@ mod tests {
             assert!(
                 matches!(
                     decision,
-                    LiveAuthorizationDecision::Deny(ref reason)
-                        if reason.code == DenyCode::NotInAllowlist
+                    LiveAuthorizationDecision::Deny(code) if code == DenyCode::NotInAllowlist
                 ),
                 "mixed consumer/capability/purpose must stay outside the closed world: {mixed:?}"
             );
