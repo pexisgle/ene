@@ -2417,10 +2417,12 @@ async fn learning_new_memory_keeps_summary_grounds_and_current_row() {
         })
     );
 
-    let current = store.load_current_memory(memory).await.unwrap();
-    let Some(current) = current else {
-        panic!("the committed memory must be current");
-    };
+    let memories = store
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "the committed memory must be current");
+    let current = &memories[0];
     assert_eq!(current.content, "owner likes jasmine tea");
     assert_eq!(current.scope, LearningScope::companion(companion));
     assert_eq!(current.importance, Importance::clamped(4));
@@ -2487,7 +2489,14 @@ async fn learning_reused_summary_identity_with_a_different_payload_is_refused() 
             summary: evidence.id,
         })
     );
-    assert_eq!(store.load_current_memory(second).await, Ok(None));
+    assert!(
+        store
+            .list_memory_revisions(second)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the refused change must leave no current row"
+    );
     let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
     assert_eq!(stored.content, "owner likes jasmine tea");
 }
@@ -2601,9 +2610,13 @@ async fn learning_update_appends_a_revision_and_keeps_the_previous_one() {
             revision: MemoryRevision::from_u64(2),
         })
     );
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert_eq!(current.content, "owner lives in Osaka");
-    assert_eq!(current.revision, MemoryRevision::from_u64(2));
+    let memories = store
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "the memory must be current");
+    assert_eq!(memories[0].content, "owner lives in Osaka");
+    assert_eq!(memories[0].revision, MemoryRevision::from_u64(2));
 
     let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions.len(), 2, "the old revision is kept");
@@ -2669,12 +2682,12 @@ async fn learning_stale_update_is_rejected_without_overwriting() {
             current: MemoryRevision::from_u64(2),
         })
     );
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(
-        current.content, "owner switched to the day shift",
+        revisions[1].content, "owner switched to the day shift",
         "the stale result must not overwrite the newer recognition"
     );
-    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 2);
+    assert_eq!(revisions.len(), 2);
 }
 
 #[tokio::test]
@@ -2773,15 +2786,10 @@ async fn learning_forgetting_suppresses_recall_and_keeps_content_and_revisions()
         forgotten,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert!(current.recall_suppressed, "recall is suppressed");
-    assert_eq!(
-        current.content, "owner was worried about the launch",
-        "normal forgetting never deletes content"
-    );
     let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions.len(), 2, "revision history is kept");
     assert_eq!(revisions[0].content, "owner was worried about the launch");
+    assert!(revisions[1].recall_suppressed, "recall is suppressed");
     assert_eq!(revisions[1].change, ChangeKind::Forgotten);
 
     // A later reinforcement clears the suppression without deleting it.
@@ -2804,9 +2812,9 @@ async fn learning_forgetting_suppresses_recall_and_keeps_content_and_revisions()
         remembered,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert!(!current.recall_suppressed);
-    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 3);
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    assert!(!revisions[2].recall_suppressed);
+    assert_eq!(revisions.len(), 3);
 }
 
 #[tokio::test]
@@ -2888,11 +2896,12 @@ async fn learning_memory_survives_reopen() {
     drop(store);
 
     let reopened = Store::open(&path).await.unwrap();
-    let current = reopened.load_current_memory(memory).await.unwrap();
-    let Some(current) = current else {
-        panic!("memory must survive reopen");
-    };
-    assert_eq!(current.content, "owner prefers morning conversations");
+    let memories = reopened
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "memory must survive reopen");
+    assert_eq!(memories[0].content, "owner prefers morning conversations");
     let revisions = reopened.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions.len(), 1);
     assert_eq!(revisions[0].summary, Some(evidence.id));
@@ -2926,8 +2935,8 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    let opened = store.load_current_memory(MemoryId::generate()).await;
-    assert_eq!(opened, Ok(None), "migrated schema answers reads");
+    let opened = store.list_current_memories(RawId::new(), None, 10).await;
+    assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
         Some(11),
@@ -3049,8 +3058,6 @@ async fn approval_sweep_redacts_history_and_learning_content() {
     let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].text, "the key is [credential]");
-    let current = store.load_current_memory(memory).await.unwrap().unwrap();
-    assert_eq!(current.content, "owner key [credential]");
     let revisions = store.list_memory_revisions(memory).await.unwrap();
     assert_eq!(revisions[0].content, "owner key [credential]");
     let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
@@ -3189,7 +3196,13 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
         Ok(MemoryChangeOutcome::StaleCredentialSet),
         "a stale credential-set premise must refuse the Learning commit"
     );
-    assert_eq!(writer.load_current_memory(memory).await, Ok(None));
+    assert!(
+        writer
+            .list_current_memories(companion, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
     assert!(
         writer
@@ -3346,7 +3359,13 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
         })
         .await;
     assert_eq!(stale, Ok(MemoryChangeOutcome::StaleCredentialSet));
-    assert_eq!(writer.load_current_memory(memory).await, Ok(None));
+    assert!(
+        writer
+            .list_current_memories(companion, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
     assert!(
         writer

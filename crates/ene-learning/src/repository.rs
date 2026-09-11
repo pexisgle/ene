@@ -150,12 +150,6 @@ pub trait LearningRepository: Send + Sync {
         commit: MemoryChangeCommit,
     ) -> Result<MemoryChangeOutcome, LearningTechnicalError>;
 
-    /// Loads the current recognition, including suppressed ones.
-    async fn load_current_memory(
-        &self,
-        memory: MemoryId,
-    ) -> Result<Option<Memory>, LearningTechnicalError>;
-
     /// Lists current memories for one Companion, most recently formed first,
     /// capped at `limit`. Suppressed memories are included: suppression is a
     /// recall decision, not a visibility restriction.

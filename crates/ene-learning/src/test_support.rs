@@ -128,19 +128,6 @@ impl LearningRepository for FakeLearningRepository {
         Ok(outcome)
     }
 
-    async fn load_current_memory(
-        &self,
-        memory: MemoryId,
-    ) -> Result<Option<Memory>, LearningTechnicalError> {
-        Ok(self
-            .memories
-            .lock()
-            .expect("fake memory lock")
-            .iter()
-            .find(|stored| stored.id == memory)
-            .cloned())
-    }
-
     async fn list_current_memories(
         &self,
         companion: RawId,
