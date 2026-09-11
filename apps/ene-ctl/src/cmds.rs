@@ -425,6 +425,19 @@ pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
         companion: CompanionWireRef(companion.to_string()),
         since: None,
         limit,
+        round: None,
+    }
+}
+
+/// Round-scoped history: the Host filters by the stored round projection, so
+/// the round is addressable even after a Host restart dropped its transient
+/// wire map, and the result does not depend on the overall recent window.
+pub fn round_history_request(companion: &str, round: &str, limit: u64) -> HistoryRequest {
+    HistoryRequest {
+        companion: CompanionWireRef(companion.to_string()),
+        since: None,
+        limit,
+        round: Some(RoundWireId(round.to_string())),
     }
 }
 
@@ -645,7 +658,8 @@ mod tests {
         HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for,
         credential_id_for, credential_intent, credential_target_for, describe_intake,
         describe_management, history_request, memory_view_request, new_local_id, parse_command,
-        render_history, render_round_history, render_view, setup_view_request, submit_input,
+        render_history, render_round_history, render_view, round_history_request,
+        setup_view_request, submit_input,
     };
     use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
 
@@ -1297,6 +1311,15 @@ mod tests {
         assert!(
             history.companion.0 == "companion-1" && history.limit == 7,
             "history echoes the learned companion: {history:?}"
+        );
+        assert!(
+            history.round.is_none(),
+            "plain history reads the whole timeline: {history:?}"
+        );
+        let scoped = round_history_request("companion-1", "round-9", 7);
+        assert!(
+            scoped.round == Some(RoundWireId(String::from("round-9"))),
+            "round-scoped history carries the projection: {scoped:?}"
         );
         let input = submit_input(
             "companion-1",

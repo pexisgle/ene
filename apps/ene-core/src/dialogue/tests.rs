@@ -124,6 +124,16 @@ fn intent_frame_with_id(
 }
 
 fn history_frame(companion: &str, connection: ConnectionWireId) -> ene_plugin_ipc::WireFrame {
+    history_frame_filtered(companion, connection, None, 100, None)
+}
+
+fn history_frame_filtered(
+    companion: &str,
+    connection: ConnectionWireId,
+    since: Option<String>,
+    limit: u64,
+    round: Option<RoundWireId>,
+) -> ene_plugin_ipc::WireFrame {
     let frame = ene_plugin_ipc::WireFrame {
         envelope: new_outgoing_envelope(
             ProtocolVersion::V1,
@@ -132,8 +142,9 @@ fn history_frame(companion: &str, connection: ConnectionWireId) -> ene_plugin_ip
         ),
         payload: WirePayload::HistoryRequest(ene_api::v1::round::HistoryRequest {
             companion: CompanionWireRef(companion.to_string()),
-            since: None,
-            limit: 100,
+            since,
+            limit,
+            round,
         }),
     };
     stamped(frame, connection)
@@ -312,7 +323,7 @@ async fn timeline_count(handle: &HostHandle) -> Result<usize, String> {
         .map_err(|error| format!("the companion must resolve: {error:?}"))?;
     let timeline = handle
         .store
-        .load_timeline(companion, None, 100)
+        .load_timeline(companion, None, None, 100)
         .await
         .map_err(|error| format!("the timeline must load: {error:?}"))?;
     Ok(timeline.len())
@@ -532,7 +543,7 @@ async fn submit_without_setup_needs_revalidation() {
         Some(device_client("client-a")),
         "the attach names the submitting device"
     );
-    let timeline = handle.store.load_timeline(companion, None, 50).await;
+    let timeline = handle.store.load_timeline(companion, None, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.is_empty()),
         "a declined input must leave no history row, got {timeline:?}"
@@ -856,6 +867,117 @@ async fn full_dialogue_round_streams_and_restores() {
         return;
     };
     assert_eq!(second.items.len(), 2, "the replay appends nothing durable");
+}
+
+#[tokio::test]
+async fn history_round_scope_resolves_the_stored_projection() -> Result<(), String> {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_presence::PresenceRepository as _;
+
+    let transport = ok_transport();
+    let live = live_input("client-a");
+    let (handle, _dir) = round_test_handle("dlg-history-round", &live, &transport).await?;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("companion must resolve: {error:?}"))?;
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .map_err(|error| format!("attribution must load: {error:?}"))?
+        .ok_or_else(|| String::from("attribution must exist"))?
+        .generation;
+    let old_round = RawId::new();
+    let old_wire = RawId::new().as_uuid().to_string();
+    let other_round = RawId::new();
+    let append = |round: RawId, wire: String, text: &str| ene_companion::AppendHistoryCommand {
+        companion,
+        round,
+        role: ene_companion::HistoryRole::Owner,
+        text: text.to_string(),
+        lang: String::from("en"),
+        at: ene_primitive::WallClockWithTz::now(),
+        expected_generation: generation,
+        expected_consent: None,
+        expected_credential_set: None,
+        command_id: None,
+        round_wire: Some(wire),
+        round_intent: None,
+        incarnation: None,
+        local_id: None,
+    };
+    for text in ["old one", "old two"] {
+        let outcome = handle
+            .store
+            .append_message(append(old_round, old_wire.clone(), text))
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(ene_companion::HistoryAppendOutcome::CommittedAs { .. })
+            ),
+            "fixture row must commit: {outcome:?}"
+        );
+    }
+    let other_wire = RawId::new().as_uuid().to_string();
+    let outcome = handle
+        .store
+        .append_message(append(other_round, other_wire, "newer round"))
+        .await;
+    assert!(outcome.is_ok(), "the other round must commit");
+
+    // The wire never entered this handle's transient map, so resolving it is
+    // the stored projection's job (the restart case).
+    assert!(
+        handle.round_for(&old_wire).is_none(),
+        "the fixture wire must be absent from the transient map"
+    );
+    let scoped = handle
+        .handle_frame(
+            history_frame_filtered(
+                handle.companion_wire(),
+                live.connection_id,
+                None,
+                500,
+                Some(RoundWireId(old_wire.clone())),
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let WirePayload::HistoryView(scoped) = &scoped.first().unwrap().payload else {
+        return Err(String::from("round history must answer a view"));
+    };
+    let texts: Vec<&str> = scoped.items.iter().map(|item| item.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["old one", "old two"],
+        "only the scoped round returns, oldest first"
+    );
+
+    let unknown = handle
+        .handle_frame(
+            history_frame_filtered(
+                handle.companion_wire(),
+                live.connection_id,
+                None,
+                500,
+                Some(RoundWireId("no-such-round".to_string())),
+            ),
+            live,
+            &transport,
+        )
+        .await;
+    let WirePayload::HistoryView(unknown) = &unknown.first().unwrap().payload else {
+        return Err(String::from("unknown round must still answer a view"));
+    };
+    assert!(
+        unknown.items.is_empty(),
+        "an unresolvable projection answers nothing, never the whole timeline"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -2020,7 +2142,7 @@ async fn submit_without_command_id_is_declined_without_side_effects() {
     );
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();
-    let timeline = handle.store.load_timeline(companion, None, 50).await;
+    let timeline = handle.store.load_timeline(companion, None, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.is_empty()),
         "a declined keyless input must leave no history row, got {timeline:?}"
@@ -2077,7 +2199,7 @@ async fn submit_with_reused_command_and_new_text_is_declined() {
     );
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();
-    let timeline = handle.store.load_timeline(companion, None, 50).await;
+    let timeline = handle.store.load_timeline(companion, None, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.len() == 2),
         "the declined forgery must append nothing (owner plus reply only), got {timeline:?}"
@@ -2184,7 +2306,7 @@ async fn submit_with_unknown_companion_needs_revalidation() {
     );
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();
-    let timeline = handle.store.load_timeline(companion, None, 50).await;
+    let timeline = handle.store.load_timeline(companion, None, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.is_empty()),
         "the unknown-companion send must append nothing, got {timeline:?}"
@@ -2227,7 +2349,7 @@ async fn consent_move_mid_flight_interrupts_adoption() {
     );
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();
-    let timeline = handle.store.load_timeline(companion, None, 50).await;
+    let timeline = handle.store.load_timeline(companion, None, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.len() == 1),
         "only the owner row commits on interrupted adoption, got {timeline:?}"
@@ -2723,7 +2845,7 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     let companion = handle.store.ensure_running_companion().await.unwrap();
     let timeline = handle
         .store
-        .load_timeline(companion, None, 10)
+        .load_timeline(companion, None, None, 10)
         .await
         .unwrap();
     let owner = timeline
@@ -3002,7 +3124,7 @@ async fn approving_a_credential_redacts_its_prior_occurrences() {
 
     let timeline = handle
         .store
-        .load_timeline(companion, None, 10)
+        .load_timeline(companion, None, None, 10)
         .await
         .unwrap();
     let row = timeline
@@ -3088,7 +3210,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
     );
     let timeline = restarted
         .store
-        .load_timeline(companion, None, 10)
+        .load_timeline(companion, None, None, 10)
         .await
         .unwrap();
     let row = timeline
@@ -3237,7 +3359,7 @@ async fn management_open_never_sweeps_and_the_serve_boundary_fails_closed() {
     );
     let timeline = management
         .store
-        .load_timeline(companion, None, 10)
+        .load_timeline(companion, None, None, 10)
         .await
         .unwrap();
     let legacy = timeline
@@ -3279,7 +3401,7 @@ async fn management_open_never_sweeps_and_the_serve_boundary_fails_closed() {
     );
     let timeline = reopened
         .store
-        .load_timeline(companion, None, 10)
+        .load_timeline(companion, None, None, 10)
         .await
         .unwrap();
     let swept = timeline

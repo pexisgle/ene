@@ -860,9 +860,20 @@ impl HostHandle {
             .since
             .as_deref()
             .and_then(|bound| WallClockWithTz::parse_rfc3339(bound).ok());
+        // A round-scoped request resolves the stored projection durably, so
+        // an old round stays addressable after a restart dropped the
+        // transient wire map. An unresolvable projection answers nothing:
+        // falling back to the whole timeline would silently widen the read.
+        let round = match &request.round {
+            None => None,
+            Some(wire) => match self.store.round_for_stored_wire(companion, &wire.0).await {
+                Ok(Some(round)) => Some(round),
+                Ok(None) | Err(_) => return vec![empty_history(frame, live)],
+            },
+        };
         let items = self
             .store
-            .load_timeline(companion, since, request.limit)
+            .load_timeline(companion, since, round, request.limit)
             .await
             .unwrap_or_default();
         let view_items = items

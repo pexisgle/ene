@@ -209,20 +209,234 @@ async fn append_message_commits_and_timeline_reads_back() {
         matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
         "happy path must commit"
     );
-    let loaded = store.load_timeline(companion, None, 10).await;
+    let loaded = store.load_timeline(companion, None, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
     assert_eq!(timeline[0].text, "hello history");
     assert_eq!(timeline[0].lang, "en");
     assert_eq!(timeline[0].presence_generation, generation);
     let bounded = store
-        .load_timeline(companion, Some(fixture_clock()), 10)
+        .load_timeline(companion, Some(fixture_clock()), None, 10)
         .await;
     let kept = bounded.unwrap();
     assert_eq!(kept.len(), 1, "item at the bound must be kept");
-    let capped = store.load_timeline(companion, None, 0).await;
+    let capped = store.load_timeline(companion, None, None, 0).await;
     let none = capped.unwrap();
     assert!(none.is_empty(), "zero limit must return nothing");
+}
+
+/// One raw batch insert bypasses the per-append transaction so a large
+/// fixture stays fast. Rows carry the same canonical `at_utc` the production
+/// append writes. `start_date` is a `YYYY-MM-DD` prefix; each row is one
+/// second later starting at midnight (counts stay within one day). Returns
+/// `(message, round, round_wire)` per row.
+fn insert_history_batch(
+    store: &Store,
+    companion: CompanionId,
+    count: usize,
+    start_date: &str,
+    round: Option<RawId>,
+) -> Vec<(RawId, RawId, String)> {
+    assert!(count < 86_400, "the fixture stays within one day");
+    let companion_text = crate::codec::encode_id(companion.as_raw());
+    let mut guard = store.conn.lock().expect("store lock");
+    let tx = guard
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .expect("batch transaction must open");
+    let mut inserted = Vec::with_capacity(count);
+    // Every row of one round carries that round's single stored projection,
+    // exactly like the production append path.
+    let round_wire = RawId::new().as_uuid().to_string();
+    for index in 0..count {
+        let second = index as u32;
+        let at = WallClockWithTz::parse_rfc3339(&format!(
+            "{start_date}T{:02}:{:02}:{:02}Z",
+            second / 3600,
+            (second / 60) % 60,
+            second % 60
+        ))
+        .expect("fixture timestamp must parse");
+        let message = RawId::new();
+        let round = round.unwrap_or_default();
+        tx.execute(
+            "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, NULL, ?9, NULL, NULL, NULL, NULL)",
+            params![
+                crate::codec::encode_id(message),
+                companion_text,
+                crate::codec::encode_id(round),
+                "owner",
+                format!("row {index}"),
+                "en",
+                at.to_rfc3339(),
+                at.to_rfc3339_utc(),
+                round_wire,
+            ],
+        )
+        .expect("batch row must insert");
+        inserted.push((message, round, round_wire.clone()));
+    }
+    tx.commit().expect("batch must commit");
+    inserted
+}
+
+/// `at_utc` keeps query comparison exact across offsets; the display `at`
+/// keeps its creation offset.
+#[tokio::test]
+async fn history_since_compares_instants_across_offsets() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    // Inserted first but earlier in time: a lexical comparison of the raw
+    // offset renderings would order these two the other way around.
+    let mut early = history_command(companion, generation, "early");
+    early.at = WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00+09:00")
+        .expect("fixture timestamp must parse");
+    let mut late = history_command(companion, generation, "late");
+    late.at = WallClockWithTz::parse_rfc3339("2026-09-12T00:30:00-05:00")
+        .expect("fixture timestamp must parse");
+    assert!(store.append_message(early).await.is_ok());
+    assert!(store.append_message(late).await.is_ok());
+
+    let bound = WallClockWithTz::parse_rfc3339("2026-09-12T02:00:00Z")
+        .expect("fixture timestamp must parse");
+    let loaded = store.load_timeline(companion, Some(bound), None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(
+        timeline.len(),
+        1,
+        "the offset comparison must select the later instant only"
+    );
+    assert_eq!(timeline[0].text, "late");
+    assert_eq!(
+        timeline[0].at.to_rfc3339(),
+        "2026-09-12T00:30:00-05:00",
+        "the display rendering keeps the creation offset"
+    );
+}
+
+/// The limit bounds SQLite's scan and the Rust decode, not only the returned
+/// vector: a malformed row beyond the limit never reaches the decoder.
+#[tokio::test]
+async fn history_limit_bounds_decoding_not_only_the_returned_vector() {
+    let store = open_memory().await.unwrap();
+    let (companion, _generation) = running_companion(&store).await.unwrap();
+    insert_history_batch(&store, companion, 20_000, "2026-01-01", None);
+    // A poisoned row after every well-formed one: any implementation that
+    // decodes the whole table before truncating fails here.
+    {
+        let guard = store.conn.lock().expect("store lock");
+        guard
+            .execute(
+                "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation) VALUES (?1, ?2, ?3, 'owner', 'poison', 'en', 'not-a-timestamp', '2027-01-01T00:00:00.000000000Z', 0)",
+                params![
+                    RawId::new().as_uuid().hyphenated().to_string(),
+                    crate::codec::encode_id(companion.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                ],
+            )
+            .expect("poison row must insert");
+    }
+    let loaded = store.load_timeline(companion, None, None, 1).await;
+    let timeline = loaded.expect("limit 1 must not decode the whole table");
+    assert_eq!(timeline.len(), 1);
+    assert_eq!(timeline[0].text, "row 0");
+}
+
+/// Round scope comes from the stored projection: an old round is addressable
+/// even though the caller's default window would never contain it.
+#[tokio::test]
+async fn history_round_scope_is_independent_of_the_recent_window() {
+    let store = open_memory().await.unwrap();
+    let (companion, _generation) = running_companion(&store).await.unwrap();
+    let old_round = RawId::new();
+    let old_rows = insert_history_batch(&store, companion, 120, "2026-01-01", Some(old_round));
+    insert_history_batch(&store, companion, 120, "2026-02-01", None);
+
+    let wire = &old_rows[0].2;
+    let resolved = store.round_for_stored_wire(companion, wire).await;
+    assert_eq!(
+        resolved,
+        Ok(Some(old_round)),
+        "the stored projection resolves to its domain round"
+    );
+    assert_eq!(
+        store.round_for_stored_wire(companion, "no-such-wire").await,
+        Ok(None)
+    );
+    let loaded = store
+        .load_timeline(companion, None, Some(old_round), 500)
+        .await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 120, "the whole old round comes back");
+    assert!(timeline.iter().all(|item| item.text.starts_with("row ")));
+    assert_eq!(
+        timeline[0].round_wire.as_deref(),
+        Some(wire.as_str()),
+        "items stay oldest-first and carry the stored projection"
+    );
+
+    let wide = store.load_timeline(companion, None, None, 500).await;
+    let all = wide.unwrap();
+    assert_eq!(all.len(), 240, "the unfiltered window still sees both");
+}
+
+#[tokio::test]
+async fn history_limit_zero_is_empty_and_huge_limits_saturate() {
+    let store = open_memory().await.unwrap();
+    let (companion, _generation) = running_companion(&store).await.unwrap();
+    insert_history_batch(&store, companion, 3, "2026-01-01", None);
+    let zero = store.load_timeline(companion, None, None, 0).await;
+    assert_eq!(zero, Ok(Vec::new()), "zero means no items, not an error");
+    let huge = store.load_timeline(companion, None, None, u64::MAX).await;
+    assert_eq!(
+        huge.map(|items| items.len()),
+        Ok(3),
+        "a limit beyond i64 saturates instead of failing"
+    );
+}
+
+/// Rewinds a store to the pre-v13 shape and proves the reopen backfills the
+/// canonical timestamps and the offset display rendering survives.
+#[tokio::test]
+async fn migration_backfills_canonical_timestamps() {
+    let dir = tempfile::tempdir().expect("tempdir must exist");
+    let path = dir.path().join("store.db");
+    let store = Store::open(&path).await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let mut command = history_command(companion, generation, "legacy row");
+    command.at = WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00+09:00")
+        .expect("fixture timestamp must parse");
+    assert!(store.append_message(command).await.is_ok());
+    {
+        let guard = store.conn.lock().expect("store lock");
+        guard
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_history_message_companion_at;
+                 ALTER TABLE history_message DROP COLUMN at_utc;
+                 PRAGMA user_version = 12;",
+            )
+            .expect("the pre-v13 fixture must apply");
+    }
+    drop(store);
+
+    let reopened = Store::open(&path).await.expect("the reopen must migrate");
+    let loaded = reopened.load_timeline(companion, None, None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 1);
+    assert_eq!(
+        timeline[0].at.to_rfc3339(),
+        "2026-09-12T10:00:00+09:00",
+        "the display rendering keeps its offset"
+    );
+    let bound = WallClockWithTz::parse_rfc3339("2026-09-12T02:00:00+09:00")
+        .expect("fixture timestamp must parse");
+    let filtered = reopened
+        .load_timeline(companion, Some(bound), None, 10)
+        .await;
+    assert_eq!(
+        filtered.map(|items| items.len()),
+        Ok(1),
+        "the backfilled projection serves since filters"
+    );
 }
 
 #[tokio::test]
@@ -245,7 +459,7 @@ async fn append_with_stale_generation_is_rejected() {
         },
         "stale expectation must carry the current generation"
     );
-    let loaded = store.load_timeline(companion, None, 10).await;
+    let loaded = store.load_timeline(companion, None, None, 10).await;
     let timeline = loaded.unwrap();
     assert!(timeline.is_empty(), "stale append must store nothing");
 }
@@ -365,7 +579,7 @@ async fn append_with_moved_consent_is_rejected() {
         HistoryAppendOutcome::StaleConsent,
         "moved consent must answer stale-consent"
     );
-    let loaded = store.load_timeline(companion, None, 10).await;
+    let loaded = store.load_timeline(companion, None, None, 10).await;
     assert!(
         matches!(&loaded, Ok(items) if items.is_empty()),
         "stale-consent append must store nothing"
@@ -833,7 +1047,7 @@ async fn local_id_is_correspondence_metadata_not_a_replay_key() {
         first_outcome, second_outcome,
         "local id repeats must mint distinct messages"
     );
-    let loaded = store.load_timeline(companion, None, 10).await;
+    let loaded = store.load_timeline(companion, None, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 2, "both local id repeats must persist");
     assert!(
@@ -1141,7 +1355,7 @@ async fn lookup_command_roundtrip_returns_both_ids() {
         matches!(missing, Ok(None)),
         "unknown command must find nothing"
     );
-    let loaded = store.load_timeline(companion, None, 10).await;
+    let loaded = store.load_timeline(companion, None, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
     assert_eq!(timeline[0].id, message);
@@ -1214,7 +1428,7 @@ PRAGMA user_version = 2;",
     }
     let opened = Store::open(&path).await;
     let store = opened.unwrap();
-    let loaded = store.load_timeline(companion, None, 10).await;
+    let loaded = store.load_timeline(companion, None, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "legacy row must survive migration");
     assert_eq!(timeline[0].id, message_id);
@@ -1242,8 +1456,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(12)),
-        "migration must record version 12"
+        matches!(version, Ok(13)),
+        "migration must record version 13"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1383,7 +1597,7 @@ async fn history_wire_projection_and_incarnation_roundtrip() {
     let HistoryAppendOutcome::CommittedAs { message } = appended.unwrap() else {
         panic!("unexpected variant");
     };
-    let loaded = store.load_timeline(companion, None, 10).await;
+    let loaded = store.load_timeline(companion, None, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
     assert_eq!(timeline[0].id, message);
@@ -1594,8 +1808,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(12)),
-        "reopened database must record schema version 12"
+        matches!(version, Ok(13)),
+        "reopened database must record schema version 13"
     );
 }
 
@@ -2360,8 +2574,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(12)),
-        "reopened database must record schema version 12"
+        matches!(version, Ok(13)),
+        "reopened database must record schema version 13"
     );
 }
 
@@ -2396,7 +2610,7 @@ async fn restart_keeps_timeline_intact() {
     let ensured_again = second.ensure_running_companion().await;
     let same = ensured_again.unwrap();
     assert_eq!(same, companion, "companion must survive restart");
-    let loaded = second.load_timeline(companion, None, 10).await;
+    let loaded = second.load_timeline(companion, None, None, 10).await;
     let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 2, "both items must survive restart");
     assert_eq!(timeline[0].text, "first");
@@ -3430,7 +3644,10 @@ async fn stale_credential_set_refuses_history_append_after_approval() {
         Ok(HistoryAppendOutcome::StaleCredentialSet),
         "a stale credential-set premise must refuse the raw append"
     );
-    let timeline = writer.load_timeline(companion, None, 10).await.unwrap();
+    let timeline = writer
+        .load_timeline(companion, None, None, 10)
+        .await
+        .unwrap();
     assert!(
         timeline.iter().all(|item| !item.text.contains("sk-new")),
         "no raw bearer may land in History: {timeline:?}"
@@ -3556,7 +3773,10 @@ async fn reapproval_with_a_new_value_refuses_a_stale_history_premise() {
         writer.append_message(stale).await,
         Ok(HistoryAppendOutcome::StaleCredentialSet)
     );
-    let timeline = writer.load_timeline(companion, None, 10).await.unwrap();
+    let timeline = writer
+        .load_timeline(companion, None, None, 10)
+        .await
+        .unwrap();
     assert!(
         timeline.iter().all(|item| !item.text.contains("sk-b")),
         "a stale premise must not re-save the updated value: {timeline:?}"

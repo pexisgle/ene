@@ -202,9 +202,19 @@ impl core::fmt::Debug for HistoryItem {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryRequest {
     pub companion: CompanionWireRef,
-    /// Items at or after this wall-clock rendering, if bounded.
+    /// Items at or after this wall-clock rendering, if bounded. The Host
+    /// parses it as RFC 3339 and compares instants; a different UTC offset is
+    /// therefore respected, never compared as plain text.
     pub since: Option<String>,
+    /// Maximum number of items, oldest first. Zero requests no items; the
+    /// Host applies the bound to the storage query, not after reading.
     pub limit: u64,
+    /// Restrict to one Host-issued round projection, or [`None`] for the
+    /// whole companion timeline. The projection travels opaquely: the Host
+    /// resolves it against stored history, so a round stays addressable
+    /// across restarts even though the transient wire map is gone.
+    #[serde(default)]
+    pub round: Option<RoundWireId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

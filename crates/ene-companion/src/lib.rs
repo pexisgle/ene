@@ -488,13 +488,17 @@ pub trait HistoryRepository {
 
     /// Loads timeline items for one companion, oldest first.
     ///
-    /// `since` bounds items at or after that wall-clock rendering when set;
-    /// `limit` caps the number returned. Wall-clock bounds are display
-    /// filtering only, never currentness evidence.
+    /// `since` bounds items at or after that instant when set; `round`
+    /// restricts to one domain round when set; `limit` caps the number
+    /// returned. All three are applied by the storage query, so the bound is
+    /// on the rows read and decoded, not only on the returned vector.
+    /// Wall-clock bounds are display selection only, never currentness
+    /// evidence.
     async fn load_timeline(
         &self,
         companion: CompanionId,
         since: Option<WallClockWithTz>,
+        round: Option<RawId>,
         limit: u64,
     ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError>;
 
