@@ -333,17 +333,14 @@ impl IntentOutcomeRepository for Store {
             };
             let expected = parse_consent_mark(&expected_base, CapabilityKind::Dialogue);
             let current_state = current.as_ref().map(|record| record.rev.as_u64());
-            let outcome = match expected {
-                None => IntentOutcome::StaleBaseView {
+            let outcome = if expected != Some(current_state) {
+                IntentOutcome::StaleBaseView {
                     current: current_mark(CapabilityKind::Dialogue, current.as_ref()),
-                },
-                Some(expected_state) if expected_state != current_state => {
-                    IntentOutcome::StaleBaseView {
-                        current: current_mark(CapabilityKind::Dialogue, current.as_ref()),
-                    }
                 }
-                Some(_) if current.is_some() && bearer_present => IntentOutcome::AppliedAsOneTime,
-                Some(_) => IntentOutcome::NeedsClarification,
+            } else if current.is_some() && bearer_present {
+                IntentOutcome::AppliedAsOneTime
+            } else {
+                IntentOutcome::NeedsClarification
             };
             let decided = IntentOutcomeRecord {
                 fingerprint,
