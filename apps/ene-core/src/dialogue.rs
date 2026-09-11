@@ -69,8 +69,8 @@ use ene_companion::{
     UndeliveredRepository,
 };
 use ene_credential::{
-    CredentialRefRepository, CredentialSetRepository as _, CredentialStore, CredentialValuesDigest,
-    CredentialValuesDigestBuilder, REDACTED_CREDENTIAL, ScrubbedText,
+    CredentialRefRepository, CredentialSetRepository as _, CredentialStore, REDACTED_CREDENTIAL,
+    ScrubbedText,
 };
 use ene_inference::{
     Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor,
@@ -680,12 +680,6 @@ impl HostHandle {
                 frame.envelope.sender.incarnation_id.random,
             )),
         };
-        // The effective credential values may have moved since the input
-        // scrub; fail closed so the retry re-scrubs under the new set
-        // instead of persisting content prepared under the old one.
-        if scrubber.verify_current().await.is_err() {
-            return vec![held_frame(frame, live)];
-        }
         match begin_turn(input, &self.store, &executor).await {
             DialogueBegin::Ready(turn) => {
                 self.record_open_round(
@@ -954,115 +948,23 @@ fn lock_learning_queue(
 /// prompt or durable content.
 ///
 /// Uses the existing credential boundary: bearer values are borrowed inside
-/// `with_bearer` and only redacted copies escape. Every scrub observes the
-/// effective value set, fingerprints it, and compares it with the durable
-/// observation; a change is reconciled in one transaction (sweep the new
-/// values + record the fingerprint + advance the revision) before a premise
-/// is issued, so the returned revision always names the observed values.
-/// Every value is applied longest-first so a shorter registered value cannot
-/// split an occurrence of a longer one. An unreadable registry or bearer
-/// fails closed: absence cannot be proven, so the caller must not use the
-/// original text.
+/// `with_bearer` and only redacted copies escape. The credential store pins
+/// its values for the whole Host run, so the revision read here names exactly
+/// the values being applied; an explicit approval or the startup sweep
+/// advances that revision with its own durable sweep. Every value is applied
+/// longest-first so a shorter registered value cannot split an occurrence of
+/// a longer one. An unreadable registry or bearer fails closed: absence
+/// cannot be proven, so the caller must not use the original text.
 struct CredentialScrubber<'a> {
     refs: &'a Store,
     store: &'a CredStore,
 }
 
-/// Bounded re-observation attempts when a value change races the scrub.
-///
-/// Each attempt sees a consistent enough snapshot; a change that keeps
-/// arriving eventually fails closed instead of looping forever.
-const CREDENTIAL_SET_OBSERVE_ATTEMPTS: usize = 4;
-
-impl CredentialScrubber<'_> {
-    /// Fingerprints the effective values and returns the observed set.
-    ///
-    /// Also records `(value length, ref)` for the caller's redaction pass.
-    async fn observe_values(
-        &self,
-        refs: &[ene_credential::CredentialRef],
-    ) -> Result<
-        (
-            CredentialValuesDigest,
-            Vec<(usize, ene_credential::CredentialRef)>,
-        ),
-        SecretScrubError,
-    > {
-        let mut builder = CredentialValuesDigestBuilder::new();
-        let mut known: Vec<(usize, ene_credential::CredentialRef)> = Vec::with_capacity(refs.len());
-        let mut ordered: Vec<&ene_credential::CredentialRef> = refs.iter().collect();
-        ordered.sort_by_key(|credential| credential.id());
-        for credential in ordered {
-            let length = self
-                .store
-                .with_bearer(credential, |bearer| {
-                    builder.add(credential, bearer);
-                    bearer.len()
-                })
-                .map_err(|_| SecretScrubError::SecretUnavailable)?;
-            if length == 0 {
-                // An empty value matches every position; treating it as
-                // unprovable keeps the raw text out of prompts and storage.
-                return Err(SecretScrubError::SecretUnavailable);
-            }
-            known.push((length, credential.clone()));
-        }
-        Ok((builder.finish(), known))
-    }
-}
-
 impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
     async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
-        for _ in 0..CREDENTIAL_SET_OBSERVE_ATTEMPTS {
-            let state = self
-                .refs
-                .credential_set_state()
-                .await
-                .map_err(|_| SecretScrubError::RegistryUnavailable)?;
-            let refs = self
-                .refs
-                .list_refs()
-                .await
-                .map_err(|_| SecretScrubError::RegistryUnavailable)?;
-            let (observed, mut known) = self.observe_values(&refs).await?;
-            if state.values != Some(observed) {
-                // The effective values moved past the last observation: sweep
-                // them and advance the revision atomically, then re-observe so
-                // the returned premise covers exactly the values used.
-                self.refs
-                    .reconcile_values(&refs, self.store)
-                    .map_err(|_| SecretScrubError::RegistryUnavailable)?;
-                continue;
-            }
-            known.sort_by_key(|(length, _)| std::cmp::Reverse(*length));
-            let mut scrubbed = text.to_owned();
-            for (_, credential) in known {
-                let replaced = self.store.with_bearer(&credential, |bearer| {
-                    scrubbed.replace(bearer, REDACTED_CREDENTIAL)
-                });
-                let Ok(next) = replaced else {
-                    // A registered credential exists but its bearer cannot be
-                    // read, so absence of the value cannot be proven. Fail
-                    // closed rather than risk putting the raw text in a
-                    // prompt or a durable Learning row.
-                    return Err(SecretScrubError::SecretUnavailable);
-                };
-                scrubbed = next;
-            }
-            return Ok(ScrubbedText {
-                text: scrubbed,
-                credential_set: state.revision,
-            });
-        }
-        // The value set kept changing underneath every observation; fail
-        // closed instead of issuing a premise that may already be stale.
-        Err(SecretScrubError::ValuesChanged)
-    }
-
-    async fn verify_current(&self) -> Result<(), SecretScrubError> {
-        let state = self
+        let credential_set = self
             .refs
-            .credential_set_state()
+            .current_set_revision()
             .await
             .map_err(|_| SecretScrubError::RegistryUnavailable)?;
         let refs = self
@@ -1070,16 +972,38 @@ impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
             .list_refs()
             .await
             .map_err(|_| SecretScrubError::RegistryUnavailable)?;
-        let (observed, _) = self.observe_values(&refs).await?;
-        if state.values == Some(observed) {
-            return Ok(());
+        let mut known: Vec<(usize, ene_credential::CredentialRef)> = Vec::with_capacity(refs.len());
+        for credential in refs {
+            let length = self
+                .store
+                .with_bearer(&credential, |bearer| bearer.len())
+                .map_err(|_| SecretScrubError::SecretUnavailable)?;
+            if length == 0 {
+                // An empty value matches every position; treating it as
+                // unprovable keeps the raw text out of prompts and storage.
+                return Err(SecretScrubError::SecretUnavailable);
+            }
+            known.push((length, credential));
         }
-        // Reconcile (sweep + fingerprint + revision bump) so the change is
-        // durable before this caller fails closed; a retry re-scrubs.
-        self.refs
-            .reconcile_values(&refs, self.store)
-            .map_err(|_| SecretScrubError::RegistryUnavailable)?;
-        Err(SecretScrubError::ValuesChanged)
+        known.sort_by_key(|(length, _)| std::cmp::Reverse(*length));
+        let mut scrubbed = text.to_owned();
+        for (_, credential) in known {
+            let replaced = self.store.with_bearer(&credential, |bearer| {
+                scrubbed.replace(bearer, REDACTED_CREDENTIAL)
+            });
+            let Ok(next) = replaced else {
+                // A registered credential exists but its bearer cannot be
+                // read, so absence of the value cannot be proven. Fail closed
+                // rather than risk putting the raw text in a prompt or a
+                // durable Learning row.
+                return Err(SecretScrubError::SecretUnavailable);
+            };
+            scrubbed = next;
+        }
+        Ok(ScrubbedText {
+            text: scrubbed,
+            credential_set,
+        })
     }
 }
 
@@ -1164,18 +1088,6 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         authorized: AuthorizedInference,
         prompt: ScrubbedText,
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
-        // The effective credential values may have moved since the prompt
-        // scrub; reconcile and refuse rather than send content prepared
-        // under the old set.
-        let scrubber = CredentialScrubber {
-            refs: self.store,
-            store: self.cred_store,
-        };
-        if scrubber.verify_current().await.is_err() {
-            return Ok(InferenceDispatchOutcome::NotSent(
-                NotSentReason::ConsentStale,
-            ));
-        }
         ene_inference::dispatch_authorized(
             authorized,
             prompt,

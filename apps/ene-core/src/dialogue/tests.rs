@@ -2852,69 +2852,43 @@ async fn approving_a_credential_redacts_its_prior_occurrences() {
     assert!(row.text.contains("[credential]"));
 }
 
-/// An effective value rotation outside the approval boundary (the Env store
-/// reads the environment on every call) must be reconciled into the
-/// credential-set revision, and old scrub premises must stop being usable.
+/// A value change is adopted only at a Host boundary: the next start pins
+/// the new value, sweeps its durable occurrences, and advances the revision
+/// before serving, so a restart never uses a new bearer with stale content
+/// and never keeps serving content prepared under the old set.
 #[tokio::test]
-async fn rotated_credential_value_invalidates_the_old_scrub_premise() {
+async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
-    use ene_credential::{CredentialRefRepository as _, CredentialSetRepository as _};
+    use ene_credential::{
+        CredentialRefRepository as _, CredentialSetRepository as _, EnvCredentialStore,
+    };
     use ene_learning::SecretScrubber as _;
     use ene_presence::PresenceRepository as _;
     use ene_primitive::WallClockWithTz;
 
-    let (handle, _dir) = setup_handle("dlg-rotation").await.unwrap();
-    // Register the ref through the non-secret registry path; the value is
-    // provisioned in the credential store. The first scrub must observe and
-    // sweep whatever the store currently serves.
-    handle
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    let companion_store = EnvCredentialStore::from_lookup(|_| Some(String::from("test-bearer")));
+    let first = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the first open must succeed");
+    first
         .store
         .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
         .await
         .expect("the ref must register");
-    let scrubber = super::CredentialScrubber {
-        refs: &handle.store,
-        store: &handle.cred_store,
-    };
-    let first = scrubber
-        .scrub("my key is test-bearer")
-        .await
-        .expect("the initial scrub must prove absence");
-    assert!(!first.text.contains("test-bearer"));
-    let old_revision = first.credential_set;
-
-    // The value changes without an approval; the memory fixture models what
-    // the Env store does when the environment rotates.
-    let CredStore::Memory(store) = &handle.cred_store else {
-        panic!("the test fixture is memory-backed");
-    };
-    store.insert(
-        CredentialRef::new("openai", "main").expect("valid test fixture"),
-        "rotated-bearer",
-    );
-
-    // Verification observes the change, reconciles it (sweep + revision
-    // bump), and fails closed so the caller re-scrubs.
-    assert!(matches!(
-        scrubber.verify_current().await,
-        Err(ene_learning::SecretScrubError::ValuesChanged)
-    ));
-    let state = handle.store.credential_set_state().await.unwrap();
-    assert!(
-        state.revision > old_revision,
-        "the observed value change must advance the revision"
-    );
-
-    // A write prepared under the old revision is refused.
-    let companion = handle.store.ensure_running_companion().await.unwrap();
-    let generation = handle
+    let companion = first.store.ensure_running_companion().await.unwrap();
+    let generation = first
         .store
         .load_attribution(companion.as_raw())
         .await
         .unwrap()
         .unwrap()
         .generation;
-    let stale = handle
+    // The future value already sits in durable content (for example, typed
+    // as ordinary text while the old value was still pinned). The running
+    // Host cannot know it yet, so the row keeps the plaintext.
+    let old_revision = first.store.current_set_revision().await.unwrap();
+    first
         .store
         .append_message(ene_companion::AppendHistoryCommand {
             companion,
@@ -2932,32 +2906,84 @@ async fn rotated_credential_value_invalidates_the_old_scrub_premise() {
             incarnation: None,
             local_id: None,
         })
-        .await;
-    assert_eq!(
-        stale,
-        Ok(ene_companion::HistoryAppendOutcome::StaleCredentialSet)
+        .await
+        .expect("the row commits under the old set");
+    drop(first);
+
+    // Restart: construction pins the rotated value, and the startup sweep
+    // must replace its occurrences and advance the revision before the
+    // handle serves anything.
+    let companion_store = EnvCredentialStore::from_lookup(|_| Some(String::from("rotated-bearer")));
+    let restarted = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the restarted open must succeed");
+    let new_revision = restarted.store.current_set_revision().await.unwrap();
+    assert!(
+        new_revision > old_revision,
+        "the startup boundary must advance the revision"
+    );
+    let timeline = restarted
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let row = timeline
+        .iter()
+        .find(|item| item.text.contains("[credential]"))
+        .expect("the swept row is still present");
+    assert!(
+        !row.text.contains("rotated-bearer"),
+        "the startup sweep must redact the newly pinned value: {}",
+        row.text
     );
 
-    // A fresh scrub redacts the new value and issues the new revision; its
-    // content commits normally.
-    let second = scrubber
-        .scrub("my key is rotated-bearer")
-        .await
-        .expect("the fresh scrub must prove absence");
-    assert!(!second.text.contains("rotated-bearer"));
-    assert_eq!(second.credential_set, state.revision);
-    let fresh = handle
+    // A write prepared under the old revision is refused; a fresh scrub
+    // names the new revision and commits normally.
+    let stale = restarted
         .store
         .append_message(ene_companion::AppendHistoryCommand {
             companion,
             round: RawId::new(),
             role: ene_companion::HistoryRole::Owner,
-            text: second.text,
+            text: String::from("a second stale row"),
             lang: String::from("en"),
             at: WallClockWithTz::now(),
             expected_generation: generation,
             expected_consent: None,
-            expected_credential_set: Some(second.credential_set),
+            expected_credential_set: Some(old_revision),
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await;
+    assert_eq!(
+        stale,
+        Ok(ene_companion::HistoryAppendOutcome::StaleCredentialSet)
+    );
+    let scrubber = super::CredentialScrubber {
+        refs: &restarted.store,
+        store: &restarted.cred_store,
+    };
+    let fresh = scrubber
+        .scrub("my key is rotated-bearer")
+        .await
+        .expect("the fresh scrub must prove absence");
+    assert_eq!(fresh.credential_set, new_revision);
+    assert!(!fresh.text.contains("rotated-bearer"));
+    let committed = restarted
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: fresh.text,
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: Some(fresh.credential_set),
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -2966,7 +2992,60 @@ async fn rotated_credential_value_invalidates_the_old_scrub_premise() {
         })
         .await;
     assert!(matches!(
-        fresh,
+        committed,
         Ok(ene_companion::HistoryAppendOutcome::CommittedAs { .. })
     ));
+}
+
+/// A running Host never re-reads the environment: the value is pinned when
+/// the store is constructed, so an external change is adopted only by the
+/// next start, where the sweep and revision advance bracket the new value.
+#[tokio::test]
+async fn running_host_never_re_reads_the_environment() {
+    use ene_credential::{CredentialRefRepository as _, EnvCredentialStore};
+    use ene_learning::SecretScrubber as _;
+    use std::cell::Cell;
+
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    let reads = Cell::new(0_u32);
+    // The single construction read sees the old value; any later read would
+    // see the rotated one, modelling an external rotation while Host runs.
+    let companion_store = EnvCredentialStore::from_lookup(|_| {
+        reads.set(reads.get() + 1);
+        Some(String::from(if reads.get() == 1 {
+            "test-bearer"
+        } else {
+            "rotated-bearer"
+        }))
+    });
+    let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the open must succeed");
+    handle
+        .store
+        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
+        .await
+        .expect("the ref must register");
+    let scrubber = super::CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let scrubbed = scrubber
+        .scrub("my key is test-bearer")
+        .await
+        .expect("the pinned scrub must prove absence");
+    assert!(!scrubbed.text.contains("test-bearer"));
+    assert_eq!(
+        reads.get(),
+        1,
+        "the running Host must not re-read the environment"
+    );
+    let unknown = scrubber
+        .scrub("a note says rotated-bearer")
+        .await
+        .expect("the scrub must prove absence of the pinned value");
+    assert!(
+        unknown.text.contains("rotated-bearer"),
+        "the rotated value is not the active bearer, so it stays untouched"
+    );
 }

@@ -2998,15 +2998,13 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         table_columns(&path, "consent_record").contains(&String::from("capability")),
         "the rebuilt consent table is capability-scoped"
     );
-    assert!(
-        !table_columns(&path, "credential_set").is_empty(),
-        "the credential-set revision table is created"
+    assert_eq!(
+        table_columns(&path, "credential_set"),
+        vec![String::from("id"), String::from("rev")],
+        "the credential-set table stores non-secret revision metadata only"
     );
     assert_eq!(
-        store
-            .credential_set_state()
-            .await
-            .map(|state| state.revision),
+        store.current_set_revision().await,
         Ok(CredentialSetRevision::initial()),
         "an existing environment starts before any registered credential"
     );
@@ -3071,7 +3069,7 @@ async fn stale_credential_set_refuses_history_append_after_approval() {
         panic!("the running companion must resolve");
     };
     // The writer scrubs its row under the current set premise.
-    let premise = writer.credential_set_state().await.unwrap().revision;
+    let premise = writer.current_set_revision().await.unwrap();
     // The approver concurrently sweeps + registers + bumps in one commit.
     assert!(matches!(
         approver
@@ -3107,7 +3105,7 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
     let writer = Store::open(&path).await.unwrap();
     let approver = Store::open(&path).await.unwrap();
     let companion = RawId::new();
-    let premise = writer.credential_set_state().await.unwrap().revision;
+    let premise = writer.current_set_revision().await.unwrap();
     assert!(matches!(
         approver
             .request_approval(String::from("acme"), String::from("main"))
@@ -3173,7 +3171,7 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
         )
         .await;
     assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
-    let premise = sender.credential_set_state().await.unwrap().revision;
+    let premise = sender.current_set_revision().await.unwrap();
     assert!(matches!(
         approver
             .request_approval(String::from("openai"), String::from("main"))
@@ -3221,13 +3219,13 @@ async fn reapproval_with_a_new_value_refuses_a_stale_history_premise() {
         approver.approve_credential_with_sweep("acme", "main", "sk-a"),
         Ok(true)
     ));
-    let premise = writer.credential_set_state().await.unwrap().revision;
+    let premise = writer.current_set_revision().await.unwrap();
     // The Owner updates the value to B through a re-approval.
     assert!(matches!(
         approver.approve_credential_with_sweep("acme", "main", "sk-b"),
         Ok(true)
     ));
-    let updated = writer.credential_set_state().await.unwrap().revision;
+    let updated = writer.current_set_revision().await.unwrap();
     assert!(
         updated > premise,
         "a successful re-approval must advance the credential-set revision"
@@ -3272,12 +3270,12 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
         approver.approve_credential_with_sweep("acme", "main", "sk-a"),
         Ok(true)
     ));
-    let premise = writer.credential_set_state().await.unwrap().revision;
+    let premise = writer.current_set_revision().await.unwrap();
     assert!(matches!(
         approver.approve_credential_with_sweep("acme", "main", "sk-b"),
         Ok(true)
     ));
-    let updated = writer.credential_set_state().await.unwrap().revision;
+    let updated = writer.current_set_revision().await.unwrap();
 
     let memory = MemoryId::generate();
     let evidence = learning_summary(companion, "evidence says sk-b");
@@ -3356,12 +3354,12 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
         approver.approve_credential_with_sweep("openai", "main", "sk-a"),
         Ok(true)
     ));
-    let premise = sender.credential_set_state().await.unwrap().revision;
+    let premise = sender.current_set_revision().await.unwrap();
     assert!(matches!(
         approver.approve_credential_with_sweep("openai", "main", "sk-b"),
         Ok(true)
     ));
-    let updated = sender.credential_set_state().await.unwrap().revision;
+    let updated = sender.current_set_revision().await.unwrap();
     assert!(updated > premise);
 
     let stale = sender

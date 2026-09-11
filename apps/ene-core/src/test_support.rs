@@ -4,7 +4,7 @@
 //! drop, so early returns and panics need no manual cleanup. Handles open
 //! file-backed stores under those directories with a
 //! [`MemoryCredentialStore`], which keeps tests hermetic: the environment
-//! store would read the real process environment on every call.
+//! store reads the real process environment once when it is constructed.
 
 use ene_api::v1::refs::ConnectionWireId;
 use ene_credential::MemoryCredentialStore;

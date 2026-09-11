@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use ene_credential::{
     CredentialApprovalRepository, CredentialIntentRepository, CredentialRef,
-    CredentialRefRepository, CredentialSetRepository, CredentialSetRevision, CredentialSetState,
-    CredentialStore, CredentialTechnicalError, CredentialValuesDigest,
-    CredentialValuesDigestBuilder, DeviceId, DevicePairingRepository, DevicePairingStatus,
-    DeviceRecord, PendingCredentialApproval, PendingPairing, REDACTED_CREDENTIAL,
-    RegistrationApply, RegistrationFingerprint, RegistrationState,
+    CredentialRefRepository, CredentialSetRepository, CredentialSetRevision, CredentialStore,
+    CredentialTechnicalError, DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord,
+    PendingCredentialApproval, PendingPairing, REDACTED_CREDENTIAL, RegistrationApply,
+    RegistrationFingerprint, RegistrationState,
 };
 use ene_permission::{IntentFingerprint, IntentOutcome};
 use ene_primitive::{RawId, WallClockWithTz};
@@ -23,9 +22,6 @@ use crate::run_blocking;
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
 
 pub(crate) const SQL_SELECT_SET_REV: &str = "SELECT rev FROM credential_set WHERE id = 1";
-
-pub(crate) const SQL_SELECT_SET_STATE: &str =
-    "SELECT rev, values_digest FROM credential_set WHERE id = 1";
 
 const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_ref ORDER BY id ASC";
 
@@ -155,13 +151,11 @@ impl Store {
             approved = true;
         }
         if approved {
-            // The value set may have changed even when the ref already
-            // existed (re-approval after an env rotation), so every
-            // successful approval advances the revision and invalidates the
-            // recorded observation. The sweep above and this bump are one
-            // transaction: old premises are refused, and the next scrub
-            // reconciles the full effective set.
-            advance_credential_set(&tx, None)?;
+            // A re-approval may accompany a value change (after a restart or
+            // an explicit update), so every successful approval advances the
+            // revision. The sweep above and this bump are one transaction, so
+            // premises taken before the approval are refused.
+            advance_credential_set(&tx)?;
         }
         tx.commit()
             .map_err(|error| credential_unavailable(error.to_string()))?;
@@ -199,26 +193,19 @@ fn sweep_registered_secret(
     Ok(())
 }
 
-/// Advances the credential-set revision and records the observed value
-/// fingerprint inside the caller's transaction.
-///
-/// Passing [`None`] invalidates the last observation (a ref or approval
-/// change); the next scrub reconciles the effective values before issuing a
-/// premise.
+/// Advances the credential-set revision inside the caller's transaction.
 fn advance_credential_set(
     tx: &rusqlite::Transaction<'_>,
-    values: Option<CredentialValuesDigest>,
 ) -> Result<CredentialSetRevision, CredentialTechnicalError> {
     let current: i64 = tx
-        .query_row(SQL_SELECT_SET_STATE, (), |row| row.get(0))
+        .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
         .map_err(|error| credential_unavailable(error.to_string()))?;
     let next = current
         .checked_add(1)
         .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
-    let digest = values.map(CredentialValuesDigest::to_hex);
     tx.execute(
-        "UPDATE credential_set SET rev = ?1, values_digest = ?2 WHERE id = 1",
-        params![next, digest],
+        "UPDATE credential_set SET rev = ?1 WHERE id = 1",
+        params![next],
     )
     .map_err(|error| credential_unavailable(error.to_string()))?;
     let revision = u64::try_from(next)
@@ -227,69 +214,58 @@ fn advance_credential_set(
 }
 
 impl CredentialSetRepository for Store {
-    async fn credential_set_state(&self) -> Result<CredentialSetState, CredentialTechnicalError> {
+    async fn current_set_revision(
+        &self,
+    ) -> Result<CredentialSetRevision, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let (stored_rev, stored_values): (i64, Option<String>) = guard
-                .query_row(SQL_SELECT_SET_STATE, (), |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
+            let stored_rev: i64 = guard
+                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             let revision = u64::try_from(stored_rev)
                 .map_err(|_| credential_unavailable("credential set revision out of range"))?;
-            let values = match stored_values {
-                Some(text) => {
-                    Some(CredentialValuesDigest::from_hex(&text).ok_or_else(|| {
-                        credential_unavailable("malformed credential values digest")
-                    })?)
-                }
-                None => None,
-            };
-            Ok(CredentialSetState {
-                revision: CredentialSetRevision::from_u64(revision),
-                values,
-            })
+            Ok(CredentialSetRevision::from_u64(revision))
         })
         .await
     }
+}
 
-    /// One short `Immediate` transaction: sweep every effective value, record
-    /// the observed fingerprint, and advance the revision together. A crash
-    /// cannot leave a bumped revision without its sweep or a sweep without
-    /// the bump.
-    fn reconcile_values<S: CredentialStore>(
+impl Store {
+    /// Sweeps every readable registered value and advances the revision once.
+    ///
+    /// The Host startup and explicit update boundaries call this before any
+    /// use: one short `Immediate` transaction replaces plaintext occurrences
+    /// of the pinned values in durable content and advances the revision
+    /// together, so a crash cannot leave the sweep and the generation apart.
+    /// A ref whose value is unreadable is skipped; the sweep then still
+    /// advances the revision so no premise from before the boundary survives.
+    /// An empty registry changes nothing.
+    pub fn sweep_registered_values<S: CredentialStore>(
         &self,
         refs: &[CredentialRef],
         values: &S,
-    ) -> Result<CredentialSetRevision, CredentialTechnicalError> {
+    ) -> Result<(), CredentialTechnicalError> {
+        if refs.is_empty() {
+            return Ok(());
+        }
         let mut guard = lock_shared(&self.conn);
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        let mut builder = CredentialValuesDigestBuilder::new();
-        // The digest is order-independent, but a stable read order keeps the
-        // transaction reproducible.
-        let mut ordered: Vec<&CredentialRef> = refs.iter().collect();
-        ordered.sort_by_key(|cred| cred.id());
-        for cred in ordered {
-            let swept = values.with_bearer(cred, |bearer| {
-                if bearer.is_empty() {
-                    return Err(credential_unavailable("empty credential value"));
-                }
-                sweep_registered_secret(&tx, bearer)?;
-                builder.add(cred, bearer);
-                Ok(())
-            });
-            match swept {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) | Err(error) => return Err(error),
+        for cred in refs {
+            // An unreadable value is unavailable anyway; the boundary still
+            // advances the revision below.
+            if let Ok(swept) =
+                values.with_bearer(cred, |bearer| sweep_registered_secret(&tx, bearer))
+            {
+                swept?;
             }
         }
-        let revision = advance_credential_set(&tx, Some(builder.finish()))?;
+        advance_credential_set(&tx)?;
         tx.commit()
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(revision)
+        Ok(())
     }
 }
 
@@ -307,9 +283,8 @@ impl CredentialRefRepository for Store {
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
             // A ref becoming registered changes the credential set; every
-            // scrub premise older than this must fail its commit, and the
-            // next scrub must observe the effective values again.
-            advance_credential_set(&tx, None)?;
+            // scrub premise older than this must fail its commit.
+            advance_credential_set(&tx)?;
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(())
@@ -667,9 +642,8 @@ impl CredentialApprovalRepository for Store {
                 )
                 .map_err(|error| credential_unavailable(error.to_string()))?;
                 // A ref becoming usable changes the credential set; every
-                // scrub premise older than this must fail its commit, and the
-                // next scrub must observe the effective values again.
-                advance_credential_set(&tx, None)?;
+                // scrub premise older than this must fail its commit.
+                advance_credential_set(&tx)?;
                 tx.commit()
                     .map_err(|error| credential_unavailable(error.to_string()))?;
                 return Ok(true);

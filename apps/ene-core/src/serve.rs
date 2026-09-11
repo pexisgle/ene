@@ -64,9 +64,9 @@ use ene_api::v1::refs::{ConnectionWireId, RoundWireId};
 use ene_api::v1::reject::RejectKind;
 use ene_companion::{CompanionId, CompanionRepository};
 use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialStore, CredentialTechnicalError,
-    DevicePairingRepository, DeviceRecord, EnvCredentialStore, FileDeviceAuthStore,
-    MemoryCredentialStore,
+    CredentialApprovalRepository, CredentialRef, CredentialRefRepository as _, CredentialStore,
+    CredentialTechnicalError, DevicePairingRepository, DeviceRecord, EnvCredentialStore,
+    FileDeviceAuthStore, MemoryCredentialStore,
 };
 use ene_inference::ProviderTransport;
 use ene_permission::EvaluationTracker;
@@ -312,8 +312,8 @@ impl HostHandle {
     /// credential store.
     ///
     /// Integration tests pass [`CredStore::Memory`] pre-provisioned with test
-    /// bearers to stay hermetic (the environment store would read the real
-    /// process environment on every call). The device-auth file opens on
+    /// bearers to stay hermetic (the environment store reads the real process
+    /// environment once when it is constructed). The device-auth file opens on
     /// `<data_dir>/device-auth.json` (created lazily on first approval) after
     /// the data directory is ensured, so the open always has its parent.
     ///
@@ -321,7 +321,7 @@ impl HostHandle {
     ///
     /// [`CoreError::Store`] as in [`HostHandle::open`], plus when the
     /// device-auth file cannot be opened (unreadable, malformed, or wrongly
-    /// permissioned).
+    /// permissioned), or when the startup credential sweep cannot commit.
     pub async fn open_with_cred_store(
         data_dir: &Path,
         cred_store: CredStore,
@@ -333,7 +333,7 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))?;
         let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(Self {
+        let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
             open_rounds: StdMutex::new(HashMap::new()),
@@ -344,7 +344,35 @@ impl HostHandle {
             learning_queue: StdMutex::new(VecDeque::new()),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
-        })
+        };
+        // Startup boundary: the credential store has pinned its values (for
+        // the env store, read once), so sweep every registered value out of
+        // durable content and advance the revision together before serving.
+        // A failed sweep keeps the handle closed rather than serving content
+        // prepared under an unknown set.
+        handle.sweep_registered_values().await?;
+        Ok(handle)
+    }
+
+    /// Sweeps every registered pinned value and advances the revision once.
+    ///
+    /// Runs before the handle serves anything. A ref whose value is
+    /// unreadable is skipped but still covered by the revision advance: it
+    /// cannot be used, so it cannot leak, and no premise from before the
+    /// boundary survives.
+    async fn sweep_registered_values(&self) -> Result<(), CoreError> {
+        let refs = self
+            .store
+            .list_refs()
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        if refs.is_empty() {
+            return Ok(());
+        }
+        self.store
+            .sweep_registered_values(&refs, &self.cred_store)
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        Ok(())
     }
 
     pub(crate) fn companion_wire(&self) -> &str {

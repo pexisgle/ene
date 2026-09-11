@@ -259,13 +259,6 @@ pub async fn form_experience(
     let secret_premise = ScrubbedText::oldest_premise(
         std::iter::once(&summary_text).chain(prepared.iter().map(|(_, content)| content)),
     );
-    // The effective credential values may have moved while the prompt was
-    // judged; reconcile and refuse the whole pass rather than commit content
-    // prepared under the old set.
-    scrubber
-        .verify_current()
-        .await
-        .map_err(secret_boundary_failure)?;
 
     let mut changes = Vec::new();
     for (proposed, content) in prepared {
