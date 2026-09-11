@@ -410,6 +410,7 @@ enum LiveAuthorizationDecision {
 ```
 
 - 各開始について現在の条件を実対象へ適用する。適用責任は実行・拡張（作用）・推論（送信）・各参照保存箇所に残り、許可の意味自体は権限・制約に残る。無関係な変更ごとの再承認は要求しない。再評価要否は重要な変更で決める（K-H）。
+- setup completeness（consent 記録・credential 登録・bearer の有無）は推論 admission（K-E）が唯一の owner であり、本 query は setup 状態を含めない。本 live check は consent 状態だけを判定し、setup 不足を独立に拒否しない。
 
 ### K-C 秘密利用（認証用途への供給）
 
@@ -489,6 +490,7 @@ struct InferenceResultArrival {
 ```
 
 - 送信手順：admission が現在の consent revision・credential premise・K-B の single-use authorization を確定し、attempt claim が保存 consent との一致を確定してから送信する。送信時点で `resolved_route` と candidate、consent revision を再照合しない（admission / claim との二重 gate を作らない）。
+- setup completeness（consent 記録・credential 登録・bearer の有無）の判定は admission が唯一の owner であり、不足は `NotSent` として送信前に処理する。permission の live check は consent 状態だけを判定する。
 - 参照できたことと送れることの区別、解決済み送信先の包括許可化の禁止、同意不足の本文削減による黙解消の禁止。Prompt cache・session は最適化に限る。判定用推論にも自身の割当同意・認証用途・費用制限を適用する。
 
 ### K-F fallback 選択
