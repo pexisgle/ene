@@ -465,14 +465,9 @@ fn select_existing(scanned: Vec<Memory>, transcript: &[ExperienceTurn]) -> Vec<M
         .collect::<Vec<_>>()
         .join("\n");
     let terms = crate::relevance::terms(&experience);
-    let mut older: Vec<(usize, Memory)> = scanned[RECENT_MEMORY_LIMIT..]
+    let mut older: Vec<(usize, &Memory)> = scanned[RECENT_MEMORY_LIMIT..]
         .iter()
-        .map(|memory| {
-            (
-                crate::relevance::overlap(&terms, &memory.content),
-                memory.clone(),
-            )
-        })
+        .map(|memory| (crate::relevance::overlap(&terms, &memory.content), memory))
         .collect();
     // Stable sort: equal overlap keeps the repository's newest-first order.
     older.sort_by(|(left, _), (right, _)| right.cmp(left));
@@ -480,7 +475,7 @@ fn select_existing(scanned: Vec<Memory>, transcript: &[ExperienceTurn]) -> Vec<M
         older
             .into_iter()
             .take(RELEVANT_MEMORY_LIMIT)
-            .map(|(_, memory)| memory),
+            .map(|(_, memory)| memory.clone()),
     );
     selected
 }
