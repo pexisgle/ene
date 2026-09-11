@@ -291,7 +291,6 @@ struct PermissionEvaluationId(/* opaque */);
 ### 5.5 権限・制約・Credential・推論割当・利用量
 
 ```rust
-struct RuleId(/* opaque */);
 struct RuleRevision(u64);
 struct AssignmentConsentId(/* opaque */);
 struct DevicePermissionRef { /* per-device 制御状態の対応 */ }
@@ -304,7 +303,7 @@ struct UsageAttributionRef {
 /// 現在の許可の確定は権限・制約が行う。本 struct は照合材料である。
 struct CurrentPermissionBoundary {
     permission_evaluation: PermissionEvaluationRef,
-    rule: Option<(RuleId, RuleRevision)>,
+    rule_revision: Option<RuleRevision>, // 依拠 Rule の expected revision。Rule identity は rule store 導入 stage で再導入
     assignment_consent: Option<AssignmentConsentId>,
     device: Option<DevicePermissionRef>,
     // 保存された Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定は

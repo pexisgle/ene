@@ -103,7 +103,7 @@ Ene は単一 Host 上の非同期 system であり、並行の源泉は Host �
 | SD-Undelivered | per `undelivered_id`（＋登録時の親原子） | 報告状況 `Pending→Summarized→Presented/Unknown` の更新。会話由来は History append と同一原子、Task 由来は Task durable 後の別 transaction 原子登録 | 異なる undelivered 間の報告。同一物の読取・要約生成（commit 前） | PR AU1a/AU1b/AU8。送信だけで `Presented` にしない（durable-after-confirmed） |
 | SD-Deletion | per `DeletionOperationId`＋sweep | operation＋`erasure_condition` の先行 durable、参加者集約・残存検証、検索 token の除去 / 復元不能化、全域完了の原子確定。token と完了 marker を同じ durable commit にできない間は `finalizing` を維持 | 参加者の局所処理・検証そのもの。対象外の通常活動。異なる operation 間 | PR AU9。durable-before-enforce。局所返却で hold を解除しない。token が復元可能な状態を全域完了にしない。全 domain の lock ではない |
 | SD-Restore | singleton `restore_generation_state` の switch 瞬間のみ | staging 検証後の `restore_generation` bump＋正本 pointer switch の原子確定 | staging 作業、live mutation（switch 瞬間を除く）、異なる時点の backup 作成、derived 再構築 | PR AU11。switch 前は復元前正常が正本、switch 後は復元内容が正本。第三の混合を作らない。switch 全期間の read 停止はしない（第12節） |
-| SD-RuleConsent | per `RuleId` / `AssignmentId` / `DevicePermission` / `SandboxException` | 本文・解釈・scope・同意 revision の更新、Undo 対応の付記 | 評価（読取＋判断）そのもの。異なる rule / assignment 間 | 評価時は保存 Allow を再利用しない。更新と評価を同一更新にしない |
+| SD-RuleConsent | per Rule identity / `AssignmentId` / `DevicePermission` / `SandboxException` | 本文・解釈・scope・同意 revision の更新、Undo 対応の付記 | 評価（読取＋判断）そのもの。異なる rule / assignment 間 | 評価時は保存 Allow を再利用しない。更新と評価を同一更新にしない |
 | SD-CompanionLife | per `CompanionId` の lifecycle | Running / Stopped / Deleted（tombstone 最小）の遷移、新規禁止 hold の先行 | 異なる Companion の lifecycle。各 owner の局所削除・検証作業 | PR AU13。単一 global transaction にしない。各 owner の局所 durable の集約 |
 
 明示的に serialization **しない**もの：inference 実行、外部作用の継続、Provider session、embedding / index rebuild、routing 文脈生成、要約生成、表示・集計、Observer Capture・候補検知、backup file copy（marking 前）、restore staging 検証。これらは premise 付きで開始し、commit 時に compare する（第5節）。
@@ -263,7 +263,7 @@ COMMIT;
 
 ```
 state: Reserved(処理中・上限引き当て) → Committed(確定) / Released(解放)
-       + Reported / Estimated / Unknown の区別を別 field に保持する
+       + Reported / Unknown の区別を別 field に保持する
 ```
 
 - **reservation（開始時、短い `Immediate` tx）。** `usage_fact_*` に `Reserved` 行を insert し、同一 tx 内で `cap_limit`＋関連 `usage_fact_*`（`Reserved + Committed + Unknown` の合計。`Released` を除く）を読み取って cap 照合する。上限超過・不明で継続不可なら ROLLBACK し、開始しない。予約量は推定上限（upper bound）とし、過小予約による超過をしない。

@@ -373,13 +373,14 @@ struct ProposeControlChangeCommand {
 
 enum ControlChangeDecision {
     AppliedAsOneTimeApproval,        // 現在の明確な依頼の一回限りの承認
-    StoredAsRule(RuleId, RuleRevision), // 解釈・適用範囲表示・Undo 付き
+    StoredAsRule(RuleRevision),      // 解釈・適用範囲表示・Undo 付き
     NeedsClarification,              // 曖昧・矛盾・過度に広い・重大
     DeniedByBoundary,                // 永続 Deny・Always ask・Capability 境界の黙上書きに当たる
 }
 ```
 
 - 開始：入出力・提示＋個体調整・作業（意図供給）。判断：権限・制約。LLM 出力・Learning・Character・Skill・外部 content は材料であり、Owner 由来の管理意図との対応なしに control plane を変更できない。Rule 保存自体は Action の trigger にしない。
+- Rule store の identity 型（`RuleId`）は rule store 導入 stage で再導入する。
 
 ### K-B 現在の利用可否の照合（live authorization check）
 
@@ -474,7 +475,7 @@ struct RequestInferenceCommand {
 }
 
 enum InferenceUseOutcome {
-    SentAndCompleted(InferenceResultRef),
+    SentAndCompleted(InferenceResultArrival),
     SentButCompletionPending(InferenceTicketRef), // 長時間・継続部分。completion は別 interface
     NotSent(NeedsRevalidationRef),   // 同意・cap・保留・帰属・消去条件の不一致
     InsufficientCapability(CapabilityGapRef),
@@ -483,8 +484,7 @@ enum InferenceUseOutcome {
 struct InferenceResultArrival {
     ticket: InferenceTicketRef,      // 元要求・範囲との対応
     result_ref: InferenceOutputRef,  // 送信表現・Provider 側 context・戻り結果と元要求・情報範囲の対応
-    usage_fact: UsageFactRef,        // 報告 / 推定 / 不明の区別付き
-    certainty: InferenceCertainty,   // 不足・接続失敗と結果の区別
+    usage_fact: UsageFactRef,        // 報告 / 不明の区別付き
 }
 ```
 
@@ -1137,7 +1137,7 @@ fn request_action(cmd: ExecuteActionCommand)
 
 | 長時間処理 | request（開始） | completion / result（到着） | 戻れる対応（durable） |
 |---|---|---|---|
-| 推論（単発・継続・fallback・再送） | `RequestInferenceCommand`（ticket 発行・予約・admission の前提確定） | `InferenceResultArrival`（ticket→結果・利用量・確定度） | `(ticket, consumer, Task/委任対応, 用途, revision/generation 前提, provenance)`。PR Group F/I、CI §6.4 の世代タグ |
+| 推論（単発・継続・fallback・再送） | `RequestInferenceCommand`（ticket 発行・予約・admission の前提確定） | `InferenceResultArrival`（ticket→結果・利用量） | `(ticket, consumer, Task/委任対応, 用途, revision/generation 前提, provenance)`。PR Group F/I、CI §6.4 の世代タグ |
 | Task 委任・Task Agent | `CreateDelegationCommand`（expected revision の atomic compare） | `TaskAgentResultArrival`（delegation→現在 Task の受入） | `(delegation, TaskRef 前提, scope 写し, attempt 対応, 目的)`。PR Group D、CI §5.3 |
 | Action 試行・外部 Tool・Computer Use | `ExecuteActionCommand`（開始前 atomic compare）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（per-attempt CAS）＋ `LateArrivalAttribution`（遅延帰属） | `(attempt, Task revision 前提, 実対象・操作, 依拠 Permission, presence/restore 世代, prior_unknown)`。PR Group E |
 | Backup 作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点・参照・未完了の対応が揃って成功） | `(backup_point, 対象時点・参照対応・除外・未完了状況)`。PR Group J |
