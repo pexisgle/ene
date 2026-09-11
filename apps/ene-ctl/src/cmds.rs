@@ -358,18 +358,6 @@ pub fn setup_view_request() -> ManagementViewRequest {
     }
 }
 
-/// There are no `setup`- or `usage`-named sections Host-side, so neither name
-/// is requested.
-pub fn status_view_request() -> ManagementViewRequest {
-    ManagementViewRequest {
-        sections: HOST_SETUP_SECTIONS
-            .iter()
-            .map(|section| (*section).to_string())
-            .collect(),
-        memory_after: None,
-    }
-}
-
 /// Requests only the read-only Memory section, optionally continuing after
 /// the `next:` id of a previous page.
 pub fn memory_view_request(after: Option<&str>) -> ManagementViewRequest {
@@ -604,8 +592,7 @@ mod tests {
         HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for,
         credential_id_for, credential_intent, credential_target_for, describe_intake,
         describe_management, history_request, memory_view_request, new_local_id, parse_command,
-        render_history, render_round_history, render_view, setup_view_request, status_view_request,
-        submit_input,
+        render_history, render_round_history, render_view, setup_view_request, submit_input,
     };
     use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
 
@@ -1166,11 +1153,6 @@ mod tests {
                     .map(|section| (*section).to_string())
                     .collect::<Vec<String>>(),
             "setup --show requests the Host sections: {setup:?}"
-        );
-        let status = status_view_request();
-        assert!(
-            status.sections == setup.sections,
-            "status requests the same Host sections: {status:?}"
         );
         let memory = memory_view_request(None);
         assert!(

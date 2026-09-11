@@ -131,7 +131,7 @@ async fn run_command(
     match command {
         cmds::Command::Setup(mode) => run_setup(&mut session, mode).await,
         cmds::Command::Status => {
-            let view = request_view(&mut session, cmds::status_view_request()).await?;
+            let view = request_view(&mut session, cmds::setup_view_request()).await?;
             emit(&cmds::render_view(&view))
         }
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
@@ -176,7 +176,7 @@ async fn request_view(
         WirePayload::ManagementView(view) => Ok(view),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while reading a view; expected ManagementView",
-            client::payload_kind(&unexpected)
+            unexpected.message_type()
         ))),
     }
 }
@@ -195,7 +195,7 @@ async fn request_history(
         WirePayload::HistoryView(view) => Ok(view),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while reading history; expected HistoryView",
-            client::payload_kind(&unexpected)
+            unexpected.message_type()
         ))),
     }
 }
@@ -212,7 +212,7 @@ async fn apply_intent(
         unexpected => {
             return Err(CliError::ServerRejected(format!(
                 "unexpected {} while applying an intent; expected ManagementOutcome",
-                client::payload_kind(&unexpected)
+                unexpected.message_type()
             )));
         }
     };
@@ -286,7 +286,7 @@ async fn run_send(
         unexpected => {
             return Err(CliError::ServerRejected(format!(
                 "unexpected {} while submitting text; expected RoundIntakeOutcome",
-                client::payload_kind(&unexpected)
+                unexpected.message_type()
             )));
         }
     };
@@ -336,7 +336,7 @@ async fn run_send(
             unexpected => {
                 return Err(CliError::ServerRejected(format!(
                     "unexpected {} while streaming text; expected TextStreamFrame",
-                    client::payload_kind(&unexpected)
+                    unexpected.message_type()
                 )));
             }
         }
