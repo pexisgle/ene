@@ -363,6 +363,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-learning"
+version = "0.1.0"
+dependencies = [
+ "ene-primitive",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "ene-permission"
 version = "0.1.0"
 dependencies = [
@@ -414,6 +423,7 @@ dependencies = [
  "ene-companion",
  "ene-credential",
  "ene-inference",
+ "ene-learning",
  "ene-permission",
  "ene-presence",
  "ene-primitive",
