@@ -8,6 +8,7 @@ ene の内部設計の正本。巨大な summary ではなく、目的から各 
 2. 設計は `architecture/` → `critical-areas/` → `subsystems/` → `concrete/` の順に上位から下位へ具体化する。下位文書は上位文書の責務境界、semantic owner、identity / revision / generation の意味、保存分類、依存規則、Security / Privacy / Permission の意味を黙って変更しない。同じ層の中では、各文書が冒頭で前提として挙げる文書が先行する。
 3. 文書間の矛盾、および下位設計や実装で上位文書の性質を成立させられないことが判明した場合は、下位側や実装で意味を決めず GitHub Issue として扱う。具体 mechanism が未決定であること自体は Issue ではなく、各文書の Design Freedom に属する。各文書に Issue の有無や進捗を記録する節は置かず、実装の現在地は [`docs/implementation/PROGRESS.md`](../implementation/PROGRESS.md) だけが持つ。
 4. 規範となるのは現行文書へ統合された判断だけである。過去の独立レビュー記録、過去の作業指示、既存実装、Git 履歴、[参考資料](../requirements/references.md) は非規範であり、設計根拠にしない。独立レビュー記録の原文は Git 履歴（commit `b5c7990` 以前の `docs/design/reviews/`）で辿れる。
+5. レビューや実装中の発見は、それ自体を新しい review summary の正本にしない。将来も守るべき製品挙動は Requirements、再利用可能な内部設計契約はそれを所有する既存 `docs/design/` artifact、repository-wide の実装規約は [`AGENTS.md`](../../AGENTS.md) へ統合する。未解決の個別 defect / TODO は GitHub Issue を正本とし、特定 PR の判断理由や現時点だけの評価は PR / Issue の rationale に留める。同じ内容を複数の正本へ転載しない。
 
 ## 目的別索引
 
@@ -37,4 +38,4 @@ ene の内部設計の正本。巨大な summary ではなく、目的から各 
 - SO: [State Ownership](architecture/state-ownership.md)
 - DR-01〜12: [Dependency Rules](architecture/dependency-rules.md)
 - RF-01〜08: [Runtime Flows](architecture/runtime-flows.md)
-- CC-01〜07: [Cross-cutting Design](architecture/cross-cutting.md)
+- CC-01〜07: [Cross-cutting Design](architecture/cross-cutting.md)（CC）
