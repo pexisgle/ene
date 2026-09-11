@@ -35,49 +35,25 @@ enum CliError {
     Serve(#[from] CoreError),
 }
 
-/// Parses `--config PATH`, excluding the program name.
+/// Splits a subcommand token out of `args`, wherever it appears.
 ///
-/// With no arguments there is no override and the result is [`None`]. A
-/// repeated `--config` keeps the last value; the value is consumed verbatim,
-/// even when it starts with `--`. A missing value and any unknown argument
-/// (including `--help` and `--version`) are [`CliError::Usage`] failures whose
-/// display contains the usage line.
-///
-/// The function is pure: it inspects only `args` and never touches the
-/// process environment, the filesystem, or `stdout`.
-fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
-    let mut config: Option<PathBuf> = None;
-    let mut pending = args.iter();
-    while let Some(arg) = pending.next() {
-        if arg.as_str() == "--config" {
-            let Some(value) = pending.next() else {
-                return Err(CliError::Usage("missing value for --config".to_string()));
-            };
-            config = Some(PathBuf::from(value));
-        } else {
-            return Err(CliError::Usage(format!("unknown argument: {arg}")));
-        }
-    }
-    Ok(config)
-}
-
 /// Both `ene-core serve --config PATH` and `ene-core --config PATH serve`
-/// work, and the remaining arguments are what [`parse_args`] then parses for
-/// `--config`.
-fn extract_serve(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
-    let mut serve = false;
+/// work, and the remaining arguments are what [`extract_named`] later parses
+/// for that mode's flags. A repeated token is a usage error.
+fn extract_subcommand(args: &[String], name: &str) -> Result<(bool, Vec<String>), CliError> {
+    let mut found = false;
     let mut rest = Vec::new();
     for arg in args {
-        if arg.as_str() == "serve" {
-            if serve {
-                return Err(CliError::Usage("duplicate subcommand: serve".to_string()));
+        if arg.as_str() == name {
+            if found {
+                return Err(CliError::Usage(format!("duplicate subcommand: {name}")));
             }
-            serve = true;
+            found = true;
         } else {
             rest.push(arg.clone());
         }
     }
-    Ok((serve, rest))
+    Ok((found, rest))
 }
 
 /// Later flags override earlier ones; the value is consumed verbatim, even
@@ -99,66 +75,10 @@ fn extract_named(args: &[String], flag: &str) -> Result<(Option<String>, Vec<Str
     Ok((value, rest))
 }
 
-fn extract_approve_credential(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
-    let mut approve = false;
-    let mut rest = Vec::new();
-    for arg in args {
-        if arg.as_str() == "approve-credential" {
-            if approve {
-                return Err(CliError::Usage(
-                    "duplicate subcommand: approve-credential".to_string(),
-                ));
-            }
-            approve = true;
-        } else {
-            rest.push(arg.clone());
-        }
-    }
-    Ok((approve, rest))
-}
-
-/// Both `ene-core approve-device --descriptor EXACT` and
-/// `ene-core --descriptor EXACT approve-device` work; the remaining arguments
-/// are what [`parse_args`] parses for `--config` and [`extract_descriptor`]
-/// parses for `--descriptor`.
-fn extract_approve_device(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
-    let mut approve = false;
-    let mut rest = Vec::new();
-    for arg in args {
-        if arg.as_str() == "approve-device" {
-            if approve {
-                return Err(CliError::Usage(
-                    "duplicate subcommand: approve-device".to_string(),
-                ));
-            }
-            approve = true;
-        } else {
-            rest.push(arg.clone());
-        }
-    }
-    Ok((approve, rest))
-}
-
 /// A repeated `--descriptor` keeps the last value; the value is consumed
-/// verbatim, even when it starts with `--`. The remaining arguments are what
-/// [`parse_args`] then parses for `--config`.
+/// verbatim, even when it starts with `--`.
 fn extract_descriptor(args: &[String]) -> Result<(Option<String>, Vec<String>), CliError> {
-    let mut descriptor: Option<String> = None;
-    let mut rest = Vec::new();
-    let mut pending = args.iter();
-    while let Some(arg) = pending.next() {
-        if arg.as_str() == "--descriptor" {
-            let Some(value) = pending.next() else {
-                return Err(CliError::Usage(
-                    "missing value for --descriptor".to_string(),
-                ));
-            };
-            descriptor = Some(value.clone());
-        } else {
-            rest.push(arg.clone());
-        }
-    }
-    Ok((descriptor, rest))
+    extract_named(args, "--descriptor")
 }
 
 /// Parsed Host command line: exactly one mode plus its flags.
@@ -200,9 +120,9 @@ fn parse_cli(args: &[String]) -> Result<CliCommand, CliError> {
     let (descriptor, rest) = extract_descriptor(&rest)?;
     let (provider, rest) = extract_named(&rest, "--provider")?;
     let (label, rest) = extract_named(&rest, "--label")?;
-    let (serve_mode, rest) = extract_serve(&rest)?;
-    let (approve_mode, rest) = extract_approve_device(&rest)?;
-    let (approve_cred_mode, rest) = extract_approve_credential(&rest)?;
+    let (serve_mode, rest) = extract_subcommand(&rest, "serve")?;
+    let (approve_mode, rest) = extract_subcommand(&rest, "approve-device")?;
+    let (approve_cred_mode, rest) = extract_subcommand(&rest, "approve-credential")?;
     let modes = [serve_mode, approve_mode, approve_cred_mode]
         .iter()
         .filter(|selected| **selected)
@@ -214,8 +134,10 @@ fn parse_cli(args: &[String]) -> Result<CliCommand, CliError> {
     }
     // Anything left is an unknown argument: option values traveled with
     // their flags above, so the remainder holds no legal values.
-    let path = parse_args(&rest)?;
-    let config = config.map(PathBuf::from).or(path);
+    if let Some(unknown) = rest.first() {
+        return Err(CliError::Usage(format!("unknown argument: {unknown}")));
+    }
+    let config = config.map(PathBuf::from);
     if approve_cred_mode {
         let (Some(provider), Some(label)) = (provider, label) else {
             return Err(CliError::Usage(
@@ -451,10 +373,7 @@ async fn approve_device_async(data_dir: &Path, descriptor: &str) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CliCommand, extract_approve_device, extract_descriptor, extract_serve, parse_args,
-        parse_cli,
-    };
+    use super::{CliCommand, extract_descriptor, extract_named, extract_subcommand, parse_cli};
     use std::path::PathBuf;
 
     fn args(words: &[&str]) -> Vec<String> {
@@ -463,25 +382,26 @@ mod tests {
 
     #[test]
     fn no_args_yields_no_override() {
-        let args: Vec<String> = Vec::new();
-        let path = parse_args(&args).expect("no args must succeed");
-        assert!(path.is_none(), "no args must yield no override");
+        let parsed = parse_cli(&[]).expect("no args must succeed");
+        assert_eq!(parsed, CliCommand::ShowConfig { config: None });
     }
 
     #[test]
     fn config_flag_captures_its_value() {
-        let args = [String::from("--config"), String::from("/tmp/ene.json")];
-        let path = parse_args(&args).expect("--config with a value must succeed");
-        assert!(
-            path == Some(PathBuf::from("/tmp/ene.json")),
-            "the --config value must become the override"
+        let parsed =
+            parse_cli(&args(&["--config", "/tmp/ene.json"])).expect("--config must succeed");
+        assert_eq!(
+            parsed,
+            CliCommand::ShowConfig {
+                config: Some(PathBuf::from("/tmp/ene.json"))
+            }
         );
     }
 
     #[test]
     fn missing_config_value_is_a_usage_error() {
-        let args = [String::from("--config")];
-        let error = parse_args(&args).expect_err("a missing --config value must fail");
+        let error =
+            parse_cli(&args(&["--config"])).expect_err("a missing --config value must fail");
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -491,8 +411,7 @@ mod tests {
 
     #[test]
     fn unknown_argument_is_a_usage_error() {
-        let args = [String::from("--verbose")];
-        let error = parse_args(&args).expect_err("an unknown argument must fail");
+        let error = parse_cli(&args(&["--verbose"])).expect_err("an unknown argument must fail");
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -502,23 +421,25 @@ mod tests {
 
     #[test]
     fn repeated_config_keeps_the_last_value() {
-        let args = [
-            String::from("--config"),
-            String::from("/tmp/first.json"),
-            String::from("--config"),
-            String::from("/tmp/second.json"),
-        ];
-        let path = parse_args(&args).expect("a repeated --config must succeed");
-        assert!(
-            path == Some(PathBuf::from("/tmp/second.json")),
-            "a repeated --config must keep the last value"
+        let parsed = parse_cli(&args(&[
+            "--config",
+            "/tmp/first.json",
+            "--config",
+            "/tmp/second.json",
+        ]))
+        .expect("a repeated --config must succeed");
+        assert_eq!(
+            parsed,
+            CliCommand::ShowConfig {
+                config: Some(PathBuf::from("/tmp/second.json"))
+            }
         );
     }
 
     #[test]
     fn bare_args_select_no_subcommand() {
         let args = [String::from("--config"), String::from("/tmp/ene.json")];
-        let split = extract_serve(&args);
+        let split = extract_subcommand(&args, "serve");
         assert!(split.is_ok(), "args without serve must split");
         let (serve, rest) = split.ok().unwrap();
         assert!(!serve, "no serve token means no subcommand");
@@ -540,7 +461,7 @@ mod tests {
                 String::from("serve"),
             ],
         ] {
-            let split = extract_serve(&args);
+            let split = extract_subcommand(&args, "serve");
             assert!(split.is_ok(), "a single serve must split: {args:?}");
             let (serve, rest) = split.ok().unwrap();
             assert!(serve, "the serve token must select the subcommand");
@@ -554,7 +475,7 @@ mod tests {
     #[test]
     fn repeated_serve_is_a_usage_error() {
         let args = [String::from("serve"), String::from("serve")];
-        let split = extract_serve(&args);
+        let split = extract_subcommand(&args, "serve");
         assert!(split.is_err(), "a repeated serve must fail");
         let error = split.err().unwrap();
         let rendered = format!("{error}");
@@ -579,7 +500,7 @@ mod tests {
                 String::from("approve-device"),
             ],
         ] {
-            let split = extract_approve_device(&args);
+            let split = extract_subcommand(&args, "approve-device");
             assert!(
                 split.is_ok(),
                 "a single approve-device must split: {args:?}"
@@ -595,7 +516,6 @@ mod tests {
 
     #[test]
     fn approve_credential_splits_and_parses_named_flags() {
-        use super::{extract_approve_credential, extract_named};
         let args = [
             String::from("approve-credential"),
             String::from("--provider"),
@@ -603,7 +523,7 @@ mod tests {
             String::from("--label"),
             String::from("main"),
         ];
-        let split = extract_approve_credential(&args);
+        let split = extract_subcommand(&args, "approve-credential");
         let (approve, rest) = split.unwrap();
         assert!(approve, "the token must select the subcommand");
         let named = extract_named(&rest, "--provider");
@@ -623,7 +543,7 @@ mod tests {
             String::from("approve-device"),
             String::from("approve-device"),
         ];
-        let split = extract_approve_device(&args);
+        let split = extract_subcommand(&args, "approve-device");
         assert!(split.is_err(), "a repeated approve-device must fail");
         let error = split.err().unwrap();
         let rendered = format!("{error}");
