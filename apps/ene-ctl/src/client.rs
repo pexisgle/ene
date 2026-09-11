@@ -29,8 +29,17 @@
 //! [`session::SessionState`] mirror. The trailing presence fact is consumed as the
 //! session's first attribution before returning.
 //!
-//! Request/response correlation: every [`Client::request`] stamps a fresh
-//! command ID on its outgoing envelope and matches the answer by transport
+//! Identity: pure requests ([`ene_api::v1::management::ManagementViewRequest`],
+//! [`ene_api::v1::round::HistoryRequest`]) carry only a fresh `request_id`;
+//! command payloads carry exactly one `command_id`
+//! ([`ene_api::v1::round::SubmitTextInput`] mints one, a
+//! [`ManagementIntent`](ene_api::v1::management::ManagementIntent) keeps its
+//! `intent_id`). [`Client::prepare`] retains that command identity caller-side
+//! so a lost reply is re-sent through [`Client::retry`] as the same command
+//! with fresh message/request ids; [`Client::request`] is the one-shot
+//! convenience that does not expose the identity.
+//!
+//! Request/response correlation: every send matches the answer by transport
 //! pairing (`reply_to` against our message ID). A single read per request is
 //! wrong because the Host pipelines unsolicited facts ahead of answers
 //! (capability appends the current presence fact right after the negotiated
@@ -69,6 +78,7 @@ pub mod frames;
 pub mod session;
 mod transport;
 
+pub use frames::PreparedRequest;
 pub use transport::Client;
 
 /// Pure: the caller decides whether the directory or socket must exist;
