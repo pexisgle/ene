@@ -291,7 +291,6 @@ struct PermissionEvaluationId(/* opaque */);
 ### 5.5 権限・制約・Credential・推論割当・利用量
 
 ```rust
-struct RuleRevision(u64);
 struct AssignmentConsentId(/* opaque */);
 struct DevicePermissionRef { /* per-device 制御状態の対応 */ }
 struct SandboxExceptionRef { /* 特定 Local MCP の隔離外例外の対応。Plugin へ流用しない */ }
@@ -303,7 +302,6 @@ struct UsageAttributionRef {
 /// 現在の許可の確定は権限・制約が行う。本 struct は照合材料である。
 struct CurrentPermissionBoundary {
     permission_evaluation: PermissionEvaluationRef,
-    rule_revision: Option<RuleRevision>, // 依拠 Rule の expected revision。Rule identity は rule store 導入 stage で再導入
     assignment_consent: Option<AssignmentConsentId>,
     device: Option<DevicePermissionRef>,
     // 保存された Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定は
@@ -312,6 +310,7 @@ struct CurrentPermissionBoundary {
 ```
 
 - 明確な現在依頼は一回限りの承認として解釈できるが、永続 Deny・Always ask・Capability 境界を黙って上書きしない（CC-01）。
+- Rule の identity（`RuleId`）と revision（`RuleRevision`）は rule store 導入 stage でまとめて再導入する。
 - Credential 値は本節のいずれの struct にも入れない。用途参照は非秘密の参照に留める（DR-05）。model 出力からの自動登録・変更をしない。
 
 ### 5.6 presence・接続・Client 主張
