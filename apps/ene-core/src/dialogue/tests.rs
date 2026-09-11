@@ -3395,6 +3395,169 @@ async fn repeated_identical_owner_input_is_excluded_by_message_identity() {
     );
 }
 
+/// Dialogue background is selected inside the final request budget: long
+/// older turns are reduced, but the current input still reaches inference.
+#[tokio::test]
+async fn long_background_is_trimmed_to_the_request_budget() {
+    use ene_companion::{AppendHistoryCommand, CompanionRepository as _, HistoryRepository as _};
+    use ene_presence::PresenceRepository as _;
+
+    let transport = LearningAwareTransport::new("noted", None);
+    let live = live_input("client-budget");
+    let (handle, _dir) = round_test_handle("dlg-budget", &live, &transport)
+        .await
+        .unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    for index in 0..3 {
+        let text = format!("long message {index} {}", "x".repeat(6_000));
+        let appended = handle
+            .store
+            .append_message(AppendHistoryCommand {
+                companion,
+                round: RawId::new(),
+                role: ene_companion::HistoryRole::Owner,
+                text,
+                lang: String::from("en"),
+                at: ene_primitive::WallClockWithTz::now(),
+                expected_generation: generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                command_id: None,
+                round_wire: None,
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            })
+            .await;
+        assert!(appended.is_ok(), "the long turn must commit: {appended:?}");
+    }
+
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-budget",
+        "続けて",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+    let inputs = transport.dialogue_inputs();
+    assert_eq!(inputs.len(), 1, "the input reaches inference exactly once");
+    let prompt = &inputs[0];
+    assert!(
+        prompt.chars().count() <= ene_inference::MAX_INPUT_CHARS,
+        "the assembled prompt must stay inside the request budget, got {}",
+        prompt.chars().count()
+    );
+    assert!(
+        prompt.contains("Owner: 続けて"),
+        "the current input is carried: {prompt}"
+    );
+    assert!(
+        prompt.matches("long message").count() < 3,
+        "background was reduced instead of the current input: {prompt}"
+    );
+}
+
+/// A current input that cannot fit even alone is an explicit pre-acceptance
+/// outcome: no durable append, no presence move, no provider call.
+#[tokio::test]
+async fn current_input_over_the_budget_is_declined_before_acceptance() {
+    use ene_companion::CompanionRepository as _;
+    use ene_presence::{PresenceRepository as _, PresenceState};
+
+    let transport = LearningAwareTransport::new("noted", None);
+    let live = live_input("client-budget-limit");
+    let (handle, _dir) = round_test_handle("dlg-budget-limit", &live, &transport)
+        .await
+        .unwrap();
+    let oversized = "x".repeat(ene_inference::MAX_INPUT_CHARS);
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-over-limit",
+        &oversized,
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    let Some(first) = responses.first() else {
+        panic!("the oversized input must answer");
+    };
+    assert!(
+        matches!(
+            &first.payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation { reason })
+                if reason.0 == "input-over-limit"
+        ),
+        "an unsendable current input must be named, got {:?}",
+        first.payload
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        0,
+        "an unsendable input is never appended"
+    );
+    assert!(
+        transport.dialogue_inputs().is_empty(),
+        "no provider call happens for an unsendable input"
+    );
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let attribution = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        attribution.state,
+        PresenceState::NoActive,
+        "the decline leaves presence untouched"
+    );
+}
+
+/// The budget counts the scrubbed text, not the raw input: redaction can
+/// grow a request past the limit even when the raw text fits.
+#[tokio::test]
+async fn budget_uses_the_scrubbed_length() {
+    let transport = LearningAwareTransport::new("noted", None);
+    let live = live_input("client-budget-scrub");
+    let (handle, _dir) = round_test_handle("dlg-budget-scrub", &live, &transport)
+        .await
+        .unwrap();
+    let raw = "test-bearer".repeat(700);
+    assert!(
+        raw.chars().count() < ene_inference::MAX_INPUT_CHARS,
+        "the raw text must fit so only the scrubbed form can exceed the budget"
+    );
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-scrub-budget",
+        &raw,
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert!(
+        matches!(
+            responses.first().map(|frame| &frame.payload),
+            Some(WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation { reason }))
+                if reason.0 == "input-over-limit"
+        ),
+        "redaction growth must be counted, got {:?}",
+        responses.first().map(|frame| &frame.payload)
+    );
+}
+
 /// Dialogue context carries each source message's own offset-qualified time,
 /// distinct from the current-time line, so a past relative date is not
 /// re-anchored to now.

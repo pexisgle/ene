@@ -171,6 +171,7 @@ fn intake_reason(reason: &RevalidationReason) -> &'static str {
         RevalidationReason::UnknownCompanion => "unknown-companion",
         RevalidationReason::StoppedCompanion => "stopped-companion",
         RevalidationReason::MissingCommandId => "missing-command-id",
+        RevalidationReason::InputOverLimit => "input-over-limit",
         RevalidationReason::UnknownReasonTag => "unknown-reason",
     }
 }
@@ -533,6 +534,14 @@ impl HostHandle {
             }
             ReplayClassification::Held => return vec![held_frame(frame, live)],
             ReplayClassification::None => {}
+        }
+        // The scrubbed current input is secured before any optional
+        // background. If it cannot fit the final request budget even alone,
+        // reducing background cannot help: decline before acceptance (no
+        // append, no presence move) with the explicit reason instead of
+        // storing an unsendable turn and closing an interrupted stream.
+        if !ene_companion::dialogue::dialogue_input_fits(&text) {
+            return vec![revalidate_frame(frame, live, "input-over-limit")];
         }
         // The winner's intake premise below carries the fresh generation from
         // the committed fact. Any other path carries the envelope view

@@ -367,7 +367,45 @@ pub const DIALOGUE_RECALL_LIMIT: usize = 6;
 
 const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions.";
 
-/// Builds the dialogue input from bounded recent History and recall.
+/// Prompt layout pieces shared by the budget check and the assembly, so the
+/// pre-acceptance check and the built prompt cannot drift apart.
+const CURRENT_TIME_LABEL: &str = "\nCurrent time: ";
+const OWNER_LABEL: &str = "\nOwner: ";
+const MEMORIES_HEADER: &str = "\n\nRelevant memories:\n";
+const RECENT_HEADER: &str = "\n\nRecent conversation:\n";
+
+/// Characters the prompt always carries before any optional background: the
+/// preamble, the current-time line, and the `Owner: ` label.
+fn fixed_prompt_chars(current_time: &str) -> usize {
+    DIALOGUE_PREAMBLE.chars().count()
+        + CURRENT_TIME_LABEL.chars().count()
+        + current_time.chars().count()
+        + 1
+        + OWNER_LABEL.chars().count()
+}
+
+/// Whether a scrubbed current input fits the dialogue request budget even
+/// with no optional background.
+///
+/// The Host checks this before accepting a turn: an oversized input is then
+/// an explicit pre-acceptance outcome (`input-over-limit`) instead of a
+/// durable append followed by an interrupted stream, and reducing background
+/// cannot change the answer.
+#[must_use]
+pub fn dialogue_input_fits(input_text: &str) -> bool {
+    let current_time = WallClockWithTz::now().to_rfc3339();
+    fixed_prompt_chars(&current_time).saturating_add(input_text.chars().count())
+        <= ene_inference::MAX_INPUT_CHARS
+}
+
+/// Builds the dialogue input within the final request budget.
+///
+/// Priority order: the current input and the fixed labels are secured first;
+/// remaining characters go to recent History (newest first) and then to
+/// recalled Memory, each selected as whole meaning units. An item that does
+/// not fit is skipped rather than truncated, and selection stops at the
+/// budget, so the assembled prompt never exceeds
+/// [`ene_inference::MAX_INPUT_CHARS`] no matter how large old context grows.
 ///
 /// The current owner input is carried once, after the context sections, and
 /// is excluded from the recent-context window by `current_message` identity.
@@ -402,44 +440,88 @@ async fn assemble_dialogue_input(
     .await
     .unwrap_or_default();
     // The input is always scrubbed, and its premise seeds the oldest-premise
-    // fold, so the returned set is total without a fallback branch.
+    // fold, so the returned set is total without a fallback branch. The
+    // scrubbed length is what the budget counts: redaction changes size.
     let input = scrubber.scrub(input_text).await?;
     let mut credential_set = input.credential_set;
-    let mut prompt = String::from(DIALOGUE_PREAMBLE);
-    // The current time anchors the current input's relative dates; each
-    // source line carries its own time, so past relative dates are not
-    // reinterpreted from now.
-    prompt.push_str(&format!(
-        "\nCurrent time: {}\n",
-        WallClockWithTz::now().to_rfc3339()
-    ));
-    if !recalled.is_empty() {
-        prompt.push_str("\n\nRelevant memories:\n");
-        for memory in &recalled {
-            let content = scrubber.scrub(&memory.content).await?;
-            credential_set = credential_set.min(content.credential_set);
-            prompt.push_str("- ");
-            prompt.push_str(&content.text);
-            prompt.push('\n');
+    let current_time = WallClockWithTz::now().to_rfc3339();
+    let mut budget = ene_inference::MAX_INPUT_CHARS.saturating_sub(
+        fixed_prompt_chars(&current_time).saturating_add(input.text.chars().count()),
+    );
+
+    // Recent History first, newest to oldest: a fitting older message is
+    // still useful when the newest one is too large, and whole messages are
+    // never cut. Selection order is reversed for the oldest-first rendering.
+    let mut chosen_history: Vec<String> = Vec::new();
+    let mut history_header = false;
+    for item in recent
+        .iter()
+        .filter(|item| item.id != current_message)
+        .rev()
+    {
+        let text = scrubber.scrub(&item.text).await?;
+        credential_set = credential_set.min(text.credential_set);
+        let role = match item.role {
+            HistoryRole::Owner => "Owner",
+            HistoryRole::Companion => "Companion",
+        };
+        // The source message's own offset-qualified time stays attached:
+        // "tomorrow" in a past message is not re-anchored to now.
+        let line = format!("{role} [{}]: {}\n", item.at.to_rfc3339(), text.text);
+        let header_cost = if history_header {
+            0
+        } else {
+            RECENT_HEADER.chars().count()
+        };
+        let line_chars = line.chars().count();
+        if line_chars + header_cost > budget {
+            continue;
+        }
+        budget -= line_chars + header_cost;
+        history_header = true;
+        chosen_history.push(line);
+    }
+    chosen_history.reverse();
+
+    // Recalled Memory fills what remains, in recall rank order.
+    let mut chosen_memories: Vec<String> = Vec::new();
+    let mut memories_header = false;
+    for memory in &recalled {
+        let content = scrubber.scrub(&memory.content).await?;
+        credential_set = credential_set.min(content.credential_set);
+        let line = format!("- {}\n", content.text);
+        let header_cost = if memories_header {
+            0
+        } else {
+            MEMORIES_HEADER.chars().count()
+        };
+        let line_chars = line.chars().count();
+        if line_chars + header_cost > budget {
+            continue;
+        }
+        budget -= line_chars + header_cost;
+        memories_header = true;
+        chosen_memories.push(line);
+    }
+
+    let mut prompt = String::new();
+    prompt.push_str(DIALOGUE_PREAMBLE);
+    prompt.push_str(CURRENT_TIME_LABEL);
+    prompt.push_str(&current_time);
+    prompt.push('\n');
+    if !chosen_memories.is_empty() {
+        prompt.push_str(MEMORIES_HEADER);
+        for line in &chosen_memories {
+            prompt.push_str(line);
         }
     }
-    if recent.iter().any(|item| item.id != current_message) {
-        prompt.push_str("\nRecent conversation:\n");
-        for item in recent.iter().filter(|item| item.id != current_message) {
-            let text = scrubber.scrub(&item.text).await?;
-            credential_set = credential_set.min(text.credential_set);
-            prompt.push_str(match item.role {
-                HistoryRole::Owner => "Owner",
-                HistoryRole::Companion => "Companion",
-            });
-            // The source message's own offset-qualified time stays attached:
-            // "tomorrow" in a past message is not re-anchored to now.
-            prompt.push_str(&format!(" [{}]: ", item.at.to_rfc3339()));
-            prompt.push_str(&text.text);
-            prompt.push('\n');
+    if !chosen_history.is_empty() {
+        prompt.push_str(RECENT_HEADER);
+        for line in &chosen_history {
+            prompt.push_str(line);
         }
     }
-    prompt.push_str("\nOwner: ");
+    prompt.push_str(OWNER_LABEL);
     prompt.push_str(&input.text);
     Ok(ScrubbedText {
         text: prompt,
