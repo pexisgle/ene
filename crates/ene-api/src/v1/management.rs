@@ -202,6 +202,18 @@ pub struct ManagementViewRequest {
     /// syntax embedded in a section name.
     #[serde(default)]
     pub memory_after: Option<String>,
+    /// When set, the `memory` section renders one Memory's revision history
+    /// (with grounds) instead of the current list. The value is the Memory id
+    /// from the list. The revision history is paged independently, so it is
+    /// never inflated into the list page.
+    #[serde(default)]
+    pub memory_revisions_of: Option<String>,
+    /// Revision number the revision page continues after, exclusive, oldest
+    /// first. Semantics mirror [`memory_after`](Self::memory_after); the Host
+    /// ends the page with a `next-revision: <n>` line while newer revisions
+    /// remain. `None` or zero starts at the first revision.
+    #[serde(default)]
+    pub memory_revisions_after: Option<u64>,
 }
 
 /// Short labels stay visible; bodies redact.

@@ -166,6 +166,8 @@ fn view_request_frame(connection: ConnectionWireId) -> ene_plugin_ipc::WireFrame
         payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
             sections: Vec::new(),
             memory_after: None,
+            memory_revisions_of: None,
+            memory_revisions_after: None,
         }),
     };
     stamped(frame, connection)
@@ -185,6 +187,8 @@ fn memory_request_frame(
         payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
             sections: vec![String::from("memory")],
             memory_after: after.map(str::to_owned),
+            memory_revisions_of: None,
+            memory_revisions_after: None,
         }),
     };
     stamped(frame, connection)
@@ -192,6 +196,27 @@ fn memory_request_frame(
 
 fn view_page_request_frame(connection: ConnectionWireId, after: &str) -> ene_plugin_ipc::WireFrame {
     memory_request_frame(connection, Some(after))
+}
+
+fn revision_request_frame(
+    connection: ConnectionWireId,
+    memory: &str,
+    after_revision: Option<u64>,
+) -> ene_plugin_ipc::WireFrame {
+    let frame = ene_plugin_ipc::WireFrame {
+        envelope: new_outgoing_envelope(
+            ProtocolVersion::V1,
+            sender(),
+            WireMessageType(String::from("ManagementViewRequest")),
+        ),
+        payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
+            sections: vec![String::from("memory")],
+            memory_after: None,
+            memory_revisions_of: Some(memory.to_string()),
+            memory_revisions_after: after_revision,
+        }),
+    };
+    stamped(frame, connection)
 }
 
 /// The memory section body of one view answer.
@@ -2607,15 +2632,17 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     assert_eq!(memories[0].importance.as_u8(), 4);
     let revisions = handle
         .store
-        .list_memory_revisions(memories[0].id)
+        .list_memory_revisions(memories[0].id, None, 100)
         .await
         .unwrap();
     assert_eq!(revisions.len(), 1, "the initial revision is recorded");
     let summary = handle
         .store
-        .load_summary(revisions[0].summary.unwrap())
+        .load_summaries(&[revisions[0].summary.unwrap()])
         .await
         .unwrap()
+        .into_iter()
+        .next()
         .unwrap();
     assert!(summary.content.contains("jasmine tea"), "grounds are kept");
 }
@@ -2753,14 +2780,16 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     );
     let revisions = handle
         .store
-        .list_memory_revisions(memories[0].id)
+        .list_memory_revisions(memories[0].id, None, 100)
         .await
         .unwrap();
     let summary = handle
         .store
-        .load_summary(revisions[0].summary.unwrap())
+        .load_summaries(&[revisions[0].summary.unwrap()])
         .await
         .unwrap()
+        .into_iter()
+        .next()
         .unwrap();
     assert!(
         !summary.content.contains("test-bearer"),
@@ -3456,18 +3485,37 @@ async fn memory_view_renders_current_recognition_grounds_and_revisions() {
     else {
         panic!("the view must carry a memory section");
     };
-    assert!(memory.body.contains("The owner likes jasmine tea."));
+    assert!(memory.body.contains("The owner prefers coffee now."));
     assert!(memory.body.contains("importance=4"));
     assert!(memory.body.contains("temporal=enduring"));
     assert!(memory.body.contains("recall=active"));
-    assert!(memory.body.contains("grounds summary"));
-    assert!(memory.body.contains("rev1 initial"), "{}", memory.body);
     assert!(
-        memory.body.contains("rev2 changed-since"),
-        "{}",
+        !memory.body.contains("grounds summary") && !memory.body.contains("  rev"),
+        "the list page stays current recognition plus metadata: {}",
         memory.body
     );
-    assert!(memory.body.contains("The owner prefers coffee now."));
+    let memory_id = memory
+        .body
+        .lines()
+        .find(|line| line.starts_with("memory "))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .expect("the list names the addressable Memory id")
+        .to_owned();
+
+    // Revisions and grounds are a separate bounded read.
+    let requested = handle
+        .handle_frame(
+            revision_request_frame(live.connection_id, &memory_id, None),
+            live.clone(),
+            &update,
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert!(body.contains("rev1 initial"), "{body}");
+    assert!(body.contains("rev2 changed-since"), "{body}");
+    assert!(body.contains("grounds summary"), "{body}");
+    assert!(body.contains("The owner likes jasmine tea."), "{body}");
+    assert!(body.contains("The owner prefers coffee now."), "{body}");
 }
 
 /// A page cursor drives the read-only Memory view, and untrusted cursor text
@@ -3553,6 +3601,191 @@ async fn memory_view_cursor_pages_older_memories_and_rejects_invalid_ids() {
         )
         .await;
     assert_eq!(memory_body(&invalid), "invalid cursor");
+}
+
+/// A Memory with hundreds of revisions must not inflate the first list page,
+/// and its revision history must stay fully traversable in bounded pages
+/// that always fit one IPC frame.
+#[tokio::test]
+async fn memory_revision_pages_are_bounded_and_fully_traversable() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ChangeKind, ExperienceSourceKind, Importance, LearningRepository as _, LearningScope,
+        MemoryChange, MemoryChangeCommit, MemoryId, MemoryRevision, MemoryTarget, SourceRangeRef,
+        SummaryId, SummaryRecord, TemporalMeaning,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-memory-revisions");
+    let transport = ok_transport();
+    let setup = round_test_handle("dlg-memory-revisions", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let scope = LearningScope::companion(companion.as_raw());
+    let memory = MemoryId::generate();
+    let shared_evidence = SummaryRecord {
+        id: SummaryId::generate(),
+        scope,
+        content: String::from("shared grounds"),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: RawId::new(),
+            end: RawId::new(),
+        },
+        formed_at: WallClockWithTz::now(),
+    };
+    let commit = |target: MemoryTarget,
+                  content: String,
+                  change: ChangeKind,
+                  summary: Option<SummaryRecord>| MemoryChangeCommit {
+        summary,
+        secret_premise: None,
+        change: MemoryChange {
+            target,
+            scope,
+            content,
+            importance: Importance::default(),
+            temporal: TemporalMeaning::Enduring,
+            change,
+            recall_suppressed: false,
+            at: WallClockWithTz::now(),
+        },
+    };
+    let outcome = handle
+        .store
+        .commit_memory_change(commit(
+            MemoryTarget::New { id: memory },
+            String::from("revision one"),
+            ChangeKind::Initial,
+            Some(shared_evidence.clone()),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ene_learning::MemoryChangeOutcome::Committed { .. }
+    ));
+    let mut revision = MemoryRevision::initial();
+    for index in 1..=250_u64 {
+        let outcome = handle
+            .store
+            .commit_memory_change(commit(
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: revision,
+                },
+                format!("revision {index}"),
+                ChangeKind::Refined,
+                Some(shared_evidence.clone()),
+            ))
+            .await
+            .unwrap();
+        let ene_learning::MemoryChangeOutcome::Committed { revision: next, .. } = outcome else {
+            panic!("revision {index} must commit: {outcome:?}");
+        };
+        revision = next;
+    }
+
+    // The list names the memory without expanding any revision, and the page
+    // still fits one IPC frame.
+    let requested = handle
+        .handle_frame(
+            view_request_frame(live.connection_id),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert_eq!(memory_lines(&body), 1, "one current memory is listed");
+    assert!(
+        !body.contains("  rev"),
+        "the list must not expand revisions"
+    );
+    assert!(
+        ene_plugin_ipc::encode_frame(&requested[0]).is_ok(),
+        "the list page must fit one frame"
+    );
+    let memory_id = body
+        .lines()
+        .find(|line| line.starts_with("memory "))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .expect("the list names the addressable Memory id")
+        .to_owned();
+
+    // Walk every revision page: the frame cap holds on each, and the union
+    // covers every revision without skip or duplicate.
+    let mut after = None;
+    let mut seen = Vec::new();
+    for _ in 0..100 {
+        let responses = handle
+            .handle_frame(
+                revision_request_frame(live.connection_id, &memory_id, after),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert!(
+            ene_plugin_ipc::encode_frame(&responses[0]).is_ok(),
+            "every revision page must fit one frame"
+        );
+        let body = memory_body(&responses);
+        for line in body.lines() {
+            if let Some(rest) = line.strip_prefix("  rev") {
+                seen.push(
+                    rest.split_whitespace()
+                        .next()
+                        .and_then(|number| number.parse::<u64>().ok())
+                        .expect("a revision line names its number"),
+                );
+            }
+        }
+        assert!(
+            body.contains("grounds summary"),
+            "the shared grounds render on the page"
+        );
+        match body
+            .lines()
+            .find_map(|line| line.strip_prefix("next-revision: "))
+        {
+            Some(next) => after = Some(next.parse().expect("the cursor is numeric")),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        (1..=251).collect::<Vec<u64>>(),
+        "no skip or duplicate across revision pages"
+    );
+
+    // Cursor states stay distinct from data absence.
+    let malformed = handle
+        .handle_frame(
+            revision_request_frame(live.connection_id, "not-a-memory", None),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(memory_body(&malformed), "invalid cursor");
+    let unknown = handle
+        .handle_frame(
+            revision_request_frame(
+                live.connection_id,
+                &RawId::new().as_uuid().to_string(),
+                None,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(memory_body(&unknown), "unknown memory");
+    let exhausted = handle
+        .handle_frame(
+            revision_request_frame(live.connection_id, &memory_id, Some(99_999)),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(memory_body(&exhausted), "no more revisions");
 }
 
 /// A `memory`-only view reads no setup state, so an unreadable configured

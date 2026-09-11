@@ -659,12 +659,21 @@ mod tests {
         let [stored] = memories.as_slice() else {
             panic!("exactly the new memory must be stored: {memories:?}");
         };
-        let revisions = repository.list_memory_revisions(stored.id).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(stored.id, None, 100)
+            .await
+            .unwrap();
         assert_eq!(stored.revision, MemoryRevision::initial());
         assert_eq!(revisions[0].content, "The owner likes jasmine tea.");
         assert_eq!(revisions[0].scope, LearningScope::companion(companion));
         assert_eq!(revisions[0].importance.as_u8(), 4);
-        let evidence = repository.load_summary(summary).await.unwrap().unwrap();
+        let evidence = repository
+            .load_summaries(&[summary])
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(evidence.content, "The owner likes jasmine tea.");
         assert_eq!(revisions[0].summary, Some(summary));
         assert_eq!(revisions[0].change, crate::memory::ChangeKind::Initial);
@@ -973,7 +982,10 @@ mod consolidation_tests {
             1,
             "no duplicate memory is created"
         );
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(revisions.len(), 2);
         assert_eq!(revisions[0].content, "owner likes tea");
         assert_eq!(revisions[1].change, ChangeKind::Reinforced);
@@ -990,7 +1002,10 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(revisions.len(), 2);
         assert_eq!(
             revisions[1].content,
@@ -1010,7 +1025,10 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(revisions[1].change, ChangeKind::CorrectedInitiallyWrong);
 
         let (repository, memory, decision) = apply_update(
@@ -1018,7 +1036,10 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(revisions[1].change, ChangeKind::ChangedSince);
         assert_ne!(
             ChangeKind::CorrectedInitiallyWrong,
@@ -1033,7 +1054,10 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(revisions.len(), 2);
         assert_eq!(revisions[0].content, "owner likes tea");
         assert_eq!(revisions[1].change, ChangeKind::Forgotten);
@@ -1050,7 +1074,10 @@ mod consolidation_tests {
         )
         .await;
         assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(
             revisions.last().unwrap().importance.as_u8(),
             crate::Importance::default().as_u8(),
@@ -1077,7 +1104,10 @@ mod consolidation_tests {
             matches!(decision, FormationDecision::NoChangesApplied),
             "a moved target must reject the stale formation, got {decision:?}"
         );
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(
             revisions.last().unwrap().content,
             "advanced by another formation",
@@ -1117,7 +1147,10 @@ mod consolidation_tests {
             "no Summary evidence may be stored: {answer}"
         );
         if let Some((memory, revision)) = target {
-            let revisions = repository.list_memory_revisions(memory).await.unwrap();
+            let revisions = repository
+                .list_memory_revisions(memory, None, 100)
+                .await
+                .unwrap();
             assert_eq!(revisions.len(), 1, "no partial revision may remain");
             assert_eq!(
                 revisions.last().unwrap().revision,
@@ -1290,7 +1323,10 @@ mod consolidation_tests {
             21,
             "correcting the old memory must not create a duplicate"
         );
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap();
         assert_eq!(revisions[1].content, "The owner's dog is named Momo");
         assert_eq!(revisions[1].revision, MemoryRevision::from_u64(2));
         assert_eq!(

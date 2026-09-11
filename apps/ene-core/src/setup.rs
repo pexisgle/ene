@@ -74,7 +74,8 @@ use ene_credential::{
     available_credential,
 };
 use ene_learning::{
-    ChangeKind, LearningRepository, Memory, MemoryId, MemoryRevisionRecord, TemporalMeaning,
+    ChangeKind, LearningRepository, Memory, MemoryId, MemoryRevision, MemoryRevisionRecord,
+    SummaryId, TemporalMeaning,
 };
 use ene_permission::{
     AssignConsentIntent, CapabilityKind, ConsentRecord, ConsentRepository, IntentFingerprint,
@@ -368,7 +369,7 @@ impl HostHandle {
     ) -> Vec<WireFrame> {
         let target = intent.target.0.as_str();
         if target == SETUP_SHOW_TARGET {
-            let view = self.build_view(&[], None).await;
+            let view = self.build_view(&[], None, None, None).await;
             return vec![view_frame(frame, live, view)];
         }
         if target == SETUP_COMPLETE_TARGET {
@@ -611,7 +612,8 @@ impl HostHandle {
     /// An empty section list selects every known section (`provider`,
     /// `model`, `consent`, `credential`, `memory`); otherwise only requested
     /// known sections render and unknown names are skipped. `memory_after`
-    /// continues the `memory` section from a previous page.
+    /// continues the current-memory list; `memory_revisions_of` (with
+    /// `memory_revisions_after`) renders one Memory's revision page instead.
     pub(crate) async fn answer_view(
         &self,
         frame: &WireFrame,
@@ -619,7 +621,12 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         let view = self
-            .build_view(&request.sections, request.memory_after.as_deref())
+            .build_view(
+                &request.sections,
+                request.memory_after.as_deref(),
+                request.memory_revisions_of.as_deref(),
+                request.memory_revisions_after,
+            )
             .await;
         vec![view_frame(frame, live, view)]
     }
@@ -635,6 +642,8 @@ impl HostHandle {
         &self,
         wanted: &[String],
         memory_after: Option<&str>,
+        memory_revisions_of: Option<&str>,
+        memory_revisions_after: Option<u64>,
     ) -> ManagementView {
         let wants = |name: &str| wanted.is_empty() || wanted.iter().any(|section| section == name);
         let mut sections = Vec::new();
@@ -713,7 +722,9 @@ impl HostHandle {
             sections.push(ViewSection {
                 kind: String::from("memory"),
                 title: String::from("Memory"),
-                body: self.render_memory_view(memory_after).await,
+                body: self
+                    .render_memory_view(memory_after, memory_revisions_of, memory_revisions_after)
+                    .await,
             });
         }
         ManagementView {
@@ -743,67 +754,133 @@ impl HostHandle {
 
     /// Read-only projection of current Memory and its change history.
     ///
-    /// Renders one page of [`MEMORY_PAGE_SIZE`] current memories, newest
-    /// first, continuing strictly after `after` when a previous page named it.
-    /// While older memories remain the body ends with `next: <id>`, so every
-    /// memory is reachable by feeding that id back as the page cursor. There
-    /// is no write path here: corrections and changes arrive as Experience
-    /// through Learning, never by editing a Memory row.
-    async fn render_memory_view(&self, after: Option<&str>) -> String {
+    /// With no direction, renders one page of [`MEMORY_PAGE_SIZE`] current
+    /// memories, newest first, continuing strictly after `after` and ending
+    /// with `next: <id>` while more remain. With `revisions_of`, renders one
+    /// page of that Memory's revisions (oldest first) plus their grounds,
+    /// continuing strictly after `after_revision` and ending with
+    /// `next-revision: <n>` while more remain. Both pages stop at a body byte
+    /// budget, so a large corpus never inflates one frame past the IPC cap;
+    /// the cursor is the last rendered item, so stopping early cannot skip or
+    /// duplicate a row.
+    ///
+    /// The list and the revision detail are separate reads on purpose: a
+    /// Memory with hundreds of revisions must not enlarge the list page.
+    /// There is no write path here: corrections and changes arrive as
+    /// Experience through Learning, never by editing a Memory row.
+    async fn render_memory_view(
+        &self,
+        after: Option<&str>,
+        revisions_of: Option<&str>,
+        after_revision: Option<u64>,
+    ) -> String {
+        match revisions_of {
+            Some(raw) => self.render_revision_page(raw, after_revision).await,
+            None => self.render_memory_list(after).await,
+        }
+    }
+
+    async fn render_memory_list(&self, after: Option<&str>) -> String {
         let Ok(companion) = self.store.ensure_running_companion().await else {
             return String::from("unavailable");
         };
         let cursor = match after {
-            Some(raw) => match uuid::Uuid::parse_str(raw) {
-                Ok(id) => Some(MemoryId::from_raw(RawId::from_uuid(id))),
-                Err(_) => return String::from("invalid cursor"),
+            Some(raw) => match parse_memory_id(raw) {
+                Some(id) => Some(id),
+                None => return String::from("invalid cursor"),
             },
             None => None,
         };
-        let Ok(mut memories) = self
+        let Ok(memories) = self
             .store
             .list_current_memories(companion.as_raw(), cursor, MEMORY_PAGE_SIZE + 1)
             .await
         else {
             return String::from("unavailable");
         };
-        let has_more = memories.len() > MEMORY_PAGE_SIZE as usize;
-        memories.truncate(MEMORY_PAGE_SIZE as usize);
-        let Some(first) = memories.first() else {
+        if memories.is_empty() {
             return if after.is_some() {
                 String::from("no older memories")
             } else {
                 String::from("(none)")
             };
-        };
-        let mut body = String::new();
-        let mut last_id = first.id;
-        for memory in &memories {
-            last_id = memory.id;
-            body.push_str(&render_memory(memory));
-            match self.store.list_memory_revisions(memory.id).await {
-                Ok(revisions) => {
-                    for revision in &revisions {
-                        body.push_str(&render_revision(revision));
-                        if let Some(summary_id) = revision.summary
-                            && let Ok(Some(summary)) = self.store.load_summary(summary_id).await
-                        {
-                            body.push_str(&format!(
-                                "  grounds summary {}: {}\n",
-                                short_id(summary.id.as_raw()),
-                                summary.content
-                            ));
-                        }
-                    }
-                }
-                Err(_) => body.push_str("  revisions: unavailable\n"),
-            }
-            body.push('\n');
         }
-        if has_more {
+        let mut body = String::new();
+        let mut last_id = memories[0].id;
+        let mut rendered = 0_usize;
+        for memory in memories.iter().take(MEMORY_PAGE_SIZE as usize) {
+            let line = render_memory(memory);
+            if rendered > 0 && body.len() + line.len() > MEMORY_BODY_BUDGET {
+                break;
+            }
+            body.push_str(&line);
+            body.push('\n');
+            last_id = memory.id;
+            rendered += 1;
+        }
+        if rendered < memories.len() {
             // The cursor is the last rendered id, so the next page starts at
-            // the first older memory and cannot skip or repeat a row.
+            // the first unrendered memory and cannot skip or repeat a row.
             body.push_str(&format!("next: {}\n", last_id.as_raw().as_uuid()));
+        }
+        body.trim_end().to_owned()
+    }
+
+    async fn render_revision_page(&self, memory: &str, after_revision: Option<u64>) -> String {
+        let Some(memory_id) = parse_memory_id(memory) else {
+            return String::from("invalid cursor");
+        };
+        let after = match after_revision {
+            Some(revision) if revision > 0 => Some(MemoryRevision::from_u64(revision)),
+            _ => None,
+        };
+        let Ok(revisions) = self
+            .store
+            .list_memory_revisions(memory_id, after, MEMORY_REVISION_PAGE_SIZE + 1)
+            .await
+        else {
+            return String::from("unavailable");
+        };
+        if revisions.is_empty() {
+            return if after.is_some() {
+                String::from("no more revisions")
+            } else {
+                String::from("unknown memory")
+            };
+        }
+        // One batch lookup for the page's grounds: a shared Summary is read
+        // once, and a Summary id with no stored row is rendered as its own
+        // unavailable state rather than silently omitted.
+        let summary_ids: Vec<SummaryId> = revisions.iter().filter_map(|r| r.summary).collect();
+        let loaded = self.store.load_summaries(&summary_ids).await;
+        let summaries_unavailable = loaded.is_err();
+        let loaded = loaded.unwrap_or_default();
+        let mut body = String::new();
+        let mut last_revision = revisions[0].revision;
+        let mut rendered = 0_usize;
+        for revision in revisions.iter().take(MEMORY_REVISION_PAGE_SIZE as usize) {
+            let mut piece = render_revision(revision);
+            if let Some(summary_id) = revision.summary {
+                let short = short_id(summary_id.as_raw());
+                match loaded.iter().find(|summary| summary.id == summary_id) {
+                    Some(summary) => {
+                        piece.push_str(&format!("  grounds summary {short}: {}\n", summary.content))
+                    }
+                    None if summaries_unavailable => {
+                        piece.push_str("  grounds: unavailable\n");
+                    }
+                    None => piece.push_str(&format!("  grounds summary {short}: unavailable\n")),
+                }
+            }
+            if rendered > 0 && body.len() + piece.len() > MEMORY_BODY_BUDGET {
+                break;
+            }
+            body.push_str(&piece);
+            last_revision = revision.revision;
+            rendered += 1;
+        }
+        if rendered < revisions.len() {
+            body.push_str(&format!("next-revision: {}\n", last_revision.as_u64()));
         }
         body.trim_end().to_owned()
     }
@@ -820,6 +897,24 @@ fn presence_text(present: bool, source: &str) -> String {
 /// Current memories rendered by one management view page.
 const MEMORY_PAGE_SIZE: u64 = 20;
 
+/// Revisions rendered by one revision-history page.
+const MEMORY_REVISION_PAGE_SIZE: u64 = 20;
+
+/// Soft cap on one memory section body before frame encoding.
+///
+/// The IPC frame cap is 256 KiB including the envelope and every other
+/// section; this leaves headroom. Both pages stop at the last item that
+/// fits, so the cursor continues without skips and a large corpus can never
+/// inflate one frame without bound.
+const MEMORY_BODY_BUDGET: usize = 192 * 1024;
+
+fn parse_memory_id(raw: &str) -> Option<MemoryId> {
+    uuid::Uuid::parse_str(raw)
+        .ok()
+        .map(RawId::from_uuid)
+        .map(MemoryId::from_raw)
+}
+
 fn short_id(id: RawId) -> String {
     id.as_uuid()
         .as_hyphenated()
@@ -832,7 +927,7 @@ fn short_id(id: RawId) -> String {
 fn render_memory(memory: &Memory) -> String {
     format!(
         "memory {} scope=companion importance={} temporal={} recall={} revision={} updated={}\ncontent: {}\n",
-        short_id(memory.id.as_raw()),
+        memory.id.as_raw().as_uuid(),
         memory.importance.as_u8(),
         temporal_label(memory.temporal),
         if memory.recall_suppressed {
