@@ -114,7 +114,7 @@ flowchart TB
 |---|---|---|
 | transport adapter | frame I/O、liveness（heartbeat）、backpressure の伝達、peer 切断検知 | domain 意味・presence・許可・世代の判断。liveness を presence・報告完了にしない |
 | connection auth | pairing・session・revoke・re-auth（第9節） | domain 許可・Task 反映・作用確定 |
-| wire envelope | routing（recipient hint・stream mux）、compatibility（version・message type・correlation ID）、duplicate suppression key（第5・6節） | semantic owner・authority。envelope の存在・到着を確定にしない |
+| wire envelope | routing（recipient hint）、compatibility（version・message type・correlation ID）、duplicate suppression key（第5・6節） | semantic owner・authority。envelope の存在・到着を確定にしない |
 | domain payload | typed message（第4節の pattern 別）。Client は candidate / observation / ack を送り、Host は fact / decision 投影・command を送る | Host-local の確定条件全文・secret・判定 copy |
 | binary attachment | audio frame・capture frame・asset chunk の byte 列（descriptor と対応付け） | 意味。descriptor なしの attachment を解釈しない |
 | host ipc mapping | DTO validation、wire ref → domain premise への mapping、domain fact → DTO 投影（第25節） | 採否・達成・許可・確定度の判断（各 owner） |
@@ -130,7 +130,7 @@ flowchart TB
 | command + acknowledgement | Host→Client または Client→Host の「してほしい」と、その受付確認。ack は受信・記録であり、効果・完了ではない | `command_id` で対応。ack は `Received \| RejectedStale \| DeniedByHold \| Unsupported` 等の domain outcome。完了は別 message | move intent→transition ack、action command→receipt ack、deletion demand→local result（完了は Host 集約）、cancel request→cancel-received |
 | one-way fact | authoritative 側からの一方向の伝達。受信は理解・採否を意味しない | 対応不要。最新値意味のものは supersede する | presence attribution broadcast、eligibility 表示、availability fact、revocation notice、body-state hint |
 | subscription + notification | 購読登録と、その後の条件付き通知。購読は許可・presence ではない | `subscription_id` で管理。条件不成立・停止・失効で server 側が終了・保留を通知する | presence subscription、undelivered summary 更新、observation eligibility 変更 |
-| stream (open / frame / close) | 順序付き frame 列。open が前提（ticket・session・round）を確定し、frame はその範囲内でのみ有効 | `stream_id`＋`seq`。close は `Completed \| Interrupted \| Cancelled \| Stale` を区別する。旧 stream の自動継続をしない | text token stream、voice audio stream、asset chunk stream |
+| stream (open / frame / close) | 順序付き frame 列。open が前提（ticket・session・round）を確定し、frame はその範囲内でのみ有効 | `StreamWireId`（payload field）＋`seq`。close は `Completed \| Interrupted \| Cancelled \| Stale` を区別する。旧 stream の自動継続をしない | text token stream、voice audio stream、asset chunk stream |
 | progress + completion | 長時間処理の中間報告と最終確定。progress は確定ではない | progress は `operation_id`＋単調 `progress_seq`。completion は certainty（成功 / 失敗 / 不明）を伴う | action progress→effect report、asset transfer progress→assembled、deletion local progress→local result |
 
 pattern 横断の禁止：
@@ -149,7 +149,7 @@ envelope は routing と compatibility のためだけに存在する。semantic
 struct WireEnvelope {
     protocol: ProtocolVersion,      // major.minor（第7節）
     message_id: WireMessageId,      // transport duplicate suppression key（第6節）
-    correlation: WireCorrelation,   // request/response・command/ack・stream の対応付け
+    correlation: WireCorrelation,   // request/response・command/ack の対応付け
     sender: WireSender,             // device / incarnation / connection（第11節）
     observed: ObservedMarks,        // Client が見た世代表示の写し（主張ではなく照合材料）
     message_type: WireMessageType,  // payload の型識別（unknown type は拒否。第7節）
@@ -159,9 +159,7 @@ struct WireEnvelope {
 struct WireCorrelation {
     request_id: Option<RequestWireId>,  // request/response 用。Client 発行可
     command_id: Option<CommandWireId>,  // command/ack 用。発行者は方向別（第6節）
-    stream_id: Option<StreamWireId>,    // stream 用。Host 発行が既定
     reply_to: Option<WireMessageId>,    // 応答対象 message（transport 対応用。domain 対応は ID 別）
-    causation_span: Option<SpanWireId>, // 診断・追跡用。authority・順序の根拠にしない
 }
 
 struct WireSender {
@@ -178,13 +176,13 @@ struct WireSender {
 struct ObservedMarks {
     presence_generation_view: Option<u64>, // Client が見た presence generation 値の写し
     round_view: Option<RoundWireId>,       // Client が属するつもりの round
-    ticket_view: Option<TicketWireId>,     // capture ticket 等の前提表示
 }
 ```
 
 envelope の扱い：
 
 - `message_type` は routing の hint であり、payload の意味確定ではない。unknown type は `UnsupportedMessage` として拒否し、guess して処理しない。
+- stream の対応付けは payload の `StreamWireId`（第13節）で運ぶ。`causation_span`（診断 span）と `ticket_view`（capture ticket の前提表示）は current stage で producer / consumer がなく、必要 stage で再導入する。
 - `observed` は Client の主張ではなく「Client が何を見て送ったか」の写しである。Host は durable・live と比較し、不一致なら stale として不受理にする。Client が自身を current だと宣言しただけでは成立しない。
 - 秘密 material（pairing token・session proof・鍵）は通常 payload・envelope へ載せない。auth 専用 frame（第9節）でのみ扱う。
 - 時刻は wall-clock＋作成時 timezone を保持する（CI §4.6）。時刻を revision / generation の代替・stale 判定の根拠にしない。
@@ -209,7 +207,7 @@ wire ref と domain identity の関係：wire ref は Host mapping が内部 ide
 
 - Pairing / authentication の pre-auth request / response は authenticated sender epoch をまだ持たないため、本節の command retry idempotency の対象にしない。`PairingRequest` / auth frame は `request_id`・`message_id`・`reply_to` と第9節の単発 nonce / proof 規則で対応付け、認証前の sender tuple を domain command の idempotency namespace として使わない。
 - Client→Host の input・ack・fact・capability・availability の `command_id` / `request_id` は Client が発行する。Host は認証後の domain command の `command_id` を domain idempotency key として扱い、同一 sender epoch 内の同一 `command_id` の再送には再実行せず prior outcome（または再実行を禁止できる typed 既処理結果）を返す。
-- Host→Client の move transition・action command・deletion demand・capture ticket の `command_id` / `operation_id` / `stream_id` は Host が発行する。Client はこれらを minted しない。Client が command を合成・推測して送ることは protocol 違反として拒否する。
+- Host→Client の move transition・action command・deletion demand・capture ticket の `command_id` / `operation_id` は Host が発行する。Client はこれらを minted しない。Client が command を合成・推測して送ることは protocol 違反として拒否する。
 - **retry-admissible sender epoch。** Client→Host では、Host が current として受理している authenticated `(device_id, incarnation_id, connection_id)` の組を command retry の epoch とする。connection replacement・incarnation replacement・device revoke 等でその epoch が current でなくなった後は、旧 epoch の command を semantic 実行へ進める前に `StaleConnection` / `StaleIncarnation` 等で拒否する。Host→Client も同様に、当該 authenticated Client connection / incarnation へ発行した command を新 connection へ自動継続・replay しない。
 - **保持期間の不変条件。** receiver は、retry を受理し得る sender epoch が current な間、受理済み `command_id` ごとに少なくとも「再実行禁止」を判定できる idempotency marker を保持する。詳細 response / progress を compact することはできるが、marker を先に捨てて同じ `command_id` を新規 command として実行してはならない。round 等の新しい durable identity を発行した command は、retry に同じ identity を返せる最小結果（例：`AcceptedForRound { round }`）も epoch の間保持するか、同じ durable 対応から再構成できること。
 - marker は同じ `command_id` が同じ semantic command であることを確認できる fingerprint を持つ。fingerprint は少なくとも message kind、payload、target / premise に関係する `observed` field を含み、`message_id`・`reply_to`・診断用 span 等の送信ごとに変わる transport metadata を含めない。同一性を判定できる限り、canonical encoding / hash の具体方式は Freedom とする。
@@ -275,28 +273,20 @@ Client によって Body・Voice・screen capture・Computer Use・notification�
 // ene-api::v1::capability（pseudo-code）
 struct CapabilityAdvertise {
     supported_protocol: Vec<ProtocolVersion>, // 対応 version 一覧
-    features: Vec<ClientFeature>,             // 機能名＋可否＋制約
     limits: ClientLimits,                     // frame 上限・同時 stream 上限等の申告
     platform: PlatformDescriptor,             // OS・device 種別等の表示用。許可の根拠にしない
 }
 
-struct ClientFeature {
-    kind: ClientFeatureKind, // Body2D | VoiceDuplex | ScreenCapture | ComputerUse |
-                             // Notification | TrayIntegration | ...
-    available: bool,
-    detail: FeatureDetailRef, // codec・解像度上限等の申告。検証なしに信用しない
-}
-
 struct NegotiatedConnection {
     version: ProtocolVersion,          // Host が選択した negotiated version
-    accepted_features: Vec<ClientFeatureKind>, // Host が受領した申告（許可ではない）
 }
 ```
 
+- `ClientFeature` / `ClientFeatureKind`（feature 申告）と `accepted_features` は current stage で producer / consumer がなく、必要 stage で再導入する。
 - capability claim ≠ Permission。Host は availability（申告）と Permission / current presence 等を別々に照合する。申告があっても許可・presence・device 許可なしには開始しない。
 - Host は申告を availability fact として保持し、Action 可否・observation 対象・routing・UI 表示の材料にする。申告の存在を能力の証明にしない（必要なら Host が到達性・device 許可と合わせて確認する）。
 - capability の変化（fullscreen 開始・device 喪失・負荷・mute 等）は `CapabilityUpdate` fact / `AvailabilityFact` で通知する。変化前に発行した ticket・command の有効性は延びない（各受入で現在照合する）。
-- negotiated version・accepted features は connection record に保持し、`RestoreGeneration`・presence generation とは別の次元として扱う。混ぜない。
+- negotiated version は connection record に保持し、`RestoreGeneration`・presence generation とは別の次元として扱う。混ぜない。
 
 ## 9. Authentication / pairing
 
@@ -337,7 +327,7 @@ wire semantic と transport を分離し、以下を共通化の範囲とする�
 | transport | 用途 | 選択 |
 |---|---|---|
 | same-machine | Host と同 PC の Client | OS local socket（Linux: Unix domain socket、Windows: named pipe または loopback＋OS peer 認証相当）。OS account 保護を前提とし、TLS は必須にしない。frame は length-prefixed（4-byte BE exclusive-length、上限付き） |
-| LAN / remote device | 別 PC の Client（同一 LAN・Owner 管理 VPN） | WebSocket（binary message）＋TLS。ene 運営 relay・account・Cloud を接続要件にしない。単一 connection で論理 stream を多重する（`stream_id` で mux） |
+| LAN / remote device | 別 PC の Client（同一 LAN・Owner 管理 VPN） | WebSocket（binary message）＋TLS。ene 運営 relay・account・Cloud を接続要件にしない。単一 connection で論理 stream を多重する（payload の `StreamWireId` で mux） |
 | future transport | 将来の追加 | adapter 追加で対応する。wire semantic・DTO・version・auth property を変えない |
 
 QUIC 等の採用は現時点でしない。理由：現在の topology（単一 Owner-managed Host、少数 Client、ticket 制御の低頻度 capture、WebSocket で足りる stream 多重）では必要性がなく、over-engineering になるためである。将来 transport は adapter として追加できる（第28節）。
@@ -383,7 +373,7 @@ enum TransportFrame {
   2. `connection_id` が当該 device の current であること（authentication 成功後の message にだけ適用する。pre-auth の pairing・auth 用 message は `None` を許可する）。
   3. `incarnation_id` が current incarnation と対応すること（旧 incarnation からの到着は stale）。
   4. `observed.presence_generation_view` が現在の帰属 generation と対応すること（Client 依存操作の場合）。
-  5. `round_view` / `ticket_view` が現在の round / ticket と対応すること（該当操作の場合）。
+  5. `round_view` が現在の round と対応すること（該当操作の場合）。
 - authenticated domain command では 1〜3 を満たした current sender epoch の command だけが第6.2節の semantic idempotency 判定へ進む。旧 epoch は stale reject されるため、旧 epoch の marker cleanup 後でも semantic 再実行へ到達しない。pre-auth pairing / auth message はこの idempotency lookup へ入れない。
 - Client 側が自身を current だと宣言しただけでは成立しない。Host の durable・live との照合が必須である。確認不能を現在と推定しない。
 
@@ -404,8 +394,8 @@ Host 側の authoritative presence generation を基準とする。二つの Cli
 | `TransitionAck` | Host→関係 Client | ack＋fact | `旧→移行中→新` の durable 遷移結果（新 generation 付き）。移動元・移動先の両方へ送る |
 | `PresenceAttributionFact` | Host→購読 Client | fact | 現在帰属（companion・state・active・generation）。最新値意味で supersede する |
 | `DisconnectNotice` | 両方向 | fact | 切断の観測事実（検知側が送る）。帰属 durable の即時破棄ではない |
-| `ReconnectHello` | Client→Host | command（再認証付き） | 再接続の申告。新規 connection auth を伴う。旧 state の復活要求ではない |
-| `RecoveryInvite` | Host→Client | fact | Host restart 後の復旧誘い（復元前 Client への自動復元用）。presence 成立ではなく確認の求め |
+
+`ReconnectHello` / `RecoveryInvite`（再接続申告・復旧誘い）は current stage で producer / consumer がなく、必要 stage で再導入する。
 
 ### 12.2 規則
 
@@ -413,7 +403,7 @@ Host 側の authoritative presence generation を基準とする。二つの Cli
 - 移行中は新旧いずれでも Client 依存の新規開始をしない。旧 in-flight は安全な区切りまで継続し、旧作用の別 Client 自動継続をしない。
 - Client の UI ack（`PresencePresentedAck`）は「表示した」ことの確認であり、presence 成立の authority ではない。ack がなくても帰属は成立し、ack があっても帰属は変わらない。
 - 一時的な到達不能では帰属を直ちに捨てず、新規 Client 依存開始を抑止する。通常の Client 切断・process 終了が確定したら、Host の `ene-presence` は利用可能な Host PC 上の Client（§10.1 の SameMachine・現認証・`ene-permission` の device 許可・排他性を確認可能）へ、SD-Presence の CAS で `旧→移行中→Host PC Client` と遷移する。候補なし・確認不能なら `NoActive` に確定する。Host 側 Client 環境を自動起動しない。切断 Client 待ちの `RecoveryWait` は Host restart restoration に限る。通常切断後の再接続だけでは帰属を復帰させず、呼出し・事前指示・通常の自発判断を経る。Stop は disconnect と異なり、停止中 Companion に fallback・復旧を適用しない。
-- Host restart restoration：Host は `presence_attribution`＋hint・復旧先（非現在の参照）を読み、`RecoveryWait` として再構成し、復元前 Client へ `RecoveryInvite` を送る。現接続・許可・排他性の確認ができれば `Present` へ確定し、できなければ active なしにする。別 Client への無条件自動移動・Stopped への適用・Task 再開権限化をしない。
+- Host restart restoration：Host は `presence_attribution`＋hint・復旧先（非現在の参照）を読み、`RecoveryWait` として再構成し、復元前 Client の再認証・応答を確認する。現接続・許可・排他性の確認ができれば `Present` へ確定し、できなければ active なしにする。別 Client への無条件自動移動・Stopped への適用・Task 再開権限化をしない。復旧誘い・再接続申告の message は必要 stage で再導入する。
 
 ### 12.3 DTO（抜粋。全体は第21節）
 
@@ -427,11 +417,6 @@ struct MoveIntent {
     intent_id: CommandWireId,
 }
 enum MoveIntentReason { OwnerSummon, PriorInstruction, SpontaneousNeed }
-enum MoveReason {
-    OwnerSummon, PriorInstruction, SpontaneousNeed,
-    DisconnectFallback,
-    ReconnectRecovery,
-}
 enum MoveOutcome {
     Transitioning { new_generation: u64 },
     RejectedStalePresence { current_generation: u64 },
@@ -440,7 +425,7 @@ enum MoveOutcome {
 }
 ```
 
-`MoveReason` は Host の遷移記録と `TransitionAck` / `PresenceAttributionFact` の理由投影に使う。Client 起点の `MoveIntent` では Host 専用の二理由を送れない。`ReconnectRecovery` は Host が現在の `RecoveryWait`・復旧先へ対応付けた `RecoveryInvite` に対する再認証・`ReconnectHello` の応答事実を照合した場合だけ記録する。hello 単独では復旧待ちを作らない。
+Host の遷移記録・`PresenceAttributionFact` の理由投影（`MoveReason`）は current stage で producer / consumer がなく、必要 stage で再導入する。切断 fallback・復旧の理由は Host の記録側に留め、Client 起点の `MoveIntentReason` では要求しない。
 
 ## 13. Text / Voice / presentation
 
@@ -452,7 +437,7 @@ enum MoveOutcome {
 |---|---|---|---|
 | `SubmitTextInput` | Client→Host | command | Owner 入力 candidate（companion 参照・round 参照または新規開始 None・`ClientInputLocalId`・本文）。受理ではなく提案 |
 | `RoundIntakeOutcome` | Host→Client | ack（domain outcome） | `AcceptedForRound \| StaleRound \| HeldForTransition \| NeedsRevalidation`。旧 round なら元 round へ対応付け、新 round へ付け替えない |
-| `TextStreamOpen` | Host→Client | stream open | 応答 stream の開始（`stream_id`・round・generation 付き）。open 成功は提示・達成ではない |
+| `TextStreamOpen` | Host→Client | stream open | 応答 stream の開始（`StreamWireId`・round・generation 付き）。open 成功は提示・達成ではない |
 | `TextStreamFrame` | Host→Client | stream frame | 部分出力（`seq`・delta text・`is_final`）。`seq` 順に提示する |
 | `TextStreamClose` | Host→Client | stream close | `Completed \| Interrupted \| Cancelled \| Stale` の区別 |
 | `ConfirmPresentation` | Client→Host | observation | 提示確認（`Presented \| Unknown \| Failed`＋理由）。送信≠報告完了 |
@@ -461,7 +446,7 @@ enum MoveOutcome {
 - round identity：round は Host 発行の `RoundWireId` である。移動・切断・再起動で旧 round の入力・未提示出力を新 round へ付け替えない。
 - 初回入力は `SubmitTextInput.round = None` で新規 round の開始を要求できる。`observed.presence_generation_view` は必須、`observed.round_view` は None とする。Host の `ene-presentation::round` が現接続・帰属・許可・停止・保留を照合して round を発行し、IB X-B の非 optional `RoundId` へ解決して受理し、`AcceptedForRound { round }` を返す。mapping 自体は round を発行しない。以後の当該 round 入力は `Some(round)` を使い、旧 round の拒否を None への自動再送で迂回しない。
 - **None 要求の retry は第6.2節の semantic idempotency に従う。** current sender epoch で同一 `command_id`・同一 fingerprint を再送した場合、Host は初回に発行した round / outcome を再現して返し、別 round を発行・別入力として受理しない。少なくともその epoch の間はこの対応を再構成できる marker / result を保持する。marker を evict した後も retry を新規 None 要求として受理する状態は作らない。sender epoch が stale なら round 発行より先に stale reject する。同じ ID で fingerprint が違えば `CommandReplayRejectWire::CommandIdConflict` とする。
-- partial / streaming output：`stream_id`＋`seq`＋`is_final` で順序付ける。`is_final` なしの frame を完了にしない。
+- partial / streaming output：`StreamWireId`＋`seq`＋`is_final` で順序付ける。`is_final` なしの frame を完了にしない。
 - 未提示出力は `UndeliveredSummary`（第18節・W-3）へ接続し、次 Client で現在の結果・利用制限・削除状況へ照合して要約報告する。送信・受信を報告完了にしない。
 
 ### 13.2 Voice
@@ -632,7 +617,7 @@ pattern・方向・authority の所在を一覧する。envelope 自体は含め
 | M-4 | `CapabilityUpdate / AvailabilityFact` | C→H | fact | Host（材料）。許可・presence ではない |
 | M-5 | `MoveIntent / MoveOutcome(TransitionAck)` | C→H / H→C | command+ack | 接続・存在（帰属成立）。意図は個体調整・Client |
 | M-6 | `PresenceAttributionFact` | H→C | fact（subscribe） | 接続・存在。最新値意味 |
-| M-7 | `DisconnectNotice / ReconnectHello / RecoveryInvite` | 両方向 | fact / command / fact | 帰属は接続・存在。hello は申告 |
+| M-7 | `DisconnectNotice` | 両方向 | fact | 帰属は接続・存在 |
 | M-8 | `SubmitTextInput / RoundIntakeOutcome` | C→H / H→C | command+ack | 入出力・提示（None 要求の round 発行）＋個体調整（会話受理）＋接続・存在（帰属照合） |
 | M-9 | `TextStreamOpen / Frame / Close` | H→C | stream | 入出力・提示（round 実際）。意味は個体調整 |
 | M-10 | `ConfirmPresentation` | C→H | observation | 個体調整（報告状況）。送信≠報告 |
@@ -688,7 +673,6 @@ struct PresenceAttributionWire {
     state: PresenceStateWire,
     active_client: Option<ClientWireRef>,
     generation: u64,
-    move_reason: Option<MoveReason>,
 }
 
 // ---- text ----
@@ -769,7 +753,7 @@ enum ActionReceiptAckWire {
     Received,
     RejectedStale { current_generation: u64 },
     DeniedByHold { reason: HoldReasonWire },
-    UnsupportedCapability { kind: ClientFeatureKindWire },
+    UnsupportedCapability,
 }
 struct EffectReportWire {
     operation: OperationWireId,
@@ -822,7 +806,7 @@ DTO → Host domain command への変換点（Host ingress mapping。判断は�
 
 ## 22. Backpressure and streams
 
-すべての message へ global total ordering を要求しない。順序が必要なのは stream 内（`stream_id`＋`seq`）だけであり、stream 間・fact・command 間は順序付けしない。重要 control message を高頻度 capture frame と同じ drop policy にしない。
+すべての message へ global total ordering を要求しない。順序が必要なのは stream 内（`StreamWireId`＋`seq`）だけであり、stream 間・fact・command 間は順序付けしない。重要 control message を高頻度 capture frame と同じ drop policy にしない。
 
 | domain | buffering | drop / stale policy | ordering |
 |---|---|---|---|
@@ -889,7 +873,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 ### V-1 Client connect → authenticate → capability advertise
 
 1. 未 pairing Client の最初の `PairingRequest` は `sender.device_id=None`・自 incarnation・`connection_id=None` で送り、`request_id` / `message_id` で対応付ける。これは authenticated command sender epoch ではない。pairing 済み Client は `AuthChallenge→AuthProof` を行い、`AuthProof` 等は `device_id=Some`・`connection_id=None` を許す。秘密を通常 payload へ載せない。
-2. Host は auth 成功時に `ConnectionWireId` を発行し、以後の domain command で current authenticated sender epoch を成立させる。`CapabilityAdvertise` を受けて negotiated version・accepted features を確定する。申告は availability fact であり、許可・presence ではない。
+2. Host は auth 成功時に `ConnectionWireId` を発行し、以後の domain command で current authenticated sender epoch を成立させる。`CapabilityAdvertise` を受けて negotiated version を確定する。申告は availability fact であり、許可・presence ではない。feature 申告は必要 stage で再導入する。
 3. 失格条件：上記 pre-auth 例外以外で sender field を欠落させない。auth なしの domain 操作は不受理にし、失効 device の旧 material では復活させない。
 
 ### V-2 Owner Text → Host → response stream → presentation acknowledgement
@@ -945,7 +929,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 ### V-10 Host restart → reconnect → presence restoration
 
 1. Host restart 後、presence は `RecoveryWait` として再構成する。Task は明示再開待ち、Unknown attempt は `Unknown` のまま、未完了消去・保留は維持する。
-2. Host は復元前 Client へ `RecoveryInvite` を送り、Client は新規 connection として再認証・`ReconnectHello` で応答する。Host は現在の `RecoveryWait` と復旧先への対応および現接続・許可・排他性を照合し、確認できれば `Present`（理由 `ReconnectRecovery`）へ確定し、できなければ active なしにする。Client の `MoveIntent` でこの理由を要求できない。
+2. Host は復元前 Client の再認証・応答を、現在の `RecoveryWait` と復旧先への対応および現接続・許可・排他性と照合し、確認できれば `Present` へ確定し、できなければ active なしにする。Client の `MoveIntent` で復旧理由を要求できない。
 3. 古い一時 state・旧承認・解決済み経路だけでの presence・許可・再開の成立をしない。Task・Action の再開権限化をしない。
 
 ### V-11 Host newer / old Client
