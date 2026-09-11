@@ -19,8 +19,6 @@
 //!   a live `send` in the same process because streams cannot resume, so that
 //!   follow mode is deferred (see [`Command::Watch`]).
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
     ManagementViewRequest, RationaleOrigin, consent_target, credential_target,
@@ -62,8 +60,6 @@ pub const HOST_MEMORY_SECTION: &str = "memory";
 
 /// Only provider the setup flow knows how to assign yet.
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
-
-static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -412,15 +408,11 @@ pub fn submit_input(
     }
 }
 
-/// Mints a client-local correspondence ID: `ctl-<pid>-<counter>`.
-///
-/// The `uuid` crate is unavailable to this binary, so uniqueness rests on the
-/// process id plus a process-local monotonic counter: unique per connection
-/// for this process, which is all `local_id` needs (it matches acks to sends
-/// within one Client and is never Host-canonical).
+/// Mints a client-local correspondence ID from a v4 UUID: unique per
+/// connection for this process, which is all `local_id` needs (it matches
+/// acks to sends within one Client and is never Host-canonical).
 pub fn new_local_id() -> ClientLocalId {
-    let counter = LOCAL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    ClientLocalId(format!("ctl-{}-{counter}", std::process::id()))
+    ClientLocalId(uuid::Uuid::new_v4().to_string())
 }
 
 /// `"credential:<provider>:main"` via the shared [`credential_target`]
@@ -1333,11 +1325,11 @@ mod tests {
     }
 
     #[test]
-    fn local_id_names_this_process_counter() {
+    fn local_id_is_a_uuid() {
         let id = new_local_id().0;
         assert!(
-            id.starts_with(&format!("ctl-{}-", std::process::id())),
-            "local ID must name this process: {id:?}"
+            uuid::Uuid::parse_str(&id).is_ok(),
+            "local ID must be a UUID: {id:?}"
         );
     }
 }
