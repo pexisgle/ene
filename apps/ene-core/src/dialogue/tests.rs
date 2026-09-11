@@ -2073,11 +2073,13 @@ impl ene_inference::ProviderTransport for RevokingTransport {
         let db = self.db.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
-            use ene_permission::{CapabilityKind, ConsentRepository as _};
+            use ene_permission::{
+                CapabilityKind, ConsentRepository as _, ConsentRevision, IntentFingerprint,
+                IntentOutcomeRepository as _,
+            };
             if let Ok(store) = ene_store::Store::open(&db).await
                 && let Ok(Some(current)) = store.load_current(CapabilityKind::Dialogue).await
             {
-                use ene_permission::{ConsentRepository as _, ConsentRevision};
                 let bumped = ene_permission::ConsentRecord {
                     capability: CapabilityKind::Dialogue,
                     id: current.id.clone(),
@@ -2087,7 +2089,18 @@ impl ene_inference::ProviderTransport for RevokingTransport {
                     credential_id: current.credential_id.clone(),
                 };
                 let _bumped = store
-                    .compare_and_save(Some((current.id, current.rev)), bumped)
+                    .assign_with_intent(
+                        Some((current.id, current.rev)),
+                        bumped,
+                        IntentFingerprint {
+                            intent_id: RawId::new().as_uuid().to_string(),
+                            kind: String::from("assign"),
+                            target: String::from("consent:dialogue:test-revoke"),
+                            base: String::from("consent-test-revoke"),
+                            rationale_origin: String::from("conversation"),
+                            rationale_quote: None,
+                        },
+                    )
                     .await;
             }
             inner.complete(req).await
@@ -3542,7 +3555,10 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
         ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
         MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
     };
-    use ene_permission::{CapabilityKind, ConsentRecord, ConsentRepository as _, ConsentRevision};
+    use ene_permission::{
+        CapabilityKind, ConsentRecord, ConsentRevision, IntentFingerprint,
+        IntentOutcomeRepository as _,
+    };
     use ene_primitive::WallClockWithTz;
 
     let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
@@ -3558,7 +3574,7 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
         .expect("the ref must register");
     let saved = handle
         .store
-        .compare_and_save(
+        .assign_with_intent(
             None,
             ConsentRecord {
                 capability: CapabilityKind::Dialogue,
@@ -3567,6 +3583,14 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
                 provider: String::from("openai"),
                 model: String::from("dialogue-1"),
                 credential_id: String::from("openai:main"),
+            },
+            IntentFingerprint {
+                intent_id: RawId::new().as_uuid().to_string(),
+                kind: String::from("assign"),
+                target: String::from("consent:dialogue:test-fixture"),
+                base: String::from("consent-test-fixture"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
             },
         )
         .await;

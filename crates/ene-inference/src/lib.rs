@@ -713,8 +713,8 @@ mod dispatch_tests {
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
-        CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
-        ConsumerKind, InferenceUseCandidate, PermissionTechnicalError, PurposeKind,
+        CapabilityKind, ConsentRecord, ConsentRepository, ConsentRevision, ConsumerKind,
+        InferenceUseCandidate, PermissionTechnicalError, PurposeKind,
     };
     use ene_primitive::RawId;
 
@@ -744,20 +744,6 @@ mod dispatch_tests {
                 .0
                 .clone()
                 .filter(|consent| consent.capability == capability))
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
-        async fn compare_and_save(
-            &self,
-            _expected: Option<(String, ConsentRevision)>,
-            _record: ConsentRecord,
-        ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
-            Err(PermissionTechnicalError::StorageUnavailable {
-                reason: String::from("read-only test consent"),
-            })
         }
     }
 
@@ -1063,8 +1049,7 @@ mod admission_tests {
         CredentialRef, CredentialRefRepository, CredentialTechnicalError, MemoryCredentialStore,
     };
     use ene_permission::{
-        CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
-        PermissionTechnicalError,
+        CapabilityKind, ConsentRecord, ConsentRepository, ConsentRevision, PermissionTechnicalError,
     };
 
     fn record_for(capability: CapabilityKind) -> ConsentRecord {
@@ -1093,20 +1078,6 @@ mod admission_tests {
                 .0
                 .clone()
                 .filter(|consent| consent.capability == capability))
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
-        async fn compare_and_save(
-            &self,
-            _expected: Option<(String, ConsentRevision)>,
-            _record: ConsentRecord,
-        ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
-            Err(PermissionTechnicalError::StorageUnavailable {
-                reason: String::from("read-only test consent"),
-            })
         }
     }
 
@@ -1254,20 +1225,6 @@ mod admission_tests {
             &self,
             _capability: CapabilityKind,
         ) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
-            Err(PermissionTechnicalError::StorageUnavailable {
-                reason: String::from("consent store down"),
-            })
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
-        async fn compare_and_save(
-            &self,
-            _expected: Option<(String, ConsentRevision)>,
-            _record: ConsentRecord,
-        ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
             Err(PermissionTechnicalError::StorageUnavailable {
                 reason: String::from("consent store down"),
             })
