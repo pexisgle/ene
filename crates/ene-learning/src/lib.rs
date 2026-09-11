@@ -33,9 +33,8 @@ mod test_support;
 #[doc(no_inline)]
 pub use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
 pub use formation::{
-    ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
-    FormationDecision, LearningInference, LearningInferenceError, MAX_FORMATION_CHANGES,
-    MAX_FORMATION_TURNS, form_experience,
+    ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision, LearningInference,
+    LearningInferenceError, MAX_FORMATION_CHANGES, MAX_FORMATION_TURNS, form_experience,
 };
 pub use identity::{ExperienceSourceKind, MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
 pub use memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};

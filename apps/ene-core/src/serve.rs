@@ -270,8 +270,8 @@ pub struct HostHandle {
     /// In-memory, best-effort queue of pinned Experience premises whose
     /// completed replies await a Learning formation pass.
     ///
-    /// Each item carries its own source range, transcript, and Client / round
-    /// / continuity correspondence, pinned at reply completion. See
+    /// Each item carries its own source range and transcript, pinned at reply
+    /// completion. See
     /// [`crate::dialogue`]: the pass is post-response work, never a condition
     /// of the client-visible completion, and a crash simply drops the queued
     /// derived update instead of replaying an old pass.

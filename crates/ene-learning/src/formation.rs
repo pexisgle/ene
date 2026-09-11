@@ -116,23 +116,6 @@ impl core::fmt::Debug for ExperienceTurn {
     }
 }
 
-/// Stage 3 dialogue correspondence of one Experience.
-///
-/// Carries the parts of the `ProposeExperienceCandidate` boundary a dialogue
-/// formation needs and that an in-memory queue must not lose while the pass
-/// is pending: the Client and round the turn belonged to, and the presence
-/// generation anchoring continuity within one Host run. Cross-domain
-/// identities stay opaque [`RawId`]s and are never converted here.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ExperienceCorrespondence {
-    /// Client that accepted the round, when known.
-    pub client: Option<RawId>,
-    /// Round the completed turn belonged to, when known.
-    pub round: Option<RawId>,
-    /// Presence generation at acceptance; continuity within one Host run.
-    pub generation: Option<u64>,
-}
-
 /// One experience proposed for formation.
 ///
 /// `source` references the retained History the transcript was read from; the
@@ -145,9 +128,6 @@ pub struct ExperienceCandidate {
     pub source: SourceRangeRef,
     pub transcript: Vec<ExperienceTurn>,
     pub at: WallClockWithTz,
-    /// Client / round / continuity correspondence confirmed when the
-    /// Experience was proposed.
-    pub correspondence: ExperienceCorrespondence,
 }
 
 /// What one formation pass decided.
@@ -620,8 +600,8 @@ mod tests {
     use ene_primitive::{RawId, WallClockWithTz};
 
     use crate::formation::{
-        ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
-        FormationDecision, LearningInferenceError, form_experience,
+        ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision,
+        LearningInferenceError, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::repository::{LearningRepository, LearningTechnicalError};
@@ -649,7 +629,6 @@ mod tests {
                 })
                 .collect(),
             at: WallClockWithTz::now(),
-            correspondence: ExperienceCorrespondence::default(),
         }
     }
 
@@ -928,8 +907,8 @@ mod consolidation_tests {
     use ene_primitive::{RawId, WallClockWithTz};
 
     use crate::formation::{
-        ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
-        FormationDecision, MAX_FORMATION_CHANGES, form_experience,
+        ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision,
+        MAX_FORMATION_CHANGES, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::memory::ChangeKind;
@@ -955,7 +934,6 @@ mod consolidation_tests {
                 text: text.to_owned(),
             }],
             at: WallClockWithTz::now(),
-            correspondence: ExperienceCorrespondence::default(),
         }
     }
 
