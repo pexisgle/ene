@@ -406,27 +406,26 @@ async fn assemble_dialogue_input(
     )
     .await
     .unwrap_or_default();
+    // The input is always scrubbed, and its premise seeds the oldest-premise
+    // fold, so the returned set is total without a fallback branch.
+    let input = scrubber.scrub(input_text).await?;
+    let mut credential_set = input.credential_set;
     let mut prompt = String::from(DIALOGUE_PREAMBLE);
-    let mut premises = Vec::new();
     if !recalled.is_empty() {
         prompt.push_str("\n\nRelevant memories:\n");
         for memory in &recalled {
             let content = scrubber.scrub(&memory.content).await?;
-            premises.push(content.credential_set);
+            credential_set = credential_set.min(content.credential_set);
             prompt.push_str("- ");
             prompt.push_str(&content.text);
             prompt.push('\n');
         }
     }
-    let prior: Vec<_> = recent
-        .iter()
-        .filter(|item| item.id != current_message)
-        .collect();
-    if !prior.is_empty() {
+    if recent.iter().any(|item| item.id != current_message) {
         prompt.push_str("\nRecent conversation:\n");
-        for item in prior {
+        for item in recent.iter().filter(|item| item.id != current_message) {
             let text = scrubber.scrub(&item.text).await?;
-            premises.push(text.credential_set);
+            credential_set = credential_set.min(text.credential_set);
             prompt.push_str(match item.role {
                 HistoryRole::Owner => "Owner: ",
                 HistoryRole::Companion => "Companion: ",
@@ -435,15 +434,6 @@ async fn assemble_dialogue_input(
             prompt.push('\n');
         }
     }
-    // The input is always scrubbed, so the oldest-premise fold is total.
-    let input = scrubber.scrub(input_text).await?;
-    premises.push(input.credential_set);
-    let credential_set = premises.into_iter().min().unwrap_or_else(|| {
-        // Unreachable by construction: the current-input scrub above always
-        // pushes one premise. Initial is the safe fallback for a future
-        // refactor that removes it.
-        CredentialSetRevision::initial()
-    });
     prompt.push_str("\nOwner: ");
     prompt.push_str(&input.text);
     Ok(ScrubbedText {
