@@ -179,6 +179,10 @@ pub enum RevalidationReason {
     /// The command carried no idempotency key. Replay safety needs one, so
     /// keyless commands are declined rather than accepted unkeyed.
     MissingCommandId,
+    /// The current input alone exceeds the inference request budget. Emitted
+    /// by the Host before acceptance (never by [`check_intake`]); the Owner
+    /// shrinks the input and retries.
+    InputOverLimit,
     /// The wire reason tag matched no known reason. Ingress-only; never
     /// emitted by [`check_intake`].
     UnknownReasonTag,
