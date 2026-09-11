@@ -13,6 +13,7 @@ publish = false
 # External dependency version policy for workspace crates.
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context"] }
 directories = "6"
 figment = { version = "0.10", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
