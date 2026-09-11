@@ -61,11 +61,14 @@ use crate::secret::SecretValue;
 /// new bytes to a temp file in the same directory (created `0600` on Unix,
 /// flushed with `sync_all`) and renaming it over the target. The rename is
 /// the atomic replace: concurrent readers observe the old or the new
-/// document whole, so torn reads are impossible. Read-modify-write cycles
-/// still race across processes: concurrent approves of different devices are
-/// last-writer-wins and can drop an entry, and concurrent approves of one
-/// device are a rotation race. Approval is therefore an owner-serialized
-/// operation; this store provides durability, not mutual exclusion.
+/// document whole, so torn reads are impossible. Atomic replacement does
+/// not order writers, so every read-modify-write cycle additionally holds an
+/// exclusive OS advisory lock on the sidecar `device-auth.json.lock` for
+/// its whole duration: concurrent approves of different devices serialize
+/// instead of dropping each other's entry, and concurrent rotations of one
+/// device leave exactly one current secret. The kernel releases the lock
+/// when the holder exits or drops it, so a crashed approval never leaves a
+/// permanent lock.
 ///
 /// Backup-exclusion contract: this file holds Group K verification material
 /// with E classification. It must never enter backups or exports and must
@@ -74,7 +77,8 @@ use crate::secret::SecretValue;
 /// `device-auth.json` directly under the caller's data directory; restore
 /// must not replace it, reset wipes it only on full-data reset, and a Host
 /// without this file authenticates nothing until fresh pairing mints new
-/// material.
+/// material. The mutation sidecar `device-auth.json.lock` carries no secret
+/// material; backups may ignore it and restore must not replace it.
 pub struct FileDeviceAuthStore {
     path: PathBuf,
 }
@@ -150,30 +154,77 @@ impl FileDeviceAuthStore {
     /// validation on it, it only takes custody. The entry's `descriptor` is
     /// the owner-visible display string and `paired_at` is stamped with the
     /// write time for display and audit only (it is not the pairing record's
-    /// pairing time). Concurrent approves must be owner-serialized by the
-    /// caller.
+    /// pairing time). The whole read-modify-write runs under the sidecar
+    /// advisory lock, so concurrent approvals from independent processes
+    /// serialize instead of losing each other's entries; the wait is bounded
+    /// by one short whole-file rewrite.
     ///
     /// # Errors
     ///
     /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// file cannot be read (including a malformed existing file), the
-    /// staging temp cannot be written, or the atomic replace fails.
+    /// lock or the file cannot be read (including a malformed existing
+    /// file), the staging temp cannot be written, or the atomic replace
+    /// fails.
     pub fn save_secret(
         &self,
         device: &DeviceId,
         descriptor: &str,
         secret: &str,
     ) -> Result<(), CredentialTechnicalError> {
-        let mut entries = self.read_entries()?;
-        entries.insert(
-            device_key(device),
-            StoredDeviceAuth {
-                secret_hex: encode_hex_lower(secret.as_bytes()),
-                descriptor: descriptor.to_owned(),
-                paired_at: WallClockWithTz::now().to_rfc3339(),
-            },
-        );
-        self.write_entries(&entries)
+        self.with_mutation_lock(|| {
+            let mut entries = self.read_entries()?;
+            entries.insert(
+                device_key(device),
+                StoredDeviceAuth {
+                    secret_hex: encode_hex_lower(secret.as_bytes()),
+                    descriptor: descriptor.to_owned(),
+                    paired_at: WallClockWithTz::now().to_rfc3339(),
+                },
+            );
+            self.write_entries(&entries)
+        })
+    }
+
+    /// Sidecar path carrying no content: it exists only for the advisory
+    /// lock that serializes mutations across processes.
+    fn lock_path(&self) -> PathBuf {
+        let mut name = self
+            .path
+            .file_name()
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::ffi::OsString::from("device-auth.json"));
+        name.push(".lock");
+        self.path.with_file_name(name)
+    }
+
+    /// Runs `mutate` while holding the exclusive cross-process mutation
+    /// lock.
+    ///
+    /// The lock file is created on demand; the OS releases the lock when the
+    /// file closes, including on process death, so a crashed holder never
+    /// blocks later approvals. Reads intentionally skip the lock: the atomic
+    /// rename already gives them a whole document.
+    pub(crate) fn with_mutation_lock<R>(
+        &self,
+        mutate: impl FnOnce() -> Result<R, CredentialTechnicalError>,
+    ) -> Result<R, CredentialTechnicalError> {
+        let shown = self.path.display();
+        let lock_path = self.lock_path();
+        let lock_error = |err: &std::io::Error| CredentialTechnicalError::StorageUnavailable {
+            reason: format!("device-auth lock for {shown} is unavailable: {err}"),
+        };
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|err| lock_error(&err))?;
+        lock.lock().map_err(|err| lock_error(&err))?;
+        let result = mutate();
+        // Dropping the handle releases the advisory lock; the mutation result
+        // stays authoritative, so an unlock error cannot mask it.
+        drop(lock);
+        result
     }
 
     /// Loads the persisted secret for `device`, if any.

@@ -352,6 +352,158 @@ fn device_auth_persists_across_store_instances() {
 }
 
 #[test]
+fn device_auth_concurrent_approvals_keep_both_devices() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let store = Arc::new(open_device_auth_store(&path));
+    let first = DeviceId(RawId::new());
+    let second = DeviceId(RawId::new());
+    let barrier = Arc::new(Barrier::new(3));
+    let mut threads = Vec::new();
+    for (device, descriptor) in [(first, "phone"), (second, "tablet")] {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            store.save_secret(&device, descriptor, "shared-race-secret")
+        }));
+    }
+    barrier.wait();
+    for thread in threads {
+        assert!(
+            thread.join().expect("writer must not panic").is_ok(),
+            "a concurrent approval must persist"
+        );
+    }
+    assert!(
+        store.load_secret(&first).unwrap().is_some(),
+        "the first concurrent approval must survive"
+    );
+    assert!(
+        store.load_secret(&second).unwrap().is_some(),
+        "the second concurrent approval must survive"
+    );
+}
+
+#[test]
+fn device_auth_same_device_rotations_leave_one_current_secret() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let store = Arc::new(open_device_auth_store(&path));
+    let device = DeviceId(RawId::new());
+    let barrier = Arc::new(Barrier::new(3));
+    let mut threads = Vec::new();
+    for secret in ["first-secret", "second-secret"] {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            store.save_secret(&device, "phone", secret)
+        }));
+    }
+    barrier.wait();
+    for thread in threads {
+        assert!(
+            thread.join().expect("writer must not panic").is_ok(),
+            "a concurrent rotation must persist"
+        );
+    }
+    let loaded = store.load_secret(&device);
+    let current = loaded.unwrap().unwrap();
+    assert!(
+        current.bytes() == b"first-secret" || current.bytes() == b"second-secret",
+        "exactly one written secret stays current"
+    );
+    let raw = std::fs::read(&path).unwrap_or_default();
+    let document: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(
+        document["devices"].as_object().map(serde_json::Map::len),
+        Some(1),
+        "one device holds exactly one entry regardless of the race"
+    );
+}
+
+/// The mutation lock is a real cross-handle exclusion: a second writer waits
+/// until the holder releases, and dropping the holder recovers the file for
+/// the next approval (the kernel owns release-on-exit, so a crash behaves
+/// like a drop).
+#[test]
+fn device_auth_mutation_lock_serializes_writers() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let holder_path = path.clone();
+    let holder = std::thread::spawn(move || {
+        let store = open_device_auth_store(&holder_path);
+        store.with_mutation_lock(|| {
+            acquired_tx.send(()).expect("test receiver lives");
+            release_rx.recv().expect("test sender lives");
+            Ok(())
+        })
+    });
+    acquired_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the holder must acquire the mutation lock");
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        let store = open_device_auth_store(&writer_path);
+        let saved = store.save_secret(&DeviceId(RawId::new()), "phone", "racing");
+        done_tx.send(saved.is_ok()).expect("test receiver lives");
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "a second writer must wait for the held lock"
+    );
+    release_tx.send(()).expect("holder waits for release");
+    assert!(
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the writer completes after the release"),
+        "the released lock lets the writer persist"
+    );
+    holder.join().expect("holder must not panic").unwrap();
+    writer.join().expect("writer must not panic");
+}
+
+/// A failed approval leaves the previous custody document intact, and the
+/// next approval recovers once the cause (here: a malformed file) is
+/// removed.
+#[test]
+fn device_auth_write_failure_recovers_on_the_next_approval() {
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let store = open_device_auth_store(&path);
+    let written = std::fs::write(&path, b"not json{{{");
+    assert!(written.is_ok(), "the malformed fixture must write");
+    let device = DeviceId(RawId::new());
+    assert!(
+        store.save_secret(&device, "phone", "first-try").is_err(),
+        "a malformed file refuses the write, never clobbers"
+    );
+    assert!(
+        std::fs::read(&path).unwrap_or_default() == b"not json{{{",
+        "the failed approval must not rewrite the document"
+    );
+    std::fs::remove_file(&path).expect("the malformed fixture must be removable");
+    assert!(
+        store.save_secret(&device, "phone", "second-try").is_ok(),
+        "the next approval recovers after the cause is cleared"
+    );
+    let loaded = store.load_secret(&device);
+    assert_eq!(loaded.unwrap().unwrap().bytes(), b"second-try");
+}
+
+#[test]
 fn device_auth_debug_carries_no_secret_or_descriptor() {
     let temp = fresh_tempdir();
     let path = temp.path().join("device-auth.json");
