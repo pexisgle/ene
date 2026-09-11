@@ -7,7 +7,7 @@ use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{AuthProof, CapabilityAdvertise, PairingRequest};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
-    ClientIncarnationId, CommandWireId, DeviceWireId, RequestWireId, WireMessageId, WireMessageType,
+    ClientIncarnationId, CommandWireId, DeviceWireId, RequestWireId, WireMessageType,
 };
 use ene_plugin_ipc::WireFrame;
 
@@ -96,11 +96,63 @@ pub fn retry_frame(
     generation: Option<u64>,
     command: CommandWireId,
 ) -> WireFrame {
-    let mut frame = frame_for_session(payload, sender, generation);
-    frame.envelope.correlation.command_id = Some(command);
-    frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
-    frame
+    PreparedRequest {
+        command_id: Some(command),
+        payload,
+    }
+    .frame(sender, generation)
 }
+
+/// A logical send prepared before I/O: the payload plus the command identity a
+/// transport retry must reuse. Prepare through [`super::Client::prepare`] and
+/// keep the handle; [`super::Client::execute`] and [`super::Client::retry`]
+/// send it without rebuilding the identity.
+///
+/// The command identity is [`None`] for a pure request/response payload
+/// (`HistoryRequest`, `ManagementViewRequest`): those pair by `request_id` and
+/// `reply_to` only and have no command saga to replay.
+///
+/// A prepared command is bound to the sender incarnation that prepared it.
+/// The Host keys command idempotency on the authenticated sender epoch, so
+/// after a reconnect (new incarnation) the same handle can no longer be
+/// replayed — re-prepare under the new incarnation instead of retrying.
+pub struct PreparedRequest {
+    command_id: Option<CommandWireId>,
+    payload: WirePayload,
+}
+
+impl PreparedRequest {
+    /// Captures one payload's canonical command identity before I/O: a
+    /// [`ManagementIntent`](ene_api::v1::management::ManagementIntent) keeps
+    /// its `intent_id` (the Host's management idempotency key, never a second
+    /// minted id), a
+    /// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) mints a fresh
+    /// [`CommandWireId`], and a pure request carries none.
+    #[must_use]
+    pub fn new(payload: WirePayload) -> Self {
+        let command_id = match &payload {
+            WirePayload::ManagementIntent(intent) => Some(intent.intent_id),
+            WirePayload::SubmitTextInput(_) => Some(CommandWireId(uuid::Uuid::new_v4())),
+            _ => None,
+        };
+        Self {
+            command_id,
+            payload,
+        }
+    }
+
+    /// One transport attempt: the caller-owned command identity travels
+    /// unchanged while message and request ids go fresh, so re-sending the
+    /// same handle replays one logical command (IPC §6.2) instead of minting
+    /// a new one.
+    pub(super) fn frame(&self, sender: WireSender, generation: Option<u64>) -> WireFrame {
+        let mut frame = frame_for_session(self.payload.clone(), sender, generation);
+        frame.envelope.correlation.command_id = self.command_id;
+        frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+        frame
+    }
+}
+
 /// Stamps `observed.presence_generation_view` on
 /// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) sends only: the
 /// generation view is intake comparison material, not a general envelope
@@ -159,16 +211,6 @@ pub fn frame_for(payload: WirePayload, sender: WireSender) -> WireFrame {
     let message_type = message_type_for(&payload);
     let envelope = new_outgoing_envelope(ProtocolVersion::V1, sender, message_type);
     WireFrame { envelope, payload }
-}
-
-/// One fresh [`CommandWireId`] per send; the returned message ID is what the
-/// Host echoes in `reply_to`. Handshake and fire-and-forget frames skip this
-/// and pair by message ID only; transport retry of one logical send reuses
-/// the command ID through [`super::Client::retry`].
-pub(super) fn stamp_request(frame: &mut WireFrame) -> WireMessageId {
-    frame.envelope.correlation.command_id = Some(CommandWireId(uuid::Uuid::new_v4()));
-    frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
-    frame.envelope.message_id
 }
 
 /// Rejection-message kind name (never a body), delegated to the canonical
