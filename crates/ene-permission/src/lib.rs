@@ -430,7 +430,7 @@ pub enum ShortcutIntentOutcome {
     /// Route already holds: snapshot recorded, answer the current record.
     Hit { current: ConsentRecord },
     /// Route differs: answer through the normal path. Nothing recorded.
-    Miss { current: Option<ConsentRecord> },
+    Miss,
 }
 
 /// Renders one capability's consent state as a mark segment:

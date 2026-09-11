@@ -421,11 +421,6 @@ pub struct AuthorizedInference {
 }
 
 impl AuthorizedInference {
-    #[must_use]
-    pub fn ticket(&self) -> InferenceTicketId {
-        self.ticket
-    }
-
     /// Consent premise as `(id, rev)`.
     #[must_use]
     pub fn consent_premise(&self) -> (&str, u64) {

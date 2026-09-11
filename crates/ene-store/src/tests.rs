@@ -2037,9 +2037,7 @@ async fn shortcut_with_intent_hits_atomically() {
     assert!(
         matches!(
             miss,
-            Ok(IntentResolution::Decided(
-                ShortcutIntentOutcome::Miss { .. }
-            ))
+            Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss))
         ),
         "differing route must miss, got {miss:?}"
     );
