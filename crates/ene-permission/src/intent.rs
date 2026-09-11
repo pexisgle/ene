@@ -144,7 +144,7 @@ pub async fn assign_consent(
                 },
             ));
         }
-        IntentResolution::Decided(ShortcutIntentOutcome::Miss { .. }) => {}
+        IntentResolution::Decided(ShortcutIntentOutcome::Miss) => {}
         IntentResolution::Replay(stored) => {
             return Ok(AssignConsentResolution::Replay(stored));
         }
