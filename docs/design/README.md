@@ -15,7 +15,7 @@ ene の内部設計の正本。巨大な summary ではなく、目的から各 
 
 - **保存・復旧・競合:** [Persistence / Recovery](concrete/persistence-recovery.md)（PR）、[Concurrency](concrete/concurrency-control.md)（CCT）
 - **通信（Host↔Client）:** [Host↔Client IPC](concrete/host-client-ipc.md)
-- **Learning / 会話 / Task:** [個体継続・対話調整 / 作業 / 認識・学習](subsystems/companion-task-learning.md)、[Context Assembly](critical-areas/context-assembly.md)
+- **Learning / 会話 / Task:** [個体継続・対話調整 / 作業 / 認識・学習](subsystems/companion-task-learning.md)、[Context Assembly](critical-areas/context-assembly.md)、[Context Selection / Continuity](concrete/context-selection.md)
 - **権限 / 実行 / 秘密 / 推論:** [権限・秘密・実行・推論](subsystems/permission-credential-execution-inference.md)、[Action Execution](critical-areas/action-execution.md)
 - **削除 / 保全 / Restore:** [Targeted Deletion](critical-areas/targeted-deletion.md)、[内部データ保全・消去](subsystems/data-preservation-erasure.md)、[Backup / Restore](critical-areas/backup-restore.md)
 - **presence / 入出力 / 観測:** [Client Presence Transition](critical-areas/client-presence-transition.md)、[接続・入出力・観測](subsystems/client-presence-io-observation.md)
