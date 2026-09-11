@@ -41,7 +41,10 @@ use crate::repository::{
 use crate::scope::LearningScope;
 use crate::summary::SummaryRecord;
 
-/// Cap on Memory changes formed from one experience.
+/// Most Memory changes one formation pass accepts.
+///
+/// The prompt states this cap. An answer proposing more is undecidable as a
+/// whole and deferred rather than truncated, so no entry is silently dropped.
 pub const MAX_FORMATION_CHANGES: usize = 5;
 
 /// Cap on the turns read into one formation prompt.
@@ -415,6 +418,9 @@ async fn build_prompt(
     }
     prompt.push('\n');
     prompt.push_str(PROMPT_SCHEMA);
+    prompt.push_str(&format!(
+        "\nReturn at most {MAX_FORMATION_CHANGES} memory entries; keep only the most important when more changes seem needed."
+    ));
     let credential_set = match premises.into_iter().min() {
         Some(revision) => revision,
         // No scrubbed piece exists (empty transcript); still bind the prompt
@@ -489,13 +495,19 @@ struct ResolvedChange {
 }
 
 /// Resolves every listed entry, or `None` when any entry cannot be decided.
+///
+/// An answer listing more than [`MAX_FORMATION_CHANGES`] entries is undecidable
+/// as a whole: the pass cannot tell which changes the model would keep, so
+/// nothing is committed instead of truncating the list.
 fn resolve_model_memories(
     entries: Vec<ModelMemory>,
     existing: &[Memory],
 ) -> Option<Vec<ResolvedChange>> {
+    if entries.len() > MAX_FORMATION_CHANGES {
+        return None;
+    }
     entries
         .into_iter()
-        .take(MAX_FORMATION_CHANGES)
         .map(|entry| resolve_model_memory(entry, existing))
         .collect()
 }
@@ -973,7 +985,7 @@ mod consolidation_tests {
 
     use crate::formation::{
         ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
-        FormationChange, FormationDecision, form_experience,
+        FormationChange, FormationDecision, MAX_FORMATION_CHANGES, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::memory::ChangeKind;
@@ -1295,6 +1307,70 @@ mod consolidation_tests {
         deferred_answer_stores_nothing(
             true,
             r#"{"summary": "s", "memories": [{"action": "create", "content": "new", "temporal": "enduring"}, {"action": "update", "target": 1, "content": "no change kind"}]}"#,
+        )
+        .await;
+    }
+
+    fn create_entries(count: usize) -> String {
+        (0..count)
+            .map(|index| {
+                format!(
+                    r#"{{"action": "create", "content": "memory {index}", "importance": 3, "temporal": "enduring"}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    #[tokio::test]
+    async fn an_answer_at_the_change_cap_is_accepted() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let entries = create_entries(MAX_FORMATION_CHANGES);
+        let inference = ScriptedInference::new(vec![Ok(format!(
+            r#"{{"summary": "s", "memories": [{entries}]}}"#
+        ))]);
+        let decision = form_experience(&repository, &inference, &scrubber(), candidate(companion))
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, FormationDecision::Formed { .. }),
+            "an answer at the cap is still decidable, got {decision:?}"
+        );
+        assert_eq!(repository.current().len(), MAX_FORMATION_CHANGES);
+        assert!(
+            inference.prompts()[0].contains(&format!("at most {MAX_FORMATION_CHANGES}")),
+            "the prompt states the same cap the parser enforces"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_over_the_change_cap_defers_the_whole_answer() {
+        let entries = create_entries(MAX_FORMATION_CHANGES + 1);
+        deferred_answer_stores_nothing(
+            false,
+            &format!(r#"{{"summary": "s", "memories": [{entries}]}}"#),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_valid_prefix_is_not_committed_when_the_answer_exceeds_the_cap() {
+        let mut entries = vec![
+            String::from(
+                r#"{"action": "update", "target": 1, "change": "refined", "content": "y"}"#,
+            );
+            MAX_FORMATION_CHANGES
+        ];
+        entries.push(String::from(
+            r#"{"action": "explode", "content": "z", "temporal": "enduring"}"#,
+        ));
+        deferred_answer_stores_nothing(
+            true,
+            &format!(
+                r#"{{"summary": "s", "memories": [{}]}}"#,
+                entries.join(", ")
+            ),
         )
         .await;
     }
