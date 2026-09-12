@@ -1,280 +1,282 @@
 # Persistence / 保存単位 / Recovery の具体設計 — Step 13 Concrete Design
 
-本書は Step 13 の Persistence / 保存単位 / Recovery artifact である。[対応関係・識別](correspondence-identity.md)（CI）の identity / revision / generation / correlation / boundary token の意味を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の SO は [State Ownership](../architecture/state-ownership.md) を指す。
+本書は、システムの状態をどのように保存（Persistence）し、障害や再起動からどのように復旧（Recovery）させるかについての具体設計（Step 13）をまとめたドキュメントです。[対応関係・識別（Correspondence Identity）](correspondence-identity.md)で定めた識別子（identity）、改訂番号（revision）、世代（generation）、紐付け対応（correlation）、境界トークン（boundary token）の定義をそのまま前提とし、勝手に意味を変更しません。上位設計との優先順位や、万一矛盾が生じた場合の扱いは [設計文書 README](../README.md#正本と優先順位) に従います。なお、本書内で登場する「SO」は [状態の所有権（State Ownership）](../architecture/state-ownership.md) を指します。
 
 ## 1. 対象と非対象
 
 ### 1.1 本書が具体化するもの
 
-- 何を永続化しなければならないか / 一時でよいか / 再構築可能派生か / 外部・credential-store かの分類。
-- 保存単位（logical table / collection）の体系化と owner / durability / deletion / reconstruction の明示。
-- どの property 同士が整合して保存・復旧されなければならないか（atomicity / ordering / durable-before-visible）。
-- Host restart / crash 後にどの durable を読めばどの runtime を再構成できるか、自動再開してよいものとしてはいけないもの。
-- Targeted Deletion / Backup / Restore と persistence schema の関係。
-- concurrency 制御が成立するために persistence が持つべき revision / generation / expected value / operation / attempt / durable boundary。
-- 上記から導かれる technology mapping（SQLite / sqlite-vec / filesystem / credential store）。
+- **データの永続化分類**: 何をディスクに確実に保存しなければならないか、何がメモリ上の一時データでよいか、何が後から再構築できる派生データか、何を外部や安全な認証情報ストア（credential-store）に隔離すべきかを明確に分類します。
+- **保存単位の体系化**: 論理的なテーブルやコレクションなどの保存単位を整理し、担当責任者（semantic owner）、永続性（durability）、削除ルール、再構築方法を明示します。
+- **整合性の境界**: どのデータ項目同士が足並みを揃えて保存・復旧されなければならないか（トランザクションの原子性、更新順序、公開前に保存を完了する原則）を定義します。
+- **再起動・クラッシュ後の復旧手順**: Host が再起動したり異常終了（クラッシュ）したりした後に、どの保存データを読み込んで実行時状態を再構成するか、自動で再開してよい処理と人間の判断を待つべき処理を明確に区別します。
+- **個人データ完全削除（Targeted Deletion）やバックアップ・リストアとの関係**: 保存スキーマがこれらの全域操作とどう連携するかを定めます。
+- **並行処理を成立させるためのデータ構造**: 排他制御や競合検出が正しく機能するために、保存データが保持すべき改訂番号（revision）、世代番号（generation）、期待値、操作・試行の記録、保存境界を整理します。
+- **ストレージ技術への対応付け**: 上記の要求を満たすための具体的な技術（SQLite、sqlite-vec、ローカルファイルシステム、OSの認証情報ストア）へのマッピングを導き出します。
 
 ### 1.2 本書が決めないもの
 
-- DB 製品固有の完全な `CREATE TABLE`（index, migration, vacuum, 暗号実装を含む）、製品固有 SQL 方言。
-- crate / module 分割、process / thread 配置、IPC / wire format。
-- concurrency mechanism（lock / MVCC / actor / queue / transaction protocol）、retry / timeout 値、scheduling algorithm、embedding / retrieval scoring。
-- 各 Subsystem の完全な API 一覧。ただし「後続 interface で落としてはならない永続 property」は第11節で固定する。
-- 暗号方式、archive 形式、署名方式。
+- データベース製品固有の完全な `CREATE TABLE` 文（インデックスの詳細、マイグレーション手順、VACUUM 設定、暗号化の実装を含む）や特定の SQL 方言。
+- クレートやモジュールの分割、プロセスやスレッドの配置、IPC の通信フォーマット。
+- 並行処理の低レベルな仕組み（ロック、MVCC、アクター、キュー、トランザクションプロトコル）、リトライ回数やタイムアウト秒数、スケジューリングアルゴリズム、ベクトル検索の類似度スコア算出式。
+- 各サブシステムの完全な API 一覧（ただし、後続のインターフェース設計で落としてはならない永続化プロパティは第11節で確定します）。
+- 暗号化アルゴリズムの詳細、アーカイブファイル形式、電子署名方式。
 
 ### 1.3 用語
 
-- **durable primary**: restart を跨いで canonical 現在値として参照される Host 正本。`correspondence-identity.md` §7.1 の persisted 対応に対応。
-- **durable history**: 過去 revision / 原記録 / 試行 / Audit 等の履歴。append-only が自然なものと version chain が自然なものを区別する。
-- **durable operation/recovery**: 全域操作・未完了・保留・再保存防止・不明等、crash を跨いで守る進行・条件。対応は失わず、本文は保持しない。
-- **rebuildable derived**: durable primary から再構築できる派生。独立復元対象にしない。第二の正本にしない。
-- **transient**: process / round / Client 一時表現。失ってよい。受理済み指示・作業記録・未伝達・不明・全域未完了は含めない。
-- **external / credential-store**: ene live state ではない外部所有物と、秘密値・device-auth の分離保管。DB の durable には参照だけを持つ。device-auth は検証材料が非秘密でも backup から trust を復活させないためこの境界に置く。
-- **semantic owner**: SO で定めた意味・通常変更・lifecycle 判断の引受先。persistence の table / record は owner にならない。
-- **storage 共有**: 同じ SQLite / filesystem 技術を使うこと。ownership の統合を意味しない。
+- **durable primary（永続マスターデータ）**: 再起動を跨いで「現在の正式な状態（Host 正本）」として参照されるデータです。`correspondence-identity.md` §7.1 で定義した「永続化された対応関係」に該当します。
+- **durable history（永続履歴データ）**: 過去の改訂履歴、生の発言・行動記録、実行試行のログ、監査ログ（Audit）などです。単なる追記専用（append-only）が適しているものと、変更履歴の連鎖（version chain）として管理すべきものを区別します。
+- **durable operation/recovery（永続操作・復旧データ）**: 全域的な操作の進行状況、未完了タスク、保留状態、再保存の防止フラグ、結果不明な状態など、クラッシュ後も確実に引き継いで守らなければならない進行状態や制約条件です。関係性の紐付け（対応）は保持しますが、削除対象の本文データなどは保持しません。
+- **rebuildable derived（再構築可能な派生データ）**: 永続マスターデータからいつでも計算・再生成できる派生データ（ベクトル検索用の埋め込み表現、インデックス、キャッシュなど）です。これらを単独でバックアップから復元する対象にはせず、第二の正本としても扱いません。
+- **transient（一時データ）**: プロセス内、1回の対話ターン（round）、または Client 端末上でのみ存在する一時的なデータ（入力途中の文字列、描画用バッファ、推論中の一時コンテキストなど）です。失われても問題ありません。ただし、すでにシステムが正式に受理した指示、作業記録、未伝達の通知、結果不明な処理、全域で未完了の操作は、一時データに含めてはならず確実に永続化します。
+- **external / credential-store（外部リソースおよび認証情報ストア）**: システムの実行時状態ではない外部の所有物（外部ワークスペース内のファイルなど）や、パスワード・APIキー・端末ペアリング鍵などの秘密情報です。これらは通常のデータベースには含めず厳重に分離保管し、データベース側には参照用の識別子のみを保持します。端末認証情報（device-auth）は、バックアップのリストアによって古い信頼関係が勝手に復活する事故を防ぐため、この分離境界に配置します。
+- **semantic owner（担当責任者）**: 状態の所有権（SO）で定めた、そのデータの意味、通常の変更権限、ライフサイクル判断を引き受ける責務・サブシステムです。データベースのテーブルやファイル自体が担当責任者になることはありません。
+- **ストレージの共有**: 同じ SQLite ファイルやファイルシステム技術を利用することを指します。これは実装技術の共有にすぎず、データの担当責任（ownership）まで統合されたことを意味しません。
 
 ## 2. 原則
 
-1. **persistence は semantic owner にならない。** table / record / file の存在・保存成功を、Task 達成・作用成功・許可・報告完了・全域完了の確定にしない。意味変更は各 owner が行い、persistence は対応の保持・照合可能性だけを支える。
-2. **storage 上で近いことと ownership が同じことを混同しない。** 同じ SQLite file を共有しても table group ごとに owner を明示する。共有は atomicity / backup 整合のための mechanism 選択であり、意味の統合ではない。
-3. **万能 table を作らない。** universal state / entity / revision / event log / generic JSON blob / generic KV を semantic schema の代替にしない。revision counter, generation counter, snapshot id, transaction id を全 domain で共有しない。
-4. **contract から保存構造を導出する。** schema を先に決めて semantic contract を押し込まない。identity / revision / generation / correlation / boundary token の意味（correspondence-identity §4）を維持し、domain ID を統合せず、revision と generation を混同しない。
-5. **必要な atomicity は最小にするが、壊れると意味が成立しない更新は保護する。** すべてを一つの global transaction にまとめない。一方で durable-before-visible, ordering, atomic compare が必要な境界は第7節で明示する。
-6. **derived を第二の正本にしない。** embedding / index / cache / session / routing 派生物から現在状態・権限・帰属を復活させない。derived 消失は機能縮退であり、正本喪失ではない。
-7. **本文非複製。** 対応の伝達・保持のために private 本文・Credential・削除対象本文を別保管しない。識別用の値であっても復元できるなら保護・消去対象である。
+1. **永続化層は担当責任者（semantic owner）にはなれません。** テーブルやレコード、ファイルが存在することや、保存が成功したという事実だけで、「タスクが完了した」「外部への作用が成功した」「権限が付与された」「報告が完了した」「全域操作が終わった」と勝手に判断してはなりません。意味の変更や判断は必ず各担当責任者が行い、永続化層はその紐付け対応を確実に保持し、後から正しく照合できるように支える役割に徹します。
+2. **ストレージが物理的に近いことと、担当責任が同一であることを混同しません。** 同じ SQLite ファイルにテーブルを同居させる場合であっても、テーブルグループごとに担当責任者を明確に分けます。ファイルの共有は、トランザクションの原子性（atomicity）やバックアップの整合性を保つための技術的な選択であり、業務上の意味や責任をひとつにまとめることではありません。
+3. **何でも入る万能なテーブルを作りません。** 汎用エンティティテーブル、万能イベントログ、巨大な汎用 JSON カラム、何でも入る Key-Value ストアなどで誤魔化さず、それぞれのドメインの意味に応じた専用の保存構造を定義します。改訂番号（revision）や世代番号（generation）、トランザクション ID を全ドメインで無差別に共有してはなりません。
+4. **契約（contract）から保存構造を導き出します。** 先にデータベースのテーブル定義を決めてしまい、そこに業務ロジックを無理やり押し込めるような本末転倒な設計はしません。[対応関係・識別 §4](correspondence-identity.md) で定めた識別子、改訂番号、世代番号、紐付け対応の意味を厳格に維持し、ドメインごとの ID を安易に統合したり、改訂（内容の更新）と世代（区間の切り替え）を混同したりしません。
+5. **必要な原子性（atomicity）は最小限に抑えつつ、崩れると意味が破綻する更新は確実に保護します。** システム全体のすべてをひとつの巨大なグローバルトランザクションでまとめようとする過剰設計は避けます。その一方で、公開前に保存を完了しなければならない順序（durable-before-visible）や、整合性を保つための比較と更新（atomic compare）が必要な境界は、第7節で明確に保護します。
+6. **派生データを「第二の正本」に格上げしません。** ベクトル埋め込み、検索インデックス、キャッシュ、セッション情報、画面用の集計結果などの派生データから、現在の正式な状態や権限、帰属関係を復元してはなりません。派生データが失われたとしても、それは単に一時的に機能が低下した（検索が一時的に遅くなるなど）だけであり、マスターデータが失われたわけではありません。
+7. **本文を余計に複製して保持しません。** データの紐付けや伝達を行うために、プライベートな本文、認証情報、個人データ完全削除の対象となった本文をあちこちにコピーして保管してはなりません。識別用の値であっても、それから元の本文が復元できてしまうのであれば、保護および完全消去の対象となります。
 
 ## 3. Durability 分類
 
-分類名は本書の作業用であり、新しい統一 state 型ではない。各行の owner は SO / Step 12 の再掲であり変更しない。
+以下で定義する分類名は本書で論理的に整理するための名前であり、システム内に新しい単一の型を作るわけではありません。各データ項目の担当責任者は [状態の所有権（State Ownership）](../architecture/state-ownership.md) や Step 12 で定めた定義をそのまま引き継ぎます。
 
 ### 3.1 分類定義
 
-| 分類 | 意味 | restart 後の扱い |
+| 分類 | 意味 | 再起動（restart）後の扱い |
 |---|---|---|
-| durable primary (D1) | canonical 現在値。Host 正本として参照される | そのまま正本として読む。stale 化したら現在性確認なしに利用しない |
-| durable history (D2) | 過去 revision / 原記録 / 試行 / Audit。正確な引用・由来・訂正・検証の材料 | 追記順・revision 順で読む。現在値の代替にしない |
-| durable operation/recovery (D3) | 未完了・保留・消去条件・復元操作・不明・未伝達報告状況等。継続して守る条件 | 未完了として再構成し、保留・再保存防止を維持する。完了・解除と誤認しない |
-| rebuildable derived (R) | embedding / index / cache / session / 有効経路 / 表示集計 / routing 派生物等 | 失っても正本は失わない。再構築または縮退する。古い派生物で現在を復活させない |
-| transient (T) | Client 入力途中・表示 timeline・audio buffer・VAD・Raw・候補・推論中 context・Agent 一時 context・実行中 buffer・MCP Apps 表示等 | 失ってよい。受理済み・作業記録・未伝達・不明・全域未完了は含めない |
-| external / credential-store (E) | 外部 Workspace 実体・Provider/MCP 側状態・外部 Package 原本・export / backup copy・秘密値・Host device-auth store | DB の durable には参照だけを持つ。内容・秘密・device 検証材料を DB / Backup / Audit へ流さない |
+| **durable primary (D1)**<br>永続マスターデータ | 現在の正式な最新値。Host のマスターデータ（正本）として参照されます。 | そのままマスターデータとして読み込みます。内容が古くなっている（stale）可能性がある場合は、現在性を再確認せずにそのまま利用してはなりません。 |
+| **durable history (D2)**<br>永続履歴データ | 過去の改訂履歴、生の発言・行動記録、試行ログ、監査ログなど。正確な引用、由来の追跡、訂正、検証のための根拠資料です。 | 追記された順序や改訂番号の順序に従って読み込みます。現在の最新値の代わりとして使ってはなりません。 |
+| **durable operation/recovery (D3)**<br>永続操作・復旧データ | 未完了の処理、保留状態、消去条件、復元操作の進行状況、結果不明な状態、未伝達の通知状況など、障害後も守り続けなければならない制約や進行状態です。 | 再起動後も「未完了」として正しく復元し、保留状態や再保存の防止をそのまま維持します。勝手に「完了した」あるいは「解除された」と誤認してはなりません。 |
+| **rebuildable derived (R)**<br>再構築可能な派生データ | ベクトル埋め込み、検索インデックス、キャッシュ、セッション、有効なルーティング経路、画面用の集計データなどです。 | 失われてもマスターデータ自体は失われません。必要に応じて再構築するか、縮退運転を行います。古い派生データから現在の状態を勝手に復活させてはなりません。 |
+| **transient (T)**<br>一時データ | Client での入力途中テキスト、表示用タイムライン、音声バッファ、音声区間検出（VAD）、未加工データ（Raw）、推論中の一時コンテキスト、Agent の作業用バッファ、MCP Apps の画面表示などです。 | 失われても構いません。ただし、すでに正式に受理された指示、確定した作業記録、未伝達の通知、結果不明な処理、全域で未完了の操作をこの一時データに含めてはなりません。 |
+| **external / credential-store (E)**<br>外部・認証情報ストア | 外部ワークスペースの実体ファイル、AIプロバイダやMCP側の保持状態、外部パッケージ原本、エクスポートやバックアップのファイル、パスワード等の秘密情報、Host の端末認証ストアなどです。 | データベースの永続領域には参照用の識別子のみを保持します。秘密情報本体や端末の検証材料を、通常のデータベース、バックアップ、監査ログへ流出させてはなりません。 |
 
 ### 3.2 状態 inventory と分類
 
-| 意味上のまとまり（owner） | D1 durable primary | D2 durable history | D3 durable operation/recovery | R rebuildable derived | T transient | E external / credential-store |
+| 意味上のまとまり（担当責任者） | D1 永続マスター | D2 永続履歴 | D3 永続操作・復旧 | R 再構築可能な派生 | T 一時データ | E 外部・認証情報ストア |
 |---|---|---|---|---|---|---|
-| Character 静的構成・revision（Character） | 内部 Character 定義・現在 revision 一覧 | revision 別静的内容・差分提示内容・import provenance 受入対応 | import / 適用供給の中断時の未完了（旧 revision・旧適用を破壊しないための進行記録） | 適用可能部品の表示用派生・export 確認表示 | 編集中の未確定内容・表示 copy | 外部 Package 原本・外部制作 file・export 済み copy |
-| Companion 同一性・適用関係（個体調整） | Companion lifecycle（Running/Stopped/Deleted  tombstone 最小）・現在適用関係（Companion→Character revision・部品・Owner 選択対応） | 適用関係の履歴・Companion 生成・適用の対応記録 | 停止・削除の未完了・新規禁止 hold（保全・消去と協調） | 適用結果の表示用派生 | 適用供給の一時 buffer | — |
-| 会話 History・活動記録（個体調整） | —（現在値ではなく記録であるため D2 が正本） | History 原 record（参加者・文脈・時刻+tz）・非会話活動記録・evidence | 未完了の保持整理の進行（保全・消去と協調） | 報告用要約・由来説明・進捗表示 | Client 入力途中・表示 timeline・audio buffer | export 済み History copy |
-| 未伝達・報告状況（個体調整） | 未伝達の必要内容・対象・元対応（Task 由来→Task record 参照、活動由来→活動 record 参照、元なし通知は必要範囲の活動 record） | 報告状況の遷移履歴（要否に応じて。少なくとも現在状況は D3 として保全） | 報告状況（Pending/Summarized/Presented/Unknown）・提示不明の保持 | 報告用要約（派生表現） | 表示 copy 送信・接続状態 | — |
-| 進行中の意味判断（個体調整） | — | 残すべき発言・結果が History 等へ反映された後の記録 | —（進行中判断自体は永続化しない） | — | I-7 の進行中判断・推論・入出力の一時処理 | — |
-| Task・委任・context・Workspace・Schedule（作業） | Task 現在（現在 TaskPurposeRef と目的本文・担当・進捗・待機・結果・未完了・次の判断）・委任対応（Task revision 前提・範囲・進捗・待機・停止・受領）・Workspace 関連付け・Schedule 設定（担当・内容・時刻条件・作成時 tz・初期入力） | Task revision 履歴・委任の対応履歴・Task context entry（採用 identity・由来・取得時点）・Schedule 発生対応（missed/Started/Cancelled + 各回 Task 対応）・Task 記録（終了≠削除） | 途中 Task の明示再開待ち・判断待ち・委任停止・Schedule missed の未完了・Task 削除 vs log 整理の進行 | Task 進捗表示・次回 Schedule 表示・由来説明 | W-2 の Agent 一時 context・推論作業領域・詳細 payload 全量 | 外部 Workspace 実体・案内 file・Skill・成果物（通常 file）・外部 Skill 原本 |
-| Task 内部 copy・中間 file（作業） | 内部保持 copy の意味（由来・取得時点・用途）・中間 file の用途・期間・整理対象 | copy・中間 file の受入・整理の対応記録 | 整理待ち・保持方針との対応・targeted deletion 参加の未完了 | — | 実行中 buffer | 外部原本の現在値・成果物の外部実体 |
-| Learning Summary・根拠（認識・学習） | Summary 本体（圧縮 evidence）・形成判断と根拠の対応（Summary→Memory/Skill/Relationship/State revision） | Summary の履歴・根拠関係の履歴・source 範囲参照 | 形成中処理の保留・消去参加の未完了 | embedding / index / query 派生・検索 score | 一時 reasoning・Raw | — |
-| Memory・Skill・Relationship・State（認識・学習） | 各現在認識・有効 revision・scope・重要度・由来（Memory 主要知識、Skill 有効手順、Relationship 主体別解釈、State 一時/持続の区別） | 各過去 revision・変更経緯・利用根拠（誤訂正 vs 時間変化の区別を保つ） | 訂正・scope 変更の未完了・消去参加の未完了・再形成防止 hold | embedding / index / similarity / score・表示集計 | L の一時 buffer 的側面・検索中 context | — |
-| Action 試行・作用・確定度（実行・拡張） | —（試行は履歴であり現在値ではない。確定度は D3 として保全） | Action attempt record（attempt・Task/委任対応・実対象・操作種別・依拠 Permission・段階・確定度・根拠対応） | 確定度 Unknown の粘着保持・hold・停止要求と停止結果・retry 前提（prior unknown 対応） | 作用報告の表示用派生 | 実行中 buffer・Tool 実行 buffer | 外部作用そのもの（外部所有）・外部 process 内部 |
-| Rule・Permission・同意・禁止・上限（権限・制約） | Rule 本文・解釈・scope・現在 revision・Undo 対応・assignment 同意（Provider/model・送信先・data・用途・取扱い・費用・fallback 順序・Observer 専用含む）・device 許可・sandbox 外例外・保存禁止・非共有・cap 定義 | Rule revision 履歴・Permission 判断記録（生きた許可ではない）・同意変更履歴 | Owner 判断待ち・失効・停止・保留・消去・復元保留との照合結果（現在の利用可否は評価時に導出し、Allow copy を正本にしない）・新規禁止と停止要求の結合の未完了 | 解決済み割当経路・有効 Provider 経路・費用集計 | 推論中 context | — |
-| 利用量・費用（推論 + 各利用 owner） | cap 定義（権限・制約）。利用事実は各 owner の原記録として D2 | 利用事実（報告・不明・処理中の別、consumer・用途・送信先対応） | 処理中・未報告・不明消費の保全（ゼロ化・リセットしない） | 費用集計・表示集計・cached token 表示 | 集計 cache（一時） | Provider 請求確定値（外部報告） |
-| Credential（認証秘密） | 非秘密の用途・参照元・有効性・登録・更新・失効の対応（DB 側参照） | 登録・更新・失効の対応履歴（非秘密のみ）・認証失敗・再認証必要性の事実 | 再認証待ち・失効の未完了 | — | — | 秘密値本体（OS credential store 等の分離保管。DB / Backup / Audit / log / Debug へ流さない） |
-| Provider 登録・能力・割当解決（推論） | 非秘密の登録・能力観測（最終観測は D1 だが現在性の確認なしに利用しない） | 能力観測の履歴・利用量の原記録 | 能力不足・接続失敗の未完了・fallback の未完了 | 解決済み経路・Prompt cache・Provider session・一時 context | 推論 session・cache・圧縮 context | Provider 側 session・cache・保有 copy（外部） |
-| 接続・帰属・hint・復旧先（接続・存在） | 個体別帰属 record（state + active_client + presence generation）・hint・復旧先（非現在の参照）・最終接続管理 record | 帰属遷移 log・接続の観測事実の履歴 | 切替区間（旧/移行中/新/active なし/停止中/復旧待ち）の未完了・排他性未確認の保留 | 存在人数・routing 対象の導出値 | 現在接続の live 性（到達性）・切断検知の一時状態 | Client 固有の接続材料の秘密部分（Client / credential-store 側。DB へ流さない） |
-| 入出力 round・提示（入出力・提示） | 一般設定（UI 言語・Body 位置/size/hide・Voice 一般設定）・Host 自動起動の選択（日常利用の意味。OS 適用結果と区別） | round→History 対応・提示状況の対応記録 | 提示不明の保持・移動区切りの未完了 | Body・Voice 出力・描画・表示集計 | round 進行・描画 frame・motion 位置・audio buffer・VAD・barge-in・Mute・device 利用状況・MCP Apps 表示 | OS の fullscreen・負荷・device 状態（外部現在事実） |
-| 観測運用・候補・routing 派生（共有観測） | 観測運用設定（Client/全体 ON/Pause/OFF・頻度） | 対象・時機の判断対応記録 | 未完了 Capture・検知・delivery の保留・消去参加の未完了 | routing 用限定文脈（派生表現）・候補・検索派生物 | Raw・候補・routing 用 data・推論中 context | — |
-| 保持方針・操作状況・backup 設定・Audit・Debug（保全・消去） | 保持方針・容量管理方針（既定 OFF）・backup 設定（保存先・独自 schedule・保持数・保護） | backup 作成結果・操作状況の履歴・Audit 追記順・保持 | Targeted Deletion / Restore / Reset / retention の操作状況（目的・対象・参加・影響・完了範囲・未完了・失敗・検証・保留）・消去条件・有効区間・完了境界・pending/unreachable/failed の区別 | 進捗表示・由来説明 | 一時 buffer | 作成済み backup copy（外部 copy として境界を保つ。live 正本ではない）・Owner 保存 backup・export copy |
+| **Character 静的構成・改訂**<br>（Character） | 内部の Character 定義、現在の有効改訂一覧 | 改訂ごとの静的定義内容、差分提示内容、インポート時の受入記録（provenance） | インポートや適用処理が中断されたときの未完了状態（古い改訂や既存の適用を壊さないための進行記録） | 適用可能な部品一覧の画面表示用データ、エクスポート前の確認画面用データ | 編集途中の未確定な内容、画面表示用のコピー | 外部パッケージの原本ファイル、外部で制作されたファイル、エクスポート済みのコピー |
+| **Companion 個体同一性・適用関係**<br>（個体調整） | Companion のライフサイクル（Running / Stopped / Deleted の最小限の墓標レコード）、現在適用されている構成（Character 改訂・部品・オーナーの選択対応） | 適用構成の変更履歴、Companion の生成・適用の対応記録 | 停止・削除の処理が中断したときの未完了状態、新規活動禁止の保留（hold）状態（保全・消去と連携） | 適用結果の画面表示用データ | 適用反映中の一時バッファ | — |
+| **会話履歴・活動記録**<br>（個体調整） | —<br>（会話は「現在値」ではなく蓄積される記録そのものであるため、D2 が正式な記録となります） | 会話履歴の生レコード（参加者、文脈、タイムゾーン付き時刻）、非会話の活動記録、判断の根拠（evidence） | 保持期間に応じた整理や削除の未完了状態（保全・消去と連携） | 報告用の要約、由来の説明文、進捗表示用テキスト | Client での入力途中テキスト、画面上のタイムライン、音声バッファ | エクスポート済みの会話履歴コピー |
+| **未伝達・報告状況**<br>（個体調整） | ユーザーへ伝えるべき未伝達の内容、宛先、元の発生源（タスク由来ならタスク記録、日常活動由来なら活動記録を参照。元がない通知は必要な最小範囲の活動記録） | 報告状況の遷移履歴（必要に応じて。少なくとも現在の報告状況は D3 として保護） | 報告状況（Pending / Summarized / Presented / Unknown）、画面へ提示できたか不明な状態の保持 | 報告用の要約文（画面向け派生表現） | 画面表示用コピーの送信中データ、通信の接続状態 | — |
+| **進行中の意味判断**<br>（個体調整） | — | 残すべき発言や行動結果が、会話履歴等に正式に反映された後の記録 | —<br>（進行中の思考・判断そのものは永続化しません） | — | 進行中の判断、推論作業、入出力の一時処理 | — |
+| **タスク・委任・コンテキスト・ワークスペース・スケジュール**<br>（作業） | タスクの現在状態（現在の `TaskPurposeRef` と目的本文、担当者、進捗状況、待機状態、完了・失敗・キャンセル・結果・未完了事項、次の判断、方向転換の前提）、委任の対応関係（タスクリビジョン前提・範囲・進捗・待機・停止・受領）、ワークスペースとの関連付け、定期実行スケジュール設定（担当、内容、実行時刻、作成時タイムゾーン、初期入力） | タスクの改訂履歴、委任のやり取り履歴、タスクコンテキストの各項目（採用識別子、由来、取得日時、用途、有効期限）、スケジュール発生の対応記録（実行開始、見送り、キャンセルと各タスクへの紐付け）、タスクの完了記録（終了しても勝手に削除しない） | 途中で中断したタスクの再開待ち、人間の判断待ち、委任の停止処理、見送られたスケジュール実行の未完了記録、タスク削除とログ整理の進行状態 | タスク進捗の表示用データ、次回スケジュール日時の表示、作業由来の説明文 | 作業中エージェントの一時コンテキスト、推論の作業領域、詳細なペイロードの全量 | 外部ワークスペースの実体ファイル、案内ファイル、スキル定義、生成された成果物ファイル、外部スキルの原本 |
+| **タスク内部コピー・中間ファイル**<br>（作業） | 作業のために内部保持しているコピーの意味情報（由来、取得時点、用途）、中間ファイルの用途・保持期間・整理フラグ | 内部コピーや中間ファイルの受入・整理の履歴記録 | 中間ファイルの整理待ち状態、保持方針との対応付け、個人データ完全削除の処理待ち状態 | — | 実行中の作業バッファ | 外部原本の最新状態、外部に出力された成果物の実体 |
+| **学習サマリー・根拠**<br>（認識・学習） | サマリー本文（圧縮された根拠情報）、形成判断と元データとの対応関係（どの記憶・スキル・関係性・状態改訂に基づいているか） | サマリーの改訂履歴、根拠関係の履歴、参照元の会話・タスク範囲 | サマリー生成処理の中断・保留状態、個人データ完全削除の処理待ち状態 | ベクトル埋め込み、検索インデックス、検索クエリ用の派生表現、類似度スコア | 一時的な推論過程、未加工の思考ログ | — |
+| **記憶・スキル・関係性・個体状態**<br>（認識・学習） | 現在の有効な認識、改訂番号、適用スコープ、重要度、由来情報（記憶の主要知識、スキルの有効手順、相手ごとの関係性解釈、一時的状態と持続的傾向の区別） | 過去の各改訂内容、変更の経緯、利用された根拠（「間違いを訂正したのか」「時間の経過で変化したのか」の区別を保持） | 訂正処理やスコープ変更の中断状態、個人データ完全削除の処理待ち状態、誤った再学習を防ぐための保持（hold）状態 | ベクトル埋め込み、検索インデックス、類似度スコア、画面用の集計データ | 検索中の一時バッファ、推論作業用コンテキスト | — |
+| **アクション試行・作用・確定度**<br>（実行・拡張） | —<br>（試行は履歴であり現在値ではないため。ただし確定度は D3 として保護） | アクション試行記録（試行ID、タスク・委任との紐付け、実際の操作対象、操作種別、依拠した権限評価、実行段階、確定度、判断根拠） | 確定度が「Unknown（結果不明）」のまま粘着保持されている状態、保留（hold）、停止要求とその結果、リトライ前提の管理 | 外部への作用結果の画面表示用データ | 実行中の一時バッファ、ツール呼び出しの一時データ | 外部システムへの実際の作用そのもの、外部プロセスの内部状態 |
+| **ルール・権限・同意・禁止・上限**<br>（権限・制約） | ルール本文、解釈、適用スコープ、現在の改訂番号、取り消し（Undo）対応、機能割当（Assignment）のユーザー同意（AIプロバイダ、モデル、送信先、用途、費用、フォールバック順など）、端末の利用許可、サンドボックス除外設定、保存禁止・非共有の制約、利用上限（cap）定義 | ルールの改訂履歴、権限評価の実行記録（過去のログであり、現在も有効な許可証ではない）、同意の変更履歴 | ユーザーの判断待ち、失効・停止・保留・完全削除・リストア保留との照合結果（現在の可否は評価時に動的に算出し、過去の「許可」コピーを正本にしない）、新規活動禁止と停止要求の未完了状態 | 解決済みの割当経路、現在利用可能なプロバイダ経路、費用集計結果 | 推論中の一時コンテキスト | — |
+| **利用量・費用**<br>（推論 ＋ 各利用担当） | 上限（cap）定義（権限・制約が管理）。実際の利用実績は各担当の生記録として D2 で保持 | 利用実績の記録（確定報告、結果不明、処理中の区別、利用者・用途・送信先との対応） | 処理中・未報告・結果不明な消費量の保護（再起動してもゼロにリセットしない） | 費用の画面表示用集計、トークンキャッシュの利用状況表示 | 集計用の一時キャッシュ | AIプロバイダ側の請求確定データ（外部の報告値） |
+| **認証情報（Credential）**<br>（認証秘密） | 秘密値以外の用途、参照元、有効性、登録・更新・失効の対応記録（DB側には参照のみを保持） | 登録・更新・失効の対応履歴（非秘密情報のみ）、認証失敗や再認証が必要になった事実の記録 | 再認証の入力待ち、失効処理の未完了状態 | — | — | パスワードやAPIキーなどの秘密値本体（OSのセキュアストレージ等で厳重に分離保管し、DB・バックアップ・ログ・デバッグ出力へ絶対に流出させない） |
+| **プロバイダ登録・能力・割当解決**<br>（推論） | 秘密情報を含まない登録情報、観測された能力（最終観測値は D1 だが、現在性を再確認せずにそのまま信頼しない） | プロバイダ能力の観測履歴、利用量の生記録 | 能力不足や接続失敗の未完了状態、代替プロバイダへの切り替え（fallback）の進行状態 | 解決済みの通信経路、プロンプトキャッシュ、プロバイダ側セッション、推論用の一時コンテキスト | 推論中のセッション情報、一時キャッシュ、圧縮されたコンテキスト | プロバイダ側で保持されているセッション、キャッシュ、保管データ |
+| **接続・帰属・ヒント・復旧先**<br>（接続・存在） | 個体ごとの帰属レコード（状態、現在アクティブな Client、帰属世代番号）、再配置ヒント、復旧先の候補（非現在の一時参照）、最終接続管理レコード | 帰属状態の遷移履歴ログ、接続が観測された事実の履歴 | 画面切り替えの過渡区間（旧Client / 移行中 / 新Client / アクティブなし / 停止中 / 復旧待ち）の未完了状態、排他性が未確認であることによる保留 | 現在の接続人数、メッセージ配信対象の計算結果 | 現在の通信接続が生きているかどうかの到達性（live 性）、切断検知の一時フラグ | Client 端末固有の接続用秘密鍵など（Client 側およびセキュアストレージに保持し、DB には保存しない） |
+| **入出力ターン・提示**<br>（入出力・提示） | 一般設定（UI言語、キャラクターの立ち絵位置・サイズ・非表示設定、音声の基本設定）、Host の自動起動の選択設定（日常利用のための設定であり、OSへの登録完了の事実とは区別） | 入出力ターンと会話履歴の対応、画面提示状況の対応記録 | 画面へ提示できたか不明な状態の保持、対話ターンの区切り処理の未完了状態 | キャラクターの立ち絵・表情の描画データ、音声合成出力、画面集計表示 | 入出力ターンの進行状態、描画フレーム、モーション位置、音声バッファ、音声区間検出（VAD）、割り込み（barge-in）検知、ミュート状態、デバイス利用状態、MCP Apps の画面表示 | OS の全画面表示状態、システム負荷、ハードウェアデバイスの状態（外部の現在の事実） |
+| **観測運用・候補・ルーティング派生**<br>（共有観測） | 観測の運用設定（Client別や全体の ON / 一時停止 / OFF、観測頻度） | 観測対象や実施タイミングの判断記録 | 画面キャプチャ・イベント検知・データ配信の中断・保留状態、個人データ完全削除の処理待ち状態 | ルーティング用の要約コンテキスト（画面向け派生表現）、処理候補データ、検索用の派生データ | 未加工のキャプチャ画像・音声（Raw）、候補データ、推論中の一時コンテキスト | — |
+| **保持方針・操作状況・バックアップ設定・監査・デバッグ**<br>（保全・消去） | データの保持期間方針、容量管理方針（既定では自動削除 OFF）、バックアップ設定（保存先フォルダ、独自スケジュール、保持世代数、保護設定） | バックアップ作成結果の履歴、操作状況の履歴ログ、監査ログ（追記専用で厳重保持） | 個人データ完全削除、リストア、全データ初期化（Reset）、データ整理の操作状況（目的、対象、参加者、影響範囲、完了範囲、未完了、失敗、検証結果、保留）、消去条件、有効期間、完了境界、未到達や失敗の区別 | バックアップや削除の進捗表示、操作の由来説明文 | 処理中の一時バッファ | 作成されたバックアップファイル（外部コピーとして独立管理し、稼働中のマスターデータとは絶対に混同しない）、ユーザーが手動退避したバックアップ、エクスポートファイル |
 
-補足：
+**補足事項**:
+- Client の一時的な状態（入力途中テキスト、表示用タイムライン、音声バッファ、未送信の操作、ツールUIの内部データ）や未加工データ（Raw Observation、生の音声、詳細なツールペイロード、内部推論ログ）は、ディスクに永続化しません（アーキテクチャの固定前提）。
+- バックアップファイルは稼働中のマスターデータ（正本）ではありません。明示的なリストア手続きを経ずに、稼働中の状態として読み戻してはなりません。
+- パスワードやAPIキーなどの秘密情報は、通常のデータベース、バックアップ、監査ログには一切流出させず、OS の認証情報ストア等で分離して保管します（アーキテクチャの固定前提）。
+- Host 側の端末認証情報（ペアリング情報に対応する検証鍵、現在の信頼範囲、失効状態）も外部・認証情報ストア（E）に分類し、たとえ公開鍵などの非秘密データであってもバックアップには含めず、リストアによって古い信頼関係を巻き戻さないようにします（Group K）。データベースに端末の参照レコードが残っていることだけで、認証や利用を成立させてはなりません。
+- 派生データ（ベクトル埋め込み、検索インデックス、プロンプトキャッシュ、プロバイダセッション、画面表示データなど）は、単独のバックアップ復元対象にしません。古い派生データから、現在の権限や状態、帰属関係を勝手に復活させてはなりません。
 
-- Client temporary state（入力途中・表示 timeline・audio buffer・未送信操作・Tool UI data）や Raw capture（Raw Observation / Raw Voice / 詳細 Tool payload / 内部推論 / chain-of-thought）は canonical persistent 化しない（固定 premise）。
-- Backup copy は canonical ではない。明示 restore を経ずに live 正本として読み戻さない。
-- Credential secret は通常 DB / Backup / Audit へ流さず、現在 credential-store 側で扱う（固定 premise）。
-- Host 側 device-auth（pairing identity に対応する検証材料・現在 trust 範囲・失効）も E とし、非秘密の検証材料であっても backup へ含めず Restore で巻き戻さない（Group K）。DB の device 参照・許可記録だけでは認証・利用を成立させない。
-- 派生物（embedding / index / query 派生 / Prompt cache / Provider session / 有効経路 / 次回表示 / 集計表示）は独立復元対象にしない。古い派生物から権限・状態・帰属を復活させない。
+## 4. Logical persistence groups と schema concretization
 
-## 4. Logical persistence groups と schema  concretization
-
-DB 製品固有 SQL は確定しない。以下は logical table / collection の提案であり、後続 interface 設計で同義の改名は許すが、owner 分離・revision / generation の区別・deletion / reconstruction の意味は維持すること。
+ここではデータベース製品固有の SQL 構文は固定しません。以下に示す論理テーブル（logical table）やコレクションは概念的な設計例であり、後続のインターフェース設計で同等の意味を持つ名前に変更することは認められます。ただし、「担当責任者（semantic owner）の分離」「改訂（revision）と世代（generation）の区別」「削除ルールと再構築方法」の意味は厳格に維持しなければなりません。
 
 ### 4.1 技術共有と ownership 分離の方針
 
-- Host durable（D1/D2/D3）は単一 SQLite file（例: `app.db`）に owner 別 table group として共存させる。共有理由は backup 整合（対象時点・参照対応）と、必要最小の cross-owner atomic read（§7）のためであり、ownership 統合のためではない。
-- Derived（R）は別 SQLite file（例: `derived.db`、sqlite-vec を含む）または同一技術の別 group として、 primary を破壊せず削除・再構築できる配置にする。primary file の backup に derived を含めない。
-- 内部保持 copy の blob 本体が大きい場合は filesystem（例: `internal_copies/`）に置き、DB 側は参照・由来・用途・削除 marker だけを持つ。blob を DB inline にする選択は許すが、消去の意味は変えない。内部 copy・中間 file の blob 本体は Task 内部 data として backup に含める（外部 Workspace 実体は収集しない）。
-- Credential 秘密値は OS credential store 等の分離保管（DPAPI / libsecret / Keychain 等の抽象）に置き、DB 側は非秘密参照だけを持つ。Client 固有の接続材料の秘密部分も同様である。
-- Portable full backup は filesystem 上の外部 copy（例: `*.ene-backup`）とし、暗号化選択可能・非暗号化時は private 説明を事前に行う。backup copy を live 正本にしない。
+- **Host の永続データ（D1/D2/D3）**: 単一の SQLite ファイル（例: `app.db`）の中に、担当責任者ごとのテーブルグループとして同居させます。同一ファイルにまとめる理由は、バックアップ作成時のデータ整合性（特定時点でのスナップショット作成や参照関係の保持）を確保するため、および担当責任者を跨ぐ最小限の不可分な読み取り（cross-owner atomic read、§7 参照）を実現するためであり、担当責任（ownership）を統合するためではありません。
+- **派生データ（R）**: 別の SQLite ファイル（例: ベクトル検索拡張を含む `derived.db`）に配置するか、マスターデータを破壊せずにいつでも安全に削除・再構築できる独立したグループとして配置します。マスターデータベースのバックアップファイルに、この派生データファイルを含めてはなりません。
+- **内部保持コピーの大きなバイナリ（blob）**: ファイルサイズが大きいバイナリデータはファイルシステム上（例: `internal_copies/` ディレクトリ）に保存し、データベース側にはファイルへのパス参照、由来情報、用途、削除フラグのみを保持します（将来的にデータベース内に直接 blob としてインライン保存する選択も許容しますが、削除の意味は変えません）。なお、タスク内部のデータであるため、これらの中間ファイルや内部コピーはバックアップに含めます（外部ワークスペース内のユーザー実体ファイルは収集しません）。
+- **認証情報の秘密値**: OS のセキュアストレージ（Windows の DPAPI、Linux の Secret Service / libsecret、macOS の Keychain などの抽象化層）に隔離して保管し、データベース側には秘密を含まない参照用識別子のみを保持します。Client 端末固有の接続秘密鍵も同様に扱います。
+- **ポータブルなフルバックアップファイル**: ファイルシステム上に独立した外部ファイル（例: `*.ene-backup`）として出力します。暗号化の有無をユーザーが選択できるようにし、非暗号化を選択した場合はプライベートな情報が含まれる旨を事前に丁寧に説明します。バックアップファイルをそのまま稼働中のマスターデータとして扱ってはなりません。
 
-いずれも storage technology の共有・分離は logical persistence requirements から導いたものであり、semantic owner の統合・分離ではない。
+いずれのストレージ技術の共有・分離も、論理的なデータ要件から導き出されたものであり、担当責任者（semantic owner）の境界を曖昧にするものではありません。
 
 ### 4.2 Table group 一覧（owner 明示）
 
-凡例：PK = primary key、CORR = correspondence relation（FK ではなく対応。参照先の意味 owner を移さない）、REV = revision field、GEN = generation field。
+**凡例**:
+- **PK**: 主キー（Primary Key）
+- **CORR**: 紐付け対応関係（単なる外部キー制約ではなく、論理的な対応。参照先の担当責任者を奪うものではありません）
+- **REV**: 改訂番号フィールド（同一エンティティに対する内容の更新順序）
+- **GEN**: 世代番号フィールド（ライフサイクルや区間の切り替え順序）
 
-#### Group A — Character（owner: Character）
+#### Group A — Character（担当責任者: Character）
 
-| logical table | PK | 主な field（REV/GEN/CORR 含む） | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド（REV/GEN/CORR 含む） | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `character_identity` | `character_id` | 静的定義の存在、作成対応 | D1 | Character 削除で定義を除去。tombstone として `character_id` のみ残し内容は消去。既存 Companion の経験・記録へ cascade しない | backup / restore の復元対象。dangling は未解決として扱う |
-| `character_revision` | `(character_id, character_revision)` | 静的部品・推奨 Skill 指定・import provenance 対応（CORR→`character_import`）、差分提示内容。REV=`character_revision` | D1+D2（現在一覧 + 履歴） | Character 削除で除去。targeted deletion で対象情報を復元できる内容を持つ場合のみ参加 | 現在 revision 一覧から供給。存在≠適用と区別する |
-| `character_import` | `import_id` | CORR→対象 Character・revision、外部原本参照（E、所有ではない）、受入時点・validation 結果（実行許可ではない） | D2 | Character 削除で除去。targeted deletion は参加原則に従う | 受入対応の履歴として読む |
+| `character_identity` | `character_id` | 静的定義の存在確認、作成時の紐付け対応 | D1 | キャラクター削除時に定義を除去。墓標（tombstone）として `character_id` のみを残し、詳細内容は消去します。既存の Companion が積んだ経験や履歴レコードには連鎖削除（cascade）しません。 | バックアップ・リストアの復元対象。参照先が見つからない宙づり（dangling）状態は「未解決」として安全に扱います。 |
+| `character_revision` | `(character_id, character_revision)` | 静的部品の構成、推奨スキル指定、インポート時の受入記録（CORR → `character_import`）、差分提示内容。<br>REV = `character_revision` | D1 + D2<br>（現在一覧 ＋ 過去履歴） | キャラクター削除時に除去。個人データ完全削除（Targeted Deletion）において、対象情報を復元できるデータが含まれる場合のみ削除処理に参加します。 | 現在の改訂一覧から構成を供給します。「定義が存在すること」と「個体に適用されていること」を混同しません。 |
+| `character_import` | `import_id` | CORR → 対象キャラクターと改訂番号、外部原本ファイルへの参照（E、システムの所有ではない）、受入日時、バリデーション検証結果（実行許可証ではありません） | D2 | キャラクター削除時に除去。個人データ完全削除には原則に従って参加します。 | インポート受け入れの履歴記録として読み込みます。 |
 
-適用関係は Group B（個体調整）に置く。
+#### Group B — Companion / 会話履歴 / 未伝達 / 対話ターン対応（担当責任者: 個体調整。対話ターンの実体は入出力・提示）
 
-#### Group B — Companion / History / 未伝達 / round 対応（owner: 個体調整。round の実際は入出力・提示）
-
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `companion` | `companion_id` | lifecycle `Running/Stopped/Deleted`、CORR→適用関係（`companion_applied_current`）、生成対応。Deleted は tombstone 最小（識別のみ残し私的 field は消去） | D1 | Companion 削除で個体固有 field を消去し tombstone 化。History・Task 記録へ cascade しない | restart 後に同一性・活動状態を再構成する起点 |
-| `companion_applied_current` | `companion_id` | CORR→`(character_id, character_revision)`、適用部品群・`OwnerSelectionRef`（管理操作 identity + 時刻）、適用時点。REV=`character_revision` | D1 | Companion 削除で除去。Character 削除で dangling として未解決にし黙って置換しない | 現在適用を再構成する。未適用を更新済みにしない |
-| `companion_applied_history` | `(companion_id, applied_seq)` | 過去適用の対応記録 | D2 | 同上 | 変更経緯として読む |
-| `history_message` | `message_id` | CORR→`companion_id`・空間（一対一/グループ/Companion 間）・参加者・文脈、wallclock+tz、本文（D2 正本）。CORR→`round_id`・`presence_generation`・`restore_generation` | D2（append-only が自然） | 通常削除・retention で整理（形成済みへ cascade しない）。targeted deletion で該当本文を除去または復元不能化。本文保持のまま完了にしない | 正確な引用・未伝達の元記録・Summary source として読む |
-| `activity_record` | `activity_id` | CORR→`companion_id`、種別・何を行い何を認識・報告したか、必要範囲の内容、CORR→Task/Action/Audit（各 owner を参照し独立更新しない） | D2 | 同上。結果説明に必要な範囲であることを消去拒否にしない | 由来説明・未伝達の元記録として読む |
-| `undelivered` | `undelivered_id` | CORR→`companion_id`、CORR→source（`TaskRecord(task_id)` または `ActivityRecord(activity_id)`。第二の Task 正本にしない）、報告状況 `Pending/Summarized/Presented/Unknown`、CORR→`round_id`・`presence_generation`・`restore_generation` | D1+D3（必要内容 + 報告状況の保全） | Companion 削除で当該個体の管理を終えるが元 record は残す（SO 4.4）。targeted deletion で報告用要約・メモ中の対象本文を復元させない | restart 後に未伝達一覧を再構成し次 Client で要約報告する |
-| `presence_attribution` は Group G に置く。round 進行自体は T であり、round 対応は `history_message` / `undelivered` / `action_attempt` の CORR として保持する。旧 round の入力・未提示を新 round へ付け替えない。 |
+| `companion` | `companion_id` | ライフサイクル状態（`Running / Stopped / Deleted`）、CORR → 現在の適用関係（`companion_applied_current`）、個体生成時の紐付け。<br>※ `Deleted` は最小限の墓標レコード（識別子のみを残し、個人のプライベートな設定や属性はすべて消去） | D1 | Companion 削除時に個体固有のフィールドを消去し、墓標レコード化します。会話履歴やタスク記録へ連鎖削除（cascade）はしません。 | 再起動後に個体の同一性や活動状態を再構成するための起点となります。 |
+| `companion_applied_current` | `companion_id` | CORR → `(character_id, character_revision)`、現在適用されている部品一覧、`OwnerSelectionRef`（ユーザー操作の識別子 ＋ 時刻）、適用日時。<br>REV = `character_revision` | D1 | Companion 削除時に除去。参照先の Character が削除された場合は、未解決の宙づり状態として安全に扱い、勝手に別のキャラクターへ置き換えたりしません。 | 現在の適用構成を正しく再構成します。まだ適用されていない改訂を「更新済み」と見なすことはありません。 |
+| `companion_applied_history` | `(companion_id, applied_seq)` | 過去に適用された構成の履歴記録 | D2 | 同上 | 構成の変更経緯をたどるために読み込みます。 |
+| `history_message` | `message_id` | CORR → `companion_id`・会話空間（一対一 / グループ / 個体間）・参加者・文脈情報、タイムゾーン付き壁時計時刻、発言本文（D2 のマスターデータ）。<br>CORR → `round_id`・`presence_generation`・`restore_generation` | D2<br>（追記専用の記録） | 通常の履歴整理方針（retention）に従って整理（すでに形成された記憶へ連鎖削除はしません）。個人データ完全削除（Targeted Deletion）では、該当する本文を完全に除去または復元不能化します（本文を残したまま「削除完了」にはしません）。 | 正確な発言引用、未伝達通知の元記録、学習サマリーの元ネタとして読み込みます。 |
+| `activity_record` | `activity_id` | CORR → `companion_id`、行動種別、何を行い何を認識・報告したか、必要な最小限の内容。<br>CORR → Task / Action / Audit（各担当責任者を参照するのみで、勝手に書き換えません） | D2 | 同上。ユーザーへの結果説明に必要な最小限の範囲であっても、個人データ完全削除の要求を拒否する理由にはしません。 | 動作の由来説明や、未伝達通知の元記録として読み込みます。 |
+| `undelivered` | `undelivered_id` | CORR → `companion_id`、CORR → 発生元の記録（`TaskRecord(task_id)` または `ActivityRecord(activity_id)`。第二のタスク正本にはしません）、報告状況（`Pending / Summarized / Presented / Unknown`）。<br>CORR → `round_id`・`presence_generation`・`restore_generation` | D1 + D3<br>（報告内容 ＋ 報告状況の保護） | Companion 削除時にその個体向けの通知管理は終了しますが、元のタスクや活動記録自体は残します（SO 4.4）。個人データ完全削除では、報告用の要約やメモに含まれる対象本文を復元できないよう確実に消去します。 | 再起動後に未伝達の通知一覧を再構成し、次に Client が接続してきた際に要約して報告します。 |
 
-`companion` の Deleted tombstone は「個体が存在したこと」の historical attribution のためであり、私的 state の残存ではない。Summary を historical log へ分類し直して残さない。
+※ 画面への帰属情報（`presence_attribution`）は Group G で管理します。対話ターンの進行自体はメモリ上の一時データ（T）であり、対話ターンとの対応関係は `history_message` / `undelivered` / `action_attempt` の紐付け参照（CORR）として保持します。古いターンの入力途中の内容や未提示のデータを、新しい対話ターンへ勝手に付け替えてはなりません。
 
-#### Group C — Learning（owner: 認識・学習）
+`companion` の `Deleted` 墓標レコードは、「かつてその個体が存在した」という歴史的な記録（historical attribution）を残すためだけのものであり、個人のプライベートな状態を残すためではありません。学習サマリーを「歴史ログ」と言い換えてこっそり残すような抜け道は許されません。
 
-Memory / Skill / Relationship / State / Summary を一つの canonical / schema / revision model / retention へ潰さない。各概念で別 table とする。
+#### Group C — Learning（担当責任者: 認識・学習）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+記憶（Memory）、スキル（Skill）、関係性（Relationship）、個体状態（State）、学習サマリー（Summary）を、安易に単一の共通スキーマや共通リビジョン管理、共通の保持期間にひとまとめにして混同してはなりません。それぞれの概念に応じて個別のテーブルとして管理します。
+
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `summary` | `summary_id` | 圧縮 evidence、CORR→source 範囲（Conversation・Task 等の大まか範囲）、scope（個体固有/共有の識別）、形成時点。現在知識の正本にしない | D1+D2 | Companion 削除で個体固有 Summary を削除。共有は残存・参照不能を説明。targeted deletion で過去根拠も対象にし分離可能なら分離する | 形成・改訂の根拠として読む。逐語引用は History へ戻す |
-| `summary_grounds_link` | `(summary_id, learning_id, learning_revision)` | CORR→形成先 Learning の `(id, revision)`。graph 全体を永続 object にしない | D2（CORR のみ。本文複製しない） | 同上。関係自体に対象情報が残る場合も消去へ参加させる | 根拠対応を辿るために読む |
-| `memory_current` | `memory_id` | CORR→`companion_id` または Global、現在内容・時間的意味・重要度・scope、REV=`learning_revision`、CORR→根拠（Summary / source 範囲） | D1 | Companion 削除で Companion scope を削除（Global は残す）。targeted deletion は通常保持より優先する | restart 後に現在認識を再構成する |
-| `memory_revision` | `(memory_id, learning_revision)` | 過去内容・scope・根拠・誤訂正 vs 時間変化の区別。REV=`learning_revision` | D2 | 同上。自動 cleanup は既定 OFF・明示 opt-in のみ | 訂正・由来説明として読む。現在値の代替にしない |
-| `skill_current` / `skill_revision` | `skill_id` / `(skill_id, learning_revision)` | 有効 revision・由来・scope・原本対応・実行結果対応（未検証/成功/失敗の区別）。原本を破壊せず別 revision とする | D1+D2 | Companion 削除で Companion scope Skill と過去 revision を削除し自動 Global 化しない | 現在手順として読む。推奨＝有効切替え・実行許可にしない |
-| `relationship_current` / `relationship_history` | `(subject_companion, peer)` / 同 + seq | 主体別現在解釈・保持過去・根拠。事実矛盾時は Memory 優先で再解釈する | D1+D2 | 主体・相手のいずれかの削除で削除する。共有 Summary 等まで一律削除しない | 現在解釈として読む。第二の Memory にしない |
-| `companion_state` | `companion_id` | 一時状態と持続的傾向の区別・継続に要る状態・時間的意味・保持根拠。REV は全過去値の恒久 revision を要求しない | D1（+ 必要根拠の D2） | Companion 削除の対象。無関係な傾向まで一律初期化しない | restart 後に経過時間を解釈して再構成する。一時固定・不自然な初期化をしない |
+| `summary` | `summary_id` | 圧縮された根拠情報（evidence）、CORR → 参照元の会話やタスクの大まかな範囲、適用スコープ（個体固有 / 全体共有の識別）、サマリー形成日時。<br>※ 現在の知識のマスターデータにはしません。 | D1 + D2 | Companion 削除時に個体固有のサマリーを削除します。全体共有のサマリーは残しますが、削除された個体からの参照が切れたことを説明できるようにします。個人データ完全削除では過去の根拠も対象とし、分離可能なら確実に切り離します。 | 知識の形成や改訂の根拠として読み込みます。一言一句の正確な引用が必要な場合は、元の会話履歴（History）を参照します。 |
+| `summary_grounds_link` | `(summary_id, learning_id, learning_revision)` | CORR → 形成された学習データの `(id, revision)`。<br>※ 知識グラフ全体をひとつの巨大な永続オブジェクトにはしません。 | D2<br>（紐付け情報のみ。本文は複製しない） | 同上。関係性の紐付け自体に対象の個人情報が残っている場合も、完全削除に参加させます。 | 知識とサマリーの根拠関係をたどるために読み込みます。 |
+| `memory_current` | `memory_id` | CORR → `companion_id` または Global（全体共有）、現在の記憶内容、時間的な意味合い、重要度、適用スコープ。<br>REV = `learning_revision`、CORR → 形成根拠（サマリーや参照元の範囲） | D1 | Companion 削除時にその個体スコープの記憶を削除します（Global は残します）。個人データ完全削除は通常のデータ保持方針よりも常に優先されます。 | 再起動後に「現在の認識」を再構成するための起点となります。 |
+| `memory_revision` | `(memory_id, learning_revision)` | 過去の改訂内容、スコープ、根拠情報、「間違いを訂正したのか」「時間の経過で変化したのか」の区別。<br>REV = `learning_revision` | D2 | 同上。古い改訂の自動クリーンアップは既定で OFF（明示的に有効化された場合のみ動作）とします。 | 過去の訂正経緯や判断の由来を説明するために読み込みます。現在の最新値の代わりにはしません。 |
+| `skill_current` / `skill_revision` | `skill_id` / `(skill_id, learning_revision)` | 有効な改訂番号、スキルの由来、適用スコープ、原本ファイルへの参照、実行結果の対応記録（未検証 / 成功 / 失敗の区別）。原本を上書き破壊せず別改訂として保存します。 | D1 + D2 | Companion 削除時に個体スコープのスキルおよびその過去改訂を削除します（勝手に全体共有へ昇格させません）。 | 「現在の実行手順」として読み込みます。「推奨されていること」と「実際に有効化されていること」や「実行が許可されていること」を混同しません。 |
+| `relationship_current` / `relationship_history` | `(subject_companion, peer)` / 同 ＋ 連番 | 主体ごとの現在の相手に対する解釈、過去の解釈履歴、判断の根拠。客観的事実と矛盾した場合は、記憶（Memory）を優先して再解釈します。 | D1 + D2 | 主体または相手のいずれかの個体が削除されたときに削除します。全体共有のサマリー等まで無差別に連鎖削除はしません。 | 「相手に対する現在の解釈」として読み込みます。第二の記憶テーブルとして流用しません。 |
+| `companion_state` | `companion_id` | 一時的な状態と持続的な性格・傾向の区別、継続に必要な状態、時間的な意味、保持の根拠。<br>※ 全過去値の完全な履歴保存までは求めません。 | D1<br>（＋ 必要な根拠の D2） | Companion 削除の対象となります。無関係な持続的傾向まで一律にリセットすることはありません。 | 再起動後に、前回の終了からの経過時間を計算・解釈した上で状態を復元します。一時的な状態が永遠に固定されたり、不自然に完全初期化されたりするのを防ぎます。 |
 
-Skill の scope default（Package 由来→Companion scope、単体 import→Owner 選択）は本 schema の初期値として扱い、意味判断自体は認識・学習に残る。
+※ スキルの適用スコープの既定値（パッケージ由来なら個体スコープ、単体インポートならユーザーの明示選択）は本スキーマの初期値として扱いますが、その意味的な判断自体は「認識・学習」サブシステムが担います。
 
-#### Group D — Task / 委任 / context / Workspace / Schedule（owner: 作業）
+#### Group D — Task / 委任 / コンテキスト / Workspace / スケジュール（担当責任者: 作業）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `task` | `task_id` | 現在 REV=`task_revision`、現在 `TaskPurposeRef`・目的本文の現行値（steering 前提は現在 revision と `TaskPurposeRef` で表す）、担当、進捗・待機・完了・失敗・Cancel・結果・未完了・次の判断、CORR→`restore_generation`（保全・消去 slice で導入） | D1 | Task 削除で固有 Workspace 関連付けを削除。形成済み・外部成果物へ cascade しない | restart 後に保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする |
-| `task_revision` | `(task_id, task_revision)` | 目的本文・`TaskPurposeRef`・担当・委任前提の snapshot、steering 前後の区別。採用した追加指示は採用 revision の `task_context_entry`（H-A steering 配線 slice）が表す。REV=`task_revision` | D2 | 同上 | 遅延結果の帰属（attempt→task revision→現在 Task）に使う |
-| `delegation` | `delegation_id` | CORR→`(task_id, task_revision)` 前提・委任元 Companion・一時 Agent ephemeral id・scope 写し・進捗・待機・停止・受領 | D1+D2 | Agent 終了・担当削除で Task record を消さない | 委任の継続・停止・受領を再構成する。Agent 一時 context 消失を完了根拠にしない |
-| `task_context_entry` | `entry_id` | CORR→`(task_id, task_revision)`、採用した目的・指示・材料・途中理解の identity 群・由来・取得時点。AU2/AU4 は採用目的の entry を持ち、H-A steering 配線 slice が採用指示 entry を同じ AU4 forward の 1 transaction で追加する。材料・途中理解は利用先が分岐する slice で producer とともに導入する。item-kind discriminator を追加する migration は既存 row を採用目的として backfill する。採用目的 row は目的 identity payload を必須とし、採用指示 row は目的 payload を持たない（`new_purpose: None` の引き継ぎ読み出しは item kind が採用目的の row に限定する）。unknown kind・kind と payload の不一致は技術エラーとし、読み飛ばし・再解釈しない。採用指示 entry は採用 revision で 1 度だけ書き、後の forward で再記録しない。現在有効な採用指示は、現在 revision までの採用指示 entry 全体である（revision は現在 revision を越える entry の検出にのみ使い、その存在は技術エラーとして扱って黙って除外しない。同じ由来 record の再提案は別 entry として採用され得る。store は由来 record による重複排除をしない）。retire は採用 entry を削除・再記録せず identity の supersede として表し、producer を持つ slice が write premise・migration・現在有効 identity の比較 read rule を同じ design 変更で追加する（それまで全採用指示 entry が現在有効）。採用目的の有効性は item の採用 identity が現在有効な採用 identity と一致するかで解決する（revision 番号の一致では判定しない。`new_purpose: None` で引き継いだ目的は、採用 revision が現在 revision より前でも現在有効）。採用指示 entry は再記録しないため、保存済みの過去 revision entry の欠落（Task 削除・targeted deletion を除く）は現在 revision の読みから検出できない。`origin.source` は参照であり、参照先 record の存在・可読性を要求しない。本文複製を要求しない | D1+D2 | Task 削除で固有分を削除。targeted deletion に参加する。Task 限り情報を Learning へ自動昇格しない | Task 判断・Observer 仲介（個体調整–作業協調経由）の材料として読む |
-| `workspace_assoc` | `assoc_id` | CORR→`task_id`、外部 folder/file/source 参照（E、所有ではない）、利用条件・保存先・待機。作成時は関連付けを確定した場合のみ row を持ち、folder と保存先を保存する。利用条件・待機はそれらを解決する slice で追加する | D1 | Task 削除で関連付けを削除。外部実体へ cascade しない。backup は関連付けのみ含め実体を収集しない | 関連付けを再構成する |
-| `internal_copy` | `copy_id` | CORR→`task_id`・元外部参照・由来・取得時点・用途、保管参照（DB inline または filesystem path）、削除 marker | D1 | Task 削除で整理。targeted deletion に参加する（外部所有を理由に除外しない） | 作業継続に必要な copy として読む。外部現在値と混同しない |
-| `intermediate_file` | `file_id` | 用途・必要期間・整理対象・保管参照（外部に置いた場合も外部作用として Permission に従う） | D1（一時作業物だが Task 終了まで durable） | Task 終了または保持方針で整理する。永久成果物と混同しない | 整理対象として読む |
-| `schedule` | `schedule_id` | 担当 Companion・実行内容・時刻条件・作成時 tz・停止等・初期 Workspace 入力、状態 | D1 | 担当削除で Schedule を削除し自動引継ぎしない。各回 Task 記録は残す | 将来回の通常判定として読む。作成依頼を token にしない |
-| `schedule_occurrence` | `occurrence_id` | CORR→`schedule_id`、予定時刻・状態 `Missed/Started/Cancelled`・CORR→`started_task_id`（各回は新 Task） | D2 | missed を実行済みに書き換えない | missed 非補完・各回 Task 対応として読む |
+| `task` | `task_id` | 現在の改訂番号（REV = `task_revision`）、現在の `TaskPurposeRef` と目的本文の現行値（方針指示 steering 前提は現在リビジョンと `TaskPurposeRef` で表現）、担当者、進捗状況、待機状態、完了・失敗・キャンセル・結果・未完了事項、次の判断。<br>CORR → `restore_generation`（保全・消去スライスで導入） | D1 | タスク削除時に固有のワークスペース関連付けを削除します。すでに形成された学習成果や外部成果物へ連鎖削除はしません。 | 再起動後に、保存済みの進捗・確定した作用・結果不明事項・未完了事項を画面に提示し、ユーザーからの明示的な再開指示を待つ起点となります。 |
+| `task_revision` | `(task_id, task_revision)` | 目的本文、`TaskPurposeRef`、担当者、委任前提のスナップショット、方針指示（steering）の前後の区別。採用した追加指示は採用リビジョンの `task_context_entry`（H-A steering 配線スライス）が表現します。<br>REV = `task_revision` | D2 | 同上 | 遅れたタイミングで届いた実行結果の正しい帰属判定（試行 attempt → task revision → 現在タスク）に利用します。 |
+| `delegation` | `delegation_id` | CORR → `(task_id, task_revision)` 前提、委任元の Companion、一時的なエージェントの一時識別子（ephemeral ID）、委任スコープの写し、進捗、待機、停止、受領状態 | D1 + D2 | サブエージェントの終了や担当個体の削除によって、元のタスク記録を勝手に消去することはありません。 | 委任の継続・停止・結果受領の状態を再構成します。エージェントの一時メモリが消えたことだけを理由に「タスク完了」とみなしてはなりません。 |
+| `task_context_entry` | `entry_id` | CORR → `(task_id, task_revision)`、採用された目的・指示・参照資料・途中理解の識別子群、由来、取得日時。AU2/AU4 は採用目的の項目を持ち、H-A steering 配線スライスが採用指示項目を同一の AU4 前進（forward）の 1 トランザクションで追加します。材料や途中理解は利用先が分岐するスライスで生成元（producer）とともに導入します。項目種別識別子（item-kind discriminator）を追加するマイグレーションでは、既存の行を採用目的としてバックフィルします。採用目的の行は目的識別子ペイロードを必須とし、採用指示の行は目的ペイロードを持ちません（`new_purpose: None` の引き継ぎ読み出しは項目種別が採用目的の行に限定します）。未知の種別（unknown kind）や種別とペイロードの不一致は技術的エラーとし、読み飛ばしや勝手な再解釈を行ってはなりません。採用指示項目は採用リビジョンで 1 度だけ書き込み、以降の前進では再記録しません。現在有効な採用指示は、現在リビジョンまでの採用指示項目全体となります（リビジョン番号は現在リビジョンを超える項目の検出にのみ使用し、その存在は技術的エラーとして扱って黙って除外してはなりません。同一の由来レコードの再提案は別の項目として採用され得ます。ストア側で由来レコードによる重複排除を行ってはなりません）。破棄・退役（retire）は採用項目を削除・再記録するのではなく識別子の置き換え（supersede）として表現し、生成元を持つスライスが書き込み前提・マイグレーション・現在有効な識別子の比較読み出し規則を同一の設計変更で追加します（それまではすべての採用指示項目が現在有効として扱われます）。採用目的の有効性は、項目の採用識別子が現在有効な採用識別子と一致するかで解決します（リビジョン番号の一致では判定しません。`new_purpose: None` で引き継いだ目的は、採用リビジョンが現在リビジョンより前であっても現在有効となります）。採用指示項目は再記録しないため、保存済みの過去リビジョン項目の欠落（タスク削除や個人データ完全削除を除く）は現在リビジョンの読み出しからは検出できません。`origin.source` は参照であり、参照先レコードの存在や可読性は要求しません。本文全体の複製は要求しません。 | D1 + D2 | タスク削除時に固有のコンテキストを削除します。個人データ完全削除に参加します。タスク限りの一次情報を勝手に長期記憶（Learning）へ自動昇格させません。 | タスクの状況判断や、個体調整と作業の協調仲介のための材料として読み込みます。 |
+| `workspace_assoc` | `assoc_id` | CORR → `task_id`、外部のフォルダ・ファイル・ソースコード参照（E、システムの所有物ではない）、利用条件、保存先、待機状態。作成時は関連付けを確定した場合のみ行（row）を持ち、フォルダと保存先を保存します。利用条件・待機状態はそれらを解決する開発スライスで追加します。 | D1 | タスク削除時に紐付け情報のみを削除します。外部の実体ファイルを勝手に削除することはありません。バックアップにも紐付けのみを含め、実体ファイルは収集しません。 | ワークスペースとの関連付けを再構成します。 |
+| `internal_copy` | `copy_id` | CORR → `task_id`・元の外部参照・由来・取得日時・用途、保管先参照（DB内のインラインまたはファイルシステム上のパス）、削除フラグ | D1 | タスク削除時に整理します。個人データ完全削除に参加します（外部データ由来であることを理由に削除を除外しません）。 | 作業継続に必要なコピーとして読み込みます。外部の最新ファイルと混同しません。 |
+| `intermediate_file` | `file_id` | 用途、保持が必要な期間、整理対象フラグ、保管先参照（外部に出力した場合も外部作用として権限評価に従います） | D1<br>（一時的な作業物ですがタスク終了まで確実に保存） | タスク終了時または保持方針に従って整理します。永久に残す成果物と混同しません。 | 整理対象の中間ファイルとして読み込みます。 |
+| `schedule` | `schedule_id` | 担当 Companion、実行内容、実行時刻条件、作成時タイムゾーン、一時停止フラグ、初期ワークスペース入力、状態 | D1 | 担当個体が削除された場合はスケジュール自体を削除し、勝手に別の個体へ引き継ぎません（各回のタスク実行記録は残します）。 | 将来の実行タイミングを通常どおり判定するために読み込みます。スケジュールの作成依頼文を実行トークンとして使い回しません。 |
+| `schedule_occurrence` | `occurrence_id` | CORR → `schedule_id`、予定時刻、実行結果状態（`Missed / Started / Cancelled`）、CORR → 起動された `started_task_id`（各回の実行は独立した新しいタスクとなります） | D2 | 実行が見送られた（missed）記録を、勝手に「実行済み」に書き換えてはなりません。 | 停止中にスキップされた回を勝手に後から実行（自動補完）せず、各回のタスク実行の履歴として読み込みます。 |
 
-Task record の lifetime を担当 Companion への参照が決めない。担当削除後も残 Task record は管理面から到達できる。
+※ タスク記録の寿命（lifetime）は、担当 Companion への参照によって左右されません。担当個体が削除された後でも、残されたタスク記録には管理画面から安全にアクセスできます。
 
-#### Group E — Action 試行・作用（owner: 実行・拡張）
+#### Group E — Action 試行・作用（担当責任者: 実行・拡張）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `action_attempt` | `attempt_id` | CORR→`task`（軽微な非 Task では NULL + 活動 record 対応）・委任・Workspace、解決後の実対象・操作種別（Read/Create/Edit/Delete/Execute を潰さない）・依拠 Permission 対応（`permission_evaluation_id`。生きた許可ではない）・段階（受付/開始/送信/把握）・確定度 `ConfirmedSuccess/ConfirmedFailure/Unknown`・根拠対応・hold・CORR→`presence_generation`・`restore_generation`・CORR→`prior_attempt_id`（retry の元不明対応） | D2+D3（append-only 試行 + Unknown の粘着保持） | 内部削除は作用記録の消去であり外部 rollback ではない。targeted deletion で対象本文を除去し事実と両立させる。確定度を消去理由で書き換えない | restart 後に Unknown を Unknown のまま再構成し重複 risk 付き Owner 判断へ戻す。retry は新 `attempt_id` とする |
+| `action_attempt` | `attempt_id` | CORR → `task`（タスク外の軽微な操作では NULL ＋ 活動記録への紐付け）、委任関係、ワークスペース。<br>解決された実際の操作対象、操作種別（Read / Create / Edit / Delete / Execute を混同しない）、依拠した権限評価（`permission_evaluation_id`。過去の評価ログであり、現在有効な許可証ではない）、実行段階（受付 / 開始 / 送信 / 把握）、確定度（`ConfirmedSuccess / ConfirmedFailure / Unknown`）、判断根拠、保留（hold）。<br>CORR → `presence_generation`・`restore_generation`、CORR → `prior_attempt_id`（リトライ時の元不明試行との対応） | D2 + D3<br>（追記専用の試行記録 ＋ 結果不明 Unknown の粘着保持） | 内部データの削除は「操作ログの消去」であり、すでに外部システムに及んだ作用を取り消す（rollback）ことではありません。個人データ完全削除では対象の本文を除去しつつ、操作が行われた事実の記録と両立させます。確定度のステータスを削除理由で書き換えてはなりません。 | 再起動後も「Unknown（結果不明）」は不明のまま正しく復元し、二重実行のリスクを明示した上でユーザーの判断へ戻します。リトライを行う場合は、必ず新しい `attempt_id` を発行します。 |
 
-retry・再送・fallback・再委任は新しい `attempt_id` とする。重複し得る再送を「同じ試行の継続」として除外しない。
+※ リトライ、再送信、フォールバック、再委任を行う場合は、必ず新しい `attempt_id` を発行します。二重実行のリスクがある再送信を、「同一の試行が続いているだけ」とみなしてごまかしてはなりません。
 
-#### Group F — 権限・制約・利用量（owner: 権限・制約。利用事実の原記録は各利用 owner）
+#### Group F — 権限・制約・利用量（担当責任者: 権限・制約。利用実績の生記録は各利用担当）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `rule` | `rule_id` | 現在 REV=`rule_revision`、本文・解釈・scope・Undo 対応 | D1 | — | 現在方針として読む。trigger にしない |
-| `rule_revision` | `(rule_id, rule_revision)` | 過去本文・解釈・scope | D2 | — | 変更経緯として読む |
-| `permission_evaluation` | `evaluation_id` | 実行主体＋委任 chain・Task＋Workspace 範囲・目的・実対象＋操作＋送信先・利用 data＋目的・費用・risk・依拠 Owner 意図・Rule の対応、判断（Allow/Deny/Ask/Wait）、評価時点の boundary snapshot（rule revision・consent・device・cap・失効・停止・保留・消去・復元条件の写し） | D2（判断記録。生きた許可ではない） | targeted deletion に参加する。保存された Allow を現在許可として復活させない | Audit・説明・対応付けとして読む。開始前に現在条件と再照合する |
-| `assignment_consent` | `assignment_id` | Capability・Provider/model・送信先・data・用途・取扱い・費用範囲・Host 既定/Companion override/Observer 専用・fallback 順序、REV（同意 revision）・CORR→`restore_generation` | D1 | — | 現在同意として読む。登録・認証成功で成立させない |
-| `device_permission` | `(device_id, function)` | 許可機能の記録・CORR→pairing identity。失効表示は現在 E 側 trust との照合で導出する | D1 | — | 復元対象の許可記録。現在 E 側の同一 pairing・trust 範囲・非失効と照合してのみ利用する。認証・失効の正本にはしない |
-| `sandbox_exception` | `exception_id` | 特定 Local MCP・command・由来・既知 access・risk・失う強制境界・保存・失効・重要変更時の再確認状態。Plugin へ流用しない | D1 | — | 隔離例外として読む。包括承認にしない |
-| `control_constraint` | `constraint_id` | Owner の明示的な保存禁止・非共有の適用対象・範囲。Learning scope 意味と区別する | D1 | — | 各利用箇所で迂回不能に適用する |
-| `cap_limit` | `cap_id` | Provider 別・全体の費用・資源・反復・並列等の上限定義 | D1 | — | 現在可否の上限として読む |
-| `usage_fact_provider`（owner: 推論） | `usage_id` | consumer（Companion/Observer 専用/Task 等）・報告/不明/処理中の別・量・CORR→attempt/task/assignment・報告時点 | D2+D3 | Companion 削除で費用 log を削除・使用量をリセットしない。targeted deletion で該当情報を参加させる（消去を消費リセットにしない） | cap 評価の入力として読む。未報告・処理中・不明をゼロにしない |
-| `usage_fact_task`（owner: 作業） / `usage_fact_action`（owner: 実行・拡張） / `usage_fact_storage`（owner: 保全・消去） | `usage_id` | 同上（委任稼働・Action 実行・保存量等の各事実） | D2+D3 | 同上 | 同上 |
+| `rule` | `rule_id` | 現在の改訂番号（REV = `rule_revision`）、ルール本文、解釈、適用スコープ、取り消し（Undo）対応情報 | D1 | — | 現在の運用方針として読み込みます。単体で勝手にアクションを起動するトリガーにはしません。 |
+| `rule_revision` | `(rule_id, rule_revision)` | 過去のルール本文、解釈、適用スコープ | D2 | — | ルールの変更経緯として読み込みます。 |
+| `permission_evaluation` | `evaluation_id` | 実行主体 ＋ 委任チェーン、タスク ＋ ワークスペース範囲、目的、実際の対象 ＋ 操作 ＋ 送信先、利用データ ＋ 目的、費用、リスク、依拠したユーザー意図・ルールの対応、判断結果（`Allow / Deny / Ask / Wait`）、評価時点の境界スナップショット（ルール改訂・同意・端末・上限・失効・停止・保留・消去・復元条件の写し） | D2<br>（評価の実行ログ。現在有効な許可証ではない） | 個人データ完全削除に参加します。過去に保存された「Allow（許可）」の記録を、現在の実行許可として復活させてはなりません。 | 監査ログ、理由説明、操作の対応付けとして読み込みます。アクションを実行する直前には、必ず現在の最新条件と再照合します。 |
+| `assignment_consent` | `assignment_id` | 機能（Capability）、AIプロバイダ / モデル、送信先、送信データ、用途、データの取扱い条件、許容費用範囲、Host既定 / Companion上書き / Observer専用の別、フォールバック順序。<br>REV（同意改訂番号）、CORR → `restore_generation` | D1 | — | ユーザーから得た現在の有効な同意として読み込みます。プロバイダの登録や認証が成功したことだけで、勝手に同意が成立したとみなしてはなりません。 |
+| `device_permission` | `(device_id, function)` | 許可された機能の記録、CORR → ペアリング識別子。機能の失効状態は、現在のセキュアストレージ側の信頼状態（trust）と照合して動的に導き出します。 | D1 | — | リストア対象となる許可設定の記録です。現在のセキュアストレージ側に同一のペアリング情報・有効な検証鍵・有効な信頼範囲が存在し、かつ失効していない場合のみ利用を認めます。本レコード単体を認証や失効の正本にしてはなりません。 |
+| `sandbox_exception` | `exception_id` | 特定のローカル MCP ツールやコマンドの実行許可、由来、把握されたアクセス範囲、リスク、失われる隔離境界、保存・失効条件、重要な変更があった際の再確認状態。<br>※ プラグイン等へ勝手に流用しません。 | D1 | — | サンドボックス隔離の明示的な例外として読み込みます。包括的なフリーパスとして扱ってはなりません。 |
+| `control_constraint` | `constraint_id` | ユーザーが明示的に指示した保存禁止や非共有の制約、適用対象、適用範囲。<br>※ 通常の学習スコープの意味とは厳格に区別します。 | D1 | — | すべてのデータ処理箇所において、迂回できない絶対的な制約として適用します。 |
+| `cap_limit` | `cap_id` | プロバイダ別およびシステム全体での費用、リソース、繰り返し回数、並列実行数などの利用上限の定義 | D1 | — | 現在の実行可否を判断するための上限値として読み込みます。 |
+| `usage_fact_provider`（担当: 推論） | `usage_id` | 消費者（Companion / Observer専用 / Task 等）、確定報告 / 結果不明 / 処理中の別、消費量、CORR → attempt / task / assignment、報告日時 | D2 + D3 | Companion が削除されても、費用の履歴ログを消去したり使用実績をゼロにリセットしたりしません。個人データ完全削除に対象情報を参加させますが、消費実績をなかったことにはしません。 | 利用上限（cap）評価の入力として読み込みます。未報告・処理中・結果不明な消費量を勝手にゼロとみなしてはなりません。 |
+| `usage_fact_task`（担当: 作業）<br>`usage_fact_action`（担当: 実行・拡張）<br>`usage_fact_storage`（担当: 保全・消去） | `usage_id` | 同上（エージェント稼働時間、アクション実行回数、ストレージ保存容量などの各実績事実） | D2 + D3 | 同上 | 同上 |
 
-「現在の利用可否」は保存された行ではなく、保存条件＋活動状態＋委任＋帰属＋利用量＋失効＋保留等を照合した評価時に導出する。
+※「現在、その操作を実行してよいか」は、データベースに保存された1行のフラグだけで決まるものではありません。保存された制約条件、現在の活動状態、委任関係、接続帰属、利用実績、失効フラグ、保留状態などを総合的に照合して、実行の瞬間に動的に評価・判断します。
 
-#### Group G — 接続・帰属（owner: 接続・存在。pairing・device 許可の意味は権限・制約、秘密は認証秘密）
+#### Group G — 接続・帰属（担当責任者: 接続・存在。ペアリングや端末許可の意味は権限・制約、秘密情報は認証秘密）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `presence_attribution` | `companion_id` | state `Present/NoActive/InTransition/Stopped/RecoveryWait`・`active_client`・GEN=`presence_generation`（個体ごとの帰属 lifecycle 順序）。`active_client` は再起動前の帰属記録であり、起動直後は `RecoveryWait` として解釈し現接続・許可・排他性の確認を経て `Present/NoActive` へ確定する | D1+D3 | Stopped は帰属解除として保持する（hint と区別） | restart 後に現接続・許可・排他性の確認と合わせて presence を再構成する |
-| `presence_transition_log` | `transition_seq` | CORR→`companion_id`、旧 state/新 state・旧 GEN/新 GEN・理由（Owner 呼出し・事前指示・自発判断・`DisconnectFallback`・Host restart 限定の `ReconnectRecovery`）・時点 | D2 | — | stale 診断・Audit として読む。authority ではない |
-| `device_ref` | `device_id` | descriptor・CORR→pairing identity・`DeviceWireId` 対応（非秘密表示参照のみ） | D1 | 全データ Reset で削除 | 表示・対応解決用。検証材料は Group K（E）であり、行の復元だけで pairing を成立させない |
-| `client_last_connection` | `client_id` | 最終接続管理 record・CORR→device / incarnation / connection・機能利用可能性・`transport_class`（SameMachine / Remote）の最終観測。分類は IPC §10.1 の Host transport adapter が確定 | D1 | — | 管理記録として読む。現在接続として再成立させない。fallback 候補判定では live connection の分類・認証・device 許可・排他性を再照合する |
-| `relocation_hint` | `companion_id` | `last_client`・`recovery_destination`（非現在の参照） | D1 | — | 復旧先・再配置候補として読む。記録だけで presence にしない |
+| `presence_attribution` | `companion_id` | 状態（`Present / NoActive / InTransition / Stopped / RecoveryWait`）、`active_client`（現在アクティブな Client 識別子）、GEN = `presence_generation`（個体ごとの帰属世代番号）。<br>※ `active_client` は再起動前の帰属記録であり、Host 起動直後は一時的に `RecoveryWait` として解釈し、実際の通信接続・端末許可・排他性の確認が取れてから `Present` または `NoActive` へ確定します。 | D1 + D3 | 停止（Stopped）された個体は「帰属解除」として記録を保持します（一時的な切断ヒントとは区別）。 | 再起動後に、実際の通信接続、端末許可、排他制御の確認結果と突き合わせて帰属関係を再構成します。 |
+| `presence_transition_log` | `transition_seq` | CORR → `companion_id`、旧状態 / 新状態、旧世代番号 / 新世代番号、遷移理由（ユーザー呼び出し、事前指示、自発判断、通信切断によるフォールバック `DisconnectFallback`、Host再起動時限定の再接続復旧 `ReconnectRecovery`）、遷移日時 | D2 | — | 過去の古い状態（stale）の診断や監査ログとして読み込みます。これ自体が現在の権限を保証するものではありません。 |
+| `device_ref` | `device_id` | デバイスの記述名、CORR → ペアリング識別子、通信プロトコル上の `DeviceWireId` との対応（非秘密の画面表示・参照用のみ） | D1 | 全データ初期化（Reset）時に削除します。 | 画面表示や対応関係の解決のために読み込みます。検証用の鍵データは Group K（セキュアストレージ）で管理し、本レコードが存在することだけでペアリング成立とみなしてはなりません。 |
+| `client_last_connection` | `client_id` | 最終接続管理レコード、CORR → デバイス / インカーネーション / 接続インスタンス、利用可能な機能、通信経路の種別（同一マシン上の `SameMachine` / ネットワーク経由の `Remote`）の最終観測結果。<br>※ 通信種別の判定は Host のトランスポート層（IPC §10.1）が確定します。 | D1 | — | 接続の管理記録として読み込みます。これだけで現在の接続が生きていると見なしてはなりません。フォールバック先の候補を判定する際は、現在生きている通信の種別、認証、端末許可、排他性をすべて再照合します。 |
+| `relocation_hint` | `companion_id` | 最後に接続していた Client（`last_client`）、再配置先の候補（`recovery_destination`。過去の非現在参照） | D1 | — | 切断時の復旧先や再配置の候補として読み込みます。この記録が存在することだけで帰属が成立したとみなしてはなりません。 |
 
-現在接続（到達性）は T であり、古い保存値から再成立させない。通常切断確定時は `ene-presence` が利用可能な Host PC Client（SameMachine）へ SD-Presence / AU7 で fallback し、なければ `NoActive` とする。Host 側 Client を自動起動せず、切断 Client の再接続だけで帰属を戻さない。Host restart に限り、Running presence は現接続・許可・排他性の確認ができれば復元前 Client へ自動復元し、できなければ active なしにする。Stopped に移動・復旧しない。
+※ 現在の通信接続（到達性）はメモリ上の一時状態（T）であり、過去に保存されたレコードから勝手に復活させてはなりません。通常の通信切断が確定した場合、システムは安全に Host PC 上のローカル Client（同一マシン接続）へフォールバックし、利用可能なローカル Client が存在しなければ「アクティブな画面なし（`NoActive`）」とします。このとき Host 側で勝手にローカル Client プロセスを自動起動したり、切断されたリモート Client が再接続してきたことだけで勝手に元の画面へ戻したりしません。ただし Host 全体の再起動時に限り、実行中（Running）だった個体について、元の Client との接続・許可・排他性が確認できた場合にのみ元の画面へ自動復旧し、確認できなければアクティブなしで待機します。停止中（Stopped）の個体を勝手に移動・復旧させることはありません。
 
-#### Group H — 入出力・提示 / 観測設定（owner: 入出力・提示 / 共有観測）
+#### Group H — 入出力・提示 / 観測設定（担当責任者: 入出力・提示 / 共有観測）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `io_general_settings` | `settings_scope`（typed。generic KV にしない） | UI 言語・Body 位置/size/hide・Voice 一般設定等の typed field | D1 | Companion 固有分は個体削除範囲へ対応付ける | 一般設定として読む。未確定編集・描画位置と区別する |
-| `host_autostart_choice` | `singleton` | Owner の起動・日常利用選択・選択時点・説明対応。OS 適用結果（実行・拡張の作用事実）と区別する | D1 | — | 選択として読む。Task 再開・restore 有効化・Host 側 Client 自動起動を導かない |
-| `observer_settings` | `(scope_client_or_global)` | ON/Pause/OFF・Client ごと頻度 | D1 | — | 対象・時機の入力として読む。設定 ON＝実行中と表示しない |
-| `spontaneity_settings` | `companion_id` | 雑談・通知・内部調査・交流の OFF 含む頻度・上限・未応答抑制 | D1 | Companion 削除範囲に従う | 自発性判断の入力として読む |
+| `io_general_settings` | `settings_scope`（型付けされたキー。汎用KVにしない） | UI言語、キャラクターの立ち絵位置・サイズ・非表示設定、音声の基本設定などの厳格に型付けされた設定項目 | D1 | Companion 固有の設定は、個体削除の対象範囲に対応付けます。 | 基本設定として読み込みます。編集途中の未確定データや描画中の一時データとは明確に区別します。 |
+| `host_autostart_choice` | `singleton` | ユーザーが選択した自動起動・日常利用の希望設定、選択日時、説明への同意記録。<br>※ OSへの自動起動登録の実行結果（実行・拡張の作用事実）とは区別します。 | D1 | — | ユーザーの意向設定として読み込みます。タスクの自動再開、リストアの自動有効化、Host 側 Client の勝手なプロセス自動起動を導くことはありません。 |
+| `observer_settings` | `(scope_client_or_global)` | 画面・音声観測の ON / 一時停止 / OFF、Client ごとの観測頻度 | D1 | — | 観測の対象や実施タイミングを判断するための入力として読み込みます。「設定がONであること」と「現在まさにキャプチャ中であること」を混同して表示しません。 |
+| `spontaneity_settings` | `companion_id` | 雑談、通知、内部調査、個体間交流の自発的な発言頻度、上限回数、未応答時の自発抑制（OFF設定を含む） | D1 | Companion の削除範囲に従って削除します。 | 自発的な行動や発言を行うかどうかの判断入力として読み込みます。 |
 
-実効的な可否・時機・存在人数・routing 対象は導出（R/T）であり durable primary にしない。round の実際・提示状況の対応記録は Group B の CORR として保持する。
+※ 実効的な実行可否、最適なタイミング、現在の接続人数、メッセージのルーティング対象などは、その都度計算される派生データまたは一時状態（R/T）であり、永続マスターデータには含めません。対話ターンの進行記録や提示状況は、Group B の紐付け参照（CORR）として確実に保持します。
 
-#### Group I — Provider 登録・観測（owner: 推論。割当同意は権限・制約）
+#### Group I — Provider 登録・観測（担当責任者: 推論。割当同意は権限・制約）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `provider_registration` | `provider_id` | 非秘密の接続先・protocol・model 等・能力の最終観測 | D1 | — | 解決の入力として読む。登録＝利用可にしない |
-| `provider_capability_log` | `(provider_id, observed_at_seq)` | 能力・利用可能性の観測履歴 | D2 | — | 鮮度確認の材料として読む。古い観測を現在能力にしない |
+| `provider_registration` | `provider_id` | 秘密情報を含まない接続先エンドポイント、通信プロトコル、対応モデル一覧など、観測された能力の最新情報 | D1 | — | 推論経路を解決するための入力として読み込みます。「登録されていること」と「利用が許可されていること」を混同しません。 |
+| `provider_capability_log` | `(provider_id, observed_at_seq)` | プロバイダの能力や利用可能性が観測された履歴ログ | D2 | — | 情報の鮮度を確認するための材料として読み込みます。過去の古い観測結果を、現在の利用可能能力と過信してはなりません。 |
 
-解決済み経路・Prompt cache・Provider session は R/T であり独立復元対象にしない。
+※ 解決済みの通信経路、プロンプトキャッシュ、プロバイダ側セッション情報は、派生データまたは一時データ（R/T）であり、単独のバックアップ復元対象にはしません。
 
-#### Group J — 保全・消去（owner: 保全・消去。元事実の意味は発生元）
+#### Group J — 保全・消去（担当責任者: 保全・消去。元となる事実の意味は発生元が保持）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `retention_policy` | `policy_id` | History/log/Audit 等の対象・期間・手動範囲・影響 | D1 | — | 保持整理の入力として読む。既定で自動削除しない |
-| `capacity_policy` | `policy_id` | Learning revision・Summary 等の opt-in retention（既定 OFF）・範囲・影響 | D1 | — | 明示 opt-in 時のみ適用する |
-| `backup_setting` | `singleton` | 保存先・backup 独自 schedule・保持数・保護選択 | D1 | Task Schedule とは別 | backup 作成の入力として読む |
-| `backup_point` | `backup_point_id` | 対象時点・参照対応・除外（secret・外部実体）・未完了状況・結果・失敗・保管参照（filesystem path）・暗号化 flag | D2 | 内部削除で Owner 保存 copy も消えたとしない | restore 選択・説明として読む。各部 copy 成功だけを成功にしない |
-| `deletion_operation` | `operation_id` | GEN=`deletion_sweep_generation`、目的・対象記述（機械的条件は検索用 token として操作期間だけ保持する。全域完了へ遷移する前に token を除去または復元不能化し、完了記録・Audit へ本文を残さない。未完了の間は backup に復旧可能な対応として含めてよいが、token が復元可能な状態を全域完了として保存しない）・意味的条件・影響・除外・要確認対応・有効区間（開始〜検証完了）・状態（進行中/局所完了/finalizing/pending/unreachable/failed/全域完了） | D3 | 完了後も事実（目的・範囲・影響・除外・確認・結果）は Audit として残し本文は残さない | restart 後に未完了・保留・再保存防止を再構成する。`finalizing` または token が復元可能なら全域完了として扱わない |
-| `deletion_participant` | `(operation_id, participant_owner)` | 局所処理・検証・未完了・失敗・未確認範囲・報告時点 | D3 | 同上 | 全域完了の集約として読む。局所返却で hold を解除しない |
-| `erasure_condition` | `(operation_id, deletion_sweep_generation)` | 対象範囲の利用・再保存を制限するための条件・有効区間・完了境界。 ingestion 時の照合用 index | D3 | 全域完了の確定前に区間を閉じ、復元可能な検索 token を除去または復元不能化する。完了後の Owner 新規提供は新 Experience として区別する | 各受入・保存先が進行中・finalizing の消去条件として読む。token 消去未完了なら hold を維持する |
-| `restore_operation` | `restore_id` | CORR→`backup_point_id`、GEN=`restore_generation`、受理・説明・隔離・照合・置換・保留・一括有効化対応・状態 | D3 | 完了後も事実は Audit へ追記し本文・秘密は残さない | restart 後に旧 live 分離・保留を再構成する |
-| `restore_generation_state` | `singleton` | 現在 `restore_generation`（成功した Restore ごとの順序） | D1 | — | 復元 vs 旧 live の区別・stale 判定として読む |
-| `reset_operation` | `reset_id` | 種別（設定/全データ）・列挙・強い確認・範囲・状態。クラッシュ中の継続のための進行 marker（filesystem marker と併用し DB 削除後も継続できる） | D3 | 全データ Reset 完了後は Host 内部 data と共に除去される（外部 Workspace・保存 backup は残す） | restart 後に Reset の継続・完了を再構成する |
-| `audit_log` | `audit_seq`（audit scope の順序。global state version ではない） | 発生元・事実種別・非秘密・非対象本文の記述・CORR→対象 identity（task/attempt/operation/restore 等）・追記時点 | D2（append-only が自然） | 通常保持管理と targeted deletion へ参加する（残った対象情報を除去）。追記順を発生順・許可正本・再生入力にしない | 説明・検証として読む。本文別保管庫にしない |
-| `debug_capture` | `capture_id` | 明示対象・内容・有効期間・停止・削除・状態 | D3（短期・明示有効化） | 期限・停止・削除で除去する。Credential を含めない | 診断として読む。通常保存の理由にしない |
+| `retention_policy` | `policy_id` | 会話履歴、ログ、監査ログなどの保持対象、保持期間、手動整理の範囲、影響の説明 | D1 | — | データ保持・整理処理の入力として読み込みます。既定で勝手に過去データを自動削除することはありません。 |
+| `capacity_policy` | `policy_id` | 学習改訂データやサマリー等の容量管理方針（既定では自動整理 OFF）、対象範囲、影響の説明 | D1 | — | ユーザーが明示的に opt-in で有効化した場合にのみ適用します。 |
+| `backup_setting` | `singleton` | バックアップの保存先フォルダ、バックアップ専用の実行スケジュール、保持世代数、保護設定。<br>※ タスクの定期実行スケジュールとは完全に独立して管理します。 | D1 | — | バックアップ作成処理の入力として読み込みます。 |
+| `backup_point` | `backup_point_id` | バックアップ対象の時点、参照関係の対応付け、除外された項目（秘密情報、外部実体ファイルなど）、未完了処理の状況、成否結果、エラー情報、保管先ファイルパス、暗号化フラグ | D2 | データベース内の過去バックアップ一覧からレコードを削除しても、ユーザーが外部に退避したバックアップファイルまで消えたと見なしてはなりません。 | リストア時の選択画面や内容説明のために読み込みます。各部の一時ファイルコピーが成功したことだけを理由に「全体成功」と誤認しません。 |
+| `deletion_operation` | `operation_id` | 世代番号（GEN = `deletion_sweep_generation`）、削除の目的、対象の記述（機械的な検索条件は、削除操作の実行期間中のみ検索用トークンとして保持します。全域完了へ遷移する前にこのトークンを確実に除去または復元不能化し、完了記録や監査ログに対象本文を残しません。未完了の間に作成されたバックアップには復旧用として含めて構いませんが、トークンが復元可能な状態のまま「全域完了」として保存してはなりません）、意味的な条件、影響範囲、除外項目、要確認事項、有効期間（開始〜検証完了）、進行状態（`進行中 / 局所完了 / finalizing / pending / unreachable / failed / 全域完了`） | D3 | 削除完了後も、操作が行われた事実（目的、範囲、影響、除外、確認、結果）は監査ログとして残しますが、削除された本文自体は一切残しません。 | 再起動後に未完了の削除処理、必要な保留状態、再保存の防止フラグを正しく再構成します。`finalizing` の状態や、検索トークンがまだ復元可能な状態であれば、決して全域完了として扱いません。 |
+| `deletion_participant` | `(operation_id, participant_owner)` | 各サブシステム（参加者）での局所的な削除処理、残存検証、未完了事項、失敗、未確認範囲、報告日時 | D3 | 同上 | 全域完了を判定するための集約データとして読み込みます。一部の参加者から局所的な完了報告が返っただけで、全体の保留（hold）を解除してはなりません。 |
+| `erasure_condition` | `(operation_id, deletion_sweep_generation)` | 対象範囲のデータ利用や再保存を防止・制限するための制約条件、有効期間、完了境界。データ受入（ingestion）時の照合用インデックス | D3 | 全域完了が確定する前に有効期間を閉じ、復元可能な検索トークンを除去または復元不能化します。削除完了後にユーザーから新しく提供された情報は、新しい経験（新 Experience）として明確に区別します。 | 各サブシステムのデータ受入先や保存先が、現在進行中および finalizing 中の消去条件として読み込みます。検索トークンの消去が未完了である間は、保留（hold）を維持します。 |
+| `restore_operation` | `restore_id` | CORR → `backup_point_id`、GEN = `restore_generation`、リストア操作の受理、内容説明、ステージング隔離、整合性照合、データ置換、処理保留、一括有効化の対応関係、進行状態 | D3 | リストア完了後も、操作の事実は監査ログへ追記しますが、本文や秘密情報は残しません。 | 再起動後に、古い稼働データとの分離状態や処理の保留状態を正しく再構成します。 |
+| `restore_generation_state` | `singleton` | 現在のリストア世代番号（`restore_generation`。リストアが成功するたびに単調増加） | D1 | — | リストアされたデータと以前の古い稼働データを明確に区別し、古い参照（stale）を無効化するために読み込みます。 |
+| `reset_operation` | `reset_id` | 初期化種別（設定のみのリセット / 全データ初期化）、対象一覧、強い確認の記録、範囲、進行状態。クラッシュ後も確実に初期化を継続するための進行マーカー（ファイルシステム上のマーカーと併用し、DBファイル削除後も処理を継続可能にします） | D3 | 全データ初期化（Reset）が完了した後は、Host 内部のデータとともに本レコードも消去されます（外部ワークスペースや退避済みバックアップは保持）。 | 再起動後に初期化処理の継続や完了判定を正しく再構成します。 |
+| `audit_log` | `audit_seq`（監査ログ専用の連番。システム全体のグローバルバージョンではありません） | 発生元、事実の種別、秘密情報を含まない説明、削除対象本文を含まない記述、CORR → 対象の識別子（タスク、試行、操作、リストア等）、追記日時 | D2<br>（追記専用の記録） | 通常の保持管理および個人データ完全削除に参加します（残存している個人情報を確実に除去）。追記順序を、出来事の絶対的な発生順、現在有効な許可証、あるいはイベント再生用の入力として扱ってはなりません。 | ユーザーへの説明や監査検証のために読み込みます。本文をこっそり退避しておく別保管庫にしてはなりません。 |
+| `debug_capture` | `capture_id` | 明示的に指定された対象、キャプチャ内容、有効期限、停止・削除フラグ、進行状態 | D3<br>（短期間・明示的に有効化された場合のみ） | 有効期限切れ、停止、削除指示によって完全に除去します。認証情報や秘密情報を含めてはなりません。 | 障害診断のために読み込みます。通常のデータ保存の口実に流用してはなりません。 |
 
-`audit_seq` は Audit 追記順の確認のための scope 内順序であり、全 state 共通の snapshot id・transaction id・global version counter ではない。
+※ `audit_seq` は監査ログの追記順序を確認するためだけのログ専用連番であり、システム全体のあらゆる状態に共通するスナップショットID、トランザクションID、グローバルバージョン番号ではありません。
 
-#### Group K — Credential 参照・device-auth（保管 owner: 認証秘密。device trust の意味は権限・制約）
+#### Group K — Credential 参照・端末認証（保管担当: 認証秘密。端末信頼の意味は権限・制約）
 
-| logical table | PK | 主な field | durability | deletion | reconstruction source |
+| 論理テーブル名 | PK | 主なフィールド | 保存分類 | 削除時の動作 | 再構築の起点 |
 |---|---|---|---|---|---|
-| `credential_ref` | `credential_id` | 用途・参照元（非秘密）・有効性・登録・更新・失効の対応。秘密値を含めない。非秘密参照は backup の復元対象に含めるが、秘密値（E）は除外・維持し、復元後に現在の store と照合する | D1 | 全データ Reset で削除する。設定 Reset で維持する。Companion/Task 参照で全体へ cascade させない | 現在 store 照合・再認証要求として読む |
-| 秘密値本体 | `credential_id`（credential-store 側 key） | 値・用途限定利用 | E（OS credential store 等） | 失効・更新は別操作。内部露出 copy の消去と外部失効を混同しない | 認証用途に限定して利用する。model context・Tool argument・通常 result・UI・Learning・History・Task 結果・log・Audit・Debug・backup へ流さない |
-| Host device-auth record | pairing identity（store 側 key） | device 対応・Host 側所有証明検証材料（公開鍵等の非秘密材料も含む）・現在 trust 範囲（許可機能の上限）・有効/失効状態 | E（credential-store の device-auth 用途。Provider/MCP Credential と用途分離） | device 失効で検証材料を無効化・削除。機能失効は現在 trust 範囲にも適用。全データ Reset で trust・材料を削除、設定 Reset では維持 | backup 除外・Restore 非置換。E 側の有効材料なしには auth を拒否。DB の許可と現在 trust 範囲の両方を満たす機能だけ利用できる |
+| `credential_ref` | `credential_id` | 秘密情報を含まない用途、参照元、有効性、登録・更新・失効の対応記録。<br>※ パスワード等の秘密値本体は含めません。非秘密の参照レコードはバックアップの復元対象に含めますが、秘密値本体（E）はバックアップから除外・保護し、リストア後に現在のセキュアストレージと照合します。 | D1 | 全データ初期化（Reset）時に削除します。設定のみのリセットでは保持します。Companion やタスクの削除から、全体へ連鎖削除（cascade）させません。 | 現在のセキュアストレージとの照合や、再認証要求の必要性を判断するために読み込みます。 |
+| 秘密値本体 | `credential_id`（セキュアストレージ側のキー） | 秘密値データ、厳格に限定された用途定義 | E<br>（OS のセキュアストレージ等） | 失効や更新は独立した明示的な操作で行います。内部メモリで一時的に露出したコピーの消去と、外部サービス側での失効手続きを混同しません。 | 認証用途にのみ限定して使用します。モデルのプロンプトコンテキスト、ツールの引数、通常の結果表示、UI画面、学習記憶、会話履歴、タスク成果物、ログ、監査ログ、デバッグ出力、バックアップファイルへ絶対に流出させません。 |
+| Host 端末認証レコード（Host device-auth record） | ペアリング識別子（セキュアストレージ側のキー） | 端末との対応関係、Host 側での端末所有証明の検証材料（公開鍵などの非秘密材料を含む）、現在の信頼範囲（許可された機能の上限）、有効 / 失効状態 | E<br>（セキュアストレージ内の端末認証専用領域。プロバイダやMCPのAPIキーとは用途分離） | 端末のペアリング失効時に検証材料を無効化・削除します。機能の失効は現在の信頼範囲にも即座に適用します。全データ初期化で信頼範囲・検証材料を完全削除し、設定のみのリセットでは保持します。 | バックアップから除外され、リストアによっても上書きされません。セキュアストレージ側に有効な検証材料が存在しなければ、端末認証を拒否します。データベース側の許可レコードと、セキュアストレージ側の現在の信頼範囲の両方を満たす機能だけが利用できます。 |
 
-Client 固有の接続材料の秘密部分も同様に E とし、DB 側は非秘密の用途参照だけを持つ。
+※ Client 端末固有の接続秘密鍵なども同様に外部・認証情報ストア（E）に分類し、データベース側には秘密を含まない用途参照のみを保持します。
 
-device-auth の保護・検証材料保持は `ene-credential`、trust / 許可変更・失効の意味判断は `ene-permission`、現在接続・帰属への適用は `ene-presence` に残す。E 側 trust は権限・制約が決めた現在範囲の保持であり、認証秘密の独立許可判断ではない。既存の premise 供給・Host 媒介で接続し、owner 間の具体 crate 依存を追加しない。変更の完了は E 側 durable 更新と DB 側記録の対応が揃ってから返し、部分失敗では対象の利用を保留して再評価する。失効完了を DB flag だけで返さない。再 pairing は新 identity と Host PC 上の trusted first-party management surface の最終確認（IPC §18）を必要とし、旧 DB 行・旧材料を再有効化しない。
+端末認証の保護と検証材料の保持は `ene-credential`、端末の信頼範囲（trust）や許可変更・失効の意味判断は `ene-permission`、現在の通信接続や画面帰属への適用は `ene-presence` がそれぞれ担当します。セキュアストレージ側に保持される信頼範囲は、「権限・制約」サブシステムが決定した現在の有効範囲を安全に保持しているだけであり、認証秘密側が勝手に独立して認可判断を下すわけではありません。既存の前提知識の供給や Host の仲介を通じて連携し、サブシステム間に不要な具象クレートの依存関係を追加しません。設定変更の完了通知は、セキュアストレージ側の永続更新とデータベース側の記録の両方が揃って初めて呼び出し元へ返し、一部が失敗した場合は対象機能の利用を保留して再評価します。データベース上のフラグを書き換えただけで「失効完了」と報告してはなりません。端末の再ペアリングを行う場合は、新しいペアリング識別子を発行し、Host PC 上の信頼できる公式管理画面（trusted first-party management surface、IPC §18）でユーザーによる最終確認を必須とします。古いデータベース行や過去の鍵材料を勝手に再有効化してはなりません。
 
 ### 4.3 Rust persistence-facing type（例示）
 
-コンパイル対象の code ではなく、後続 interface で同義の改名は許すが型分離と field 意味は維持すること。`correspondence-identity.md` §5 の newtype 方針に従う。
+以下に示す Rust の構造体は、永続化層が保持すべきデータ項目のイメージを示すための概念的な型定義です。コンパイルを通すための確定コードではなく、後続のインターフェース設計で同等の意味を持つ名前に変更することは認められます。ただし、型の分離方針や各フィールドが担う意味は厳格に維持しなければなりません（[対応関係・識別 §5](correspondence-identity.md) の newtype 方針に従います）。
 
 ```rust
 struct TaskRow {
     task: TaskId,
-    revision: TaskRevision,              // D1 現在 + D2 履歴の対応
-    restore_generation: RestoreGeneration, // 復元跨ぎ参照の世代タグ（保全・消去 slice で導入）
-    purpose: TaskPurposeRef,             // 現在採用されている目的（steering 前後の区別）
-    purpose_text: TaskPurpose,           // 現在 revision の snapshot
+    revision: TaskRevision,              // D1（現在値）および D2（履歴）の対応
+    restore_generation: RestoreGeneration, // リストアを跨いだ古い参照を識別するための世代タグ（保全・消去スライスで導入）
+    purpose: TaskPurposeRef,             // 現在採用されている目的（方向転換 steering 前後の区別）
+    purpose_text: TaskPurpose,           // 現在リビジョンのスナップショット
     assignee: AssigneeRef,
-    progress: TaskProgress,              // 進捗・待機・完了・失敗・Cancel・結果・未完了・次の判断
+    progress: TaskProgress,              // 進捗、待機、完了、失敗、キャンセル、結果、未完了事項、次の判断
     delegation_scope: DelegationScopeRef,
 }
 
 struct ActionAttemptRow {
     attempt: ActionAttemptId,
-    task: Option<TaskRef>,               // Task revision 前提を含む。軽微 Action では None
-    prior_unknown: Option<ActionAttemptId>, // retry の元不明対応。新試行の証明
+    task: Option<TaskRef>,               // どのタスク改訂に基づくか（軽微な単発操作では None）
+    prior_unknown: Option<ActionAttemptId>, // リトライ時に「どの不明試行のやり直しか」を示す紐付け
     real_target: RealTargetRef,
     operation: OperationKind,
-    relied_evaluation: PermissionEvaluationId, // 生きた許可ではない
-    certainty: ActionCertainty,          // Unknown 粘着。owner の新 evidence でのみ更新
+    relied_evaluation: PermissionEvaluationId, // 依拠した権限評価（過去ログであり、現在有効な許可証ではない）
+    certainty: ActionCertainty,          // 結果不明（Unknown）の粘着保持。担当責任者の新証拠でのみ更新
     presence_generation: PresenceGeneration,
     restore_generation: RestoreGeneration,
 }
@@ -283,287 +285,304 @@ struct PresenceRow {
     companion: CompanionId,
     state: PresenceState,
     active_client: Option<ClientId>,
-    generation: PresenceGeneration,      // 単調。値の新旧ではなく区間の識別
+    generation: PresenceGeneration,      // 単調増加する世代番号（値の新旧ではなく、切替区間の識別）
 }
 
 struct DeletionOperationRow {
     operation: DeletionOperationId,
     sweep: DeletionSweepGeneration,
-    // 機械的条件の検索 token は操作期間だけ保持する。
-    // 全域完了を durable に確定する前に除去または復元不能化し、
-    // 完了記録・Audit へ対象本文を残さない。
-    mechanical_search: Option<SealedSearchToken>, // 要暗号化・操作期間限定
-    semantic_hint: Option<SemanticHintRef>,       // 完全性を保証しない
+    // 機械的な検索トークンは、削除操作の実行期間中のみ保持します。
+    // 全域完了を確実に確定する前にトークンを除去または復元不能化し、
+    // 完了記録や監査ログ（Audit）に対象本文を残しません。
+    mechanical_search: Option<SealedSearchToken>, // 暗号化等で保護され、操作期間限定で保持
+    semantic_hint: Option<SemanticHintRef>,       // 意味的なヒント（完全な網羅性は保証しない）
     valid_interval: ErasureInterval,
-    status: OperationStatus,             // 進行中/局所完了/finalizing/pending/unreachable/failed/全域完了を潰さない
+    status: OperationStatus,             // 進行中 / 局所完了 / finalizing / pending / unreachable / failed / 全域完了を混同しない
 }
 
 struct RestoreOperationRow {
     restore: RestoreId,
     backup_point: BackupPointId,
-    generation: RestoreGeneration,       // 成功ごとに前進。旧 live 分離用
+    generation: RestoreGeneration,       // リストア成功ごとに前進し、古い稼働データと分離
     status: OperationStatus,
     hold: HoldConditionRef,
 }
 ```
 
-`SealedSearchToken` の実装（暗号化・hash・平文の扱い）は固定しない。固定するのは「完了記録・Audit・説明へ対象本文を戻さない」「全域完了を durable に確定する前に検索 token を除去または復元不能化する」「token が復元可能な間は operation / hold を未完了として復旧できる」「token 保持中も通常 model context・他個体・外部送信へ渡す権限が生じない」ことである。
+※ `SealedSearchToken` の具体的な実装方式（暗号化、ハッシュ化、メモリ上での平文保持など）は固定しません。本書で固定する要件は、「完了記録、監査ログ、ユーザー向け説明に対象本文を戻さないこと」「全域完了をディスクに確定する前に、検索トークンを確実に除去または復元不能化すること」「トークンが復元可能な間は、削除操作や保留状態を未完了として正しく復旧できること」「トークンを保持している間であっても、通常のプロンプトコンテキストや他個体への提供、外部送信へ流用する権限は一切生じないこと」の4点です。
 
 ### 4.4 所有・durability matrix（要約）
 
-| storage technology | 入る group | owner は統合されるか | backup に含めるか |
+| ストレージ技術 | 格納されるテーブルグループ | 担当責任者（owner）は統合されるか | バックアップに含めるか |
 |---|---|---|---|
-| Host SQLite `app.db`（durable） | A〜K の D1/D2/D3（秘密値・blob 本体・derived を除く） | いいえ。table group ごとに owner を明示する。transaction 共有は mechanism であり ownership ではない | はい（D1/D2/D3 の対応を復旧可能な形で。secret・外部実体・derived・transient を除く） |
-| Host SQLite `derived.db` / 同技術の derived group（sqlite-vec 含む） | R（embedding / index / score / cache / 有効経路 / 集計） | いいえ。元 state の owner が対応・利用範囲を説明する | いいえ。再構築可能なので含めない |
-| filesystem `internal_copies/` | D1 の blob 本体（内部 copy・中間 file） | いいえ。意味は作業等に残る | 内容を含める（Task 内部 data。外部 Workspace 実体は収集しない） |
-| credential store（OS 分離） | E の秘密値・Client 接続材料の秘密部分・Host device-auth record（非秘密検証材料も含む） | 保管・保護は認証秘密。device trust の意味判断は権限・制約のまま | いいえ。除外し Restore で巻き戻さない |
-| filesystem `*.ene-backup` | portable full backup copy（外部 copy） | いいえ。live 正本ではない | 自身が backup である。内部削除で copy も消えたとしない |
-| Client / Provider / MCP / 外部 file | T / R の一時・派生・外部所有 | いいえ。Client・Provider・MCP を正本・owner にしない | いいえ（外部 copy 消去を内部完了に含めない） |
+| **Host SQLite `app.db`**<br>（永続データ） | Group A〜K の D1 / D2 / D3<br>（秘密情報、大きなバイナリ本体、派生データを除く） | **いいえ。** テーブルグループごとに担当責任者を明確に分けます。同一トランザクションを共有できるのは実装技術の都合であり、責任の統合ではありません。 | **はい。** D1 / D2 / D3 の紐付け対応関係を復旧可能な形で含めます（秘密情報、外部実体、派生データ、一時データを除く）。 |
+| **Host SQLite `derived.db`**<br>（sqlite-vec を含む派生データ） | Group R<br>（ベクトル埋め込み、検索インデックス、類似度スコア、キャッシュ、有効経路、画面集計など） | **いいえ。** 元となるデータの担当責任者が、対応関係と利用可能範囲を説明します。 | **いいえ。** マスターデータからいつでも再構築できるため、バックアップには含めません。 |
+| **ファイルシステム `internal_copies/`** | D1 のバイナリ本体<br>（タスクの内部コピー、中間ファイル） | **いいえ。** そのデータが持つ業務上の意味は「作業」サブシステム等に残ります。 | **はい。** タスク内部の作業データとして内容を含めます（外部ワークスペース内のユーザー実体ファイルは収集しません）。 |
+| **OS セキュアストレージ**<br>（OS 分離保管層） | Group E の秘密情報<br>（APIキー等の秘密値、Client接続秘密鍵、Host端末認証レコードと非秘密の検証材料） | 保管と保護は「認証秘密」が担いますが、端末の信頼範囲（trust）の意味判断は「権限・制約」が保持します。 | **いいえ。** バックアップから完全に除外し、リストアによっても過去の状態へ巻き戻しません。 |
+| **ファイルシステム `*.ene-backup`** | ポータブルなフルバックアップファイル<br>（外部コピーファイル） | **いいえ。** 稼働中のマスターデータ（正本）ではありません。 | **本ファイル自身がバックアップです。** 内部でデータを削除したからといって、すでに作成されたバックアップコピーまで消えたと見なしません。 |
+| **Client / Provider / MCP / 外部ファイル** | T / R の一時データ、派生データ、外部の所有物 | **いいえ。** Client、プロバイダ、MCP をシステムのマスターデータや担当責任者にはしません。 | **いいえ。** 外部のコピーを消去することは、システム内部の削除完了には含まれません。 |
 
 ## 5. Derived data の扱い
 
-性能目的の derived を第二の正本にしない。
+処理速度や検索性能の向上のために生成される派生データ（derived data）を、「第二の正本」に格上げしてはなりません。
 
-| derived | primary（再構築元） | durable primary として保存するか | invalidation / revision relation | 備考 |
+| 派生データ種別 | 再構築の元となるマスターデータ | 永続マスターデータ（D1）として保存するか | 無効化（invalidation）と改訂の対応 | 備考 |
 |---|---|---|---|---|
-| embedding / search index / similarity / retrieval score | 認識・学習等の検索対象（Memory・Summary・History 等） | いいえ（R） | 対象の `(id, revision, scope, 利用制限)` + `restore_generation` + 消去条件 `(operation, sweep, valid_interval)`。hit を理由に source 参照・制約確認を省かない | 派生物がなくても正本は失われない。訂正・scope 変更・targeted deletion へ参加する。古い index から権限・状態を復活させない |
-| Prompt cache / Provider session / Provider 向け一時 context | 論理的 context（用途・選択方針）+ 現在 assignment・同意 | いいえ（R/T） | 用途・data・送信先・同意・費用・保留・帰属・消去条件。hit/miss・期限切れで論理 context・権限・永続化契約を変えない | Provider 側にしか継続状態が残らない構造を作らない。現在使えない情報を含む session を再利用しない |
-| 有効 Provider 経路・次回 Schedule 表示・費用集計・負荷表示 | 割当同意・時刻条件・利用事実 | いいえ（R） | 同意 revision・時刻条件・利用事実の対応。古い派生値を独立正本として編集しない | 導出値であり保存条件・利用可能額の正本ではない |
-| Task 進捗表示・由来説明・報告用要約・Body・Voice 出力 | Task 記録・作用確定度・Memory 等の domain 正本 | いいえ（R） | 元 record の `(id, revision)` + 現在条件。要約・演出で確定度を強めない | 表現の成功・失敗と元の成功を混同しない |
-| Observer 限定 routing 文脈 | History・個体文脈（個体調整）・Memory・Learning（認識・学習）・Task context（作業。個体調整–作業協調経由） | いいえ（R/T。一時的な派生表現） | 元情報・対象 Companion・用途・制約の対応 + `presence_generation` + 選択時前提 + 消去・失効条件。scope 変更・同意失効・消去を生成済み要約・処理中結果にも適用する | 新正本・新 scope・包括共有にしない。混合生成文しかなく分離を確認できなければ個体へ渡さない |
-| 解決済み割当経路 | 登録・能力観測（推論）+ 割当同意（権限・制約） | いいえ（R） | 同意・登録の現在性。設定・同意変更後も以前の選択を有効とする根拠にしない | 独立した利用可能 assignment の正本にしない |
+| **ベクトル埋め込み / 検索インデックス / 類似度スコア** | 「認識・学習」等の検索対象データ（記憶、学習サマリー、会話履歴など） | **いいえ**（R: 派生データ） | 対象の `(id, revision, scope, 利用制限)` ＋ `restore_generation` ＋ 消去条件 `(operation, sweep, valid_interval)`。<br>※ 検索でヒットしたことだけを理由に、元のデータの参照や制約の再確認を省略してはなりません。 | 派生データが消失しても、マスターデータ自体は失われません。記憶の訂正、スコープ変更、個人データ完全削除に確実に参加します。古い検索インデックスから、過去の権限や状態を勝手に復活させてはなりません。 |
+| **プロンプトキャッシュ / プロバイダセッション / 推論用一時コンテキスト** | 論理的なコンテキスト（用途、選択方針）＋ 現在の機能割当・同意 | **いいえ**（R/T: 派生・一時データ） | 用途、送信データ、送信先、ユーザー同意、許容費用、保留状態、帰属関係、消去条件。<br>※ キャッシュのヒット/ミスや有効期限切れを理由に、論理コンテキストや権限、永続化契約を変更してはなりません。 | プロバイダ側にしかセッション状態が残らないような脆弱な構造を作ってはなりません。現在利用できない情報が含まれている過去のセッションを再利用してはなりません。 |
+| **有効なプロバイダ経路 / 次回スケジュール表示 / 費用集計 / 負荷表示** | 割当同意、実行時刻条件、利用実績の事実 | **いいえ**（R: 派生データ） | 同意改訂番号、時刻条件、利用実績との対応関係。<br>※ 古い派生表示値を、独立したマスターデータとして直接編集してはなりません。 | あくまで計算された導出値であり、保存条件や利用可能残額のマスターデータではありません。 |
+| **タスク進捗表示 / 由来説明 / 報告用要約 / 立ち絵・音声出力** | タスク記録、アクション確定度、記憶などの各ドメインのマスターデータ | **いいえ**（R: 派生データ） | 元レコードの `(id, revision)` ＋ 現在の最新条件。<br>※ 要約表現や演出の都合で、元のアクション確定度を勝手に強い表現に書き換えてはなりません。 | 画面表示や音声出力が成功したことと、元のアクション自体が成功したことを混同しません。 |
+| **Observer 限定ルーティング文脈** | 会話履歴・個体文脈（個体調整）、記憶・学習（認識・学習）、タスクコンテキスト（作業。個体調整と作業の協調仲介を経由） | **いいえ**（R/T: 一時的な派生表現） | 元情報、対象 Companion、用途、制約の対応 ＋ `presence_generation` ＋ 選択時の前提条件 ＋ 消去・失効条件。<br>※ スコープ変更、同意失効、完全削除は、生成済みの要約や処理中の結果にも直ちに適用します。 | 新たなマスターデータや新しいスコープを作ったり、包括的な情報共有の抜け道にしたりしません。複数の個体情報が混ざった要約文しか存在せず、個別の情報を安全に分離できる確証がない場合は、個体へ渡してはなりません。 |
+| **解決済みの割当経路** | プロバイダ登録情報・能力観測（推論）＋ 割当同意（権限・制約） | **いいえ**（R: 派生データ） | 同意およびプロバイダ登録の現在性。<br>※ 設定や同意が変更された後も、過去の解決結果を有効とし続ける根拠にはできません。 | 独立した「利用可能な機能割当」の正本にしてはなりません。 |
 
-derived の生成・保持・破棄を行う責務が、元 state との対応と利用範囲を説明し、訂正・scope 変更・targeted deletion へ参加する。具体的な無効化・再計算方式は固定しない。
+派生データの生成、保持、破棄を行う責務は、常に「元となったマスターデータとの対応関係」と「利用可能な範囲」を説明できなければならず、マスターデータの訂正、スコープ変更、個人データ完全削除の要求へ誠実に応じる必要があります。具体的なキャッシュ無効化や再計算のアルゴリズムは実装の自由度とします。
 
 ## 6. Recovery — restart / crash 後に何を読んで何を再構成するか
 
 ### 6.1 Recovery 原則
 
-1. **保存した派生物を材料にできても、旧要求の実利用許可・旧実行をそのまま再開しない。**
-2. **途中 Task は明示再開待ち、Schedule は将来回の通常判定、Running presence は元 Client への復旧**というそれぞれの既存条件に従う。通常再起動を restore のような一律の復元内容確認へ拡大しない。
-3. **不明は不明のまま、未完了は未完了のまま、保留は保留のまま**再構成する。再起動・再接続・restore を完了・解除・成功の根拠にしない。
-4. **復旧先・hint・Client 表示・過去帰属・Provider 残存だけで presence・許可・実行を成立させない。** 現在の接続・許可・排他性を確認できて初めて成立する。
-5. **復元成立と実行再有効化は別々に確認する。** 復元成立だけでは自動処理を開始しない。
+1. **保存された派生データを再構成の材料として利用できても、過去の要求に対する実利用許可や実行処理をそのまま自動再開してはなりません。**
+2. **「中断したタスクはユーザーの明示的な再開指示を待つ」「定期スケジュールは将来の実行回を通常どおり判定する」「実行中だった個体は元の Client 画面への復旧を試みる」という、それぞれの既存の個別ルールに従います。** 通常のプロセス再起動を、バックアップリストアのような大掛かりな「復元内容の全件再確認」へ無差別に拡大してユーザーの手間を増やすことはしません。
+3. **結果不明なものは「不明」のまま、未完了のものは「未完了」のまま、保留中のものは「保留」のまま正しく復元します。** システムが再起動したことや再接続したこと、リストアが完了したことを理由に、「処理が完了した」「保留が解除された」「成功した」と勝手に都合よく解釈してはなりません。
+4. **再配置ヒント、過去の画面表示、過去の帰属記録、プロバイダ側の残存セッションが存在することだけで、現在の画面帰属、実行権限、アクション実行を勝手に成立させてはなりません。** 現在の通信接続、最新の権限、排他制御を改めて確認できて初めて成立します。
+5. **復元の成立と、処理の再有効化は別々に確認します。** データの読み込みや復元が完了したことだけで、自動的な処理をいきなり開始してはなりません。
 
 ### 6.2 Recovery matrix
 
-| 対象 | 読む durable（Host） | 再構成する runtime | 自動実行してよいか |
+| 対象 | 読み込む永続データ（Host側） | 再構成する実行時状態（runtime） | 自動実行してよいか |
 |---|---|---|---|
-| Running Companion の presence | `presence_attribution` + `relocation_hint`/`client_last_connection` + 現接続・許可・排他性の live 確認 | 現在帰属（Present / NoActive / RecoveryWait）。元 Client が利用可能なら自動復元し、できなければ active なしで待つ | presence 復旧のみ自動でよい。別 Client への無条件移動・Stopped への適用・Host 側 Client 自動起動はしない。Task・Action の再開権限にしない |
-| Stopped Companion | `companion`（Stopped）+ `presence_attribution`（Stopped） | presence なし・Observer 人数外・routing 対象外。hint は再配置候補のまま | 自動復旧しない。接続回復だけで Resume・再配置しない |
-| 現在 presence attribution | `presence_attribution`（state + generation）+ `presence_transition_log` | 切替区間の区別（旧/移行中/新/active なし/停止中/復旧待ち）。移行中に crash したら active なし起点で扱い新旧いずれも新規開始しない | 切替の自動継続をしない。旧 in-flight は安全な区切りまで、旧作用の別 Client 自動継続をしない |
-| Task / Schedule | `task` + `task_revision` + `task_context_entry` + `workspace_assoc` + `schedule` + `schedule_occurrence` + `restore_generation_state` | 保存済み進捗・既知作用・不明・未完了・判断待ち・missed/Started の対応。次回表示は保存条件＋現在日時・tz から導出する | 自動再開しない。明示再開と現在条件（担当・Permission・同意・cap・Workspace・Client 依存・不明 risk）を必要とする。停止中の回は missed のまま自動補完しない |
-| 委任された作業 | `delegation` + `task` | 委任範囲・進捗・待機・停止・受領の対応。Agent 一時 context は失われたものとして扱う | Agent を自動再起動しない。Task 記録が残るだけで Agent を再起動しない。新委任は新 Task revision 前提で開始する |
-| Unknown Action | `action_attempt`（`Unknown` + 根拠対応・hold + `prior_attempt` 対応 + generation タグ） | Unknown の保持・既知作用の説明・重複 risk の提示 | 自動再実行・replay しない。不明試行の再実行は重複 risk を示した Owner 判断を必要とし、新 `attempt_id` とする。確認済み失敗と不明を同じ retry 経路へ潰さない |
-| 未伝達（undelivered） | `undelivered` + `history_message` / `task`（元 record）+ 報告状況 | 未伝達一覧・要約報告材料。次 Client で現在の結果・利用制限・削除状況へ照合して報告する | 自動報告済みにしない。接続・表示 copy 送信・Task 完了だけで報告済みにしない。提示不明を保持する |
-| 削除 operation | `deletion_operation` + `deletion_participant` + `erasure_condition` | 未完了範囲・必要な保留・再保存防止・pending/unreachable/failed/finalizing の区別。検索 token が復元可能なら finalization 未完了として扱う | 自動完了・自動解除しない。検証と最終消去を継続する。局所結果返却で hold を解除しない。検索 token の除去・復元不能化前に全域完了へ遷移しない。完了後に削除前根拠だけによる再形成・遅延再保存を防ぐ |
-| 復元 operation | `restore_operation` + `restore_generation_state` + `backup_point` | 旧 live 分離（`restore_generation`）・受理・説明・保留・一括有効化の対応。置換成立前は復元前正常が正本、成立後は復元内容が正本 | 置換成立前は旧正常を破壊しない。成立後も自動処理を開始しない。部分置換を新正本にしない。再起動で保留を解除しない |
-| retention / reset 等の全域操作 | `retention_policy` + `capacity_policy` + `reset_operation`（+ filesystem marker）+ `deletion_operation` / `restore_operation` | 未完了・保留・再保存防止の維持。設定 Reset の保護対象と全データ Reset の外部除外の区別 | 未完了を完了としない。全データ Reset の途中で再起動しても旧処理・一時 copy から復活させない。到達不能 Client の物理消去を確認済みにしない |
-| 現在 Character 適用 revision | `character_revision` + `companion_applied_current` + `OwnerSelectionRef` | 現在適用関係。未適用 revision は未適用のまま | 自動適用しない。Package 更新を成長の初期化にしない。適用禁止種別を authority にしない |
-| Learning 現在・revision | `memory_current` + `memory_revision` + `skill_current`/`skill_revision` + `relationship_current`/`history` + `companion_state` + `summary` + `summary_grounds_link` | 現在認識・過去 revision・根拠・誤訂正 vs 時間変化の区別・scope | 遅延形成が現在を無条件上書きしない。到着順を根拠の新旧にしない。古い根拠だけによる自動再形成をしない |
+| **実行中（Running）の Companion の画面帰属** | `presence_attribution` ＋ `relocation_hint` / `client_last_connection` ＋ 実際の通信接続・端末許可・排他性のリアルタイム確認 | 現在の帰属状態（`Present / NoActive / RecoveryWait`）。元の Client が利用可能であれば自動復旧し、利用できなければ「画面なし（`NoActive`）」で待機します。 | **画面帰属の復旧のみ自動で構いません。** 別の Client への無条件な勝手移動、停止中（Stopped）個体への適用、Host 側 Client プロセスの勝手な自動起動は行いません。タスクやアクションの再開権限を勝手に与える根拠にもしません。 |
+| **停止中（Stopped）の Companion** | `companion`（Stopped）＋ `presence_attribution`（Stopped） | 画面帰属なし、Observer の参加人数外、メッセージ配信対象外。再配置ヒントは単なる候補情報のまま保持します。 | **自動復旧しません。** 通信接続が回復したことだけで勝手に再開（Resume）させたり再配置したりしません。 |
+| **現在の帰属状態の遷移** | `presence_attribution`（状態 ＋ 世代番号）＋ `presence_transition_log` | 画面切り替えの区間識別（旧画面 / 移行中 / 新画面 / アクティブなし / 停止中 / 復旧待ち）。画面移行の途中でクラッシュした場合は、再起動後は「アクティブなし」を起点として扱い、新旧どちらの画面でも新規処理を開始しません。 | **切り替え処理の自動継続はしません。** 移行前に進行中だった処理は安全な区切りで終了させ、過去の処理を別の画面で勝手に自動継続させません。 |
+| **タスク / 定期スケジュール** | `task` ＋ `task_revision` ＋ `task_context_entry` ＋ `workspace_assoc` ＋ `schedule` ＋ `schedule_occurrence` ＋ `restore_generation_state` | 保存済みの進捗、確定した外部作用、結果不明事項、未完了事項、人間の判断待ち、スキップまたは開始されたスケジュールの対応。次回の日時表示は、保存された条件と現在の日時・タイムゾーンから動的に導出します。 | **自動再開しません。** ユーザーからの明示的な再開指示と、現在の前提条件（担当個体、権限、同意、利用上限、ワークスペース状態、Client依存、二重実行リスク）の再確認を必須とします。停止中にスキップされた回（missed）を勝手に後から自動実行して埋め合わせることはしません。 |
+| **委任された作業** | `delegation` ＋ `task` | 委任の対象範囲、進捗、待機、停止、受領の対応関係。サブエージェントの一時メモリ（context）は失われたものとして扱います。 | **サブエージェントを自動再起動しません。** データベースにタスク記録が残っていることだけを理由に、エージェントを勝手に起動しません。新しい委任は、新しいタスク改訂に基づいて開始します。 |
+| **結果不明（Unknown）なアクション** | `action_attempt`（`Unknown` ＋ 判断根拠・保留 ＋ `prior_attempt` 対応 ＋ 世代タグ） | 結果不明状態の保持、既知の外部作用の説明、二重実行リスクの画面提示 | **自動再実行やリプレイは絶対に行いません。** 不明な試行をやり直すには、二重実行のリスクをユーザーに明示した上での判断を必須とし、新しい `attempt_id` を発行します。「確認された失敗」と「結果不明」を同じ安易なリトライ処理にひとまとめにしてはなりません。 |
+| **未伝達の通知（undelivered）** | `undelivered` ＋ `history_message` / `task`（元の発生記録）＋ 報告状況 | 未伝達の通知一覧、要約報告用の材料。次に Client が接続してきた際に、現在の最新状況・制約・削除状態と照合して要約報告します。 | **勝手に「報告済み」にしてはなりません。** 通信が繋がったこと、表示用コピーを送信したこと、タスクが完了したことだけで報告完了とみなしてはなりません。画面に提示できたか不明な状態を厳格に保持します。 |
+| **個人データ完全削除の操作** | `deletion_operation` ＋ `deletion_participant` ＋ `erasure_condition` | 未完了の範囲、必要な保留状態、再保存の防止フラグ、未到達・失敗・最終処理中（finalizing）の区別。検索トークンがまだ復元可能な状態であれば、最終処理が未完了として扱います。 | **勝手に「完了」とみなしたり、保留を解除したりしません。** 残存検証と最終消去処理を継続します。一部の参加者から局所的な報告が返っただけで全体の保留を解除してはなりません。検索トークンの除去・復元不能化が完了する前に全域完了へ遷移してはならず、削除前の古い根拠だけによる再学習や遅延再保存を確実に防ぎます。 |
+| **リストア操作** | `restore_operation` ＋ `restore_generation_state` ＋ `backup_point` | 古い稼働データとの分離（`restore_generation`）、操作の受理、内容説明、処理保留、一括有効化の対応関係。データの置き換えが成立する前は「リストア前の正常状態」がマスターデータであり、置き換え成立後は「復元されたデータ」がマスターデータとなります。 | **置き換えが成立する前に、リストア前の正常データを破壊してはなりません。** 置き換え成立後であっても、自動処理を勝手に開始しません。中途半端な部分置き換え状態を新しいマスターデータにしてはならず、再起動によって保留状態を勝手に解除しません。 |
+| **保持期間整理や初期化等の全域操作** | `retention_policy` ＋ `capacity_policy` ＋ `reset_operation`（＋ ファイルシステム上のマーカー）＋ `deletion_operation` / `restore_operation` | 未完了状態、保留状態、再保存防止の維持。設定のみのリセットで保護すべき対象と、全データ初期化で外部に残す対象の厳格な区別 | **未完了の処理を「完了した」とみなしてはなりません。** 全データ初期化の途中で再起動した場合であっても、過去の処理や一時コピーからデータを勝手に復活させてはなりません。通信できない Client 端末の物理消去を確認できたと偽ってはなりません。 |
+| **現在の Character 適用改訂** | `character_revision` ＋ `companion_applied_current` ＋ `OwnerSelectionRef` | 現在の適用構成。まだ適用されていない新しい改訂は未適用のまま保持します。 | **自動適用しません。** パッケージの更新によって、キャラクターの成長記録を勝手に初期化してはなりません。適用が禁止されている種別のデータを、権限の正本として扱ってはなりません。 |
+| **記憶・学習の現在値と改訂** | `memory_current` ＋ `memory_revision` ＋ `skill_current` / `skill_revision` ＋ `relationship_current` / `history` ＋ `companion_state` ＋ `summary` ＋ `summary_grounds_link` | 現在の有効な認識、過去の改訂履歴、判断根拠、「間違いの訂正」と「時間の経過による変化」の区別、適用スコープ | **遅れて届いた古い学習処理が、現在の最新認識を無条件に上書きしてはなりません。** データの到着順序を根拠の新旧と混同せず、削除された古い根拠だけに基づいて自動的に再学習させてはなりません。 |
 
-Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の未完了を保全し、外部作用が Host と同時に消えると推定しない。一時 buffer の消失は成功・完了の根拠にしない。
+※ Host がシャットダウンした場合であっても、必要な進捗状況、外部作用の結果不明状態、未伝達の通知、全域操作の未完了状態は確実に保護され、「Host の電源が切れたから外部への作用も消滅したはずだ」などと勝手に推定してはなりません。メモリ上の一時バッファが消えたことを、処理の成功や完了の根拠にしてはなりません。
 
-再起動時、および Agent 停止で所有 in-flight を失った `Reserved` は、当該利用 owner の再評価経路が元の reservation・利用対応を読み、IB K-G `CommitUsageCommand(actual = 不明)` で `Committed / Unknown` に確定する（CCT §9.2）。release・ゼロ化せず、cap 集計に引き続き含める。不明消費と孤立理由を費用管理面で報告値と区別して示し、安全継続不能なら停止・Owner 判断待ちとする。具体的な Owner の扱い・表示方式はこの非ゼロ化契約内の Freedom とする。
+再起動時、およびサブエージェントの停止によって実行中のまま孤立してしまった費用の予約枠（`Reserved`）については、各利用担当の再評価処理が元の予約情報と利用実績を読み込み、インターフェース境界 K-G の `CommitUsageCommand(actual = 不明)` によって「確定・結果不明（`Committed / Unknown`）」として確定させます（[Concurrency Control §9.2](concurrency-control.md) 参照）。これを勝手に解放（release）したりゼロにリセットしたりせず、利用上限（cap）の集計に引き続き算入します。結果不明な消費量と孤立した理由は、費用管理画面において通常の確定報告値と明確に区別してユーザーに提示し、安全な継続が困難な場合は処理を停止してユーザーの判断を待ちます。画面での具体的な表示レイアウトやユーザーへの提示文は、この「勝手にゼロにリセットしない」という契約を守る範囲内での設計自由度（Freedom）とします。
 
 ### 6.3 再開してよいもの / 復旧するだけで自動実行してはいけないもの
 
-- **自動でよい**: Running presence の元 Client への復旧（確認できた場合）、Host 完結の許可済み Task・Schedule・保存の継続（active なしでも継続できる範囲）、将来 Schedule 回の通常判定、未完了消去・復旧の保留の維持（守るための継続）。
-- **復旧するだけで自動実行してはいけない**: 途中 Task の実行再開（明示再開待ち）、委任 Agent の再起動、Unknown Action の再実行・replay、Schedule missed の補完、復元後の Task・Schedule・外部接続の自動処理（復元後保留＋一括有効化待ち）、停止中個体の再開・再配置、Client 依存の対話・操作の新規開始（現在帰属・許可の確認なしには開始しない）、削除前根拠だけによる Learning 再形成、古い判定・解決済み経路だけによる新規利用。
+- **自動で再開・復旧してよいもの**:
+  - 実行中（Running）だった個体の画面帰属の元 Client への復旧（通信接続や排他制御が確認できた場合）。
+  - Host 内部で完結し、すでに承認済みのタスク、定期スケジュール判定、データ保存処理の継続（画面なしの状態でも安全に継続できる範囲）。
+  - 将来の定期スケジュール実行回の通常判定。
+  - 未完了の個人データ完全削除やリストアにおける、保留状態（hold）の維持（安全を守るための保護の継続）。
+- **復旧するだけで、自動実行してはならないもの**:
+  - 途中で中断したタスクの実行再開（ユーザーの明示的な再開指示を待つ）。
+  - 委任されたサブエージェントの勝手な自動再起動。
+  - 結果不明（Unknown）なアクションの勝手な自動再実行やリプレイ。
+  - 停止中にスキップされた定期スケジュール回（missed）の勝手な後追い実行。
+  - リストア完了直後のタスク、スケジュール、外部通信の自動処理（リストア後保留を維持し、ユーザーによる一括有効化を待つ）。
+  - 停止中（Stopped）の個体の勝手な再開や画面再配置。
+  - Client 画面に依存する対話や操作の新規開始（現在の画面帰属や権限を再確認するまでは開始しない）。
+  - 削除前の古い根拠データだけに基づく学習・記憶の自動再形成。
+  - 過去の古い権限判定や解決済み通信経路だけに基づく新しい外部利用。
 
 ## 7. Update and consistency boundaries
 
-すべてを一つの global transaction へまとめない。一方で途中で壊れると意味が成立しない更新については atomicity / ordering / durable-before-visible を明確にする。具体的な transaction library・lock 方式は後続でもよい。共有 SQLite transaction は mechanism であり ownership の統合ではない。
+システム全体のあらゆる更新を、ひとつの巨大なグローバルトランザクションにまとめるような過剰設計は行いません。その一方で、「更新の途中でクラッシュした場合に、データの意味が破綻してしまう組み合わせ」については、トランザクションの原子性（atomicity）、処理の順序（ordering）、公開前に保存を完了する原則（durable-before-visible）を厳格に定義します。具体的なトランザクションライブラリやロックの仕組みは実装の自由度としますが、同じ SQLite ファイルのトランザクションを共有することは単なる「実装メカニズムの共有」であり、担当責任（ownership）の統合ではないことを明確にします。
 
 ### 7.1 Atomicity / ordering 要件表
 
-| 更新 | 整合していなければならない property | 要求する性質 | 備考（owner を統合しないための分離） |
+| 更新処理 | 整合していなければならないプロパティ | 要求される性質（原子性・順序） | 備考（担当責任を混同しないための分離） |
 |---|---|---|---|
-| Conversation / History 記録と Learning 形成 | History 原 record・活動 record・Summary・Memory revision・根拠対応・scope・保存禁止・非共有・消去条件 | History append と未伝達登録（該当時）は同一 durable transaction で原子にする（§7.2 AU1）。Learning 形成は別 transaction とし、History durable 後に認識・学習が現在認識・根拠へ照合して採否を決める。到着順を根拠の新旧にしない | 会話受付・History・Learning 更新完了を同一条件にしない。全状態の同時更新を要求しない |
-| Task / delegation / steering | Task 現在・Task revision・Task context entry・Workspace 関連付け・委任 scope・steering 前提・Permission 現在条件 | Task 作成時は task + task_revision + 初期 task_context_entry を原子にし、Workspace 関連付けを確定した場合は workspace_assoc を含める。commit 前は委任・実行から不可視にする（durable-before-visible）。steering は新 revision + 新 context の原子 forward とし、旧目的の結果を新目的に自動採用しない。委任は `expected_task_revision` の atomic compare を満たして作成する | Task 達成判断（作業）と作用確定度（実行・拡張）と許可確定（権限・制約）を同一 transaction にしない。attempt 確定後に Task が別途読み取って達成を更新する |
-| Action attempt / effect / outcome | attempt・Task revision 前提・委任 scope・実対象・操作種別・依拠 Permission・段階・確定度・根拠・hold・presence/restore generation | attempt insert は Task revision 前提・委任有効性・実対象解決・現在許可の照合を満たして原子にする。確定度 `Unknown→Confirmed` は新 evidence との原子更新とし、owner 以外は独立更新しない。retry は `prior_attempt` 対応付きの新 row とし旧 row を上書きしない | Task 側の確定度独立更新をしない。Agent 申告を証拠にしない。Task 達成・報告は別受入とする |
-| Permission / usage / cap | Rule revision・同意 revision・device・cap 定義・利用事実（報告/不明/処理中の別）・失効・停止・保留 | 評価時は保存 Allow・委任時 copy・事前判定・復元 Rule・context 内許可文・cache 判定を現在許可として再利用しない。並列消費は同一 SQLite transaction 内で利用事実の atomic insert + cap 照合を行い、同一残額の独立使い切りを許さない（mechanism 共有であり owner 統合ではない）。処理中・不明をゼロにしない | 利用事実の原記録は各 owner に残し、権限・制約は可否だけを管理する。Task・推論側に独立許可・使用実績の正本を作らない |
-| presence attribution / generation | 帰属 state・active_client・presence generation・現接続・許可・排他性・hint・復旧先 | 帰属切替は `expected_generation + expected_state` の atomic compare による `旧→移行中→新` の durable 遷移とし、新旧いずれも新規開始しない区間を保つ。hint・復旧先の更新と帰属成立を同一視しない。現在接続を古い保存値から再成立させない | 帰属成立（接続・存在）と移動必要性（個体調整）と許可確定（権限・制約）を同一更新にしない。live 到達性は DB 外の確認であり DB atomic に含めない |
-| undelivered 登録 / delivery 確定 | History / Task 元 record・未伝達必要内容・報告状況・提示状況・帰属・消去条件 | 会話由来の登録は History append と原子にする。Task 由来の登録は Task 結果 durable 後の別 transaction で `undelivered` を原子に登録し、Task durable→未伝達可視の順序を保つ（Task と未伝達を単一 transaction にしない。共有 SQLite transaction は mechanism 共有として許すが、Task 達成と報告管理の owner を統合しない）。delivery 確定（Presented）は実際の提示確認（入出力・提示→個体調整）を受けてから durable 更新し、送信だけで確定しない（durable-after-confirmed） | 接続・表示 copy 送信・Task 完了を報告完了にしない。報告済みを承認・再開にしない |
-| Targeted Deletion 進行 | 削除 operation・sweep・消去条件・有効区間・完了境界・参加者局所結果・hold・再保存防止・検索 token の復元不能化 | operation + erasure_condition の durable を参加開始より先行させる（durable-before-enforce）。各参加者の局所完了・検証は durable 化してから coordinator へ返し、返却で hold を解除しない。全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たした後、検索 token を除去または復元不能化し、その成立を確認してから全域完了を原子に確定する。token の最終消去と完了 marker を同じ durable commit に含められない場合、その間は `finalizing` の未完了状態を維持する | 全 domain の通常意味変更権・単一 transaction・無制限 access を coordinator に与えない。対象外の通常活動の一律停止を必須にしない |
-| Backup 作成 | 対象時点・参照対応・除外・保護・各 owner 提供・未完了状況・保管 file | file durable を `backup_point` 成功 marking より先行させる（durable-before-mark-success）。対象時点・参照・履歴・未完了の対応が揃って初めて成功とし、各部 copy 成功だけを成功にしない。未完了消去・復旧と重なる場合は制約を無視した正常 copy を作らない | 処理中 memory の丸ごと保存を要求しない。一時 buffer・Provider session の復元を前提にしない |
-| Restore 正本切替 | 復元内容・Credential 維持・外部非巻戻し・単一正本・非混合・権限先行復活の禁止・旧 live 分離・保留・一括有効化 | staging（別 file / 別 group）での照合・検証を先行させ、`restore_generation` の原子 switch で正本を切り替える。switch 前は復元前正常が正本、switch 後は復元内容が正本とし、第三の混合を作らない。switch 前の crash は旧正本＋pending、switch 後の crash は新正本＋保留とする。復元済み assignment/consent だけで自動利用を開始しない | Credential store・外部現実・現在の到達性・未完了の保留は置換対象から除外して維持する。Audit は backup 時点置換＋成立後の Restore 事実追記とする |
-| Character revision / applied relation | Character revision・差分提示・Owner 明示選択・適用関係・経験状態 | 新 revision insert と適用は分離する。適用は `expected_character_revision + OwnerSelectionRef` の atomic compare による current pointer 更新＋履歴 append とし、未確認部品を更新済みにしない。適用禁止種別を revision に含めない・適用対象にしない | 内容の正本（Character）と適用関係の正本（個体調整）と経験状態（認識・学習）を同一更新にしない。Package 更新を成長の初期化にしない |
-| Companion deletion | 個体固有設定・Summary・Companion scope Learning・State・Relationship・担当 Schedule・残存 History・Task 記録・Global・共有 Summary・既知作用 | 個体 lifecycle（個体調整）と全域成立（保全・消去）を対応付けるが、全 owner の削除を単一 transaction にしない。各 owner の局所削除・検証を durable 化し、未完了なら削除完了と表示しない。新規活動禁止 hold を削除開始より先行させる。遅延結果から削除済み個体状態を再作成しない | History・Task 記録を個体削除だけで消さない。Summary を historical log へ分類し直して残さない。自動 Global 化・Schedule 自動引継ぎをしない |
+| **会話・活動の記録と学習の形成** | 会話履歴の生レコード、活動記録、学習サマリー、記憶の改訂、判断根拠の対応、適用スコープ、保存禁止・非共有の制約、消去条件 | 会話履歴の追記と、未伝達通知の登録（該当時）は同一の永続化トランザクションで不可分（アトミック）にします（§7.2 AU1a）。学習の形成は完全に別の独立したトランザクションとし、会話履歴がディスクに書き込まれた後に、「認識・学習」サブシステムが現在の最新認識や根拠と照合して採否を判断します。データの到着順序を根拠の新旧と混同しません。 | 会話の受付完了、履歴の保存、長期記憶の更新完了を同一の成功条件にしてはなりません。全状態の同時一括更新を要求しません。 |
+| **タスク作成・委任・方向転換** | タスク現在値、タスク改訂、タスクコンテキスト項目、ワークスペース関連付け、委任スコープ、方向転換（steering）前提、現在の権限条件 | タスク新規作成時は、タスク本体 ＋ 初期改訂 ＋ 初期コンテキスト ＋（関連付けを確定した場合のみ）ワークスペース関連付けを不可分にコミットし、コミット完了前はエージェントへの委任や実行処理から見えないようにします（durable-before-visible）。方向転換時は、新改訂 ＋ 新コンテキストの不可分な前進とし、古い目的のために得られた結果を新しい目的へ勝手に自動採用しません。委任は、期待するタスク改訂番号（`expected_task_revision`）が一致していることを不可分に確認（atomic compare）した上で作成します。 | タスクの達成判断（作業担当）と、外部作用の確定度（実行・拡張担当）と、権限の付与（権限・制約担当）を同一トランザクションにまとめません。アクションが確定した後に、タスク担当がそれを読み取って進捗を更新します。 |
+| **アクション試行・作用・結果確定** | アクション試行、タスク改訂の前提、委任スコープ、実際の操作対象、操作種別、依拠した権限評価、実行段階、確定度、判断根拠、保留、帰属・リストア世代 | 試行レコードの作成は、タスク改訂の前提、委任の有効性、実際の対象の解決、現在の権限照合を満たした上で不可分に行います。確定度が「結果不明（Unknown）から確定（Confirmed）」へ遷移する際は、担当責任者が得た新しい客観的証拠との照合を不可分に更新し、担当責任者以外が勝手にステータスを書き換えてはなりません。リトライ時は元不明試行への紐付けを持つ新しい行を発行し、過去の試行レコードを上書きしません。 | タスク側が勝手にアクションの確定度を書き換えてはなりません。エージェントの自己申告だけを証拠として信用せず、タスク達成と完了報告は別々の受入として処理します。 |
+| **権限評価・利用量・利用上限** | ルール改訂、同意改訂、端末許可、利用上限（cap）定義、利用実績の事実（確定/不明/処理中の別）、失効・停止・保留フラグ | 実行可否の評価時には、過去に保存された「許可（Allow）」フラグ、委任時のコピー、事前判定結果、リストアされた古いルール、プロンプト内の指示文、キャッシュされた判定を、現在の許可証として再利用してはなりません。並列での利用量消費は、同一の SQLite トランザクション内で利用実績の不可分な追記と利用上限の照合を行い、同一の残枠を複数の処理が同時に使い切ってしまう二重消費を許しません（メカニズムの共有であり、責任の統合ではありません）。処理中や結果不明の消費量を勝手にゼロにリセットしません。 | 利用実績の生記録は各利用担当に保持させ、「権限・制約」サブシステムは実行可否の判定のみを管理します。タスクや推論の側に、独立した許可証や利用実績のマスターデータを作らせません。 |
+| **画面帰属・世代切り替え** | 帰属状態、アクティブな Client、帰属世代番号、実際の通信接続、端末許可、排他制御、再配置ヒント、復旧先候補 | 帰属の切り替えは、期待する世代番号と状態（`expected_generation + expected_state`）を照合した不可分な比較更新（atomic compare）により、「旧画面 → 移行中 → 新画面」と段階的に永続遷移させ、新旧どちらの画面でも新規処理を開始しない安全な過渡区間を確保します。再配置ヒントの更新と画面帰属の成立を混同せず、過去に保存されたレコードから通信接続を勝手に復活させません。 | 画面帰属の成立（接続・存在担当）と、移動の必要性判断（個体調整担当）と、権限の確認（権限・制約担当）を同一トランザクションにまとめません。通信が生きているかどうかの確認はデータベース外のネットワーク処理であり、DB トランザクションに含めません。 |
+| **未伝達通知の登録と提示確定** | 会話・タスクの元レコード、未伝達の必要内容、報告状況、画面への提示状況、帰属関係、消去条件 | 会話由来の通知登録は、会話履歴の追記と不可分に行います。タスク由来の通知登録は、タスク結果がディスクに保存された後の別トランザクションとして不可分に登録し、「タスク結果の保存 → 未伝達通知の可視化」という順序を守ります（タスクと未伝達を単一トランザクションにまとめず、SQLite トランザクションの共有は許容しつつもタスク達成と報告管理の責任を分離します）。画面への提示完了（`Presented`）は、実際の画面提示の成功確認を受けてから永続ステータスを更新し、単にメッセージを送信しただけで完了にしてはなりません（durable-after-confirmed）。 | 通信接続、表示用コピーの送信、タスク完了の事実だけで「報告完了」とみなしてはなりません。報告済みになったことを、ユーザーによる承認やタスク再開と混同しません。 |
+| **個人データ完全削除の進行** | 削除操作、走査世代番号、消去条件、有効期間、完了境界、各参加者の局所結果、保留、再保存防止、検索トークンの復元不能化 | 削除操作レコードと消去条件（`erasure_condition`）のディスク保存を、各サブシステムへの削除参加指示よりも先行させます（durable-before-enforce）。各参加者は局所的な削除と残存検証をディスクに完了させてからコーディネーターへ報告を返し、局所的な報告だけで全体の保留（hold）を解除してはなりません。全参加者の完了集約、機械的な残存検証、削除期間中に再到着したデータの取り込みがすべて完了したことを確認した後、検索トークンを除去または復元不能化し、その成功を確認してから「全域完了」を不可分に確定します。トークンの最終消去と完了マーカーの保存を同一コミットにまとめられない場合は、その間は `finalizing` の未完了状態を維持します。 | システム全体のあらゆるデータに対する変更権限や、巨大な単一トランザクション、無制限のアクセス権をコーディネーターに与えてはなりません。削除対象外の通常の活動まで一律に全面停止させることを必須としません。 |
+| **バックアップ作成** | 対象時点、参照関係の対応、除外項目、保護設定、各担当が提供したデータ、未完了状態の状況、出力ファイル | バックアップ実体ファイルのディスクへの書き込み完了を、管理レコード（`backup_point`）への「成功」記録よりも先行させます（durable-before-mark-success）。対象時点、参照関係、履歴、未完了状況の対応がすべて揃って初めて全体成功とし、一部のファイルコピーが成功したことだけを理由に全体成功と誤認しません。未完了の削除やリストアと重なる場合は、制約を無視した即時実行可能な正常コピーを作成してはなりません。 | 実行中のメモリ空間を丸ごとダンプして保存することを要求しません。メモリ上の一時バッファやプロバイダ側セッションが復元されることを前提にしません。 |
+| **リストア時の正本切り替え** | 復元内容、認証情報の維持、外部実体の非巻戻し、単一正本の原則、データの非混合、権限の先行復活禁止、旧稼働データとの分離、処理保留、一括有効化 | ステージング領域（別ファイルまたは別グループ）での整合性照合と検証を先行させ、リストア世代番号（`restore_generation`）の不可分な切り替え（atomic switch）によってマスターデータを切り替えます。切り替え前は「リストア前の正常状態」がマスターデータであり、切り替え後は「復元されたデータ」がマスターデータとなり、新旧が中途半端に混ざり合った第三の状態を作ってはなりません。切り替え前のクラッシュは「旧マスター ＋ 保留解除」、切り替え後のクラッシュは「新マスター ＋ 処理保留」となります。復元された同意設定だけで自動利用を開始しません。 | セキュアストレージ、外部の現実世界、現在の通信到達性、未完了の保留状態は、置き換え対象から除外して現在の状態を維持します。監査ログはバックアップ時点の状態へ置き換えた上で、リストアが成立した事実を新しい監査ログとして追記します。 |
+| **Character 改訂と適用関係** | キャラクター改訂、差分提示、ユーザーの明示選択、適用関係、これまでの経験・成長状態 | 新しい改訂の保存と、個体への適用処理は完全に分離します。適用処理は、期待する改訂番号とユーザー選択の記録（`expected_character_revision + OwnerSelectionRef`）を照合した不可分な比較更新により、現在ポインタの更新と適用履歴の追記を行い、未確認の部品を「更新済み」にしません。適用が禁止されている種別のデータを改訂に含めたり適用対象にしたりしません。 | 定義内容のマスターデータ（Character担当）と、適用関係のマスターデータ（個体調整担当）と、個体の経験状態（認識・学習担当）を同一トランザクションにまとめません。パッケージの更新によって個体の成長記録を初期化しません。 |
+| **Companion の削除** | 個体固有設定、学習サマリー、個体スコープの記憶・スキル・状態・関係性、担当スケジュール、残存する会話履歴・タスク記録、全体共有データ、既知の外部作用 | 個体のライフサイクル管理（個体調整担当）と全域での削除成立（保全・消去担当）を連携させますが、すべてのサブシステムの削除処理をひとつの巨大な単一トランザクションにはしません。各サブシステムの局所的な削除と検証をディスクに保存させ、未完了であれば「削除完了」と表示しません。新規活動を禁止する保留（hold）を、削除処理の開始よりも先行させます。遅れて届いた処理結果から、削除済み個体の状態を勝手に再作成してはなりません。 | 会話履歴やタスク記録を、個体の削除だけを理由に消去してはなりません。学習サマリーを「歴史ログ」と偽って残してはなりません。個体スコープのスキルを勝手に全体共有へ昇格させたり、スケジュールを自動で引き継いだりしません。 |
 
 ### 7.2 代表的な atomic unit（SQLite transaction の例示。mechanism 共有であり ownership ではない）
 
-- AU1a（同 owner 原子）: `history_message` insert + `undelivered` insert（会話・交流由来の要時）。いずれかだけが残る中間を可視にしない。
-- AU1b（順序＋原子登録）: Task 由来の `undelivered` は Task 結果 durable 後に別 transaction で原子に登録する（Task durable→未伝達可視の順序。単一 transaction にまとめず、共有 SQLite transaction は mechanism として許す）。Task durable なしに未伝達だけが残る dangling、Task durable ありに未伝達なしの報告漏れのいずれも残さないよう、crash 後は Task 結果と未伝達の対応を照合して未登録を補完できること。
-- AU2（同 owner 原子）: `task` insert + `task_revision` insert + 初期 `task_context_entry` insert(s) +（Workspace 関連付けを確定した場合のみ `workspace_assoc` insert）。commit 前は委任・実行から不可視。いずれかの insert が失敗したら先行 insert を含めて rollback し、一部だけの行・未 commit の部分を可視にしない。
-- AU3（cross-owner atomic read）: `delegation` insert 時の `expected_task_revision` 照合（Task 現在 revision との compare）。不一致なら不受理・再評価へ戻す。
-- AU4（同 owner 原子）: steering 時の `task_revision` forward + `task` current pointer 更新（現在 `TaskPurposeRef`・目的本文も同一 commit で更新し、`new_purpose: None` は直前値を維持する）+ 新 `task_context_entry`（目的を変更しない場合も直前の採用目的 entry を新 revision に引き継いで記録する）。旧 revision を残す。新 revision の採用目的 entry の identity は `TaskCommitPremise.adopted_purpose_entry` として作業（orchestrate）が mint し、repository は渡された identity を採番し直さない。repository が刻むのは `TaskContextEntry.reference = (task, new revision)` と、`new_purpose: Some` の場合の採用 revision である。採用指示 entry は H-A steering 配線 slice が同じ `forward_steering` transaction に追加する（`TaskCommitPremise.adopted_instruction`。entry 自身が採用 identity であり、採用 revision で 1 度だけ書いて後の forward で再記録しない）。いずれかの insert / UPDATE が失敗したら先行分を含めて rollback し、部分的な forward を可視にしない。hold slice の hold 照合も同じ atomic section に加わる。premise が指す Task の durable state がない場合（`MissingTask`）と次の相異なる revision を durable に確定できない場合（`RevisionExhausted`）は、書き込みなしの domain outcome とする。
-- AU5（同 owner 原子 + 別 owner 順序）: `action_attempt` insert（前提照合付き）。確定度更新は同 row の `expected_certainty + 新 evidence` の原子更新。Task 達成は別 transaction で attempt を読み取って更新する（durable-before-adopt）。
-- AU6（cross-owner atomic read）: `usage_fact_*` insert + cap 照合（`cap_limit` + 関連 `usage_fact_*` の合計読み取り）。同一 transaction 内で判定し、cap・不明で継続不可なら data 保持のまま停止・判断待ちにする。
-- AU7（同 owner 原子）: `presence_attribution` の `expected_generation + expected_state` 照合付き更新 + `presence_transition_log` append + `relocation_hint` 更新（要時）。
-- AU8（順序）: 未伝達 `Presented` は提示確認後の durable 更新とする。送信時には更新しない。
-- AU9（順序＋完了境界）: `deletion_operation` + `erasure_condition` durable → 各 `deletion_participant` durable → 全参加の集約・機械的残存検証・区間内再到着の取込み → 検索 token の除去または復元不能化 → 全域完了の durable 原子確定。token の最終消去と完了 marker を同一 durable commit にできない場合、その間は `finalizing` として D3 を維持し、crash 後に最終消去を再開する。検索 token が復元可能な状態で `全域完了` を保存しない。
-- AU10（順序）: backup file durable → `backup_point` 成功 marking。失敗時は最後の正常を破壊しない。
-- AU11（原子 switch）: restore staging 検証 → `restore_generation_state` bump + 正本 pointer switch の原子確定。失敗時は復元前正常を維持する。
-- AU12（同 owner 原子 + cross-owner 照合）: `companion_applied_current` 更新 + `companion_applied_history` append（`expected_character_revision` 照合付き）。
-- AU13（協調・非単一 transaction）: Companion 削除は各 owner の局所 durable の集約とし、単一 global transaction にしない。新規禁止 hold を先行させる。
+- **AU1a（同一担当の不可分コミット）**: `history_message` の追記 ＋ `undelivered` の登録（会話や個体間交流に由来し、通知が必要な場合）。どちらか一方だけが保存された中途半端な状態を外部に見せません。
+- **AU1b（順序保証 ＋ 不可分登録）**: タスク由来の未伝達通知は、タスク結果がディスクに保存された後に、別トランザクションとして `undelivered` を不可分に登録します（タスク保存 → 未伝達可視化の順序。単一トランザクションにまとめず、SQLite のトランザクション共有を実装都合として利用します）。タスク結果がないのに未伝達通知だけが残る宙づりや、タスク結果があるのに未伝達通知が登録されない報告漏れを防ぐため、再起動後はタスク結果と未伝達通知の対応を照合して未登録分を自動補完できるようにします。
+- **AU2（同一担当の不可分コミット）**: `task` 挿入 ＋ `task_revision` 挿入 ＋ 初期 `task_context_entry` 群の挿入 ＋（ワークスペース関連付けを確定した場合のみ）`workspace_assoc` 挿入。コミット完了前は、外部エージェントへの委任や実行処理から一切見えないようにします（durable-before-visible）。いずれかの挿入が失敗した場合は先行の挿入を含めてロールバックし、一部だけの行や未コミットの部分を可視にしません。
+- **AU3（担当責任者を跨ぐ不可分な読み取り）**: `delegation`（委任）レコード作成時に、期待するタスク改訂番号（`expected_task_revision`）が現在のタスク改訂番号と一致しているかを不可分に照合（atomic read & compare）します。不一致であれば受理を拒否し、再評価へ戻します。
+- **AU4（同一担当の不可分コミット）**: 方針指示（steering）時の `task_revision` の前進 ＋ `task` の現在ポインタ更新（現在の `TaskPurposeRef` と目的本文も同一コミットで更新し、`new_purpose: None` の場合は直前の値を維持します）＋ 新しい `task_context_entry` の登録（目的を変更しない場合も直前の採用目的項目を新リビジョンに引き継いで記録します）。過去のリビジョン履歴はそのまま残します。新リビジョンの採用目的項目の識別子は `TaskCommitPremise.adopted_purpose_entry` として作業担当（orchestrate）が発行し、リポジトリは渡された識別子を採番し直しません。リポジトリが刻むのは `TaskContextEntry.reference = (task, new revision)` と、`new_purpose: Some` の場合の採用リビジョンです。採用指示項目は H-A steering 配線スライスが同一の `forward_steering` トランザクションに追加します（`TaskCommitPremise.adopted_instruction`。項目自身が採用識別子であり、採用リビジョンで 1 度だけ書き込んで以降の前進では再記録しません）。いずれかの挿入や UPDATE が失敗した場合は先行分を含めてロールバックし、部分的な前進を可視にしません。hold スライスの安全保留照合も同一の不可分区間に加わります。前提が指すタスクの永続化状態が存在しない場合（`MissingTask`）や、次の相異なるリビジョンを永続化データとして確定できない場合（`RevisionExhausted`）は、書き込みを行わない正常系（`Ok` 側）のドメイン判定結果とします。
+- **AU5（同一担当の不可分コミット ＋ 担当間の順序保証）**: `action_attempt` の挿入（前提条件の照合付き）。確定度の更新は、同一レコードに対する期待確定度と新しい証拠（`expected_certainty + 新 evidence`）の不可分な更新とします。タスクの達成判定は別トランザクションで試行レコードを読み取って更新します（durable-before-adopt）。
+- **AU6（担当責任者を跨ぐ不可分な読み取り）**: `usage_fact_*`（利用実績）の挿入 ＋ 利用上限（`cap_limit`）および関連実績合計の不可分な照合。同一トランザクション内で判定し、上限超過や結果不明で継続不能な場合は、データを保持したまま処理を停止してユーザー判断待ちにします。
+- **AU7（同一担当の不可分コミット）**: `presence_attribution` の期待世代・状態（`expected_generation + expected_state`）照合付き更新 ＋ `presence_transition_log` 追記 ＋ `relocation_hint` 更新（必要な場合）。
+- **AU8（順序保証）**: 未伝達通知の提示完了ステータス（`Presented`）は、画面への実際の提示が確認された後にディスク更新します。単に送信した段階では更新しません。
+- **AU9（順序保証 ＋ 完了境界の確定）**: `deletion_operation` ＋ `erasure_condition` の保存 → 各参加者の局所削除と検証の保存 → 全参加者の集約・機械的残存検証・期間内再到着の取り込み → 検索トークンの除去または復元不能化 → 全域完了の不可分な確定。検索トークンの消去と完了マーカーの保存を同一コミットにできない場合は、その間は `finalizing` として D3 状態を維持し、再起動後に最終消去を再開します。検索トークンが復元可能な状態で「全域完了」を保存してはなりません。
+- **AU10（順序保証）**: バックアップ実体ファイルのディスク保存完了 → `backup_point` への成功マーキング。失敗時は直前の正常なバックアップを破壊しません。
+- **AU11（不可分な正本切り替え）**: リストアのステージング領域での検証完了 → `restore_generation_state` の更新 ＋ 正本ポインタの不可分な切り替え。失敗時はリストア前の正常状態を完全に維持します。
+- **AU12（同一担当の不可分コミット ＋ 担当間の照合）**: `companion_applied_current` の更新 ＋ `companion_applied_history` の追記（期待する Character 改訂番号 `expected_character_revision` の照合付き）。
+- **AU13（協調動作・非単一トランザクション）**: Companion の削除は各サブシステムの局所的な削除処理の集約として行い、単一の巨大なグローバルトランザクションにはしません。新規活動を禁止する保留（hold）を必ず先行させます。
 
-cross-owner の atomic read（AU3/AU6 等）は同一 SQLite file の transaction を使うことを許すが、意味変更権の統合・共同所有・無制限 access を意味しない。Coordinator は参加 owner の局所結果に依存し、全構造への無制限 access を要求しない。
+担当責任者を跨ぐ不可分な読み取り（AU3 や AU6 など）では、同一の SQLite ファイルのトランザクションを利用することが許容されますが、これは意味の決定権の統合や共同所有、全権アクセスの付与を意味するものではありません。コーディネーターは各参加サブシステムから返された局所的な結果に依存するのみであり、内部の全データ構造へ無制限にアクセスすることは許されません。
 
 ## 8. Targeted Deletion と persistence schema の関係
 
-`targeted-deletion.md` と `data-preservation-erasure.md` を前提とし、semantic owner・boundary を変更しない。
+本書は [Targeted Deletion（個人データ完全削除）](../critical-areas/targeted-deletion.md) および [データの保全と消去](../subsystems/data-preservation-erasure.md) の設計方針を前提とし、担当責任者やセキュリティ境界を変更しません。
 
 ### 8.1 追跡不能にしないための persistence 要件
 
-- 各 durable content row は、本文を複製せず、次の対応を保持または正本から解決できること：`(owner, source 関係, 取得・生成時点, scope・共有関係, 用途・保存・共有・送信の制限, revision・generation 前提)`。本書 §4 の各 table の CORR / REV / GEN / 時点 field がこれに当たる。
-- 遅延結果の帰属に要る `(attempt, Task revision 前提, source 範囲, presence/restore generation)` の対応を `action_attempt` / `task_revision` / `history_message` / `undelivered` の CORR として保持すること。source を消した後に依存関係も消失し遅延結果を識別できなくなる実装は不可とする。
-- 各受入・保存先が飛行中の消去条件を適用できるよう、`erasure_condition(operation, sweep, valid_interval)` を durable かつ index 付きで保持すること。既知 source の追跡だけでは区間内再到着を扱えない。
-- 派生物・cache・Client / 拡張一時 copy・処理中利用も消去へ参加できるよう、derived の invalidation key（§5）に消去条件を含めること。hit を理由に制約確認を省かない。
-- 局所処理・検証との関係（どの参加先がどこまで除去・検証・未完了か）を `deletion_participant` として durable に保持すること。局所返却で hold を解除しない。
+- **本文を複製しない紐付け対応**: 各永続レコードは、本文そのものを無駄に複製することなく、次の対応関係を保持またはマスターデータから解決できなければなりません：`(担当責任者, 参照元の関係, 取得・生成日時, 適用スコープ・共有関係, 用途・保存・共有・送信の制限条件, 改訂・世代の前提)`。本書 §4 の各テーブルに定義された CORR / REV / GEN / 日時フィールドがこれに該当します。
+- **遅延結果を追跡するための紐付け**: 処理が遅れて後から届いた結果を正しく識別・帰属させるために必要な情報 `(試行ID, タスク改訂の前提, 参照元の範囲, 帰属・リストア世代番号)` を、`action_attempt` / `task_revision` / `history_message` / `undelivered` の紐付け参照（CORR）として確実に保持します。参照元の本文を消去した後に、この依存関係まで一緒に消滅してしまい、遅延結果がどのタスクに属するものか判別できなくなるような設計は認められません。
+- **飛行中のデータに対する消去条件の適用**: 処理中や通信途中のデータ受入先・保存先が、現在進行中の消去条件を漏れなく適用できるよう、消去条件レコード `erasure_condition(operation, sweep, valid_interval)` をインデックス付きで確実にディスク保存します。既知の保存済みデータだけを追跡する方式では、削除処理の最中に届いたデータの再保存を防げません。
+- **派生データの確実な消去参加**: 派生データ、キャッシュ、Client 端末上の一時コピー、処理中の推論コンテキストも漏れなく削除に参加できるよう、派生データの無効化キー（§5）に消去条件を含めます。キャッシュにヒットしたことだけを理由に、消去制約の確認を省略してはなりません。
+- **局所処理と検証状況の追跡**: どのサブシステムがどこまで削除を完了し、どこまで残存検証を済ませ、何が未完了であるかを、`deletion_participant` レコードとしてディスクに保持します。一部の参加者から局所的な報告が返っただけで、全体の保留（hold）を解除してはなりません。
 
 ### 8.2 過剰設計にしないための制限
 
-- 「すべての文字列の意味的依存を DB graph へ保存する」ことはしない。graph 全体を永続 object にせず、必要な対応だけを CORR として保持し辿れればよい。
-- 全 Summary へ同じ retention / revision 方式を課さない。分離を確認できない混合出力は全入力に依存し得るものとして扱うが、LLM 自己申告だけで依存を外さないという contract で足り、完全な意味 graph を要求しない。
-- 指定文字列の機械的検索・除去・残存検証を LLM へ依存させない。意味的同一情報の特定に LLM を利用できるが完全検出を保証しない。検出限界を既知依存の追跡省略・未確認範囲の完了扱いにしない。
-- 対象記述の伝達・保持に private 本文の複製を増やさない。`deletion_operation.mechanical_search` は操作期間限定の `SealedSearchToken` とし、全域完了を durable に確定する前に除去または復元不能化する。最終消去と完了 marker が不可分でない場合は `finalizing` を durable に保ち、token が復元可能なまま完了記録・Audit・説明へ進めない。制限情報・識別用の値も復元できるなら保護・消去対象である。
+- **全文字列の依存グラフを作らない**: 「システム内のあらゆる文字列の意味的な依存関係を、巨大なグラフとしてデータベースに保存する」といった過剰設計は行いません。グラフ全体を巨大な永続オブジェクトにする必要はなく、必要な対応関係のみを論理的な紐付け（CORR）として保持し、後から辿れるようにすれば十分です。
+- **全サマリーに一律の改訂ルールを強制しない**: すべての学習サマリーに対して一律の保持期間や改訂方式を課すことはしません。複数の情報が混ざり合って個別に分離できない出力は「すべての入力に依存している」として安全側に倒して扱いますが、LLM の自己申告のみで依存関係を外すことを禁止する契約を守れば十分であり、完璧な意味ネットワークグラフの構築までは求めません。
+- **機械的な検索や検証を LLM に頼らない**: 指定された個人情報文字列の機械的な検索、完全消去、残存検証を、LLM の推論機能に依存させてはなりません。意味的に同じ表現を特定するために LLM を補助的に利用することは認められますが、完全な検出は保証されません。LLM の検出限界を理由にして、既知の依存関係の追跡を省略したり、未確認の範囲を「削除完了」と偽ったりしてはなりません。
+- **対象本文の無駄なコピーを増やさない**: 削除対象の記述を各サブシステムへ伝達・保持するために、プライベートな本文の複製をあちこちに作ってはなりません。`deletion_operation.mechanical_search` に格納する機械的検索条件は、操作期間限定の保護されたトークン（`SealedSearchToken`）として扱い、全域完了をディスクに確定する前に必ず除去または復元不能化します。トークンの最終消去と完了マーカーの保存を同時に行えない場合は、`finalizing` の未完了状態を維持し、トークンが復元可能な状態のまま完了記録や監査ログ、画面説明へ進めてはなりません。制限情報や識別用の値であっても、それから元の本文が復元できるのであれば、保護および完全消去の対象となります。
 
 ### 8.3 Crash 中の deletion の persistence
 
-- 操作途中の restart でも未完了の認識と必要な保留・再保存防止を `deletion_operation` + `erasure_condition` + `deletion_participant` として Host で保全する。完了と誤認したり保留を黙って解除したりしない。
-- 参加者・残存検証が終了していても検索 token の最終消去が未完了なら `finalizing` として扱う。restart 後は token を再利用して通常処理を開始せず、最終消去と完了確定だけを再開する。token の復元不能化を確認するまで hold を解除しない。
-- 消去中に Client が切断した場合、確認不能を成功に読み替えず、`deletion_participant` を pending/unreachable として保全する。古い一時 data を再接続時に Host へ戻して再形成しない。
-- 未完了消去と backup 作成が重なる場合、制約を無視した正常・即実行可能な copy を作らない。作成を待たせるか未完了・制約も復旧可能に含めるかは自由度である（§9）。
+- **クラッシュ後も未完了状態と保留を維持**: 削除操作の途中で Host が再起動した場合であっても、操作が未完了である事実、必要な保留状態、再保存の防止フラグを、`deletion_operation` ＋ `erasure_condition` ＋ `deletion_participant` に基づいて確実に復旧します。勝手に完了したと誤認したり、保留を黙って解除したりしません。
+- **最終消去（finalizing）の確実な完遂**: 全参加者の局所処理と残存検証が終了していても、検索トークンの最終消去が未完了である場合は、`finalizing` 状態として扱います。再起動後はトークンを通常処理に再利用することなく、最終消去と完了確定の処理だけを再開します。トークンが復元不能化されたことを確認できるまでは、保留（hold）を解除しません。
+- **Client 切断時の安全な扱い**: 削除処理の最中に Client 端末との通信が切断された場合、確認が取れない状態を「成功」と読み替えることはせず、`deletion_participant` を「未到達（unreachable）」または「未完了（pending）」として保護します。Client 端末に残っていた古い一時データが、再接続時に Host へ送られて再学習・再保存されることを確実に防ぎます。
+- **バックアップ作成と削除の競合防止**: 未完了の個人データ完全削除とバックアップ作成が重なった場合、制約を無視して通常どおり即時実行可能なバックアップファイルを作成してはなりません。バックアップ作成を待機させるか、あるいは削除が未完了である制約情報も含めて復元できるようにするかは、実装の設計自由度とします（§9）。
 
 ## 9. Backup / Restore と persistence schema の関係
 
-`backup-restore.md` の Owner decision を維持する。古い Backup Restore に関する既存 decision を変更しない。
+本書は [Backup / Restore](../critical-areas/backup-restore.md) で確定した製品設計判断を厳格に維持し、過去の設計決定を変更しません。
 
-Restore の実行確認・復元後の一括有効化、および Full Reset の強い確認は IPC §18 の Host PC 上の trusted first-party management surface で行う。remote 要求の受付を確認済みとして扱わない。復元成立と再有効化は別確認のまま保つ。
+リストアの実行確認、復元後のデータ一括有効化、および全データ初期化（Full Reset）の厳格な確認は、IPC §18 で定めた「Host PC 上の信頼できる公式管理画面（trusted first-party management surface）」で直接行います。リモートの Client から送られてきた要求を受信したことだけで「確認完了」とみなしてはなりません。また、「復元の成立」と「処理の再有効化」は別々に確認する原則を維持します。
 
 ### 9.1 Backup に含めるもの / 含めないもの
 
-| 扱い | 対象 |
+| 扱い | 対象データ |
 |---|---|
-| 含める（durable の対応を復旧可能な形で） | Character 静的構成・revision・適用関係対応（外部 Package 原本は除く）、Companion 同一性・活動状態・適用済み構成（削除済み個体の私的 state は backup 時点に存在しないものとして扱い、残存 historical record は含める）、History・非会話活動記録・evidence・未伝達（原 record と報告状況を分け、表示 copy 送信を報告済みにしない対応を保つ）、Summary・根拠関係・Memory 現在・過去 revision・Skill 有効・過去 revision・原本対応・実行結果対応・Relationship・State と保持根拠（共有根拠の利用関係を保ち Global 本文から私的根拠全文への access 拡大を作らない）、Task・Task context・委任対応・Action 試行・確定度・停止結果、Workspace 関連付け（外部実体は辿って収集しない）、Schedule 設定・作成時 tz・初期入力・発生対応・各回 Task 対応、Rule・Permission 判断記録・assignment 同意（Observer 専用含む）・fallback・device・保存禁止・非共有・cap 等の制御条件の記録、Provider 非秘密登録・能力情報・MCP・Plugin 非秘密受入設定、利用量・費用の記録（報告/不明の区別を含む。現在消費の正本として扱わない条件は §6 に従う）、Credential の用途・参照元（非秘密のみ）、Audit 追記順・保持、保持方針・操作状況・backup 設定と作成結果のうち復旧可能な対応に必要な範囲 |
-| 含めない（rebuild / transient / external / secret） | 派生物（embedding・index・query 派生・Prompt cache・Provider session・有効経路・次回表示・集計表示等）、一時 data（Raw・詳細 payload・内部推論・Client 表示 copy・入力途中・audio buffer・観測候補・推論中 context・MCP Apps 表示等。ただし受理済み指示・作業記録・未伝達・作用不明まで失ってよいわけではなく Host 正本の範囲で復元する）、Credential 等の secret・外部 Workspace 実体・Provider/MCP 側固有状態・保有 copy・外部 Package 原本・export 済み copy、Client 接続材料の secret 部分 |
-| 作成成功の条件 | 各部の copy 出力成功だけを成功にしない。対象時点・参照・必要な履歴と未完了状況の対応が揃って初めて成功とする。実行中の不明がある場合、最後の正常記録が外部最新とは限らないことを保ち、不明を未実行へ戻して正常 copy と偽らない |
+| **含めるもの**<br>（永続データの対応関係を復旧可能な形で） | - キャラクターの静的構成、改訂情報、適用関係の対応（外部パッケージ原本ファイルは除く）。<br>- Companion の個体同一性、活動状態、現在適用されている構成（削除済み個体のプライベートな設定はバックアップ時点に存在しないものとして扱い、歴史的記録としての墓標レコードは含めます）。<br>- 会話履歴、非会話の活動記録、判断根拠、未伝達通知（生レコードと報告状況を明確に分け、表示用コピーを送信しただけで報告済みと誤認しない構造を保持）。<br>- 学習サマリー、根拠関係、記憶の現在値と過去改訂、スキルの有効改訂と過去改訂、原本対応、実行結果対応、関係性解釈、個体状態と保持根拠（全体共有の根拠の利用関係を保ちつつ、全体知識から個人のプライベートな根拠全文へのアクセス拡大を許さない構造）。<br>- タスク、タスクコンテキスト、委任関係、アクション試行ログ、確定度、停止結果。<br>- ワークスペースとの関連付け情報（外部の実体ファイルは収集しません）。<br>- 定期実行スケジュール設定、作成時タイムゾーン、初期入力、各回のタスク実行対応。<br>- ルール、権限評価の記録、機能割当の同意（Observer専用含む）、フォールバック設定、端末許可、保存禁止・非共有の制約、利用上限（cap）などの制御条件の記録。<br>- プロバイダの非秘密登録情報、観測された能力情報、MCP・プラグインの非秘密受入設定。<br>- 利用実績・費用の記録（確定報告と結果不明の区別を含む。現在消費のマスターデータとして扱わない条件は §6 に従う）。<br>- 認証情報の用途・参照元（非秘密情報のみ）。<br>- 監査ログ（追記順で厳重保持）。<br>- データの保持方針、操作状況、バックアップ設定と作成結果のうち、復旧に必要な範囲。 |
+| **含めないもの**<br>（再構築可能、一時データ、外部所有、秘密情報） | - 派生データ（ベクトル埋め込み、検索インデックス、検索クエリ用データ、プロンプトキャッシュ、プロバイダ側セッション、有効経路、次回表示、画面集計など）。<br>- 一時データ（未加工のキャプチャ画像・音声、詳細なツールペイロード、内部推論ログ、Client 画面の表示用コピー、入力途中テキスト、音声バッファ、推論中コンテキスト、MCP Apps 表示など。ただし、正式に受理された指示、作業記録、未伝達通知、結果不明なアクションは Host マスターデータの範囲で確実に復元します）。<br>- パスワードやAPIキーなどの秘密情報、外部ワークスペースの実体ファイル、プロバイダやMCP側の保持状態、外部パッケージ原本、エクスポート済みコピー、Client 端末固有の接続秘密鍵。 |
+| **バックアップ作成成功の条件** | 各サブシステムのデータ書き出しが個別に成功したことだけを理由に全体成功としてはなりません。対象時点、参照関係、必要な履歴、未完了状況の対応がすべて揃って初めて「バックアップ作成成功」と記録します。実行中の結果不明なアクションが存在する場合、直前の正常記録が外部の最新状態とは限らないことを正しく認識し、結果不明な状態を勝手に「未実行」へ書き換えて正常コピーと偽ってはなりません。 |
 
-上表の device は Group G の `device_ref` / `client_last_connection` と Group F の `device_permission` 等の非秘密参照・記録だけを指す。Host device-auth record（Group K、E）の検証材料・現在 trust 範囲・失効状態は、非秘密部分を含めて backup から除外する。現在環境で維持する認証・trust を、復元 data の一部として扱わない（§9.2）。
+※ 上表でバックアップに含めるとしている端末情報（device）は、Group G の `device_ref` / `client_last_connection` や Group F の `device_permission` などの非秘密な参照・記録のみを指します。Host 側の端末認証レコード（Group K、E）に含まれる検証鍵、現在の信頼範囲、失効状態は、非秘密部分を含めてバックアップから完全に除外します。現在の環境で維持すべき認証や信頼状態を、復元データの一部として上書きしてはなりません（§9.2）。
 
-Backup 作成に担当 Companion や Task Agent の稼働を必要とせず、管理面と保存済み data の利用可能性を Body・Voice・Provider・拡張の成功へ従属させない。Backup 設定自体が復元対象に含まれる場合、保存先・schedule・保持数・保護は backup 時点へ置換されるが、Owner が別保存先へ作成した既存 copy そのものは削除しない。
+バックアップ作成にあたって、特定の Companion やタスクエージェントが稼働している必要はなく、管理機能や保存済みデータの利用可能性を、キャラクターの立ち絵描画、音声合成、プロバイダ接続、拡張機能の動作へ従属させてはなりません。バックアップ設定自体が復元対象に含まれる場合、保存先フォルダやスケジュール、保持世代数、保護設定はバックアップ時点の設定へ復元されますが、ユーザーが別の保存先へ手動退避した既存のバックアップファイル自体を勝手に削除することはありません。
 
 ### 9.2 現在 environment から維持するもの
 
-- Restore 開始前から Host にある現在の Credential store の秘密値本体（E）とその登録・更新・失効の状態（Backup から復元・巻戻ししない）。DB 側の非秘密参照（`credential_ref`）は backup の復元対象に含めるが、復元後は現在の秘密値・用途・有効性と照合し、利用可能なら現在の Credential を利用し、不足・無効なら再認証を要求する。復元された assignment/consent だけで自動利用を開始しない。
-- 現在の Host device-auth store（Group K、E）の pairing identity・検証材料・現在 trust 範囲・失効状態。検証材料が非秘密でも backup 除外・Restore 非置換とし、失効で削除した材料の不在も維持する。新 Host 等で対応材料がなければ未認証とし、Host-local 最終確認による新規 pairing を必要とする。復元した `device_ref` / `device_permission` から E 側 record を生成・再有効化しない。
-- 外部 Workspace の現在内容・存在・access、外部 account・source 状態、Provider・MCP 側固有状態・保有 copy、外部作用の既成事実、OS・device・Network の現在状態、現在日時・tz。
-- 現在の接続・到達性・device 利用可能性・排他性の事実。保存された接続・帰属を現在の到達性とみなさない。
-- Restore 前に未完了の全域操作の保留・再保存防止に必要な条件（特に未完了 targeted deletion の消去条件・検証未完了・再保存防止は置換で黙って解除しない。§9.4 に従う）。
-- Restore 操作自体の受理・説明・実行保留。復元前正常は置換成立まで破壊しない。
-- Audit は backup 時点へ置換されるが、置換成立後の Restore 事実（目的・対象範囲・影響・除外・確認・成立結果）は新しい Audit 事実として追記する。追記順を発生順・許可正本・再生入力にしない。
+リストアを実行した際、過去のバックアップデータで上書きせず、「現在の実行環境（environment）」からそのまま維持しなければならない要素は以下のとおりです：
+
+- **現在のセキュアストレージ内の秘密情報本体（E）**: リストア開始前から Host に存在している現在の API キー等の秘密値本体、およびその登録・更新・失効の状態（バックアップから復元して古い鍵へ巻き戻しません）。データベース側の非秘密参照（`credential_ref`）はバックアップから復元されますが、復元後は現在のセキュアストレージ内の秘密値・用途・有効性と照合し、利用可能であれば現在の秘密情報を利用し、不足や無効があればユーザーへ再認証を要求します。復元された同意設定が存在することだけで、勝手に外部サービスへのアクセスを開始しません。
+- **現在の Host 端末認証ストア（Group K、E）**: 現在のペアリング識別子、検証材料、現在の信頼範囲、失効状態。検証材料が公開鍵等の非秘密データであってもバックアップから除外され、リストアによっても上書きされず、失効操作によって削除された鍵の不在状態も維持されます。新しい Host マシンへ移行した場合などで対応する鍵材料が存在しない場合は「未認証」として扱い、Host PC 上での最終確認による新規ペアリングを必須とします。復元された `device_ref` や `device_permission` から、セキュアストレージ側の認証レコードを勝手に自動生成・再有効化してはなりません。
+- **外部環境の最新の現実**: 外部ワークスペースの最新ファイル内容・存在・アクセス権、外部サービスのアカウント状態、プロバイダやMCP側の保持状態・セッション、外部システムに対して過去に行われた作用の既成事実、OS・ハードウェア・ネットワークの現在の状態、現在の日時とタイムゾーン。
+- **通信接続と到達性の事実**: 現在の通信接続、Client 端末の到達性、デバイスの利用可能性、排他制御の現在の事実。過去に保存されていた接続記録を、現在の通信到達性とみなしてはなりません。
+- **未完了の全域操作の制約**: リストア実行前に進行中だった全域操作の保留状態や再保存防止フラグ（特に、未完了だった個人データ完全削除の消去条件、検証未完了状態、再保存防止は、リストアによって勝手に解除してはなりません。§9.4 に従います）。
+- **リストア操作自体の進行状態**: リストア操作自体の受理、説明、実行保留の状態。リストア前の正常なデータは、置き換えが完全に成立するまで絶対に破壊しません。
+- **監査ログの整合性**: 過去の監査ログはバックアップ時点の状態へ復元されますが、リストアが成立した事実（目的、対象範囲、影響、除外、確認、成立結果）は、復元されたログの末尾に新しい監査ログとして追記します。監査ログの追記順を、過去の出来事の発生順や、現在有効な許可証、イベント再生用の入力として扱ってはなりません。
 
 ### 9.3 Restore 時の全置換対象・正本切替前後の識別
 
-- 置換対象は現在の Credential store（秘密値・Host device-auth record、E）を除く対象内部 data の対応 backup 時点への全置換であり、旧 live との merge ではない。DB 側の非秘密参照（`credential_ref`・`device_ref`）と `device_permission` は置換対象に含めるが、現在 store の維持・照合は §9.2 に従う。局所 copy 成功の集合だけを成立にしない。
-- いかなる時点でも Host 正本は一つである。置換成立前は復元前正常が正本、成立後は復元内容が正本であり、backup copy・部分置換状態を正本にしない。旧 state と復元 state を意味的に混ぜた第三の状態を作らない。
-- 実行 authority だけ先に復活させない。復元成立・一括有効化・現在条件の確認前に新規 Action・送信・外部作用を開始しない。
-- 識別は `restore_generation_state` の現在 generation と各参照の `restore_generation` 前提タグで行う。復元を跨ぐ参照（Task・Rule・同意・assignment・作用・未伝達・全域未完了）には generation を添え、旧世代の参照だけで復元後に利用・実行・送信しない。Task の目的変更は `task_revision` の前進であり generation 変化で代替しない（revision と generation を混同しない）。
-- 復元成立と実行再有効化は別々に確認する。復元成立後も Task・Schedule・外部接続の自動処理は保留し、Owner が内容確認後まとめて有効化できる。一件ずつの再承認は要求しないが、Deny・同意・cap・認証不足・外部作用不明を無視しない。
-- 復元された assignment/consent・Rule・Schedule・Client device 参照・Provider/MCP 参照は、現在の Credential・device-auth の同一 pairing identity / 有効検証材料 / trust 範囲 / 非失効・制約・保留・到達性・排他性と照合して初めて利用できる。device 行だけでは auth・許可を復活させず、過去の機能許可も現在 E 側 trust 範囲を超えない。stale な Permission・Provider・Client・作用結果・外部参照を現在事実にしない。dangling 参照は未解決とし、不明は不明のまま保持し replay しない。
-- 旧 live 要求・結果・Client copy を復元正本へ混ぜない。切替前に開始した推論・Tool 結果が切替後に届いても用途別受入で現在の対象・制限・意味へ照合し、旧作用説明と区別する。Client copy で Host を上書きせず、未送信操作を自動 queue にしない。
+- **一括全置換の原則**: リストアによるデータの置き換えは、現在のセキュアストレージ（秘密値および端末認証レコード、E）を除く、システム内部の管理データをバックアップ時点の状態へ「一括全置換」するものであり、現在の稼働データと過去データを中途半端に統合（merge）することではありません。データベース側の非秘密参照（`credential_ref` や `device_ref`）および `device_permission` は置き換え対象に含まれますが、現在のセキュアストレージとの照合は §9.2 に従います。一部のテーブルだけがコピーできた状態を「リストア成立」とみなしてはなりません。
+- **常に単一の正本を守る**: いかなる瞬間であっても、Host のマスターデータは常にひとつだけです。置き換えが成立する前は「リストア前の正常状態」がマスターデータであり、置き換え成立後は「復元されたデータ」がマスターデータとなります。バックアップファイル自体や、部分的に置き換えられた途中の状態をマスターデータにしてはなりません。以前の状態と復元された状態を都合よく混ぜ合わせた「第三の状態」を作り出してはなりません。
+- **実行権限の先行復活の禁止**: 復元の成立、ユーザーによる一括有効化、現在の前提条件の再確認が完了する前に、新しいアクションの実行、外部へのデータ送信、外部への作用を開始してはなりません。
+- **世代番号による新旧の識別**: データの新旧識別は、`restore_generation_state` が管理する現在の世代番号と、各参照レコードに付与された `restore_generation` 前提タグを用いて厳格に行います。リストアを跨ぐ参照（タスク、ルール、同意、機能割当、アクション、未伝達通知、全域未完了操作）には必ず世代番号を添え、以前の古い世代の参照レコードだけに基づいて、復元後に処理を継続・実行・送信してはなりません。なお、タスクの目的変更はタスク改訂番号（`task_revision`）の前進であり、リストア世代番号の変化で代用してはなりません（改訂と世代を混同しません）。
+- **復元成立と実行再有効化の分離**: リストアの成立後であっても、タスク、定期スケジュール、外部通信の自動処理は保留状態（post-restore hold）を維持し、ユーザーが管理画面で復元内容を確認した上でまとめて有効化できるようにします。一件ずつのアクションを都度再承認させるような過剰な負担は求めませんが、拒絶（Deny）ルール、同意設定、利用上限、認証情報の不足、外部作用の結果不明状態を無視して勝手に処理を動かしてはなりません。
+- **現在の環境との再照合**: 復元された機能割当・同意設定、ルール、スケジュール、Client 端末参照、プロバイダやMCPの参照は、現在のセキュアストレージ内の同一ペアリング情報、有効な検証材料、現在の信頼範囲、非失効状態、各種制約、保留フラグ、実際の通信到達性、排他制御と照合して初めて利用可能になります。データベースに端末レコードが残っていることだけで認証や許可を復活させてはならず、過去に許可されていた機能であっても現在のセキュアストレージ側の信頼範囲を超えて利用することはできません。古い権限、プロバイダ情報、Client情報、作用結果、外部参照を現在の事実と誤認してはなりません。参照先が見つからない宙づり（dangling）参照は「未解決」として安全に扱い、結果不明な状態は不明のまま保持して勝手にリプレイしません。
+- **古い要求や結果の混入防止**: リストア切り替え前に開始されていた推論処理やツールの実行結果が切り替え後に届いた場合であっても、現在の対象、制約、目的に照合して安全に受け入れを判断し、過去のアクション説明と混同しません。Client 端末側に残っていた画面表示コピーで Host のマスターデータを上書きしてはならず、Client 端末内の未送信操作を勝手にキューに積んで実行してはなりません。
 
 ### 9.4 旧 backup 交差（確定済み Owner decision の落とし込み）
 
-以下は確定済みの製品判断であり本書で変更しない。
+以下に示す事項は、すでに確定している製品判断であり、本書で勝手に変更することはありません：
 
-- 古い Backup を Targeted Deletion 完了後に自動改変・再消去しない。保存済み copy を黙って書き換えない。
-- Restore 前に削除済み情報や旧 Rule・同意・Schedule が戻り得ることを説明する。
-- Owner が理解して明示 restore した場合、それを過去 state の意図的な再導入として扱う。戻った情報は新しい正本として扱い、新しい Experience の根拠になり得る。自動再形成禁止の迂回ではない。
-- 過去の Targeted Deletion を Restore 後に自動再適用しない。改めて消去するには新しい targeted deletion の明示が必要である。
-- cache・session・delayed result 等による意図しない再出現とは区別する。前者は再保存防止で防ぐ対象であり、後者は Owner の明示判断による別操作である。復元成立後の保留・一括有効化・現在条件の再評価を経ずに戻った情報を送信・作用・学習へ自動利用しない。
-- 未完了の消去と backup/restore が重なる場合は、制約を無視した正常・即実行可能な copy を作らず、未完了・保留・再保存防止を Host で保全する。
-- 消去区間に重なる Restore 由来の再到着は、各受入・保存先が進行中の消去条件を適用し、古い根拠だけからの再形成・遅延再保存を防ぐ。
+- **過去のバックアップファイルの不遡及性**: 個人データ完全削除が完了した後に、過去に作成された古いバックアップファイルを自動で改変したり再消去したりしません。すでに保存されているバックアップファイルを勝手に書き換えることはしません。
+- **リストア前の丁寧な説明**: 古いバックアップをリストアする前に、すでに削除された個人情報や、過去の古いルール、過去の同意設定、過去のスケジュールが復活する可能性がある旨を、ユーザーに分かりやすく事前に説明します。
+- **明示的リストアは意図的な再導入**: ユーザーが上記の説明を理解した上で明示的にリストアを実行した場合、それは「過去の状態を意図的に再導入した」ものとして正当に扱います。復元された情報は新しいマスターデータとして扱われ、今後の新しい経験（Experience）の根拠となり得ます。これは「削除された情報の自動再学習禁止」を不正に迂回したことにはなりません。
+- **過去の削除処理の自動再適用はしない**: 過去に実行された個人データ完全削除の操作を、リストア完了後に勝手に自動で再適用することはありません。復元されたデータを改めて消去したい場合は、ユーザーが明示的に新しい個人データ完全削除を指示する必要があります。
+- **キャッシュ等による意図しない復活との厳格な区別**: キャッシュ、セッション、遅延して届いた結果などによってデータが意図せず再出現することと、ユーザーの明示的なリストアによる過去データの再導入は明確に区別します。前者は再保存防止フラグで厳重に防ぐべき事故であり、後者はユーザーの明示的な意思決定に基づく正当な操作です。リストア成立後の保留、一括有効化、現在の前提条件の再評価を経ることなく、復元された情報が外部送信やアクション、学習へ自動利用されることはありません。
+- **消去とリストアが競合した場合の保護**: 未完了の個人データ完全削除とバックアップ・リストアが重なった場合、制約を無視して通常どおり即時実行可能なコピーを作成してはならず、未完了状態、保留状態、再保存防止フラグを Host 上で確実に保護します。
+- **消去期間中のリストアによる再到着の防止**: 個人データ完全削除の実行期間中にリストアによって古いデータが再導入された場合であっても、各データ受入先や保存先が現在進行中の消去条件を適用し、削除対象となった古い根拠データだけからの勝手な再学習や遅延再保存を確実に防ぎます。
 
 ### 9.5 Restore operation 自身の durable progress
 
-- `restore_operation`（受理・説明・隔離・照合・置換・保留・一括有効化対応・状態）と `restore_generation_state` を D3/D1 として Host で保全する。保留中・確認途中・置換途中に再起動しても、復元済み assignment/consent だけで自動利用を開始しない。部分置換を新正本にしない。到達不能・確認不能を成功に読み替えない。
-- 失敗時は復元前正常を維持し、不完全な復元や旧 live と競合する正本を成功と表示しない。
+- **リストア処理自体の進行状態の保護**: リストア操作レコード `restore_operation`（受理、説明、ステージング隔離、整合性照合、データ置換、処理保留、一括有効化の対応関係、進行状態）および現在のリストア世代番号 `restore_generation_state` を、永続操作データ（D3）および永続マスターデータ（D1）として Host 上で確実に保護します。処理の保留中、内容確認の途中、データ置き換えの最中に Host が再起動した場合であっても、復元された同意設定だけで勝手に外部通信を開始してはなりません。中途半端な部分置き換え状態を新しいマスターデータにしてはならず、Client 端末と通信できない状態を「リストア成功」と読み替えてはなりません。
+- **失敗時のロールバック**: リストア処理が失敗した場合は、リストア前の正常な状態を完全に維持し、不完全な復元状態や、以前の稼働データと競合するような異常な状態を「成功」として画面に表示してはなりません。
 
 ## 10. Concurrency のために persistence が持つべき property と atomic compare
 
-concurrency mechanism そのものは [Concurrency Control](concurrency-control.md) が定める。本節は成立のために persistence 側が持つ必要のある property と「どの比較を atomic に行える必要があるか」を固定する。
+並行処理や排他制御の低レベルな仕組み（ロック、MVCC、アクターなど）そのものは [Concurrency Control（並行処理制御）](concurrency-control.md) で定めます。本節では、それらの制御が正しく機能するために、永続化層（データベース）側が保持しなければならないデータ属性（property）と、「どの比較判定を不可分（atomic）に行えなければならないか」を確定します。
 
 ### 10.1 必須 property
 
-- **identity**: 各 domain の newtype（`CompanionId`, `TaskId`, `ActionAttemptId`, `DeletionOperationId`, `BackupPointId` 等）。opaque・一意・再利用しない・削除後に再発行しない。内部表現が同じでも相互変換しない。
-- **revision**: 同一 identity に対する owner 判断の順序（`task_revision`, `learning_revision`, `rule_revision`, `character_revision`）。`(identity, revision)` の組で扱い、単独で持ち歩かない。異なる identity 間・異なる owner 間で比較しない。
-- **generation**: 同一 lifecycle の区間順序（`presence_generation`, `restore_generation`, `deletion_sweep_generation`）。値の新旧ではなく区間の識別。異なる lifecycle 間で比較しない。global version counter を設けない。
-- **expected current value（boundary token）**: 照合の入力として渡す期待する対応の写し（`expected_task_revision`, `expected_presence_generation + expected_state`, `expected_certainty`, `expected_rule_revision` 等）。authority ではなく比較材料であり、不一致なら hold・deny・不足・再評価へ戻す。暗黙の「最新を使う」を設けず、欠落は不受理の理由にする。
-- **operation identity**: 全域操作の対応付け先（`deletion_operation_id + sweep`, `restore_id + generation`, `backup_point_id`）。局所完了と全域完了を区別するために使う。
-- **attempt identity**: 論理的な試行の識別（`action_attempt_id + prior_unknown` 対応）。retry は別 Attempt とし、同じ試行の継続として除外しない。
-- **durable boundary**: 消去条件・有効区間・完了境界・保留・hold（`erasure_condition.valid_interval`, `hold_conditions`, `post_restore_hold`）。各利用箇所が照合できる関係として durable に持つ。
+- **identity（識別子）**: 各ドメインごとの専用の型（`CompanionId`, `TaskId`, `ActionAttemptId`, `DeletionOperationId`, `BackupPointId` など）。中身が隠蔽され（opaque）、システム内で一意であり、使い回し（再利用）せず、削除後にも同じIDを再発行しません。内部的なデータ型（UUID や整数など）がたまたま同じであっても、異なるドメインの ID 同士を勝手に相互変換してはなりません。
+- **revision（改訂番号）**: 同一の識別子を持つエンティティに対して、担当責任者が下した内容変更の順序を表す番号（`task_revision`, `learning_revision`, `rule_revision`, `character_revision`）。常に `(identity, revision)` のペアとして扱い、番号単体で持ち歩いてはなりません。異なるエンティティ間や、異なるドメイン間で改訂番号の数値を比較してはなりません。
+- **generation（世代番号）**: 同一のライフサイクルや過渡区間の切り替え順序を表す番号（`presence_generation`, `restore_generation`, `deletion_sweep_generation`）。数値の「新旧」を比較するのではなく、「以前の区間と現在の区間が異なっていること」を確実に識別するために使います。異なるライフサイクル間で数値を比較してはならず、システム全体共通のグローバルバージョン番号のようなものは設けません。
+- **expected current value（期待値 / boundary token）**: 整合性を確認するために呼び出し側が提示する「現在の状態に関する期待値の写し」（`expected_task_revision`, `expected_presence_generation + expected_state`, `expected_certainty`, `expected_rule_revision` など）。これ自体が権限を持つわけではなく、あくまで「データベースの現在の値と比較するための材料」です。もし期待値とデータベースの現在値が食い違っていれば、処理を保留、拒否、または再評価へ戻します。「暗黙のうちに自動で最新値を使って処理を継続する」ような曖昧な挙動は排除し、期待値の指定がない場合は要求を受理しません。
+- **operation identity（全域操作識別子）**: 全域的な一連の操作を束ねるための識別子（`deletion_operation_id + sweep`, `restore_id + generation`, `backup_point_id`）。各参加サブシステムの局所的な完了と、システム全体での全域完了を厳格に区別するために用います。
+- **attempt identity（試行識別子）**: 外部アクションの論理的な試行ごとに発行される固有の識別子（`action_attempt_id` ＋ 元不明試行への対応 `prior_unknown`）。処理をやり直す（retry）場合は必ず新しい試行識別子を発行し、「前回の試行がまだ続いているだけ」とみなして二重実行のリスクを見失うことを防ぎます。
+- **durable boundary（永続化された境界条件）**: 消去条件、有効期間、完了境界、保留状態（`erasure_condition.valid_interval`, `hold_conditions`, `post_restore_hold`）。各サブシステムが実行時に照合できるよう、ディスク上に確実に永続化します。
 
 ### 10.2 Atomic compare 要件表（mechanism は後続）
 
-| 利用・受入 | atomic に比較しなければならないもの | 不一致時の扱い |
+| 利用・受入処理 | 不可分（atomic）に比較・照合しなければならない組み合わせ | 不一致・競合時の安全な扱い |
 |---|---|---|
-| Task への委任・steering・Action 開始 | `(task_id, expected_task_revision)` × 現在 `(task_id, task_revision)` × 委任 scope・Workspace 有効性・steering 前提 | 開始しない。旧判定・解決済み経路だけで開始しない |
-| Action の新規開始 | `attempt` の `(Task revision 前提, 委任 scope, 実対象・操作種別, 依拠 Permission evaluation)` × 現在の同型の組 × Client 依存なら `presence_generation` と現接続・可用性 × 消去・復元保留 | 開始しない。Owner 確認待ちは実行せず待機にする |
-| 確定度の更新 | `(attempt_id, expected_certainty=Unknown)` × 新 evidence の事実 owner 確認 × 現在 Task revision | 新 evidence なしに Unknown を未実行・成功・失敗へ書き換えない |
-| Client 依存活動の開始・継続 | `claimed_generation` × `presence_attribution.generation` × 現接続・可用性 × 現在許可・停止・保留 | 確認不能なら継続しない。旧一時 state・旧承認だけで成立させない |
-| 消去区間の受入・生成・再保存 | 到着・生成情報の `(source 関係, 取得・生成時点)` × `(operation, sweep, valid_interval)` × 保持者の局所検証 | 区間内再到着・再生成は消去対象とする。実行中処理による再保存をしない |
-| 復元後の利用 | 利用の `(restore generation 前提, assignment/consent revision, Credential 照合, 依拠 Rule revision)` × 現在の `(restore_generation, 現 store, 現制約, 復元後保留)` | 旧 live・旧同意・旧 assignment だけで自動利用・自動処理を開始しない |
-| 権限・Rule 解釈の採用 | 過去 Allow・復元 Rule・context 内許可文・cache 判定 × 現在の `(rule revision, 同意, device, cap, 失効・停止・帰属・消去・復元保留)` | 制御を変更しない。将来 Rule は解釈・表示・保存・Undo を経る |
-| 費用・資源の継続判断 | 消費の `(用途・送信先対応, 報告/不明/処理中の別)` × 現在 cap・資源・不明の扱い | 処理中・遅延・不明をゼロにしない。並列で同一残額を使い切れる扱いにしない |
-| Character 適用 | `(character_id, expected_character_revision)` × 現在適用関係 × `OwnerSelectionRef` | 未確認部品を更新済みにしない。適用禁止種別を適用しない |
-| 全域完了の確定 | 各 `participant` の局所完了・検証・未完了・失敗 × 機械的残存検証 × 区間内再到着の取込み × 本文非再保存 × 検索 token の除去・復元不能化 | 未確認・検証失敗・pending/unreachable・token 残存を成功に読み替えない。局所完了の集合だけを全域完了にしない |
+| **タスクへの委任・方向転換・アクション開始** | `(task_id, expected_task_revision)` × 現在の `(task_id, task_revision)` × 委任スコープ・ワークスペースの有効性・方向転換の前提条件 | **処理を開始しません。** 過去の古い判定結果や、過去に解決された通信経路だけを頼りに処理を開始してはなりません。 |
+| **アクションの新規開始** | 試行レコードの `(タスク改訂前提, 委任スコープ, 実際の対象・操作種別, 依拠した権限評価)` × 現在の最新条件 × （Client画面依存なら）`presence_generation` と実際の通信接続・利用可能性 × 個人データ完全削除やリストアによる保留状態 | **処理を開始しません。** ユーザーへの確認待ちとなっている操作は、勝手に実行せず待機状態を維持します。 |
+| **アクション確定度の更新** | `(attempt_id, expected_certainty = Unknown)` × 事実の担当責任者が確認した新しい客観的証拠 × 現在のタスク改訂番号 | **新しい客観的証拠なしに、ステータスを勝手に「未実行」「成功」「失敗」へ書き換えてはなりません。** |
+| **Client 画面に依存する活動の開始・継続** | 要求元の世代番号（`claimed_generation`）× 現在の帰属世代番号（`presence_attribution.generation`）× 実際の通信接続・利用可能性 × 現在の権限・停止・保留状態 | **確認が取れない場合は処理を継続しません。** 過去の一時状態や古い承認記録だけで処理を成立させてはなりません。 |
+| **消去期間中のデータ受入・生成・再保存** | 新たに到着・生成された情報の `(参照元の関係, 取得・生成日時)` × 進行中の消去条件 `(operation, sweep, valid_interval)` × データ保持側の局所検証結果 | **消去期間中に到着・再生成されたデータは消去対象とします。** 実行中のバックグラウンド処理によって、削除対象のデータがこっそり再保存されることを防ぎます。 |
+| **リストア完了後のデータ利用** | 利用要求の `(リストア世代前提, 機能割当・同意改訂, 認証情報の照合, 依拠するルール改訂)` × 現在の `(restore_generation, 現在のセキュアストレージ, 現在の制約, リストア後保留)` | **過去の古い稼働データや古い同意設定だけを根拠にして、自動利用や外部通信を開始してはなりません。** |
+| **権限・ルール解釈の採用** | 過去の「許可」レコード、復元されたルール、プロンプト内の指示文、キャッシュされた判定 × 現在の `(ルール改訂, 同意, 端末, 利用上限, 失効・停止・帰属・消去・復元保留)` | **現在の安全制御を勝手に変更してはなりません。** 将来のルール変更は、正式な解釈・画面提示・保存・取り消し（Undo）の手続きを経る必要があります。 |
+| **費用・リソースの継続判断** | 消費要求の `(用途・送信先との対応, 確定報告/結果不明/処理中の別)` × 現在の利用上限（cap）・リソース残枠・結果不明消費の扱い | **処理中や遅延、結果不明な消費量を勝手にゼロとみなしてはなりません。** 並列で動く複数の処理が、同一の残枠を同時に使い切ってしまうような過剰消費を許しません。 |
+| **Character 改訂の適用** | `(character_id, expected_character_revision)` × 現在の適用関係 × ユーザー操作の記録（`OwnerSelectionRef`） | **ユーザーが確認していない部品を「更新済み」にしてはなりません。** 適用が禁止されている種別のデータを適用してはなりません。 |
+| **全域完了の確定** | 各参加サブシステムの局所完了・残存検証・未完了・失敗 × 機械的な残存検証 × 消去期間中の再到着データの取り込み × 本文の非再保存 × 検索トークンの除去・復元不能化 | **未確認、検証失敗、未到達、検索トークンの残存を「成功」と読み替えてはなりません。** 一部の参加者の局所的な完了報告が集まっただけで「全域完了」とみなしてはなりません。 |
 
-「最新の値を読んだ」「cache に hit した」「到着順で最後」であることは、いずれも単独では受入根拠にならない。revision と generation は混ぜない。
+※「最新の値を読み込んだから」「キャッシュにヒットしたから」「到着順序が最後だったから」という事実はいずれも、単独では要求を受理する正当な根拠にはなりません。改訂番号（revision）と世代番号（generation）を混同して比較してはなりません。
 
 ## 11. Technology choice（logical requirements からの導出）
 
-| state 種別 | 使う技術 | 導出理由 |
-|---|---|---|
-| Host durable primary / history / operation（D1/D2/D3。秘密値・blob 本体・derived を除く） | SQLite 単一 file（例: `app.db`） | backup 整合（対象時点・参照対応・未完了状況を復旧可能な対応で含める）と必要最小の cross-owner atomic read（Task+未伝達、usage+cap、presence 切替等）のため。共有は mechanism であり ownership 統合ではない。単一 file を理由に一つの state・lifecycle・revision へまとめない |
-| embedding / index / score（R） | sqlite-vec（derived file / group。例: `derived.db`） | 検索用派生は元 state との対応・利用制限に従い、派生物なしでも正本が失われないこと、targeted deletion へ参加しつつ primary を破壊せず再構築できることが必要であるため。古い派生物から権限・状態を復活させない |
-| cache / session / 一時 context（R/T） | SQLite derived group または process memory（永続化しない） | hit/miss・期限切れで論理 context・権限・永続化契約を変えないこと、Provider 側にしか継続状態が残らない構造を作らないことが必要であるため |
-| 内部保持 copy・中間 file の blob 本体 | filesystem（例: `internal_copies/`）+ DB 側の参照・由来・用途・削除 marker | 大きい blob を DB inline に必須としないため。意味は作業等に残り、外部所有を理由に内部消去から除外しない。backup には内容を含め、外部 Workspace 実体は収集しない |
-| Credential 秘密値・Client 接続材料の秘密部分・Host device-auth record | credential store（OS 分離保管の抽象。DPAPI / libsecret / Keychain 等。具体方式は固定しない） | 秘密の通常経路への非露出、device 検証材料・trust の backup 除外・Restore 維持・Reset 範囲の分離が必要であるため。DB 側は非秘密参照だけを持つ（Group K） |
-| portable full backup copy | filesystem（例: `*.ene-backup`。暗号化選択可能） | 稼働中の正本とは別の外部 copy として境界を保ち、明示 restore を経ずに live 正本へ戻さないことが必要であるため。保存先・schedule・保持数・保護は Owner が選ぶ |
-| Client 一時・Provider 保有・MCP 側状態・外部 Workspace 実体・外部 Package 原本 | 各所在のまま（ene の durable としない） | Client を正本・永続 cache にしないこと、Provider/MCP 側を内部正本・内部消去保証に含めないこと、外部所有を内部所有にしないことが必要であるため |
+システムの論理的な永続化要件から導き出されるストレージ技術の選定と配置は以下のとおりです：
 
-DB を分ける / 同一にする判断は上表の必要性に限る。Host durable を単一 file にすることは、全 state を一つの保存単位・一つの lifecycle・一つの revision へまとめる理由にならない。一般 App Data は Owner の OS account だけが扱える領域に置き、一律の application-level 暗号化を必須にしない（要件の Local data 契約を維持する）。
+| データ種別 | 採用する技術 | 選定の理由 |
+|---|---|---|
+| **Host 永続データ**<br>（D1 / D2 / D3。秘密情報、大きなバイナリ、派生データを除く） | **単一の SQLite ファイル**<br>（例: `app.db`） | バックアップ作成時の整合性（特定時点のスナップショット、参照関係、未完了状態を復旧可能な形で含めること）を確保するため、および担当責任者を跨ぐ最小限の不可分な読み取り（タスクと未伝達通知の整合、利用実績と上限の照合、画面帰属の安全な切り替えなど）を実現するためです。ファイルの共有は実装メカニズムの選択であり、責任の統合ではありません。単一ファイルであることを理由に、すべてのデータをひとつの巨大なテーブルや共通の改訂管理にまとめてはなりません。 |
+| **ベクトル埋め込み / 検索インデックス / スコア**<br>（R: 派生データ） | **sqlite-vec**<br>（派生データ専用の別ファイル。例: `derived.db`） | 検索用の派生データは、元となるマスターデータとの対応関係や利用制約に厳格に従う必要があり、派生データが消失してもマスターデータ自体は失われないこと、および個人データ完全削除に参加しつつマスターデータベースを壊さずにいつでも再構築できることが不可欠であるためです。古い派生データから過去の権限や状態を復活させてはなりません。 |
+| **キャッシュ / セッション / 一時コンテキスト**<br>（R / T: 派生・一時データ） | **SQLite の派生グループ、またはプロセス内メモリ**<br>（ディスクに永続化しない） | キャッシュのヒット/ミスや有効期限切れによって、論理的なコンテキストや権限、永続化契約を変更してはならないため、またプロバイダ側にしか状態が残らないような脆弱な構造を避けるためです。 |
+| **タスク内部コピー・中間ファイルのバイナリ本体**<br>（D1: 内部作業データ） | **ファイルシステム**<br>（例: `internal_copies/` ディレクトリ）＋ DB側の参照・由来・用途・削除フラグ | サイズの大きなバイナリデータをデータベース内にインライン保存することを必須としないためです。データの業務上の意味は「作業」サブシステム等に残り、外部由来であることを理由に個人データ完全削除から除外しません。バックアップにはその内容を含めます（外部ワークスペース内の実体ファイルは収集しません）。 |
+| **認証情報の秘密値・Client接続秘密鍵・Host端末認証レコード**<br>（E: 秘密情報） | **OS セキュアストレージ**<br>（OS の分離保管機能の抽象化層。Windows DPAPI、Linux libsecret、macOS Keychain など。具体的実装は自由度） | 秘密情報を通常の通信経路やログに一切露出させないため、また端末の検証材料や信頼範囲をバックアップから除外してリストア時にも巻き戻さないため、さらに全データ初期化と設定リセットの消去範囲を厳格に分離するためです。データベース側には秘密を含まない参照情報のみを保持します（Group K）。 |
+| **ポータブルなフルバックアップファイル**<br>（外部コピー） | **ファイルシステム**<br>（例: `*.ene-backup`。暗号化の選択が可能） | 稼働中のマスターデータとは完全に独立した外部コピーとしての境界を保ち、明示的なリストア手続きを経ずに稼働中のデータとして読み戻さないようにするためです。保存先フォルダ、実行スケジュール、保持世代数、暗号化保護はユーザーが自由に選択できます。 |
+| **Client一時データ・プロバイダ側保持データ・MCP側状態・外部ワークスペース実体・外部パッケージ原本** | **各所在のまま**<br>（システムの永続データとしない） | Client 端末をマスターデータや永続キャッシュにしないため、プロバイダやMCP側をシステムの内部正本や消去保証の範囲に含めないため、そして外部の所有物をシステムの所有物と混同しないためです。 |
+
+データベースを分けるか同一にするかの判断は、上表に示した技術的・論理的必然性のみに基づきます。Host の永続データを単一の SQLite ファイルにまとめることは、あらゆる状態を単一の保存単位、単一のライフサイクル、単一のリビジョン番号に統合してよい理由にはなりません。なお、一般的なアプリケーションデータは、ユーザー本人の OS アカウントのみがアクセスできる保護されたディレクトリに配置し、アプリケーション独自の一律なファイル暗号化を必須とはしません（要件定義におけるローカルデータ保護契約を維持します）。
 
 ## 12. Validation walkthrough
 
-固定チェックリストではなく、正常系と意味のある競合・障害を選んで walkthrough した。各行の owner・contract は既存のままである。
+あらかじめ用意された形式的なチェックリストをなぞるのではなく、正常系のシナリオおよび技術的に意味のある競合・障害ケースを実際に選定してウォークスルー検証を行いました。各サブシステムの担当責任や契約条件は既存の設計を完全に遵守しています。
 
-| scenario | 歩行と必要な結果 | 本書の成立箇所 |
+| 検証シナリオ | 処理の流れと必要な結果 | 本書における成立箇所 |
 |---|---|---|
-| normal conversation → History → Learning | 会話→`history_message` append +（要時）`undelivered` の AU1a 原子 durable。形成は別 transaction で認識・学習が現在認識・根拠・scope・保存条件・消去状況へ照合し、必要な状態だけ形成・Summary を共通根拠に対応付ける。訂正は新 Experience とし過去発言を現在認識へ書き換えない | §3, §4 Group B/C, §7 AU1a |
-| Task delegation → result | Task 作成の AU2 原子 durable（task+task_revision+初期 context＋関連付けを確定した場合の workspace_assoc の durable-before-visible）。委任は `expected_task_revision` の atomic compare。結果は attempt→Task revision→現在 Task の順に辿り、記録（元へ残す）と採用（現在の受入）を分ける。旧目的の結果を新目的に自動採用しない | §4 Group D/E, §7 AU2/AU3/AU5, §10 |
-| unknown external Action → restart | `action_attempt(Unknown + 根拠・hold + generation タグ)` を D3 として保全し、restart 後に Unknown のまま再構成する。自動再実行・replay せず、重複 risk を示した Owner 判断による新 attempt とする。記録保存失敗を未実行の根拠にしない | §4 Group E, §6, §7 AU5 |
-| Client move → restart → stale reconnect | `presence_attribution(generation)` + hint・復旧先（非現在）+ 現接続・許可・排他性の確認で stale を識別する。再接続の古い一時 state・旧承認・解決済み経路だけで presence・Permission・再開を成立させない。元 Client 利用不能なら active なしで待つ。旧 round・旧試行を replay しない | §4 Group G, §6, §7 AU7, §10 |
-| Targeted Deletion 中の crash | `deletion_operation` + `erasure_condition` + `deletion_participant` を Host で保全し、未完了・保留・再保存防止を維持する。参加者・残存検証完了後でも検索 token が復元可能なら `finalizing` として再起動後に最終消去を続け、token の除去・復元不能化を確認する前に全域完了・hold 解除へ進まない。区間内再到着・遅延再保存・古い根拠からの再形成を防ぎ、完了記録・Audit へ本文を残さない | §4 Group J, §6, §7 AU9, §8 |
-| Restore 途中の crash | 置換成立前は復元前正常を正本とし、成立後は復元内容を正本とする単一正本を守る。staging 検証→`restore_generation` switch の原子確定とし、部分置換を新正本にしない。成立後も自動処理は保留し一括有効化待ちとする。再起動で保留を解除しない | §4 Group J, §6, §7 AU11, §9 |
-| delayed result arrival | 用途別受入（会話・Task・Learning・Permission・次 Action・必要事実）で現在の対象・制限・意味へ照合し、記録・更新・次実行・提示を分ける。到着が遅いことだけで出来事を新しくせず、最新到着だけで現在値を決めない。消去・復元・steering・Cancel 後の到着物は元 Action/Task へ事実を残し後続を自動開始しない | §7, §10（CC-03 の persistence 側の保持） |
-| Companion / Character deletion | Companion 削除は個体固有 Summary・Companion scope・Skill 過去 revision・State・主体/相手 Relationship・担当 Schedule を削除し、History・活動記録・Task 記録・Global・共有 Summary・外部 file を残す。各 owner の局所 durable の集約とし単一 transaction にしない。新規禁止 hold を先行させる。Character 削除は静的定義の除去であり経験・記録へ cascade しない。dangling は未解決とする | §4 Group A/B/C/D, §6, §7 AU12/AU13 |
-| undelivered Task completion | Task 完了と報告完了を分ける。`undelivered(Pending→Summarized→Presented)` は提示確認後の durable 更新とし、接続・表示 copy 送信・Task 完了だけで報告済みにしない。active なし期間は Host に残し次 Client で現在の結果・利用制限・削除状況へ照合して要約報告する | §4 Group B, §6, §7 AU1a/AU1b/AU8 |
-| retention / reset 等の全域操作（追加） | 通常 History/log 整理は形成済みへ cascade させず、Learning revision・Summary の cleanup は既定 OFF・明示 opt-in のみとする。全データ Reset の途中 crash でも旧処理・一時 copy から復活させない。外部 Workspace・保存 backup を削除しない | §4 Group J, §6 |
-| Schedule 到来と active なし（追加） | Schedule 設定・発生対応・各回 Task の区別を保ち、停止中の回は missed とし自動補完しない。将来回は新 Task として現在条件で開始する。active なしでも Host 完結作業は継続し、Client 依存確認は判断待ちにする | §4 Group D, §6 |
-| Observer routing と scope 変更（追加） | routing 限定文脈は R/T の派生表現とし、新正本・新 scope・包括共有にしない。scope 変更・同意失効・消去を生成済み要約・処理中結果にも適用する。混合文しかなく分離を確認できなければ個体へ渡さない | §5 |
+| **通常の会話 → 履歴保存 → 長期記憶の形成** | ユーザーの発言受付 → `history_message` の追記 ＋（必要な場合）未伝達通知 `undelivered` の登録を、AU1a により不可分にディスクコミットします。長期記憶の形成は完全に別のトランザクションとして行い、「認識・学習」サブシステムが現在の最新認識、判断根拠、スコープ、保存制約、消去状況と照合し、必要なデータのみを学習させ、サマリーを共通の根拠に対応付けます。ユーザーによる過去の発言の訂正は「新しい経験（Experience）」として扱い、過去の発言ログを現在の認識で直接上書き改ざんすることはありません。 | §3, §4 Group B/C, §7 AU1a |
+| **タスク委任 → 実行結果の受入** | タスク作成時に AU2 により不可分コミット（タスク本体 ＋ 改訂 ＋ 初期コンテキスト ＋ 関連付けを確定した場合のワークスペース関連付けを保存し、完了前は外部エージェントへの委任や実行から不可視とする）。エージェントへの委任時は期待する改訂番号（`expected_task_revision`）を不可分に照合します。実行結果が届いた際は「試行ログ → タスク改訂 → 現在のタスク」の順序で辿り、客観的事実の記録（元レコードへの保存）と、結果の採用（現在のタスクへの取り込み）を明確に分離します。古いタスク目的のために得られた結果を、方向転換後の新しい目的へ勝手に自動採用しません。 | §4 Group D/E, §7 AU2/AU3/AU5, §10 |
+| **外部アクション実行中の結果不明 → Host 再起動** | アクション試行レコード `action_attempt(Unknown ＋ 根拠・保留 ＋ 世代タグ)` を永続操作データ（D3）として確実にディスク保護し、再起動後も「結果不明（Unknown）」のまま正しく復元します。勝手に自動で再実行したりリプレイしたりせず、二重実行のリスクを画面に明示した上でユーザーの判断を仰ぎ、やり直す場合は新しい試行ID（`attempt_id`）を発行します。「ログの保存に失敗したこと」を「外部アクションが実行されなかった証拠」と誤認しません。 | §4 Group E, §6, §7 AU5 |
+| **画面移動 → Host 再起動 → 古い Client の再接続** | 個体ごとの帰属レコード `presence_attribution(generation)` ＋ 再配置ヒント（過去の非現在参照）＋ 実際の通信接続・端末許可・排他制御の確認により、古い無効な接続（stale）を正しく識別します。再接続してきた Client 端末側に残っていた古い一時データ、過去の承認記録、過去の解決済み通信経路が存在することだけで、画面帰属や権限を勝手に成立させたり処理を再開したりしません。元の Client が利用できない場合は「アクティブな画面なし（`NoActive`）」で待機します。古い対話ターンや過去のアクション試行を勝手にリプレイしません。 | §4 Group G, §6, §7 AU7, §10 |
+| **個人データ完全削除の実行中のクラッシュ** | 削除操作レコード `deletion_operation` ＋ 消去条件 `erasure_condition` ＋ 参加者状況 `deletion_participant` を Host 上で確実に保護し、未完了状態、必要な保留（hold）、再保存防止フラグを維持します。全参加者の局所処理と残存検証が完了した後であっても、検索トークンの最終消去が未完了であれば `finalizing` 状態として扱い、再起動後に最終消去処理を再開します。検索トークンの除去・復元不能化が確認できるまでは、全域完了への遷移や保留の解除を行いません。削除期間中に到着したデータの再保存や、削除前の古い根拠だけに基づく再学習を確実に防ぎ、完了記録や監査ログに対象本文を残しません。 | §4 Group J, §6, §7 AU9, §8 |
+| **リストア処理の途中のクラッシュ** | データの置き換えが成立する前は「リストア前の正常状態」がマスターデータであり、置き換え成立後は「復元されたデータ」がマスターデータとなる「単一正本の原則」を厳格に守ります。ステージング領域での検証完了から、リストア世代番号（`restore_generation`）の不可分な切り替えによって成立させ、中途半端な部分置き換え状態をマスターデータにしません。リストア成立後であっても自動処理は保留状態とし、ユーザーによる一括有効化を待ちます。再起動によって保留状態が勝手に解除されることはありません。 | §4 Group J, §6, §7 AU11, §9 |
+| **遅延した処理結果の到着** | 用途別の受入処理（会話、タスク、学習、権限、次のアクション、事実記録）において、現在の最新の対象・制約・意味と照合し、「事実の記録」「状態の更新」「次の処理の実行」「画面への提示」を明確に区別します。結果の到着が遅れたことだけを理由に出来事を新しく見せかけたり、最新の到着データだけで現在値を勝手に決めたりしません。個人データ完全削除、リストア、タスクの方向転換、キャンセルの後に届いた結果については、元のアクションやタスクに客観的事実のログを残しつつ、後続のアクションを勝手に自動開始しません。 | §7, §10（Concurrency Control CC-03 の永続化要件） |
+| **Companion / Character の削除** | Companion の削除では、個体固有のサマリー、個体スコープの記憶、スキルの過去改訂、個体状態、相手との関係性解釈、担当スケジュールを削除しつつ、過去の会話履歴、活動記録、タスク記録、全体共有データ、共有サマリー、外部ファイルは安全に残します。各サブシステムの局所的な削除処理を集約する方式をとり、巨大な単一トランザクションにはしません。新規活動を禁止する保留（hold）を必ず先行させます。Character の削除は静的な定義情報の除去であり、個体が積んできた経験や履歴レコードへ連鎖削除しません。参照先が見つからない宙づり関係は「未解決」として安全に扱います。 | §4 Group A/B/C/D, §6, §7 AU12/AU13 |
+| **未伝達通知とタスク完了の連携** | タスクの完了と、ユーザーへの報告完了を明確に分離します。未伝達通知のステータス遷移（`Pending → Summarized → Presented`）は、画面への実際の提示確認を受けてからディスク更新し、通信が繋がったこと、表示用コピーを送信したこと、タスクが完了したことだけで「報告完了」とみなしてはなりません。アクティブな画面がない期間中は Host 内部に未伝達通知を保持し続け、次に Client が接続してきた際に、最新の状況・利用制限・削除状態と照合した上で要約して報告します。 | §4 Group B, §6, §7 AU1a/AU1b/AU8 |
+| **データ保持期間整理や初期化等の全域操作** | 通常の会話履歴やログの整理処理が、すでに形成された長期記憶へ連鎖削除されることはありません。学習改訂データやサマリーの容量管理は既定で OFF であり、ユーザーが明示的に opt-in した場合のみ動作します。全データ初期化（Reset）の途中でクラッシュした場合であっても、過去の処理や一時コピーからデータを勝手に復活させません。外部ワークスペース内のファイルや、ユーザーが退避したバックアップファイルは削除しません。 | §4 Group J, §6 |
+| **定期スケジュールの到来と画面なし状態** | スケジュール設定、実行履歴、各回のタスク実行の区別を厳格に保持し、システム停止中にスキップされた回は「見送り（missed）」として記録し、後から勝手に自動補完実行しません。将来の実行回は、新しいタスクとして現在の前提条件に基づいて開始します。アクティブな画面がない状態であっても、Host 内部で完結する作業は安全に継続し、画面確認が必要な処理はユーザーの判断待ちとします。 | §4 Group D, §6 |
+| **Observer ルーティングとスコープ変更** | ルーティング用の限定文脈は、メモリ上の一時的または派生的な表現（R/T）であり、新たなマスターデータや新しい権限スコープを作ったり、包括的な情報共有の抜け道にしたりしません。スコープの変更、同意の失効、個人データ完全削除は、生成済みの要約文や処理中の推論コンテキストにも直ちに適用します。複数の個体情報が混ざった要約文しか存在せず、安全に分離できる確証がない場合は、個体へ渡しません。 | §5 |
 
 ## 13. 意図的に残した Design Freedom
 
-| 設計対象 | 固定済みの architecture property | 残す Design Freedom |
+| 設計対象 | 固定済みのアーキテクチャ原則（変更不可） | 実装者に委ねる自由度（Design Freedom） |
 |---|---|---|
-| 保存実装 | 対応の保持・照合可能性、本文非複製、secret 分離、derived 分離、backup 除外を守る | 具体 SQL 方言・index・migration・vacuum・暗号実装・filesystem layout・blob inline/file の選択・`SealedSearchToken` の実装・到達性確認方式 |
-| 原子性・順序の実現 | §7 の atomicity / ordering / durable-before-visible、§10 の atomic compare を守る。確認不能を許可・現在・完了へ変換しない | transaction library・lock / MVCC / actor / queue / event bus・IPC・process 配置・retry/timeout 値・exact progress 表現 |
-| 派生物の実現 | 第二正本化の禁止、invalidation key（revision/generation/消去条件）の保持、消去参加を守る | embedding / scoring・cache 実装・routing context 生成 model/Provider・形式・更新頻度・鮮度・選択 algorithm・再構築の時機 |
-| 全域操作の実現 | 単一正本・非混合・権限先行復活の禁止・成功表示の条件・再起動時の保全を守る | 停止伝達・切断検知・帰属調停・round 区切り・対象探索・参照整合・照合の配置・backup 整合時点の作り方・部分失敗からの復旧・保存形式・対応 version |
-| 記録・報告・監査 | 元事実の確定度・privacy・順序の意味と管理到達性を維持する。本文別保管庫を作らない | audit format・保持期間・提示確認・要約粒度・UI layout・診断 stack |
-| 時間・費用 | 経過時間の解釈、missed 非補完、並列・処理中・不明の上限反映を守る | 減衰・時刻計算・Capture 時機・費用予約・集計期間・推定・資源配分の機構 |
+| **保存実装の詳細** | 紐付け対応関係の保持、照合可能性の確保、本文を余計に複製しないこと、秘密情報の分離保管、派生データの分離、バックアップ除外ルールを厳格に遵守します。 | 具体的な SQL 方言、インデックスの張り方、マイグレーション手順、VACUUM の運用方法、暗号化ライブラリの選定、ファイルシステムのディレクトリ構造、バイナリのインライン保存/外部ファイル保存の選択、`SealedSearchToken` の内部実装方式、通信到達性の確認アルゴリズム。 |
+| **原子性・順序の実現方式** | §7 で定めたトランザクションの原子性、処理順序、公開前に保存を完了する原則（durable-before-visible）、および §10 の不可分な比較判定（atomic compare）を遵守します。「確認不能」を「許可」「現在」「完了」へ勝手に読み替えてはなりません。 | トランザクション制御ライブラリ、ロック方式、MVCC、アクターモデル、メッセージキュー、イベントバスの実装選択、IPC 通信プロトコル、プロセスやスレッドの配置、リトライ回数やタイムアウト秒数の具体値、進捗状況の低レベルなデータ表現。 |
+| **派生データの実装** | 派生データを第二の正本に格上げしないこと、無効化キー（改訂番号、世代番号、消去条件）を保持すること、個人データ完全削除へ確実に参加することを遵守します。 | ベクトル埋め込み生成モデル、検索類似度スコアの計算式、キャッシュのアルゴリズム、Observer 限定ルーティング文脈を生成するプロバイダやプロンプトの形式、更新頻度、情報の鮮度閾値、再計算や再構築のタイミング。 |
+| **全域操作の実現方式** | 常に単一の正本を守ること、新旧データを安易に混交させないこと、実行権限の先行復活を禁止すること、全体成功の判定条件、再起動後も未完了状態や保留を維持することを遵守します。 | 停止要求の伝達プロトコル、通信切断の検知方式、画面帰属の調停アルゴリズム、対話ターンの区切り方、削除対象の探索方式、バックアップ作成時のデータ静止点（整合スナップショット）の作り方、部分的な失敗からの復旧手順、バックアップファイルの保存フォーマットやバージョン管理方式。 |
+| **記録・報告・監査** | 客観的事実の確定度、プライバシー保護、出来事の順序の意味、管理画面からの到達性を維持します。本文をこっそり退避する別保管庫を作ってはなりません。 | 監査ログのフォーマット、データの保持期間、画面への提示確認のUI実装、要約の粒度や表現方法、画面レイアウト、診断ログのスタックトレース出力方式。 |
+| **時間・費用管理** | 経過時間の意味の解釈、スキップされたスケジュールの非補完、並列処理や結果不明な消費量を上限集計へ確実に反映することを遵守します。 | 時間経過に伴う記憶の減衰率の計算式、画面キャプチャの実行タイミング、費用の事前予約枠（Reservation）の管理方式、集計期間の区切り方、消費量の推定アルゴリズム、リソース配分の優先度制御。 |
 
-archive / file format、encryption implementation、DB schema の製品固有 SQL、serialization、transaction mechanism、Rust type / trait、crate / module、IPC、locking、exact progress representation、retry / timeout、specific library も固定しない。上表の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の12責務、semantic owner、Host / Client 配置と trust boundary の下で実現方法を選ぶ。
+アーカイブやバックアップのファイル形式、暗号化アルゴリズムの詳細、データベース製品固有の `CREATE TABLE` 文、シリアライズ形式、トランザクションの詳細なプロトコル、Rust の具体的なトレイトや構造体定義、クレートやモジュールの分割、プロセス間通信（IPC）のパケット形式、ロックの粒度、具体的なリトライ回数やタイムアウト値、特定の外部ライブラリの採用についても、本書では固定しません。また、上表に示した対応関係を根拠にして、システム全体を統括するような万能の「統一コンテキスト層」「ポリシーエンジン」「集中マネージャー」「統合コーディネーター」などを新設してはなりません。アーキテクチャで定めた12の独立した責務、担当責任者（semantic owner）、Host と Client の配置境界、およびセキュリティ信頼境界（trust boundary）の枠組みの中で、各サブシステムが健全に連携して実現します。

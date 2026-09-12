@@ -1,17 +1,24 @@
 # ene
 
-ene は、一人の Owner が管理する Host 上で継続する、Companion 中心のパーソナル AI システムである。会話と実作業を同じ個体から使い、永続状態の正本は Host に置く。
+ene（エネ）は、ユーザー自身が管理するPC（ホスト）上で動作する、**AIパートナー（Companion）** を中心としたパーソナルAIシステムです。
 
-## 正本
+日常的な会話を楽しみながら、ファイル整理や調べ物といったPC上の実際の作業も同じパートナーに任せることができます。対話の記憶や各種設定など、大切なデータの大元（マスター）はすべて自分のPC上で安全に管理されます。
 
-- 製品と要件: [`docs/requirements/`](docs/requirements/README.md)
-- 設計: [`docs/design/`](docs/design/README.md)
-- 実装の進め方: [`docs/implementation/README.md`](docs/implementation/README.md)
-- 実装の現在地: [`docs/implementation/PROGRESS.md`](docs/implementation/PROGRESS.md)
-- 実装規約: [`AGENTS.md`](AGENTS.md)
+## ドキュメント一覧
 
-製品条件は requirements、内部設計は design、実装の順序と完了条件は実装ガイド、いまの Stage は PROGRESS.md だけが持つ。コマンドと Rust 規約は AGENTS.md を見る。
+ene の仕様や設計、開発の進め方は以下のドキュメントで管理されています。目的に応じて参照してください。
 
-設計を目的から探すときは [設計文書](docs/design/README.md) の目的別索引を使う。工程順に全文書を読むことは通常の前提にしない。
+- 📋 **[製品定義・要件 (`docs/requirements/`)](docs/requirements/README.md)**  
+  ene が目指す体験、用語の定義、機能やセキュリティに関する正式な要件です。
+- 📐 **[内部設計 (`docs/design/`)](docs/design/README.md)**  
+  システム全体の構造（アーキテクチャ）や、各サブシステムの詳細設計です。目的別の索引から必要な設計を探せます。
+- 🛠️ **[実装ガイド (`docs/implementation/README.md`)](docs/implementation/README.md)**  
+  機能開発の進め方、実装する順序、各ステップの完了基準をまとめたガイドです。
+- 📊 **[開発の現在地 (`docs/implementation/PROGRESS.md`)](docs/implementation/PROGRESS.md)**  
+  現在の開発フェーズ（ステージ）や進行中のタスクの進捗状況です。
+- 📜 **[コーディング規約 (`AGENTS.md`)](AGENTS.md)**  
+  開発用コマンドや、Rust コードの実装ルール・方針をまとめています。
 
-`.old/` は退役実装であり、要件・設計・実装契約ではない。
+> [!NOTE]
+> `.old/` フォルダにある過去のコードは参考用（アーカイブ）です。現在の製品要件や設計には含まれません。
+

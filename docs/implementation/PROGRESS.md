@@ -1,20 +1,26 @@
-# 実装進捗
+# 実装進捗状況
 
-## 現在の milestone
+## 現在進行中のステージ (Current Milestone)
 
-- Stage 4 Task / Action
+- **Stage 4: 作業用エージェントとファイル操作タスク (Task / Action)**
 
-## 完了した milestone
 
-- Stage 0 repository / build foundation
-- Stage 1 最小 foundation と共有 contract
-- Stage 2 Setup とテキスト会話の最初の縦断 slice
-- Stage 3 Experience Summary / Memory
+## 完了したステージ (Completed)
 
-## 未解決 blocker
+- ✅ **Stage 0**: リポジトリとビルド基盤の構築（workspace, CI, lint）
+- ✅ **Stage 1**: 最小限の共通規約と基盤の作成（primitive, config, api contract）
+- ✅ **Stage 2**: セットアップとテキスト会話の最小開通（Host↔Client接続、OpenAI連携、履歴保存）
+- ✅ **Stage 3**: 経験の要約と記憶機能（Experience Summary、記憶の形成・検索・更新）
 
-- なし。後段の tracking は Issue #1384、#1385、#1387、#1389、#1390 を参照（Stage 5 の presence / recovery edge と P2 hardening）。Stage 3 の設計整合 follow-up は Issue #1508、依存表の整備は Issue #1509（いずれも closeout をブロックしない）。
+## 未解決のブロッカー (Blockers)
 
-## 次の Stage
+- **現在ブロッカーはありません。**
+  - 後続タスクの検討事項は Issue #1384, #1385, #1387, #1389, #1390 にて追跡中（Stage 5 の存在場所の復元境界および品質強化）。
+  - Stage 3 の設計フォローアップは Issue #1508、依存関係の整理は Issue #1509 にて対応中（いずれも現在の作業をブロックしません）。
 
-- Stage 5 Client lifecycle / presence / recovery（Stage 4 の縦断 slice 完了後）。presence / recovery edge は Issue #1384、#1385 で追跡する。
+## 次のステージ (Next Stage)
+
+- **Stage 5: クライアントのライフサイクルと存在場所の復元**
+  - Stage 4 のファイル操作タスクが完了次第着手予定。
+  - 画面の切断・再接続時の状態維持や復旧処理（Issue #1384, #1385）を進めます。
+
