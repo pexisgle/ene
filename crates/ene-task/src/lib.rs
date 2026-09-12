@@ -14,6 +14,7 @@
 //! domain's newtype: cross-domain identities arrive as owner-defined
 //! premises.
 
+mod agent;
 mod context;
 mod delegation;
 mod orchestrate;
@@ -21,6 +22,11 @@ mod repository;
 mod task;
 mod workspace;
 
+pub use agent::{
+    TaskAgentInference, TaskAgentInferenceError, TaskAgentInferenceOutcome,
+    TaskAgentInferencePremise, TaskAgentInferenceProduced, TaskAgentNotSent, TaskAgentOutput,
+    TaskAgentTurnError, TaskAgentTurnOutcome, TaskAgentTurnPremise, orchestrate_task_agent_turn,
+};
 pub use context::{
     TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
 };

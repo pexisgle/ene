@@ -1,10 +1,11 @@
 use rusqlite::{Connection, TransactionBehavior};
 
+use ene_permission::{CapabilityKind, ConsumerKind, PurposeKind};
 use ene_primitive::WallClockWithTz;
 
-use crate::codec::decode_id;
+use crate::codec::{decode_id, encode_consumer, encode_purpose};
 
-const CURRENT_VERSION: u64 = 17;
+const CURRENT_VERSION: u64 = 18;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -424,6 +425,113 @@ scope_save_target TEXT NULL
 );
 ";
 
+/// Adds the inference attempt's consumer/purpose attribution, the persisted
+/// credential-set premise, and the Task Agent delegation/task correlation.
+/// All columns are nullable only so that pre-existing attempts can be
+/// backfilled in this same transaction; new claims always write the whole
+/// group, and the read path fails closed on a partial group or a
+/// consumer/group disagreement. The task revision stays a copied premise
+/// (never a second master): the delegation row remains the correspondence,
+/// and the copy lets a delayed result resolve its relied revision without a
+/// second read.
+const MIGRATION_V18_ALTER: &str = "
+ALTER TABLE inference_attempt ADD COLUMN consumer TEXT NULL;
+ALTER TABLE inference_attempt ADD COLUMN purpose TEXT NULL;
+ALTER TABLE inference_attempt ADD COLUMN credential_set_rev INTEGER NULL;
+ALTER TABLE inference_attempt ADD COLUMN delegation_id TEXT NULL;
+ALTER TABLE inference_attempt ADD COLUMN task_id TEXT NULL;
+ALTER TABLE inference_attempt ADD COLUMN task_revision INTEGER NULL;
+";
+
+/// The V18 migration re-runs safely on a version-only rewind (the migration
+/// tests rely on every migration being idempotent): an all-present column
+/// set skips the ALTER, and the backfill touches only rows that have no
+/// attribution yet, so a re-run never overwrites an existing consumer
+/// attribution or its correlation. A partial additive state is unsupported
+/// and fails closed instead of guessing which columns remain.
+fn migrate_v18(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    const ADDED_COLUMNS: [&str; 6] = [
+        "consumer",
+        "purpose",
+        "credential_set_rev",
+        "delegation_id",
+        "task_id",
+        "task_revision",
+    ];
+    let mut present = 0;
+    for column in ADDED_COLUMNS {
+        if column_exists(tx, "inference_attempt", column)? {
+            present += 1;
+        }
+    }
+    match present {
+        0 => {
+            tx.execute_batch(MIGRATION_V18_ALTER)
+                .map_err(|error| error.to_string())?;
+        }
+        n if n == ADDED_COLUMNS.len() => {}
+        _ => return Err(String::from("partial V18 inference_attempt schema")),
+    }
+    backfill_inference_attempt_consumers(tx)
+}
+
+fn column_exists(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<bool, String> {
+    let mut probe = tx
+        .prepare("SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2")
+        .map_err(|error| error.to_string())?;
+    let count: i64 = probe
+        .query_row(rusqlite::params![table, column], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    Ok(count > 0)
+}
+
+/// Backfills the consumer/purpose attribution for attempts recorded before
+/// V18. The capability vocabulary was the only producer then, so the mapping
+/// is deterministic; an unknown stored capability aborts the migration
+/// instead of inventing an attribution. Rows that already carry an
+/// attribution are left untouched.
+fn backfill_inference_attempt_consumers(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    let mut select = tx
+        .prepare(
+            "SELECT ticket, capability FROM inference_attempt WHERE consumer IS NULL OR purpose IS NULL",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows: Vec<(String, String)> = select
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(select);
+    let mut update = tx
+        .prepare("UPDATE inference_attempt SET consumer = ?1, purpose = ?2 WHERE ticket = ?3")
+        .map_err(|error| error.to_string())?;
+    for (ticket, capability) in &rows {
+        let (consumer, purpose) = match CapabilityKind::from_name(capability) {
+            Some(CapabilityKind::Dialogue) => (
+                ConsumerKind::CompanionDialogue,
+                PurposeKind::DialogueResponse,
+            ),
+            Some(CapabilityKind::Learning) => (
+                ConsumerKind::CompanionLearning,
+                PurposeKind::MemoryFormation,
+            ),
+            None => return Err(String::from("unknown inference capability during backfill")),
+        };
+        update
+            .execute(rusqlite::params![
+                encode_consumer(consumer),
+                encode_purpose(purpose),
+                ticket
+            ])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// Derives the recall token rows for pre-index memories inside the
 /// migration transaction, so an upgraded database answers lexical recall
 /// from the index immediately. Fresh databases backfill zero rows.
@@ -540,6 +648,9 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     if stored_version < 17 {
         tx.execute_batch(MIGRATION_V17)
             .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 18 {
+        migrate_v18(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

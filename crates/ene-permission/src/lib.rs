@@ -72,6 +72,37 @@ pub enum ConsumerKind {
     CompanionDialogue,
     /// The learning formation pass acting for one companion.
     CompanionLearning,
+    /// The temporary Task Agent acting for one delegation.
+    ///
+    /// The agent inherits the delegating companion's assignment; the
+    /// delegation correspondence (not this variant) carries the durable who.
+    /// A Task Agent turn never presents itself as dialogue or learning.
+    TaskAgent,
+}
+
+impl ConsumerKind {
+    /// Stable storage name. One owner for the vocabulary: the inference
+    /// attempt correlation and the consent accounting render consumers
+    /// through this function.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CompanionDialogue => "companion_dialogue",
+            Self::CompanionLearning => "companion_learning",
+            Self::TaskAgent => "task_agent",
+        }
+    }
+
+    /// Parses the [`Self::as_str`] vocabulary, closed world.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "companion_dialogue" => Some(Self::CompanionDialogue),
+            "companion_learning" => Some(Self::CompanionLearning),
+            "task_agent" => Some(Self::TaskAgent),
+            _ => None,
+        }
+    }
 }
 
 /// The capability the consumer wants to exercise.
@@ -113,6 +144,35 @@ pub enum PurposeKind {
     DialogueResponse,
     /// Form one Experience Summary and its Memory changes.
     MemoryFormation,
+    /// One Task Agent inference turn on behalf of a delegation.
+    ///
+    /// It shares the delegating companion's assignment; it is never a
+    /// dialogue response or a learning formation.
+    TaskAgentTurn,
+}
+
+impl PurposeKind {
+    /// Stable wire and storage name, same closed-world policy as
+    /// [`CapabilityKind::as_str`].
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DialogueResponse => "dialogue_response",
+            Self::MemoryFormation => "memory_formation",
+            Self::TaskAgentTurn => "task_agent_turn",
+        }
+    }
+
+    /// Parses the [`Self::as_str`] vocabulary, closed world.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "dialogue_response" => Some(Self::DialogueResponse),
+            "memory_formation" => Some(Self::MemoryFormation),
+            "task_agent_turn" => Some(Self::TaskAgentTurn),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,8 +586,9 @@ impl EvaluationTracker {
 ///
 /// 1. A `(consumer, capability, purpose)` triple outside the closed world
 ///    denies with [`DenyCode::NotInAllowlist`]. The current world is
-///    `(CompanionDialogue, Dialogue, DialogueResponse)` and
-///    `(CompanionLearning, Learning, MemoryFormation)`.
+///    `(CompanionDialogue, Dialogue, DialogueResponse)`,
+///    `(CompanionLearning, Learning, MemoryFormation)`, and
+///    `(TaskAgent, Dialogue, TaskAgentTurn)`.
 /// 2. Consent comparison: when stored consent exists and differs from
 ///    `expected_consent`, the caller's view is stale and the decision is
 ///    [`LiveAuthorizationDecision::NeedsRevalidation`].
@@ -560,6 +621,10 @@ pub fn check_live_authorization(
             ConsumerKind::CompanionLearning,
             CapabilityKind::Learning,
             PurposeKind::MemoryFormation
+        ) | (
+            ConsumerKind::TaskAgent,
+            CapabilityKind::Dialogue,
+            PurposeKind::TaskAgentTurn
         )
     );
     if !in_allowlist {
@@ -827,6 +892,117 @@ mod tests {
                 "mixed consumer/capability/purpose must stay outside the closed world: {mixed:?}"
             );
         }
+    }
+
+    fn task_agent_candidate() -> InferenceUseCandidate {
+        InferenceUseCandidate {
+            consumer: ConsumerKind::TaskAgent,
+            capability: CapabilityKind::Dialogue,
+            provider_ref: "acme".to_owned(),
+            model: "dialogue-1".to_owned(),
+            purpose: PurposeKind::TaskAgentTurn,
+        }
+    }
+
+    #[test]
+    fn task_agent_turn_inherits_the_dialogue_consent() {
+        let stored = record();
+        let query = CheckLiveAuthorizationQuery {
+            candidate: task_agent_candidate(),
+            expected_consent: Some((stored.id.clone(), stored.rev)),
+        };
+        let mut tracker = EvaluationTracker::new();
+        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
+        let LiveAuthorizationDecision::AllowForThisUse(id) = decision else {
+            panic!("task agent turn must be allowed under the inherited consent, got {decision:?}");
+        };
+        assert!(
+            tracker.consume(&id, &task_agent_candidate().fingerprint()),
+            "the task agent evaluation is bound to the task agent fingerprint"
+        );
+        assert!(
+            !tracker.consume(&id, &candidate().fingerprint()),
+            "a dialogue fingerprint must not consume a task agent evaluation"
+        );
+    }
+
+    #[test]
+    fn task_agent_turn_is_not_allowed_with_a_learning_consent() {
+        let stored = record_for(CapabilityKind::Learning);
+        let query = CheckLiveAuthorizationQuery {
+            candidate: task_agent_candidate(),
+            expected_consent: Some((stored.id.clone(), stored.rev)),
+        };
+        let mut tracker = EvaluationTracker::new();
+        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
+        assert!(
+            matches!(
+                decision,
+                LiveAuthorizationDecision::Deny(code) if code == DenyCode::ConsentStale
+            ),
+            "the task agent turn inherits only the dialogue capability consent, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn task_agent_turn_does_not_masquerade_as_dialogue_or_learning() {
+        let stored = record();
+        for mixed in [
+            InferenceUseCandidate {
+                consumer: ConsumerKind::CompanionDialogue,
+                ..task_agent_candidate()
+            },
+            InferenceUseCandidate {
+                consumer: ConsumerKind::CompanionLearning,
+                ..task_agent_candidate()
+            },
+            InferenceUseCandidate {
+                purpose: PurposeKind::DialogueResponse,
+                ..task_agent_candidate()
+            },
+            InferenceUseCandidate {
+                purpose: PurposeKind::MemoryFormation,
+                ..task_agent_candidate()
+            },
+            InferenceUseCandidate {
+                capability: CapabilityKind::Learning,
+                ..task_agent_candidate()
+            },
+        ] {
+            let query = CheckLiveAuthorizationQuery {
+                candidate: mixed.clone(),
+                expected_consent: Some((stored.id.clone(), stored.rev)),
+            };
+            let mut tracker = EvaluationTracker::new();
+            let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
+            assert!(
+                matches!(
+                    decision,
+                    LiveAuthorizationDecision::Deny(code) if code == DenyCode::NotInAllowlist
+                ),
+                "a Task Agent turn may only use the explicit task-agent triple: {mixed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consumer_and_purpose_storage_names_are_closed_world() {
+        for consumer in [
+            ConsumerKind::CompanionDialogue,
+            ConsumerKind::CompanionLearning,
+            ConsumerKind::TaskAgent,
+        ] {
+            assert_eq!(ConsumerKind::from_name(consumer.as_str()), Some(consumer));
+        }
+        assert_eq!(ConsumerKind::from_name("observer"), None);
+        for purpose in [
+            PurposeKind::DialogueResponse,
+            PurposeKind::MemoryFormation,
+            PurposeKind::TaskAgentTurn,
+        ] {
+            assert_eq!(PurposeKind::from_name(purpose.as_str()), Some(purpose));
+        }
+        assert_eq!(PurposeKind::from_name("unknown"), None);
     }
 
     #[test]

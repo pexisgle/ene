@@ -75,7 +75,7 @@ use ene_credential::{
 use ene_inference::{
     Admission, AuthorizedInference, DeltaFlow, DeltaSink, InferenceDispatchOutcome,
     InferenceExecutor, InferenceTechnicalError, NotSentReason, PreparedAdmission,
-    ProviderTransport,
+    ProviderTransport, TaskAgentAttemptPremise,
 };
 use ene_learning::{ExperienceCandidate, SecretScrubError, SecretScrubber as _};
 use ene_permission::{CapabilityKind, ConsentRepository as _, EvaluationTracker};
@@ -238,8 +238,9 @@ fn command_conflict_detail(command: &CommandId) -> String {
     )
 }
 
-/// Admission never produces the over-limit reason, which belongs to the
-/// dispatch cap; it maps defensively rather than claiming a setup failure.
+/// Admission never produces the over-limit or task-premise-stale reasons,
+/// which belong to dispatch; they map defensively rather than claiming a
+/// setup failure.
 fn admission_reason(reason: NotSentReason) -> &'static str {
     match reason {
         NotSentReason::SetupIncomplete => "setup-incomplete",
@@ -247,6 +248,7 @@ fn admission_reason(reason: NotSentReason) -> &'static str {
         NotSentReason::NotInAllowlist => "not-in-allowlist",
         NotSentReason::EvaluationConsumed => "evaluation-consumed",
         NotSentReason::OverLimit => "unknown-reason",
+        NotSentReason::TaskPremiseStale => "unknown-reason",
     }
 }
 
@@ -1177,6 +1179,19 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
             self.store,
             self.store,
             self.cred_store,
+        ))
+        .await
+    }
+
+    async fn admit_task_agent(
+        &self,
+        task_agent: TaskAgentAttemptPremise,
+    ) -> Result<Admission, InferenceTechnicalError> {
+        self.admit(ene_inference::prepare_task_agent_admission(
+            self.store,
+            self.store,
+            self.cred_store,
+            task_agent,
         ))
         .await
     }

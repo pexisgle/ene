@@ -10,8 +10,8 @@ use ene_credential::{
 };
 use ene_inference::{InferenceTechnicalError, UsageSource};
 use ene_permission::{
-    CapabilityKind, ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcome,
-    IntentOutcomeRecord, IntentResolution, PermissionTechnicalError,
+    CapabilityKind, ConsentRecord, ConsentRevision, ConsumerKind, IntentFingerprint, IntentOutcome,
+    IntentOutcomeRecord, IntentResolution, PermissionTechnicalError, PurposeKind,
 };
 use ene_presence::{
     ClientId, PresenceAttribution, PresenceGeneration, PresenceState, PresenceTechnicalError,
@@ -176,6 +176,24 @@ pub(crate) fn encode_usage_source(source: UsageSource) -> &'static str {
         UsageSource::Reported => "reported",
         UsageSource::Unknown => "unknown",
     }
+}
+
+/// Consumer/purpose storage vocabulary is owned by `ene-permission`; unknown
+/// stored names are unreadable rows and fail closed on decode.
+pub(crate) fn encode_consumer(consumer: ConsumerKind) -> &'static str {
+    consumer.as_str()
+}
+
+pub(crate) fn decode_consumer(text: &str) -> Result<ConsumerKind, String> {
+    ConsumerKind::from_name(text).ok_or_else(|| String::from("unknown inference consumer"))
+}
+
+pub(crate) fn encode_purpose(purpose: PurposeKind) -> &'static str {
+    purpose.as_str()
+}
+
+pub(crate) fn decode_purpose(text: &str) -> Result<PurposeKind, String> {
+    PurposeKind::from_name(text).ok_or_else(|| String::from("unknown inference purpose"))
 }
 
 pub(crate) fn encode_move_reason(reason: ThinMoveReason) -> &'static str {
