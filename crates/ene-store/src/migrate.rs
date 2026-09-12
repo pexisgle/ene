@@ -4,7 +4,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::decode_id;
 
-const CURRENT_VERSION: u64 = 15;
+const CURRENT_VERSION: u64 = 16;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -376,6 +376,34 @@ save_target TEXT
 CREATE INDEX IF NOT EXISTS idx_workspace_assoc_task ON workspace_assoc (task_id);
 ";
 
+/// Adds the `task_context_entry.item_kind` discriminator and makes the
+/// purpose payload nullable, so one entry records either the adopted purpose
+/// (payload required) or the adopted instruction (payload absent; the entry
+/// identity itself is the adoption identity). SQLite cannot drop the
+/// `NOT NULL` on `purpose_adopted_revision` in place, so the table is
+/// rebuilt: every existing row is backfilled as `adopted_purpose` with its
+/// stored payload, the old table and its index are replaced, and the new
+/// table carries the discriminator from the start. No CHECK constraints, in
+/// keeping with the existing schema style: the read path enforces the
+/// kind/payload agreement.
+const MIGRATION_V16: &str = "
+CREATE TABLE task_context_entry_v16 (
+entry_id TEXT PRIMARY KEY,
+task_id TEXT NOT NULL,
+revision INTEGER NOT NULL,
+item_kind TEXT NOT NULL,
+purpose_adopted_revision INTEGER NULL,
+origin_kind TEXT NOT NULL,
+origin_source TEXT NOT NULL,
+acquired_at TEXT NOT NULL
+);
+INSERT INTO task_context_entry_v16 (entry_id, task_id, revision, item_kind, purpose_adopted_revision, origin_kind, origin_source, acquired_at)
+SELECT entry_id, task_id, revision, 'adopted_purpose', purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry;
+DROP TABLE task_context_entry;
+ALTER TABLE task_context_entry_v16 RENAME TO task_context_entry;
+CREATE INDEX IF NOT EXISTS idx_task_context_entry_task ON task_context_entry (task_id, revision);
+";
+
 /// Derives the recall token rows for pre-index memories inside the
 /// migration transaction, so an upgraded database answers lexical recall
 /// from the index immediately. Fresh databases backfill zero rows.
@@ -483,6 +511,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 15 {
         tx.execute_batch(MIGRATION_V15)
+            .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 16 {
+        tx.execute_batch(MIGRATION_V16)
             .map_err(|error| error.to_string())?;
     }
     let current =

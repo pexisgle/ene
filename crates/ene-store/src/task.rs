@@ -6,11 +6,14 @@
 //! the only visibility boundary and a crash mid-creation leaves no partial
 //! AU2 unit. Steering compares the expected revision to the current row
 //! inside the same short transaction and, on success, forwards the D2
-//! snapshot, the new revision's adopted-purpose context entry, and the D1
-//! pointer atomically. Reads compose the committed rows of the current
-//! revision or answer `None`; a partial unit or a current row that disagrees
-//! with its revision snapshot, purpose, adopted context entry, or assignee is
-//! a technical error, never fabricated.
+//! snapshot, the new revision's adopted-purpose context entry, the adopted
+//! instruction entry when the premise carries one, and the D1 pointer
+//! atomically. Reads compose the committed rows or answer `None`: the current
+//! revision's adopted-purpose entry first, then every adopted instruction
+//! entry up to the current revision. A partial unit, a current row that
+//! disagrees with its revision snapshot, purpose, adopted-purpose entry, or
+//! assignee, an unknown item kind, and a kind/payload disagreement are
+//! technical errors, never fabricated.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -33,7 +36,7 @@ const SQL_INSERT_TASK: &str = "INSERT INTO task (task_id, revision, purpose_adop
 
 const SQL_INSERT_TASK_REVISION: &str = "INSERT INTO task_revision (task_id, revision, purpose_adopted_revision, purpose_text, assignee) VALUES (?1, ?2, ?3, ?4, ?5)";
 
-const SQL_INSERT_TASK_CONTEXT_ENTRY: &str = "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+const SQL_INSERT_TASK_CONTEXT_ENTRY: &str = "INSERT INTO task_context_entry (entry_id, task_id, revision, item_kind, purpose_adopted_revision, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 const SQL_INSERT_WORKSPACE_ASSOC: &str =
     "INSERT INTO workspace_assoc (assoc_id, task_id, folder, save_target) VALUES (?1, ?2, ?3, ?4)";
@@ -48,11 +51,13 @@ const SQL_UPDATE_TASK: &str = "UPDATE task SET revision = ?2, purpose_adopted_re
 
 const SQL_SELECT_TASK_REVISION: &str = "SELECT purpose_adopted_revision, purpose_text, assignee FROM task_revision WHERE task_id = ?1 AND revision = ?2";
 
-const SQL_SELECT_TASK_CONTEXT: &str = "SELECT entry_id, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 ORDER BY rowid";
+const SQL_SELECT_TASK_CONTEXT: &str = "SELECT entry_id, revision, item_kind, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 ORDER BY revision, entry_id";
 
 /// The adopted-purpose entry in force at the current revision, used to carry
 /// its provenance into the next revision when the purpose does not change.
-const SQL_SELECT_ADOPTED_PURPOSE_ENTRY: &str = "SELECT origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND purpose_adopted_revision = ?3 ORDER BY rowid LIMIT 1";
+/// The item kind is part of the filter so an instruction row is never read as
+/// the predecessor purpose.
+const SQL_SELECT_ADOPTED_PURPOSE_ENTRY: &str = "SELECT origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND purpose_adopted_revision = ?3 AND item_kind = ?4 ORDER BY rowid LIMIT 1";
 
 const SQL_SELECT_WORKSPACE_ASSOC: &str = "SELECT assoc_id, folder, save_target FROM workspace_assoc WHERE task_id = ?1 ORDER BY rowid LIMIT 1";
 
@@ -61,6 +66,13 @@ const SQL_SELECT_WORKSPACE_ASSOC: &str = "SELECT assoc_id, folder, save_target F
 const ORIGIN_KIND_OWNER_CONVERSATION: &str = "owner_conversation";
 const ORIGIN_KIND_SPONTANEOUS: &str = "spontaneous";
 const ORIGIN_KIND_SCHEDULE_OCCURRENCE: &str = "schedule_occurrence";
+
+/// The stored `item_kind` discriminators. The kind decides which payload is
+/// required: an adopted purpose carries the adopted revision, an adopted
+/// instruction carries no payload because the entry identity is the adoption
+/// identity.
+const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
+const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
 
 fn task_unavailable(reason: impl core::fmt::Display) -> TaskTechnicalError {
     TaskTechnicalError::StorageUnavailable {
@@ -88,6 +100,37 @@ fn decode_origin_kind(text: &str) -> Result<TaskContextOriginKind, TaskTechnical
         ORIGIN_KIND_SPONTANEOUS => Ok(TaskContextOriginKind::Spontaneous),
         ORIGIN_KIND_SCHEDULE_OCCURRENCE => Ok(TaskContextOriginKind::ScheduleOccurrence),
         _ => Err(task_unavailable("unknown task context origin kind")),
+    }
+}
+
+/// Decodes one context row's kind and payload together. The kind is resolved
+/// first, and a payload that the kind does not allow is one unreadable row:
+/// an unknown kind, a purpose without its revision, and an instruction with a
+/// purpose revision are all technical errors, never skipped or reinterpreted.
+fn decode_context_item(
+    task: TaskId,
+    item_kind: &str,
+    purpose_adopted_revision: Option<i64>,
+) -> Result<TaskContextItem, TaskTechnicalError> {
+    match item_kind {
+        ITEM_KIND_ADOPTED_PURPOSE => {
+            let raw = purpose_adopted_revision.ok_or_else(|| {
+                task_unavailable("task adopted purpose entry missing its adopted revision")
+            })?;
+            Ok(TaskContextItem::AdoptedPurpose(TaskPurposeRef {
+                task,
+                adopted_revision: decode_revision(raw)?,
+            }))
+        }
+        ITEM_KIND_ADOPTED_INSTRUCTION => {
+            if purpose_adopted_revision.is_some() {
+                return Err(task_unavailable(
+                    "task adopted instruction entry carries an adopted revision",
+                ));
+            }
+            Ok(TaskContextItem::AdoptedInstruction)
+        }
+        _ => Err(task_unavailable("unknown task context item kind")),
     }
 }
 
@@ -145,6 +188,7 @@ fn create_task_sync(
             encode_id(premise.entry.as_raw()),
             task_text,
             revision_raw,
+            ITEM_KIND_ADOPTED_PURPOSE,
             revision_raw,
             encode_origin_kind(premise.origin.kind),
             encode_id(premise.origin.source),
@@ -242,11 +286,11 @@ fn forward_steering_sync(
             "task revision assignee does not match the current assignee",
         ));
     }
-    // The adopted-purpose entry is the only context kind AU4 records. Its
-    // identity comes from the premise in both branches: the repository only
-    // stamps the post-CAS reference and, on a change, the adopted revision.
-    // On a carry-forward the old adopted identity stays in `item`, while the
-    // provenance and acquisition are copied from the entry in force.
+    // The adopted-purpose entry's identity comes from the premise in both
+    // branches: the repository only stamps the post-CAS reference and, on a
+    // change, the adopted revision. On a carry-forward the old adopted
+    // identity stays in `item`, while the provenance and acquisition are
+    // copied from the entry in force.
     let (adopted_revision, purpose_text, origin_kind, origin_source, acquired_at) = match premise
         .new_purpose
     {
@@ -264,7 +308,8 @@ fn forward_steering_sync(
                     params![
                         task_text,
                         current.revision,
-                        current.purpose_adopted_revision
+                        current.purpose_adopted_revision,
+                        ITEM_KIND_ADOPTED_PURPOSE
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
@@ -306,6 +351,7 @@ fn forward_steering_sync(
             encode_id(premise.adopted_purpose_entry.as_raw()),
             task_text,
             next_raw,
+            ITEM_KIND_ADOPTED_PURPOSE,
             adopted_raw,
             origin_kind,
             origin_source,
@@ -313,6 +359,25 @@ fn forward_steering_sync(
         ],
     )
     .map_err(task_unavailable)?;
+    if let Some(instruction) = premise.adopted_instruction {
+        // The instruction entry is written once at its adoption revision: its
+        // identity is the entry itself, so the payload column stays NULL. A
+        // failure here rolls back the whole forward, purpose entry included.
+        tx.execute(
+            SQL_INSERT_TASK_CONTEXT_ENTRY,
+            params![
+                encode_id(instruction.entry.as_raw()),
+                task_text,
+                next_raw,
+                ITEM_KIND_ADOPTED_INSTRUCTION,
+                Option::<i64>::None,
+                encode_origin_kind(instruction.origin.kind),
+                encode_id(instruction.origin.source),
+                instruction.acquired_at.to_rfc3339(),
+            ],
+        )
+        .map_err(task_unavailable)?;
+    }
     tx.execute(
         SQL_UPDATE_TASK,
         params![task_text, next_raw, adopted_raw, purpose_text],
@@ -339,7 +404,9 @@ struct RawTaskRevision {
 
 struct RawContextEntry {
     entry: String,
-    purpose_adopted_revision: i64,
+    revision: i64,
+    item_kind: String,
+    purpose_adopted_revision: Option<i64>,
     origin_kind: String,
     origin_source: String,
     acquired_at: String,
@@ -379,44 +446,89 @@ fn decode_workspace(
     })
 }
 
+/// Reads the context of one Task at `current`.
+///
+/// The result is the adopted-purpose entry in force first, then every adopted
+/// instruction entry up to the current revision in `(revision, entry_id)`
+/// order. The query is not bounded by kind or revision in SQL: an unknown
+/// kind, a kind/payload disagreement, or any row beyond the current revision
+/// is corruption the read detects instead of silently excluding. Purpose
+/// entries of past revisions are retained D2 history, not context.
 fn load_context_sync(
     conn: &Connection,
     task_text: &str,
-    revision_raw: i64,
-    reference: TaskRef,
+    current: TaskRef,
+    purpose: TaskPurposeRef,
 ) -> Result<Vec<TaskContextEntry>, TaskTechnicalError> {
     let mut statement = conn
         .prepare(SQL_SELECT_TASK_CONTEXT)
         .map_err(task_unavailable)?;
     let rows = statement
-        .query_map(params![task_text, revision_raw], |row| {
+        .query_map(params![task_text], |row| {
             Ok(RawContextEntry {
                 entry: row.get(0)?,
-                purpose_adopted_revision: row.get(1)?,
-                origin_kind: row.get(2)?,
-                origin_source: row.get(3)?,
-                acquired_at: row.get(4)?,
+                revision: row.get(1)?,
+                item_kind: row.get(2)?,
+                purpose_adopted_revision: row.get(3)?,
+                origin_kind: row.get(4)?,
+                origin_source: row.get(5)?,
+                acquired_at: row.get(6)?,
             })
         })
         .map_err(task_unavailable)?;
-    let mut entries = Vec::new();
+    let mut purpose_entry = None;
+    let mut instructions = Vec::new();
     for row in rows {
         let raw = row.map_err(task_unavailable)?;
-        entries.push(TaskContextEntry {
+        let revision = decode_revision(raw.revision)?;
+        if revision > current.revision {
+            return Err(task_unavailable(
+                "task context entry revision is beyond the current revision",
+            ));
+        }
+        // Resolve the kind before reading any payload so a row is never
+        // classified by its payload when the two disagree.
+        let item = decode_context_item(current.task, &raw.item_kind, raw.purpose_adopted_revision)?;
+        let entry = TaskContextEntry {
             entry: TaskContextEntryId::from_raw(decode_id(&raw.entry).map_err(task_unavailable)?),
-            reference,
-            item: TaskContextItem::AdoptedPurpose(TaskPurposeRef {
-                task: reference.task,
-                adopted_revision: decode_revision(raw.purpose_adopted_revision)?,
-            }),
+            reference: TaskRef {
+                task: current.task,
+                revision,
+            },
+            item,
             origin: TaskContextOrigin {
                 kind: decode_origin_kind(&raw.origin_kind)?,
                 source: decode_id(&raw.origin_source).map_err(task_unavailable)?,
             },
             acquired_at: decode_clock(&raw.acquired_at)?,
-        });
+        };
+        match entry.item {
+            TaskContextItem::AdoptedPurpose(adopted) if revision == current.revision => {
+                if adopted != purpose {
+                    return Err(task_unavailable(
+                        "task context adopted purpose does not match the current purpose",
+                    ));
+                }
+                if purpose_entry.is_some() {
+                    return Err(task_unavailable(
+                        "multiple adopted purpose entries for the current revision",
+                    ));
+                }
+                purpose_entry = Some(entry);
+            }
+            TaskContextItem::AdoptedPurpose(_) => {}
+            TaskContextItem::AdoptedInstruction => instructions.push(entry),
+        }
     }
-    Ok(entries)
+    let Some(purpose_entry) = purpose_entry else {
+        return Err(task_unavailable(
+            "task context adopted purpose entry missing for the current revision",
+        ));
+    };
+    let mut context = Vec::with_capacity(instructions.len() + 1);
+    context.push(purpose_entry);
+    context.extend(instructions);
+    Ok(context)
 }
 
 fn load_task_sync(
@@ -479,22 +591,7 @@ fn load_task_sync(
         },
         assignee: revision_assignee,
     };
-    let context = load_context_sync(&guard, &task_text, raw_task.revision, reference)?;
-    if context.is_empty() {
-        return Err(task_unavailable(
-            "task context entries missing for the current revision",
-        ));
-    }
-    // AU2 records the adopted purpose as the only item kind; a non-matching
-    // adopted identity is an inconsistent unit. The first slice that adds
-    // another item kind must extend this read rule with it.
-    if !context.iter().all(|entry| {
-        matches!(entry.item, TaskContextItem::AdoptedPurpose(adopted) if adopted == purpose)
-    }) {
-        return Err(task_unavailable(
-            "task context adopted purpose does not match the current purpose",
-        ));
-    }
+    let context = load_context_sync(&guard, &task_text, reference, purpose)?;
     let workspace = guard
         .query_row(SQL_SELECT_WORKSPACE_ASSOC, params![task_text], |row| {
             Ok(RawWorkspaceAssoc {

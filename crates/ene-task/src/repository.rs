@@ -60,12 +60,14 @@ pub trait TaskRepository: Send + Sync {
     /// without changing anything. A missing Task returns
     /// [`TaskCommitOutcome::MissingTask`] with no change. A successful commit
     /// writes the new revision snapshot, the new revision's adopted-purpose
-    /// context entry, and the current pointer atomically; older revisions and
-    /// context entries are retained.
+    /// context entry, the adopted-instruction context entry when
+    /// `premise.adopted_instruction` is `Some`, and the current pointer
+    /// atomically; older revisions and context entries are retained.
     ///
-    /// The caller mints the new revision's adopted-purpose entry identity;
-    /// the repository persists it and stamps only the post-CAS `(task,
-    /// revision)` reference and the adopted revision.
+    /// The caller mints the new revision's context entry identities; the
+    /// repository persists them and stamps only the post-CAS `(task,
+    /// revision)` reference and the adopted revision. An adopted-instruction
+    /// entry is written once and is not re-recorded by a later forward.
     async fn forward_steering(
         &self,
         premise: TaskCommitPremise,
