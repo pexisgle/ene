@@ -251,8 +251,11 @@ struct DelegationRef {
     scope: DelegationScope,      // Task・Workspace 境界の写し
 }
 
-// Task context の identity 群は TaskContextEntry（採用 identity・由来・取得時点。
-// 内容の正本は Task record、本文複製を要求しない）として task 側に定義する。
+// Task context の identity 群は TaskContextEntry（採用 identity・由来・取得時点）として task 側に定義する。
+// 採用目的の本文の正本は task_revision snapshot、採用指示の本文の正本は由来 record（History）であり、
+// entry は本文を複製しない。採用目的の採用 identity は TaskPurposeRef。採用指示の採用 identity は entry
+// 自身の TaskContextEntryId であり、由来 record（History）の RawId とは別である。採用指示 entry は採用
+// revision で 1 度だけ書き、現在有効な指示は現在 revision までの採用指示 entry 全体である。
 
 struct ScheduleOccurrenceRef {
     schedule: ScheduleId,
