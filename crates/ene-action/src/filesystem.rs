@@ -56,14 +56,14 @@ pub struct ListEntry {
 }
 
 /// The kind of one listed directory entry.
+///
+/// Only regular files and directories are listable; symlinks, reparse points,
+/// junctions, mounts, and special files are excluded from the listing (never
+/// followed), so they have no kind here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListEntryKind {
     File,
     Directory,
-    Symlink,
-    /// A special file (device, socket, ...) or an entry whose type could not
-    /// be read; it is reported without being followed.
-    Other,
 }
 
 /// The observed output of one action.
@@ -272,9 +272,12 @@ impl WorkspaceRoot {
 
     /// Observes one directory as a sorted, non-recursive entry listing.
     ///
-    /// Entry types are read without following symlinks: a link is reported as
-    /// a link, never traversed. A partial read of the directory is a confirmed
-    /// refusal (a listing changes nothing).
+    /// Each direct child is classified from no-follow metadata: symlinks,
+    /// Windows reparse points, junctions, mounts/cross-device entries, and
+    /// special files are excluded from the result rather than followed or
+    /// mapped to `file`/`dir`; an excluded child never fails the whole
+    /// listing. A partial read of the directory is a confirmed refusal (a
+    /// listing changes nothing).
     fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
         let Ok(metadata) = fs::metadata(target.as_path()) else {
             return refused();
@@ -290,13 +293,10 @@ impl WorkspaceRoot {
             let Ok(entry) = entry else {
                 return refused();
             };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let kind = match entry.file_type() {
-                Ok(file_type) if file_type.is_file() => ListEntryKind::File,
-                Ok(file_type) if file_type.is_dir() => ListEntryKind::Directory,
-                Ok(file_type) if file_type.is_symlink() => ListEntryKind::Symlink,
-                _ => ListEntryKind::Other,
+            let Some(kind) = self.listable_child(&entry.path()) else {
+                continue;
             };
+            let name = entry.file_name().to_string_lossy().into_owned();
             listing.push(ListEntry { name, kind });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
@@ -305,6 +305,40 @@ impl WorkspaceRoot {
             grounds: EffectGrounds::ObservedAtTarget,
             output: Some(ActionOutput::Listing(listing)),
         }
+    }
+
+    /// Classifies one direct child of a listing without following it.
+    ///
+    /// `None` means the entry is excluded: a symlink or reparse point (no
+    /// traversal), a mount or cross-device directory (outside the root's
+    /// filesystem entity), a special file, or an entry whose metadata cannot
+    /// be read (fail closed).
+    fn listable_child(&self, path: &Path) -> Option<ListEntryKind> {
+        let metadata = fs::symlink_metadata(path).ok()?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            // Any reparse point (symlink, junction, mount point) is excluded.
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return None;
+            }
+        }
+        let kind = if file_type.is_file() {
+            ListEntryKind::File
+        } else if file_type.is_dir() {
+            ListEntryKind::Directory
+        } else {
+            return None;
+        };
+        if !self.boundary_holds(path, &metadata) {
+            return None;
+        }
+        Some(kind)
     }
 
     fn write_atomically(
@@ -897,12 +931,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn list_reports_symlink_entries_without_following_them() {
+    fn list_excludes_symlink_entries_without_following_them() {
         let (directory, root) = workspace();
         let outside = tempdir().expect("outside directory");
         fs::write(outside.path().join("secret.txt"), b"secret").expect("outside fixture");
         std::os::unix::fs::symlink(outside.path(), directory.path().join("escape"))
             .expect("escape symlink");
+        std::os::unix::fs::symlink(
+            directory.path().join("inside"),
+            directory.path().join("dangling"),
+        )
+        .expect("dangling symlink");
+        let target = root
+            .resolve(".", OperationKind::List)
+            .expect("root listing");
+        let effect = root.execute(&target, OperationKind::List, None);
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedSuccess
+        );
+        assert_eq!(
+            effect.output,
+            Some(ActionOutput::Listing(Vec::new())),
+            "symlink entries are excluded, never followed or listed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_excludes_special_files() {
+        let (directory, root) = workspace();
+        fs::write(directory.path().join("regular.txt"), b"x").expect("fixture file");
+        let _socket = std::os::unix::net::UnixListener::bind(directory.path().join("sock"))
+            .expect("fixture socket");
         let target = root
             .resolve(".", OperationKind::List)
             .expect("root listing");
@@ -910,8 +971,8 @@ mod tests {
         assert_eq!(
             effect.output,
             Some(ActionOutput::Listing(vec![ListEntry {
-                name: String::from("escape"),
-                kind: ListEntryKind::Symlink,
+                name: String::from("regular.txt"),
+                kind: ListEntryKind::File,
             }]))
         );
     }
