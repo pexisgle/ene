@@ -10,7 +10,11 @@ use ene_credential::{
     DevicePairingRepository, DevicePairingStatus, MemoryCredentialStore, RegistrationApply,
     RegistrationFingerprint, RegistrationState,
 };
-use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
+use ene_inference::{
+    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _,
+    InferenceTechnicalError, InferenceTicketId, TaskAgentAttemptPremise, UsageFact,
+    UsageRepository, UsageSource,
+};
 use ene_learning::{
     ChangeKind, ExperienceSourceKind, Importance, LearningRepository, LearningScope,
     LearningTechnicalError, MemoryChange, MemoryChangeCommit, MemoryChangeOutcome, MemoryId,
@@ -18,13 +22,13 @@ use ene_learning::{
 };
 use ene_permission::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
-    IntentFingerprint, IntentOutcomeRepository, IntentResolution,
+    ConsumerKind, IntentFingerprint, IntentOutcomeRepository, IntentResolution, PurposeKind,
 };
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
     PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
 };
-use ene_primitive::{RawId, WallClockWithTz};
+use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
     DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome, TaskCommitPremise,
@@ -1468,7 +1472,7 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(17)),
+        matches!(version, Ok(18)),
         "migration must record version 17"
     );
     let new_index: Result<String, _> = guard.query_row(
@@ -1792,7 +1796,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1841,7 +1845,7 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(17)),
+        matches!(version, Ok(18)),
         "reopened database must record schema version 17"
     );
 }
@@ -2453,11 +2457,14 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
     );
     let claim = |ticket: InferenceTicketId, rev: u64| InferenceAttempt {
         ticket,
+        consumer: ConsumerKind::CompanionDialogue,
         capability: CapabilityKind::Dialogue,
+        purpose: PurposeKind::DialogueResponse,
         expected_credential_set: CredentialSetRevision::initial(),
         expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(rev)),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
+        task_agent: None,
     };
     let ticket = InferenceTicketId(RawId::new());
     let started = store.begin_inference_attempt(claim(ticket, 1)).await;
@@ -2607,7 +2614,7 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(17)),
+        matches!(version, Ok(18)),
         "reopened database must record schema version 17"
     );
 }
@@ -3148,7 +3155,7 @@ async fn migration_v11_applies_v12_through_v17() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "a v11 database must converge on v17"
     );
     let projection = {
@@ -3247,7 +3254,7 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "a v13 database must converge on v17"
     );
     let (projection, columns) = {
@@ -4171,7 +4178,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "migration advances the schema version"
     );
     assert!(
@@ -4213,7 +4220,7 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "a v11 database must converge on v17"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
@@ -4285,7 +4292,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(17));
+    assert_eq!(read_schema_version(&path), Some(18));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
@@ -4553,11 +4560,14 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
     let claim = sender
         .begin_inference_attempt(InferenceAttempt {
             ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
             capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
             expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
             expected_credential_set: premise,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            task_agent: None,
         })
         .await;
     assert_eq!(
@@ -4715,11 +4725,14 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
     let stale = sender
         .begin_inference_attempt(InferenceAttempt {
             ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
             capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
             expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
             expected_credential_set: premise,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            task_agent: None,
         })
         .await;
     assert_eq!(stale, Ok(AttemptBeginOutcome::Stale));
@@ -4727,11 +4740,14 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
     let fresh = sender
         .begin_inference_attempt(InferenceAttempt {
             ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
             capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
             expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
             expected_credential_set: updated,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            task_agent: None,
         })
         .await;
     assert_eq!(fresh, Ok(AttemptBeginOutcome::Started));
@@ -5187,7 +5203,7 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     let reopened = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "a v14 database must converge on v17"
     );
     assert!(!table_columns(&path, "task").is_empty(), "task is created");
@@ -5350,7 +5366,7 @@ async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
         .expect("the V16 migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "a v15 database must converge on v17"
     );
 
@@ -5505,7 +5521,7 @@ async fn migration_v16_fault_rolls_back_and_reopen_converges() {
         .expect("open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "the retried migration must converge"
     );
     assert!(
@@ -7886,7 +7902,7 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         let store = Store::open(&path).await.expect("a fresh store must open");
         assert_eq!(
             read_schema_version(&path),
-            Some(17),
+            Some(18),
             "a fresh database converges on v17"
         );
         assert!(
@@ -7941,7 +7957,7 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         .expect("the V17 migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(17),
+        Some(18),
         "a v16 database converges on v17"
     );
     let columns = table_columns(&path, "delegation");
@@ -8011,3 +8027,5 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         Some(reference)
     );
 }
+
+mod agent;

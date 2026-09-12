@@ -3,10 +3,10 @@
 //!
 //! This crate binds one authorized use to one provider call and owns the
 //! whole admission-to-accounting order behind [`InferenceExecutor`]:
-//! [`prepare_dialogue_admission`] and [`prepare_learning_admission`] resolve
-//! the consent and credential premise for their consumer,
-//! [`AdmissionRequest::authorize`] runs the single-use
-//! [`ene_permission::check_live_authorization`] /
+//! [`prepare_dialogue_admission`], [`prepare_learning_admission`], and
+//! [`prepare_task_agent_admission`] resolve the consent and credential
+//! premise for their consumer, [`AdmissionRequest::authorize`] runs the
+//! single-use [`ene_permission::check_live_authorization`] /
 //! [`ene_permission::EvaluationTracker::consume`] decision, and
 //! [`dispatch_authorized`] claims the attempt, calls the provider
 //! transport, re-checks adoption, and records usage. The provider request
@@ -14,6 +14,13 @@
 //! so no caller assembles permission or credential premises by hand. The
 //! input cap is checked before the durable attempt claim; callers arrive
 //! with an already-admitted use.
+//!
+//! A Task Agent attempt carries an opaque [`TaskAgentAttemptPremise`]; the
+//! claim verifies it against the delegation row and the current Task in the
+//! same transaction as the consent and credential-set compare, and persists
+//! the correlation ([`InferenceAttemptRecord`]) so a delayed result can be
+//! attributed after a restart. The inference crate never imports Task-owned
+//! types; the mapping happens in the Host composition root.
 //!
 //! Body text is redacted from [`core::fmt::Debug`]: [`ProviderRequest`]
 //! hides `input`, and [`InferenceResultArrival`] hides `output_text`.
@@ -33,7 +40,7 @@ use ene_permission::{
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
     PermissionEvaluationId, PurposeKind, check_live_authorization,
 };
-use ene_primitive::RawId;
+use ene_primitive::{RawId, RevisionInner};
 use thiserror::Error;
 
 /// Maximum accepted input length in Unicode scalar values.
@@ -41,6 +48,21 @@ pub const MAX_INPUT_CHARS: usize = 8_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceTicketId(pub RawId);
+
+/// Task Agent correlation of one inference attempt, as opaque values.
+///
+/// The inference domain never imports Task-owned types: the task side (or
+/// the Host composition root) maps `DelegationId` / `TaskRef` into this
+/// premise, and the claim carries it through to the durable attempt row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TaskAgentAttemptPremise {
+    /// Delegation correspondence this turn runs under.
+    pub delegation: RawId,
+    /// Relied-on Task identity.
+    pub task: RawId,
+    /// Relied-on Task revision; always travels with the identity pair.
+    pub task_revision: RevisionInner,
+}
 
 /// Why an inference use was not sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,6 +86,10 @@ pub enum NotSentReason {
     NotInAllowlist,
     /// The input exceeds [`MAX_INPUT_CHARS`].
     OverLimit,
+    /// The Task Agent attempt's delegation/task premise no longer holds
+    /// before the claim: the relied revision moved, or the delegation row is
+    /// gone. Produced by dispatch only, distinct from [`Self::ConsentStale`].
+    TaskPremiseStale,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -268,10 +294,17 @@ pub trait UsageRepository: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceAttempt {
     pub ticket: InferenceTicketId,
+    /// Consumer the attempt was admitted for. Persisted so usage attribution
+    /// can distinguish a Task Agent turn from companion dialogue/learning
+    /// even when the capability (consent slot) is shared.
+    pub consumer: ConsumerKind,
     /// Capability the attempt was admitted under. The claim reads exactly
     /// this capability's consent row, so a dialogue attempt can never be
     /// validated against learning consent or vice versa.
     pub capability: CapabilityKind,
+    /// Purpose binding this use; persisted with the same discipline as
+    /// `consumer`.
+    pub purpose: PurposeKind,
     /// Consent premise the attempt relies on, as an `(id, rev)` pair that
     /// travels together (never a bare revision), so exhaustion stays visible
     /// at the boundary.
@@ -282,6 +315,28 @@ pub struct InferenceAttempt {
     pub expected_credential_set: CredentialSetRevision,
     pub provider: String,
     pub model: String,
+    /// Task Agent correlation, present exactly for a Task Agent attempt. The
+    /// claim verifies it against the delegation row and the current Task in
+    /// the same transaction.
+    pub task_agent: Option<TaskAgentAttemptPremise>,
+}
+
+/// One claimed attempt as read back for attribution and restart.
+///
+/// This is the durable correlation a delayed result starts from:
+/// `ticket -> consumer/purpose/delegation -> relied TaskRef -> delegator`.
+/// Reading it never replays or re-claims the attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceAttemptRecord {
+    pub ticket: InferenceTicketId,
+    pub consumer: ConsumerKind,
+    pub capability: CapabilityKind,
+    pub purpose: PurposeKind,
+    pub provider: String,
+    pub model: String,
+    /// Task Agent correlation, present iff the consumer is
+    /// [`ConsumerKind::TaskAgent`]; a record that disagrees is never composed.
+    pub task_agent: Option<TaskAgentAttemptPremise>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -293,6 +348,10 @@ pub enum AttemptBeginOutcome {
     /// The expected consent no longer holds (or was never recorded): the
     /// caller must NOT issue provider I/O for this ticket.
     Stale,
+    /// The Task Agent delegation/task premise no longer holds: the caller
+    /// must NOT issue provider I/O for this ticket. Distinct from
+    /// [`Self::Stale`], which is about consent or credential currency.
+    TaskPremiseStale,
 }
 
 /// Linearization point for starting provider I/O.
@@ -313,6 +372,18 @@ pub trait InferenceAttemptRepository: Send + Sync {
         &self,
         attempt: InferenceAttempt,
     ) -> Result<AttemptBeginOutcome, InferenceTechnicalError>;
+
+    /// Loads the claimed attempt for one ticket, if any.
+    ///
+    /// `None` means no attempt was claimed for this ticket. Malformed or
+    /// internally inconsistent rows (unknown consumer/purpose names, a
+    /// partial Task Agent correlation group, or a Task Agent consumer with
+    /// no correlation) are technical errors and are never composed into a
+    /// record. This read never re-claims or replays the provider call.
+    async fn load_inference_attempt(
+        &self,
+        ticket: InferenceTicketId,
+    ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError>;
 }
 
 /// Admission resolves consent and credential premises, then runs the
@@ -335,6 +406,7 @@ pub struct AdmissionRequest {
     candidate: InferenceUseCandidate,
     consent: ConsentRecord,
     credential: CredentialRef,
+    task_agent: Option<TaskAgentAttemptPremise>,
 }
 
 impl AdmissionRequest {
@@ -359,6 +431,7 @@ impl AdmissionRequest {
                         credential: self.credential,
                         candidate: self.candidate,
                         authorization,
+                        task_agent: self.task_agent,
                     }))
                 } else {
                     Admission::Declined(NotSentReason::EvaluationConsumed)
@@ -401,6 +474,7 @@ pub async fn prepare_dialogue_admission(
         ConsumerKind::CompanionDialogue,
         CapabilityKind::Dialogue,
         PurposeKind::DialogueResponse,
+        None,
     )
     .await
 }
@@ -426,6 +500,37 @@ pub async fn prepare_learning_admission(
         ConsumerKind::CompanionLearning,
         CapabilityKind::Learning,
         PurposeKind::MemoryFormation,
+        None,
+    )
+    .await
+}
+
+/// Resolves the consent and credential premises for one Task Agent turn.
+///
+/// The Task Agent inherits the delegating companion's current assignment:
+/// it uses the `Dialogue` capability consent (the delegator's reasoning
+/// route) under the dedicated [`ConsumerKind::TaskAgent`] /
+/// [`PurposeKind::TaskAgentTurn`] triple, so a Task Agent use can never be
+/// admitted as dialogue or learning. `task_agent` is the opaque
+/// delegation/relied-revision premise the claim verifies inside its
+/// transaction.
+///
+/// The returned request still needs [`AdmissionRequest::authorize`]; this
+/// function performs no authorization and holds no lock.
+pub async fn prepare_task_agent_admission(
+    consent: &impl ConsentRepository,
+    credential_refs: &impl CredentialRefRepository,
+    credential_store: &impl CredentialStore,
+    task_agent: TaskAgentAttemptPremise,
+) -> Result<PreparedAdmission, InferenceTechnicalError> {
+    prepare_admission(
+        consent,
+        credential_refs,
+        credential_store,
+        ConsumerKind::TaskAgent,
+        CapabilityKind::Dialogue,
+        PurposeKind::TaskAgentTurn,
+        Some(task_agent),
     )
     .await
 }
@@ -442,6 +547,7 @@ async fn prepare_admission(
     consumer: ConsumerKind,
     capability: CapabilityKind,
     purpose: PurposeKind,
+    task_agent: Option<TaskAgentAttemptPremise>,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
     let record = consent.load_current(capability).await.map_err(|_| {
         InferenceTechnicalError::StorageUnavailable {
@@ -477,6 +583,7 @@ async fn prepare_admission(
         candidate,
         consent: record,
         credential,
+        task_agent,
     })))
 }
 
@@ -494,6 +601,7 @@ pub struct AuthorizedInference {
     credential: CredentialRef,
     candidate: InferenceUseCandidate,
     authorization: PermissionEvaluationId,
+    task_agent: Option<TaskAgentAttemptPremise>,
 }
 
 impl AuthorizedInference {
@@ -501,6 +609,12 @@ impl AuthorizedInference {
     #[must_use]
     pub fn consent_premise(&self) -> (&str, u64) {
         (&self.consent.0, self.consent.1.as_u64())
+    }
+
+    /// Task Agent correlation carried through the claim, when present.
+    #[must_use]
+    pub fn task_agent_premise(&self) -> Option<TaskAgentAttemptPremise> {
+        self.task_agent
     }
 }
 
@@ -544,6 +658,18 @@ pub trait InferenceExecutor: Send + Sync {
     /// Learning, never presented as a dialogue response.
     async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError>;
 
+    /// Resolves and authorizes one Task Agent turn without sending.
+    ///
+    /// The dedicated entry point fixes the inherited triple
+    /// `(TaskAgent, Dialogue, TaskAgentTurn)`: a Task Agent turn never goes
+    /// through [`Self::admit_dialogue`] / [`Self::admit_learning`]. The
+    /// `task_agent` premise rides the attempt claim and the durable
+    /// correlation.
+    async fn admit_task_agent(
+        &self,
+        task_agent: TaskAgentAttemptPremise,
+    ) -> Result<Admission, InferenceTechnicalError>;
+
     /// Claims the attempt, calls the provider, records usage, and reports
     /// whether adoption consent survived the await.
     ///
@@ -585,23 +711,30 @@ pub async fn dispatch_authorized(
         return Ok(InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit));
     }
     let ticket = authorized.ticket;
+    let consumer = authorized.candidate.consumer;
     let capability = authorized.candidate.capability;
+    let purpose = authorized.candidate.purpose;
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
     let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
     let credential_set = prompt.credential_set;
     let credential = authorized.credential;
+    let task_agent = authorized.task_agent;
     // The claim is the linearization point: it reads, compares, and inserts
-    // in one short transaction, so a stale consent or a stale credential-set
-    // premise fails here before any byte leaves. A store failure is
-    // infrastructure, never a refusal.
+    // in one short transaction, so a stale consent, a stale credential-set
+    // premise, or a moved Task Agent delegation/task premise fails here
+    // before any byte leaves. A store failure is infrastructure, never a
+    // refusal.
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
+            consumer,
             capability,
+            purpose,
             expected_consent: (consent_id.clone(), consent_rev),
             expected_credential_set: credential_set,
             provider: provider.clone(),
             model: model.clone(),
+            task_agent,
         })
         .await
     {
@@ -609,6 +742,11 @@ pub async fn dispatch_authorized(
         Ok(AttemptBeginOutcome::Stale) => {
             return Ok(InferenceDispatchOutcome::NotSent(
                 NotSentReason::ConsentStale,
+            ));
+        }
+        Ok(AttemptBeginOutcome::TaskPremiseStale) => {
+            return Ok(InferenceDispatchOutcome::NotSent(
+                NotSentReason::TaskPremiseStale,
             ));
         }
         Err(error) => return Err(error),
@@ -791,17 +929,18 @@ mod dispatch_tests {
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
         AttemptBeginOutcome, AuthorizedInference, DiscardSink, InferenceAttempt,
-        InferenceAttemptRepository, InferenceDispatchOutcome, InferenceResultArrival,
-        InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS, NotSentReason,
-        PermissionEvaluationId, ProviderRequest, ProviderResponse, ProviderTransport, RawUsage,
-        UsageFact, UsageRepository, UsageSource, dispatch_authorized,
+        InferenceAttemptRecord, InferenceAttemptRepository, InferenceDispatchOutcome,
+        InferenceResultArrival, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
+        NotSentReason, PermissionEvaluationId, ProviderRequest, ProviderResponse,
+        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageFact, UsageRepository,
+        UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
         CapabilityKind, ConsentRecord, ConsentRepository, ConsentRevision, ConsumerKind,
         InferenceUseCandidate, PermissionTechnicalError, PurposeKind,
     };
-    use ene_primitive::RawId;
+    use ene_primitive::{RawId, RevisionInner};
 
     fn record(revision: u64) -> ConsentRecord {
         ConsentRecord {
@@ -845,6 +984,17 @@ mod dispatch_tests {
         ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
             Ok(AttemptBeginOutcome::Started)
         }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
     }
 
     struct RecordingAttempts(Mutex<usize>);
@@ -860,6 +1010,17 @@ mod dispatch_tests {
         ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
             *self.0.lock().expect("attempt count lock") += 1;
             Ok(AttemptBeginOutcome::Started)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
         }
     }
 
@@ -877,6 +1038,74 @@ mod dispatch_tests {
             _attempt: InferenceAttempt,
         ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
             Ok(AttemptBeginOutcome::Stale)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// An attempt repository whose claim answers a moved Task Agent premise,
+    /// modelling steering landing between admission and the claim.
+    struct TaskPremiseStaleAttempts;
+
+    impl InferenceAttemptRepository for TaskPremiseStaleAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::TaskPremiseStale)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// An attempt repository that keeps the claimed attempts for correlation
+    /// assertions.
+    struct CapturedAttempts(Mutex<Vec<InferenceAttempt>>);
+
+    impl InferenceAttemptRepository for CapturedAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            self.0.lock().expect("attempt capture lock").push(attempt);
+            Ok(AttemptBeginOutcome::Started)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
         }
     }
 
@@ -940,6 +1169,35 @@ mod dispatch_tests {
                 purpose: PurposeKind::DialogueResponse,
             },
             authorization: PermissionEvaluationId(RawId::new()),
+            task_agent: None,
+        }
+    }
+
+    fn task_agent_premise() -> TaskAgentAttemptPremise {
+        TaskAgentAttemptPremise {
+            delegation: RawId::new(),
+            task: RawId::new(),
+            task_revision: RevisionInner::from_u64(1),
+        }
+    }
+
+    fn authorized_task_agent(premise: TaskAgentAttemptPremise) -> AuthorizedInference {
+        let consent = record(1);
+        AuthorizedInference {
+            ticket: InferenceTicketId(RawId::new()),
+            consent: (consent.id, consent.rev),
+            provider: consent.provider,
+            model: consent.model,
+            credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
+            candidate: InferenceUseCandidate {
+                consumer: ConsumerKind::TaskAgent,
+                capability: CapabilityKind::Dialogue,
+                provider_ref: String::from("acme"),
+                model: String::from("dialogue-1"),
+                purpose: PurposeKind::TaskAgentTurn,
+            },
+            authorization: PermissionEvaluationId(RawId::new()),
+            task_agent: Some(premise),
         }
     }
 
@@ -1110,6 +1368,88 @@ mod dispatch_tests {
         );
     }
 
+    #[tokio::test]
+    async fn task_premise_stale_never_calls_the_provider() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let outcome = dispatch_authorized(
+            authorized_task_agent(task_agent_premise()),
+            prompt("delegated work"),
+            &mut DiscardSink,
+            &consent,
+            &TaskPremiseStaleAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::TaskPremiseStale),
+            "a moved task premise is a task-stale refusal, not consent staleness"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a task-stale claim must not reach the provider"
+        );
+        assert!(usage.0.lock().expect("usage capture lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_agent_claim_carries_the_durable_correlation() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        let premise = task_agent_premise();
+        let outcome = dispatch_authorized(
+            authorized_task_agent(premise),
+            prompt("delegated work"),
+            &mut DiscardSink,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert!(matches!(
+            outcome,
+            InferenceDispatchOutcome::Completed { adopted: true, .. }
+        ));
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].consumer, ConsumerKind::TaskAgent);
+        assert_eq!(claimed[0].purpose, PurposeKind::TaskAgentTurn);
+        assert_eq!(claimed[0].capability, CapabilityKind::Dialogue);
+        assert_eq!(claimed[0].task_agent, Some(premise));
+    }
+
+    #[tokio::test]
+    async fn dialogue_claim_carries_no_task_agent_correlation() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &mut DiscardSink,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].task_agent, None);
+    }
+
     #[test]
     fn debug_redacts_output_text() {
         let ticket = InferenceTicketId(RawId::new());
@@ -1134,7 +1474,8 @@ mod dispatch_tests {
 mod admission_tests {
     use super::{
         Admission, InferenceTechnicalError, NotSentReason, PreparedAdmission,
-        prepare_dialogue_admission, prepare_learning_admission,
+        TaskAgentAttemptPremise, prepare_dialogue_admission, prepare_learning_admission,
+        prepare_task_agent_admission,
     };
     use ene_credential::{
         CredentialRef, CredentialRefRepository, CredentialTechnicalError, MemoryCredentialStore,
@@ -1142,6 +1483,7 @@ mod admission_tests {
     use ene_permission::{
         CapabilityKind, ConsentRecord, ConsentRepository, ConsentRevision, PermissionTechnicalError,
     };
+    use ene_primitive::{RawId, RevisionInner};
 
     fn record_for(capability: CapabilityKind) -> ConsentRecord {
         ConsentRecord {
@@ -1219,6 +1561,48 @@ mod admission_tests {
             prepared,
             Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
             "a dialogue assignment never authorizes learning formation"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_agent_admission_inherits_the_dialogue_consent() {
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
+        let refs = FixedRefs(vec![credential]);
+        let premise = TaskAgentAttemptPremise {
+            delegation: RawId::new(),
+            task: RawId::new(),
+            task_revision: RevisionInner::from_u64(1),
+        };
+        let prepared =
+            prepare_task_agent_admission(&consent, &refs, &credential_store, premise).await;
+        let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
+            panic!("a complete setup must prepare a task agent admission");
+        };
+        let mut tracker = ene_permission::EvaluationTracker::new();
+        let Admission::Admitted(authorized) = request.authorize(&mut tracker) else {
+            panic!("the task agent candidate is inside the closed world");
+        };
+        assert_eq!(authorized.task_agent_premise(), Some(premise));
+        assert_eq!(authorized.consent_premise().0, "consent-1");
+    }
+
+    #[tokio::test]
+    async fn task_agent_admission_declines_without_the_dialogue_consent() {
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Learning)));
+        let refs = FixedRefs(vec![credential]);
+        let premise = TaskAgentAttemptPremise {
+            delegation: RawId::new(),
+            task: RawId::new(),
+            task_revision: RevisionInner::from_u64(1),
+        };
+        let prepared =
+            prepare_task_agent_admission(&consent, &refs, &credential_store, premise).await;
+        assert_eq!(
+            prepared,
+            Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
+            "task agent admission inherits only the dialogue capability consent"
         );
     }
 

@@ -28,6 +28,7 @@ pub mod conn;
 pub mod dialogue;
 pub mod serve;
 pub mod setup;
+pub mod task_agent;
 
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -19,6 +19,7 @@ ene-presence = { path = "../../crates/ene-presence" }
 ene-presentation = { path = "../../crates/ene-presentation" }
 ene-primitive = { path = "../../crates/ene-primitive" }
 ene-store = { path = "../../crates/ene-store" }
+ene-task = { path = "../../crates/ene-task" }
 tokio.workspace = true
 uuid.workspace = true
 thiserror.workspace = true

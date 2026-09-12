@@ -339,6 +339,7 @@ dependencies = [
  "ene-presentation",
  "ene-primitive",
  "ene-store",
+ "ene-task",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -470,6 +471,7 @@ dependencies = [
 name = "ene-task"
 version = "0.1.0"
 dependencies = [
+ "ene-credential",
  "ene-primitive",
  "thiserror",
  "tokio",
