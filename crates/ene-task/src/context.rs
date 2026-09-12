@@ -66,30 +66,11 @@ pub struct TaskContextEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind};
-    use crate::task::{TaskId, TaskPurposeRef, TaskRef, TaskRevision};
-    use ene_primitive::RawId;
+    use super::TaskContextEntryId;
 
     #[test]
-    fn context_item_keeps_the_adopted_purpose_identity() {
-        let task = TaskId::generate();
-        let purpose = TaskPurposeRef {
-            task,
-            adopted_revision: TaskRevision::initial(),
-        };
+    fn context_entry_id_round_trips_through_raw() {
         let entry = TaskContextEntryId::generate();
-        let reference = TaskRef {
-            task,
-            revision: TaskRevision::initial(),
-        };
-        let item = TaskContextItem::AdoptedPurpose(purpose);
-        assert_eq!(item, TaskContextItem::AdoptedPurpose(purpose));
-        assert_eq!(reference.task, task);
-        assert_eq!(entry.as_raw(), entry.as_raw());
-        let origin = TaskContextOrigin {
-            kind: TaskContextOriginKind::OwnerConversation,
-            source: RawId::new(),
-        };
-        assert_eq!(origin.kind, TaskContextOriginKind::OwnerConversation);
+        assert_eq!(TaskContextEntryId::from_raw(entry.as_raw()), entry);
     }
 }

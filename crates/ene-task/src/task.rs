@@ -2,8 +2,8 @@
 
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 
-use crate::context::TaskContextEntry;
-use crate::workspace::WorkspaceAssociation;
+use crate::context::{TaskContextEntry, TaskContextEntryId, TaskContextOrigin};
+use crate::workspace::{WorkspaceAssociation, WorkspaceAssociationPremise};
 
 /// Identity of one Task. Wraps [`RawId`]; never converted to any other domain
 /// newtype and never reused.
@@ -11,11 +11,6 @@ use crate::workspace::WorkspaceAssociation;
 pub struct TaskId(RawId);
 
 impl TaskId {
-    #[must_use]
-    pub fn from_raw(raw: RawId) -> Self {
-        Self(raw)
-    }
-
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
@@ -97,23 +92,11 @@ pub struct TaskPurposeRef {
 
 /// The Companion a Task is assigned to, as a Task-owned premise.
 ///
-/// Wraps [`RawId`] and is never converted from or into another domain's
+/// Carries [`RawId`] and is never converted from or into another domain's
 /// Companion newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AssigneeRef {
     pub companion: RawId,
-}
-
-impl AssigneeRef {
-    #[must_use]
-    pub fn from_raw(raw: RawId) -> Self {
-        Self { companion: raw }
-    }
-
-    #[must_use]
-    pub fn as_raw(self) -> RawId {
-        self.companion
-    }
 }
 
 /// The current durable state of one Task (D1).
@@ -158,12 +141,12 @@ pub struct TaskCreationPremise {
     pub task: TaskId,
     pub purpose: TaskPurpose,
     /// Identity of the initial context entry adopting the purpose.
-    pub entry: crate::context::TaskContextEntryId,
-    pub origin: crate::context::TaskContextOrigin,
+    pub entry: TaskContextEntryId,
+    pub origin: TaskContextOrigin,
     pub acquired_at: WallClockWithTz,
     pub assignee: AssigneeRef,
     /// The confirmed workspace association, when the Task has one.
-    pub workspace: Option<crate::workspace::WorkspaceAssociationPremise>,
+    pub workspace: Option<WorkspaceAssociationPremise>,
 }
 
 #[cfg(test)]
@@ -229,6 +212,7 @@ mod tests {
     #[test]
     fn assignee_ref_carries_the_raw_companion_identity() {
         let companion = RawId::new();
-        assert_eq!(AssigneeRef::from_raw(companion).as_raw(), companion);
+        let assignee = AssigneeRef { companion };
+        assert_eq!(assignee.companion, companion);
     }
 }

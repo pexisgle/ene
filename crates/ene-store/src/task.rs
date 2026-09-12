@@ -21,7 +21,7 @@ use ene_task::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
-use crate::codec::{decode_id, decode_u64, encode_id, lock_shared};
+use crate::codec::{decode_id, decode_u64, encode_id, encode_u64, lock_shared};
 use crate::run_blocking;
 
 const SQL_INSERT_TASK: &str = "INSERT INTO task (task_id, revision, purpose_adopted_revision, purpose_text, assignee) VALUES (?1, ?2, ?3, ?4, ?5)";
@@ -54,10 +54,6 @@ fn task_unavailable(reason: impl core::fmt::Display) -> TaskTechnicalError {
     }
 }
 
-fn encode_revision(revision: TaskRevision) -> Result<i64, TaskTechnicalError> {
-    i64::try_from(revision.as_u64()).map_err(task_unavailable)
-}
-
 fn decode_revision(raw: i64) -> Result<TaskRevision, TaskTechnicalError> {
     Ok(TaskRevision::from_u64(
         decode_u64(raw).map_err(task_unavailable)?,
@@ -82,9 +78,9 @@ fn decode_origin_kind(text: &str) -> Result<TaskContextOriginKind, TaskTechnical
 }
 
 fn decode_assignee(text: &str) -> Result<AssigneeRef, TaskTechnicalError> {
-    Ok(AssigneeRef::from_raw(
-        decode_id(text).map_err(task_unavailable)?,
-    ))
+    Ok(AssigneeRef {
+        companion: decode_id(text).map_err(task_unavailable)?,
+    })
 }
 
 fn decode_clock(text: &str) -> Result<WallClockWithTz, TaskTechnicalError> {
@@ -100,14 +96,9 @@ fn create_task_sync(
         task: premise.task,
         revision,
     };
-    let purpose = TaskPurposeRef {
-        task: premise.task,
-        adopted_revision: revision,
-    };
     let task_text = encode_id(premise.task.as_raw());
-    let revision_raw = encode_revision(revision)?;
-    let purpose_revision_raw = encode_revision(purpose.adopted_revision)?;
-    let assignee_text = encode_id(premise.assignee.as_raw());
+    let revision_raw = encode_u64(revision.as_u64()).map_err(task_unavailable)?;
+    let assignee_text = encode_id(premise.assignee.companion);
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -117,7 +108,7 @@ fn create_task_sync(
         params![
             task_text,
             revision_raw,
-            purpose_revision_raw,
+            revision_raw,
             premise.purpose.text,
             assignee_text,
         ],
@@ -128,7 +119,7 @@ fn create_task_sync(
         params![
             task_text,
             revision_raw,
-            purpose_revision_raw,
+            revision_raw,
             premise.purpose.text,
             assignee_text,
         ],
@@ -140,7 +131,7 @@ fn create_task_sync(
             encode_id(premise.entry.as_raw()),
             task_text,
             revision_raw,
-            purpose_revision_raw,
+            revision_raw,
             encode_origin_kind(premise.origin.kind),
             encode_id(premise.origin.source),
             premise.acquired_at.to_rfc3339(),
@@ -305,6 +296,11 @@ fn load_task_sync(
         assignee: decode_assignee(&snapshot.assignee)?,
     };
     let context = load_context_sync(&guard, &task_text, raw_task.revision, reference)?;
+    if context.is_empty() {
+        return Err(task_unavailable(
+            "task context entries missing for the current revision",
+        ));
+    }
     let workspace = guard
         .query_row(SQL_SELECT_WORKSPACE_ASSOC, params![task_text], |row| {
             Ok(RawWorkspaceAssoc {

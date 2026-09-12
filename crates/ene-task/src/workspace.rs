@@ -56,31 +56,3 @@ pub struct WorkspaceAssociation {
     pub folder: WorkspaceFolderRef,
     pub save_target: Option<WorkspaceFolderRef>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
-    };
-
-    #[test]
-    fn a_need_without_a_save_target_keeps_it_open() {
-        let folder = WorkspaceFolderRef {
-            path: String::from("/home/owner/work"),
-        };
-        let need = WorkspaceNeedRef {
-            folder: folder.clone(),
-            save_target: None,
-        };
-        assert_eq!(need.folder, folder);
-        assert_eq!(
-            need.save_target, None,
-            "an undecided save target stays open"
-        );
-        let association = WorkspaceAssociationPremise {
-            assoc: WorkspaceAssocId::generate(),
-            need,
-        };
-        assert_eq!(association.need.save_target, None);
-    }
-}

@@ -27,9 +27,9 @@ use ene_presence::{
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
-    TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRepository, TaskRevision,
-    TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef,
-    WorkspaceNeedRef,
+    TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRef, TaskRepository,
+    TaskRevision, TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociationPremise,
+    WorkspaceFolderRef, WorkspaceNeedRef,
 };
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -4775,7 +4775,9 @@ fn task_premise(workspace: Option<WorkspaceAssociationPremise>) -> TaskCreationP
             source: RawId::new(),
         },
         acquired_at: fixture_clock(),
-        assignee: AssigneeRef::from_raw(RawId::new()),
+        assignee: AssigneeRef {
+            companion: RawId::new(),
+        },
         workspace,
     }
 }
@@ -4823,7 +4825,11 @@ async fn task_creation_commits_the_au2_unit_and_loads() {
         TaskContextItem::AdoptedPurpose(record.task.purpose)
     );
     assert_eq!(entry.origin, premise.origin);
-    assert_eq!(entry.acquired_at, premise.acquired_at);
+    assert_eq!(
+        entry.acquired_at.to_rfc3339(),
+        premise.acquired_at.to_rfc3339(),
+        "the stored acquisition time keeps its creation rendering"
+    );
     let association = record
         .workspace
         .expect("the confirmed association must load");
@@ -4874,7 +4880,20 @@ async fn task_au2_survives_reopen() {
         .unwrap()
         .expect("the task must survive reopen");
     assert_eq!(after, before, "the committed AU2 unit survives reopen");
+    assert_eq!(
+        after.task.reference,
+        TaskRef {
+            task: premise.task,
+            revision: TaskRevision::initial(),
+        },
+        "the created revision survives reopen"
+    );
     assert_eq!(after.revision.purpose_text, premise.purpose);
+    assert_eq!(
+        after.context.len(),
+        1,
+        "the adopted purpose entry must survive reopen"
+    );
     assert_eq!(after.context[0].origin, premise.origin);
     let association = after
         .workspace
@@ -4903,15 +4922,16 @@ async fn task_creation_is_atomic_across_every_au2_insert() {
                 ))
                 .expect("the fault trigger must install");
         }
-        let failed = store
-            .create_task(task_premise(Some(task_workspace(
-                "/srv/workspace/ene",
-                None,
-            ))))
-            .await;
+        let premise = task_premise(Some(task_workspace("/srv/workspace/ene", None)));
+        let failed = store.create_task(premise.clone()).await;
         assert!(
             matches!(failed, Err(TaskTechnicalError::StorageUnavailable { .. })),
             "a fault on {table} must surface a storage failure, got {failed:?}"
+        );
+        assert_eq!(
+            store.load_task(premise.task).await,
+            Ok(None),
+            "a failed creation is not visible as a Task"
         );
         for probe in [
             "task",
@@ -4944,6 +4964,57 @@ async fn task_creation_is_atomic_across_every_au2_insert() {
     let record = store.load_task(created.task).await.unwrap().unwrap();
     assert_eq!(record.context.len(), 1);
     assert_eq!(record.task.purpose.task, premise.task);
+}
+
+#[tokio::test]
+async fn task_load_rejects_a_partial_au2_unit() {
+    let store = open_memory().await.unwrap();
+
+    // A current row without its revision snapshot is corruption, not an empty Task.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_revision WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the snapshot probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current row without its revision snapshot is a technical error"
+    );
+
+    // A current revision without its adopted context entry is corruption too.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the context probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current revision without its context entry is a technical error"
+    );
 }
 
 #[tokio::test]
@@ -4986,6 +5057,19 @@ async fn task_migration_adds_tables_to_a_v14_database() {
         !table_columns(&path, "workspace_assoc").is_empty(),
         "workspace_assoc is created"
     );
+    let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
+    for index in ["idx_task_context_entry_task", "idx_workspace_assoc_task"] {
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                rusqlite::params![index],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("the index catalog must read");
+        assert!(found.is_some(), "{index} is created");
+    }
+    drop(conn);
     let premise = task_premise(None);
     let created = reopened
         .create_task(premise.clone())
