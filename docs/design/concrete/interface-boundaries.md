@@ -360,7 +360,7 @@ enum TaskAgentTurnOutcome {
     StaleTaskRevision { current: TaskRef }, // 依拠リビジョンが前進済み。provider へ送信していない
     MissingTask { task: TaskId },
     MissingDelegation { delegation: DelegationId },
-    NotSent(TaskAgentNotSent),       // setup 不足・許可リスト外・同意失効・入力上限・認証情報前提不一致
+    NotSent(TaskAgentNotSent),       // setup 不足・許可リスト外・同意失効・入力上限・利用済み評価
 }
 // `TaskAgentNotSent` / `TaskAgentInferenceError` は推論側 `NotSentReason` / `InferenceTechnicalError`
 // と同じ意味の語彙を作業側に写したもの。`StaleTaskPremise` は作業側が委任と現在のタスクを再読込し、
@@ -687,7 +687,7 @@ struct InferenceResultArrival {
 
 - **送信の手順**:
   1. 受付ゲート（admission）が最新の同意・認証前提と、K-B の単一利用認可を確認して `Admission` を返します。Task Agent の admission は `(TaskAgent, Dialogue, TaskAgentTurn)` を固定した専用経路（`admit_task_agent`）のみで作り、`admit_dialogue` / `admit_learning` の代用を許しません。
-  2. 試行の確定（attempt claim）が、保存された同意情報および認証情報セットとの一致を単一のトランザクションで確定した上で、トランスポート層を介して送信します。Task Agent の利用では、同じトランザクションで次の 3 条件を照合します: (1) 前提の `delegation` が `delegation` 行に存在する、(2) その行の `(task_id, task_revision)` が依拠 `TaskRef` 前提と一致する、(3) 現在の `task` 行のリビジョンが依拠リビジョンと一致する。(1)(3) の不一致と行の欠如は `TaskPremiseStale` として送信前に拒絶し、(2) の不一致や部分的・不整合な行は技術的エラー（fail closed）とします。同意・認証情報の不一致は従来どおり `Stale` で、`TaskPremiseStale` と区別します。
+  2. 試行の確定（attempt claim）が、保存された同意情報および認証情報セットとの一致を単一のトランザクションで確定した上で、トランスポート層を介して送信します。Task Agent の利用では、同じトランザクションで次の 3 条件を照合します: (1) 前提の `delegation` が `delegation` 行に存在する、(2) その行の `(task_id, task_revision)` が依拠 `TaskRef` 前提と一致する、(3) 現在の `task` 行のリビジョンが依拠リビジョンと一致する。(1)(3) の不一致と行の欠如は `TaskPremiseStale` として送信前に拒絶し(2) の不一致や部分的・不整合な行は技術的エラー（fail closed）とします。同意・認証情報の不一致は従来どおり `Stale` で、`TaskPremiseStale` と区別します。
   3. 入力トークン上限は確定前に、プロンプト内の認証情報セット前提は試行確定と同一のトランザクションで照合します。
   4. 試行確定後のプロバイダへの非同期I/Oはロックを持たずに並行実行し、送信の瞬間に権限やルーティングを二重に検証することはありません（受付ゲートとの二重チェックによる競合を防ぐため）。
   5. ネットワーク待機（await）後に同意状態が変化して結果を採用できなくなった場合は、生成結果の採用のみを安全に破棄し、利用実績の記録は確定した試行情報に従って正しく残します。
