@@ -143,6 +143,7 @@ struct TaskPurpose { text: String }  // 採用目的本文。Debug では redact
 // steering・遅延結果の比較材料（boundary token。authority ではない）。
 // expected は依拠した現在 revision、purpose は依拠した現在目的。
 // premise.purpose は expected.revision の目的と一致すること（不一致は stale として不受理）。
+// orchestrate が premise 構築時にこの対応を照合し、repository の revision atomic compare が現在性を包含する。
 struct SteeringPremiseRef {
     expected: TaskRef,
     purpose: TaskPurposeRef,
@@ -195,7 +196,7 @@ struct ProposeTaskCommand {
 // TaskId・TaskContextEntryId・WorkspaceAssocId は作業（orchestrate）が mint し、
 // TaskCreationPremise を構成して repository へ渡す。steering（AU4）の新 revision が
 // 記録する採用目的 entry の TaskContextEntryId も同じく作業が mint し、
-// TaskCommitPremise で渡す（repository は domain identity を採番しない）。
+// TaskCommitPremise で渡す（repository は渡された context entry identity を採番し直さない）。
 struct TaskProposalPremise {
     requester: AssigneeRef,          // ProposeTaskCommand.requester の写し
     purpose: TaskPurpose,
@@ -211,10 +212,9 @@ struct ProposeSteeringCommand {
     unadopted: Vec<UnadoptedReasonRef>, // 未反映・待機の対応（あれば）
 }
 
-// 作業が採用した追加指示の identity。採用は新 revision の context entry（指示 entry は
-// H-A steering 配線 slice で追加）が表し、発言 record（History の正本）を採用済みと同一視しない。
-// source は由来 record の参照であり、entry identity・採用位置 (task, revision) とは別である。
-struct AdoptedInstructionRef { source: RawId }
+// 作業が採用した追加指示の identity は、新 revision の context entry（指示 entry は H-A steering 配線 slice
+// で producer とともに追加）が表す。発言 record（History の正本）を採用済みと同一視しない。caller が渡す
+// instruction_source は由来 record の参照であり、採用 identity・entry identity とは別である。
 
 struct CancelTaskCommand {
     task: TaskId,                    // Cancel 対象。revision は問わない（現在への記録のため）
@@ -227,7 +227,7 @@ enum TaskProposalOutcome {
     AcceptedAsSteering(TaskRef),     // 新 revision として受理（旧 revision を残す）
     CancelAccepted,                  // Cancel を現在 Task に記録（停止完了ではない）
     StalePremise { current: TaskRef }, // expected revision 不一致。再評価へ戻す
-    HeldByGlobalHold(HoldConditionRef), // 消去・復元保留・停止等で新規禁止。payload は受入側 owner が定義する premise に写す（第4節 inversion）
+    HeldByGlobalHold(HoldConditionRef), // 消去・復元保留・停止等で新規禁止。hold slice で導入。payload は受入側 owner が定義する premise に写す（第4節 inversion）
     NeedsRevalidation(NeedsRevalidationRef), // 権限・帰属・cap 等の再照合が必要
     InsufficientContext(InsufficientRef),    // 目的・Workspace 条件が不足
 }
@@ -242,7 +242,7 @@ struct CreateDelegationCommand {
 enum DelegationOutcome {
     Delegated(DelegationRef),
     StaleTaskRevision { current: TaskRef },
-    HeldByGlobalHold(HoldConditionRef),
+    HeldByGlobalHold(HoldConditionRef), // hold slice で導入
     NeedsRevalidation(NeedsRevalidationRef),
 }
 
@@ -659,7 +659,7 @@ enum ActionStartOutcome {
     Denied(DenyReasonRef),
     AskOwner(OwnerQuestionRef),      // 実行せず待機
     StalePremise(StalePremiseRef),   // Task revision・委任・Workspace・実対象・許可・帰属・消去・復元条件の不一致
-    HeldByGlobalHold(HoldConditionRef),
+    HeldByGlobalHold(HoldConditionRef), // hold slice で導入
 }
 
 // 開始後の outcome tracking（並列、per-attempt CAS）。実行・拡張が確定する。
@@ -1180,8 +1180,8 @@ fn request_action(cmd: ExecuteActionCommand)
 
 | domain | outcome enum（例） | 主な variant の意味 |
 |---|---|---|
-| Task 提案・委任 | `TaskProposalOutcome`、`DelegationOutcome` | Accepted / StalePremise(current 付き) / HeldByGlobalHold / NeedsRevalidation / InsufficientContext |
-| Task commit（steering, AU4） | `TaskCommitOutcome` | CommittedAs / StaleExpected(current 付き) / MissingTask / RevisionExhausted / HeldByGlobalHold（hold slice で追加） |
+| Task 提案・steering・委任（command-level） | `TaskProposalOutcome`、`DelegationOutcome` | Accepted / StalePremise(current 付き) / HeldByGlobalHold（hold slice で追加） / NeedsRevalidation / InsufficientContext |
+| Task commit（steering, AU4。repository-level） | `TaskCommitOutcome` | CommittedAs / StaleExpected(current 付き) / MissingTask / RevisionExhausted / HeldByGlobalHold（hold slice で追加） |
 | Agent 結果受入 | `TaskResultAcceptance` | AdoptedToCurrent / RecordedToOriginalOnly / HeldForPermissionReview / DiscardedAsStaleWithRecord |
 | Experience・訂正・scope | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | Formed / Deferred / Declined / Corrected / KeptAsCompanion / DeniedByExplicitConstraint / StaleTarget / HeldByErasure |
 | Permission live check | `LiveAuthorizationDecision` | AllowForThisUse / Deny / AskOwner / WaitForCondition / NeedsRevalidation |
@@ -1266,26 +1266,26 @@ enum TaskCommitOutcome {
 // TaskCommitPremise の意味:
 // - 新 revision = expected.revision + 1 を repository が CAS 成立後に確定する。caller は未来 revision を名指ししない。
 // - new_purpose: Some は採用位置（TaskPurposeRef.adopted_revision）を新 revision とし、None は直前の
-//   採用 identity・本文を維持して新 revision の採用目的 entry を再記録する。
-// - adopted_purpose_entry は新 revision の採用 context entry の identity であり、作業が mint する。
-//   repository は domain identity を採番せず、CAS 成立後に TaskContextEntry.reference = (task, new revision)
-//   と、Some の場合の採用 revision を刻む。
+//   採用 identity・本文を維持して新 revision の採用目的 entry を再記録する。None の場合、repository は
+//   現在 revision の採用目的 entry から origin・acquired_at を引き継ぎ、同じ transaction 内で読む。
+// - adopted_purpose_entry は新 revision の採用 context entry の identity であり、作業（orchestrate）が mint
+//   する。repository は渡された identity を採番し直さず、CAS 成立後に TaskContextEntry.reference =
+//   (task, new revision) と、Some の場合の採用 revision を刻む。
 // - MissingTask / RevisionExhausted は Ok 側の domain outcome とし、durable state を変更しない。
 //   RevisionExhausted は successor 不在だけでなく、successor を durable 表現に写せない場合も含む。
-// - 追加の採用 context item（指示・材料・途中理解）は H-A steering 配線 slice が最初の producer として
-//   追加する。その slice は TaskCommitPremise に new_context: Vec<TaskContextEntryPremise>
-//   （write-side: entry identity・item premise・origin・acquired_at）を追加し、TaskContextItemPremise の
-//   variant、task_context_entry の item-kind discriminator と migration（既存 row は採用目的として backfill）、
-//   read rule の拡張を同じ design 変更で行う。以後の kind も同じ forward_steering transaction に載せ、
-//   別 method・別 revision・別 transaction の採用経路を作らない。unknown kind・kind と payload の不一致は
-//   技術エラーとし、読み飛ばし・再解釈しない。
-// - HeldByGlobalHold は hold slice（Targeted Deletion / Restore / Stop の producer が存在する stage）で、
-//   Task 所有の hold-check premise（HoldCheckContextRef 相当。adopt_result と同型）と対で追加する。
-//   forward_steering は同じ atomic compare 内で現在の hold・消去・復元保留を照合し、成立しなければ何も
-//   書かず HeldByGlobalHold を返す。それまで concrete enum に hold の代役 variant・仮 premise を置かない。
+// - AU4 の repository slice が記録する context kind は採用目的のみ。追加 kind は、その producer を持ち
+//   採用判断を行う slice が write-side premise・item-kind discriminator・migration・read rule 拡張を
+//   同じ design 変更で追加する（最初の追加 kind である指示は H-A steering 配線 slice、材料・途中理解は
+//   それぞれの利用先が分岐する slice）。どの kind も同じ forward_steering transaction に載せ、
+//   別 method・別 revision・別 transaction の採用経路を作らない。
+// - HeldByGlobalHold は hold slice（HoldConditionRef の producer が存在する最初の stage。Targeted
+//   Deletion / Restore / Stop のいずれか早い方）で、Task 所有の hold-check premise
+//   （HoldCheckContextRef 相当。adopt_result と同型）と対で追加する。forward_steering は同じ
+//   atomic compare 内で現在の hold・消去・復元保留を照合し、成立しなければ何も書かず
+//   HeldByGlobalHold を返す。それまで concrete enum に hold の代役 variant・仮 premise を置かない。
 //   この名前は H-A command-level（TaskProposalOutcome / DelegationOutcome 等）と repository-level
-//   （TaskCommitOutcome）で共通の domain 名であり、management intent の HeldByOperation（未確定・保留）
-//   とは別概念である。
+//   （TaskCommitOutcome）で共通の domain 名であり、いずれも hold slice で追加する。management intent の
+//   HeldByOperation（未確定・保留）とは別概念である。
 
 // Task 作成の全内容（AU2）。identity は owner（作業）が mint し、commit 前は委任・実行から不可視。
 struct TaskCreationPremise {

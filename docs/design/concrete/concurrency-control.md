@@ -204,12 +204,13 @@ CI 第6節の述語を concurrency の commit 境界へ落としたものであ�
 -- steering (SD-Task, 短い tx)
 BEGIN IMMEDIATE;
   cur = SELECT revision FROM task WHERE task_id = ?;
-  IF task が存在しない THEN ROLLBACK; RETURN MissingTask;
-  IF cur != expected_revision THEN ROLLBACK; RETURN StaleExpected { current: cur };
-  -- next = cur+1。successor を durable に確定できないなら ROLLBACK; RETURN RevisionExhausted
+  IF task が存在しない THEN RETURN MissingTask { task }; -- 未 commit のまま終了（書き込みなし）
+  IF cur != expected_revision THEN RETURN StaleExpected { current: (task, cur) }; -- 同上
+  -- next = cur+1。successor を durable に確定できないなら RETURN RevisionExhausted { task }
   INSERT task_revision(task_id, next, 新目的または直前値・担当・委任前提);
   UPDATE task SET revision = next, 現在 purpose・目的本文 = 新目的または直前値 WHERE task_id = ?;
   INSERT task_context_entry(entry = premise.adopted_purpose_entry, reference = (task, next), 採用目的 identity, 由来, 取得時点);
+  -- None の由来・取得時点は現在 revision の採用目的 entry から同じ tx で引き継ぐ
   -- 追加 context kind は premise が列挙する。hold slice の hold 照合は同じ tx に加わる
 COMMIT;
 
@@ -462,7 +463,7 @@ publication guard の具体実装は固定しない。process 内の lock / in-p
 | 利用量・費用 | 用途・送信先の対応、報告 / 不明 / 処理中の別、cap・資源の現在条件、予約 `usage_id` |
 | Character 適用 | `(character_id, expected_character_revision)`、`OwnerSelectionRef`、適用部品群 |
 
-- **acceptance result の表現。** commit 結果は少なくとも `Accepted / StalePremise / HoldActive / Denied / NeedsReevaluation / AdoptedToOriginalOnly（遅延物の元記録化）` を区別できること。これは concurrency compare の結果であり、各 domain の lifecycle 状態（Task 状態・presence 状態・確定度・全域 operation 状態）を潰した共通 `Status` enum ではない。共通 lifecycle 状態 machine を新設しない（CI §2.1）。一般語と domain enum の対応例：Task steering は `TaskCommitOutcome::{CommittedAs, StaleExpected, MissingTask, RevisionExhausted}`（hold は hold slice で追加）である（IB §13.2）。
+- **acceptance result の表現。** commit 結果は少なくとも `Accepted / StalePremise / HoldActive / Denied / NeedsReevaluation / AdoptedToOriginalOnly（遅延物の元記録化）` を区別できること。これは concurrency compare の結果であり、各 domain の lifecycle 状態（Task 状態・presence 状態・確定度・全域 operation 状態）を潰した共通 `Status` enum ではない。共通 lifecycle 状態 machine を新設しない（CI §2.1）。これらは一般語であり、各 domain の concrete variant は各 owner の interface が定める（Task steering は IB §13.2 の `TaskCommitOutcome`）。
 - Serialization 境界では ID・revision・generation・correlation を明示 field として serialize し、自由記述の本文中の文字列を照合に使わない（CI §4.6）。
 
 ## 17. Concrete Rust implications（実装方針の具体化範囲）
@@ -543,7 +544,7 @@ fn reserve_usage(
 }
 ```
 
-- `CasOutcome::{Accepted, StalePremise, HoldActive, Denied, ...}` は concurrency compare の結果であり、domain lifecycle の `Status` ではない（第16節）。
+- domain ごとの `*Outcome` は concurrency compare の結果であり、domain lifecycle の `Status` ではない（第16節）。共通 enum へ潰さない。
 - error 型は本書で固定しない。library 化する際は `thiserror` を用い、bare `String` / `Box<dyn Error>` を public error にしない（repo 規約の再掲）。
 - 将来 `unsafe` が必要になれば `// SAFETY:` を付すが、本書の表現のために `unsafe` を要求しない。
 

@@ -435,7 +435,7 @@ struct ParticipantCompletionRef { /* 参加者ごとの処理・検証・未完�
 ```
 
 - `DeletionOperationRef` の完了は保全・消去が全域として確定するが、各 domain の意味変更は各 owner が行う。coordinator は任意の通常変更権を取得しない（DR-09）。
-- `HoldConditionRef` は保全・消去が持つ全域操作の調整参照であり、個々の条件（失効・cap は権限・制約、消去は保全・消去、停止は個体調整）の現在有効性の判断は各 owner に残る。各受入箇所は他 owner の型を import せず、自 crate の hold-check premise に写して同じ commit compare で照合する（IB §4 dependency inversion、CM §4.3）。
+- `HoldConditionRef` は保全・消去が持つ全域操作の調整参照であり、個々の条件（失効・cap は権限・制約、消去は保全・消去、停止は個体調整）の現在有効性の判断は各 owner に残る。各受入箇所はこの条件を自 crate の hold-check premise に写して同じ commit compare で照合する（IB §4 inversion）。
 - 旧 backup の明示 Restore による復活は、自動再形成の例外ではなく別操作として事前説明・Audit・保留・再評価を経る（PE-3、BR §8）。
 
 ## 6. 現在性・照合単位（concurrency の比較内容）
