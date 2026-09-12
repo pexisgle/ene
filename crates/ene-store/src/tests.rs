@@ -6384,6 +6384,43 @@ async fn task_forward_rejects_a_missing_current_purpose_entry() {
 }
 
 #[tokio::test]
+async fn task_forward_rejects_a_mismatched_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose(
+        "a current purpose entry that disagrees with the pointer",
+        |store, task| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    "UPDATE task_context_entry SET purpose_adopted_revision = 99 WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                    params![crate::codec::encode_id(task.as_raw())],
+                )
+                .expect("the mismatched-purpose probe must update");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_payload_free_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a current purpose entry without its payload", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = NULL WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(task.as_raw())],
+            )
+            .expect("the payload-free-purpose probe must update");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_entry() {
     let store = open_memory().await.unwrap();
     let created = store.create_task(task_premise(None)).await.unwrap();
