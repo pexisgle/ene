@@ -108,6 +108,14 @@ pub struct UsageFact {
 pub enum InferenceTechnicalError {
     #[error("provider transport failed: {0}")]
     ProviderTransportFailed(String),
+    /// The delta consumer stopped the stream: a stale presentation premise
+    /// or a failed delivery ended the provider read. Usage follows the
+    /// attempt as usual, but the reply is never adopted.
+    #[error("stream aborted: {reason}")]
+    StreamAborted {
+        /// Short cause class, never body text.
+        reason: String,
+    },
     /// The timeout-bound HTTP client could not be built. Reported instead
     /// of falling back to an unbounded default, so the timeout invariant
     /// can never silently disappear.
@@ -177,6 +185,74 @@ pub trait ProviderTransport: Send + Sync {
         &self,
         req: ProviderRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>;
+
+    /// Runs one completion, pushing incremental output to `sink`.
+    ///
+    /// Deltas are pushed in provider order and the transport stops reading
+    /// on [`DeltaFlow::Abort`], reporting [`InferenceTechnicalError::StreamAborted`]:
+    /// no delta produced after the consumer stopped is presented, and the
+    /// call never completes normally with a delivery gap. The returned
+    /// response carries the full text for adoption and History. The default
+    /// fallback is explicit: a transport without incremental support
+    /// completes synchronously and pushes the whole text once at the end,
+    /// honoring an abort the same way, so callers always observe at most one
+    /// delta and never a fabricated early one.
+    fn complete_streaming<'a>(
+        &'a self,
+        req: ProviderRequest,
+        sink: &'a mut (dyn DeltaSink + Send),
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let response = self.complete(req).await?;
+            if let DeltaFlow::Abort(reason) = sink.push_delta(&response.text).await {
+                return Err(InferenceTechnicalError::StreamAborted {
+                    reason: reason.to_owned(),
+                });
+            }
+            Ok(response)
+        })
+    }
+}
+
+/// Flow-control answer from one delta push: the provider loop continues on
+/// [`DeltaFlow::Continue`] and stops reading on [`DeltaFlow::Abort`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaFlow {
+    Continue,
+    /// Stop the provider read with this short cause class (never body text).
+    /// The transport reports it through
+    /// [`InferenceTechnicalError::StreamAborted`].
+    Abort(&'static str),
+}
+
+/// Async receiver of provider deltas, threaded from dispatch to transport.
+///
+/// A boxed-future method (rather than native `async fn`) keeps the trait
+/// object-safe, matching [`ProviderTransport`]: dispatch holds
+/// `&mut (dyn DeltaSink + Send)` and the transport awaits each push, so a
+/// slow consumer backpressures the provider read instead of queueing
+/// unboundedly, and a stale consumer aborts it before further deltas are
+/// shown or adopted.
+pub trait DeltaSink: Send {
+    fn push_delta<'a>(
+        &'a mut self,
+        delta: &'a str,
+    ) -> Pin<Box<dyn Future<Output = DeltaFlow> + Send + 'a>>;
+}
+
+/// Delta receiver that keeps nothing: for inference whose output is never
+/// presented (Learning formation), where adoption is the only outcome.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DiscardSink;
+
+impl DeltaSink for DiscardSink {
+    fn push_delta<'a>(
+        &'a mut self,
+        _delta: &'a str,
+    ) -> Pin<Box<dyn Future<Output = DeltaFlow> + Send + 'a>> {
+        Box::pin(async move { DeltaFlow::Continue })
+    }
 }
 
 #[expect(
@@ -470,10 +546,15 @@ pub trait InferenceExecutor: Send + Sync {
 
     /// Claims the attempt, calls the provider, records usage, and reports
     /// whether adoption consent survived the await.
+    ///
+    /// `sink` receives provider deltas in order while the call runs; the
+    /// returned arrival carries the full text for adoption, so display and
+    /// durable adoption stay separate facts.
     async fn dispatch(
         &self,
         authorized: AuthorizedInference,
         prompt: ScrubbedText,
+        sink: &mut (dyn DeltaSink + Send),
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
@@ -494,6 +575,7 @@ pub trait InferenceExecutor: Send + Sync {
 pub async fn dispatch_authorized(
     authorized: AuthorizedInference,
     prompt: ScrubbedText,
+    sink: &mut (dyn DeltaSink + Send),
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
@@ -532,11 +614,14 @@ pub async fn dispatch_authorized(
         Err(error) => return Err(error),
     }
     let response = match transport
-        .complete(ProviderRequest {
-            model: model.clone(),
-            credential,
-            input: prompt.text,
-        })
+        .complete_streaming(
+            ProviderRequest {
+                model: model.clone(),
+                credential,
+                input: prompt.text,
+            },
+            sink,
+        )
         .await
     {
         Ok(response) => response,
@@ -705,11 +790,11 @@ mod dispatch_tests {
 
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
-        AttemptBeginOutcome, AuthorizedInference, InferenceAttempt, InferenceAttemptRepository,
-        InferenceDispatchOutcome, InferenceResultArrival, InferenceTechnicalError,
-        InferenceTicketId, MAX_INPUT_CHARS, NotSentReason, PermissionEvaluationId, ProviderRequest,
-        ProviderResponse, ProviderTransport, RawUsage, UsageFact, UsageRepository, UsageSource,
-        dispatch_authorized,
+        AttemptBeginOutcome, AuthorizedInference, DiscardSink, InferenceAttempt,
+        InferenceAttemptRepository, InferenceDispatchOutcome, InferenceResultArrival,
+        InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS, NotSentReason,
+        PermissionEvaluationId, ProviderRequest, ProviderResponse, ProviderTransport, RawUsage,
+        UsageFact, UsageRepository, UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -866,6 +951,7 @@ mod dispatch_tests {
         let result = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut DiscardSink,
             &consent,
             &StartedAttempts,
             &usage,
@@ -889,6 +975,7 @@ mod dispatch_tests {
         let result = dispatch_authorized(
             authorized(),
             prompt("x".repeat(MAX_INPUT_CHARS + 1)),
+            &mut DiscardSink,
             &consent,
             &attempts,
             &usage,
@@ -919,6 +1006,7 @@ mod dispatch_tests {
         let outcome = dispatch_authorized(
             authorized(),
             prompt("the key is sk-new"),
+            &mut DiscardSink,
             &consent,
             &StaleAttempts,
             &usage,
@@ -954,6 +1042,7 @@ mod dispatch_tests {
         let outcome = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut DiscardSink,
             &consent,
             &StartedAttempts,
             &usage,
@@ -981,6 +1070,7 @@ mod dispatch_tests {
         let outcome = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut DiscardSink,
             &consent,
             &StartedAttempts,
             &usage,
@@ -1005,6 +1095,7 @@ mod dispatch_tests {
         let result = dispatch_authorized(
             authorized(),
             prompt("hello"),
+            &mut DiscardSink,
             &consent,
             &StartedAttempts,
             &usage,

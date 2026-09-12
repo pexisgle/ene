@@ -16,7 +16,8 @@
 
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
-    Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor, NotSentReason,
+    Admission, AuthorizedInference, DiscardSink, InferenceDispatchOutcome, InferenceExecutor,
+    NotSentReason,
 };
 use ene_learning::{
     ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn, FormationDecision,
@@ -222,6 +223,8 @@ pub async fn begin_turn(
         expected_generation: input.generation,
         expected_consent: Some((consent_id, consent_rev)),
         expected_credential_set: Some(input.credential_set),
+        // Owner appends establish recency; only replies answer it.
+        expected_owner_message: None,
         local_id: input.local_id.clone(),
         command_id: Some(input.command),
         round_wire: Some(input.round_wire.clone()),
@@ -256,6 +259,10 @@ pub async fn begin_turn(
         }
         Ok(HistoryAppendOutcome::StaleConsent) => DialogueBegin::StaleConsent,
         Ok(HistoryAppendOutcome::StaleCredentialSet) => DialogueBegin::StaleCredentialSet,
+        // Owner appends carry no Owner-message premise, so the check is
+        // skipped and this arm is unreachable; Held is the safe mapping —
+        // retry-safe, with no side effects either way.
+        Ok(HistoryAppendOutcome::StaleOwnerInput) => DialogueBegin::Held,
         Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
         Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
             DialogueBegin::HeldByLifecycle(lifecycle)
@@ -281,15 +288,25 @@ pub async fn begin_turn(
 /// never-sent or technical outcome closes the stream interrupted; usage
 /// accounting is already decided inside the inference boundary. An adopted
 /// reply appends with its undelivered registration in the same atomic
-/// section; any other reply outcome is interrupted. After that durable
-/// append, the Experience premise is pinned for the post-response Learning
-/// pass.
+/// section; any other reply outcome is interrupted. Provider deltas are
+/// pushed to `sink` as they arrive, each gated on a current presentation
+/// premise; a delta shown before an invalidation stays as historical
+/// partial presentation, never rewound. `is_current` runs once more after
+/// provider completion as an early, best-effort refusal of a superseded
+/// reply: it only avoids a doomed append attempt. Durable adoption
+/// authority stays inside the append transaction — the reply carries the
+/// turn's Owner message identity as its premise, and the store refuses the
+/// append when a newer accepted Owner input committed first, even inside
+/// the same round. After the durable append, the Experience premise is
+/// pinned for the post-response Learning pass.
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
     learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
+    sink: &mut (dyn ene_inference::DeltaSink + Send),
+    is_current: &(dyn Fn() -> bool + Send + Sync),
 ) -> DialogueOutcome {
     let DialogueTurn {
         input,
@@ -312,7 +329,7 @@ pub async fn finish_turn(
     else {
         return DialogueOutcome::Interrupted;
     };
-    match inference.dispatch(authorized, prompt).await {
+    match inference.dispatch(authorized, prompt, sink).await {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
@@ -320,6 +337,16 @@ pub async fn finish_turn(
             let Ok(text) = scrubber.scrub(&arrival.output_text).await else {
                 return DialogueOutcome::Interrupted;
             };
+            // The provider completed after the last gated delta: confirm
+            // the round is still the presented one before anything
+            // durable. Generation, consent, credential set, and lifecycle
+            // ride the append's atomic compare below; the Host-owned open
+            // round lives outside that transaction, so only this check can
+            // refuse a reply superseded with no further delta to trip the
+            // gate.
+            if !is_current() {
+                return DialogueOutcome::Interrupted;
+            }
             let reply = AppendHistoryCommand {
                 companion: input.companion,
                 round: input.round,
@@ -330,6 +357,10 @@ pub async fn finish_turn(
                 expected_generation: input.generation,
                 expected_consent: Some((consent_id, consent_rev)),
                 expected_credential_set: Some(text.credential_set),
+                // The durable Owner row this turn committed: the append
+                // refuses the reply when a newer accepted Owner input
+                // superseded it, even inside the same round.
+                expected_owner_message: Some(message),
                 local_id: None,
                 command_id: None,
                 // Same round, same projection; the reply is Host-produced,
@@ -519,7 +550,11 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
     async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
         match self.inference.admit_learning().await {
             Ok(Admission::Admitted(authorized)) => {
-                match self.inference.dispatch(*authorized, prompt).await {
+                match self
+                    .inference
+                    .dispatch(*authorized, prompt, &mut DiscardSink)
+                    .await
+                {
                     Ok(InferenceDispatchOutcome::Completed {
                         arrival,
                         adopted: true,

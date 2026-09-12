@@ -25,6 +25,7 @@ use ene_presence::{
     PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
 };
 use ene_primitive::{RawId, WallClockWithTz};
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 
 fn fixture_clock() -> WallClockWithTz {
@@ -92,6 +93,7 @@ fn history_command(
         expected_generation: generation,
         expected_consent: None,
         expected_credential_set: None,
+        expected_owner_message: None,
         command_id: None,
         round_wire: Some(RawId::new().as_uuid().to_string()),
         round_intent: None,
@@ -119,6 +121,7 @@ fn history_command_with_ids(
         expected_generation: generation,
         expected_consent: None,
         expected_credential_set: None,
+        expected_owner_message: None,
         command_id,
         round_wire: Some(RawId::new().as_uuid().to_string()),
         round_intent: command_id.map(|_| RoundIntentMark::Auto),
@@ -245,6 +248,106 @@ async fn append_with_stale_generation_is_rejected() {
     let loaded = store.load_timeline(companion, None, 10).await;
     let timeline = loaded.unwrap();
     assert!(timeline.is_empty(), "stale append must store nothing");
+}
+
+/// A reply naming a superseded Owner message is refused inside the same
+/// transaction that would insert it: the newer accepted Owner input wins
+/// by commit order, even inside one round, and the refused reply registers
+/// nothing.
+#[tokio::test]
+async fn reply_after_newer_owner_input_is_stale() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let HistoryAppendOutcome::CommittedAs { message: owner1 } = store
+        .append_message(history_command(companion, generation, "first"))
+        .await
+        .unwrap()
+    else {
+        panic!("the first owner input must commit");
+    };
+    let HistoryAppendOutcome::CommittedAs { message: owner2 } = store
+        .append_message(history_command(companion, generation, "second"))
+        .await
+        .unwrap()
+    else {
+        panic!("the second owner input must commit");
+    };
+    let mut stale_reply = history_command(companion, generation, "stale reply");
+    stale_reply.role = HistoryRole::Companion;
+    stale_reply.expected_owner_message = Some(owner1);
+    let (outcome, registered) = store
+        .append_reply_with_undelivered(stale_reply, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        HistoryAppendOutcome::StaleOwnerInput,
+        "a reply to a superseded owner must not adopt"
+    );
+    assert!(
+        registered.is_none(),
+        "a refused reply registers no undelivered entry"
+    );
+    let mut current_reply = history_command(companion, generation, "current reply");
+    current_reply.role = HistoryRole::Companion;
+    current_reply.expected_owner_message = Some(owner2);
+    let (outcome, _) = store
+        .append_reply_with_undelivered(current_reply, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
+        "a reply to the latest owner still commits, got {outcome:?}"
+    );
+    let loaded = store.load_timeline(companion, None, 10).await.unwrap();
+    assert_eq!(
+        loaded.len(),
+        3,
+        "two owners plus the current reply, never the stale one"
+    );
+    assert!(
+        loaded.iter().all(|item| item.text != "stale reply"),
+        "the refused reply leaves no row"
+    );
+}
+
+/// The supersession probe is an index seek, not a History scan: it stops
+/// at the first newer Owner row, so proving recency costs one index step
+/// in the common current case no matter how long the timeline grows.
+#[tokio::test]
+async fn supersession_probe_is_index_backed_not_a_scan() {
+    let store = open_memory().await.unwrap();
+    let plan = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut statement = guard
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::companion::SQL_EXISTS_NEWER_OWNER
+            ))
+            .expect("the probe must explain");
+        statement
+            .query_map(rusqlite::params!["companion", "owner", 1_i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("the plan must read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan rows must decode")
+    };
+    assert!(!plan.is_empty(), "the probe plan must have steps");
+    for step in &plan {
+        assert!(
+            !step.starts_with("SCAN history_message") && !step.contains("TEMP B-TREE"),
+            "the probe must seek the index with no table scan or sort, got: {plan:?}"
+        );
+    }
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("idx_history_message_companion_role")),
+        "the probe must use the companion-role index, got: {plan:?}"
+    );
 }
 
 #[tokio::test]
@@ -1139,8 +1242,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(11)),
-        "migration must record version 11"
+        matches!(version, Ok(12)),
+        "migration must record version 12"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1442,7 +1545,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(11),
+        Some(12),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1491,8 +1594,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(11)),
-        "reopened database must record schema version 11"
+        matches!(version, Ok(12)),
+        "reopened database must record schema version 12"
     );
 }
 
@@ -2257,8 +2360,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(11)),
-        "reopened database must record schema version 11"
+        matches!(version, Ok(12)),
+        "reopened database must record schema version 12"
     );
 }
 
@@ -3068,7 +3171,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(11),
+        Some(12),
         "migration advances the schema version"
     );
     assert!(
@@ -3083,6 +3186,43 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
         !table_columns(&path, "learning_summary").is_empty(),
         "learning_summary is created"
     );
+}
+
+/// A v11 database gains the owner-recency index on reopen and converges on
+/// v12, so upgraded stores enforce reply-adoption recency from the index.
+#[tokio::test]
+async fn migration_v11_adds_the_owner_recency_index() {
+    let dir = tempfile::tempdir().expect("a temp dir must open");
+    let path = dir.path().join("store.db");
+    {
+        let store = Store::open(&path).await.expect("a fresh store must open");
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_history_message_companion_role;
+                 PRAGMA user_version = 11;",
+            )
+            .expect("the version-11 rewind must apply");
+    }
+    let _store = Store::open(&path).await.expect("migration must succeed");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(12),
+        "a v11 database must converge on v12"
+    );
+    let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
+    let index: Option<String> = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_role'",
+            (),
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("the index catalog must read");
+    assert!(index.is_some(), "v12 must create the companion-role index");
 }
 
 #[tokio::test]
@@ -3107,7 +3247,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(11));
+    assert_eq!(read_schema_version(&path), Some(12));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await

@@ -111,6 +111,67 @@ pub enum CoreError {
     UnsupportedPlatform(&'static str),
 }
 
+/// Where Host responses go at the point they are decided.
+///
+/// The connection loop forwards each frame to the socket as it is emitted,
+/// which is what makes an early accept and incremental provider deltas
+/// observable before the host future completes. Control frames `try_send`
+/// on the bounded stream channel; the open stream's deltas pace the
+/// provider through real backpressure on the same channel.
+pub trait FrameSink: Send {
+    fn emit(&mut self, frame: WireFrame) -> Result<(), FrameDeliveryError>;
+}
+
+/// How one control-frame delivery ended.
+///
+/// Closed means the connection is gone: later sends stop, the operation is
+/// never treated as delivered, and already-durable state stays untouched.
+/// Full means the control allowance broke (each call emits only a handful
+/// on a fresh channel far below the bound): never a silent drop, never a
+/// normal completion — the operation ends as a delivery failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a failed delivery must stop the operation, never drop silently"]
+pub enum FrameDeliveryError {
+    Closed,
+    Full,
+}
+
+/// Emits one terminal control frame, ending the operation.
+/// A delivery failure ends it identically: the frame never reached the
+/// client, so no outcome is treated as delivered and nothing further
+/// emits. Durable state already committed stays untouched.
+pub(crate) fn emit_end(sink: &mut dyn FrameSink, frame: WireFrame) {
+    if sink.emit(frame).is_err() {
+        // Gone or full channel: the operation ends undelivered either way.
+    }
+}
+
+/// Queued frames per connection between the Host and the socket writer.
+///
+/// Bounds slow-client memory: provider-paced deltas backpressure through
+/// this capacity (the stream gate awaits room) instead of accumulating
+/// without limit, while control frames stay far below it — each call emits
+/// only a handful on a fresh channel, so `try_send` there fails only when
+/// the receiver is gone.
+pub(crate) const STREAM_BUFFER_FRAMES: usize = 32;
+
+impl FrameSink for tokio::sync::mpsc::Sender<WireFrame> {
+    fn emit(&mut self, frame: WireFrame) -> Result<(), FrameDeliveryError> {
+        use tokio::sync::mpsc::error::TrySendError;
+
+        match self.try_send(frame) {
+            Ok(()) => Ok(()),
+            // The receiver is gone because the connection is closing; the
+            // host future is dropped with it and there is nowhere to write.
+            Err(TrySendError::Closed(_)) => Err(FrameDeliveryError::Closed),
+            // Control frames are O(1) per call on a fresh channel while the
+            // stream gate paces deltas with real backpressure, so reaching
+            // this means the control allowance was exceeded.
+            Err(TrySendError::Full(_)) => Err(FrameDeliveryError::Full),
+        }
+    }
+}
+
 /// Bearer store behind the Host handle.
 ///
 /// [`CredentialStore::with_bearer`] is generic over its closure return type,
@@ -386,7 +447,7 @@ impl HostHandle {
     /// [`crate::conn`], while inference arrives as `transport` so tests pass a
     /// fake and production passes the `OpenAI` transport. The envelope
     /// `message_type`, the negotiated version, and the ingress gate
-    /// (`gate_trips`) are checked in that order before dispatch; unhandled
+    /// (`gateTrips`) are checked in that order before dispatch; unhandled
     /// variants answer an empty vector.
     pub async fn handle_frame(
         &self,
@@ -394,81 +455,164 @@ impl HostHandle {
         live: LiveInput,
         transport: &impl ProviderTransport,
     ) -> Vec<WireFrame> {
+        let (stream_tx, stream_rx) = tokio::sync::mpsc::channel(STREAM_BUFFER_FRAMES);
+        let drain = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            let mut stream_rx = stream_rx;
+            while let Some(frame) = stream_rx.recv().await {
+                frames.push(frame);
+            }
+            frames
+        });
+        let mut sink = stream_tx.clone();
+        self.handle_frame_to(frame, live, transport, &mut sink, &stream_tx)
+            .await;
+        drop(stream_tx);
+        drop(sink);
+        match drain.await {
+            Ok(frames) => frames,
+            // The drain task only collects frames, so a panic there is the
+            // task's own panic: resume it rather than reporting success.
+            Err(join) => std::panic::resume_unwind(join.into_panic()),
+        }
+    }
+
+    /// [`HostHandle::handle_frame`] with incremental emission.
+    ///
+    /// Every response is handed to `sink` at the point it is decided. For a
+    /// text submit this is what makes `AcceptedForRound` and provider deltas
+    /// real: the connection loop forwards them to the socket while this
+    /// future still awaits the provider, instead of splitting a completed
+    /// response afterwards. Other frames emit their single response as
+    /// before. `stream_tx` feeds the same channel and carries the open
+    /// stream's ordered frames; the submit path emits each response on
+    /// exactly one of the two senders in emission order, so the drained
+    /// channel preserves the response order.
+    pub async fn handle_frame_to(
+        &self,
+        frame: WireFrame,
+        live: LiveInput,
+        transport: &impl ProviderTransport,
+        sink: &mut dyn FrameSink,
+        stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
+    ) {
         if frame.envelope.message_type.0 != frame.payload.message_type() {
-            return vec![reject_frame(
-                &frame,
-                &live,
-                RejectKind::UnsupportedMessage,
-                format!("unknown message type {:?}", frame.envelope.message_type.0),
-            )];
+            return emit_end(
+                sink,
+                reject_frame(
+                    &frame,
+                    &live,
+                    RejectKind::UnsupportedMessage,
+                    format!("unknown message type {:?}", frame.envelope.message_type.0),
+                ),
+            );
         }
         let negotiated_version = live.negotiated.as_ref().map(|terms| terms.version);
         match (negotiated_version, frame.envelope.protocol) {
             (Some(want), got) if got != want => {
-                return vec![reject_frame(
-                    &frame,
-                    &live,
-                    RejectKind::IncompatibleProtocol,
-                    format!("version {got:?} outside negotiated version {want:?}"),
-                )];
+                return emit_end(
+                    sink,
+                    reject_frame(
+                        &frame,
+                        &live,
+                        RejectKind::IncompatibleProtocol,
+                        format!("version {got:?} outside negotiated version {want:?}"),
+                    ),
+                );
             }
             (None, got) if got != ProtocolVersion::V1 => {
-                return vec![reject_frame(
-                    &frame,
-                    &live,
-                    RejectKind::IncompatibleProtocol,
-                    format!("version {got:?} without negotiation"),
-                )];
+                return emit_end(
+                    sink,
+                    reject_frame(
+                        &frame,
+                        &live,
+                        RejectKind::IncompatibleProtocol,
+                        format!("version {got:?} without negotiation"),
+                    ),
+                );
             }
             _ => {}
         }
         match &frame.payload {
-            WirePayload::PairingRequest(request) => self.pair(&frame, request, &live).await,
+            WirePayload::PairingRequest(request) => {
+                for response in self.pair(&frame, request, &live).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
             WirePayload::CapabilityAdvertise(advertise) => {
                 if live.paired_device.is_none() {
-                    return vec![unpaired_close(&frame, &live)];
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
-                self.advertise(&frame, advertise, &live)
+                for response in self.advertise(&frame, advertise, &live) {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
             }
-            WirePayload::AuthProof(proof) => self.verify_proof(&frame, proof, &live).await,
+            WirePayload::AuthProof(proof) => {
+                for response in self.verify_proof(&frame, proof, &live).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
             // Inbound challenges and results are never solicited (the Host
             // mints challenges and issues results), so both answer nothing —
-            // the same empty vector as the catch-all below, spelled out so
-            // the auth direction stays explicit.
-            WirePayload::AuthChallenge(_) | WirePayload::AuthResult(_) => Vec::new(),
+            // the same silence as the catch-all below, spelled out so the
+            // auth direction stays explicit.
+            WirePayload::AuthChallenge(_) | WirePayload::AuthResult(_) => {}
             WirePayload::SubmitTextInput(submit) => {
                 if Self::gate_trips(&frame, &live) {
-                    return vec![unpaired_close(&frame, &live)];
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
-                self.submit_text(&frame, submit, &live, transport).await
+                self.submit_text(&frame, submit, &live, transport, sink, stream_tx)
+                    .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
                 if Self::gate_trips(&frame, &live) {
-                    return vec![unpaired_close(&frame, &live)];
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
-                self.confirm_presentation(&frame, confirm).await
+                for response in self.confirm_presentation(&frame, confirm).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
             }
             WirePayload::HistoryRequest(request) => {
                 if Self::gate_trips(&frame, &live) {
-                    return vec![unpaired_close(&frame, &live)];
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
-                self.answer_history(&frame, request, &live).await
+                for response in self.answer_history(&frame, request, &live).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
             }
             WirePayload::ManagementIntent(intent) => {
                 if Self::gate_trips(&frame, &live) {
-                    return vec![unpaired_close(&frame, &live)];
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
-                self.apply_intent(&frame, intent, &live).await
+                for response in self.apply_intent(&frame, intent, &live).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
             }
             WirePayload::ManagementViewRequest(request) => {
                 if Self::gate_trips(&frame, &live) {
-                    return vec![unpaired_close(&frame, &live)];
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
-                self.answer_view(&frame, request, &live).await
+                for response in self.answer_view(&frame, request, &live).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
             }
             // Inbound rejects, stray acks, and future variants answer
             // nothing: only the Host rejects, and only in response.
-            _ => Vec::new(),
+            _ => {}
         }
     }
 

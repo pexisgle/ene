@@ -1,4 +1,4 @@
-use super::{AttachOutcome, CHUNK_CHARS, chunk_text};
+use super::AttachOutcome;
 use crate::serve::{CredStore, HostHandle, LiveInput, device_client};
 use crate::test_support::{live_input, memory_handle_with};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
@@ -470,38 +470,6 @@ async fn assign_learning(
     )
 }
 
-#[test]
-fn empty_text_yields_one_empty_chunk() {
-    assert_eq!(chunk_text(""), vec![String::new()]);
-}
-
-#[test]
-fn chunk_boundaries_hold_at_200_chars() {
-    let full: String = "a".repeat(CHUNK_CHARS);
-    assert_eq!(chunk_text(&full), vec![full]);
-    let over: String = "a".repeat(CHUNK_CHARS + 1);
-    let chunks = chunk_text(&over);
-    assert_eq!(chunks.len(), 2, "one char over fills two chunks");
-    let first = chunks.first().unwrap();
-    assert_eq!(first.chars().count(), CHUNK_CHARS);
-    let second = chunks.get(1).unwrap();
-    assert_eq!(second, "a");
-}
-
-#[test]
-fn multibyte_text_never_splits_a_code_point() {
-    let emoji: String = "😀".repeat(250);
-    let chunks = chunk_text(&emoji);
-    assert_eq!(chunks.len(), 2, "250 emoji fill two 200-char chunks");
-    assert!(
-        chunks
-            .iter()
-            .all(|chunk| chunk.chars().count() <= CHUNK_CHARS),
-        "every chunk respects the bound"
-    );
-    assert_eq!(chunks.concat(), emoji, "reassembly preserves the text");
-}
-
 #[tokio::test]
 async fn submit_without_setup_needs_revalidation() {
     use ene_companion::CompanionRepository as _;
@@ -766,8 +734,8 @@ async fn full_dialogue_round_streams_and_restores() {
         .await;
     assert_eq!(
         responses.len(),
-        4,
-        "the winning attach accepts with open, one frame, close, got {responses:?}"
+        5,
+        "the winning attach emits accept, open, one delta, the final marker, close, got {responses:?}"
     );
     for response in &responses {
         assert_eq!(
@@ -796,11 +764,19 @@ async fn full_dialogue_round_streams_and_restores() {
     assert!(
         matches!(
             &stream_frame.payload,
-            WirePayload::TextStreamFrame(frame) if frame.is_final && frame.seq == 0
+            WirePayload::TextStreamFrame(frame) if !frame.is_final && frame.seq == 0
         ),
-        "the single frame is final at seq zero"
+        "the fallback delta arrives at seq zero"
     );
-    let closed = responses.get(3).unwrap();
+    let final_frame = responses.get(3).unwrap();
+    assert!(
+        matches!(
+            &final_frame.payload,
+            WirePayload::TextStreamFrame(frame) if frame.is_final && frame.seq == 1 && frame.delta.is_empty()
+        ),
+        "the final marker closes the delta sequence"
+    );
+    let closed = responses.get(4).unwrap();
     assert!(
         matches!(
             &closed.payload,
@@ -2920,6 +2896,7 @@ async fn queued_experience_keeps_its_completion_premise() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: None,
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3002,6 +2979,7 @@ async fn approving_a_credential_redacts_its_prior_occurrences() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: None,
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3081,6 +3059,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: Some(old_revision),
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3136,6 +3115,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: Some(old_revision),
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3169,6 +3149,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: Some(fresh.credential_set),
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3224,6 +3205,7 @@ async fn management_open_never_sweeps_and_the_serve_boundary_fails_closed() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: None,
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3990,4 +3972,1342 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
         memory_body(&requested).contains("renders without setup state"),
         "the Memory section must render despite the unreadable credential"
     );
+}
+
+/// Streaming provider that emits deltas and pauses after the first one until
+/// released, so a test can observe delivery before completion. It honors a
+/// sink abort the way production transports do: the read stops and the call
+/// reports the abort instead of completing with a gap.
+struct GatedStreamingTransport {
+    deltas: Vec<String>,
+    release: tokio::sync::Notify,
+    completed: std::sync::atomic::AtomicBool,
+}
+
+impl GatedStreamingTransport {
+    fn new(deltas: &[&str]) -> Self {
+        Self {
+            deltas: deltas.iter().map(|delta| (*delta).to_owned()).collect(),
+            release: tokio::sync::Notify::new(),
+            completed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    async fn release(&self) {
+        self.release.notify_one();
+    }
+
+    fn completed(&self) -> bool {
+        self.completed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ProviderTransport for GatedStreamingTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let text = self.deltas.concat();
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            for (index, delta) in self.deltas.iter().enumerate() {
+                if let ene_inference::DeltaFlow::Abort(reason) = sink.push_delta(delta).await {
+                    return Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    });
+                }
+                if index == 0 && self.deltas.len() > 1 {
+                    self.release.notified().await;
+                }
+            }
+            self.completed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ene_inference::ProviderResponse {
+                text: self.deltas.concat(),
+                usage: None,
+            })
+        })
+    }
+}
+
+/// A provider that emits one delta and then fails: display happened, durable
+/// adoption did not.
+struct FailingStreamingTransport;
+
+impl ProviderTransport for FailingStreamingTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Err(ene_inference::InferenceTechnicalError::ProviderTransportFailed("down".to_owned()))
+        })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let _ = sink.push_delta("Hel").await;
+            Err(ene_inference::InferenceTechnicalError::ProviderTransportFailed("down".to_owned()))
+        })
+    }
+}
+
+/// Acceptance and the first delta reach the sink before the provider call
+/// completes, `seq` stays monotonic without gaps, and completion is reported
+/// only after the durable reply exists.
+#[tokio::test]
+async fn streaming_emits_accept_and_first_delta_before_provider_completion() {
+    let transport = GatedStreamingTransport::new(&["Hel", "lo"]);
+    let live = live_input("client-stream");
+    let (handle, _dir) = round_test_handle("dlg-stream", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream",
+        "hi",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut host =
+        Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink, &stream_tx));
+
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut host => panic!("the provider completed before the early frames"),
+            maybe = rx.recv() => early.push(maybe.expect("frames must arrive")),
+        }
+    }
+    assert!(
+        matches!(
+            &early[0].payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        ),
+        "the first frame is the durable acceptance"
+    );
+    assert!(
+        matches!(&early[1].payload, WirePayload::TextStreamOpen(_)),
+        "the stream opens before deltas"
+    );
+    let WirePayload::TextStreamFrame(first) = &early[2].payload else {
+        panic!("the third frame is the first delta");
+    };
+    assert_eq!(first.delta, "Hel");
+    assert_eq!(first.seq, 0);
+    assert!(
+        !transport.completed(),
+        "the first delta must arrive while the provider call is still pending"
+    );
+
+    transport.release().await;
+    host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut frames = early;
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+
+    let mut sequences = Vec::new();
+    let mut final_seen = false;
+    let mut close = None;
+    for frame in &frames {
+        match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => {
+                sequences.push(delta.seq);
+                if delta.is_final {
+                    final_seen = true;
+                    assert!(
+                        delta.delta.is_empty(),
+                        "the final frame only closes the sequence"
+                    );
+                }
+            }
+            WirePayload::TextStreamClose(status) => close = Some(status.status),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        sequences,
+        vec![0, 1, 2],
+        "delta sequence numbers are monotonic and gap-free"
+    );
+    assert!(final_seen, "completion carries a final frame");
+    assert_eq!(close, Some(StreamClose::Completed));
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        2,
+        "the owner input and the adopted reply are durable"
+    );
+}
+
+/// A provider failure after a displayed delta closes the stream interrupted
+/// and never adopts or stores the partial text.
+#[tokio::test]
+async fn streaming_error_after_a_delta_closes_interrupted_without_adoption() {
+    let transport = FailingStreamingTransport;
+    let live = live_input("client-stream-fail");
+    let (handle, _dir) = round_test_handle("dlg-stream-fail", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream-fail",
+        "hi",
+        live.connection_id,
+    );
+    let frames = handle.handle_frame(frame, live.clone(), &transport).await;
+    let payloads: Vec<&WirePayload> = frames.iter().map(|frame| &frame.payload).collect();
+    assert!(
+        matches!(
+            payloads.first(),
+            Some(WirePayload::RoundIntakeOutcome(
+                RoundIntakeOutcomeWire::AcceptedForRound { .. }
+            ))
+        ),
+        "acceptance precedes the failure"
+    );
+    let displayed: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        displayed,
+        vec!["Hel"],
+        "the partial display is the actually delivered range"
+    );
+    assert!(
+        matches!(
+            frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the stream closes interrupted, never completed"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        1,
+        "the owner input is durable but the reply is not adopted"
+    );
+}
+
+/// A transport without incremental support falls back to one delta carrying
+/// the whole text, delivered only when the completion returns.
+#[tokio::test]
+async fn non_streaming_provider_delivers_the_full_text_as_one_delta() {
+    let transport = FakeProviderTransport::new(String::from("all at once"), None);
+    let live = live_input("client-stream-fallback");
+    let (handle, _dir) = round_test_handle("dlg-stream-fallback", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream-fallback",
+        "hi",
+        live.connection_id,
+    );
+    let frames = handle.handle_frame(frame, live.clone(), &transport).await;
+    let deltas: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) if !delta.is_final => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["all at once"],
+        "the fallback delivers the whole text exactly once"
+    );
+    assert!(
+        matches!(
+            frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+        ),
+        "the fallback still completes"
+    );
+}
+
+/// A newer submit replacing the open round mid-stream stops presentation:
+/// the first delta may stay as historical partial display, but no later
+/// delta is shown, the stream closes interrupted, and the stale reply is
+/// never adopted — while the overtaking round completes normally.
+#[tokio::test]
+async fn streaming_stops_presenting_once_a_newer_submit_replaces_the_round() -> Result<(), String> {
+    use ene_inference::fake::FakeProviderTransport;
+
+    let gated = GatedStreamingTransport::new(&["Hel", "lo"]);
+    let live = live_input("client-stale-stream");
+    let (handle, _dir) = round_test_handle("dlg-stale-stream", &live, &gated).await?;
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stale-1",
+        "first input",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live.clone(), &gated, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
+        return Err(String::from("the third frame is the first delta"));
+    };
+    if shown.delta != "Hel" {
+        return Err(format!(
+            "only the pre-stale delta shows, got {:?}",
+            shown.delta
+        ));
+    }
+    // The overtaking submit mints a new round while the first provider is
+    // still parked, so the first stream's premise goes stale mid-flight.
+    let overtaking = FakeProviderTransport::new(String::from("second reply"), None);
+    let generation = current_generation(&handle).await?;
+    let mut second = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-stale-2",
+        "second input",
+        live.connection_id,
+    );
+    if let WirePayload::SubmitTextInput(ref mut input) = second.payload {
+        input.fresh = true;
+    }
+    let second_frames = handle.handle_frame(second, live.clone(), &overtaking).await;
+    if !matches!(
+        second_frames.last().map(|frame| &frame.payload),
+        Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+    ) {
+        return Err(format!(
+            "the overtaking round completes, got {second_frames:?}"
+        ));
+    }
+    gated.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    let shown: Vec<&str> = first_frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        vec!["Hel"],
+        "no delta produced after invalidation is presented, got {shown:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the stale stream closes interrupted, got {first_frames:?}"
+    );
+    let sequences: Vec<u64> = first_frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sequences,
+        vec![0],
+        "the aborted stream keeps a gap-free prefix, got {sequences:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        3,
+        "both owner inputs plus the overtaking reply are durable, never the stale one"
+    );
+    Ok(())
+}
+
+/// Premises for one test stream gate: an open round plus the baselines the
+/// gate compares each delta against. Mirrors the submit path's stream-open
+/// state without running a full submit, so gate-level tests can stall the
+/// channel and move premises with exact timing.
+struct GatePremises {
+    handle: HostHandle,
+    _dir: tempfile::TempDir,
+    live: LiveInput,
+    companion: ene_companion::CompanionId,
+    companion_key: String,
+    round: RoundId,
+    generation: ene_presence::PresenceGeneration,
+    consent: (String, u64),
+    credential_set: ene_credential::CredentialSetRevision,
+    probe: ene_plugin_ipc::WireFrame,
+}
+
+async fn gate_premises(tag: &str, client: &str) -> Result<GatePremises, String> {
+    use ene_companion::CompanionRepository as _;
+    use ene_credential::CredentialSetRepository as _;
+    use ene_permission::{CapabilityKind, ConsentRepository as _};
+    use ene_presentation::OpenRound;
+
+    let transport = ok_transport();
+    let live = live_input(client);
+    let (handle, dir) = round_test_handle(tag, &live, &transport).await?;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("the companion must resolve: {error:?}"))?;
+    let round = RoundId::from_raw(RawId::new());
+    let generation = current_generation(&handle).await?;
+    let companion_key = companion.as_raw().as_uuid().to_string();
+    handle.record_open_round(
+        &live.client_ref,
+        &companion_key,
+        OpenRound {
+            companion: companion.as_raw(),
+            client: device_client(client),
+            round,
+            generation: ene_presence::PresenceGeneration::from_u64(generation),
+        },
+    );
+    let consent = handle
+        .store
+        .load_current(CapabilityKind::Dialogue)
+        .await
+        .map_err(|error| format!("consent must load: {error:?}"))?
+        .ok_or(String::from("setup must assign dialogue consent"))?;
+    let credential_set = handle
+        .store
+        .current_set_revision()
+        .await
+        .map_err(|error| format!("the credential set must load: {error:?}"))?;
+    let probe = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-probe",
+        "probe",
+        live.connection_id,
+    );
+    Ok(GatePremises {
+        handle,
+        _dir: dir,
+        live,
+        companion,
+        companion_key,
+        round,
+        generation: ene_presence::PresenceGeneration::from_u64(generation),
+        consent: (consent.id, consent.rev.as_u64()),
+        credential_set,
+        probe,
+    })
+}
+
+fn gate_for(
+    premises: &GatePremises,
+    tx: tokio::sync::mpsc::Sender<ene_plugin_ipc::WireFrame>,
+) -> super::StreamGate<'_> {
+    super::StreamGate {
+        handle: &premises.handle,
+        frame: &premises.probe,
+        live: &premises.live,
+        client_ref: premises.live.client_ref.clone(),
+        companion_key: premises.companion_key.clone(),
+        companion: premises.companion,
+        stream: ene_api::v1::refs::StreamWireId(RawId::new().as_uuid()),
+        round: premises.round,
+        generation: premises.generation,
+        consent: premises.consent.clone(),
+        credential_set: premises.credential_set,
+        tx,
+        seq: 0,
+    }
+}
+
+/// A stalled client paces the provider instead of queueing without limit:
+/// pushes beyond the buffer pend, the queued frames never exceed the bound,
+/// and once drained every delta still arrives gap-free with a normal
+/// completion — no silent loss, no gap presented as completed.
+#[tokio::test]
+async fn slow_client_backpressures_the_provider_instead_of_queueing() -> Result<(), String> {
+    use ene_inference::{DeltaFlow, DeltaSink as _};
+
+    let premises = gate_premises("dlg-slow", "client-slow").await?;
+    // A tiny buffer stands in for the production bound; the policy under
+    // test is boundedness itself, not the constant.
+    let (gate_tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let mut gate = gate_for(&premises, gate_tx);
+    for index in 0..2 {
+        if gate.push_delta(&format!("d{index}")).await != DeltaFlow::Continue {
+            return Err(String::from("a drained buffer must accept pushes"));
+        }
+    }
+    // The receiver stays parked, modelling a stalled client: the next push
+    // must pend rather than queue a third frame.
+    tokio::select! {
+        biased;
+        _ = gate.push_delta("d2") => {
+            return Err(String::from("a stalled client must pace the provider, not queue"));
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+    }
+    // Drain: the two queued frames, then the rest paced by the drain, then
+    // the completion. Every delta arrives exactly once, in order.
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        received.push(
+            rx.recv()
+                .await
+                .ok_or(String::from("queued frames must arrive"))?,
+        );
+    }
+    for index in 2..10 {
+        if gate.push_delta(&format!("d{index}")).await != DeltaFlow::Continue {
+            return Err(String::from("a drained buffer must accept pushes"));
+        }
+        received.push(
+            rx.recv()
+                .await
+                .ok_or(String::from("paced frames must arrive"))?,
+        );
+    }
+    gate.finish().await;
+    drop(gate);
+    while let Some(frame) = rx.recv().await {
+        received.push(frame);
+    }
+    let mut deltas = Vec::new();
+    let mut sequences = Vec::new();
+    let mut final_seen = false;
+    for frame in &received {
+        if let WirePayload::TextStreamFrame(delta) = &frame.payload {
+            deltas.push(delta.delta.clone());
+            sequences.push(delta.seq);
+            if delta.is_final {
+                final_seen = true;
+            }
+        }
+    }
+    let expected: Vec<String> = (0..10).map(|index| format!("d{index}")).collect();
+    assert_eq!(
+        deltas[..10],
+        expected,
+        "no delta is silently lost, got {deltas:?}"
+    );
+    assert_eq!(
+        sequences,
+        (0..=10).collect::<Vec<_>>(),
+        "the sequence stays gap-free through backpressure, got {sequences:?}"
+    );
+    assert!(final_seen, "completion carries the final frame");
+    assert!(
+        matches!(
+            received.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+        ),
+        "a paced stream still completes, got {received:?}"
+    );
+    Ok(())
+}
+
+/// A premise that goes stale while a delta waits for capacity must still
+/// stop that delta: the capacity wait re-checks currentness and publishes
+/// only into a current premise, with no await between the final check and
+/// the publication. On the old check-then-send shape this test fails: the
+/// parked send completes after the drain and the stale delta publishes.
+#[tokio::test]
+async fn stale_while_waiting_for_capacity_never_publishes() -> Result<(), String> {
+    use ene_inference::{DeltaFlow, DeltaSink as _};
+    use ene_presentation::OpenRound;
+
+    let premises = gate_premises("dlg-stale-race", "client-stale-race").await?;
+    // Fill the single-slot buffer without draining: the next push parks on
+    // capacity, modelling a slow client mid-stream.
+    let (gate_tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let mut gate = gate_for(&premises, gate_tx);
+    if gate.push_delta("d0").await != DeltaFlow::Continue {
+        return Err(String::from("the empty buffer must accept the first push"));
+    }
+    let mut parked = Box::pin(gate.push_delta("d1"));
+    tokio::select! {
+        biased;
+        _ = &mut parked => return Err(String::from("the second push must park on the full buffer")),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+    }
+    // A newer submit replaces the open round while the delta waits.
+    premises.handle.record_open_round(
+        &premises.live.client_ref,
+        &premises.companion_key,
+        OpenRound {
+            companion: premises.companion.as_raw(),
+            client: device_client("client-stale-race"),
+            round: RoundId::from_raw(RawId::new()),
+            generation: premises.generation,
+        },
+    );
+    // Free one slot: the parked push must abort instead of publishing.
+    let shown = rx
+        .recv()
+        .await
+        .ok_or(String::from("the queued frame must arrive"))?;
+    let WirePayload::TextStreamFrame(first) = &shown.payload else {
+        return Err(String::from("the queued frame is the first delta"));
+    };
+    if first.delta != "d0" {
+        return Err(format!(
+            "only the pre-stale delta shows, got {:?}",
+            first.delta
+        ));
+    }
+    match parked.await {
+        DeltaFlow::Abort(_) => {}
+        DeltaFlow::Continue => {
+            return Err(String::from(
+                "a delta parked past invalidation must abort, not publish",
+            ));
+        }
+    }
+    if gate.seq != 1 {
+        return Err(format!(
+            "the aborted delta must take no sequence number, got seq {}",
+            gate.seq
+        ));
+    }
+    drop(gate);
+    if rx.recv().await.is_some() {
+        return Err(String::from("the stale delta must never publish"));
+    }
+    Ok(())
+}
+
+/// A provider transport that counts streaming calls without performing I/O.
+struct CountingTransport {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    text: String,
+}
+
+impl CountingTransport {
+    fn new(text: &str) -> Self {
+        Self {
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            text: text.to_owned(),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ene_inference::ProviderTransport for CountingTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let text = self.text.clone();
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        _sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let text = self.text.clone();
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+}
+
+/// A full control channel aborts the submit before any provider I/O: the
+/// failed accept is observed, never silently dropped, and no Completed
+/// frame can follow it. The durable owner append stays; only delivery
+/// fails.
+#[tokio::test]
+async fn submit_with_full_control_channel_aborts_before_provider_call() -> Result<(), String> {
+    let transport = ok_transport();
+    let live = live_input("client-full");
+    let (handle, _dir) = round_test_handle("dlg-full-channel", &live, &transport).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let filler = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-fill",
+        "fill",
+        live.connection_id,
+    );
+    for _ in 0..crate::serve::STREAM_BUFFER_FRAMES {
+        tx.try_send(filler.clone())
+            .map_err(|_| String::from("the prefill must fit"))?;
+    }
+    let counting = CountingTransport::new("never sent");
+    let mut sink = tx.clone();
+    handle
+        .handle_frame_to(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-full",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &counting,
+            &mut sink,
+            &tx,
+        )
+        .await;
+    assert_eq!(
+        counting.calls(),
+        0,
+        "an undeliverable accept must abort before provider I/O"
+    );
+    let mut drained = 0;
+    while rx.try_recv().is_ok() {
+        drained += 1;
+    }
+    assert_eq!(
+        drained,
+        crate::serve::STREAM_BUFFER_FRAMES,
+        "no frame slipped past the failed accept — especially no Completed"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        1,
+        "the durable owner append stays, with no adopted reply"
+    );
+    Ok(())
+}
+
+/// A gone connection stops the submit the same way: the failed accept is
+/// observed as Closed, the provider is never read, and nothing is treated
+/// as delivered.
+#[tokio::test]
+async fn submit_with_gone_connection_stops_before_provider_call() -> Result<(), String> {
+    let transport = ok_transport();
+    let live = live_input("client-gone");
+    let (handle, _dir) = round_test_handle("dlg-gone-channel", &live, &transport).await?;
+    let (tx, rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    drop(rx);
+    let counting = CountingTransport::new("never sent");
+    let mut sink = tx.clone();
+    handle
+        .handle_frame_to(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-gone",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &counting,
+            &mut sink,
+            &tx,
+        )
+        .await;
+    assert_eq!(
+        counting.calls(),
+        0,
+        "a gone connection must stop the submit before provider I/O"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        1,
+        "the durable owner append stays, with no adopted reply"
+    );
+    Ok(())
+}
+
+/// A provider that emits one delta, then parks before `response.completed`
+/// until released, with no further delta: the completion window — last
+/// delta already published while current, premise going stale before the
+/// provider result returns — in isolation.
+struct CompletionGatedTransport {
+    delta: String,
+    text: String,
+    release: tokio::sync::Notify,
+}
+
+impl CompletionGatedTransport {
+    fn new(delta: &str, text: &str) -> Self {
+        Self {
+            delta: delta.to_owned(),
+            text: text.to_owned(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+impl ProviderTransport for CompletionGatedTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let text = self.text.clone();
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if let ene_inference::DeltaFlow::Abort(reason) = sink.push_delta(&self.delta).await {
+                return Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                    reason: reason.to_owned(),
+                });
+            }
+            self.release.notified().await;
+            Ok(ene_inference::ProviderResponse {
+                text: self.text.clone(),
+                usage: None,
+            })
+        })
+    }
+}
+
+/// A completion that lands after the round moved on adopts nothing: the
+/// last delta was current when published, but the reply it belongs to is
+/// already superseded, and no further delta arrives to trip the gate. The
+/// durable append is refused, the stream closes interrupted with no final
+/// frame, and only the overtaking round stays durable.
+#[tokio::test]
+async fn completion_after_round_replacement_adopts_nothing() -> Result<(), String> {
+    use ene_inference::fake::FakeProviderTransport;
+
+    let stalled = CompletionGatedTransport::new("Hel", "Hello");
+    let live = live_input("client-completion-race");
+    let (handle, _dir) = round_test_handle("dlg-completion-race", &live, &stalled).await?;
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-race-1",
+        "first input",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live.clone(), &stalled, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
+        return Err(String::from("the third frame is the first delta"));
+    };
+    if shown.delta != "Hel" || shown.seq != 0 {
+        return Err(format!(
+            "only the pre-stale delta shows, got {:?}",
+            early[2].payload
+        ));
+    }
+    // The overtaking submit mints a new round and completes while the old
+    // provider is still parked before response.completed.
+    let overtaking = FakeProviderTransport::new(String::from("second reply"), None);
+    let generation = current_generation(&handle).await?;
+    let mut second = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-race-2",
+        "second input",
+        live.connection_id,
+    );
+    if let WirePayload::SubmitTextInput(ref mut input) = second.payload {
+        input.fresh = true;
+    }
+    let second_frames = handle.handle_frame(second, live.clone(), &overtaking).await;
+    if !matches!(
+        second_frames.last().map(|frame| &frame.payload),
+        Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+    ) {
+        return Err(format!(
+            "the overtaking round completes, got {second_frames:?}"
+        ));
+    }
+    stalled.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    let shown: Vec<&str> = first_frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        vec!["Hel"],
+        "no delta follows the published prefix, got {shown:?}"
+    );
+    assert!(
+        !first_frames.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamFrame(delta) if delta.is_final
+        )),
+        "the stale stream emits no final frame, got {first_frames:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the superseded stream closes interrupted, got {first_frames:?}"
+    );
+    let sequences: Vec<u64> = first_frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sequences,
+        vec![0],
+        "the aborted stream keeps a gap-free prefix, got {sequences:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        3,
+        "both owner inputs plus the overtaking reply are durable, never the stale one"
+    );
+    Ok(())
+}
+
+/// A provider that commits a newer accepted Owner input after its last
+/// delta, before returning completion — without moving the open round,
+/// generation, consent, or lifecycle. Only the append transaction's
+/// Owner-message premise can refuse the stale reply, which proves the
+/// durable authority split: the Host-side check passes, the store
+/// refuses.
+struct OwnerSupersedingTransport<'a> {
+    store: &'a ene_store::Store,
+    release: tokio::sync::Notify,
+}
+
+impl OwnerSupersedingTransport<'_> {
+    async fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+impl ProviderTransport for OwnerSupersedingTransport<'_> {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(ene_inference::ProviderResponse {
+                text: String::from("Hello"),
+                usage: None,
+            })
+        })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if let ene_inference::DeltaFlow::Abort(reason) = sink.push_delta("Hel").await {
+                return Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                    reason: reason.to_owned(),
+                });
+            }
+            self.release.notified().await;
+            // A concurrent Owner commit landing after the last delta and
+            // before the reply append: the open round, generation, consent,
+            // and lifecycle never move, so the Host-side check still passes
+            // and only the append transaction can refuse.
+            {
+                use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+                use ene_presence::PresenceRepository as _;
+
+                let companion = self
+                    .store
+                    .ensure_running_companion()
+                    .await
+                    .expect("the companion must resolve");
+                let attribution = self
+                    .store
+                    .load_attribution(companion.as_raw())
+                    .await
+                    .expect("attribution must load")
+                    .expect("attribution must exist");
+                let overtaking = ene_companion::AppendHistoryCommand {
+                    companion,
+                    round: RawId::new(),
+                    role: ene_companion::HistoryRole::Owner,
+                    text: String::from("overtaking input"),
+                    lang: String::from("en"),
+                    at: ene_primitive::WallClockWithTz::now(),
+                    expected_generation: attribution.generation,
+                    expected_consent: None,
+                    expected_credential_set: None,
+                    expected_owner_message: None,
+                    command_id: None,
+                    round_wire: None,
+                    round_intent: None,
+                    incarnation: None,
+                    local_id: None,
+                };
+                let outcome = self
+                    .store
+                    .append_message(overtaking)
+                    .await
+                    .expect("the overtaking owner must commit");
+                assert!(
+                    matches!(
+                        outcome,
+                        ene_companion::HistoryAppendOutcome::CommittedAs { .. }
+                    ),
+                    "the overtaking owner must commit, got {outcome:?}"
+                );
+            }
+            Ok(ene_inference::ProviderResponse {
+                text: String::from("Hello"),
+                usage: None,
+            })
+        })
+    }
+}
+
+/// The append transaction refuses a reply whose Owner was superseded after
+/// the Host-side check passed: the open round, generation, consent, and
+/// lifecycle never move, so the Host predicate still answers current and
+/// only the durable Owner-message premise refuses. No append, no
+/// completion, no final frame — while the overtaking Owner row stays
+/// durable.
+#[tokio::test]
+async fn append_racing_a_newer_owner_commit_adopts_nothing() -> Result<(), String> {
+    use ene_companion::CompanionRepository as _;
+
+    let setup = ok_transport();
+    let live = live_input("client-owner-race");
+    let (handle, _dir) = round_test_handle("dlg-owner-race", &live, &setup).await?;
+    let racing = OwnerSupersedingTransport {
+        store: &handle.store,
+        release: tokio::sync::Notify::new(),
+    };
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-owner-1",
+        "first input",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live.clone(), &racing, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
+        return Err(String::from("the third frame is the first delta"));
+    };
+    if shown.delta != "Hel" {
+        return Err(format!(
+            "only the pre-race delta shows, got {:?}",
+            shown.delta
+        ));
+    }
+    let accepted = accepted_round(&early)?;
+    // Release the provider: it commits the overtaking Owner input, then
+    // returns completion with every Host-side premise untouched.
+    racing.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    assert!(
+        !first_frames.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamFrame(delta) if delta.is_final
+        )),
+        "the superseded stream emits no final frame, got {first_frames:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the superseded stream closes interrupted, got {first_frames:?}"
+    );
+    // The Host-side premise never moved: the open round still names the
+    // old turn, so the refusal came from the append transaction alone.
+    let expected = handle
+        .round_for(&accepted.0)
+        .ok_or(String::from("the accepted round must resolve"))?;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("the companion must resolve: {error:?}"))?;
+    let retained =
+        handle.open_round_for(&live.client_ref, &companion.as_raw().as_uuid().to_string());
+    assert!(
+        retained.is_none_or(|open| open.round == expected),
+        "no newer submit moved the open round in this race"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        2,
+        "both owner inputs are durable, never the stale reply"
+    );
+    Ok(())
+}
+
+/// A second Owner input in the SAME round still supersedes the running
+/// inference: round equality alone cannot prove recency, so the reply
+/// append compares the turn's Owner message against the latest accepted
+/// Owner instead. The old stream interrupts with no adoption while the
+/// joined round completes normally.
+#[tokio::test]
+async fn same_round_newer_owner_input_supersedes_the_running_reply() -> Result<(), String> {
+    use ene_inference::fake::FakeProviderTransport;
+
+    let parked = CompletionGatedTransport::new("Hel", "Hello");
+    let live = live_input("client-same-round");
+    let (handle, _dir) = round_test_handle("dlg-same-round", &live, &parked).await?;
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-same-1",
+        "first input",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live.clone(), &parked, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    let first_round = accepted_round(&early)?;
+    // The second send joins the open round: no fresh flag, current
+    // generation, same open entry afterwards — yet its Owner input is
+    // newer, so the running reply is superseded anyway.
+    let overtaking = FakeProviderTransport::new(String::from("second reply"), None);
+    let generation = current_generation(&handle).await?;
+    let second = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-same-2",
+        "second input",
+        live.connection_id,
+    );
+    let second_frames = handle.handle_frame(second, live.clone(), &overtaking).await;
+    assert_eq!(
+        accepted_round(&second_frames)?,
+        first_round,
+        "the second send must join the same round for this race"
+    );
+    if !matches!(
+        second_frames.last().map(|frame| &frame.payload),
+        Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+    ) {
+        return Err(format!("the joined round completes, got {second_frames:?}"));
+    }
+    parked.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    assert!(
+        !first_frames.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamFrame(delta) if delta.is_final
+        )),
+        "the superseded stream emits no final frame, got {first_frames:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the superseded stream closes interrupted, got {first_frames:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        3,
+        "both owner inputs plus the joined reply are durable, never the stale one"
+    );
+    Ok(())
 }

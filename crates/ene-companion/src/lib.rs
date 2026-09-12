@@ -181,6 +181,13 @@ pub struct AppendHistoryCommand {
     /// [`HistoryAppendOutcome::StaleCredentialSet`] instead of landing raw.
     /// [`None`] skips the check (tests and non-content appends).
     pub expected_credential_set: Option<CredentialSetRevision>,
+    /// Durable identity of the accepted Owner message this reply answers.
+    /// The store compares it inside the append transaction against the
+    /// latest accepted Owner message for the companion: a newer Owner
+    /// input answers [`HistoryAppendOutcome::StaleOwnerInput`] instead of
+    /// adopting a superseded reply. [`None`] skips the check (owner
+    /// appends, which establish recency rather than answer it).
+    pub expected_owner_message: Option<RawId>,
     /// Command-scoped idempotency identity, when the caller carries one.
     /// [`None`] stores NULL (no replay key). A retry reuses the same command
     /// id with a fresh message id; `local_id` stays as correspondence
@@ -220,6 +227,7 @@ impl core::fmt::Debug for AppendHistoryCommand {
             .field("expected_generation", &self.expected_generation)
             .field("expected_consent", &self.expected_consent)
             .field("expected_credential_set", &self.expected_credential_set)
+            .field("expected_owner_message", &self.expected_owner_message)
             .field("command_id", &self.command_id)
             .field("round_wire", &self.round_wire)
             .field("round_intent", &self.round_intent)
@@ -297,6 +305,14 @@ pub enum HistoryAppendOutcome {
     /// newly registered credential value and must not be committed; the
     /// caller re-scrubs and retries (owner input) or interrupts (reply).
     StaleCredentialSet,
+    /// A newer accepted Owner input superseded this turn's owner before the
+    /// reply append ran. Generation, consent, and credential premises may
+    /// all still hold: the reply would answer input the owner already moved
+    /// past, so it must not be adopted. Distinct from
+    /// [`HistoryAppendOutcome::StaleExpected`], which is presence-generation
+    /// staleness only. The caller interrupts the stream; the superseding
+    /// input's own turn proceeds normally.
+    StaleOwnerInput,
     /// A reused command key arrived with a different request than the
     /// stored row: the stored [`RequestFingerprint`] (role, body, language,
     /// sending incarnation, and canonical round intent) did not match — or
@@ -560,6 +576,7 @@ mod tests {
             expected_generation: PresenceGeneration::first(),
             expected_consent: None,
             expected_credential_set: None,
+            expected_owner_message: None,
             command_id: Some(CommandId(RawId::new())),
             round_wire: Some(String::from("round-wire-1")),
             round_intent: Some(RoundIntentMark::Auto),

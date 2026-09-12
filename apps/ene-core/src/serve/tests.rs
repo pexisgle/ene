@@ -1053,3 +1053,46 @@ async fn disconnect_without_presence_is_a_no_op() {
         "a disconnect with nothing attached changes nothing"
     );
 }
+
+/// A full control channel reports Full instead of queueing: the failed
+/// frame never enters the channel, so the caller observes the failure
+/// rather than silently dropping the frame.
+#[test]
+fn control_emit_reports_full_without_queueing() {
+    use super::{FrameDeliveryError, FrameSink, STREAM_BUFFER_FRAMES};
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(STREAM_BUFFER_FRAMES);
+    let filler = pairing_frame("fill");
+    for _ in 0..STREAM_BUFFER_FRAMES {
+        tx.try_send(filler.clone()).expect("the prefill must fit");
+    }
+    let mut sink = tx.clone();
+    assert_eq!(
+        sink.emit(filler.clone()),
+        Err(FrameDeliveryError::Full),
+        "a full control channel must fail loudly"
+    );
+    let mut drained = 0;
+    while rx.try_recv().is_ok() {
+        drained += 1;
+    }
+    assert_eq!(
+        drained, STREAM_BUFFER_FRAMES,
+        "the failed frame was never queued"
+    );
+}
+
+/// A gone connection reports Closed, distinct from Full.
+#[test]
+fn control_emit_reports_closed() {
+    use super::{FrameDeliveryError, FrameSink};
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    drop(rx);
+    let mut sink = tx;
+    assert_eq!(
+        sink.emit(pairing_frame("gone")),
+        Err(FrameDeliveryError::Closed),
+        "a gone connection must report Closed, not Full"
+    );
+}

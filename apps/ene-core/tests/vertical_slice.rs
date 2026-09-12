@@ -924,18 +924,22 @@ async fn spawn_fake_responses(
                 {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
-                let payload = serde_json::json!({
-                    "status": "completed",
-                    "output": [{
-                        "type": "message",
-                        "content": [{"type": "output_text", "text": text}],
-                    }],
-                    "usage": {"input_tokens": 7, "output_tokens": 9},
-                });
-                let payload = payload.to_string();
+                let mut payload = String::new();
+                // Server-sent events: the production transport requests
+                // incremental output, so the fake provider streams two deltas
+                // and then completes with usage.
+                let (first, second) = text.split_at(text.len() / 2);
+                for delta in [first, second] {
+                    payload.push_str(&format!(
+                        "data: {{\"type\":\"response.output_text.delta\",\"delta\":{}}}\n\n",
+                        serde_json::json!(delta)
+                    ));
+                }
+                payload.push_str(
+                    "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":9}}}\n\n",
+                );
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                    payload.len()
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
                 );
                 drop(stream.write_all(response.as_bytes()).await);
                 drop(stream.shutdown().await);

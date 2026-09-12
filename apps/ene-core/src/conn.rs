@@ -90,7 +90,7 @@ use ene_api::v1::payload::WirePayload;
 #[cfg(unix)]
 use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
 #[cfg(unix)]
-use ene_plugin_ipc::{MAX_FRAME_BYTES, decode_frame, encode_frame};
+use ene_plugin_ipc::{MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
@@ -451,6 +451,45 @@ where
     }
 }
 
+#[cfg(unix)]
+use crate::serve::STREAM_BUFFER_FRAMES;
+
+/// Applies one response's table bookkeeping and writes it to the socket.
+///
+/// Returns `false` when the connection can no longer carry frames (encode or
+/// write failure). The accepted connection id authenticates only when it is
+/// the table key the handle echoed back.
+#[cfg(unix)]
+async fn write_response(
+    stream: &mut tokio::net::UnixStream,
+    table: &ConnectionTable,
+    connection: &ConnectionWireId,
+    response: WireFrame,
+    terminal: &mut bool,
+) -> bool {
+    use tokio::io::AsyncWriteExt as _;
+
+    if let WirePayload::PairingResult(PairingResult::Paired { device_id }) = &response.payload {
+        table.note_paired(connection, &device_id.0.as_hyphenated().to_string());
+    }
+    if let WirePayload::AuthResult(AuthResult::Accepted { connection_id }) = &response.payload
+        && *connection_id == *connection
+    {
+        table.note_authed(connection);
+    }
+    if let WirePayload::NegotiatedConnection(negotiated) = &response.payload {
+        table.note_negotiated(connection, negotiated.clone());
+    }
+    if matches!(response.payload, WirePayload::DisconnectNotice(_)) {
+        *terminal = true;
+    }
+    let Ok(encoded) = encode_frame(&response) else {
+        return false;
+    };
+    stream.write_all(&encoded).await.is_ok()
+}
+
+#[cfg(unix)]
 /// An incarnation mismatch, a corrupt or oversize frame, or a terminal
 /// [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) in the
 /// responses ends the connection; close always forgets the table entry and
@@ -458,7 +497,6 @@ where
 /// [`HostHandle::note_disconnect`](crate::serve::HostHandle::note_disconnect)
 /// only when no other live connection still holds that device (see
 /// [`ConnectionTable::note_closed`]).
-#[cfg(unix)]
 async fn serve_connection<T>(
     mut stream: tokio::net::UnixStream,
     connection: ConnectionWireId,
@@ -468,7 +506,7 @@ async fn serve_connection<T>(
 ) where
     T: ProviderTransport + Send + Sync + 'static,
 {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::io::AsyncReadExt as _;
 
     let mut prefix = [0_u8; 4];
     loop {
@@ -494,38 +532,60 @@ async fn serve_connection<T>(
             LiveDecision::Duplicate => continue,
             LiveDecision::Invalid => break,
         };
-        let responses = handle.handle_frame(frame, live, transport.as_ref()).await;
-        for response in &responses {
-            if let WirePayload::PairingResult(PairingResult::Paired { device_id }) =
-                &response.payload
-            {
-                table.note_paired(&connection, &device_id.0.as_hyphenated().to_string());
-            }
-            // The accepted id is the table key the handle echoed back: only
-            // an exact match authenticates this connection.
-            if let WirePayload::AuthResult(AuthResult::Accepted { connection_id }) =
-                &response.payload
-                && *connection_id == connection
-            {
-                table.note_authed(&connection);
-            }
-            if let WirePayload::NegotiatedConnection(negotiated) = &response.payload {
-                table.note_negotiated(&connection, negotiated.clone());
-            }
-        }
+        // The handle emits each response as it is decided; this loop writes
+        // them while the host future is still running, so an early accept and
+        // provider deltas reach the socket before provider completion. The
+        // channel is bounded: stream deltas backpressure the provider when
+        // the client falls behind instead of queueing without limit.
+        let (frame_tx, mut frame_rx) =
+            tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
+        let mut sink = frame_tx.clone();
+        let mut host = std::pin::pin!(handle.handle_frame_to(
+            frame,
+            live,
+            transport.as_ref(),
+            &mut sink,
+            &frame_tx,
+        ));
         let mut failed = false;
         let mut terminal = false;
-        for response in &responses {
-            if matches!(response.payload, WirePayload::DisconnectNotice(_)) {
-                terminal = true;
+        let mut host_done = false;
+        loop {
+            if host_done {
+                while let Ok(response) = frame_rx.try_recv() {
+                    if !write_response(&mut stream, &table, &connection, response, &mut terminal)
+                        .await
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                break;
             }
-            let Ok(encoded) = encode_frame(response) else {
-                failed = true;
-                break;
-            };
-            if stream.write_all(&encoded).await.is_err() {
-                failed = true;
-                break;
+            tokio::select! {
+                biased;
+                () = &mut host => {
+                    host_done = true;
+                }
+                maybe = frame_rx.recv() => {
+                    match maybe {
+                        Some(response) => {
+                            if !write_response(
+                                &mut stream,
+                                &table,
+                                &connection,
+                                response,
+                                &mut terminal,
+                            )
+                            .await
+                            {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        None => host_done = true,
+                    }
+                }
             }
         }
         // The response above is already on the wire: post-response Learning
