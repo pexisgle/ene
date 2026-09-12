@@ -2,7 +2,7 @@
 
 ## 現在の milestone
 
-- Stage 4 Task / Action（最初の slice: Task の最小 durable lifecycle）
+- Stage 4 Task / Action
 
 ## 完了した milestone
 
