@@ -1343,8 +1343,8 @@ struct WorkspaceAssociationPremise {
     need: WorkspaceNeedRef,
 }
 
-// reload / recovery の読み戻し。現在 revision の AU2 単位（現在 revision の目的 entry と、現在 revision までの
-// 有効な採用指示 entry 全体）を返す。
+// reload / recovery の読み戻し。現行 revision 単位（AU2 作成＋AU4 forward）（現在 revision の目的 entry と、
+// 現在 revision までの有効な採用指示 entry 全体）を返す。
 struct Task {                        // task 行の現行値（D1）。内容の正本は revision snapshot で、同じ revision を指す
     reference: TaskRef,              // 現在 revision
     purpose: TaskPurposeRef,         // 現在採用されている目的（本文は revision snapshot）
