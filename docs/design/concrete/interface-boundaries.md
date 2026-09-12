@@ -156,7 +156,14 @@ struct AssigneeRef { companion: RawId }  // 担当 Companion（CompanionId と�
 // AU2/AU4 の repository slice が採用するのは目的のみ。指示 entry は H-A steering 配線 slice が、
 // 材料・途中理解はそれぞれの利用先が分岐する slice が、producer とともに追加する。
 struct TaskContextEntryId(/* opaque */);
-enum TaskContextItem { AdoptedPurpose(TaskPurposeRef) }
+enum TaskContextItem {
+    AdoptedPurpose(TaskPurposeRef),
+    // 採用指示。採用 identity は entry 自身の TaskContextEntryId であり、由来 record（会話: History）は
+    // origin.source が参照する。本文は複製しない。entry は採用 revision で 1 度だけ書き、後の forward では
+    // 再記録しない。現在有効な指示は、現在 revision までの AdoptedInstruction entry 全体である
+    // （retire の producer が存在するまで。retire は producer を持つ slice が read rule とともに追加する）。
+    AdoptedInstruction,
+}
 struct TaskContextOrigin {
     kind: TaskContextOriginKind,   // 会話・自発・Schedule 各回等の由来
     source: RawId,                 // 由来 record の identity（会話: History record、自発: 活動 record、
@@ -209,12 +216,16 @@ struct ProposeSteeringCommand {
     premise: SteeringPremiseRef,     // 依拠した revision・目的（boundary token）
     new_purpose: Option<TaskPurpose>, // None = 目的変更なし（直前の purpose を引き継ぐ）
     instruction_source: RawId,       // 採用を提案する追加指示の発言 record の参照（採用判断・採用 identity は作業）
-    unadopted: Vec<UnadoptedReasonRef>, // 未反映・待機の対応（あれば）
+    unadopted: Vec<UnadoptedReasonRef>, // 未反映・待機の対応（あれば）。反映判断 slice で導入し、H-A steering 配線 slice はこの field を含めない
 }
 
 // 作業が採用した追加指示の identity は、新 revision の context entry（指示 entry は H-A steering 配線 slice
 // で producer とともに追加）が表す。発言 record（History の正本）を採用済みと同一視しない。caller が渡す
 // instruction_source は由来 record の参照であり、採用 identity・entry identity とは別である。
+// 採用指示の採用 identity は、新 revision の採用指示 entry の TaskContextEntryId である。entry は採用 revision で
+// 1 度だけ書き、後の forward で作り直さない。よって採用 identity は revision を跨いで安定し、instruction_source
+// （History record の RawId）とは別物である。現在有効な採用指示は、現在 revision までの AdoptedInstruction entry
+// 全体として読み出される（retire の producer が存在するまで）。
 
 struct CancelTaskCommand {
     task: TaskId,                    // Cancel 対象。revision は問わない（現在への記録のため）
@@ -226,7 +237,9 @@ enum TaskProposalOutcome {
     AcceptedAsTask(TaskRef),         // 新 Task として受理
     AcceptedAsSteering(TaskRef),     // 新 revision として受理（旧 revision を残す）
     CancelAccepted,                  // Cancel を現在 Task に記録（停止完了ではない）
-    StalePremise { current: TaskRef }, // expected revision 不一致。再評価へ戻す
+    StalePremise { current: TaskRef }, // expected revision・依拠 purpose の不一致。再評価へ戻す
+    MissingTask { task: TaskId },       // steering: premise の Task に durable state がない（書き込みなし。repository outcome の写し）
+    RevisionExhausted { task: TaskId }, // steering: 次の相異なる revision を durable に確定できない（書き込みなし。repository outcome の写し）
     HeldByGlobalHold(HoldConditionRef), // 消去・復元保留・停止等で新規禁止。hold slice で導入。payload は受入側 owner が定義する premise に写す（第4節 inversion）
     NeedsRevalidation(NeedsRevalidationRef), // 権限・帰属・cap 等の再照合が必要
     InsufficientContext(InsufficientRef),    // 目的・Workspace 条件が不足
@@ -262,7 +275,8 @@ enum TaskResultAcceptance {
 }
 ```
 
-- request 開始責務：個体調整（Task 化・steering・Cancel の意図）。authoritative 判断：作業（受理・反映・達成）。`TaskProposalOutcome`・`TaskRepository` trait・repository outcome は作業が所有し、caller（dialogue）は自分の要求型（`ProposeTaskCommand` 等）を Task 側の値 premise（`TaskProposalPremise`）へ mapping して渡す。TaskId・TaskContextEntryId・WorkspaceAssocId の identity は作業（`orchestrate`）が mint して `TaskCreationPremise` を構成する。steering の新 revision が記録する context entry（採用目的、および追加 kind が導入された後の指示等）の `TaskContextEntryId` も作業が mint し、caller は依拠した現在 revision（`expected`）だけを渡す。creation では requester を担当 `AssigneeRef` として写す。Permission 判断は権限・制約、作用成功は実行・拡張に残る。
+- request 開始責務：個体調整（Task 化・steering・Cancel の意図）。authoritative 判断：作業（受理・反映・達成）。`TaskProposalOutcome`・`TaskRepository` trait・repository outcome は作業が所有し、caller（dialogue）は自分の要求型（`ProposeTaskCommand` 等）を Task 側の値 premise（`TaskProposalPremise`）へ mapping して渡す。TaskId・TaskContextEntryId・WorkspaceAssocId の identity は作業（`orchestrate`）が mint して `TaskCreationPremise` を構成する。steering の新 revision が記録する context entry（採用目的・採用指示等）の `TaskContextEntryId` も作業が mint し、caller は依拠した現在 revision（`expected`）だけを渡す。creation では requester を担当 `AssigneeRef` として写す。Permission 判断は権限・制約、作用成功は実行・拡張に残る。
+- steering の outcome mapping：orchestrate は `TaskCommitOutcome::CommittedAs` を `TaskProposalOutcome::AcceptedAsSteering`、`StaleExpected{current}` を `StalePremise{current}` へ写し、`MissingTask`/`RevisionExhausted` は同じ意味・payload のまま `Ok` 側で返す。orchestrate の premise 構築時 check で `premise.purpose` が `expected.revision` の目的と一致しなければ `StalePremise{current}` として不受理にし、repository の revision atomic compare が現在性（pre-check 後の race を含む）を包含する。
 - 入力として必要なもの：採用を提案する目的本文と由来（creation）、`SteeringPremiseRef`（依拠 revision・目的。steering）、委任 scope 写し、Workspace 利用条件、Client 依存条件。軽微処理の Task 化省略は本体が行える範囲だが、閾値・分類 algorithm は固定しない（H-9）。
 - purpose / origin / scope：目的本文・採用位置の identity・由来・委任範囲・Workspace 範囲を欠落させない。発言 record と Task 反映内容と未反映・待機を区別する。
 - Client 依存条件：`client_binding` は受入時の現在条件として照合し、Task の durable state にしない。実行時の Client 条件は後続 boundary（Action 開始等）で現在の presence generation・現接続から再確認する（IB §10）。
@@ -1180,7 +1194,7 @@ fn request_action(cmd: ExecuteActionCommand)
 
 | domain | outcome enum（例） | 主な variant の意味 |
 |---|---|---|
-| Task 提案・steering・委任（command-level） | `TaskProposalOutcome`、`DelegationOutcome` | Accepted / StalePremise(current 付き) / HeldByGlobalHold（hold slice で追加） / NeedsRevalidation / InsufficientContext |
+| Task 提案・steering・委任（command-level） | `TaskProposalOutcome`、`DelegationOutcome` | Accepted / StalePremise(current 付き) / MissingTask / RevisionExhausted / HeldByGlobalHold（hold slice で追加） / NeedsRevalidation / InsufficientContext |
 | Task commit（steering, AU4。repository-level） | `TaskCommitOutcome` | CommittedAs / StaleExpected(current 付き) / MissingTask / RevisionExhausted / HeldByGlobalHold（hold slice で追加） |
 | Agent 結果受入 | `TaskResultAcceptance` | AdoptedToCurrent / RecordedToOriginalOnly / HeldForPermissionReview / DiscardedAsStaleWithRecord |
 | Experience・訂正・scope | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | Formed / Deferred / Declined / Corrected / KeptAsCompanion / DeniedByExplicitConstraint / StaleTarget / HeldByErasure |
@@ -1249,10 +1263,16 @@ struct TaskPurposeAdoptionPremise {
     origin: TaskContextOrigin,       // 採用の由来
     acquired_at: WallClockWithTz,    // 取得時点
 }
+struct TaskInstructionAdoptionPremise { // steering で採用する追加指示（H-A steering 配線 slice で導入）
+    entry: TaskContextEntryId,       // 新 revision が記録する採用指示 entry の identity。作業（orchestrate）が mint し、entry 自身が採用 identity
+    origin: TaskContextOrigin,       // 採用の由来（会話: History record。source = ProposeSteeringCommand.instruction_source）
+    acquired_at: WallClockWithTz,    // 取得時点
+}
 struct TaskCommitPremise {            // steering（AU4）。1 commit = 1 revision forward
     expected: TaskRef,               // expected current revision。caller は cur+1 を名指ししない
     new_purpose: Option<TaskPurposeAdoptionPremise>, // None = 直前の採用目的 identity・本文を引き継ぐ。Some は新 revision を採用位置とする
     adopted_purpose_entry: TaskContextEntryId, // 新 revision が記録する採用目的 context entry の identity。作業（orchestrate）が mint
+    adopted_instruction: Option<TaskInstructionAdoptionPremise>, // この forward で採用する指示。None = 指示の採用なし
 }
 
 enum TaskCommitOutcome {
@@ -1273,11 +1293,15 @@ enum TaskCommitOutcome {
 //   (task, new revision) と、Some の場合の採用 revision を刻む。
 // - MissingTask / RevisionExhausted は Ok 側の domain outcome とし、durable state を変更しない。
 //   RevisionExhausted は successor 不在だけでなく、successor を durable 表現に写せない場合も含む。
-// - AU4 の repository slice が記録する context kind は採用目的のみ。追加 kind は、その producer を持ち
-//   採用判断を行う slice が write-side premise・item-kind discriminator・migration・read rule 拡張を
-//   同じ design 変更で追加する（最初の追加 kind である指示は H-A steering 配線 slice、材料・途中理解は
-//   それぞれの利用先が分岐する slice）。どの kind も同じ forward_steering transaction に載せ、
-//   別 method・別 revision・別 transaction の採用経路を作らない。
+// - AU4 の repository slice が記録する context kind は採用目的のみ。最初の追加 kind である採用指示は
+//   H-A steering 配線 slice が write-side premise（`adopted_instruction`）・item-kind discriminator・
+//   migration・read rule 拡張と同じ design 変更で追加する。材料・途中理解はそれぞれの利用先が分岐する
+//   slice が同じ形で追加する。どの kind も同じ forward_steering transaction に載せ、別 method・別
+//   revision・別 transaction の採用経路を作らない。
+// - 採用指示の identity は新 revision の TaskContextEntryId であり、repository は渡された identity を
+//   採番し直さず、CAS 成立後に reference = (task, new revision) だけを刻む。entry は採用 revision で
+//   1 度だけ書き、後の forward で再記録しない（目的 entry の carry-forward とは異なる）。現在有効な
+//   採用指示は、現在 revision までの AdoptedInstruction entry 全体である。
 // - HeldByGlobalHold は hold slice（HoldConditionRef の producer が存在する最初の stage。Targeted
 //   Deletion / Restore / Stop のいずれか早い方）で、Task 所有の hold-check premise
 //   （HoldCheckContextRef 相当。adopt_result と同型）と対で追加する。forward_steering は同じ
@@ -1302,7 +1326,8 @@ struct WorkspaceAssociationPremise {
     need: WorkspaceNeedRef,
 }
 
-// reload / recovery の読み戻し。現在 revision の AU2 単位を返す。
+// reload / recovery の読み戻し。現在 revision の AU2 単位（現在 revision の目的 entry と、現在 revision までの
+// 有効な採用指示 entry 全体）を返す。
 struct Task {                        // task 行の現行値（D1）。内容の正本は revision snapshot で、同じ revision を指す
     reference: TaskRef,              // 現在 revision
     purpose: TaskPurposeRef,         // 現在採用されている目的（本文は revision snapshot）
@@ -1323,7 +1348,7 @@ struct WorkspaceAssociation {
 struct TaskRecord {
     task: Task,
     revision: TaskRevisionRecord,    // 現在 revision の snapshot
-    context: Vec<TaskContextEntry>,  // 現在 revision の entry
+    context: Vec<TaskContextEntry>,  // 現在 revision の目的 entry と、現在 revision までの採用指示 entry（順序は目的 entry が先、指示は採用順）
     workspace: Option<WorkspaceAssociation>,
 }
 
@@ -1344,7 +1369,9 @@ trait TaskRepository {
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError>;
 
-    // reload / recovery：commit 済みの AU2 単位のみを現在 revision について読み戻す。
+    // reload / recovery：commit 済みの AU2 単位のみを現在 revision について読み戻す。現在 revision の
+    // 採用目的 entry は必須で、現在 revision までの採用指示 entry を decode して返す。未知 item kind・
+    // kind と payload の不一致・現在 revision を越える entry は技術エラーとし、読み飛ばし・再解釈しない。
     // 存在しない identity は None。部分的な行から TaskRecord を合成しない（欠損は技術エラー）。
     async fn load_task(
         &self,
@@ -1612,7 +1639,7 @@ crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定め
 
 1. 個体調整は `ProposeTaskCommand(requester, purpose, origin, workspace_need)` を作業へ渡す。会話受付は Task 反映ではない。作業は `TaskProposalOutcome::AcceptedAsTask(TaskRef)` を確定する。作成は `TaskCreationPremise`（初期 purpose・初期 context entry・確定した Workspace 関連付け）の原子 durable 後に可視化する。
 2. 作業は `CreateDelegationCommand(task=TaskRef(expected), scope_copy, consumer_assignment)` で委任を作成する。Agent は一時主体に留まり、独立権限・Credential・Provider override・予算を持たない。
-3. Owner の追加指示は `ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source, unadopted)` で新 revision＋新 context の原子 forward となる。採用 identity は作業が確定し、新 revision の context entry が表す。旧 revision を残す。二つの steering 競合は SD-Task の順序で直列化し、先勝ちを現在にし、後着は新現在への再 steering として評価する。
+3. Owner の追加指示は `ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source)`（`unadopted` は反映判断 slice で導入）で新 revision＋新 context の原子 forward となる。新 revision は採用目的 entry と採用指示 entry を同じ `forward_steering` transaction に記録する。採用 identity は作業が確定し、採用指示 entry 自身の `TaskContextEntryId` が表す（`instruction_source` は由来 record の参照であり、採用 identity ではない）。旧 revision を残す。二つの steering 競合は SD-Task の順序で直列化し、先勝ちを現在にし、後着は新現在への再 steering として評価する。
 4. steering 後に旧 revision 前提の委任作成・Action 開始が届いたら `StalePremise{current}`・`StaleTaskRevision{current}` として不受理・再評価へ戻す。実行中の旧委任は best-effort 停止・縮小し、旧結果を新目的に自動採用しない。
 5. 遅延 Agent 結果は `TaskAgentResultArrival(delegation, attempt_refs, result_body_ref, certainty)` で到着し、`(attempt の Task revision 前提から解決する目的)×現在の(Task revision の目的・steering 前提)` を比較する。目的は依拠 revision の `task_revision` snapshot から解決し、本文一致で照合しない。一致しなければ `RecordedToOriginalOnly` として元 revision へ記録し、現在不採用とする。古い承認で Cancel を解除しない。
 6. 失われないこと：発言 record と Task 反映内容と未反映・待機の対応、steering 前後の目的の区別、委任・Workspace・Client 依存条件、Task revision 前提。
