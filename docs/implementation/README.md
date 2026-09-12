@@ -132,8 +132,8 @@ crate、boundary、abstraction は、実際の slice に必要になった時点
 
 実装順の目安:
 
-1. Task / TaskRevision / TaskContext
-2. Workspace association
+1. Task / TaskRevision / TaskContext（Task 作成の AU2 原子 durable。確定した Workspace 関連付けを含む）
+2. Workspace association（保存先確認・関連付けの操作）
 3. delegation / Task Agent lifecycle
 4. Action boundary と current Permission check
 5. Workspace 内 file list / read / create / edit
