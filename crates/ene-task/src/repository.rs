@@ -39,7 +39,8 @@ pub trait TaskRepository: Send + Sync {
 
     /// Loads the committed AU2 unit of one Task at its current revision.
     ///
-    /// `None` means the identity has no stored Task. Partial rows are never
-    /// composed into a [`TaskRecord`]; that is a technical error.
+    /// `None` means the identity has no stored Task. Partial or inconsistent
+    /// rows are never composed into a [`TaskRecord`]; that is a technical
+    /// error.
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError>;
 }

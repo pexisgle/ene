@@ -5018,6 +5018,102 @@ async fn task_load_rejects_a_partial_au2_unit() {
 }
 
 #[tokio::test]
+async fn task_load_rejects_an_inconsistent_au2_unit() {
+    let store = open_memory().await.unwrap();
+
+    // D1 current purpose and the D2 snapshot adopted revision must agree.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_revision SET purpose_adopted_revision = 2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the purpose probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current/snapshot purpose mismatch is a technical error"
+    );
+
+    // The adopted-purpose entry must record the current purpose.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = 2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the context probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an adopted-purpose/current purpose mismatch is a technical error"
+    );
+
+    // D1 current assignee and the D2 snapshot assignee must agree.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_revision SET assignee = ?2 WHERE task_id = ?1",
+                params![
+                    crate::codec::encode_id(premise.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                ],
+            )
+            .expect("the assignee probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current/snapshot assignee mismatch is a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_origin_kinds_round_trip() {
+    let store = open_memory().await.unwrap();
+    for kind in [
+        TaskContextOriginKind::OwnerConversation,
+        TaskContextOriginKind::Spontaneous,
+        TaskContextOriginKind::ScheduleOccurrence,
+    ] {
+        let mut premise = task_premise(None);
+        premise.origin.kind = kind;
+        let created = store.create_task(premise).await.unwrap();
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        assert_eq!(
+            record.context[0].origin.kind, kind,
+            "the stored origin kind round-trips"
+        );
+    }
+}
+
+#[tokio::test]
 async fn task_migration_adds_tables_to_a_v14_database() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.db");

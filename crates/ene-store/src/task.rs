@@ -5,8 +5,9 @@
 //! — that association in one short `Immediate` transaction, so the commit is
 //! the only visibility boundary and a crash mid-creation leaves no partial
 //! AU2 unit. Reads compose the committed rows of the current revision or
-//! answer `None`; a current row without its revision snapshot is a technical
-//! error, never fabricated.
+//! answer `None`; a partial unit or a current row that disagrees with its
+//! revision snapshot, purpose, adopted context entry, or assignee is a
+//! technical error, never fabricated.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -36,7 +37,7 @@ const SQL_INSERT_WORKSPACE_ASSOC: &str =
 const SQL_SELECT_TASK: &str =
     "SELECT revision, purpose_adopted_revision, assignee FROM task WHERE task_id = ?1";
 
-const SQL_SELECT_TASK_REVISION: &str = "SELECT purpose_adopted_revision, purpose_text, assignee FROM task_revision WHERE task_id = ?1 AND revision = ?2";
+const SQL_SELECT_TASK_REVISION: &str = "SELECT revision, purpose_adopted_revision, purpose_text, assignee FROM task_revision WHERE task_id = ?1 AND revision = ?2";
 
 const SQL_SELECT_TASK_CONTEXT: &str = "SELECT entry_id, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 ORDER BY rowid";
 
@@ -165,6 +166,7 @@ struct RawTask {
 }
 
 struct RawTaskRevision {
+    revision: i64,
     purpose_adopted_revision: i64,
     purpose_text: String,
     assignee: String,
@@ -194,9 +196,10 @@ fn raw_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTask> {
 
 fn raw_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTaskRevision> {
     Ok(RawTaskRevision {
-        purpose_adopted_revision: row.get(0)?,
-        purpose_text: row.get(1)?,
-        assignee: row.get(2)?,
+        revision: row.get(0)?,
+        purpose_adopted_revision: row.get(1)?,
+        purpose_text: row.get(2)?,
+        assignee: row.get(3)?,
     })
 }
 
@@ -284,21 +287,49 @@ fn load_task_sync(
         .ok_or_else(|| {
             task_unavailable("task revision snapshot missing for the current revision")
         })?;
+    // The D1 current row and its D2 snapshot must describe the same revision,
+    // purpose, and assignee. A mismatch is an inconsistent unit, never a
+    // TaskRecord.
+    if decode_revision(snapshot.revision)? != reference.revision {
+        return Err(task_unavailable(
+            "task revision snapshot does not match the current revision",
+        ));
+    }
+    let revision_purpose = TaskPurposeRef {
+        task,
+        adopted_revision: decode_revision(snapshot.purpose_adopted_revision)?,
+    };
+    if revision_purpose != purpose {
+        return Err(task_unavailable(
+            "task revision purpose does not match the current purpose",
+        ));
+    }
+    let task_assignee = decode_assignee(&raw_task.assignee)?;
+    let revision_assignee = decode_assignee(&snapshot.assignee)?;
+    if revision_assignee != task_assignee {
+        return Err(task_unavailable(
+            "task revision assignee does not match the current assignee",
+        ));
+    }
     let revision = TaskRevisionRecord {
         reference,
-        purpose: TaskPurposeRef {
-            task,
-            adopted_revision: decode_revision(snapshot.purpose_adopted_revision)?,
-        },
+        purpose: revision_purpose,
         purpose_text: TaskPurpose {
             text: snapshot.purpose_text,
         },
-        assignee: decode_assignee(&snapshot.assignee)?,
+        assignee: revision_assignee,
     };
     let context = load_context_sync(&guard, &task_text, raw_task.revision, reference)?;
     if context.is_empty() {
         return Err(task_unavailable(
             "task context entries missing for the current revision",
+        ));
+    }
+    if !context.iter().all(|entry| {
+        matches!(entry.item, TaskContextItem::AdoptedPurpose(adopted) if adopted == purpose)
+    }) {
+        return Err(task_unavailable(
+            "task context adopted purpose does not match the current purpose",
         ));
     }
     let workspace = guard
@@ -317,7 +348,7 @@ fn load_task_sync(
         task: Task {
             reference,
             purpose,
-            assignee: decode_assignee(&raw_task.assignee)?,
+            assignee: task_assignee,
         },
         revision,
         context,
