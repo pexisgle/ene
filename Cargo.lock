@@ -458,6 +458,7 @@ dependencies = [
  "ene-permission",
  "ene-presence",
  "ene-primitive",
+ "ene-task",
  "rusqlite",
  "tempfile",
  "thiserror",
@@ -469,6 +470,7 @@ name = "ene-task"
 version = "0.1.0"
 dependencies = [
  "ene-primitive",
+ "thiserror",
 ]
 
 [[package]]

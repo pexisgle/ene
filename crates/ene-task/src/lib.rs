@@ -1,19 +1,33 @@
-//! Task ownership: Task identity, the owner-decided revision order, and the
-//! reference pair that carries both.
+//! Task ownership: Task identity, purpose, context, workspace association,
+//! and the repository boundary that persists them.
 //!
-//! [`TaskId`] is opaque and never reused. [`TaskRevision`] is the order of
-//! the Task owner's decisions about that identity; the two travel together
-//! as a [`TaskRef`] boundary token and are never compared across different
-//! tasks. A Task purpose change is a forward step of this revision, never a
-//! change of another lifecycle's generation.
+//! A [`Task`] is one unit of tracked work. Its identity ([`TaskId`]) is
+//! separate from the revision ([`TaskRevision`]) that orders the owner's
+//! decisions; the two travel together as a [`TaskRef`]. The adopted purpose
+//! is identified by [`TaskPurposeRef`] and its text lives in the revision
+//! snapshot, so a purpose change is a revision forward and never a change of
+//! another lifecycle's generation.
 //!
-//! Only this identity/revision contract lives here today. The durable
-//! creation boundary is one atomic unit — current Task, initial revision,
-//! initial context, and workspace association — and arrives with its own
-//! slice once those premise types are fixed. This crate never depends on the
-//! store, and it never imports another domain's newtype: cross-domain
-//! identities arrive as owner-defined premises.
+//! This crate owns the semantics and the [`TaskRepository`] contract; the
+//! persistent implementation lives behind that trait (see `ene-store`), so
+//! this crate never depends on the store, and it never imports another
+//! domain's newtype: cross-domain identities arrive as owner-defined
+//! premises.
 
+mod context;
+mod repository;
 mod task;
+mod workspace;
 
-pub use task::{TaskId, TaskRef, TaskRevision};
+pub use context::{
+    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
+};
+pub use repository::{TaskRepository, TaskTechnicalError};
+pub use task::{
+    AssigneeRef, Task, TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRecord,
+    TaskRef, TaskRevision, TaskRevisionRecord,
+};
+pub use workspace::{
+    WorkspaceAssocId, WorkspaceAssociation, WorkspaceAssociationPremise, WorkspaceFolderRef,
+    WorkspaceNeedRef,
+};

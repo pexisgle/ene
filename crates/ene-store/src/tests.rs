@@ -25,6 +25,12 @@ use ene_presence::{
     PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
 };
 use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{
+    AssigneeRef, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
+    TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRef, TaskRepository,
+    TaskRevision, TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociationPremise,
+    WorkspaceFolderRef, WorkspaceNeedRef,
+};
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 
@@ -1459,8 +1465,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(14)),
-        "migration must record version 14"
+        matches!(version, Ok(15)),
+        "migration must record version 15"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1762,7 +1768,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(14),
+        Some(15),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1811,8 +1817,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(14)),
-        "reopened database must record schema version 14"
+        matches!(version, Ok(15)),
+        "reopened database must record schema version 15"
     );
 }
 
@@ -2577,8 +2583,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(14)),
-        "reopened database must record schema version 14"
+        matches!(version, Ok(15)),
+        "reopened database must record schema version 15"
     );
 }
 
@@ -3048,12 +3054,12 @@ async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
     );
 }
 
-/// A v11 database migrates through v12 and v13 into v14 in one chain:
+/// A v11 database migrates through v12 and v13 into v15 in one chain:
 /// history rows gain the canonical UTC projection and pre-index memories
 /// gain token rows, so neither the History window nor lexical recall goes
 /// dark.
 #[tokio::test]
-async fn migration_v11_applies_v12_then_v13_then_v14_in_order() {
+async fn migration_v11_applies_v12_then_v13_then_v14_and_v15() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
     let path = dir.path().join("app.db");
     let companion = RawId::new();
@@ -3117,8 +3123,8 @@ async fn migration_v11_applies_v12_then_v13_then_v14_in_order() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(14),
-        "a v11 database must converge on v14"
+        Some(15),
+        "a v11 database must converge on v15"
     );
     let projection = {
         let guard = match store.conn.lock() {
@@ -3149,7 +3155,7 @@ async fn migration_v11_applies_v12_then_v13_then_v14_in_order() {
     );
 }
 
-/// A v13 database with the History projection applied migrates into v14
+/// A v13 database with the History projection applied migrates through v14
 /// with that projection intact and the token schema added.
 #[tokio::test]
 async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
@@ -3216,8 +3222,8 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(14),
-        "a v13 database must converge on v14"
+        Some(15),
+        "a v13 database must converge on v15"
     );
     let (projection, columns) = {
         let guard = match store.conn.lock() {
@@ -4140,7 +4146,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(14),
+        Some(15),
         "migration advances the schema version"
     );
     assert!(
@@ -4158,7 +4164,8 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
 }
 
 /// A v11 database gains the owner-recency index on reopen and converges on
-/// v14, so upgraded stores enforce reply-adoption recency from the index.
+/// the current version, so upgraded stores enforce reply-adoption recency
+/// from the index.
 #[tokio::test]
 async fn migration_v11_adds_the_owner_recency_index() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
@@ -4181,8 +4188,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(14),
-        "a v11 database must converge on v14"
+        Some(15),
+        "a v11 database must converge on v15"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -4253,7 +4260,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(14));
+    assert_eq!(read_schema_version(&path), Some(15));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
@@ -4724,4 +4731,478 @@ async fn recent_timeline_keeps_the_newest_window_in_order() {
     assert_eq!(recent.len(), 2, "the window is capped");
     assert_eq!(recent[0].text, "two", "oldest first within the window");
     assert_eq!(recent[1].text, "three");
+}
+
+// --- Task: AU2 creation / reload ---
+
+/// Counts rows of one test-probed table. The table name is a literal from
+/// this test module, never caller input.
+fn task_table_count(store: &Store, table: &str) -> i64 {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), (), |row| {
+            row.get(0)
+        })
+        .expect("the row count must read")
+}
+
+fn task_workspace(folder: &str, save_target: Option<&str>) -> WorkspaceAssociationPremise {
+    WorkspaceAssociationPremise {
+        assoc: WorkspaceAssocId::generate(),
+        need: WorkspaceNeedRef {
+            folder: WorkspaceFolderRef {
+                path: folder.to_owned(),
+            },
+            save_target: save_target.map(|path| WorkspaceFolderRef {
+                path: path.to_owned(),
+            }),
+        },
+    }
+}
+
+fn task_premise(workspace: Option<WorkspaceAssociationPremise>) -> TaskCreationPremise {
+    TaskCreationPremise {
+        task: TaskId::generate(),
+        purpose: TaskPurpose {
+            text: String::from("write the AU2 slice"),
+        },
+        entry: TaskContextEntryId::generate(),
+        origin: TaskContextOrigin {
+            kind: TaskContextOriginKind::OwnerConversation,
+            source: RawId::new(),
+        },
+        acquired_at: fixture_clock(),
+        assignee: AssigneeRef {
+            companion: RawId::new(),
+        },
+        workspace,
+    }
+}
+
+#[tokio::test]
+async fn task_creation_commits_the_au2_unit_and_loads() {
+    let store = open_memory().await.unwrap();
+    let workspace = task_workspace("/srv/workspace/ene", Some("/srv/workspace/ene/out"));
+    let premise = task_premise(Some(workspace.clone()));
+    let created = store
+        .create_task(premise.clone())
+        .await
+        .expect("creation must commit");
+    assert_eq!(created.task, premise.task);
+    assert_eq!(created.revision, TaskRevision::initial());
+
+    let record = store
+        .load_task(created.task)
+        .await
+        .unwrap()
+        .expect("the created task must load");
+    assert_eq!(record.task.reference, created);
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: premise.task,
+            adopted_revision: TaskRevision::initial(),
+        }
+    );
+    assert_eq!(record.task.assignee, premise.assignee);
+    assert_eq!(record.revision.reference, created);
+    assert_eq!(record.revision.purpose, record.task.purpose);
+    assert_eq!(record.revision.purpose_text, premise.purpose);
+    assert_eq!(record.revision.assignee, premise.assignee);
+    assert_eq!(
+        record.context.len(),
+        1,
+        "AU2 records exactly the adopted purpose entry"
+    );
+    let entry = &record.context[0];
+    assert_eq!(entry.entry, premise.entry);
+    assert_eq!(entry.reference, created);
+    assert_eq!(
+        entry.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(entry.origin, premise.origin);
+    assert_eq!(
+        entry.acquired_at.to_rfc3339(),
+        premise.acquired_at.to_rfc3339(),
+        "the stored acquisition time keeps its creation rendering"
+    );
+    let association = record
+        .workspace
+        .expect("the confirmed association must load");
+    assert_eq!(association.assoc, workspace.assoc);
+    assert_eq!(association.task, premise.task);
+    assert_eq!(association.folder, workspace.need.folder);
+    assert_eq!(association.save_target, workspace.need.save_target);
+
+    assert_eq!(
+        store.load_task(TaskId::generate()).await,
+        Ok(None),
+        "a missing task is never fabricated"
+    );
+}
+
+#[tokio::test]
+async fn task_creation_without_workspace_omits_the_association() {
+    let store = open_memory().await.unwrap();
+    let premise = task_premise(None);
+    let created = store.create_task(premise).await.unwrap();
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.workspace, None);
+    assert_eq!(
+        task_table_count(&store, "workspace_assoc"),
+        0,
+        "no confirmed association writes no row"
+    );
+}
+
+#[tokio::test]
+async fn task_au2_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let workspace = task_workspace("/srv/workspace/ene", None);
+    let premise = task_premise(Some(workspace.clone()));
+    let before = {
+        let store = Store::open(&path).await.unwrap();
+        let created = store.create_task(premise.clone()).await.unwrap();
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        drop(store);
+        record
+    };
+
+    let reopened = Store::open(&path).await.unwrap();
+    let after = reopened
+        .load_task(premise.task)
+        .await
+        .unwrap()
+        .expect("the task must survive reopen");
+    assert_eq!(after, before, "the committed AU2 unit survives reopen");
+    assert_eq!(
+        after.task.reference,
+        TaskRef {
+            task: premise.task,
+            revision: TaskRevision::initial(),
+        },
+        "the created revision survives reopen"
+    );
+    assert_eq!(after.revision.purpose_text, premise.purpose);
+    assert_eq!(
+        after.context.len(),
+        1,
+        "the adopted purpose entry must survive reopen"
+    );
+    assert_eq!(after.context[0].origin, premise.origin);
+    let association = after
+        .workspace
+        .expect("the association must survive reopen");
+    assert_eq!(association.folder, workspace.need.folder);
+    assert_eq!(reopened.load_task(TaskId::generate()).await, Ok(None));
+}
+
+#[tokio::test]
+async fn task_creation_is_atomic_across_every_au2_insert() {
+    let store = open_memory().await.unwrap();
+    for table in [
+        "task",
+        "task_revision",
+        "task_context_entry",
+        "workspace_assoc",
+    ] {
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch(&format!(
+                    "CREATE TRIGGER au2_abort BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'injected fault'); END;"
+                ))
+                .expect("the fault trigger must install");
+        }
+        let premise = task_premise(Some(task_workspace("/srv/workspace/ene", None)));
+        let failed = store.create_task(premise.clone()).await;
+        assert!(
+            matches!(failed, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a fault on {table} must surface a storage failure, got {failed:?}"
+        );
+        assert_eq!(
+            store.load_task(premise.task).await,
+            Ok(None),
+            "a failed creation is not visible as a Task"
+        );
+        for probe in [
+            "task",
+            "task_revision",
+            "task_context_entry",
+            "workspace_assoc",
+        ] {
+            assert_eq!(
+                task_table_count(&store, probe),
+                0,
+                "a fault on {table} must leave no {probe} row"
+            );
+        }
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch("DROP TRIGGER au2_abort;")
+                .expect("the fault trigger must drop");
+        }
+    }
+
+    let premise = task_premise(Some(task_workspace("/srv/workspace/ene", None)));
+    let created = store
+        .create_task(premise.clone())
+        .await
+        .expect("creation succeeds after the faults clear");
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.context.len(), 1);
+    assert_eq!(record.task.purpose.task, premise.task);
+}
+
+#[tokio::test]
+async fn task_load_rejects_a_partial_au2_unit() {
+    let store = open_memory().await.unwrap();
+
+    // A current row without its revision snapshot is corruption, not an empty Task.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_revision WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the snapshot probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current row without its revision snapshot is a technical error"
+    );
+
+    // A current revision without its adopted context entry is corruption too.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the context probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current revision without its context entry is a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_an_inconsistent_au2_unit() {
+    let store = open_memory().await.unwrap();
+    let mismatch = i64::try_from(TaskRevision::initial().as_u64() + 1)
+        .expect("the probe revision fits an integer");
+
+    // D1 current purpose and the D2 snapshot adopted revision must agree.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_revision SET purpose_adopted_revision = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw()), mismatch],
+            )
+            .expect("the purpose probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current/snapshot purpose mismatch is a technical error"
+    );
+
+    // The adopted-purpose entry must record the current purpose.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw()), mismatch],
+            )
+            .expect("the context probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an adopted-purpose/current purpose mismatch is a technical error"
+    );
+
+    // D1 current assignee and the D2 snapshot assignee must agree.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_revision SET assignee = ?2 WHERE task_id = ?1",
+                params![
+                    crate::codec::encode_id(premise.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                ],
+            )
+            .expect("the assignee probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current/snapshot assignee mismatch is a technical error"
+    );
+
+    // An unknown stored origin kind is an unreadable row.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET origin_kind = 'unknown' WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the origin probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an unknown stored origin kind is a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_origin_kinds_round_trip() {
+    let store = open_memory().await.unwrap();
+    for kind in [
+        TaskContextOriginKind::OwnerConversation,
+        TaskContextOriginKind::Spontaneous,
+        TaskContextOriginKind::ScheduleOccurrence,
+    ] {
+        let mut premise = task_premise(None);
+        premise.origin.kind = kind;
+        let created = store.create_task(premise).await.unwrap();
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        assert_eq!(
+            record.context[0].origin.kind, kind,
+            "the stored origin kind round-trips"
+        );
+    }
+}
+
+#[tokio::test]
+async fn task_migration_adds_tables_to_a_v14_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    {
+        let store = Store::open(&path).await.unwrap();
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute_batch(
+                "DROP TABLE IF EXISTS workspace_assoc;
+                 DROP TABLE IF EXISTS task_context_entry;
+                 DROP TABLE IF EXISTS task_revision;
+                 DROP TABLE IF EXISTS task;
+                 PRAGMA user_version = 14;",
+            )
+            .expect("the version-14 rewind must apply");
+    }
+
+    let reopened = Store::open(&path).await.expect("migration must succeed");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(15),
+        "a v14 database must converge on v15"
+    );
+    assert!(!table_columns(&path, "task").is_empty(), "task is created");
+    assert!(
+        !table_columns(&path, "task_revision").is_empty(),
+        "task_revision is created"
+    );
+    assert!(
+        !table_columns(&path, "task_context_entry").is_empty(),
+        "task_context_entry is created"
+    );
+    assert!(
+        !table_columns(&path, "workspace_assoc").is_empty(),
+        "workspace_assoc is created"
+    );
+    let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
+    for index in ["idx_task_context_entry_task", "idx_workspace_assoc_task"] {
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                rusqlite::params![index],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("the index catalog must read");
+        assert!(found.is_some(), "{index} is created");
+    }
+    drop(conn);
+    let premise = task_premise(None);
+    let created = reopened
+        .create_task(premise.clone())
+        .await
+        .expect("an upgraded database creates");
+    assert_eq!(
+        reopened
+            .load_task(created.task)
+            .await
+            .unwrap()
+            .map(|record| record.task.reference),
+        Some(created),
+        "an upgraded database answers create and load"
+    );
 }

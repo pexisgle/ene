@@ -13,6 +13,7 @@ ene-learning = { path = "../ene-learning" }
 ene-permission = { path = "../ene-permission" }
 ene-credential = { path = "../ene-credential" }
 ene-inference = { path = "../ene-inference" }
+ene-task = { path = "../ene-task" }
 rusqlite.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
