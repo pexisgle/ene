@@ -93,8 +93,8 @@ use ene_store::Store;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
-    CredStore, FrameSink, HostHandle, LiveInput, device_client, outgoing_frame, reject_frame,
-    unpaired_close,
+    CredStore, FrameSink, HostHandle, LiveInput, device_client, emit_end, outgoing_frame,
+    reject_frame, unpaired_close,
 };
 
 /// Garbage maps to [`None`] (no replay key) rather than rejection: a
@@ -358,8 +358,7 @@ impl HostHandle {
         stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
         let Some(device_wire) = live.paired_device.clone() else {
-            sink.emit(unpaired_close(frame, live));
-            return;
+            return emit_end(sink, unpaired_close(frame, live));
         };
         let client = device_client(&device_wire);
         // The companion ref resolves through the handle mapping, never
@@ -367,35 +366,37 @@ impl HostHandle {
         // restart) revalidates so the Client relearns from presence.
         let companion = match self.resolve_companion(&submit.companion.0).await {
             Err(_) => {
-                sink.emit(held_frame(frame, live));
-                return;
+                return emit_end(sink, held_frame(frame, live));
             }
             Ok(None) => {
-                sink.emit(revalidate_frame(
-                    frame,
-                    live,
-                    intake_reason(&RevalidationReason::UnknownCompanion),
-                ));
-                return;
+                return emit_end(
+                    sink,
+                    revalidate_frame(
+                        frame,
+                        live,
+                        intake_reason(&RevalidationReason::UnknownCompanion),
+                    ),
+                );
             }
             Ok(Some(companion)) => companion,
         };
         let Ok(Some(mut attribution)) = self.store.load_attribution(companion.as_raw()).await
         else {
-            sink.emit(held_frame(frame, live));
-            return;
+            return emit_end(sink, held_frame(frame, live));
         };
         let companion_key = companion.as_raw().as_uuid().to_string();
         // Idempotency keys are mandatory: a command without one cannot be
         // replayed safely, so it is declined before any state changes
         // (before attach, before maps, before appends).
         let Some(command) = command_id_for(&frame.envelope) else {
-            sink.emit(revalidate_frame(
-                frame,
-                live,
-                intake_reason(&RevalidationReason::MissingCommandId),
-            ));
-            return;
+            return emit_end(
+                sink,
+                revalidate_frame(
+                    frame,
+                    live,
+                    intake_reason(&RevalidationReason::MissingCommandId),
+                ),
+            );
         };
         // Canonical round premise first: the two carriers must agree before
         // anything else is judged, so a contradictory frame is declined
@@ -403,14 +404,16 @@ impl HostHandle {
         let Some(round_premise) =
             canonical_round_premise(submit, frame.envelope.observed.round_view.as_ref())
         else {
-            sink.emit(self.stale_frame(
-                frame,
-                live,
-                &live.client_ref,
-                &companion_key,
-                attribution.generation.as_u64(),
-            ));
-            return;
+            return emit_end(
+                sink,
+                self.stale_frame(
+                    frame,
+                    live,
+                    &live.client_ref,
+                    &companion_key,
+                    attribution.generation.as_u64(),
+                ),
+            );
         };
         // Registered credentials never reach durable History or a model
         // prompt: the owner input is redacted before any durable decision
@@ -422,8 +425,7 @@ impl HostHandle {
             store: &self.cred_store,
         };
         let Ok(scrubbed) = scrubber.scrub(&submit.body.text).await else {
-            sink.emit(held_frame(frame, live));
-            return;
+            return emit_end(sink, held_frame(frame, live));
         };
         let credential_set = scrubbed.credential_set;
         let text = scrubbed.text;
@@ -463,22 +465,25 @@ impl HostHandle {
                     round_wire,
                     attribution.generation.as_u64(),
                 ) {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
                 return;
             }
             ReplayClassification::Conflict => {
-                sink.emit(reject_frame(
-                    frame,
-                    live,
-                    RejectKind::ConflictingCommand,
-                    command_conflict_detail(&command),
-                ));
-                return;
+                return emit_end(
+                    sink,
+                    reject_frame(
+                        frame,
+                        live,
+                        RejectKind::ConflictingCommand,
+                        command_conflict_detail(&command),
+                    ),
+                );
             }
             ReplayClassification::Held => {
-                sink.emit(held_frame(frame, live));
-                return;
+                return emit_end(sink, held_frame(frame, live));
             }
             ReplayClassification::None => {}
         }
@@ -488,18 +493,22 @@ impl HostHandle {
         let mut attached_generation: Option<PresenceGeneration> = None;
         if attribution.state == PresenceState::NoActive {
             let Some(viewed) = frame.envelope.observed.presence_generation_view else {
-                sink.emit(revalidate_frame(frame, live, "missing-generation-view"));
-                return;
+                return emit_end(
+                    sink,
+                    revalidate_frame(frame, live, "missing-generation-view"),
+                );
             };
             if viewed != attribution.generation.as_u64() {
-                sink.emit(self.stale_frame(
-                    frame,
-                    live,
-                    &live.client_ref,
-                    &companion_key,
-                    attribution.generation.as_u64(),
-                ));
-                return;
+                return emit_end(
+                    sink,
+                    self.stale_frame(
+                        frame,
+                        live,
+                        &live.client_ref,
+                        &companion_key,
+                        attribution.generation.as_u64(),
+                    ),
+                );
             }
             match self
                 .attach_presence(&device_wire, live.connection_live, attribution.generation)
@@ -512,25 +521,25 @@ impl HostHandle {
                 AttachOutcome::Raced => {
                     let Ok(Some(current)) = self.store.load_attribution(companion.as_raw()).await
                     else {
-                        sink.emit(held_frame(frame, live));
-                        return;
+                        return emit_end(sink, held_frame(frame, live));
                     };
                     if matches!(
                         current.state,
                         PresenceState::InTransition | PresenceState::RecoveryWait
                     ) {
-                        sink.emit(held_frame(frame, live));
-                        return;
+                        return emit_end(sink, held_frame(frame, live));
                     }
                     {
-                        sink.emit(self.stale_frame(
-                            frame,
-                            live,
-                            &live.client_ref,
-                            &companion_key,
-                            current.generation.as_u64(),
-                        ));
-                        return;
+                        return emit_end(
+                            sink,
+                            self.stale_frame(
+                                frame,
+                                live,
+                                &live.client_ref,
+                                &companion_key,
+                                current.generation.as_u64(),
+                            ),
+                        );
                     };
                 }
             }
@@ -540,14 +549,16 @@ impl HostHandle {
             RoundPremise::Existing(reference) => match self.round_for(reference) {
                 Some(round) => Some(round),
                 None => {
-                    sink.emit(self.stale_frame(
-                        frame,
-                        live,
-                        &live.client_ref,
-                        &companion_key,
-                        attribution.generation.as_u64(),
-                    ));
-                    return;
+                    return emit_end(
+                        sink,
+                        self.stale_frame(
+                            frame,
+                            live,
+                            &live.client_ref,
+                            &companion_key,
+                            attribution.generation.as_u64(),
+                        ),
+                    );
                 }
             },
         };
@@ -560,8 +571,7 @@ impl HostHandle {
             requested.map_or(RoundIntent::Auto, RoundIntent::Existing)
         };
         let Ok(lifecycle) = self.store.load_lifecycle(companion).await else {
-            sink.emit(held_frame(frame, live));
-            return;
+            return emit_end(sink, held_frame(frame, live));
         };
         let premise = IntakePremise {
             candidate: SubmitClientInputCandidate {
@@ -596,22 +606,22 @@ impl HostHandle {
         let accepted = match check_intake(premise) {
             RoundIntakeOutcome::AcceptedForRound { round } => round,
             RoundIntakeOutcome::StaleRound { .. } => {
-                sink.emit(self.stale_frame(
-                    frame,
-                    live,
-                    &live.client_ref,
-                    &companion_key,
-                    attribution.generation.as_u64(),
-                ));
-                return;
+                return emit_end(
+                    sink,
+                    self.stale_frame(
+                        frame,
+                        live,
+                        &live.client_ref,
+                        &companion_key,
+                        attribution.generation.as_u64(),
+                    ),
+                );
             }
             RoundIntakeOutcome::HeldForTransition => {
-                sink.emit(held_frame(frame, live));
-                return;
+                return emit_end(sink, held_frame(frame, live));
             }
             RoundIntakeOutcome::NeedsRevalidation { reason } => {
-                sink.emit(revalidate_frame(frame, live, intake_reason(&reason)));
-                return;
+                return emit_end(sink, revalidate_frame(frame, live, intake_reason(&reason)));
             }
         };
         // The companion owns the accepted-turn order: admission precedes the
@@ -658,14 +668,24 @@ impl HostHandle {
                 // observes durable input acceptance as its own early fact
                 // instead of waiting for provider completion.
                 let stream = StreamWireId(RawId::new().as_uuid());
-                sink.emit(accept_frame(frame, live, &round_wire));
-                sink.emit(open_frame(
-                    frame,
-                    live,
-                    &stream,
-                    &round_wire,
-                    generation_number,
-                ));
+                // A failed accept or open aborts before the provider call:
+                // streaming to an undeliverable channel would only pile up
+                // frames the client never sees.
+                if sink.emit(accept_frame(frame, live, &round_wire)).is_err() {
+                    return;
+                }
+                if sink
+                    .emit(open_frame(
+                        frame,
+                        live,
+                        &stream,
+                        &round_wire,
+                        generation_number,
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
                 // Baselines the gate on the current record: the owner append
                 // committed under the admission consent, and any move since
                 // fails the attempt claim before the first delta. An
@@ -673,8 +693,10 @@ impl HostHandle {
                 // like any post-acceptance failure.
                 let Ok(Some(consent)) = self.store.load_current(CapabilityKind::Dialogue).await
                 else {
-                    sink.emit(close_frame(frame, live, &stream, StreamClose::Interrupted));
-                    return;
+                    return emit_end(
+                        sink,
+                        close_frame(frame, live, &stream, StreamClose::Interrupted),
+                    );
                 };
                 let consent = (consent.id, consent.rev.as_u64());
                 let mut gate = StreamGate {
@@ -723,32 +745,40 @@ impl HostHandle {
                 for response in
                     self.replay_frames(frame, live, round, round_wire, generation_number)
                 {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             DialogueBegin::StaleExpected { current } => {
-                sink.emit(stale_frame_with(frame, live, None, current.as_u64()));
+                emit_end(sink, stale_frame_with(frame, live, None, current.as_u64()));
             }
             DialogueBegin::StaleConsent => {
-                sink.emit(revalidate_frame(frame, live, "consent-stale"));
+                emit_end(sink, revalidate_frame(frame, live, "consent-stale"));
             }
             DialogueBegin::StaleCredentialSet => {
                 // The input may carry a newly registered value; hold so the
                 // Client retries and the Host re-scrubs under the new set.
-                sink.emit(held_frame(frame, live));
+                emit_end(sink, held_frame(frame, live));
             }
-            DialogueBegin::Conflict => sink.emit(reject_frame(
-                frame,
-                live,
-                RejectKind::ConflictingCommand,
-                command_conflict_detail(&command),
-            )),
-            DialogueBegin::Held => sink.emit(held_frame(frame, live)),
+            DialogueBegin::Conflict => emit_end(
+                sink,
+                reject_frame(
+                    frame,
+                    live,
+                    RejectKind::ConflictingCommand,
+                    command_conflict_detail(&command),
+                ),
+            ),
+            DialogueBegin::Held => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldByLifecycle(_) => {
-                sink.emit(revalidate_frame(frame, live, "stopped-companion"));
+                emit_end(sink, revalidate_frame(frame, live, "stopped-companion"));
             }
             DialogueBegin::Declined(reason) => {
-                sink.emit(revalidate_frame(frame, live, admission_reason(reason)));
+                emit_end(
+                    sink,
+                    revalidate_frame(frame, live, admission_reason(reason)),
+                );
             }
         }
     }
@@ -1256,17 +1286,27 @@ impl DeltaSink for StreamGate<'_> {
         delta: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
         Box::pin(async move {
+            // Fast path: never reserve capacity for an already-stale
+            // stream, and never hold a permit across the premise reads.
             if !self.current().await {
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
             let frame = self.delta_frame(delta, false);
-            match self.tx.send(frame).await {
-                Ok(()) => {
-                    self.seq += 1;
-                    DeltaFlow::Continue
-                }
-                Err(_) => DeltaFlow::Abort("the client connection is gone"),
+            let permit = match self.tx.reserve().await {
+                Ok(permit) => permit,
+                Err(_) => return DeltaFlow::Abort("the client connection is gone"),
+            };
+            // Re-check after the capacity wait: the premise may have gone
+            // stale while parked, and a stale delta must never publish.
+            // `permit.send` is synchronous, so no await sits between this
+            // check and the publication.
+            if !self.current().await {
+                drop(permit);
+                return DeltaFlow::Abort("the presentation premise went stale");
             }
+            permit.send(frame);
+            self.seq += 1;
+            DeltaFlow::Continue
         })
     }
 }

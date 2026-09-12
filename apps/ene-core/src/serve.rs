@@ -119,7 +119,31 @@ pub enum CoreError {
 /// on the bounded stream channel; the open stream's deltas pace the
 /// provider through real backpressure on the same channel.
 pub trait FrameSink: Send {
-    fn emit(&mut self, frame: WireFrame);
+    fn emit(&mut self, frame: WireFrame) -> Result<(), FrameDeliveryError>;
+}
+
+/// How one control-frame delivery ended.
+///
+/// Closed means the connection is gone: later sends stop, the operation is
+/// never treated as delivered, and already-durable state stays untouched.
+/// Full means the control allowance broke (each call emits only a handful
+/// on a fresh channel far below the bound): never a silent drop, never a
+/// normal completion — the operation ends as a delivery failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a failed delivery must stop the operation, never drop silently"]
+pub enum FrameDeliveryError {
+    Closed,
+    Full,
+}
+
+/// Emits one terminal control frame, ending the operation.
+/// A delivery failure ends it identically: the frame never reached the
+/// client, so no outcome is treated as delivered and nothing further
+/// emits. Durable state already committed stays untouched.
+pub(crate) fn emit_end(sink: &mut dyn FrameSink, frame: WireFrame) {
+    if sink.emit(frame).is_err() {
+        // Gone or full channel: the operation ends undelivered either way.
+    }
 }
 
 /// Queued frames per connection between the Host and the socket writer.
@@ -132,23 +156,18 @@ pub trait FrameSink: Send {
 pub(crate) const STREAM_BUFFER_FRAMES: usize = 32;
 
 impl FrameSink for tokio::sync::mpsc::Sender<WireFrame> {
-    fn emit(&mut self, frame: WireFrame) {
+    fn emit(&mut self, frame: WireFrame) -> Result<(), FrameDeliveryError> {
         use tokio::sync::mpsc::error::TrySendError;
 
         match self.try_send(frame) {
-            Ok(()) => {}
+            Ok(()) => Ok(()),
             // The receiver is gone because the connection is closing; the
             // host future is dropped with it and there is nowhere to write.
-            Err(TrySendError::Closed(_)) => {}
+            Err(TrySendError::Closed(_)) => Err(FrameDeliveryError::Closed),
             // Control frames are O(1) per call on a fresh channel while the
-            // stream gate paces deltas with real backpressure, so a full
-            // buffer here means the control allowance was exceeded.
-            Err(TrySendError::Full(_)) => {
-                debug_assert!(
-                    false,
-                    "control frames must stay far below the stream buffer"
-                );
-            }
+            // stream gate paces deltas with real backpressure, so reaching
+            // this means the control allowance was exceeded.
+            Err(TrySendError::Full(_)) => Err(FrameDeliveryError::Full),
         }
     }
 }
@@ -467,54 +486,65 @@ impl HostHandle {
         stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
         if frame.envelope.message_type.0 != frame.payload.message_type() {
-            sink.emit(reject_frame(
-                &frame,
-                &live,
-                RejectKind::UnsupportedMessage,
-                format!("unknown message type {:?}", frame.envelope.message_type.0),
-            ));
-            return;
+            return emit_end(
+                sink,
+                reject_frame(
+                    &frame,
+                    &live,
+                    RejectKind::UnsupportedMessage,
+                    format!("unknown message type {:?}", frame.envelope.message_type.0),
+                ),
+            );
         }
         let negotiated_version = live.negotiated.as_ref().map(|terms| terms.version);
         match (negotiated_version, frame.envelope.protocol) {
             (Some(want), got) if got != want => {
-                sink.emit(reject_frame(
-                    &frame,
-                    &live,
-                    RejectKind::IncompatibleProtocol,
-                    format!("version {got:?} outside negotiated version {want:?}"),
-                ));
-                return;
+                return emit_end(
+                    sink,
+                    reject_frame(
+                        &frame,
+                        &live,
+                        RejectKind::IncompatibleProtocol,
+                        format!("version {got:?} outside negotiated version {want:?}"),
+                    ),
+                );
             }
             (None, got) if got != ProtocolVersion::V1 => {
-                sink.emit(reject_frame(
-                    &frame,
-                    &live,
-                    RejectKind::IncompatibleProtocol,
-                    format!("version {got:?} without negotiation"),
-                ));
-                return;
+                return emit_end(
+                    sink,
+                    reject_frame(
+                        &frame,
+                        &live,
+                        RejectKind::IncompatibleProtocol,
+                        format!("version {got:?} without negotiation"),
+                    ),
+                );
             }
             _ => {}
         }
         match &frame.payload {
             WirePayload::PairingRequest(request) => {
                 for response in self.pair(&frame, request, &live).await {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             WirePayload::CapabilityAdvertise(advertise) => {
                 if live.paired_device.is_none() {
-                    sink.emit(unpaired_close(&frame, &live));
-                    return;
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
                 for response in self.advertise(&frame, advertise, &live) {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             WirePayload::AuthProof(proof) => {
                 for response in self.verify_proof(&frame, proof, &live).await {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             // Inbound challenges and results are never solicited (the Host
@@ -524,46 +554,49 @@ impl HostHandle {
             WirePayload::AuthChallenge(_) | WirePayload::AuthResult(_) => {}
             WirePayload::SubmitTextInput(submit) => {
                 if Self::gate_trips(&frame, &live) {
-                    sink.emit(unpaired_close(&frame, &live));
-                    return;
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
                 self.submit_text(&frame, submit, &live, transport, sink, stream_tx)
                     .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
                 if Self::gate_trips(&frame, &live) {
-                    sink.emit(unpaired_close(&frame, &live));
-                    return;
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
                 for response in self.confirm_presentation(&frame, confirm).await {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             WirePayload::HistoryRequest(request) => {
                 if Self::gate_trips(&frame, &live) {
-                    sink.emit(unpaired_close(&frame, &live));
-                    return;
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
                 for response in self.answer_history(&frame, request, &live).await {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             WirePayload::ManagementIntent(intent) => {
                 if Self::gate_trips(&frame, &live) {
-                    sink.emit(unpaired_close(&frame, &live));
-                    return;
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
                 for response in self.apply_intent(&frame, intent, &live).await {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             WirePayload::ManagementViewRequest(request) => {
                 if Self::gate_trips(&frame, &live) {
-                    sink.emit(unpaired_close(&frame, &live));
-                    return;
+                    return emit_end(sink, unpaired_close(&frame, &live));
                 }
                 for response in self.answer_view(&frame, request, &live).await {
-                    sink.emit(response);
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
                 }
             }
             // Inbound rejects, stray acks, and future variants answer

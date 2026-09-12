@@ -4051,21 +4051,32 @@ async fn streaming_stops_presenting_once_a_newer_submit_replaces_the_round() -> 
     Ok(())
 }
 
-/// A stalled client paces the provider instead of queueing without limit:
-/// pushes beyond the buffer pend, the queued frames never exceed the bound,
-/// and once drained every delta still arrives gap-free with a normal
-/// completion — no silent loss, no gap presented as completed.
-#[tokio::test]
-async fn slow_client_backpressures_the_provider_instead_of_queueing() -> Result<(), String> {
+/// Premises for one test stream gate: an open round plus the baselines the
+/// gate compares each delta against. Mirrors the submit path's stream-open
+/// state without running a full submit, so gate-level tests can stall the
+/// channel and move premises with exact timing.
+struct GatePremises {
+    handle: HostHandle,
+    _dir: tempfile::TempDir,
+    live: LiveInput,
+    companion: ene_companion::CompanionId,
+    companion_key: String,
+    round: RoundId,
+    generation: ene_presence::PresenceGeneration,
+    consent: (String, u64),
+    credential_set: ene_credential::CredentialSetRevision,
+    probe: ene_plugin_ipc::WireFrame,
+}
+
+async fn gate_premises(tag: &str, client: &str) -> Result<GatePremises, String> {
     use ene_companion::CompanionRepository as _;
     use ene_credential::CredentialSetRepository as _;
-    use ene_inference::{DeltaFlow, DeltaSink as _};
     use ene_permission::{CapabilityKind, ConsentRepository as _};
     use ene_presentation::OpenRound;
 
     let transport = ok_transport();
-    let live = live_input("client-slow");
-    let (handle, _dir) = round_test_handle("dlg-slow", &live, &transport).await?;
+    let live = live_input(client);
+    let (handle, dir) = round_test_handle(tag, &live, &transport).await?;
     let companion = handle
         .store
         .ensure_running_companion()
@@ -4073,12 +4084,13 @@ async fn slow_client_backpressures_the_provider_instead_of_queueing() -> Result<
         .map_err(|error| format!("the companion must resolve: {error:?}"))?;
     let round = RoundId::from_raw(RawId::new());
     let generation = current_generation(&handle).await?;
+    let companion_key = companion.as_raw().as_uuid().to_string();
     handle.record_open_round(
         &live.client_ref,
-        &companion.as_raw().as_uuid().to_string(),
+        &companion_key,
         OpenRound {
             companion: companion.as_raw(),
-            client: device_client("client-slow"),
+            client: device_client(client),
             round,
             generation: ene_presence::PresenceGeneration::from_u64(generation),
         },
@@ -4098,28 +4110,58 @@ async fn slow_client_backpressures_the_provider_instead_of_queueing() -> Result<
         handle.companion_wire(),
         Some(generation),
         None,
-        "local-slow",
+        "local-probe",
         "probe",
         live.connection_id,
     );
-    // A tiny buffer stands in for the production bound; the policy under
-    // test is boundedness itself, not the constant.
-    let (gate_tx, mut rx) = tokio::sync::mpsc::channel(2);
-    let mut gate = super::StreamGate {
-        handle: &handle,
-        frame: &probe,
-        live: &live,
-        client_ref: live.client_ref.clone(),
-        companion_key: companion.as_raw().as_uuid().to_string(),
+    Ok(GatePremises {
+        handle,
+        _dir: dir,
+        live,
         companion,
-        stream: ene_api::v1::refs::StreamWireId(RawId::new().as_uuid()),
+        companion_key,
         round,
         generation: ene_presence::PresenceGeneration::from_u64(generation),
         consent: (consent.id, consent.rev.as_u64()),
         credential_set,
-        tx: gate_tx,
+        probe,
+    })
+}
+
+fn gate_for(
+    premises: &GatePremises,
+    tx: tokio::sync::mpsc::Sender<ene_plugin_ipc::WireFrame>,
+) -> super::StreamGate<'_> {
+    super::StreamGate {
+        handle: &premises.handle,
+        frame: &premises.probe,
+        live: &premises.live,
+        client_ref: premises.live.client_ref.clone(),
+        companion_key: premises.companion_key.clone(),
+        companion: premises.companion,
+        stream: ene_api::v1::refs::StreamWireId(RawId::new().as_uuid()),
+        round: premises.round,
+        generation: premises.generation,
+        consent: premises.consent.clone(),
+        credential_set: premises.credential_set,
+        tx,
         seq: 0,
-    };
+    }
+}
+
+/// A stalled client paces the provider instead of queueing without limit:
+/// pushes beyond the buffer pend, the queued frames never exceed the bound,
+/// and once drained every delta still arrives gap-free with a normal
+/// completion — no silent loss, no gap presented as completed.
+#[tokio::test]
+async fn slow_client_backpressures_the_provider_instead_of_queueing() -> Result<(), String> {
+    use ene_inference::{DeltaFlow, DeltaSink as _};
+
+    let premises = gate_premises("dlg-slow", "client-slow").await?;
+    // A tiny buffer stands in for the production bound; the policy under
+    // test is boundedness itself, not the constant.
+    let (gate_tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let mut gate = gate_for(&premises, gate_tx);
     for index in 0..2 {
         if gate.push_delta(&format!("d{index}")).await != DeltaFlow::Continue {
             return Err(String::from("a drained buffer must accept pushes"));
@@ -4189,6 +4231,239 @@ async fn slow_client_backpressures_the_provider_instead_of_queueing() -> Result<
             Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
         ),
         "a paced stream still completes, got {received:?}"
+    );
+    Ok(())
+}
+
+/// A premise that goes stale while a delta waits for capacity must still
+/// stop that delta: the capacity wait re-checks currentness and publishes
+/// only into a current premise, with no await between the final check and
+/// the publication. On the old check-then-send shape this test fails: the
+/// parked send completes after the drain and the stale delta publishes.
+#[tokio::test]
+async fn stale_while_waiting_for_capacity_never_publishes() -> Result<(), String> {
+    use ene_inference::{DeltaFlow, DeltaSink as _};
+    use ene_presentation::OpenRound;
+
+    let premises = gate_premises("dlg-stale-race", "client-stale-race").await?;
+    // Fill the single-slot buffer without draining: the next push parks on
+    // capacity, modelling a slow client mid-stream.
+    let (gate_tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let mut gate = gate_for(&premises, gate_tx);
+    if gate.push_delta("d0").await != DeltaFlow::Continue {
+        return Err(String::from("the empty buffer must accept the first push"));
+    }
+    let mut parked = Box::pin(gate.push_delta("d1"));
+    tokio::select! {
+        biased;
+        _ = &mut parked => return Err(String::from("the second push must park on the full buffer")),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+    }
+    // A newer submit replaces the open round while the delta waits.
+    premises.handle.record_open_round(
+        &premises.live.client_ref,
+        &premises.companion_key,
+        OpenRound {
+            companion: premises.companion.as_raw(),
+            client: device_client("client-stale-race"),
+            round: RoundId::from_raw(RawId::new()),
+            generation: premises.generation,
+        },
+    );
+    // Free one slot: the parked push must abort instead of publishing.
+    let shown = rx
+        .recv()
+        .await
+        .ok_or(String::from("the queued frame must arrive"))?;
+    let WirePayload::TextStreamFrame(first) = &shown.payload else {
+        return Err(String::from("the queued frame is the first delta"));
+    };
+    if first.delta != "d0" {
+        return Err(format!(
+            "only the pre-stale delta shows, got {:?}",
+            first.delta
+        ));
+    }
+    match parked.await {
+        DeltaFlow::Abort(_) => {}
+        DeltaFlow::Continue => {
+            return Err(String::from(
+                "a delta parked past invalidation must abort, not publish",
+            ));
+        }
+    }
+    if gate.seq != 1 {
+        return Err(format!(
+            "the aborted delta must take no sequence number, got seq {}",
+            gate.seq
+        ));
+    }
+    drop(gate);
+    if rx.recv().await.is_some() {
+        return Err(String::from("the stale delta must never publish"));
+    }
+    Ok(())
+}
+
+/// A provider transport that counts streaming calls without performing I/O.
+struct CountingTransport {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    text: String,
+}
+
+impl CountingTransport {
+    fn new(text: &str) -> Self {
+        Self {
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            text: text.to_owned(),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ene_inference::ProviderTransport for CountingTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let text = self.text.clone();
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        _sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let text = self.text.clone();
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+}
+
+/// A full control channel aborts the submit before any provider I/O: the
+/// failed accept is observed, never silently dropped, and no Completed
+/// frame can follow it. The durable owner append stays; only delivery
+/// fails.
+#[tokio::test]
+async fn submit_with_full_control_channel_aborts_before_provider_call() -> Result<(), String> {
+    let transport = ok_transport();
+    let live = live_input("client-full");
+    let (handle, _dir) = round_test_handle("dlg-full-channel", &live, &transport).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let filler = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-fill",
+        "fill",
+        live.connection_id,
+    );
+    for _ in 0..crate::serve::STREAM_BUFFER_FRAMES {
+        tx.try_send(filler.clone())
+            .map_err(|_| String::from("the prefill must fit"))?;
+    }
+    let counting = CountingTransport::new("never sent");
+    let mut sink = tx.clone();
+    handle
+        .handle_frame_to(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-full",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &counting,
+            &mut sink,
+            &tx,
+        )
+        .await;
+    assert_eq!(
+        counting.calls(),
+        0,
+        "an undeliverable accept must abort before provider I/O"
+    );
+    let mut drained = 0;
+    while rx.try_recv().is_ok() {
+        drained += 1;
+    }
+    assert_eq!(
+        drained,
+        crate::serve::STREAM_BUFFER_FRAMES,
+        "no frame slipped past the failed accept — especially no Completed"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        1,
+        "the durable owner append stays, with no adopted reply"
+    );
+    Ok(())
+}
+
+/// A gone connection stops the submit the same way: the failed accept is
+/// observed as Closed, the provider is never read, and nothing is treated
+/// as delivered.
+#[tokio::test]
+async fn submit_with_gone_connection_stops_before_provider_call() -> Result<(), String> {
+    let transport = ok_transport();
+    let live = live_input("client-gone");
+    let (handle, _dir) = round_test_handle("dlg-gone-channel", &live, &transport).await?;
+    let (tx, rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    drop(rx);
+    let counting = CountingTransport::new("never sent");
+    let mut sink = tx.clone();
+    handle
+        .handle_frame_to(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-gone",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &counting,
+            &mut sink,
+            &tx,
+        )
+        .await;
+    assert_eq!(
+        counting.calls(),
+        0,
+        "a gone connection must stop the submit before provider I/O"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        1,
+        "the durable owner append stays, with no adopted reply"
     );
     Ok(())
 }
