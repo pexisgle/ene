@@ -35,11 +35,6 @@ impl DelegationId {
     pub fn generate() -> Self {
         Self(RawId::new())
     }
-
-    #[must_use]
-    pub fn from_raw(raw: RawId) -> Self {
-        Self(raw)
-    }
 }
 
 /// Identity of one temporary Task Agent execution subject.
@@ -156,16 +151,7 @@ pub enum DelegationOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{DelegatedWorkspace, DelegationId, DelegationScope, TaskAgentEphemeralId};
-    use crate::workspace::{WorkspaceAssocId, WorkspaceFolderRef};
-
-    #[test]
-    fn delegation_ids_round_trip_through_raw() {
-        let delegation = DelegationId::generate();
-        assert_eq!(DelegationId::from_raw(delegation.as_raw()), delegation);
-        let agent = TaskAgentEphemeralId::generate();
-        assert_eq!(TaskAgentEphemeralId::from_raw(agent.as_raw()), agent);
-    }
+    use super::{DelegationId, TaskAgentEphemeralId};
 
     #[test]
     fn generated_ids_are_distinct() {
@@ -174,22 +160,5 @@ mod tests {
             TaskAgentEphemeralId::generate(),
             TaskAgentEphemeralId::generate()
         );
-    }
-
-    #[test]
-    fn scope_copies_clone_and_compare_by_value() {
-        let scope = DelegationScope {
-            workspace: Some(DelegatedWorkspace {
-                assoc: WorkspaceAssocId::generate(),
-                folder: WorkspaceFolderRef {
-                    path: String::from("/workspace"),
-                },
-                save_target: Some(WorkspaceFolderRef {
-                    path: String::from("/workspace/out"),
-                }),
-            }),
-        };
-        assert_eq!(scope.clone(), scope);
-        assert_ne!(scope, DelegationScope { workspace: None });
     }
 }

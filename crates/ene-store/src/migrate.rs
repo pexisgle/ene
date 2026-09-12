@@ -422,7 +422,6 @@ scope_assoc TEXT NULL,
 scope_folder TEXT NULL,
 scope_save_target TEXT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_delegation_task ON delegation (task_id);
 ";
 
 /// Derives the recall token rows for pre-index memories inside the

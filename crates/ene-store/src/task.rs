@@ -471,7 +471,6 @@ fn create_delegation_sync(
         scope_copy,
     } = premise;
     let task_text = encode_id(task.task.as_raw());
-    let revision_raw = encode_u64(task.revision.as_u64()).map_err(task_unavailable)?;
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -518,19 +517,28 @@ fn create_delegation_sync(
         ));
     }
     // Validate the stored identity text before copying it as the delegator: a
-    // malformed stored identity is an unreadable row, not a new value.
-    let delegator = decode_assignee(&current.assignee)?;
+    // malformed stored identity is an unreadable row, not a new value. Decode
+    // both rows so this check agrees with the other read paths instead of
+    // comparing one string form against another.
+    let current_assignee = decode_assignee(&current.assignee)?;
+    let snapshot_assignee = decode_assignee(&snapshot.assignee)?;
+    if snapshot_assignee != current_assignee {
+        return Err(task_unavailable(
+            "task revision assignee does not match the current assignee",
+        ));
+    }
+    let delegator = current_assignee;
     // The scope is a copy of the boundary the delegator relied on, written
     // verbatim; it records the boundary, not a permission.
     let (scope_assoc, scope_folder, scope_save_target) = match &scope_copy.workspace {
         None => (None, None, None),
         Some(workspace) => (
             Some(encode_id(workspace.assoc.as_raw())),
-            Some(workspace.folder.path.clone()),
+            Some(workspace.folder.path.as_str()),
             workspace
                 .save_target
                 .as_ref()
-                .map(|target| target.path.clone()),
+                .map(|target| target.path.as_str()),
         ),
     };
     tx.execute(
@@ -538,7 +546,7 @@ fn create_delegation_sync(
         params![
             encode_id(delegation.as_raw()),
             task_text,
-            revision_raw,
+            current.revision,
             current.assignee,
             encode_id(agent.as_raw()),
             scope_assoc,

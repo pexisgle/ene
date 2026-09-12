@@ -45,7 +45,6 @@ enum FakeDelegationReply {
 /// delegator the fixture stamps on a successful commit.
 struct FakeTaskRepository {
     load: Mutex<Result<Option<TaskRecord>, TaskTechnicalError>>,
-    loaded_delegation: Mutex<Result<Option<DelegationRef>, TaskTechnicalError>>,
     delegation_replies: Mutex<VecDeque<Result<FakeDelegationReply, TaskTechnicalError>>>,
     delegated: Mutex<Vec<DelegationCreationPremise>>,
     delegator: AssigneeRef,
@@ -55,7 +54,6 @@ impl FakeTaskRepository {
     fn new(load: Result<Option<TaskRecord>, TaskTechnicalError>, delegator: AssigneeRef) -> Self {
         Self {
             load: Mutex::new(load),
-            loaded_delegation: Mutex::new(Ok(None)),
             delegation_replies: Mutex::new(VecDeque::new()),
             delegated: Mutex::new(Vec::new()),
             delegator,
@@ -134,10 +132,7 @@ impl TaskRepository for FakeTaskRepository {
         &self,
         _delegation: DelegationId,
     ) -> Result<Option<DelegationRef>, TaskTechnicalError> {
-        self.loaded_delegation
-            .lock()
-            .expect("fixture script is never poisoned")
-            .clone()
+        Ok(None)
     }
 }
 
@@ -208,7 +203,6 @@ async fn missing_task_is_reported_without_creating_a_delegation() {
         revision: revision(1),
     };
     let repository = FakeTaskRepository::new(Ok(None), assignee());
-    repository.script_delegation(Ok(FakeDelegationReply::Delegated));
 
     let outcome = orchestrate_delegation(
         &repository,

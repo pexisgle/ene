@@ -3084,7 +3084,7 @@ async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
 /// gain token rows, so neither the History window nor lexical recall goes
 /// dark.
 #[tokio::test]
-async fn migration_v11_applies_v12_through_v16() {
+async fn migration_v11_applies_v12_through_v17() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
     let path = dir.path().join("app.db");
     let companion = RawId::new();
@@ -3149,7 +3149,7 @@ async fn migration_v11_applies_v12_through_v16() {
     assert_eq!(
         read_schema_version(&path),
         Some(17),
-        "a v11 database must converge on v16"
+        "a v11 database must converge on v17"
     );
     let projection = {
         let guard = match store.conn.lock() {
@@ -3248,7 +3248,7 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     assert_eq!(
         read_schema_version(&path),
         Some(17),
-        "a v13 database must converge on v16"
+        "a v13 database must converge on v17"
     );
     let (projection, columns) = {
         let guard = match store.conn.lock() {
@@ -4214,7 +4214,7 @@ async fn migration_v11_adds_the_owner_recency_index() {
     assert_eq!(
         read_schema_version(&path),
         Some(17),
-        "a v11 database must converge on v16"
+        "a v11 database must converge on v17"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -5188,7 +5188,7 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     assert_eq!(
         read_schema_version(&path),
         Some(17),
-        "a v14 database must converge on v16"
+        "a v14 database must converge on v17"
     );
     assert!(!table_columns(&path, "task").is_empty(), "task is created");
     assert!(
@@ -5351,7 +5351,7 @@ async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
     assert_eq!(
         read_schema_version(&path),
         Some(17),
-        "a v15 database must converge on v16"
+        "a v15 database must converge on v17"
     );
 
     // A fresh store in its own directory builds the schema and every
@@ -7545,6 +7545,113 @@ async fn delegation_multiple_rows_are_allowed_at_one_revision() {
     );
 }
 
+/// Seeds one Task, applies `corrupt`, and requires `create_delegation` to fail
+/// closed without writing a delegation row.
+async fn assert_create_delegation_rejects(label: &str, corrupt: impl Fn(&Store, TaskId)) {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    corrupt(&store, created.task);
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "create_delegation must reject {label}, got {outcome:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a rejected {label} writes zero delegation rows"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+}
+
+#[tokio::test]
+async fn delegation_creation_fails_closed_on_an_incoherent_task_unit() {
+    for (label, statement) in [
+        (
+            "a missing revision snapshot",
+            "DELETE FROM task_revision WHERE task_id = ?1",
+        ),
+        (
+            "a disagreeing revision assignee",
+            "UPDATE task_revision SET assignee = '11111111-1111-1111-1111-111111111111' WHERE task_id = ?1",
+        ),
+        (
+            "a malformed revision assignee",
+            "UPDATE task_revision SET assignee = 'not-an-id' WHERE task_id = ?1",
+        ),
+    ] {
+        assert_create_delegation_rejects(label, |store, task| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(statement, params![crate::codec::encode_id(task.as_raw())])
+                .expect("the incoherent-unit probe must run");
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn delegation_creation_at_a_later_revision_binds_that_revision() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let moved = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("delegated after the move")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(moved) = moved else {
+        panic!("expected CommittedAs, got {moved:?}");
+    };
+    assert_eq!(moved.revision, TaskRevision::from_u64(2));
+
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            moved,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(Some(delegated_workspace(
+                WorkspaceAssocId::generate(),
+                "/srv/workspace/moved",
+                None,
+            ))),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(
+        reference.task, moved,
+        "the delegation binds the relied-on revision, not the initial one"
+    );
+    assert_eq!(
+        delegation_row(&store, delegation).map(|row| row.2),
+        Some(2),
+        "the durable row stores the relied-on revision"
+    );
+    assert_eq!(
+        store.load_delegation(delegation).await,
+        Ok(Some(reference)),
+        "the correspondence round-trips at a later revision, folder-only scope included"
+    );
+}
+
 /// Seeds one Task and one scoped delegation, applies `corrupt`, and requires
 /// `load_delegation` to fail closed without deleting or rewriting the row.
 async fn assert_load_delegation_rejects(label: &str, corrupt: impl Fn(&Store, DelegationId)) {
@@ -7584,6 +7691,14 @@ async fn assert_load_delegation_rejects(label: &str, corrupt: impl Fn(&Store, De
 async fn load_delegation_rejects_malformed_identities() {
     for (label, statement) in [
         (
+            "a malformed task id",
+            "UPDATE delegation SET task_id = 'not-an-id' WHERE delegation_id = ?1",
+        ),
+        (
+            "a negative task revision",
+            "UPDATE delegation SET task_revision = -1 WHERE delegation_id = ?1",
+        ),
+        (
             "a malformed delegator",
             "UPDATE delegation SET delegator = 'not-an-id' WHERE delegation_id = ?1",
         ),
@@ -7618,6 +7733,10 @@ async fn load_delegation_rejects_inconsistent_scope_columns() {
         (
             "assoc NULL with a save target",
             "UPDATE delegation SET scope_assoc = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
+        ),
+        (
+            "assoc NULL with a folder and save target",
+            "UPDATE delegation SET scope_assoc = NULL, scope_folder = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
         ),
         (
             "assoc without a folder",
@@ -7754,7 +7873,6 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
         conn.execute_batch(
             "DROP TABLE delegation;
-             DROP INDEX IF EXISTS idx_delegation_task;
              PRAGMA user_version = 16;",
         )
         .expect("the version-16 rewind must apply");
@@ -7791,22 +7909,6 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         assert!(
             columns.contains(&String::from(column)),
             "the migrated delegation table has {column}"
-        );
-    }
-    {
-        let conn = rusqlite::Connection::open(&path).expect("the catalog must open");
-        let found: Option<String> = conn
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_delegation_task'",
-                (),
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("the index catalog must read");
-        assert_eq!(
-            found.as_deref(),
-            Some("idx_delegation_task"),
-            "the V17 index is created"
         );
     }
 
