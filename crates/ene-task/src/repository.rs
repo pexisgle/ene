@@ -73,10 +73,13 @@ pub trait TaskRepository: Send + Sync {
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError>;
 
-    /// Loads the committed AU2 unit of one Task at its current revision.
+    /// Loads the committed current unit of one Task: the current revision's
+    /// snapshot and adopted-purpose entry, plus every adopted-instruction
+    /// entry in force (each entry keeps its own adoption reference).
     ///
     /// `None` means the identity has no stored Task. Partial or inconsistent
-    /// rows are never composed into a [`TaskRecord`]; that is a technical
-    /// error.
+    /// rows, unknown context item kinds, kind/payload mismatches, and entries
+    /// beyond the current revision are never composed into a [`TaskRecord`];
+    /// that is a technical error.
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError>;
 }

@@ -682,7 +682,8 @@ pub struct ProposeSteeringCommand {
     /// Proposed purpose body; [`None`] means the purpose is unchanged.
     pub new_purpose: Option<TaskPurpose>,
     /// Reference to the utterance record proposing the additional
-    /// instruction. The Task owner mints the adoption identity from it.
+    /// instruction. The Task owner mints a fresh adoption identity; this
+    /// reference is provenance only.
     pub instruction_source: RawId,
 }
 

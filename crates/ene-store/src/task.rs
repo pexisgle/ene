@@ -53,11 +53,14 @@ const SQL_SELECT_TASK_REVISION: &str = "SELECT purpose_adopted_revision, purpose
 
 const SQL_SELECT_TASK_CONTEXT: &str = "SELECT entry_id, revision, item_kind, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 ORDER BY revision, entry_id";
 
-/// The adopted-purpose entry in force at the current revision, used to carry
-/// its provenance into the next revision when the purpose does not change.
-/// The item kind is part of the filter so an instruction row is never read as
-/// the predecessor purpose.
-const SQL_SELECT_ADOPTED_PURPOSE_ENTRY: &str = "SELECT origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND purpose_adopted_revision = ?3 AND item_kind = ?4 ORDER BY rowid LIMIT 1";
+/// The adopted-purpose entry in force at the current revision, used to
+/// validate the unit before a steering forward writes and to carry its
+/// provenance into the next revision when the purpose does not change. The
+/// item kind is part of the filter so an instruction row is never read as the
+/// predecessor purpose. The payload is not filtered and the probe is not
+/// narrowed to one row, so a missing, duplicated, or pointer-mismatched entry
+/// stays detectable instead of being normalized.
+const SQL_SELECT_ADOPTED_PURPOSE_ENTRY: &str = "SELECT purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND item_kind = ?3 ORDER BY rowid LIMIT 2";
 
 const SQL_SELECT_WORKSPACE_ASSOC: &str = "SELECT assoc_id, folder, save_target FROM workspace_assoc WHERE task_id = ?1 ORDER BY rowid LIMIT 1";
 
@@ -216,6 +219,65 @@ fn create_task_sync(
     Ok(reference)
 }
 
+/// The adopted-purpose entry read for validation before a steering commit.
+struct RawAdoptedPurpose {
+    purpose_adopted_revision: Option<i64>,
+    origin_kind: String,
+    origin_source: String,
+    acquired_at: String,
+}
+
+/// Reads and validates the adopted-purpose entry in force at `revision`.
+///
+/// The steering forward must not normalize a unit that every read rejects:
+/// exactly one purpose entry may exist at the current revision and its
+/// adopted revision must agree with the D1 pointer. Zero rows, two or more
+/// rows, a missing payload, and a pointer disagreement are technical errors.
+/// The `LIMIT 2` probe keeps the duplicate check at the storage boundary.
+fn validated_adopted_purpose_entry(
+    conn: &Connection,
+    task_text: &str,
+    revision: i64,
+    expected_adopted_revision: TaskRevision,
+) -> Result<RawAdoptedPurpose, TaskTechnicalError> {
+    let mut statement = conn
+        .prepare(SQL_SELECT_ADOPTED_PURPOSE_ENTRY)
+        .map_err(task_unavailable)?;
+    let rows = statement
+        .query_map(
+            params![task_text, revision, ITEM_KIND_ADOPTED_PURPOSE],
+            |row| {
+                Ok(RawAdoptedPurpose {
+                    purpose_adopted_revision: row.get(0)?,
+                    origin_kind: row.get(1)?,
+                    origin_source: row.get(2)?,
+                    acquired_at: row.get(3)?,
+                })
+            },
+        )
+        .map_err(task_unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(task_unavailable)?;
+    let mut rows = rows.into_iter();
+    let entry = rows.next().ok_or_else(|| {
+        task_unavailable("task adopted purpose entry missing for the current revision")
+    })?;
+    if rows.next().is_some() {
+        return Err(task_unavailable(
+            "multiple adopted purpose entries for the current revision",
+        ));
+    }
+    let adopted = entry.purpose_adopted_revision.ok_or_else(|| {
+        task_unavailable("task adopted purpose entry missing its adopted revision")
+    })?;
+    if decode_revision(adopted)? != expected_adopted_revision {
+        return Err(task_unavailable(
+            "task context adopted purpose does not match the current purpose",
+        ));
+    }
+    Ok(entry)
+}
+
 /// Commits one steering forward (AU4).
 ///
 /// The current row is read inside the `Immediate` transaction, so the compare
@@ -286,53 +348,43 @@ fn forward_steering_sync(
             "task revision assignee does not match the current assignee",
         ));
     }
+    // The adopted-purpose entry every read resolves must be exactly one row
+    // for the current revision and agree with the D1 pointer. Validating it
+    // before the first write keeps the forward from normalizing a unit the
+    // reads reject; the validated row also supplies the carry-forward
+    // provenance when the purpose does not change.
+    let current_purpose_entry =
+        validated_adopted_purpose_entry(&tx, &task_text, current.revision, current_adopted)?;
     // The adopted-purpose entry's identity comes from the premise in both
     // branches: the repository only stamps the post-CAS reference and, on a
     // change, the adopted revision. On a carry-forward the old adopted
     // identity stays in `item`, while the provenance and acquisition are
-    // copied from the entry in force.
-    let (adopted_revision, purpose_text, origin_kind, origin_source, acquired_at) = match premise
-        .new_purpose
-    {
-        Some(adoption) => (
-            next_revision,
-            adoption.purpose.text,
-            encode_origin_kind(adoption.origin.kind).to_owned(),
-            encode_id(adoption.origin.source),
-            adoption.acquired_at.to_rfc3339(),
-        ),
-        None => {
-            let predecessor: (String, String, String) = tx
-                .query_row(
-                    SQL_SELECT_ADOPTED_PURPOSE_ENTRY,
-                    params![
-                        task_text,
-                        current.revision,
-                        current.purpose_adopted_revision,
-                        ITEM_KIND_ADOPTED_PURPOSE
-                    ],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    // copied from the validated entry in force.
+    let (adopted_revision, purpose_text, origin_kind, origin_source, acquired_at) =
+        match premise.new_purpose {
+            Some(adoption) => (
+                next_revision,
+                adoption.purpose.text,
+                encode_origin_kind(adoption.origin.kind).to_owned(),
+                encode_id(adoption.origin.source),
+                adoption.acquired_at.to_rfc3339(),
+            ),
+            None => {
+                // Fail closed on unreadable stored provenance instead of copying
+                // corruption into the new revision. The reads only validate; the
+                // bytes stay as stored.
+                decode_origin_kind(&current_purpose_entry.origin_kind)?;
+                decode_id(&current_purpose_entry.origin_source).map_err(task_unavailable)?;
+                decode_clock(&current_purpose_entry.acquired_at)?;
+                (
+                    current_adopted,
+                    snapshot.purpose_text,
+                    current_purpose_entry.origin_kind,
+                    current_purpose_entry.origin_source,
+                    current_purpose_entry.acquired_at,
                 )
-                .optional()
-                .map_err(task_unavailable)?
-                .ok_or_else(|| {
-                    task_unavailable("task adopted purpose entry missing for the current revision")
-                })?;
-            // Fail closed on unreadable stored provenance instead of copying
-            // corruption into the new revision. The reads only validate; the
-            // bytes stay as stored.
-            decode_origin_kind(&predecessor.0)?;
-            decode_id(&predecessor.1).map_err(task_unavailable)?;
-            decode_clock(&predecessor.2)?;
-            (
-                current_adopted,
-                snapshot.purpose_text,
-                predecessor.0,
-                predecessor.1,
-                predecessor.2,
-            )
-        }
-    };
+            }
+        };
     let adopted_raw = encode_u64(adopted_revision.as_u64()).map_err(task_unavailable)?;
     tx.execute(
         SQL_INSERT_TASK_REVISION,

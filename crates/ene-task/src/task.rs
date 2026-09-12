@@ -147,13 +147,19 @@ pub struct TaskRevisionRecord {
     pub assignee: AssigneeRef,
 }
 
-/// The committed AU2 unit of one Task at its current revision.
+/// The committed current unit of one Task: the AU2 creation plus every AU4
+/// steering forward.
+///
+/// The context spans the current revision's adopted-purpose entry and the
+/// adopted-instruction entries in force (adopted at or before the current
+/// revision); each entry keeps its own adoption reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRecord {
     pub task: Task,
     /// The snapshot of the current revision.
     pub revision: TaskRevisionRecord,
-    /// The context entries recorded for the current revision.
+    /// The current revision's adopted-purpose entry, followed by every
+    /// adopted-instruction entry in force.
     pub context: Vec<TaskContextEntry>,
     pub workspace: Option<WorkspaceAssociation>,
 }

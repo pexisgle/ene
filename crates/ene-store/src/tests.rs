@@ -1697,7 +1697,9 @@ fn table_columns(path: &std::path::Path, table: &str) -> Vec<String> {
 }
 
 /// Every main-schema table name except SQLite's own internals, sorted.
-fn schema_tables(path: &std::path::Path) -> Vec<String> {
+/// Comparing a migrated file against a fresh one proves the rebuild left no
+/// staging table behind; the fresh list is never hand-maintained.
+fn schema_table_names(path: &std::path::Path) -> Vec<String> {
     let Ok(conn) = rusqlite::Connection::open(path) else {
         return Vec::new();
     };
@@ -3080,7 +3082,7 @@ async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
 /// gain token rows, so neither the History window nor lexical recall goes
 /// dark.
 #[tokio::test]
-async fn migration_v11_applies_v12_then_v13_then_v14_and_v15() {
+async fn migration_v11_applies_v12_through_v16() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
     let path = dir.path().join("app.db");
     let companion = RawId::new();
@@ -5330,38 +5332,6 @@ fn v15_context_rows(path: &std::path::Path) -> Vec<V15ContextRow> {
         .unwrap_or_default()
 }
 
-/// The permanent tables a fully migrated database carries. Any leftover
-/// staging table from the V16 rebuild would appear as an extra name.
-fn permanent_schema_tables() -> Vec<String> {
-    let mut tables = [
-        "companion",
-        "consent_record",
-        "credential_pending",
-        "credential_ref",
-        "credential_set",
-        "history_message",
-        "inference_attempt",
-        "learning_memory",
-        "learning_memory_revision",
-        "learning_memory_term",
-        "learning_summary",
-        "management_intent",
-        "paired_device",
-        "pairing_pending",
-        "presence_attribution",
-        "presence_transition_log",
-        "task",
-        "task_context_entry",
-        "task_revision",
-        "undelivered",
-        "usage_fact",
-        "workspace_assoc",
-    ]
-    .map(String::from);
-    tables.sort();
-    tables.to_vec()
-}
-
 #[tokio::test]
 async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
     let dir = tempfile::tempdir().unwrap();
@@ -5381,9 +5351,19 @@ async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
         Some(16),
         "a v15 database must converge on v16"
     );
+
+    // A fresh store in its own directory builds the schema and every
+    // migration from zero, so its table list is the current permanent
+    // shape. Comparing against it proves the V16 rebuild left no staging
+    // table behind without a hand-maintained list to edit per migration.
+    let fresh_dir = tempfile::tempdir().unwrap();
+    let fresh_path = fresh_dir.path().join("store.db");
+    let _fresh = Store::open(&fresh_path)
+        .await
+        .expect("a fresh store must open");
     assert_eq!(
-        schema_tables(&path),
-        permanent_schema_tables(),
+        schema_table_names(&path),
+        schema_table_names(&fresh_path),
         "the rebuild must leave no staging table behind"
     );
 
@@ -5477,6 +5457,14 @@ async fn migration_v16_fault_rolls_back_and_reopen_converges() {
     // statement and leave the v15 shape and rows exactly as they were.
     // This faults the migration independently of the rebuild's staging
     // table name, which is not part of the contract.
+    //
+    // The fault relies on the store's connection carrying rusqlite's
+    // implicit ~5 s busy timeout: COMMIT retries against the held SHARED
+    // lock, then fails with SQLITE_BUSY when the timeout expires. The
+    // outcome is identical with the timeout disabled (COMMIT fails with
+    // SQLITE_BUSY immediately), and the lock mechanics are deterministic
+    // on Linux and Windows, so the assertions never depend on the retry
+    // duration, only on the failure and rollback.
     let blocker = rusqlite::Connection::open(&path).expect("the blocker must open");
     blocker
         .execute_batch("BEGIN")
@@ -6324,6 +6312,77 @@ async fn task_purpose_preserving_forward_fails_closed_on_an_unreadable_predecess
     }
 }
 
+/// Runs one fail-closed probe in both forward branches: seed a revision-1
+/// unit, apply `corrupt` to its creation purpose entry, and require the
+/// forward to reject the unit without writing anything.
+async fn assert_forward_rejects_corrupted_purpose(label: &str, corrupt: impl Fn(&Store, TaskId)) {
+    for adopt in [false, true] {
+        let store = open_memory().await.unwrap();
+        let created = store.create_task(task_premise(None)).await.unwrap();
+        corrupt(&store, created.task);
+        let before_current = task_current_row(&store, created.task);
+        let before_revisions = task_revision_rows(&store, created.task);
+        let before_contexts = task_context_rows(&store, created.task);
+        let new_purpose = if adopt {
+            Some(task_purpose_adoption("probe purpose"))
+        } else {
+            None
+        };
+        let outcome = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose,
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a forward must fail closed on {label} with new_purpose={adopt}, got {outcome:?}"
+        );
+        assert_eq!(task_current_row(&store, created.task), before_current);
+        assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+        assert_eq!(task_context_rows(&store, created.task), before_contexts);
+    }
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_duplicate_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a duplicate current purpose entry", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) SELECT ?1, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?2 AND item_kind = 'adopted_purpose'",
+                params![
+                    crate::codec::encode_id(TaskContextEntryId::generate().as_raw()),
+                    crate::codec::encode_id(task.as_raw()),
+                ],
+            )
+            .expect("the duplicate-purpose probe must insert");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_missing_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a missing current purpose entry", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(task.as_raw())],
+            )
+            .expect("the missing-purpose probe must delete");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_entry() {
     let store = open_memory().await.unwrap();
@@ -6521,10 +6580,13 @@ async fn task_instruction_only_forward_carries_the_purpose_entry_and_keeps_prior
         panic!("expected CommittedAs, got {second:?}");
     };
 
-    // Revision 3 adopts a second instruction only. The purpose entry is
-    // carried from the in-force revision-2 purpose entry, not re-adopted.
+    // Revision 3 adopts a second instruction only, sourced from the same
+    // utterance record as the first. The purpose entry is carried from the
+    // in-force revision-2 purpose entry, not re-adopted, and the store must
+    // return both instruction entries rather than deduplicating by
+    // provenance.
     let carried_entry = TaskContextEntryId::generate();
-    let second_instruction = task_instruction_adoption(RawId::new());
+    let second_instruction = task_instruction_adoption(first_instruction.origin.source);
     let third = store
         .forward_steering(TaskCommitPremise {
             expected: second,
@@ -6571,6 +6633,10 @@ async fn task_instruction_only_forward_carries_the_purpose_entry_and_keeps_prior
     assert_eq!(record.context[2].item, TaskContextItem::AdoptedInstruction);
     assert_eq!(record.context[2].reference, third);
     assert_eq!(record.context[2].origin, second_instruction.origin);
+    assert_eq!(
+        record.context[1].origin.source, record.context[2].origin.source,
+        "a shared source must not collapse the two instruction entries"
+    );
 
     let rows = task_context_rows(&store, created.task);
     assert_eq!(
