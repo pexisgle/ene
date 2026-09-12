@@ -269,14 +269,13 @@ enum TaskProposalOutcome {
     NeedsRevalidation(NeedsRevalidationRef), // 権限・在席帰属・利用枠などの再照合が必要
     InsufficientContext(InsufficientRef),    // 目的やワークスペース条件が不足している
 }
-}
 
 // 一時的な Task Agent への委任作成。作業担当が確定し、Agent は一時的な従属主体に留まる。
 // DelegationId・TaskAgentEphemeralId は作業担当（orchestrate）が発行し、リポジトリは
 // 採番し直しません（TaskCreationPremise と同じ規則）。
 struct CreateDelegationCommand {
     task: TaskRef,                   // 期待するタスクリビジョン（boundary token）
-    scope_copy: DelegationScope,     // タスク・ワークスペース境界の写し（独立した特権を与えない）
+    scope_copy: DelegationScope,     // 委任時のワークスペース境界の写し（独立した特権を与えない。タスク範囲は task が示す）
     // consumer_assignment: AssignmentRef（推論・費用の消費主体割り当て）は、Task Agent の
     // 推論・利用枠の producer が存在するスライスが、command・premise・マイグレーション・
     // 読み出し規則を同じ設計変更で追加します。本スライスは producer のない placeholder を
@@ -287,9 +286,9 @@ enum DelegationOutcome {
     Delegated(DelegationRef),
     StaleTaskRevision { current: TaskRef },
     MissingTask { task: TaskId },    // 前提のタスクに永続状態が存在しない（書き込みなし。§11.3 に従い Ok 側のドメイン判定結果）
-    // HeldByGlobalHold は hold スライスが、NeedsRevalidation は権限・在席・利用枠の再照合
-    // producer を持つスライスが、対応する前提型と対で追加します。それまでは具象 enum に
-    // 代役バリアントや仮の前提条件を置いてはなりません。
+    // HeldByGlobalHold は hold スライスが、NeedsRevalidation・InsufficientContext は権限・
+    // 在席・利用枠・情報不足の再照合 producer を持つスライスが、対応する前提型と対で追加します。
+    // それまでは具象 enum に代役バリアントや仮の前提条件を置いてはなりません。
 }
 
 // 長時間処理の分離：委任の作成要求（request）と Agent からの結果到着（completion）は別のインターフェース。
