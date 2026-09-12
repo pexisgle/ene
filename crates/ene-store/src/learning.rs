@@ -206,6 +206,7 @@ fn insert_current(
         ],
     )
     .map_err(learning_unavailable)?;
+    refresh_memory_terms(tx, memory, change)?;
     Ok(())
 }
 
@@ -228,6 +229,37 @@ fn update_current(
         ],
     )
     .map_err(learning_unavailable)?;
+    refresh_memory_terms(tx, memory, change)?;
+    Ok(())
+}
+
+/// Re-derives the recall token rows for one Memory inside the commit
+/// transaction, so the index never observes a half-written recognition.
+/// Suppression needs no reindexing: the lexical arm filters suppressed rows
+/// at read time, and clearing the flag re-exposes the already-indexed
+/// tokens.
+fn refresh_memory_terms(
+    tx: &Transaction<'_>,
+    memory: MemoryId,
+    change: &MemoryChange,
+) -> Result<(), LearningTechnicalError> {
+    let memory_text = encode_id(memory.as_raw());
+    tx.execute(
+        "DELETE FROM learning_memory_term WHERE memory_id = ?1",
+        params![memory_text],
+    )
+    .map_err(learning_unavailable)?;
+    let companion_text = encode_id(change.scope.companion_id());
+    let mut insert = tx
+        .prepare(
+            "INSERT OR IGNORE INTO learning_memory_term (term, memory_id, companion_id) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(learning_unavailable)?;
+    for term in ene_learning::recall_index_terms(&change.content) {
+        insert
+            .execute(params![term, memory_text, companion_text])
+            .map_err(learning_unavailable)?;
+    }
     Ok(())
 }
 
@@ -343,9 +375,40 @@ fn decode_summary(raw: RawSummary) -> Result<SummaryRecord, LearningTechnicalErr
     })
 }
 
-/// Recall candidate arms: newest, most important, and lexical matches, each
-/// capped by `limit`; suppression is excluded before any cap applies. The
-/// caller receives candidates in newest-first order with duplicates removed.
+/// Recall candidate arms: newest, most important, and lexical token
+/// matches, each capped by `limit`; suppression is excluded before any cap
+/// applies. The caller receives candidates in newest-first order with
+/// duplicates removed.
+///
+/// Every arm is an index walk, never a table scan or sort: the newest arm
+/// reverse-walks the partial companion index, the importance arm walks the
+/// partial (companion, importance) index in order, and the lexical arm seeks
+/// one covering token-index entry per query term and fetches at most `limit`
+/// rows by primary key. The importance arm carries no `rowid` tie-break
+/// because the merge below re-sorts every candidate newest-first anyway;
+/// the bare `importance DESC` is what lets SQLite walk the index with no
+/// sort step.
+pub(crate) fn recall_candidates_sql(term_count: usize) -> String {
+    let columns = "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at, rowid AS insertion_order";
+    let base = format!(
+        "SELECT {columns} FROM learning_memory WHERE companion_id = ?1 AND recall_suppressed = 0"
+    );
+    let mut sql = format!(
+        "SELECT * FROM ({base} ORDER BY rowid DESC LIMIT ?2) \
+         UNION ALL SELECT * FROM ({base} ORDER BY importance DESC LIMIT ?2)"
+    );
+    if term_count > 0 {
+        let placeholders = (0..term_count)
+            .map(|position| format!("?{}", position + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        sql.push_str(&format!(
+            " UNION ALL SELECT * FROM (SELECT m.memory_id, m.companion_id, m.revision, m.content, m.importance, m.temporal, m.recall_suppressed, m.updated_at, m.rowid AS insertion_order FROM learning_memory_term t JOIN learning_memory m ON m.memory_id = t.memory_id WHERE t.companion_id = ?1 AND t.term IN ({placeholders}) AND m.recall_suppressed = 0 LIMIT ?2)"
+        ));
+    }
+    sql
+}
+
 fn recall_candidates_sync(
     conn: &Mutex<Connection>,
     companion: RawId,
@@ -354,28 +417,10 @@ fn recall_candidates_sync(
 ) -> Result<Vec<Memory>, LearningTechnicalError> {
     let cap = encode_limit(limit)?;
     let companion_text = encode_id(companion);
-    let columns = "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at, rowid AS insertion_order";
-    let base = format!(
-        "SELECT {columns} FROM learning_memory WHERE companion_id = ?1 AND recall_suppressed = 0"
-    );
-    let mut sql = format!(
-        "SELECT * FROM ({base} ORDER BY rowid DESC LIMIT ?2) \
-         UNION ALL SELECT * FROM ({base} ORDER BY importance DESC, rowid DESC LIMIT ?2)"
-    );
+    let sql = recall_candidates_sql(terms.len());
     let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(companion_text), Box::new(cap)];
-    if !terms.is_empty() {
-        let predicates = terms
-            .iter()
-            .enumerate()
-            .map(|(position, _)| format!("instr(lower(content), ?{}) > 0", position + 3))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        sql.push_str(&format!(
-            " UNION ALL SELECT * FROM ({base} AND ({predicates}) LIMIT ?2)"
-        ));
-        for term in terms {
-            values.push(Box::new(term.clone()));
-        }
+    for term in terms {
+        values.push(Box::new(term.clone()));
     }
     let guard = lock_shared(conn);
     let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;

@@ -1139,8 +1139,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(11)),
-        "migration must record version 11"
+        matches!(version, Ok(12)),
+        "migration must record version 12"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1442,7 +1442,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(11),
+        Some(12),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1491,8 +1491,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(11)),
-        "reopened database must record schema version 11"
+        matches!(version, Ok(12)),
+        "reopened database must record schema version 12"
     );
 }
 
@@ -2257,8 +2257,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(11)),
-        "reopened database must record schema version 11"
+        matches!(version, Ok(12)),
+        "reopened database must record schema version 12"
     );
 }
 
@@ -2617,6 +2617,246 @@ async fn recall_candidates_are_bounded_and_reach_old_relevant_rows() {
         generic.len() <= 9 && !generic.is_empty(),
         "an empty query still answers bounded background, got {}",
         generic.len()
+    );
+}
+
+/// Candidate lookup work is index-backed, not just its output: the query
+/// plan for the exact recall SQL must serve every arm from an index with no
+/// table scan and no sort step, so growing unrelated rows cannot push the
+/// lookup back to a full scan. `SCAN (subquery-N)` lines only drain the
+/// already-capped arm results and are expected.
+#[tokio::test]
+async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let old = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: old },
+                "The owner likes jasmine tea.",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    for index in 0..400 {
+        let id = MemoryId::generate();
+        let outcome = store
+            .commit_memory_change(commit(
+                None,
+                learning_change(
+                    companion,
+                    MemoryTarget::New { id },
+                    &format!("filler memory {index}"),
+                    ChangeKind::Initial,
+                    false,
+                ),
+            ))
+            .await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    }
+
+    for term_count in [0, 2] {
+        let sql = crate::learning::recall_candidates_sql(term_count);
+        let plan = {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut statement = guard
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .expect("the recall SQL must explain");
+            let companion_text = crate::codec::encode_id(companion);
+            let steps: Vec<String> = if term_count == 0 {
+                statement
+                    .query_map(rusqlite::params![companion_text, 3_i64], |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .expect("the plan must read")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("plan rows must decode")
+            } else {
+                statement
+                    .query_map(
+                        rusqlite::params![companion_text, 3_i64, "jasmine", "tea"],
+                        |row| row.get::<_, String>(3),
+                    )
+                    .expect("the plan must read")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("plan rows must decode")
+            };
+            steps
+        };
+        assert!(
+            !plan.is_empty(),
+            "the recall plan must have steps for {term_count} terms"
+        );
+        for step in &plan {
+            assert!(
+                !(step.starts_with("SCAN") && !step.contains("subquery"))
+                    && !step.contains("TEMP B-TREE"),
+                "every arm must be an index walk, got: {plan:?}"
+            );
+        }
+        if term_count > 0 {
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("learning_memory_term")),
+                "the lexical arm must seek the token index, got: {plan:?}"
+            );
+        }
+    }
+
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates.len() <= 9,
+        "three arms of at most three rows each, got {}",
+        candidates.len()
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|memory| memory.content.contains("jasmine tea")),
+        "the oldest relevant memory stays reachable behind 400 newer rows"
+    );
+}
+
+/// A database migrated from before the token index still answers lexical
+/// recall: the migration derives token rows for the stored recognitions, so
+/// an old relevant Memory does not go dark on upgrade.
+#[tokio::test]
+async fn recall_token_index_backfills_memories_predating_the_index() {
+    let dir = tempfile::tempdir().expect("a temp dir must open");
+    let path = dir.path().join("app.db");
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    {
+        let conn = rusqlite::Connection::open(&path).expect("a version-11 database must open");
+        conn.execute_batch(
+            "CREATE TABLE learning_memory (
+             memory_id TEXT PRIMARY KEY,
+             companion_id TEXT NOT NULL,
+             revision INTEGER NOT NULL,
+             content TEXT NOT NULL,
+             importance INTEGER NOT NULL,
+             temporal TEXT NOT NULL,
+             recall_suppressed INTEGER NOT NULL,
+             updated_at TEXT NOT NULL
+             );
+             CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
+             PRAGMA user_version = 11;",
+        )
+        .expect("the version-11 shape must build");
+        conn.execute(
+            "INSERT INTO learning_memory (memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                crate::codec::encode_id(memory.as_raw()),
+                crate::codec::encode_id(companion),
+                1_i64,
+                "The owner likes jasmine tea.",
+                4_i64,
+                "enduring",
+                0_i64,
+                fixture_clock().to_rfc3339(),
+            ],
+        )
+        .expect("the pre-index memory must insert");
+    }
+    let store = Store::open(&path).await.expect("migration must succeed");
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.content.contains("jasmine tea")),
+        "the pre-index memory must be lexically reachable after migration"
+    );
+}
+
+/// A revision update re-derives the token rows in the same commit: the old
+/// content stops matching and the current content starts, with no orphaned
+/// index row surviving beside the new recognition.
+#[tokio::test]
+async fn recall_token_index_follows_revision_updates() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "The owner drinks something warm.",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    let Ok(MemoryChangeOutcome::Committed { revision, .. }) = outcome else {
+        panic!("the seed must commit");
+    };
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: revision,
+                },
+                "The owner likes jasmine tea now.",
+                ChangeKind::Refined,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let terms = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut statement = guard
+            .prepare("SELECT term FROM learning_memory_term WHERE memory_id = ?1")
+            .expect("token rows must be readable");
+        statement
+            .query_map(
+                rusqlite::params![crate::codec::encode_id(memory.as_raw())],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("token rows must read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("token rows must decode")
+    };
+    assert!(
+        terms.iter().any(|term| term == "jasmine"),
+        "the current content must be indexed, got {terms:?}"
+    );
+    assert!(
+        terms.iter().all(|term| term != "warm"),
+        "the replaced content must leave no token behind, got {terms:?}"
+    );
+
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.content.contains("jasmine tea now")),
+        "the updated memory matches on its current content"
     );
 }
 
@@ -3148,7 +3388,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(11),
+        Some(12),
         "migration advances the schema version"
     );
     assert!(
@@ -3182,12 +3422,47 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
                provider TEXT NOT NULL,
                model TEXT NOT NULL,
                started_at TEXT NOT NULL
+             );
+             -- A real v9 database also carries the v9 learning group the v12
+             -- token backfill reads; mirrors MIGRATION_V9.
+             CREATE TABLE learning_summary (
+               summary_id TEXT PRIMARY KEY,
+               companion_id TEXT NOT NULL,
+               content TEXT NOT NULL,
+               source_kind TEXT NOT NULL,
+               source_start TEXT NOT NULL,
+               source_end TEXT NOT NULL,
+               formed_at TEXT NOT NULL
+             );
+             CREATE TABLE learning_memory (
+               memory_id TEXT PRIMARY KEY,
+               companion_id TEXT NOT NULL,
+               revision INTEGER NOT NULL,
+               content TEXT NOT NULL,
+               importance INTEGER NOT NULL,
+               temporal TEXT NOT NULL,
+               recall_suppressed INTEGER NOT NULL,
+               updated_at TEXT NOT NULL
+             );
+             CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
+             CREATE TABLE learning_memory_revision (
+               memory_id TEXT NOT NULL,
+               revision INTEGER NOT NULL,
+               companion_id TEXT NOT NULL,
+               content TEXT NOT NULL,
+               importance INTEGER NOT NULL,
+               temporal TEXT NOT NULL,
+               recall_suppressed INTEGER NOT NULL,
+               change_kind TEXT NOT NULL,
+               summary_id TEXT,
+               at TEXT NOT NULL,
+               PRIMARY KEY (memory_id, revision)
              );",
         )
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(11));
+    assert_eq!(read_schema_version(&path), Some(12));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await

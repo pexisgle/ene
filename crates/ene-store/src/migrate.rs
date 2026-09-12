@@ -1,6 +1,8 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: u64 = 11;
+use crate::codec::decode_id;
+
+const CURRENT_VERSION: u64 = 12;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -254,6 +256,60 @@ rev INTEGER NOT NULL
 INSERT OR IGNORE INTO credential_set (id, rev) VALUES (1, 0);
 ";
 
+/// Introduces the derived recall token index and the partial B-tree indexes
+/// behind `recall_candidates`.
+///
+/// `learning_memory_term` is rebuildable derived state (persistence-recovery
+/// §5 R): every row is recomputed from `learning_memory.content` by the same
+/// tokenizer the queries use, so the table is never the Memory's canonical
+/// record and a future Memory deletion must delete its token rows with it.
+/// The two partial indexes cover only non-suppressed rows, so each candidate
+/// arm walks at most `limit` live entries instead of stepping over the whole
+/// suppressed prefix. Token rows of suppressed memories stay in place;
+/// suppression is a recall-time filter, and clearing it needs no reindexing.
+const MIGRATION_V12: &str = "
+CREATE TABLE IF NOT EXISTS learning_memory_term (
+term TEXT NOT NULL,
+memory_id TEXT NOT NULL,
+companion_id TEXT NOT NULL,
+PRIMARY KEY (companion_id, term, memory_id)
+);
+CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
+CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
+";
+
+/// Derives the recall token rows for pre-index memories inside the
+/// migration transaction, so an upgraded database answers lexical recall
+/// from the index immediately. Fresh databases backfill zero rows.
+fn backfill_recall_tokens(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    let mut select = tx
+        .prepare("SELECT memory_id, companion_id, content FROM learning_memory")
+        .map_err(|error| error.to_string())?;
+    let rows: Vec<(String, String, String)> = select
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(select);
+    let mut insert = tx
+        .prepare(
+            "INSERT OR IGNORE INTO learning_memory_term (term, memory_id, companion_id) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(|error| error.to_string())?;
+    for (memory, companion, content) in &rows {
+        // Stored ids were encoded by this same store; an undecodable one is
+        // a corrupt primary the migration must not silently reindex.
+        decode_id(memory).map_err(|error| error.to_string())?;
+        decode_id(companion).map_err(|error| error.to_string())?;
+        for term in ene_learning::recall_index_terms(content) {
+            insert
+                .execute(rusqlite::params![term, memory, companion])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 /// Atomic: pending migrations and the version bump commit together in one
 /// transaction, so a crash mid-migration rolls back to the pre-migration
 /// state and the next open retries from scratch. The commit is the sole
@@ -312,6 +368,11 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     if stored_version < 11 {
         tx.execute_batch(MIGRATION_V11)
             .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 12 {
+        tx.execute_batch(MIGRATION_V12)
+            .map_err(|error| error.to_string())?;
+        backfill_recall_tokens(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

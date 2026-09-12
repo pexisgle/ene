@@ -204,10 +204,11 @@ impl LearningRepository for FakeLearningRepository {
             if lexical == cap {
                 break;
             }
-            if terms
-                .iter()
-                .any(|term| memory.content.to_lowercase().contains(term.as_str()))
-            {
+            // Token equality, mirroring the store's derived token index:
+            // a query term matches only when the content derives that same
+            // token, never by unindexed substring search.
+            let indexed = crate::recall_index_terms(&memory.content);
+            if terms.iter().any(|term| indexed.contains(term)) {
                 note(*index, memory);
                 lexical += 1;
             }
