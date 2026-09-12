@@ -151,10 +151,10 @@ Skill の scope default（Package 由来→Companion scope、単体 import→Own
 
 | logical table | PK | 主な field | durability | deletion | reconstruction source |
 |---|---|---|---|---|---|
-| `task` | `task_id` | 現在 REV=`task_revision`、現在 `TaskPurposeRef`・目的本文の現行値、担当、進捗・待機・完了・失敗・Cancel・結果・未完了・次の判断、CORR→`restore_generation`（保全・消去 slice で導入） | D1 | Task 削除で固有 Workspace 関連付けを削除。形成済み・外部成果物へ cascade しない | restart 後に保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする |
+| `task` | `task_id` | 現在 REV=`task_revision`、現在 `TaskPurposeRef`・目的本文の現行値（steering 前提は現在 revision と `TaskPurposeRef` で表す）、担当、進捗・待機・完了・失敗・Cancel・結果・未完了・次の判断、CORR→`restore_generation`（保全・消去 slice で導入） | D1 | Task 削除で固有 Workspace 関連付けを削除。形成済み・外部成果物へ cascade しない | restart 後に保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする |
 | `task_revision` | `(task_id, task_revision)` | 目的本文・`TaskPurposeRef`・採用指示・担当・委任前提の snapshot、steering 前後の区別。REV=`task_revision` | D2 | 同上 | 遅延結果の帰属（attempt→task revision→現在 Task）に使う |
 | `delegation` | `delegation_id` | CORR→`(task_id, task_revision)` 前提・委任元 Companion・一時 Agent ephemeral id・scope 写し・進捗・待機・停止・受領 | D1+D2 | Agent 終了・担当削除で Task record を消さない | 委任の継続・停止・受領を再構成する。Agent 一時 context 消失を完了根拠にしない |
-| `task_context_entry` | `entry_id` | CORR→`(task_id, task_revision)`、採用した目的・指示・材料・途中理解の identity 群・由来・取得時点。AU2 は採用目的の entry を持つ。用途は利用先が分岐する slice で、有効性は採用 revision が現在 revision かで解決して導入する。本文複製を要求しない | D1+D2 | Task 削除で固有分を削除。targeted deletion に参加する。Task 限り情報を Learning へ自動昇格しない | Task 判断・Observer 仲介（個体調整–作業協調経由）の材料として読む |
+| `task_context_entry` | `entry_id` | CORR→`(task_id, task_revision)`、採用した目的・指示・材料・途中理解の identity 群・由来・取得時点。AU2 は採用目的の entry を持つ。用途は利用先が分岐する slice で導入する。有効性は item の採用 identity が現在有効な採用 identity と一致するかで解決する（revision 番号の一致では判定しない。`new_purpose: None` で引き継いだ目的は、採用 revision が現在 revision より前でも現在有効）。本文複製を要求しない | D1+D2 | Task 削除で固有分を削除。targeted deletion に参加する。Task 限り情報を Learning へ自動昇格しない | Task 判断・Observer 仲介（個体調整–作業協調経由）の材料として読む |
 | `workspace_assoc` | `assoc_id` | CORR→`task_id`、外部 folder/file/source 参照（E、所有ではない）、利用条件・保存先・待機。作成時は関連付けを確定した場合のみ row を持ち、folder と保存先を保存する。利用条件・待機はそれらを解決する slice で追加する | D1 | Task 削除で関連付けを削除。外部実体へ cascade しない。backup は関連付けのみ含め実体を収集しない | 関連付けを再構成する |
 | `internal_copy` | `copy_id` | CORR→`task_id`・元外部参照・由来・取得時点・用途、保管参照（DB inline または filesystem path）、削除 marker | D1 | Task 削除で整理。targeted deletion に参加する（外部所有を理由に除外しない） | 作業継続に必要な copy として読む。外部現在値と混同しない |
 | `intermediate_file` | `file_id` | 用途・必要期間・整理対象・保管参照（外部に置いた場合も外部作用として Permission に従う） | D1（一時作業物だが Task 終了まで durable） | Task 終了または保持方針で整理する。永久成果物と混同しない | 整理対象として読む |
@@ -395,9 +395,9 @@ Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の
 
 - AU1a（同 owner 原子）: `history_message` insert + `undelivered` insert（会話・交流由来の要時）。いずれかだけが残る中間を可視にしない。
 - AU1b（順序＋原子登録）: Task 由来の `undelivered` は Task 結果 durable 後に別 transaction で原子に登録する（Task durable→未伝達可視の順序。単一 transaction にまとめず、共有 SQLite transaction は mechanism として許す）。Task durable なしに未伝達だけが残る dangling、Task durable ありに未伝達なしの報告漏れのいずれも残さないよう、crash 後は Task 結果と未伝達の対応を照合して未登録を補完できること。
-- AU2（同 owner 原子）: `task` insert + `task_revision` insert + 初期 `task_context_entry` insert(s) +（Workspace 関連付けを確定した場合のみ `workspace_assoc` insert）。commit 前は委任・実行から不可視。
+- AU2（同 owner 原子）: `task` insert + `task_revision` insert + 初期 `task_context_entry` insert(s) +（Workspace 関連付けを確定した場合のみ `workspace_assoc` insert）。commit 前は委任・実行から不可視。いずれかの insert が失敗したら先行 insert を含めて rollback し、一部だけの行・未 commit の部分を可視にしない。
 - AU3（cross-owner atomic read）: `delegation` insert 時の `expected_task_revision` 照合（Task 現在 revision との compare）。不一致なら不受理・再評価へ戻す。
-- AU4（同 owner 原子）: steering 時の `task_revision` forward + `task` current pointer 更新 + 新 `task_context_entry`。旧 revision を残す。
+- AU4（同 owner 原子）: steering 時の `task_revision` forward + `task` current pointer 更新（現在 `TaskPurposeRef`・目的本文も同一 commit で更新し、`new_purpose: None` は直前値を維持する）+ 新 `task_context_entry`（目的を変更しない場合も直前の採用目的 entry を新 revision に引き継いで記録する）。旧 revision を残す。
 - AU5（同 owner 原子 + 別 owner 順序）: `action_attempt` insert（前提照合付き）。確定度更新は同 row の `expected_certainty + 新 evidence` の原子更新。Task 達成は別 transaction で attempt を読み取って更新する（durable-before-adopt）。
 - AU6（cross-owner atomic read）: `usage_fact_*` insert + cap 照合（`cap_limit` + 関連 `usage_fact_*` の合計読み取り）。同一 transaction 内で判定し、cap・不明で継続不可なら data 保持のまま停止・判断待ちにする。
 - AU7（同 owner 原子）: `presence_attribution` の `expected_generation + expected_state` 照合付き更新 + `presence_transition_log` append + `relocation_hint` 更新（要時）。
@@ -543,7 +543,7 @@ DB を分ける / 同一にする判断は上表の必要性に限る。Host dur
 | scenario | 歩行と必要な結果 | 本書の成立箇所 |
 |---|---|---|
 | normal conversation → History → Learning | 会話→`history_message` append +（要時）`undelivered` の AU1a 原子 durable。形成は別 transaction で認識・学習が現在認識・根拠・scope・保存条件・消去状況へ照合し、必要な状態だけ形成・Summary を共通根拠に対応付ける。訂正は新 Experience とし過去発言を現在認識へ書き換えない | §3, §4 Group B/C, §7 AU1a |
-| Task delegation → result | Task 作成の AU2 原子 durable（task+revision+context+関連付けの durable-before-visible）。委任は `expected_task_revision` の atomic compare。結果は attempt→Task revision→現在 Task の順に辿り、記録（元へ残す）と採用（現在の受入）を分ける。旧目的の結果を新目的に自動採用しない | §4 Group D/E, §7 AU2/AU3/AU5, §10 |
+| Task delegation → result | Task 作成の AU2 原子 durable（task+task_revision+初期 context＋関連付けを確定した場合の workspace_assoc の durable-before-visible）。委任は `expected_task_revision` の atomic compare。結果は attempt→Task revision→現在 Task の順に辿り、記録（元へ残す）と採用（現在の受入）を分ける。旧目的の結果を新目的に自動採用しない | §4 Group D/E, §7 AU2/AU3/AU5, §10 |
 | unknown external Action → restart | `action_attempt(Unknown + 根拠・hold + generation タグ)` を D3 として保全し、restart 後に Unknown のまま再構成する。自動再実行・replay せず、重複 risk を示した Owner 判断による新 attempt とする。記録保存失敗を未実行の根拠にしない | §4 Group E, §6, §7 AU5 |
 | Client move → restart → stale reconnect | `presence_attribution(generation)` + hint・復旧先（非現在）+ 現接続・許可・排他性の確認で stale を識別する。再接続の古い一時 state・旧承認・解決済み経路だけで presence・Permission・再開を成立させない。元 Client 利用不能なら active なしで待つ。旧 round・旧試行を replay しない | §4 Group G, §6, §7 AU7, §10 |
 | Targeted Deletion 中の crash | `deletion_operation` + `erasure_condition` + `deletion_participant` を Host で保全し、未完了・保留・再保存防止を維持する。参加者・残存検証完了後でも検索 token が復元可能なら `finalizing` として再起動後に最終消去を続け、token の除去・復元不能化を確認する前に全域完了・hold 解除へ進まない。区間内再到着・遅延再保存・古い根拠からの再形成を防ぎ、完了記録・Audit へ本文を残さない | §4 Group J, §6, §7 AU9, §8 |

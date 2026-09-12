@@ -206,12 +206,13 @@ BEGIN IMMEDIATE;
   cur = SELECT revision FROM task WHERE task_id = ?;
   IF cur != expected_revision THEN ROLLBACK; RETURN StalePremise;
   INSERT task_revision(task_id, cur+1, 新目的・指示・委任前提);
-  UPDATE task SET revision = cur+1 WHERE task_id = ?;
+  UPDATE task SET revision = cur+1, 現在 purpose・目的本文 = 新目的または直前値 WHERE task_id = ?;
   INSERT task_context_entry(...新 revision 対応...);
 COMMIT;
 
 -- delayed Agent result 到着 (lock なしで帰属解決 → SD-Task の短い受入 tx)
 premise = result.task_ref; -- (task_id, revision 前提)
+                           -- premise の目的は premise.revision の task_revision snapshot から解決する
 BEGIN IMMEDIATE;
   cur = SELECT revision, purpose FROM task WHERE task_id = ?;
   IF premise.revision != cur.revision OR premise.purpose != cur.purpose
@@ -510,7 +511,7 @@ fn cas_task_steer(
             return Ok(CasOutcome::StalePremise { expected, current: cur });
         }
         insert_task_revision(tx, &task, &cur.next(), &next_purpose)?;
-        update_task_current(tx, &task, &cur.next())?;
+        update_task_current(tx, &task, &cur.next(), &next_purpose)?; // 現在 purpose・目的本文も更新（None は直前値）
         insert_task_context_entry(tx, &task, &cur.next())?;
         Ok(CasOutcome::Accepted)
     })

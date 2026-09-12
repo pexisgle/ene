@@ -142,6 +142,7 @@ struct TaskPurpose { text: String }  // 採用目的本文。Debug では redact
 
 // steering・遅延結果の比較材料（boundary token。authority ではない）。
 // expected は依拠した現在 revision、purpose は依拠した現在目的。
+// premise.purpose は expected.revision の目的と一致すること（不一致は stale として不受理）。
 struct SteeringPremiseRef {
     expected: TaskRef,
     purpose: TaskPurposeRef,
@@ -156,7 +157,8 @@ struct TaskContextEntryId(/* opaque */);
 enum TaskContextItem { AdoptedPurpose(TaskPurposeRef) }
 struct TaskContextOrigin {
     kind: TaskContextOriginKind,   // 会話・自発・Schedule 各回等の由来
-    source: RawId,                 // 由来 record の identity（本文は複製しない）
+    source: RawId,                 // 由来 record の identity（会話: History record、自発: 活動 record、
+                                   // Schedule: occurrence。本文は複製しない）
 }
 enum TaskContextOriginKind { OwnerConversation, Spontaneous, ScheduleOccurrence }
 struct TaskContextEntry {
@@ -185,7 +187,18 @@ struct ProposeTaskCommand {
     purpose: TaskPurpose,            // 採用を提案する目的本文（identity は作業が確定）
     origin: TaskContextOrigin,       // 会話・自発・Schedule 各回等の由来
     workspace_need: Option<WorkspaceNeedRef>, // Workspace 利用条件（関連付けは作業が確定）
-    client_binding: Option<ClientBindingPremise>, // Client 依存条件（あれば）
+    client_binding: Option<ClientBindingPremise>, // Client 依存条件（受入時の現在条件。durable にしない）
+}
+
+// 受入側 premise（caller が要求型から写す Task 側の値。identity は含めない）。
+// TaskId・TaskContextEntryId・WorkspaceAssocId は作業（orchestrate）が mint し、
+// TaskCreationPremise を構成して repository へ渡す。
+struct TaskProposalPremise {
+    requester: AssigneeRef,          // ProposeTaskCommand.requester の写し
+    purpose: TaskPurpose,
+    origin: TaskContextOrigin,
+    workspace_need: Option<WorkspaceNeedRef>,
+    client_binding: Option<ClientBindingPremise>, // 受入時の現在条件。durable にしない
 }
 
 struct ProposeSteeringCommand {
@@ -195,8 +208,8 @@ struct ProposeSteeringCommand {
     unadopted: Vec<UnadoptedReasonRef>, // 未反映・待機の対応（あれば）
 }
 
-// 作業が採用した追加指示の identity。採用は新 revision の context entry が表し、
-// 発言 record（History の正本）を採用済みと同一視しない。
+// 作業が採用した追加指示の identity。採用は新 revision の context entry（指示 entry は
+// steering slice で追加）が表し、発言 record（History の正本）を採用済みと同一視しない。
 struct AdoptedInstructionRef { source: RawId }
 
 struct CancelTaskCommand {
@@ -245,9 +258,10 @@ enum TaskResultAcceptance {
 }
 ```
 
-- request 開始責務：個体調整（Task 化・steering・Cancel の意図）。authoritative 判断：作業（受理・反映・達成）。`TaskProposalOutcome`・`TaskRepository` trait・repository outcome は作業が所有し、caller は自分の要求型（`ProposeTaskCommand` 等）を Task 側 premise へ mapping して渡す。Permission 判断は権限・制約、作用成功は実行・拡張に残る。
+- request 開始責務：個体調整（Task 化・steering・Cancel の意図）。authoritative 判断：作業（受理・反映・達成）。`TaskProposalOutcome`・`TaskRepository` trait・repository outcome は作業が所有し、caller（dialogue）は自分の要求型（`ProposeTaskCommand` 等）を Task 側の値 premise（`TaskProposalPremise`）へ mapping して渡す。TaskId・TaskContextEntryId・WorkspaceAssocId の identity は作業（`orchestrate`）が mint して `TaskCreationPremise` を構成する。creation では requester を担当 `AssigneeRef` として写す。Permission 判断は権限・制約、作用成功は実行・拡張に残る。
 - 入力として必要なもの：採用を提案する目的本文と由来（creation）、`SteeringPremiseRef`（依拠 revision・目的。steering）、委任 scope 写し、Workspace 利用条件、Client 依存条件。軽微処理の Task 化省略は本体が行える範囲だが、閾値・分類 algorithm は固定しない（H-9）。
 - purpose / origin / scope：目的本文・採用位置の identity・由来・委任範囲・Workspace 範囲を欠落させない。発言 record と Task 反映内容と未反映・待機を区別する。
+- Client 依存条件：`client_binding` は受入時の現在条件として照合し、Task の durable state にしない。実行時の Client 条件は後続 boundary（Action 開始等）で現在の presence generation・現接続から再確認する（IB §10）。
 - expected current condition：現在の Task revision・委任有効性・Workspace 有効性・steering 前提。Client 依存なら presence generation＋現接続・可用性。
 - cancellation / hold：Cancel 受付と遂行停止・外部作用の停止完了を分ける。Cancel 後の遅延結果は `RecordedToOriginalOnly` に留める。
 - result certainty：Agent 申告を作用証拠にしない。作用確定度は実行・拡張の fact を参照・集約し、作業側で独立更新しない。
@@ -391,7 +405,7 @@ enum ReportStatusTransition {
 ```rust
 struct CreateScheduleCommand {
     owner_selection: OwnerSelectionRef,
-    assignee: CompanionId,
+    assignee: AssigneeRef,           // Task 側 premise（CompanionId を import しない）
     content: ScheduleContentRef,     // 実行内容・初期 Workspace 入力
     timezone: ScheduleTimezoneRef,   // 作成時 tz（黙置換しない）
 }
@@ -1112,7 +1126,7 @@ struct ManagementOperationCommand {
 
 | interface | expected identity+revision | expected generation（型付き） | source / consumer | purpose・用途・scope | operation / attempt | certainty | hold / 削除 / 復元関係 |
 |---|---|---|---|---|---|---|---|
-| H-A Task/steering/委任 | ● `TaskRef` | ○ restore premise（復元跨ぎ参照。保全・消去 slice で導入） | ● 委任元 Companion・Task・Workspace | ● `SteeringPremiseRef`・委任 scope | ○ `DelegationRef` | —（達成は作業、確定度は実行・拡張） | ● 停止・保留・消去・復元保留の照合 |
+| H-A Task/steering/委任 | ● `TaskRef` | ○ restore premise（復元跨ぎ参照。保全・消去 slice で導入） | ● 委任元 Companion・Task・Workspace | ● creation の目的・`SteeringPremiseRef`・委任 scope | ○ `DelegationRef` | —（達成は作業、確定度は実行・拡張） | ● 停止・保留・消去・復元保留の照合 |
 | H-A Agent 結果受入 | ● `DelegationRef`（Task revision 前提含む） | ○ presence/restore/sweep タグ | ● 委任元・Task | ● 現在目的との対応 | ● attempt 対応 | ○ Agent 申告（証拠にしない） | ● Cancel・steering・消去・復元との照合 |
 | H-B Experience | ○ Task 由来なら `TaskRef` | ○ presence/restore/sweep タグ | ● 経験個体・Task・委任 | ● intended_use・scope 期待 | — | — | ● 保存禁止・非共有・消去条件 |
 | H-C 訂正 | ● `(LearningId, expected_revision)` | ○ sweep タグ | ● 対象・新 Experience | ● 時間的意味 | — | — | ● 消去・制約 |
@@ -1226,8 +1240,8 @@ completion 側では元の identity / revision / generation / attempt / operatio
 // --- Task（PR Group D。SD-Task。前提 read → 長時間処理 → 短い commit compare） ---
 struct TaskCommitPremise {            // steering（AU4）
     expected: TaskRef,               // expected revision
-    new_purpose: Option<TaskPurpose>, // None = 目的変更なし（直前の purpose を引き継ぐ）
-    new_context: Vec<TaskContextEntry>, // 新 revision に対応する context entry（本文複製を要求しない）
+    new_purpose: Option<TaskPurpose>, // None = 目的変更なし（直前の purpose を引き継ぐ）。Some は新 revision を採用位置とする
+    new_context: Vec<TaskContextEntry>, // 新 revision に対応する context entry。reference は repository が CAS 成立後の (task, cur+1) を刻む（本文複製を要求しない）
 }
 
 enum TaskCommitOutcome {
@@ -1252,15 +1266,15 @@ struct WorkspaceAssociationPremise {
 }
 
 // reload / recovery の読み戻し。現在 revision の AU2 単位を返す。
-struct Task {
+struct Task {                        // task 行の現行値（D1）。内容の正本は revision snapshot で、同じ revision を指す
     reference: TaskRef,              // 現在 revision
-    purpose: TaskPurposeRef,         // 現在採用されている目的
+    purpose: TaskPurposeRef,         // 現在採用されている目的（本文は revision snapshot）
     assignee: AssigneeRef,
 }
 struct TaskRevisionRecord {
     reference: TaskRef,
-    purpose: TaskPurpose,            // この revision 時点の snapshot
-    purpose_ref: TaskPurposeRef,     // この revision で有効な採用目的
+    purpose: TaskPurposeRef,         // この revision で有効な採用目的
+    purpose_text: TaskPurpose,       // この revision 時点の目的本文 snapshot
     assignee: AssigneeRef,
 }
 struct WorkspaceAssociation {
@@ -1279,6 +1293,7 @@ struct TaskRecord {
 trait TaskRepository {
     // Task 作成：task + task_revision + 初期 task_context_entry +（関連付け確定時）
     // workspace_assoc の原子 durable。commit 前は委任・実行から不可視（durable-before-visible）。
+    // いずれかの insert が失敗したら先行 insert を含めて rollback し、一部だけの行を可視にしない。
     async fn create_task(
         &self,
         premise: TaskCreationPremise,
@@ -1290,8 +1305,8 @@ trait TaskRepository {
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError>;
 
-    // reload / recovery：commit 済みの AU2 単位を現在 revision について読み戻す。
-    // 存在しない identity は None（fabricate しない）。
+    // reload / recovery：commit 済みの AU2 単位のみを現在 revision について読み戻す。
+    // 存在しない identity は None。部分的な行から TaskRecord を合成しない（欠損は技術エラー）。
     async fn load_task(
         &self,
         task: TaskId,
@@ -1314,7 +1329,7 @@ trait TaskRepository {
     // 履歴・context は append 系。現在値の上書きではない。
     async fn append_task_revision_record(
         &self,
-        record: TaskRevisionRecordRef,
+        record: TaskRevisionRecord,
     ) -> Result<(), TaskTechnicalError>;
 }
 

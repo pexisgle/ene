@@ -246,16 +246,13 @@ struct TaskContextEntryId(/* opaque */);
 struct DelegationRef {
     delegation: DelegationId,
     task: TaskRef,               // 委任元 Task とその revision 前提
-    delegator: CompanionId,      // 委任元 Companion
+    delegator: AssigneeRef,      // 委任元 Companion（Task 側 premise。CompanionId を import しない）
     agent: TaskAgentEphemeralId, // 一時主体。長期人格・Relationship を持たない
     scope: DelegationScope,      // Task・Workspace 境界の写し
 }
 
-struct TaskContextRef {
-    task: TaskRef,
-    // 採用した目的・指示・材料・途中理解の identity 群（TaskContextEntry）。
-    // 採用 identity と由来・取得時点を持ち、内容の正本は Task record。本文複製を要求しない。
-}
+// Task context の identity 群は TaskContextEntry（採用 identity・由来・取得時点。
+// 内容の正本は Task record、本文複製を要求しない）として task 側に定義する。
 
 struct ScheduleOccurrenceRef {
     schedule: ScheduleId,
@@ -498,7 +495,7 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 |---|---|---|
 | 個体・適用関係 | `(CompanionId, CharacterId, CharacterRevision, AppliedPart 群, OwnerSelectionRef)` | 途中編集・import・export・適用供給の中断で最終正常と旧適用関係を保つ。部分適用・未確認編集を正本にしない。 |
 | 会話・活動 record・未伝達 | History 原 record（参加者・文脈）、保存された非会話 record・evidence、進行中意味判断、`UndeliveredRef`＋報告状況 | Client 入力途中・表示 timeline・audio buffer は失ってよい。受理済み指示・必要作業 record・未伝達は失わない。 |
-| Task・委任・context・Workspace・Schedule | `(TaskId, TaskRevision, 目的・担当・進捗・待機・結果・未完了・次の判断)`、`(DelegationId, TaskRef, 委任元・範囲・進捗・待機・停止・受領)`、`TaskContextRef`（由来・取得時点・目的・有効性）、Workspace 関連付け・保存先・待機、Schedule 設定・timezone・初期入力・回到達対応・各回 Task | 途中 Task は保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする。Agent 終了・担当削除で Task record を消さない。 |
+| Task・委任・context・Workspace・Schedule | `(TaskId, TaskRevision, 目的・担当・進捗・待機・結果・未完了・次の判断)`、`(DelegationId, TaskRef, 委任元・範囲・進捗・待機・停止・受領)`、`TaskContextEntry`（採用 identity・由来・取得時点）、Workspace 関連付け・保存先・待機、Schedule 設定・timezone・初期入力・回到達対応・各回 Task | 途中 Task は保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする。Agent 終了・担当削除で Task record を消さない。 |
 | Action の把握された作用・不明・停止結果 | `(ActionAttemptId, Task・委任対応, 実対象・操作種別, 確定度, 根拠対応, hold)` | buffer 寿命を越えて保持する。不明を未実行に戻さない。 |
 | Learning・Summary・根拠・scope | Summary＋`SummaryGroundsRef`、Memory 現在・重要度・scope・過去 revision・履歴、Skill 有効 revision・過去 revision・原本対応・実行結果対応、Relationship 現在・保持過去・根拠、Companion State（継続に要る状態・一時の時間意味・保持根拠） | 派生物（embedding / index / query 派生 / cache / session / 経路 / 表示集計）は独立復元対象にしない。古派生から権限・状態を復活させない。 |
 | 権限・制約・同意・cap・利用量 | Rule 本文・解釈・scope・`RuleRevision`・Undo 対応、Permission 判断記録（生きた許可ではない）、assignment 同意・fallback 順序・device・禁止・非共有・cap、利用量（報告・不明・処理中の別） | 過去 Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定を現在許可として復活させない。cap 用の利用量事実は cache clear・log 整理・Agent 終了・移動で reset しない。 |
