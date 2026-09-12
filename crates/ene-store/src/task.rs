@@ -220,7 +220,7 @@ fn forward_steering_sync(
     };
     let current_adopted = decode_revision(current.purpose_adopted_revision)?;
     // The forward must never normalize a D1/D2 pair that every read rejects,
-    // so the current unit is validated before any write like the read path.
+    // so the pair the commit depends on is validated before any write.
     let snapshot: RawTaskRevision = tx
         .query_row(
             SQL_SELECT_TASK_REVISION,
@@ -273,9 +273,12 @@ fn forward_steering_sync(
                 .ok_or_else(|| {
                     task_unavailable("task adopted purpose entry missing for the current revision")
                 })?;
-            // Fail closed on an unreadable stored kind instead of copying
-            // corruption into the new revision.
+            // Fail closed on unreadable stored provenance instead of copying
+            // corruption into the new revision. The reads only validate; the
+            // bytes stay as stored.
             decode_origin_kind(&predecessor.0)?;
+            decode_id(&predecessor.1).map_err(task_unavailable)?;
+            decode_clock(&predecessor.2)?;
             (
                 current_adopted,
                 snapshot.purpose_text,
