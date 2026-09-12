@@ -442,8 +442,8 @@ impl WorkspaceRoot {
     /// Linux: root and target must share a device, and no mount point from
     /// `/proc/self/mountinfo` may sit strictly below the root on the target's
     /// path (an unreadable mount table fails closed). Other Unix: device
-    /// equality. Windows: volume serial equality. Undeterminable boundaries
-    /// are refused, never assumed inside.
+    /// equality. Windows: canonical volume-prefix equality. Undeterminable
+    /// boundaries are refused, never assumed inside.
     fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
         self.boundary_holds_impl(target, metadata)
     }
@@ -475,14 +475,25 @@ impl WorkspaceRoot {
     }
 
     #[cfg(windows)]
-    fn boundary_holds_impl(&self, _target: &Path, metadata: &fs::Metadata) -> bool {
-        use std::os::windows::fs::MetadataExt;
+    fn boundary_holds_impl(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
+        use std::path::Component;
 
-        let root_volume = fs::metadata(&self.root)
-            .ok()
-            .and_then(|root| root.volume_serial_number());
-        let target_volume = metadata.volume_serial_number();
-        matches!((root_volume, target_volume), (Some(left), Some(right)) if left == right)
+        fn volume_prefix(path: &Path) -> Option<std::path::Prefix<'_>> {
+            match path.components().next() {
+                Some(Component::Prefix(prefix)) => Some(prefix.kind()),
+                _ => None,
+            }
+        }
+        // The root is already canonical; the target is canonicalized so a
+        // nested volume mount resolves to its own volume prefix. Any failure
+        // refuses the boundary rather than assuming it holds.
+        let Ok(canonical_target) = fs::canonicalize(target) else {
+            return false;
+        };
+        match (volume_prefix(&self.root), volume_prefix(&canonical_target)) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
     }
 }
 
