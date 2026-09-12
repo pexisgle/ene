@@ -28,6 +28,15 @@ fn attempt_premise(
     }
 }
 
+/// A platform-absolute fixture target. `Path::is_absolute` requires a Windows
+/// prefix, so fixtures cannot hardcode a Unix path.
+fn target_path(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Seeds one Task with a confirmed workspace association and one delegation
 /// whose copied scope relies on exactly that association.
 async fn seed_workspace_delegation(store: &Store) -> (TaskRef, DelegationId, WorkspaceAssocId) {
@@ -63,7 +72,7 @@ async fn action_attempt_records_the_durable_correlation() {
     let store = open_memory().await.unwrap();
     let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
     let attempt = ActionAttemptId::generate();
-    let target = "/srv/workspace/ene/report.md";
+    let target = target_path("report.md");
     assert_eq!(
         store
             .insert_attempt_if_current(attempt_premise(
@@ -71,7 +80,7 @@ async fn action_attempt_records_the_durable_correlation() {
                 delegation,
                 created,
                 assoc,
-                target,
+                &target,
                 OperationKind::Create,
             ))
             .await,
@@ -87,7 +96,7 @@ async fn action_attempt_records_the_durable_correlation() {
     assert_eq!(record.task, created.task.as_raw());
     assert_eq!(record.task_revision.as_u64(), created.revision.as_u64());
     assert_eq!(record.workspace, assoc.as_raw());
-    assert_eq!(record.real_target.as_path(), target);
+    assert_eq!(record.real_target.as_path(), target.as_str());
     assert_eq!(record.operation, OperationKind::Create);
     assert_eq!(
         record.certainty,
@@ -113,7 +122,7 @@ async fn action_attempt_correlation_survives_reopen_without_replay() {
                     delegation,
                     created,
                     assoc,
-                    "/srv/workspace/ene/report.md",
+                    &target_path("report.md"),
                     OperationKind::Create,
                 ))
                 .await,
@@ -155,7 +164,7 @@ async fn action_attempt_is_stale_after_a_steering_forward() {
                 delegation,
                 created,
                 assoc,
-                "/srv/workspace/ene/report.md",
+                &target_path("report.md"),
                 OperationKind::Create,
             ))
             .await,
@@ -176,7 +185,7 @@ async fn action_attempt_is_stale_when_the_delegation_is_missing() {
                 DelegationId::generate(),
                 created,
                 assoc,
-                "/srv/workspace/ene/report.md",
+                &target_path("report.md"),
                 OperationKind::Create,
             ))
             .await,
@@ -207,7 +216,7 @@ async fn action_attempt_is_stale_without_a_workspace_association() {
                 delegation,
                 created,
                 WorkspaceAssocId::generate(),
-                "/srv/workspace/ene/report.md",
+                &target_path("report.md"),
                 OperationKind::Create,
             ))
             .await,
@@ -247,7 +256,7 @@ async fn action_attempt_is_stale_when_the_delegated_scope_is_wider_than_the_asso
                 delegation,
                 created,
                 assoc,
-                "/srv/workspace/ene/report.md",
+                &target_path("report.md"),
                 OperationKind::Create,
             ))
             .await,
@@ -266,7 +275,7 @@ async fn action_attempt_premise_disagreement_is_a_technical_error() {
         delegation,
         created,
         assoc,
-        "/srv/workspace/ene/report.md",
+        &target_path("report.md"),
         OperationKind::Create,
     );
     premise.task_revision = RevisionInner::from_u64(created.revision.as_u64() + 7);
@@ -307,7 +316,7 @@ async fn multiple_workspace_associations_fail_closed_at_start() {
             delegation,
             created,
             assoc,
-            "/srv/workspace/ene/report.md",
+            &target_path("report.md"),
             OperationKind::Create,
         ))
         .await;
@@ -338,7 +347,7 @@ async fn duplicate_attempt_identity_is_a_technical_error() {
         delegation,
         created,
         assoc,
-        "/srv/workspace/ene/report.md",
+        &target_path("report.md"),
         OperationKind::Create,
     );
     assert_eq!(
@@ -368,7 +377,7 @@ async fn certainty_cas_only_moves_unknown_forward() {
                 delegation,
                 created,
                 assoc,
-                "/srv/workspace/ene/report.md",
+                &target_path("report.md"),
                 OperationKind::Create,
             ))
             .await,
@@ -440,7 +449,7 @@ async fn certainty_cas_keeps_an_unverifiable_outcome_unknown() {
             delegation,
             created,
             assoc,
-            "/srv/workspace/ene/report.md",
+            &target_path("report.md"),
             OperationKind::Edit,
         ))
         .await
@@ -497,7 +506,7 @@ async fn action_attempt_reads_fail_closed_on_corrupt_rows() {
                     delegation,
                     created,
                     assoc,
-                    "/srv/workspace/ene/report.md",
+                    &target_path("report.md"),
                     OperationKind::Read,
                 ))
                 .await,
