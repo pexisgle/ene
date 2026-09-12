@@ -2866,6 +2866,7 @@ async fn queued_experience_keeps_its_completion_premise() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: None,
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -2948,6 +2949,7 @@ async fn approving_a_credential_redacts_its_prior_occurrences() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: None,
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3027,6 +3029,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: Some(old_revision),
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3078,6 +3081,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: Some(old_revision),
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3111,6 +3115,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: Some(fresh.credential_set),
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -3165,6 +3170,7 @@ async fn startup_with_an_unreadable_registered_value_never_opens() {
             expected_generation: generation,
             expected_consent: None,
             expected_credential_set: None,
+            expected_owner_message: None,
             command_id: None,
             round_wire: None,
             round_intent: None,
@@ -4656,6 +4662,308 @@ async fn completion_after_round_replacement_adopts_nothing() -> Result<(), Strin
         timeline_count(&handle).await?,
         3,
         "both owner inputs plus the overtaking reply are durable, never the stale one"
+    );
+    Ok(())
+}
+
+/// A provider that commits a newer accepted Owner input after its last
+/// delta, before returning completion — without moving the open round,
+/// generation, consent, or lifecycle. Only the append transaction's
+/// Owner-message premise can refuse the stale reply, which proves the
+/// durable authority split: the Host-side check passes, the store
+/// refuses.
+struct OwnerSupersedingTransport<'a> {
+    store: &'a ene_store::Store,
+    release: tokio::sync::Notify,
+}
+
+impl OwnerSupersedingTransport<'_> {
+    async fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+impl ProviderTransport for OwnerSupersedingTransport<'_> {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(ene_inference::ProviderResponse {
+                text: String::from("Hello"),
+                usage: None,
+            })
+        })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ene_inference::ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if let ene_inference::DeltaFlow::Abort(reason) = sink.push_delta("Hel").await {
+                return Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                    reason: reason.to_owned(),
+                });
+            }
+            self.release.notified().await;
+            // A concurrent Owner commit landing after the last delta and
+            // before the reply append: the open round, generation, consent,
+            // and lifecycle never move, so the Host-side check still passes
+            // and only the append transaction can refuse.
+            {
+                use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+                use ene_presence::PresenceRepository as _;
+
+                let companion = self
+                    .store
+                    .ensure_running_companion()
+                    .await
+                    .expect("the companion must resolve");
+                let attribution = self
+                    .store
+                    .load_attribution(companion.as_raw())
+                    .await
+                    .expect("attribution must load")
+                    .expect("attribution must exist");
+                let overtaking = ene_companion::AppendHistoryCommand {
+                    companion,
+                    round: RawId::new(),
+                    role: ene_companion::HistoryRole::Owner,
+                    text: String::from("overtaking input"),
+                    lang: String::from("en"),
+                    at: ene_primitive::WallClockWithTz::now(),
+                    expected_generation: attribution.generation,
+                    expected_consent: None,
+                    expected_credential_set: None,
+                    expected_owner_message: None,
+                    command_id: None,
+                    round_wire: None,
+                    round_intent: None,
+                    incarnation: None,
+                    local_id: None,
+                };
+                let outcome = self
+                    .store
+                    .append_message(overtaking)
+                    .await
+                    .expect("the overtaking owner must commit");
+                assert!(
+                    matches!(
+                        outcome,
+                        ene_companion::HistoryAppendOutcome::CommittedAs { .. }
+                    ),
+                    "the overtaking owner must commit, got {outcome:?}"
+                );
+            }
+            Ok(ene_inference::ProviderResponse {
+                text: String::from("Hello"),
+                usage: None,
+            })
+        })
+    }
+}
+
+/// The append transaction refuses a reply whose Owner was superseded after
+/// the Host-side check passed: the open round, generation, consent, and
+/// lifecycle never move, so the Host predicate still answers current and
+/// only the durable Owner-message premise refuses. No append, no
+/// completion, no final frame — while the overtaking Owner row stays
+/// durable.
+#[tokio::test]
+async fn append_racing_a_newer_owner_commit_adopts_nothing() -> Result<(), String> {
+    use ene_companion::CompanionRepository as _;
+
+    let setup = ok_transport();
+    let live = live_input("client-owner-race");
+    let (handle, _dir) = round_test_handle("dlg-owner-race", &live, &setup).await?;
+    let racing = OwnerSupersedingTransport {
+        store: &handle.store,
+        release: tokio::sync::Notify::new(),
+    };
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-owner-1",
+        "first input",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live.clone(), &racing, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
+        return Err(String::from("the third frame is the first delta"));
+    };
+    if shown.delta != "Hel" {
+        return Err(format!(
+            "only the pre-race delta shows, got {:?}",
+            shown.delta
+        ));
+    }
+    let accepted = accepted_round(&early)?;
+    // Release the provider: it commits the overtaking Owner input, then
+    // returns completion with every Host-side premise untouched.
+    racing.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    assert!(
+        !first_frames.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamFrame(delta) if delta.is_final
+        )),
+        "the superseded stream emits no final frame, got {first_frames:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the superseded stream closes interrupted, got {first_frames:?}"
+    );
+    // The Host-side premise never moved: the open round still names the
+    // old turn, so the refusal came from the append transaction alone.
+    let expected = handle
+        .round_for(&accepted.0)
+        .ok_or(String::from("the accepted round must resolve"))?;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("the companion must resolve: {error:?}"))?;
+    let retained =
+        handle.open_round_for(&live.client_ref, &companion.as_raw().as_uuid().to_string());
+    assert!(
+        retained.is_none_or(|open| open.round == expected),
+        "no newer submit moved the open round in this race"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        2,
+        "both owner inputs are durable, never the stale reply"
+    );
+    Ok(())
+}
+
+/// A second Owner input in the SAME round still supersedes the running
+/// inference: round equality alone cannot prove recency, so the reply
+/// append compares the turn's Owner message against the latest accepted
+/// Owner instead. The old stream interrupts with no adoption while the
+/// joined round completes normally.
+#[tokio::test]
+async fn same_round_newer_owner_input_supersedes_the_running_reply() -> Result<(), String> {
+    use ene_inference::fake::FakeProviderTransport;
+
+    let parked = CompletionGatedTransport::new("Hel", "Hello");
+    let live = live_input("client-same-round");
+    let (handle, _dir) = round_test_handle("dlg-same-round", &live, &parked).await?;
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-same-1",
+        "first input",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live.clone(), &parked, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    let first_round = accepted_round(&early)?;
+    // The second send joins the open round: no fresh flag, current
+    // generation, same open entry afterwards — yet its Owner input is
+    // newer, so the running reply is superseded anyway.
+    let overtaking = FakeProviderTransport::new(String::from("second reply"), None);
+    let generation = current_generation(&handle).await?;
+    let second = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-same-2",
+        "second input",
+        live.connection_id,
+    );
+    let second_frames = handle.handle_frame(second, live.clone(), &overtaking).await;
+    assert_eq!(
+        accepted_round(&second_frames)?,
+        first_round,
+        "the second send must join the same round for this race"
+    );
+    if !matches!(
+        second_frames.last().map(|frame| &frame.payload),
+        Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+    ) {
+        return Err(format!("the joined round completes, got {second_frames:?}"));
+    }
+    parked.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    assert!(
+        !first_frames.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamFrame(delta) if delta.is_final
+        )),
+        "the superseded stream emits no final frame, got {first_frames:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the superseded stream closes interrupted, got {first_frames:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        3,
+        "both owner inputs plus the joined reply are durable, never the stale one"
     );
     Ok(())
 }

@@ -223,6 +223,8 @@ pub async fn begin_turn(
         expected_generation: input.generation,
         expected_consent: Some((consent_id, consent_rev)),
         expected_credential_set: Some(input.credential_set),
+        // Owner appends establish recency; only replies answer it.
+        expected_owner_message: None,
         local_id: input.local_id.clone(),
         command_id: Some(input.command),
         round_wire: Some(input.round_wire.clone()),
@@ -257,6 +259,10 @@ pub async fn begin_turn(
         }
         Ok(HistoryAppendOutcome::StaleConsent) => DialogueBegin::StaleConsent,
         Ok(HistoryAppendOutcome::StaleCredentialSet) => DialogueBegin::StaleCredentialSet,
+        // Owner appends carry no Owner-message premise, so the check is
+        // skipped and this arm is unreachable; Held is the safe mapping —
+        // retry-safe, with no side effects either way.
+        Ok(HistoryAppendOutcome::StaleOwnerInput) => DialogueBegin::Held,
         Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
         Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
             DialogueBegin::HeldByLifecycle(lifecycle)
@@ -286,14 +292,13 @@ pub async fn begin_turn(
 /// pushed to `sink` as they arrive, each gated on a current presentation
 /// premise; a delta shown before an invalidation stays as historical
 /// partial presentation, never rewound. `is_current` runs once more after
-/// provider completion, immediately before the durable append: the last
-/// delta may have been current while the reply it belongs to is already
-/// superseded, and no further delta would trip the gate. Durable premises
-/// (generation, consent, credential set, lifecycle) ride the append's
-/// atomic compare; `is_current` covers the transient presentation premise
-/// outside that transaction, so a superseded reply interrupts instead of
-/// appending. After the durable append, the Experience premise is pinned
-/// for the post-response Learning pass.
+/// provider completion as an early, best-effort refusal of a superseded
+/// reply: it only avoids a doomed append attempt. Durable adoption
+/// authority stays inside the append transaction — the reply carries the
+/// turn's Owner message identity as its premise, and the store refuses the
+/// append when a newer accepted Owner input committed first, even inside
+/// the same round. After the durable append, the Experience premise is
+/// pinned for the post-response Learning pass.
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
@@ -352,6 +357,10 @@ pub async fn finish_turn(
                 expected_generation: input.generation,
                 expected_consent: Some((consent_id, consent_rev)),
                 expected_credential_set: Some(text.credential_set),
+                // The durable Owner row this turn committed: the append
+                // refuses the reply when a newer accepted Owner input
+                // superseded it, even inside the same round.
+                expected_owner_message: Some(message),
                 local_id: None,
                 command_id: None,
                 // Same round, same projection; the reply is Host-produced,

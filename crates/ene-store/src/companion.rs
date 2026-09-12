@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
-    CompanionTechnicalError, HistoryAppendOutcome, HistoryMessage, HistoryRepository,
+    CompanionTechnicalError, HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole,
     PresentationMark, ReportStatus, ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
     UndeliveredTechnicalError,
 };
@@ -38,6 +38,17 @@ const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang
 const SQL_SELECT_RECENT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2";
 
 const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+
+/// Durable identity lookup for one Owner-message premise: the expected row
+/// resolves by primary key, never by text or position.
+pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
+    "SELECT rowid FROM history_message WHERE message_id = ?1";
+
+/// Supersession probe for one reply premise: any accepted Owner row for
+/// this companion past the expected rowid, newest or otherwise. Served by
+/// the companion-plus-role covering index and stopping at the first hit,
+/// so the common current case is one index step, never a History scan.
+pub(crate) const SQL_EXISTS_NEWER_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM history_message WHERE companion_id = ?1 AND role = ?2 AND rowid > ?3 LIMIT 1)";
 
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
@@ -143,6 +154,38 @@ fn append_history(
         let current = decode_u64(stored).map_err(companion_unavailable)?;
         if current != expected.as_u64() {
             return Ok((HistoryAppendOutcome::StaleCredentialSet, None));
+        }
+    }
+    if let Some(expected) = cmd.expected_owner_message {
+        // A newer accepted Owner input supersedes this turn's owner: the
+        // reply would answer input the owner already moved past, in any
+        // round. Committed owner rows are accepted inputs by construction
+        // — declined intakes never write — so any newer owner rowid for
+        // this companion proves supersession, inside this same
+        // transaction as the insert it guards. A premise that cannot even
+        // be read fails closed rather than adopting against the past.
+        let expected_rowid: Option<i64> = tx
+            .query_row(
+                SQL_SELECT_OWNER_ROWID,
+                params![encode_id(expected)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
+        let superseded = match expected_rowid {
+            None => true,
+            Some(rowid) => tx
+                .query_row(
+                    SQL_EXISTS_NEWER_OWNER,
+                    params![companion_text, encode_role(HistoryRole::Owner), rowid],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?
+                .is_some(),
+        };
+        if superseded {
+            return Ok((HistoryAppendOutcome::StaleOwnerInput, None));
         }
     }
     if let Some(command) = cmd.command_id {

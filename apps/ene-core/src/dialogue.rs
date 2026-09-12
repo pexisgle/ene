@@ -720,10 +720,10 @@ impl HostHandle {
                     // The open round is Host-owned transient state the
                     // companion must never read directly: hand finish_turn
                     // a sync predicate instead. It runs after provider
-                    // completion, immediately before the durable append, so
-                    // a superseding submit refuses the old reply even when
-                    // no further delta arrives to trip the presentation
-                    // gate.
+                    // completion as an early refusal, sparing a doomed
+                    // append attempt; durable adoption authority stays in
+                    // the store transaction, which compares the turn's
+                    // Owner message premise atomically.
                     let is_current = || {
                         self.open_round_for(&live.client_ref, &companion_key)
                             .is_none_or(|open| open.round == accepted)

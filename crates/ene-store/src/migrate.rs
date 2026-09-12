@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: u64 = 11;
+const CURRENT_VERSION: u64 = 12;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -254,6 +254,16 @@ rev INTEGER NOT NULL
 INSERT OR IGNORE INTO credential_set (id, rev) VALUES (1, 0);
 ";
 
+/// Backs the reply-adoption supersession probe: the newest-Owner check for
+/// one companion seeks this covering index and stops at the first hit, so
+/// a reply append never scans History to prove recency.
+///
+/// (Takes v12 on this branch, which is v11-based; the History-window and
+/// recall-index changes ahead in merge order own v12/v13 there, so this
+/// moves to v14 at integration.)
+const MIGRATION_V12: &str = "
+CREATE INDEX IF NOT EXISTS idx_history_message_companion_role ON history_message (companion_id, role);
+";
 /// Atomic: pending migrations and the version bump commit together in one
 /// transaction, so a crash mid-migration rolls back to the pre-migration
 /// state and the next open retries from scratch. The commit is the sole
@@ -311,6 +321,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 11 {
         tx.execute_batch(MIGRATION_V11)
+            .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 12 {
+        tx.execute_batch(MIGRATION_V12)
             .map_err(|error| error.to_string())?;
     }
     let current =
