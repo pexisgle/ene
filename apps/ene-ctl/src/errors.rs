@@ -2,15 +2,14 @@ use std::process::ExitCode;
 
 use ene_config::typed::ConfigError;
 
-pub const USAGE: &str = "usage: ene-ctl [--config PATH] <command>\ncommands: setup [--show | --provider openai --model MODEL], status, send [--new | --round ROUND] TEXT..., watch --round ROUND, history [--limit N], memory [--after ID]";
-
 /// Message rule: variants carry operations, payload-kind names, refs,
 /// generations, and the Host's own operational reasons only — never secrets,
 /// key material, or conversation bodies. Codec messages rely on
 /// `ene-plugin-ipc` diagnostics, which never echo frame bytes.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    /// The message always ends with [`USAGE`].
+    /// Argument misuse; the display carries the parser usage or the
+    /// domain validation message.
     #[error("{0}")]
     Usage(String),
     #[error(transparent)]
