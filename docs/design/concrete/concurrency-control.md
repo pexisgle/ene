@@ -51,6 +51,7 @@
 10. **Client claim は presence authority ではない。** presence の authority は Host 管理の個体別帰属記録のみである（CI §3.5）。
 11. **DB transaction を長時間保持しない。** external I/O・長時間 inference 中に DB transaction / mutex を保持しない（第15節）。
 12. **単純化の禁止。** 「全部 actor」「全部 mutex」「全部 DB transaction」「一つの global coordinator」「universal event ordering」「Lamport / vector clock」「distributed consensus / lease」は必要性がなければ導入しない。Owner 管理 Host を canonical authority とする現在の topology を活用する。
+13. **atomic replacement は lost update を防がない。** temp file の rename、単一 row の replace、DB の1 transaction commit は torn write・部分公開を防ぐが、複数 writer が同じ snapshot を読んで各自の変更を書き戻す read-modify-write 全体を順序付けない。そのような経路は、replacement とは別に serialization domain（短い lock / transaction / 単一 writer への集約）を持ち、lost update を防ぐ。crash 後に lock が残らない方式を選ぶ。
 
 ## 3. 何が同時に起こり得るか（concurrency sources と競合対）
 
