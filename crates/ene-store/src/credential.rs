@@ -61,9 +61,10 @@ fn fresh_pairing_secret() -> String {
 
 impl Store {
     /// Approves one credential pair atomically: sweeps existing content,
-    /// makes the ref usable, and bumps the credential-set revision.
+    /// rebuilds the derived recall tokens from the swept text, makes the ref
+    /// usable, and bumps the credential-set revision.
     ///
-    /// One `Immediate` transaction owns all three effects, so a scrub premise
+    /// One `Immediate` transaction owns all four effects, so a scrub premise
     /// taken before the commit is either covered by the sweep (content lands
     /// before) or refused by the revision (content lands after). The caller
     /// runs this while the bearer is borrowed inside
@@ -129,6 +130,11 @@ impl Store {
 }
 
 /// Table and column pairs holding quarantined plaintext content.
+///
+/// The derived recall token index is deliberately absent: a registered value
+/// is replaced as a whole string, while tokens hold its fragments, so a
+/// replace would leave credential-derived pieces behind. Token rows are
+/// rebuilt from the swept canonical text instead (see below).
 const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("history_message", "body"),
     ("learning_summary", "content"),
@@ -138,6 +144,12 @@ const SWEEP_TARGETS: &[(&str, &str)] = &[
 ];
 
 /// Sweeps `bearer` out of durable content inside the caller's transaction.
+///
+/// Canonical text is swept first then the derived recall tokens are rebuilt
+/// from the swept text in the same transaction, so the index can never keep
+/// credential-derived fragments the replace cannot see. Only memories whose
+/// pre-sweep content held the bearer are rebuilt; the common case stays one
+/// cheap probe select.
 fn sweep_registered_secret(
     tx: &rusqlite::Transaction<'_>,
     bearer: &str,
@@ -145,6 +157,20 @@ fn sweep_registered_secret(
     if bearer.is_empty() {
         return Ok(());
     }
+    // Memories holding the bearer, collected before the sweep redacts them:
+    // the rebuild below needs exactly this set, and nothing else changes.
+    let affected: Vec<(String, String)> = {
+        let mut select = tx
+            .prepare(
+                "SELECT memory_id, companion_id FROM learning_memory WHERE instr(content, ?1) > 0",
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        select
+            .query_map(params![bearer], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| credential_unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| credential_unavailable(error.to_string()))?
+    };
     // Table and column names are compile-time constants; the bearer travels
     // only as a bound parameter.
     for (table, column) in SWEEP_TARGETS {
@@ -153,6 +179,17 @@ fn sweep_registered_secret(
              WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
         );
         tx.execute(&sql, params![bearer, REDACTED_CREDENTIAL])
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+    }
+    for (memory, companion) in &affected {
+        let content: String = tx
+            .query_row(
+                "SELECT content FROM learning_memory WHERE memory_id = ?1",
+                params![memory],
+                |row| row.get(0),
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        crate::learning::rebuild_memory_terms_tx(tx, memory, companion, &content)
             .map_err(|error| credential_unavailable(error.to_string()))?;
     }
     Ok(())

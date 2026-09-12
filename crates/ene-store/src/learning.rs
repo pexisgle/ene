@@ -206,6 +206,7 @@ fn insert_current(
         ],
     )
     .map_err(learning_unavailable)?;
+    refresh_memory_terms(tx, memory, change)?;
     Ok(())
 }
 
@@ -228,6 +229,53 @@ fn update_current(
         ],
     )
     .map_err(learning_unavailable)?;
+    refresh_memory_terms(tx, memory, change)?;
+    Ok(())
+}
+
+/// Re-derives the recall token rows for one Memory inside the commit
+/// transaction, so the index never observes a half-written recognition.
+/// Suppression needs no reindexing: the lexical arm filters suppressed rows
+/// at read time, and clearing the flag re-exposes the already-indexed
+/// tokens.
+fn refresh_memory_terms(
+    tx: &Transaction<'_>,
+    memory: MemoryId,
+    change: &MemoryChange,
+) -> Result<(), LearningTechnicalError> {
+    rebuild_memory_terms_tx(
+        tx,
+        &encode_id(memory.as_raw()),
+        &encode_id(change.scope.companion_id()),
+        &change.content,
+    )
+    .map_err(learning_unavailable)?;
+    Ok(())
+}
+
+/// Re-derives one Memory's token rows from its canonical content.
+///
+/// Shared by commit-time refresh and the credential-sweep rebuild: both
+/// pass the current canonical text, so the derived rows always equal
+/// [`ene_learning::recall_index_terms`] of what `learning_memory` holds.
+/// Raw [`rusqlite::Error`] travels to the caller, which maps it into its
+/// own domain error.
+pub(crate) fn rebuild_memory_terms_tx(
+    tx: &Transaction<'_>,
+    memory_text: &str,
+    companion_text: &str,
+    content: &str,
+) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "DELETE FROM learning_memory_term WHERE memory_id = ?1",
+        params![memory_text],
+    )?;
+    let mut insert = tx.prepare(
+        "INSERT OR IGNORE INTO learning_memory_term (term, memory_id, companion_id) VALUES (?1, ?2, ?3)",
+    )?;
+    for term in ene_learning::recall_index_terms(content) {
+        insert.execute(params![term, memory_text, companion_text])?;
+    }
     Ok(())
 }
 
@@ -341,6 +389,82 @@ fn decode_summary(raw: RawSummary) -> Result<SummaryRecord, LearningTechnicalErr
         },
         formed_at: decode_clock(&raw.formed_at)?,
     })
+}
+
+/// Recall candidate arms: newest, most important, and lexical token
+/// matches, each capped by `limit`; suppression is excluded before any cap
+/// applies. The caller receives candidates in newest-first order with
+/// duplicates removed.
+///
+/// Every arm is an index walk, never a table scan or sort: the newest arm
+/// reverse-walks the partial companion index, the importance arm walks the
+/// partial (companion, importance) index in order, and the lexical arm seeks
+/// one covering token-index entry per query term and fetches at most `limit`
+/// rows by primary key. The importance arm carries no `rowid` tie-break
+/// because the merge below re-sorts every candidate newest-first anyway;
+/// the bare `importance DESC` is what lets SQLite walk the index with no
+/// sort step.
+pub(crate) fn recall_candidates_sql(term_count: usize) -> String {
+    let columns = "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at, rowid AS insertion_order";
+    let base = format!(
+        "SELECT {columns} FROM learning_memory WHERE companion_id = ?1 AND recall_suppressed = 0"
+    );
+    let mut sql = format!(
+        "SELECT * FROM ({base} ORDER BY rowid DESC LIMIT ?2) \
+         UNION ALL SELECT * FROM ({base} ORDER BY importance DESC LIMIT ?2)"
+    );
+    if term_count > 0 {
+        let placeholders = (0..term_count)
+            .map(|position| format!("?{}", position + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        sql.push_str(&format!(
+            " UNION ALL SELECT * FROM (SELECT m.memory_id, m.companion_id, m.revision, m.content, m.importance, m.temporal, m.recall_suppressed, m.updated_at, m.rowid AS insertion_order FROM learning_memory_term t JOIN learning_memory m ON m.memory_id = t.memory_id WHERE t.companion_id = ?1 AND t.term IN ({placeholders}) AND m.recall_suppressed = 0 LIMIT ?2)"
+        ));
+    }
+    sql
+}
+
+fn recall_candidates_sync(
+    conn: &Mutex<Connection>,
+    companion: RawId,
+    terms: &[String],
+    limit: u64,
+) -> Result<Vec<Memory>, LearningTechnicalError> {
+    let cap = encode_limit(limit)?;
+    let companion_text = encode_id(companion);
+    let sql = recall_candidates_sql(terms.len());
+    let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(companion_text), Box::new(cap)];
+    for term in terms {
+        values.push(Box::new(term.clone()));
+    }
+    let guard = lock_shared(conn);
+    let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;
+    let rows = statement
+        .query_map(
+            rusqlite::params_from_iter(
+                values
+                    .iter()
+                    .map(|value| value.as_ref() as &dyn rusqlite::ToSql),
+            ),
+            |row| Ok((raw_memory_row(row)?, row.get::<_, i64>(8)?)),
+        )
+        .map_err(learning_unavailable)?;
+    let mut candidates: Vec<(i64, Memory)> = Vec::new();
+    for row in rows {
+        let (raw, insertion_order) = row.map_err(learning_unavailable)?;
+        let memory = decode_memory(raw)?;
+        if !candidates
+            .iter()
+            .any(|(_, existing)| existing.id == memory.id)
+        {
+            candidates.push((insertion_order, memory));
+        }
+    }
+    // Newest first, so the caller's stable ranking keeps recency as its
+    // final tie-break.
+    candidates.sort_by_key(|(insertion_order, _)| std::cmp::Reverse(*insertion_order));
+    Ok(candidates.into_iter().map(|(_, memory)| memory).collect())
 }
 
 fn list_current_sync(
@@ -556,6 +680,17 @@ impl LearningRepository for Store {
     ) -> Result<Vec<Memory>, LearningTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || list_current_sync(&conn, companion, after, limit)).await
+    }
+
+    async fn recall_candidates(
+        &self,
+        companion: RawId,
+        terms: &[String],
+        limit: u64,
+    ) -> Result<Vec<Memory>, LearningTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        let terms = terms.to_vec();
+        run_blocking(move || recall_candidates_sync(&conn, companion, &terms, limit)).await
     }
 
     async fn list_memory_revisions(

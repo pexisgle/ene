@@ -3,17 +3,30 @@
 //! Recall is derived, not authoritative: it ranks the current durable
 //! recognition for a query and never changes it. Normal forgetting suppresses
 //! recall here; suppressed content stays in storage and can be recalled again
-//! after a later change clears the suppression. The scoring is intentionally
-//! simple (term overlap, then importance, then recency) and the whole current
-//! set read for one recall is capped, so no embedding or index is required to
-//! bound the work.
+//! after a later change clears the suppression. Candidate retrieval is
+//! bounded and multi-arm (newest, most important, and lexical matches), so an
+//! old relevant Memory is not permanently excluded by a newest-rows window;
+//! scoring stays term overlap, then importance, then recency, and needs no
+//! embedding. The lexical arm matches query terms against a derived token
+//! index rather than scanning stored content.
 
 use ene_primitive::RawId;
 
 use crate::repository::{LearningRepository, LearningTechnicalError};
 
-/// Most current memories one recall reads before ranking.
-pub const RECALL_SCAN_LIMIT: u64 = 200;
+/// Rows one candidate arm contributes to one recall.
+///
+/// Three arms run in one bounded, index-backed query, so one recall decodes
+/// at most `3 * RECALL_CANDIDATE_LIMIT` rows regardless of how many memories
+/// exist, and finding those rows visits at most one index walk of `limit`
+/// entries per arm rather than scanning the companion's whole set.
+pub const RECALL_CANDIDATE_LIMIT: u64 = 200;
+
+/// Query terms the lexical arm uses, longest first.
+///
+/// The cap keeps the generated token predicate a constant size; the
+/// longest terms are the most selective lexical evidence.
+const RECALL_MAX_TERMS: usize = 8;
 
 /// A query for the Memory one use can draw on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,8 +57,13 @@ impl core::fmt::Debug for RecalledMemory {
 
 /// Ranks the current companion-scoped memories for `query`.
 ///
-/// Suppressed memories are excluded. An empty query still returns the highest
+/// Suppressed memories are excluded by candidate retrieval, before any cap
+/// applies. Candidates come from one bounded multi-arm query: the newest
+/// rows, the most important rows, and rows whose derived index tokens carry
+/// the longest query terms, so an old relevant Memory stays reachable after
+/// any number of newer memories. An empty query still returns the highest
 /// importance, newest memories so a caller can supply generic background.
+/// Equal scores keep the repository's newest-first order.
 ///
 /// # Errors
 ///
@@ -55,11 +73,21 @@ pub async fn recall(
     repository: &impl LearningRepository,
     query: RecallQuery,
 ) -> Result<Vec<RecalledMemory>, LearningTechnicalError> {
-    let mut memories = repository
-        .list_current_memories(query.companion, None, RECALL_SCAN_LIMIT)
+    let mut terms = crate::relevance::terms(&query.text);
+    // Longest first: the cap keeps the generated lexical predicate bounded,
+    // and a longer term is stronger evidence than a short bigram. Ties sort
+    // by the term itself so the query stays deterministic.
+    terms.sort_by(|left, right| {
+        right
+            .chars()
+            .count()
+            .cmp(&left.chars().count())
+            .then(left.cmp(right))
+    });
+    terms.truncate(RECALL_MAX_TERMS);
+    let memories = repository
+        .recall_candidates(query.companion, &terms, RECALL_CANDIDATE_LIMIT)
         .await?;
-    memories.retain(|memory| !memory.recall_suppressed);
-    let terms = crate::relevance::terms(&query.text);
     let mut ranked: Vec<(usize, crate::memory::Memory)> = memories
         .into_iter()
         .map(|memory| (crate::relevance::overlap(&terms, &memory.content), memory))
@@ -179,6 +207,112 @@ mod tests {
             .unwrap();
         assert_eq!(recalled.len(), 1);
         assert!(recalled[0].content.contains("緑茶"));
+    }
+
+    #[tokio::test]
+    async fn an_old_memory_is_reachable_past_the_newest_window() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let _ = seed_memory(&repository, companion, "The owner likes jasmine tea.").await;
+        for index in 0..250 {
+            let _ = seed_memory(&repository, companion, &format!("filler memory {index}")).await;
+        }
+        let recalled = recall(
+            &repository,
+            query(companion, "Which tea does the owner like?", 1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(recalled.len(), 1);
+        assert!(
+            recalled[0].content.contains("jasmine tea"),
+            "the oldest relevant memory must stay reachable: {recalled:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn suppressed_newest_rows_do_not_consume_candidate_slots() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let _ = seed_memory(&repository, companion, "The owner likes jasmine tea.").await;
+        for index in 0..250 {
+            let content = format!("latest memory {index}");
+            let (memory, revision) = seed_memory(&repository, companion, &content).await;
+            forget_memory(&repository, companion, memory, revision, &content).await;
+        }
+        let recalled = recall(&repository, query(companion, "jasmine tea", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            recalled.len(),
+            1,
+            "suppressed rows must not crowd out the active candidate"
+        );
+        assert!(recalled[0].content.contains("jasmine tea"));
+    }
+
+    #[tokio::test]
+    async fn an_updated_old_memory_is_a_candidate_with_current_content() {
+        use crate::repository::{
+            LearningRepository as _, MemoryChange, MemoryChangeCommit, MemoryChangeOutcome,
+            MemoryTarget,
+        };
+        use crate::{ChangeKind, Importance, LearningScope, TemporalMeaning};
+
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let (memory, revision) =
+            seed_memory(&repository, companion, "The owner drinks something warm.").await;
+        for index in 0..250 {
+            let _ = seed_memory(&repository, companion, &format!("filler memory {index}")).await;
+        }
+        let outcome = repository
+            .commit_memory_change(MemoryChangeCommit {
+                summary: None,
+                secret_premise: None,
+                change: MemoryChange {
+                    target: MemoryTarget::Existing {
+                        id: memory,
+                        expected_revision: revision,
+                    },
+                    scope: LearningScope::companion(companion),
+                    content: String::from("The owner likes jasmine tea now."),
+                    importance: Importance::default(),
+                    temporal: TemporalMeaning::Enduring,
+                    change: ChangeKind::Refined,
+                    recall_suppressed: false,
+                    at: ene_primitive::WallClockWithTz::now(),
+                },
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MemoryChangeOutcome::Committed { .. }));
+        let recalled = recall(&repository, query(companion, "jasmine tea", 1))
+            .await
+            .unwrap();
+        assert_eq!(recalled.len(), 1);
+        assert!(recalled[0].content.contains("jasmine tea now"));
+    }
+
+    #[tokio::test]
+    async fn recall_candidate_work_is_bounded() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let text = (0..50)
+            .map(|index| format!("term{index}x"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = recall(&repository, query(companion, &text, 5))
+            .await
+            .unwrap();
+        let calls = repository.recall_calls();
+        assert_eq!(calls.len(), 1, "one bounded candidate query per recall");
+        assert!(
+            calls[0].0.len() <= super::RECALL_MAX_TERMS,
+            "the lexical arm stays a constant size, got {}",
+            calls[0].0.len()
+        );
+        assert_eq!(calls[0].1, super::RECALL_CANDIDATE_LIMIT);
     }
 
     #[tokio::test]

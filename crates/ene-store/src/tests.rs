@@ -1459,8 +1459,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(13)),
-        "migration must record version 13"
+        matches!(version, Ok(14)),
+        "migration must record version 14"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1762,7 +1762,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(13),
+        Some(14),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1811,8 +1811,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(13)),
-        "reopened database must record schema version 13"
+        matches!(version, Ok(14)),
+        "reopened database must record schema version 14"
     );
 }
 
@@ -2577,8 +2577,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(13)),
-        "reopened database must record schema version 13"
+        matches!(version, Ok(14)),
+        "reopened database must record schema version 14"
     );
 }
 
@@ -2858,6 +2858,758 @@ async fn memory_revision_pages_and_summary_batches_are_bounded() {
         "the shared grounds and the missing id read as one and nothing"
     );
     assert!(store.load_summaries(&[]).await.unwrap().is_empty());
+}
+
+/// Recall candidate retrieval is a bounded multi-arm query: an old relevant
+/// memory is reachable past any newest window, suppressed rows never become
+/// candidates, and each arm caps the rows read.
+#[tokio::test]
+async fn recall_candidates_are_bounded_and_reach_old_relevant_rows() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let old = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: old },
+                "The owner likes jasmine tea.",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    for index in 0..300 {
+        let id = MemoryId::generate();
+        let outcome = store
+            .commit_memory_change(commit(
+                None,
+                learning_change(
+                    companion,
+                    MemoryTarget::New { id },
+                    &format!("filler memory {index}"),
+                    ChangeKind::Initial,
+                    false,
+                ),
+            ))
+            .await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    }
+    let suppressed = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: suppressed },
+                "suppressed jasmine note",
+                ChangeKind::Initial,
+                true,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates.len() <= 9,
+        "three arms of at most three rows each, got {}",
+        candidates.len()
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|memory| memory.content.contains("jasmine tea")),
+        "the oldest relevant memory must be a candidate"
+    );
+    assert!(
+        candidates.iter().all(|memory| !memory.recall_suppressed),
+        "suppressed rows never consume candidate slots"
+    );
+
+    let generic = store.recall_candidates(companion, &[], 3).await.unwrap();
+    assert!(
+        generic.len() <= 9 && !generic.is_empty(),
+        "an empty query still answers bounded background, got {}",
+        generic.len()
+    );
+}
+
+/// Candidate lookup work is index-backed, not just its output: the query
+/// plan for the exact recall SQL must serve every arm from an index with no
+/// table scan and no sort step, so growing unrelated rows cannot push the
+/// lookup back to a full scan. `SCAN (subquery-N)` lines only drain the
+/// already-capped arm results and are expected.
+#[tokio::test]
+async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let old = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: old },
+                "The owner likes jasmine tea.",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    for index in 0..400 {
+        let id = MemoryId::generate();
+        let outcome = store
+            .commit_memory_change(commit(
+                None,
+                learning_change(
+                    companion,
+                    MemoryTarget::New { id },
+                    &format!("filler memory {index}"),
+                    ChangeKind::Initial,
+                    false,
+                ),
+            ))
+            .await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    }
+
+    for term_count in [0, 2] {
+        let sql = crate::learning::recall_candidates_sql(term_count);
+        let plan = {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut statement = guard
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .expect("the recall SQL must explain");
+            let companion_text = crate::codec::encode_id(companion);
+            let steps: Vec<String> = if term_count == 0 {
+                statement
+                    .query_map(rusqlite::params![companion_text, 3_i64], |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .expect("the plan must read")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("plan rows must decode")
+            } else {
+                statement
+                    .query_map(
+                        rusqlite::params![companion_text, 3_i64, "jasmine", "tea"],
+                        |row| row.get::<_, String>(3),
+                    )
+                    .expect("the plan must read")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("plan rows must decode")
+            };
+            steps
+        };
+        assert!(
+            !plan.is_empty(),
+            "the recall plan must have steps for {term_count} terms"
+        );
+        for step in &plan {
+            assert!(
+                !(step.starts_with("SCAN") && !step.contains("subquery"))
+                    && !step.contains("TEMP B-TREE"),
+                "every arm must be an index walk, got: {plan:?}"
+            );
+        }
+        if term_count > 0 {
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("learning_memory_term")),
+                "the lexical arm must seek the token index, got: {plan:?}"
+            );
+        }
+    }
+
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates.len() <= 9,
+        "three arms of at most three rows each, got {}",
+        candidates.len()
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|memory| memory.content.contains("jasmine tea")),
+        "the oldest relevant memory stays reachable behind 400 newer rows"
+    );
+}
+
+/// A v11 database migrates through v12 and v13 into v14 in one chain:
+/// history rows gain the canonical UTC projection and pre-index memories
+/// gain token rows, so neither the History window nor lexical recall goes
+/// dark.
+#[tokio::test]
+async fn migration_v11_applies_v12_then_v13_then_v14_in_order() {
+    let dir = tempfile::tempdir().expect("a temp dir must open");
+    let path = dir.path().join("app.db");
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let message = RawId::new();
+    {
+        let store = Store::open(&path).await.expect("a fresh store must open");
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        crate::codec::encode_id(message),
+                        crate::codec::encode_id(companion),
+                        crate::codec::encode_id(RawId::new()),
+                        "owner",
+                        "legacy row",
+                        "en",
+                        "2026-09-08T12:00:00+09:00",
+                        0_i64,
+                    ],
+                )
+                .expect("the legacy history row must insert");
+        }
+        let outcome = store
+            .commit_memory_change(commit(
+                None,
+                learning_change(
+                    companion,
+                    MemoryTarget::New { id: memory },
+                    "The owner likes jasmine tea.",
+                    ChangeKind::Initial,
+                    false,
+                ),
+            ))
+            .await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+        // Rewind to the real v11 shape: no UTC projection, no token index.
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch(
+                    "DROP INDEX IF EXISTS idx_history_message_companion_at;
+                     ALTER TABLE history_message DROP COLUMN at_utc;
+                     DROP TABLE IF EXISTS learning_memory_term;
+                     DROP INDEX IF EXISTS idx_learning_memory_term_memory;
+                     DROP INDEX IF EXISTS idx_learning_memory_recall_newest;
+                     DROP INDEX IF EXISTS idx_learning_memory_recall_importance;
+                     PRAGMA user_version = 11;",
+                )
+                .expect("the version-11 rewind must apply");
+        }
+    }
+    let store = Store::open(&path).await.expect("migration must succeed");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(14),
+        "a v11 database must converge on v14"
+    );
+    let projection = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .query_row(
+                "SELECT at_utc FROM history_message WHERE message_id = ?1",
+                rusqlite::params![crate::codec::encode_id(message)],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("the backfilled projection must read")
+    };
+    assert_eq!(
+        projection, "2026-09-08T03:00:00.000000000Z",
+        "v13 backfills the canonical UTC rendering, keeping the offset display"
+    );
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.content.contains("jasmine tea")),
+        "v14 backfills the token index for the pre-index memory"
+    );
+}
+
+/// A v13 database with the History projection applied migrates into v14
+/// with that projection intact and the token schema added.
+#[tokio::test]
+async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
+    let dir = tempfile::tempdir().expect("a temp dir must open");
+    let path = dir.path().join("app.db");
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let message = RawId::new();
+    {
+        let store = Store::open(&path).await.expect("a fresh store must open");
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![
+                        crate::codec::encode_id(message),
+                        crate::codec::encode_id(companion),
+                        crate::codec::encode_id(RawId::new()),
+                        "owner",
+                        "projected row",
+                        "en",
+                        "2026-09-08T12:00:00+09:00",
+                        "2026-09-08T03:00:00.000000000Z",
+                        0_i64,
+                    ],
+                )
+                .expect("the projected history row must insert");
+        }
+        let outcome = store
+            .commit_memory_change(commit(
+                None,
+                learning_change(
+                    companion,
+                    MemoryTarget::New { id: memory },
+                    "The owner likes jasmine tea.",
+                    ChangeKind::Initial,
+                    false,
+                ),
+            ))
+            .await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+        // Rewind to the v13 shape the History change left behind: the UTC
+        // projection stays applied, only the token index is missing.
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch(
+                    "DROP TABLE IF EXISTS learning_memory_term;
+                     DROP INDEX IF EXISTS idx_learning_memory_term_memory;
+                     DROP INDEX IF EXISTS idx_learning_memory_recall_newest;
+                     DROP INDEX IF EXISTS idx_learning_memory_recall_importance;
+                     PRAGMA user_version = 13;",
+                )
+                .expect("the version-13 rewind must apply");
+        }
+    }
+    let store = Store::open(&path).await.expect("migration must succeed");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(14),
+        "a v13 database must converge on v14"
+    );
+    let (projection, columns) = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let projection: String = guard
+            .query_row(
+                "SELECT at_utc FROM history_message WHERE message_id = ?1",
+                rusqlite::params![crate::codec::encode_id(message)],
+                |row| row.get(0),
+            )
+            .expect("the v13 projection must survive");
+        let columns: Vec<String> = guard
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+            .expect("the index catalog must read")
+            .query_map((), |row| row.get(0))
+            .expect("index rows must read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("index names must decode");
+        (projection, columns)
+    };
+    assert_eq!(
+        projection, "2026-09-08T03:00:00.000000000Z",
+        "v14 must not disturb the v13 projection"
+    );
+    for index in [
+        "idx_learning_memory_term_memory",
+        "idx_learning_memory_recall_newest",
+        "idx_learning_memory_recall_importance",
+    ] {
+        assert!(
+            columns.iter().any(|name| name == index),
+            "v14 must create {index}, got {columns:?}"
+        );
+    }
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.content.contains("jasmine tea")),
+        "the v13 memory must be lexically reachable after v14"
+    );
+}
+
+/// A revision update re-derives the token rows in the same commit: the old
+/// content stops matching and the current content starts, with no orphaned
+/// index row surviving beside the new recognition.
+#[tokio::test]
+async fn recall_token_index_follows_revision_updates() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "The owner drinks something warm.",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    let Ok(MemoryChangeOutcome::Committed { revision, .. }) = outcome else {
+        panic!("the seed must commit");
+    };
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: revision,
+                },
+                "The owner likes jasmine tea now.",
+                ChangeKind::Refined,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let terms = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut statement = guard
+            .prepare("SELECT term FROM learning_memory_term WHERE memory_id = ?1")
+            .expect("token rows must be readable");
+        statement
+            .query_map(
+                rusqlite::params![crate::codec::encode_id(memory.as_raw())],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("token rows must read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("token rows must decode")
+    };
+    assert!(
+        terms.iter().any(|term| term == "jasmine"),
+        "the current content must be indexed, got {terms:?}"
+    );
+    assert!(
+        terms.iter().all(|term| term != "warm"),
+        "the replaced content must leave no token behind, got {terms:?}"
+    );
+
+    let candidates = store
+        .recall_candidates(companion, &[String::from("jasmine")], 3)
+        .await
+        .unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.content.contains("jasmine tea now")),
+        "the updated memory matches on its current content"
+    );
+}
+
+/// The per-Memory token refresh is an index search, not a table scan: one
+/// revision update must not cost a walk over every stored token.
+#[tokio::test]
+async fn memory_term_delete_uses_the_memory_index() {
+    let store = open_memory().await.unwrap();
+    let plan = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut statement = guard
+            .prepare("EXPLAIN QUERY PLAN DELETE FROM learning_memory_term WHERE memory_id = ?1")
+            .expect("the refresh delete must explain");
+        statement
+            .query_map(rusqlite::params!["probe"], |row| row.get::<_, String>(3))
+            .expect("the plan must read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan rows must decode")
+    };
+    assert!(!plan.is_empty(), "the delete plan must have steps");
+    for step in &plan {
+        assert!(
+            !step.starts_with("SCAN"),
+            "the per-memory refresh must seek the index, got: {plan:?}"
+        );
+    }
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("idx_learning_memory_term_memory")),
+        "the delete must use the memory index, got: {plan:?}"
+    );
+}
+
+/// The credential sweep rebuilds derived tokens from the swept canonical
+/// text: a whole-string replace cannot see the fragments the tokenizer
+/// stored, so without a rebuild the old secret-derived pieces would stay
+/// searchable beside redacted canonical content.
+#[tokio::test]
+async fn credential_sweep_rebuilds_tokens_from_swept_content() {
+    use ene_learning::recall_index_terms;
+
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let secret = MemoryId::generate();
+    let mut change = learning_change(
+        companion,
+        MemoryTarget::New { id: secret },
+        "the passcode is sk-live-9901 today",
+        ChangeKind::Initial,
+        false,
+    );
+    change.importance = Importance::clamped(0);
+    let outcome = store.commit_memory_change(commit(None, change)).await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    // Bury the secret memory under higher-importance fillers so only the
+    // lexical arm can surface it: newest returns fillers, importance
+    // prefers them, and the secret term decides alone.
+    for index in 0..10 {
+        let id = MemoryId::generate();
+        let mut filler = learning_change(
+            companion,
+            MemoryTarget::New { id },
+            &format!("filler memory {index}"),
+            ChangeKind::Initial,
+            false,
+        );
+        filler.importance = Importance::clamped(9);
+        let outcome = store.commit_memory_change(commit(None, filler)).await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    }
+    let before = store
+        .recall_candidates(companion, &[String::from("live")], 3)
+        .await
+        .unwrap();
+    assert!(
+        before.iter().any(|memory| memory.id == secret),
+        "the secret-derived token is indexed before the sweep"
+    );
+
+    approve_pair(&store, "acme", "main", "sk-live-9901", "sweep-fragments-1").await;
+
+    let (content, terms) = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let content: String = guard
+            .query_row(
+                "SELECT content FROM learning_memory WHERE memory_id = ?1",
+                rusqlite::params![crate::codec::encode_id(secret.as_raw())],
+                |row| row.get(0),
+            )
+            .expect("the swept memory must read");
+        let mut statement = guard
+            .prepare("SELECT term FROM learning_memory_term WHERE memory_id = ?1")
+            .expect("token rows must be readable");
+        let terms = statement
+            .query_map(
+                rusqlite::params![crate::codec::encode_id(secret.as_raw())],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("token rows must read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("token rows must decode");
+        (content, terms)
+    };
+    assert!(
+        !content.contains("sk-live-9901"),
+        "canonical content is redacted"
+    );
+    let mut expected = recall_index_terms(&content);
+    expected.sort();
+    let mut stored = terms;
+    stored.sort();
+    assert_eq!(
+        stored, expected,
+        "derived tokens equal the swept canonical text exactly"
+    );
+    assert!(
+        stored.iter().all(|term| term != "live" && term != "9901"),
+        "no secret-derived fragment survives, got {stored:?}"
+    );
+    let after = store
+        .recall_candidates(companion, &[String::from("live")], 3)
+        .await
+        .unwrap();
+    assert!(
+        after.iter().all(|memory| memory.id != secret),
+        "the swept memory is lexically unreachable by the old fragment"
+    );
+}
+
+/// Sweep, token rebuild, and credential revision advance share one
+/// transaction: a rebuild failure rolls the canonical redaction back too,
+///
+/// never a redacted-canonical/old-token split.
+#[tokio::test]
+async fn credential_sweep_rebuild_is_atomic_with_the_redaction() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let secret = MemoryId::generate();
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: secret },
+                "the passcode is sk-live-9901 today",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    let requested = store
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            RegistrationFingerprint {
+                intent_id: String::from("sweep-atomic-1"),
+                kind: String::from("register"),
+                target: String::from("credential:acme:main"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            requested,
+            Ok(ene_credential::RegistrationApply::Decided(
+                ene_credential::RegistrationState::HeldByOperation
+            ))
+        ),
+        "the pair must pend approval"
+    );
+    let revision_before: i64 = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .query_row("SELECT rev FROM credential_set WHERE id = 1", (), |row| {
+                row.get(0)
+            })
+            .expect("the revision must read")
+    };
+    // Fault injection on the rebuild path only: the canonical sweep runs,
+    // then the token insert aborts mid-transaction.
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute_batch(
+                "CREATE TRIGGER sweep_abort BEFORE INSERT ON learning_memory_term BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+            )
+            .expect("the fault trigger must install");
+    }
+    let failed = store.approve_credential_with_sweep("acme", "main", "sk-live-9901");
+    assert!(
+        failed.is_err(),
+        "the faulted sweep must fail, got {failed:?}"
+    );
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let content: String = guard
+            .query_row(
+                "SELECT content FROM learning_memory WHERE memory_id = ?1",
+                rusqlite::params![crate::codec::encode_id(secret.as_raw())],
+                |row| row.get(0),
+            )
+            .expect("the memory must read");
+        assert!(
+            content.contains("sk-live-9901"),
+            "the rolled-back redaction leaves canonical content untouched"
+        );
+        let revision: i64 = guard
+            .query_row("SELECT rev FROM credential_set WHERE id = 1", (), |row| {
+                row.get(0)
+            })
+            .expect("the revision must read");
+        assert_eq!(
+            revision, revision_before,
+            "the revision must not advance on a rolled-back sweep"
+        );
+        guard
+            .execute_batch("DROP TRIGGER sweep_abort;")
+            .expect("the fault trigger must drop");
+    }
+    // The rolled-back registration left no pending row, so the pair
+    // registers again before the retry can approve it.
+    let retried = store
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            RegistrationFingerprint {
+                intent_id: String::from("sweep-atomic-2"),
+                kind: String::from("register"),
+                target: String::from("credential:acme:main"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            retried,
+            Ok(ene_credential::RegistrationApply::Decided(
+                ene_credential::RegistrationState::HeldByOperation
+            ))
+        ),
+        "the rolled-back registration must pend again"
+    );
+    assert!(
+        store
+            .approve_credential_with_sweep("acme", "main", "sk-live-9901")
+            .expect("the retry must commit"),
+        "the approval makes the pair usable"
+    );
 }
 
 #[tokio::test]
@@ -3388,7 +4140,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(13),
+        Some(14),
         "migration advances the schema version"
     );
     assert!(
@@ -3406,7 +4158,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
 }
 
 /// A v11 database gains the owner-recency index on reopen and converges on
-/// v13, so upgraded stores enforce reply-adoption recency from the index.
+/// v14, so upgraded stores enforce reply-adoption recency from the index.
 #[tokio::test]
 async fn migration_v11_adds_the_owner_recency_index() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
@@ -3429,8 +4181,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(13),
-        "a v11 database must converge on v13"
+        Some(14),
+        "a v11 database must converge on v14"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -3461,12 +4213,47 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
                provider TEXT NOT NULL,
                model TEXT NOT NULL,
                started_at TEXT NOT NULL
+             );
+             -- A real v9 database also carries the v9 learning group the v12
+             -- token backfill reads; mirrors MIGRATION_V9.
+             CREATE TABLE learning_summary (
+               summary_id TEXT PRIMARY KEY,
+               companion_id TEXT NOT NULL,
+               content TEXT NOT NULL,
+               source_kind TEXT NOT NULL,
+               source_start TEXT NOT NULL,
+               source_end TEXT NOT NULL,
+               formed_at TEXT NOT NULL
+             );
+             CREATE TABLE learning_memory (
+               memory_id TEXT PRIMARY KEY,
+               companion_id TEXT NOT NULL,
+               revision INTEGER NOT NULL,
+               content TEXT NOT NULL,
+               importance INTEGER NOT NULL,
+               temporal TEXT NOT NULL,
+               recall_suppressed INTEGER NOT NULL,
+               updated_at TEXT NOT NULL
+             );
+             CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
+             CREATE TABLE learning_memory_revision (
+               memory_id TEXT NOT NULL,
+               revision INTEGER NOT NULL,
+               companion_id TEXT NOT NULL,
+               content TEXT NOT NULL,
+               importance INTEGER NOT NULL,
+               temporal TEXT NOT NULL,
+               recall_suppressed INTEGER NOT NULL,
+               change_kind TEXT NOT NULL,
+               summary_id TEXT,
+               at TEXT NOT NULL,
+               PRIMARY KEY (memory_id, revision)
              );",
         )
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(13));
+    assert_eq!(read_schema_version(&path), Some(14));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
