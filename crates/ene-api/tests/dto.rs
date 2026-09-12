@@ -11,7 +11,7 @@ use ene_api::v1::refs::{
     ClientIncarnationId, ClientWireRef, CompanionWireRef, RoundWireId, WireMessageType,
 };
 use ene_api::v1::refs::{ClientLocalId, StreamWireId, TextLangWire};
-use ene_api::v1::round::{HistoryRole, HistoryView, RoundIntakeOutcomeWire, SubmitTextInput};
+use ene_api::v1::round::{HistoryResponse, HistoryRole, RoundIntakeOutcomeWire, SubmitTextInput};
 use ene_api::v1::round::{TextBodyWire, TextStreamFrameWire};
 use uuid::Uuid;
 
@@ -111,8 +111,8 @@ fn presence_and_management_roundtrip() {
 
 #[test]
 fn payload_enum_roundtrip() {
-    roundtrip(&WirePayload::HistoryView(HistoryView {
-        items: [{
+    roundtrip(&WirePayload::HistoryResponse(HistoryResponse::Items(vec![
+        {
             use ene_api::v1::round::HistoryItem;
             HistoryItem {
                 round: RoundWireId(String::from("round-1")),
@@ -120,9 +120,8 @@ fn payload_enum_roundtrip() {
                 text: String::from("hello"),
                 at: String::from("2026-09-08T12:00:00+09:00"),
             }
-        }]
-        .to_vec(),
-    }));
+        },
+    ])));
 }
 
 #[test]

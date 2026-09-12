@@ -513,7 +513,10 @@ async fn reply_after_newer_owner_input_is_stale() {
         matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
         "a reply to the latest owner still commits, got {outcome:?}"
     );
-    let loaded = store.load_timeline(companion, None, 10).await.unwrap();
+    let loaded = store
+        .load_timeline(companion, None, None, 10)
+        .await
+        .unwrap();
     assert_eq!(
         loaded.len(),
         3,
@@ -1759,7 +1762,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(12),
+        Some(13),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -3385,7 +3388,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(12),
+        Some(13),
         "migration advances the schema version"
     );
     assert!(
@@ -3403,7 +3406,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
 }
 
 /// A v11 database gains the owner-recency index on reopen and converges on
-/// v12, so upgraded stores enforce reply-adoption recency from the index.
+/// v13, so upgraded stores enforce reply-adoption recency from the index.
 #[tokio::test]
 async fn migration_v11_adds_the_owner_recency_index() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
@@ -3417,6 +3420,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
         guard
             .execute_batch(
                 "DROP INDEX IF EXISTS idx_history_message_companion_role;
+                 DROP INDEX IF EXISTS idx_history_message_companion_at;
+                 ALTER TABLE history_message DROP COLUMN at_utc;
                  PRAGMA user_version = 11;",
             )
             .expect("the version-11 rewind must apply");
@@ -3424,8 +3429,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(12),
-        "a v11 database must converge on v12"
+        Some(13),
+        "a v11 database must converge on v13"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -3461,7 +3466,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(12));
+    assert_eq!(read_schema_version(&path), Some(13));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await

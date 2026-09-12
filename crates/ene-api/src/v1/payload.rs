@@ -16,8 +16,8 @@ use super::management::{
 use super::presence::PresenceAttributionWire;
 use super::reject::RejectNotice;
 use super::round::{
-    ConfirmPresentationWire, HistoryRequest, HistoryView, RoundIntakeOutcomeWire, SubmitTextInput,
-    TextStreamClose, TextStreamFrameWire, TextStreamOpen,
+    ConfirmPresentationWire, HistoryRequest, HistoryResponse, RoundIntakeOutcomeWire,
+    SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
 
 /// Externally tagged; unknown variants are rejected at deserialization,
@@ -39,7 +39,7 @@ pub enum WirePayload {
     TextStreamClose(TextStreamClose),
     ConfirmPresentation(ConfirmPresentationWire),
     HistoryRequest(HistoryRequest),
-    HistoryView(HistoryView),
+    HistoryResponse(HistoryResponse),
     PresenceAttribution(PresenceAttributionWire),
     ManagementIntent(ManagementIntent),
     ManagementOutcome(ManagementOutcome),
@@ -70,7 +70,7 @@ impl WirePayload {
             Self::TextStreamClose(_) => "TextStreamClose",
             Self::ConfirmPresentation(_) => "ConfirmPresentation",
             Self::HistoryRequest(_) => "HistoryRequest",
-            Self::HistoryView(_) => "HistoryView",
+            Self::HistoryResponse(_) => "HistoryResponse",
             Self::PresenceAttribution(_) => "PresenceAttribution",
             Self::ManagementIntent(_) => "ManagementIntent",
             Self::ManagementOutcome(_) => "ManagementOutcome",
