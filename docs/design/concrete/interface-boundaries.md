@@ -202,19 +202,9 @@ struct DelegationId(/* 不透明な識別子 */);
 struct TaskAgentEphemeralId(/* 不透明な識別子 */);
 struct WorkspaceAssocId(/* 不透明な識別子 */);
 
-// 委任された作業の境界（作成時点の写し）。境界情報であり、権限そのものではありません。
-// パス解決・トラバーサル遮断・現在の権限照合は実行時の実行・拡張担当が行い、本構造体を
-// 生きた許可や解決済み経路として再利用してはなりません。委任対象の作業範囲は、この
-// スライスでは依拠リビジョンのタスク全体です（部分範囲の表現は、それを確定できる
-// producer を持つスライスが同じ設計変更で追加します）。
-struct DelegationScope {
-    workspace: Option<DelegatedWorkspace>, // 委任時に確定していたワークスペース境界の写し。使用しない委任では None
-}
-struct DelegatedWorkspace {
-    assoc: WorkspaceAssocId,                 // 写し元の関連付け識別子（対応関係の来歴）
-    folder: WorkspaceFolderRef,              // 委任時点のフォルダ（写し。解決の権威ではない）
-    save_target: Option<WorkspaceFolderRef>, // 委任時点の保存先（写し）
-}
+// 委任スコープ（DelegationScope / DelegatedWorkspace）の定義と凍結規則は CI §5.3 にあります。
+// 境界情報であり、権限そのものではありません。パス解決・トラバーサル遮断・現在の権限照合は
+// 実行時の実行・拡張担当が行い、本構造体を生きた許可や解決済み経路として再利用してはなりません。
 
 // タスク化・委任の要求。個体調整が要求を開始し、作業担当が受理・反映・達成を確定する。
 struct ProposeTaskCommand {
@@ -1269,7 +1259,7 @@ fn request_action(cmd: ExecuteActionCommand)
 
 | ドメイン領域 | 結果判定 enum（例） | 主なバリアントの意味論 |
 |---|---|---|
-| タスク提案・方針指示・委任（コマンドレベル） | `TaskProposalOutcome`、`DelegationOutcome` | 受理（Accepted）／前提不一致（StalePremise：現在値付き）／タスク未存在（MissingTask：方針指示・委任時）／リビジョン上限超過（RevisionExhausted：方針指示時のみ）／全体保留中（HeldByGlobalHold：hold スライスで追加）／再照合が必要（NeedsRevalidation：再照合の producer スライスで追加）／情報不足（InsufficientContext：producer スライスで追加） |
+| タスク提案・方針指示・委任（コマンドレベル） | `TaskProposalOutcome`、`DelegationOutcome` | 受理（Accepted）／前提不一致（StalePremise：現在値付き）／タスク未存在（MissingTask：方針指示・委任時）／リビジョン上限超過（RevisionExhausted：方針指示時のみ）／全体保留中（HeldByGlobalHold：hold スライスで追加）／再照合が必要（NeedsRevalidation）／情報不足（InsufficientContext）。TaskProposalOutcome は候補側の意味論をすべて持ち、DelegationOutcome は HeldByGlobalHold・NeedsRevalidation・InsufficientContext を、それぞれの producer を持つスライスで追加します |
 | タスクコミット（方針指示 AU4、リポジトリレベル） | `TaskCommitOutcome` | コミット成功（CommittedAs）／期待値不一致（StaleExpected：現在値付き）／タスク未存在（MissingTask）／リビジョン上限超過（RevisionExhausted）／全体保留中（HeldByGlobalHold：hold スライスで追加） |
 | エージェント結果受入 | `TaskResultAcceptance` | 現在タスクへ採用（AdoptedToCurrent）／過去記録にのみ保存（RecordedToOriginalOnly）／権限確認のため保留（HeldForPermissionReview）／期限切れのため破棄（DiscardedAsStaleWithRecord） |
 | 経験提出・訂正・スコープ | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | 知識形成（Formed）／保留（Deferred）／保存価値なし（Declined）／訂正完了（Corrected）／パートナー専用を維持（KeptAsCompanion）／明示制約により拒絶（DeniedByExplicitConstraint）／対象期限切れ（StaleTarget）／消去中保留（HeldByErasure） |
@@ -1457,9 +1447,10 @@ trait TaskRepository {
 
     // 委任の作成：expected_task_revision の比較照合を満たした上で安全に作成。delegation と
     // agent の識別子は作業担当（orchestrate）が発行して premise で渡し、リポジトリは採番し
-    // 直しません。delegator は同一トランザクション内で現在の Task 行の担当者から写します。
-    // リビジョン不一致（StaleTaskRevision）とタスク未存在（MissingTask）は commit せずに
-    // 返し、部分的な行を残しません。D1/D2 の不整合は技術的エラーとし、合成値を作りません。
+    // 直しません。delegator は同一トランザクション内で現在の Task 行の担当者から写し、
+    // 同じリビジョンの task_revision snapshot との担当者一致を確認します（欠如・不一致は
+    // 技術的エラー。合成値を作りません）。リビジョン不一致（StaleTaskRevision）とタスク
+    // 未存在（MissingTask）は commit せずに返し、部分的な行を残しません。
     async fn create_delegation(
         &self,
         premise: DelegationCreationPremise,
@@ -1468,7 +1459,8 @@ trait TaskRepository {
     // 委任のリロード：delegation_id に対応する対応関係（依拠タスクリビジョン・委任元・
     // ephemeral ID・スコープの写し）を読み戻します。存在しない場合は None。不正な識別子表現・
     // 不正なスコープ表現は技術的エラーとし、合成した値を返しません。行の存在は実行中・生存の
-    // 証明ではありません。
+    // 証明ではありません。再起動後の対応解決と、遅延した結果到着の帰属（結果受入スライス）が
+    // この読み出しを使い、AU3 スライスのテストは close / reopen 後の再読み出しを検証します。
     async fn load_delegation(
         &self,
         delegation: DelegationId,
@@ -1489,6 +1481,7 @@ trait TaskRepository {
 }
 
 - タスク作成の復元世代前提（復元跨ぎタグ）は、値の担当責任者（保全・消去）が存在する開発ステージで `task` に追加します。タスク側は `GenerationInner` を包むタスク所有の前提型とし、他担当の `RestoreGeneration` を直接インポートしません（CI §6.4 の復元跨ぎ参照を欠落させないため）。
+- 委任作成のオーケストレーション（作業担当）: `load_task` による事前照合（欠如は `MissingTask`、リビジョン不一致は `StaleTaskRevision { current }`）→ `DelegationId`・`TaskAgentEphemeralId` の発行 → `DelegationCreationPremise` の構成 → `create_delegation` 呼び出し、の順に進みます。事前照合は現在性の保証ではなく、`create_delegation` のリビジョン比較照合が事前照合後の競合レースを包含します。リポジトリの結果は変更不能のまま写像します。
 
 // --- アクション試行（PR グループE。SD-Attempt。追記専用 ＋ 行ごとの CAS） ---
 struct AttemptCommitPremise {

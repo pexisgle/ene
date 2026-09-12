@@ -256,6 +256,13 @@ struct SteeringPremiseRef {
 struct TaskContextEntryId(/* opaque */);
 
 // 委任された作業の境界（作成時点の写し）。境界情報であり、権限や解決済み経路ではありません。
+// 委任の有効性は常にタスクの現在単位から再確認し、この写しだけを根拠にしません。
+// 委任対象の作業範囲は、このスライスでは依拠リビジョンのタスク全体です（部分範囲の表現は、
+// それを確定できる producer を持つスライスが同じ設計変更で追加します）。
+// DelegatedWorkspace は WorkspaceAssociation の射影（task を除く）であり、作成時点の
+// 関連付けの値を凍結します。後からワークスペース関連付けが変更・整理されても、委任がどの
+// 境界を前提としたかを対応関係として説明できるようにするためであり、現在の解決・権限判断
+// にはこの写しを使いません（単一マスターは workspace_assoc のままです）。
 struct DelegationScope {
     workspace: Option<DelegatedWorkspace>, // 委任時に確定していたワークスペース境界の写し。使用しない委任では None
 }
@@ -270,7 +277,7 @@ struct DelegationRef {
     task: TaskRef,               // 委任元の親タスクとその前提リビジョン（依拠リビジョン）。目的はこのリビジョンの task_revision snapshot から解決し、複製しない
     delegator: AssigneeRef,      // 作成時に写したタスク側担当者（CompanionIdを直接インポートしない。有効性はタスクの現在単位から再確認する）
     agent: TaskAgentEphemeralId, // 一時的な作業主体。独自の長期人格や親愛度を持たず、永続データの責任者にならない
-    scope: DelegationScope,      // 委任されたタスクとワークスペースの範囲の写し
+    scope: DelegationScope,      // 委任時のワークスペース境界の写し（委任対象のタスク範囲は task が示す）
 }
 
 // タスクコンテキストの識別子群は TaskContextEntry（採用された識別子・由来・取得日時）としてタスク側に定義します。
