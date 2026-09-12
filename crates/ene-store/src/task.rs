@@ -37,7 +37,7 @@ const SQL_INSERT_WORKSPACE_ASSOC: &str =
 const SQL_SELECT_TASK: &str =
     "SELECT revision, purpose_adopted_revision, assignee FROM task WHERE task_id = ?1";
 
-const SQL_SELECT_TASK_REVISION: &str = "SELECT revision, purpose_adopted_revision, purpose_text, assignee FROM task_revision WHERE task_id = ?1 AND revision = ?2";
+const SQL_SELECT_TASK_REVISION: &str = "SELECT purpose_adopted_revision, purpose_text, assignee FROM task_revision WHERE task_id = ?1 AND revision = ?2";
 
 const SQL_SELECT_TASK_CONTEXT: &str = "SELECT entry_id, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 ORDER BY rowid";
 
@@ -166,7 +166,6 @@ struct RawTask {
 }
 
 struct RawTaskRevision {
-    revision: i64,
     purpose_adopted_revision: i64,
     purpose_text: String,
     assignee: String,
@@ -196,10 +195,9 @@ fn raw_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTask> {
 
 fn raw_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTaskRevision> {
     Ok(RawTaskRevision {
-        revision: row.get(0)?,
-        purpose_adopted_revision: row.get(1)?,
-        purpose_text: row.get(2)?,
-        assignee: row.get(3)?,
+        purpose_adopted_revision: row.get(0)?,
+        purpose_text: row.get(1)?,
+        assignee: row.get(2)?,
     })
 }
 
@@ -276,6 +274,8 @@ fn load_task_sync(
         task,
         adopted_revision: decode_revision(raw_task.purpose_adopted_revision)?,
     };
+    // The snapshot is keyed by the D1 current revision, so a row can only be
+    // the record of that revision; a missing row is an incomplete unit.
     let snapshot: RawTaskRevision = guard
         .query_row(
             SQL_SELECT_TASK_REVISION,
@@ -287,14 +287,8 @@ fn load_task_sync(
         .ok_or_else(|| {
             task_unavailable("task revision snapshot missing for the current revision")
         })?;
-    // The D1 current row and its D2 snapshot must describe the same revision,
-    // purpose, and assignee. A mismatch is an inconsistent unit, never a
-    // TaskRecord.
-    if decode_revision(snapshot.revision)? != reference.revision {
-        return Err(task_unavailable(
-            "task revision snapshot does not match the current revision",
-        ));
-    }
+    // The D1 current row and its D2 snapshot must describe the same purpose
+    // and assignee. A mismatch is an inconsistent unit, never a TaskRecord.
     let revision_purpose = TaskPurposeRef {
         task,
         adopted_revision: decode_revision(snapshot.purpose_adopted_revision)?,
@@ -325,6 +319,9 @@ fn load_task_sync(
             "task context entries missing for the current revision",
         ));
     }
+    // AU2 records the adopted purpose as the only item kind; a non-matching
+    // adopted identity is an inconsistent unit. The first slice that adds
+    // another item kind must extend this read rule with it.
     if !context.iter().all(|entry| {
         matches!(entry.item, TaskContextItem::AdoptedPurpose(adopted) if adopted == purpose)
     }) {

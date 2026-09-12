@@ -5020,6 +5020,8 @@ async fn task_load_rejects_a_partial_au2_unit() {
 #[tokio::test]
 async fn task_load_rejects_an_inconsistent_au2_unit() {
     let store = open_memory().await.unwrap();
+    let mismatch = i64::try_from(TaskRevision::initial().as_u64() + 1)
+        .expect("the probe revision fits an integer");
 
     // D1 current purpose and the D2 snapshot adopted revision must agree.
     let premise = task_premise(None);
@@ -5031,8 +5033,8 @@ async fn task_load_rejects_an_inconsistent_au2_unit() {
         };
         guard
             .execute(
-                "UPDATE task_revision SET purpose_adopted_revision = 2 WHERE task_id = ?1",
-                params![crate::codec::encode_id(premise.task.as_raw())],
+                "UPDATE task_revision SET purpose_adopted_revision = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw()), mismatch],
             )
             .expect("the purpose probe must update");
     }
@@ -5054,8 +5056,8 @@ async fn task_load_rejects_an_inconsistent_au2_unit() {
         };
         guard
             .execute(
-                "UPDATE task_context_entry SET purpose_adopted_revision = 2 WHERE task_id = ?1",
-                params![crate::codec::encode_id(premise.task.as_raw())],
+                "UPDATE task_context_entry SET purpose_adopted_revision = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw()), mismatch],
             )
             .expect("the context probe must update");
     }
@@ -5091,6 +5093,29 @@ async fn task_load_rejects_an_inconsistent_au2_unit() {
             Err(TaskTechnicalError::StorageUnavailable { .. })
         ),
         "a current/snapshot assignee mismatch is a technical error"
+    );
+
+    // An unknown stored origin kind is an unreadable row.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET origin_kind = 'unknown' WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the origin probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an unknown stored origin kind is a technical error"
     );
 }
 
