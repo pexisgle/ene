@@ -574,6 +574,52 @@ enum LiveAuthorizationDecision {
 - 各処理の開始直前に、現在の最新条件を実際の操作対象へ厳格に適用します。適用の執行責任は実行・拡張担当（外部作用）、推論担当（プロバイダ送信）、および各参照・保存箇所に残り、許可の意味論そのものの管理は権限・制約担当が担います。なお、無関係な軽微な変更が生じるたびに毎回再承認を要求するのではなく、重大な意味の変化があったかどうかに基づいて再評価の要否を判断します（K-H）。
 - 環境設定の完備状態（利用同意の記録、認証情報の登録、トークンの有無など）の確認は、推論受付ゲート（K-E）が唯一の責任者であり、本クエリには設定状態のチェックを含めません。本リアルタイム照合（live check）は同意状態そのものだけを判定し、セットアップ不足を理由にして独立に拒絶することはありません。
 
+#### K-B.1 Stage 4 の Workspace 内ファイルシステム Action に対する最小の Action 評価
+
+推論用の `PermissionEvaluationId` / `EvaluationTracker` を Action に流用・偽装してはなりません。権限・制約担当は、Action 用の候補・現在前提・単一使用の評価を独立に持ちます。
+
+```rust
+// 権限・制約担当が所有する。Task 側の対応関係は前提として受け取り、許可の意味判断は権限側に残す。
+struct ActionUseCandidate {
+    delegation: RawId,             // 依拠する委任対応
+    task: RawId,                   // 依拠タスク
+    task_revision: RevisionInner,  // 依拠タスクリビジョン（(task, revision) の対）
+    workspace: RawId,              // 現在の workspace_assoc
+    operation: ActionKind,         // List | Read | Create | Edit（この段階の closed world）
+    resolved_target: String,       // 実行直前に解決された canonical な実対象（binding）
+}
+// 呼び出し側が Task 側の永続状態から再読込した現在の前提。
+// durable copy を生きた許可にせず、判断のたびに現在値と突き合わせる。
+struct CurrentActionPremise {
+    delegation: RawId,
+    task: RawId,
+    task_revision: RevisionInner,
+    workspace: RawId,
+}
+struct ActionPermissionEvaluationId(RawId); // 推論用 PermissionEvaluationId とは別の型
+enum ActionKind { List, Read, Create, Edit }
+enum ActionAuthorizationDecision {
+    AllowForThisUse(ActionPermissionEvaluationId), // 今回の利用限り。候補 fingerprint に束縛し、single-use
+    Deny(ActionDenyCode),
+    NeedsRevalidation,
+}
+enum ActionDenyCode {
+    NotInAllowlist,   // 明示的な許可アームの外（Delete/Execute 等を producer なしで通さない）
+    PremiseMismatch,  // 候補と現在前提の不一致（無効化・再評価）
+}
+class ActionEvaluationTracker { /* mint / consume。推論用 EvaluationTracker とは別実体 */ }
+fn authorize_action_use(
+    query: ActionUseQuery,
+    current: &CurrentActionPremise,
+    tracker: &mut ActionEvaluationTracker,
+) -> ActionAuthorizationDecision;
+```
+
+- **明示的な許可アーム（default-allow の禁止）**: この段階の許可は、委任された Task Agent の Workspace capability に対する `List / Read / Create / Edit` の明示的な組です。候補の `(delegation, task, task_revision, workspace)` が `CurrentActionPremise` と一致し、操作が明示アームに含まれる場合だけ `AllowForThisUse` を返します。Delete/Execute、ルール・Deny・Always ask の producer は、この関数の明示的な拡張として追加し、既定許可で通してはなりません。
+- **binding と単一使用**: 評価 ID は候補 fingerprint（delegation・task・task_revision・workspace・operation・resolved_target）に束縛し、`consume` は一致する fingerprint での一度だけ成功します。同じ ID を別の対象や操作に使い回すことはできません。
+- **AU5 start への接続**: 実行・拡張担当は対象を解決した後に `authorize_action_use` を呼び、`AllowForThisUse` の場合だけ評価 ID を consume して `AttemptCommitPremise.relied_evaluation` として AU5 の挿入トランザクションへ渡します。挿入トランザクションは同じ不分区間で委任・依拠タスクリビジョン・現在のタスク・現在の workspace_assoc・委任スコープを再照合するため、評価の前提が動いた場合は開始されません。永続化された `relied_evaluation` と試行行の対応関係（操作・実対象・委任・依拠 TaskRef）が、その判断の durable な binding です。同じ評価 ID での二度目の開始は技術的エラーとして拒否し、二重開始を許しません。
+- **判断記録との区別**: `permission_evaluation` の評価ログ行（D2）、ルール・Deny・毎回確認の永続状態、オーナー確認（AskOwner）は、それらの producer を持つスライスが同じ判断点に追加します。このスライスは代役の許可・placeholder 列を置きません。
+
 ### K-C 秘密利用（認証用途への供給）
 
 呼び出し元へ秘密情報そのものの所有権を渡さない設計を徹底します。認証情報の参照（ハンドル）を持っていることと、その秘密情報を自由に読み出せることは全く別です。
@@ -804,7 +850,11 @@ struct ReportEffectFact {
   ユーザー入力の受付、タスクの受理、認可の判定、外部作用の開始、実際の作用の把握、内部データへの保存、タスクの達成判定、オーナーへの報告完了は、すべて独立した別の事実です。これらを単一の「成功」という状態にひとまとめにしてはなりません。「確認済み成功」「確認済み失敗」「成否不明」を明確に区別し、確認が取れない事象を勝手に「未実行」や「失敗」「成功」へ改ざんしてはなりません。再実行は必ず独立した新しい試行として扱います。
 - タイムアウトが発生しても、外部作用の確信度は変化しません（`Unknown` のまま保持）。遅れて成功の確認が取れた場合は、元の試行記録に対して `Unknown` → `Confirmed` のアトミック更新（CAS）を行い、現在のタスクへ結果を採用するかどうかは H-A の受付インターフェースにおいて改めて判定します。
 - 永続化は永続化グループE（`action_attempt`）のトランザクションで行い、実行開始前の比較照合は短いトランザクション内で不可分に完了します（CCT §8.1、PR AU5）。
-- **本スライス（Task Agent の Workspace 内ファイルシステム限定）の具体契約**: 認可の境界は、現在の `workspace_assoc`（Task につき 0..1 の不変な関連付け）と closed な `OperationKind`（`Read / Create / Edit`。`Delete / Execute` はユーザー確認・外部拡張の producer を持つスライスが追加）です。この段階では Action 用の `PermissionEvaluationId` を発行する評価 producer が存在しないため、代役の評価識別子を premise や試行行に置きません。委任の `scope_copy` は依拠時点の写し（provenance）であり、開始時に照合する生きた境界は現在の `workspace_assoc` です。実際の対象の解決（`RealTargetRef`）は実行・拡張担当が実行直前に行い、入力文字列の一致を同一性の根拠にしません。結果採用・タスク達成はこのスライスに含めません（H-A の受付インターフェースが担当）。
+- **本スライス（Task Agent の Workspace 内ファイルシステム限定）の具体契約**:
+  - **操作**: `OperationKind` は `List / Read / Create / Edit`。`List` は directory の非再帰的な列挙（名前と種別、名前昇順）で、`Read` / `Edit` は regular file のみ、`List` は directory のみを対象とします。`Delete / Execute` はユーザー確認・外部拡張の producer を持つスライスが同じ設計変更で追加します。
+  - **authorization**: 開始の直前に K-B.1 の `authorize_action_use` が今回限りの判断を返し、`AllowForThisUse` の評価 ID だけを `AttemptCommitPremise.relied_evaluation` として AU5 の挿入へ渡します。`workspace_assoc` は作業場所の authority であり、それ自体を特定の操作の許可とみなしません。委任の `scope_copy` は依拠時点の写し（provenance）であり、開始時に照合する生きた境界は現在の `workspace_assoc` です。
+  - **mount / reparse boundary**: 実際の対象の解決（`RealTargetRef`）は実行直前に行い、入力文字列の一致を同一性の根拠にしません。canonical 化とフォルダ配下の prefix 照合に加えて、Workspace root の実体境界を越える target を拒否します。Linux では `/proc/self/mountinfo` 上の入れ子 mount point を target の祖先に持つ場合と、root と target の device が異なる場合を拒否し、mountinfo が読めない場合は fail closed とします。その他の Unix では device の一致を必須とします。Windows では volume serial number の一致を必須とし、判定できない場合は拒否します。symlink / reparse point / junction は canonical 解決で外へ出るものを拒否します。
+  - **effect facts**: 作用の確定度は実行の観測（write 後の読み戻し、List の列挙結果）からのみ記録し、エージェントの自己申告を根拠にしません。結果採用・タスク達成はこのスライスに含めません（H-A の受付インターフェースが担当）。
 
 ### K-I 拡張受入
 
@@ -1564,7 +1614,8 @@ struct AttemptCommitPremise {
     task_revision: RevisionInner,    // 依拠タスクリビジョン（(task, revision) の対で運ぶ）
     workspace: RawId,                // 現在の workspace_assoc の識別子
     real_target: RealTargetRef,      // 実行直前に解決された実際の対象
-    operation: OperationKind,        // Read | Create | Edit（このスライスの closed world）
+    operation: OperationKind,        // List | Read | Create | Edit（このスライスの closed world）
+    relied_evaluation: ActionPermissionEvaluationId, // K-B.1 の今回限りの判断。single-use
 }
 
 enum ActionStartOutcome {
@@ -1582,8 +1633,10 @@ enum CertaintyUpdateOutcome {
 trait ActionAttemptRepository {
     // 試行の開始：同一の即時トランザクション内で、委任対応、依拠タスクリビジョン、
     // 現在のタスクリビジョン、現在の workspace_assoc、委任の scope_assoc を照合し、
-    // 不可分に挿入する（AU5）。委任行と premise の不一致、複数行の関連付け、
-    // 未知の操作種別は技術的エラーとし、推測で stale に丸めない。
+    // 不可分に挿入する（AU5）。relied_evaluation は single-use とし、同じ評価 ID での
+    // 二度目の挿入は技術的エラーとして拒否する（二重開始を許さない）。
+    // 委任行と premise の不一致、複数行の関連付け、未知の操作種別は技術的エラーとし、
+    // 推測で stale に丸めない。
     async fn insert_attempt_if_current(
         &self,
         premise: AttemptCommitPremise,
@@ -1830,8 +1883,8 @@ trait UndeliveredRepository {
 ### V-3 Action candidate → authorization → external effect → timeout → late result（K-H・K-B・K-K・H-A）
 
 1. 機能利用元が `ActionCandidate(principal_chain, task, delegation, workspace, purpose, described_target, operation, data_use, cost_risk, relied_intent_rule)` を組み立てます。候補構造体を組み立てられたこと自体は、実行許可を意味しません。
-2. 本スライス（Task Agent の Workspace 内ファイルシステム限定）では、現在の `workspace_assoc`（Task につき 0..1 の不変な関連付け）と closed な `OperationKind`（`Read / Create / Edit`）が実行の authorization 境界です。委任の `scope_copy` は依拠時点の写しであり、生きた境界として使い回しません。Action 用の `CheckLiveAuthorizationQuery` / `PermissionEvaluationId` / `AskOwner` は、Action 評価の producer（評価テーブルと評価ロジック）を持つ権限スライスが同じ設計変更で導入し、このスライスは代役の許可証を premise に置きません。オーナーの確認が必要な操作（削除・外部送信等）は producer が導入されるまで開始経路が存在しません。
-3. 実行・拡張担当は現在の関連付けのフォルダを実行直前に解決し、`RealTargetRef`（canonical な実対象）を得ます。対象の文字列表記が一致していることだけでは同一とみなしません。`AttemptCommitPremise(attempt, delegation, task, task_revision, workspace, real_target, operation)` を `insert_attempt_if_current` に渡し、同一の短い `Immediate` トランザクションで委任対応・依拠タスクリビジョン・現在のタスクリビジョン・現在の `workspace_assoc`・委任の `scope_assoc` を照合します（AU5）。`Started` の場合のみトランザクション外で解決済みの対象に作用し、欠如・前進は `StalePremise` として書き込みも実行も行いません。
+2. 実行・拡張担当は現在の関連付けのフォルダから対象を実行直前に解決し（canonical 化・フォルダ配下の照合・mount/reparse 境界の照合。`List` は directory、`Read`/`Edit` は regular file）、`RealTargetRef` を得ます。続いて `ActionUseCandidate(operation, resolved_target, delegation, task, task_revision, workspace)` を K-B.1 の `authorize_action_use` に渡します。`AllowForThisUse` の評価 ID だけが開始を許し、`Deny` / `NeedsRevalidation` は書き込みも実行も行いません。推論用の `PermissionEvaluationId` / `EvaluationTracker` は流用しません。
+3. `AllowForThisUse` の評価 ID を consume し、`AttemptCommitPremise(attempt, delegation, task, task_revision, workspace, real_target, operation, relied_evaluation)` を `insert_attempt_if_current` に渡します。同一の短い `Immediate` トランザクションで委任対応・依拠タスクリビジョン・現在のタスクリビジョン・現在の `workspace_assoc`・委任の `scope_assoc` を照合し（AU5）、同じ評価 ID の二度目の挿入は技術的エラーとして拒否します。`Started` の場合のみトランザクション外で解決済みの対象に作用し、欠如・前進は `StalePremise` として書き込みも実行も行いません。
 4. 作用の確定度は実行・拡張担当が実行そのものの観測から記録します。`ConfirmedSuccess` は対象の事後確認（例: 書き込み後の読み戻し一致）を根拠とし、エージェント自身の「成功しました」という自己申告を証拠にしません。作用が起き得なかったことが確認できた場合は `ConfirmedFailure`、確認できない場合は `Unknown` のまま保持し、中断要求の受理、通信の成功、画面への表示、DB保存の成功、再接続、復元、端末移動などを理由にして勝手に成功や失敗へ書き換えません。試行行は開始時に `Unknown` で挿入され、確定度は行ごとの CAS でのみ更新します。
 5. 遅れて届いた成功の証拠は、元の試行記録に対して `compare_and_set_certainty(attempt, expected=Unknown, new=Confirmed, grounds)` のアトミック更新（CAS）で記録します。新たな客観的証拠の確認を必須とし、エージェント自身の自己申告を証拠にしてはなりません。現在のタスクへ結果を採用するかどうかは、H-A の受付インターフェースにおいて改めて判定します（このスライスは採用を行いません）。成否不明となったアクションを再実行するには、新しい試行IDの発行と、重複リスクを明示したオーナー自身の再判断が必要です。
 6. **失われてはならない情報**: 判定時の想定対象と解決済み実対象の対応関係、委任の不変性、確定度（確認済み成功／確認済み失敗／成否不明）、試行と外部作用の区別、遅延到着の帰属、重複実行防止に必要な永続記録。

@@ -328,18 +328,18 @@ enum EffectGrounds {
 
 /// 実行・拡張機能が管理する、把握された外部作用の記録。
 /// この段階では task / delegation / workspace は必須（Task に紐づく Workspace 内操作のみ）。
-/// `relied_permission: PermissionEvaluationRef` は Action 用の評価 producer を持つスライスが
-/// 同じ設計変更で追加し、それまで代役の識別子を置かない。
 struct ActionAttemptRef {
     attempt: ActionAttemptId,
     task: TaskRef,                  // 依拠したタスクリビジョン（軽微な単発操作の producer は後続スライス）
     delegation: DelegationId,
     workspace: WorkspaceAssocId,    // 開始時に照合した現在の関連付け（委任 scope_copy ではない）
     real_target: RealTargetRef,     // パス解決等を経た具体的な操作対象（単なる文字列一致ではない）
-    operation: OperationKind,       // Read | Create | Edit を混同しない（Delete/Execute は後続スライス）
+    operation: OperationKind,       // List | Read | Create | Edit を混同しない（Delete/Execute は後続スライス）
+    relied_evaluation: ActionPermissionEvaluationId, // K-B.1 の今回限りの判断（single-use。評価ログ行そのものではない）
     certainty: ActionCertainty,     // 開始時は Unknown。CAS でのみ更新
     grounds: Option<EffectGrounds>, // Unknown の開始時は None
 }
+struct ActionPermissionEvaluationId(/* 不透明なID。推論用 PermissionEvaluationId とは別 */);
 
 /// 認可判断の記録を生きた許可と区別するための、判断当時の対応の写し。
 struct PermissionEvaluationRef {
