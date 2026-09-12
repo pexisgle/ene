@@ -4,7 +4,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::decode_id;
 
-const CURRENT_VERSION: u64 = 13;
+const CURRENT_VERSION: u64 = 14;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -274,16 +274,6 @@ const MIGRATION_V13: &str = "
 ALTER TABLE history_message ADD COLUMN at_utc TEXT NULL;
 CREATE INDEX IF NOT EXISTS idx_history_message_companion_at ON history_message (companion_id, at_utc);
 ";
-/// Adds the canonical UTC timestamp projection that orders and range-filters
-/// history inside SQL: fixed-width `Z` renderings compare lexically exactly
-/// like the instants they represent, regardless of the creation offsets kept
-/// in `at`. The stored `at` stays the display/provenance rendering (offset
-/// included); `at_utc` is query material only. Existing rows are backfilled
-/// in Rust because SQLite's date functions would lose nanosecond precision.
-const MIGRATION_V13: &str = "
-ALTER TABLE history_message ADD COLUMN at_utc TEXT NULL;
-CREATE INDEX IF NOT EXISTS idx_history_message_companion_at ON history_message (companion_id, at_utc);
-";
 
 /// Backfills [`MIGRATION_V13`]'s `at_utc` for rows written before it.
 ///
@@ -316,6 +306,10 @@ fn backfill_history_at_utc(tx: &rusqlite::Transaction<'_>) -> Result<(), String>
             rusqlite::params![message_id, canonical],
         )
         .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// Introduces the derived recall token index and the partial B-tree indexes
 /// behind `recall_candidates`.
 ///
@@ -323,10 +317,13 @@ fn backfill_history_at_utc(tx: &rusqlite::Transaction<'_>) -> Result<(), String>
 /// §5 R): every row is recomputed from `learning_memory.content` by the same
 /// tokenizer the queries use, so the table is never the Memory's canonical
 /// record and a future Memory deletion must delete its token rows with it.
-/// The two partial indexes cover only non-suppressed rows, so each candidate
-/// arm walks at most `limit` live entries instead of stepping over the whole
-/// suppressed prefix. Token rows of suppressed memories stay in place;
-/// suppression is a recall-time filter, and clearing it needs no reindexing.
+/// The primary key serves the lexical companion-plus-term lookup; the
+/// `memory_id` index serves the per-Memory refresh that rewrites one
+/// Memory's rows on every revision. The two partial indexes cover only
+/// non-suppressed rows, so each candidate arm walks at most `limit` live
+/// entries instead of stepping over the whole suppressed prefix. Token rows
+/// of suppressed memories stay in place; suppression is a recall-time
+/// filter, and clearing it needs no reindexing.
 const MIGRATION_V14: &str = "
 CREATE TABLE IF NOT EXISTS learning_memory_term (
 term TEXT NOT NULL,
@@ -334,6 +331,7 @@ memory_id TEXT NOT NULL,
 companion_id TEXT NOT NULL,
 PRIMARY KEY (companion_id, term, memory_id)
 );
+CREATE INDEX IF NOT EXISTS idx_learning_memory_term_memory ON learning_memory_term (memory_id);
 CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
 CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 ";
@@ -366,7 +364,6 @@ fn backfill_recall_tokens(tx: &rusqlite::Transaction<'_>) -> Result<(), String> 
                 .execute(rusqlite::params![term, memory, companion])
                 .map_err(|error| error.to_string())?;
         }
->>>>>>> afd7ee32 (Index the recall candidate lookup instead of scanning for it)
     }
     Ok(())
 }

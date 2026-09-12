@@ -243,22 +243,38 @@ fn refresh_memory_terms(
     memory: MemoryId,
     change: &MemoryChange,
 ) -> Result<(), LearningTechnicalError> {
-    let memory_text = encode_id(memory.as_raw());
+    rebuild_memory_terms_tx(
+        tx,
+        &encode_id(memory.as_raw()),
+        &encode_id(change.scope.companion_id()),
+        &change.content,
+    )
+    .map_err(learning_unavailable)?;
+    Ok(())
+}
+
+/// Re-derives one Memory's token rows from its canonical content.
+///
+/// Shared by commit-time refresh and the credential-sweep rebuild: both
+/// pass the current canonical text, so the derived rows always equal
+/// [`ene_learning::recall_index_terms`] of what `learning_memory` holds.
+/// Raw [`rusqlite::Error`] travels to the caller, which maps it into its
+/// own domain error.
+pub(crate) fn rebuild_memory_terms_tx(
+    tx: &Transaction<'_>,
+    memory_text: &str,
+    companion_text: &str,
+    content: &str,
+) -> Result<(), rusqlite::Error> {
     tx.execute(
         "DELETE FROM learning_memory_term WHERE memory_id = ?1",
         params![memory_text],
-    )
-    .map_err(learning_unavailable)?;
-    let companion_text = encode_id(change.scope.companion_id());
-    let mut insert = tx
-        .prepare(
-            "INSERT OR IGNORE INTO learning_memory_term (term, memory_id, companion_id) VALUES (?1, ?2, ?3)",
-        )
-        .map_err(learning_unavailable)?;
-    for term in ene_learning::recall_index_terms(&change.content) {
-        insert
-            .execute(params![term, memory_text, companion_text])
-            .map_err(learning_unavailable)?;
+    )?;
+    let mut insert = tx.prepare(
+        "INSERT OR IGNORE INTO learning_memory_term (term, memory_id, companion_id) VALUES (?1, ?2, ?3)",
+    )?;
+    for term in ene_learning::recall_index_terms(content) {
+        insert.execute(params![term, memory_text, companion_text])?;
     }
     Ok(())
 }
