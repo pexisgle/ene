@@ -609,7 +609,7 @@ enum ActionDenyCode {
 }
 class ActionEvaluationTracker { /* mint / consume。推論用 EvaluationTracker とは別実体 */ }
 fn authorize_action_use(
-    query: ActionUseQuery,
+    candidate: ActionUseCandidate,
     current: &CurrentActionPremise,
     tracker: &mut ActionEvaluationTracker,
 ) -> ActionAuthorizationDecision;
@@ -851,9 +851,9 @@ struct ReportEffectFact {
 - タイムアウトが発生しても、外部作用の確信度は変化しません（`Unknown` のまま保持）。遅れて成功の確認が取れた場合は、元の試行記録に対して `Unknown` → `Confirmed` のアトミック更新（CAS）を行い、現在のタスクへ結果を採用するかどうかは H-A の受付インターフェースにおいて改めて判定します。
 - 永続化は永続化グループE（`action_attempt`）のトランザクションで行い、実行開始前の比較照合は短いトランザクション内で不可分に完了します（CCT §8.1、PR AU5）。
 - **本スライス（Task Agent の Workspace 内ファイルシステム限定）の具体契約**:
-  - **操作**: `OperationKind` は `List / Read / Create / Edit`。`List` は directory の非再帰的な列挙（名前と種別、名前昇順）で、`Read` / `Edit` は regular file のみ、`List` は directory のみを対象とします。`Delete / Execute` はユーザー確認・外部拡張の producer を持つスライスが同じ設計変更で追加します。
+  - **操作と request/result**: `OperationKind` は `List / Read / Create / Edit` の closed world。request の target は Workspace 相対パスのみとし、絶対パス入力は拒否します。`List` は存在する directory のみを対象とする非再帰列挙で、request は相対 dir path、result は `{name, kind: file | dir}` の列（名前昇順）です。`Read` は存在する regular file のみを対象とし、request は相対 file path、result は file content です。`Create` は存在しない regular file の新規作成のみとし、request は相対 file path＋body、result は作成済み marker（解決済み実対象付き）です。`Edit` は存在する regular file の上書きのみとし、request は相対 file path＋body、result は更新済み marker です。directory に対する `Read`/`Create`/`Edit`、regular file に対する `List` は拒否します。`Delete / Execute` はユーザー確認・外部拡張の producer を持つスライスが同じ設計変更で追加します。
   - **authorization**: 開始の直前に K-B.1 の `authorize_action_use` が今回限りの判断を返し、`AllowForThisUse` の評価 ID だけを `AttemptCommitPremise.relied_evaluation` として AU5 の挿入へ渡します。`workspace_assoc` は作業場所の authority であり、それ自体を特定の操作の許可とみなしません。委任の `scope_copy` は依拠時点の写し（provenance）であり、開始時に照合する生きた境界は現在の `workspace_assoc` です。
-  - **mount / reparse boundary**: 実際の対象の解決（`RealTargetRef`）は実行直前に行い、入力文字列の一致を同一性の根拠にしません。canonical 化とフォルダ配下の prefix 照合に加えて、Workspace root の実体境界を越える target を拒否します。Linux では `/proc/self/mountinfo` 上の入れ子 mount point を target の祖先に持つ場合と、root と target の device が異なる場合を拒否し、mountinfo が読めない場合は fail closed とします。その他の Unix では device の一致を必須とします。Windows では volume serial number の一致を必須とし、判定できない場合は拒否します。symlink / reparse point / junction は canonical 解決で外へ出るものを拒否します。
+  - **mount / reparse boundary**: 実際の対象の解決（`RealTargetRef`）は実行直前に行い、入力文字列の一致を同一性の根拠にしません。canonical 化とフォルダ配下の prefix 照合に加え、Workspace root の実体境界から外れる target は resolve も start もできません。Linux では `/proc/self/mountinfo` 上の入れ子 mount point を target の祖先に持つ場合と、root と target の device が異なる場合を拒否します。その他の Unix では root と target の device 一致を必須とします。Windows では root と target の volume serial number の一致を必須とします。mountinfo・device・volume の取得を含め、境界の判定ができない場合は fail closed（拒否）します。symlink / reparse point / junction は canonical 解決で外へ出るものを拒否します。実装は symlink・mount・reparse・junction の escape 拒否に対する focused tests を必須とし、判定を実装できない platform・path は fail closed とします。
   - **effect facts**: 作用の確定度は実行の観測（write 後の読み戻し、List の列挙結果）からのみ記録し、エージェントの自己申告を根拠にしません。結果採用・タスク達成はこのスライスに含めません（H-A の受付インターフェースが担当）。
 
 ### K-I 拡張受入
