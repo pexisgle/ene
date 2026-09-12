@@ -17,6 +17,8 @@
 //! - [`setup`] holds the `Stage 2` setup management inlet.
 //! - [`task_agent`] adapts the Task-owned Task Agent inference port to the
 //!   Host inference boundary.
+//! - [`action`] adapts the Task-owned delegation/workspace correspondence to
+//!   the Action-owned filesystem boundary.
 //! - [`conn`] holds the Unix socket listener. The wire close convention is shared:
 //!   a [`ene_api::v1::handshake::DisconnectNotice`] in the response vector is
 //!   terminal and the connection closes after it is written.
@@ -26,6 +28,7 @@
 //! hint only; the `MessagePack` body already carries the same variant name through
 //! its externally-tagged encoding, so the two can never disagree silently.
 
+pub mod action;
 pub mod conn;
 pub mod dialogue;
 pub mod serve;

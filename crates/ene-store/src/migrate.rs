@@ -5,7 +5,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::{decode_id, encode_consumer, encode_purpose};
 
-const CURRENT_VERSION: u64 = 18;
+const CURRENT_VERSION: u64 = 19;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -532,6 +532,29 @@ fn backfill_inference_attempt_consumers(tx: &rusqlite::Transaction<'_>) -> Resul
     Ok(())
 }
 
+/// Introduces `action_attempt`: one durable Action try per `attempt_id`, with
+/// the delegation/task/workspace correlation compared inside the insert
+/// transaction (AU5). The row is append-only for its start facts and changes
+/// only through the certainty compare-and-set. `grounds` is NULL until an
+/// observation is reported; a started attempt reads `certainty = 'unknown'`.
+/// The relied permission evaluation, effect stage, hold, and generation-tag
+/// columns are absent on purpose: their producers do not exist yet, and no
+/// placeholder column is added for them.
+const MIGRATION_V19: &str = "
+CREATE TABLE IF NOT EXISTS action_attempt (
+attempt_id TEXT PRIMARY KEY,
+task_id TEXT NOT NULL,
+task_revision INTEGER NOT NULL,
+delegation_id TEXT NOT NULL,
+workspace_assoc_id TEXT NOT NULL,
+real_target TEXT NOT NULL,
+operation TEXT NOT NULL,
+certainty TEXT NOT NULL,
+grounds TEXT NULL,
+started_at TEXT NOT NULL
+);
+";
+
 /// Derives the recall token rows for pre-index memories inside the
 /// migration transaction, so an upgraded database answers lexical recall
 /// from the index immediately. Fresh databases backfill zero rows.
@@ -651,6 +674,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 18 {
         migrate_v18(&tx)?;
+    }
+    if stored_version < 19 {
+        tx.execute_batch(MIGRATION_V19)
+            .map_err(|error| error.to_string())?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

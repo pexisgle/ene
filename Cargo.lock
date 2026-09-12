@@ -287,6 +287,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "ene-action"
+version = "0.1.0"
+dependencies = [
+ "ene-primitive",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "ene-api"
 version = "0.1.0"
 dependencies = [
@@ -326,6 +336,7 @@ name = "ene-core"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ene-action",
  "ene-api",
  "ene-companion",
  "ene-config",
@@ -453,6 +464,7 @@ dependencies = [
 name = "ene-store"
 version = "0.1.0"
 dependencies = [
+ "ene-action",
  "ene-companion",
  "ene-credential",
  "ene-inference",
