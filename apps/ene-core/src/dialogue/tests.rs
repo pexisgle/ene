@@ -2689,6 +2689,7 @@ async fn learning_transport_failure_is_reported_as_unavailable() {
         transcript: vec![ExperienceTurn {
             role: ExperienceRole::Owner,
             text: String::from("remember this"),
+            at: None,
         }],
         at: WallClockWithTz::now(),
     };
@@ -3439,13 +3440,97 @@ async fn repeated_identical_owner_input_is_excluded_by_message_identity() {
         .map(|(_, rest)| rest)
         .unwrap_or_default();
     assert!(
-        recent.contains("Owner: the same words twice"),
+        recent.contains("the same words twice"),
         "the earlier identical message must stay in the window: {second}"
     );
     assert_eq!(
-        second.matches("Owner: the same words twice").count(),
+        second.matches("the same words twice").count(),
         2,
         "the current input appears once as context (the earlier send) and once as the current turn: {second}"
+    );
+}
+
+/// Dialogue context carries each source message's own offset-qualified time,
+/// distinct from the current-time line, so a past relative date is not
+/// re-anchored to now.
+#[tokio::test]
+async fn dialogue_context_keeps_source_times_distinct_from_now() {
+    use ene_companion::{
+        AppendHistoryCommand, CompanionRepository as _, HistoryRepository as _, HistoryRole,
+    };
+    use ene_presence::PresenceRepository as _;
+
+    let transport = LearningAwareTransport::new("noted", None);
+    let live = live_input("client-source-time");
+    let (handle, _dir) = round_test_handle("dlg-source-time", &live, &transport)
+        .await
+        .unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    let append = |role: HistoryRole, text: &str, at: &str| AppendHistoryCommand {
+        companion,
+        round: RawId::new(),
+        role,
+        text: text.to_string(),
+        lang: String::from("ja"),
+        at: ene_primitive::WallClockWithTz::parse_rfc3339(at).expect("fixture timestamp"),
+        expected_generation: generation,
+        expected_consent: None,
+        expected_credential_set: None,
+        command_id: None,
+        round_wire: None,
+        round_intent: None,
+        incarnation: None,
+        local_id: None,
+    };
+    let stored = handle
+        .store
+        .append_message(append(
+            HistoryRole::Owner,
+            "明日提出する",
+            "2026-09-12T10:00:00+09:00",
+        ))
+        .await;
+    assert!(stored.is_ok(), "the source turn must commit: {stored:?}");
+    let stored = handle
+        .store
+        .append_message(append(
+            HistoryRole::Companion,
+            "了解した",
+            "2026-09-12T00:30:00-05:00",
+        ))
+        .await;
+    assert!(stored.is_ok(), "the second source turn must commit");
+
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-source-time",
+        "それはいつ?",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+    let inputs = transport.dialogue_inputs();
+    let prompt = &inputs[0];
+    assert!(
+        prompt.contains("Current time: "),
+        "the current time is labeled separately: {prompt}"
+    );
+    assert!(
+        prompt.contains("Owner [2026-09-12T10:00:00+09:00]: 明日提出する"),
+        "the source time keeps the creation offset: {prompt}"
+    );
+    assert!(
+        prompt.contains("Companion [2026-09-12T00:30:00-05:00]: 了解した"),
+        "a different source offset stays on its own turn: {prompt}"
     );
 }
 

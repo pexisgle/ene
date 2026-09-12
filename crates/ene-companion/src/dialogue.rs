@@ -406,6 +406,13 @@ async fn assemble_dialogue_input(
     let input = scrubber.scrub(input_text).await?;
     let mut credential_set = input.credential_set;
     let mut prompt = String::from(DIALOGUE_PREAMBLE);
+    // The current time anchors the current input's relative dates; each
+    // source line carries its own time, so past relative dates are not
+    // reinterpreted from now.
+    prompt.push_str(&format!(
+        "\nCurrent time: {}\n",
+        WallClockWithTz::now().to_rfc3339()
+    ));
     if !recalled.is_empty() {
         prompt.push_str("\n\nRelevant memories:\n");
         for memory in &recalled {
@@ -422,9 +429,12 @@ async fn assemble_dialogue_input(
             let text = scrubber.scrub(&item.text).await?;
             credential_set = credential_set.min(text.credential_set);
             prompt.push_str(match item.role {
-                HistoryRole::Owner => "Owner: ",
-                HistoryRole::Companion => "Companion: ",
+                HistoryRole::Owner => "Owner",
+                HistoryRole::Companion => "Companion",
             });
+            // The source message's own offset-qualified time stays attached:
+            // "tomorrow" in a past message is not re-anchored to now.
+            prompt.push_str(&format!(" [{}]: ", item.at.to_rfc3339()));
             prompt.push_str(&text.text);
             prompt.push('\n');
         }
@@ -470,6 +480,9 @@ async fn pin_experience(
                     HistoryRole::Companion => ExperienceRole::Companion,
                 },
                 text: item.text.clone(),
+                // The stored History row is the source of truth for when the
+                // turn was said; the offset travels with it.
+                at: Some(item.at),
             })
             .collect(),
         at: WallClockWithTz::now(),
