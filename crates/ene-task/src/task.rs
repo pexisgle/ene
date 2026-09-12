@@ -12,6 +12,11 @@ pub struct TaskId(RawId);
 
 impl TaskId {
     #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
     }

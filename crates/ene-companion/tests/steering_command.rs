@@ -19,7 +19,8 @@ use std::sync::Mutex;
 use ene_companion::dialogue::{ProposeSteeringCommand, propose_steering};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, SteeringPremiseRef, Task, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry,
+    AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
+    SteeringPremiseRef, Task, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry,
     TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
     TaskCreationPremise, TaskId, TaskProposalOutcome, TaskPurpose, TaskPurposeRef, TaskRecord,
     TaskRef, TaskRepository, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
@@ -82,6 +83,22 @@ impl TaskRepository for FakeTaskRepository {
             .lock()
             .expect("fixture script is never poisoned")
             .clone()
+    }
+
+    async fn create_delegation(
+        &self,
+        _premise: DelegationCreationPremise,
+    ) -> Result<DelegationOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("create_delegation is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_delegation(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<Option<DelegationRef>, TaskTechnicalError> {
+        Ok(None)
     }
 }
 

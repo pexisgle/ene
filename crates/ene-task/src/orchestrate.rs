@@ -1,9 +1,13 @@
-//! Steering orchestration (H-A): premise precheck, adoption identity
-//! minting, and repository outcome mapping.
+//! Steering and delegation orchestration (H-A): premise precheck, identity
+//! minting, and repository outcome handling.
 
 use ene_primitive::{RawId, WallClockWithTz};
 
 use crate::context::{TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind};
+use crate::delegation::{
+    CreateDelegationCommand, DelegationCreationPremise, DelegationId, DelegationOutcome,
+    TaskAgentEphemeralId,
+};
 use crate::repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
 use crate::task::{
     SteeringPremiseRef, TaskCommitPremise, TaskId, TaskInstructionAdoptionPremise, TaskPurpose,
@@ -113,4 +117,42 @@ pub async fn orchestrate_steering(
             TaskProposalOutcome::RevisionExhausted { task }
         }
     })
+}
+
+/// Orchestrates one delegation creation against the repository (H-A / AU3).
+///
+/// The precheck loads the durable current state: an absent Task returns
+/// [`DelegationOutcome::MissingTask`], and a current revision different from
+/// `command.task` returns [`DelegationOutcome::StaleTaskRevision`]; neither
+/// path mints identities or writes anything. On a match the orchestration
+/// mints the delegation and agent identities, builds the premise, and calls
+/// [`TaskRepository::create_delegation`]. The precheck is not the
+/// concurrency guarantee: `create_delegation` compares the revision again
+/// inside its atomic commit, so a competing winner between the precheck and
+/// the commit still yields [`DelegationOutcome::StaleTaskRevision`].
+///
+/// The repository outcome is passed through unchanged, and repository
+/// technical errors stay `Err`; domain outcomes are never folded into them.
+pub async fn orchestrate_delegation(
+    repository: &impl TaskRepository,
+    command: CreateDelegationCommand,
+) -> Result<DelegationOutcome, TaskTechnicalError> {
+    let Some(record) = repository.load_task(command.task.task).await? else {
+        return Ok(DelegationOutcome::MissingTask {
+            task: command.task.task,
+        });
+    };
+    if record.task.reference != command.task {
+        return Ok(DelegationOutcome::StaleTaskRevision {
+            current: record.task.reference,
+        });
+    }
+    repository
+        .create_delegation(DelegationCreationPremise {
+            delegation: DelegationId::generate(),
+            task: command.task,
+            agent: TaskAgentEphemeralId::generate(),
+            scope_copy: command.scope_copy,
+        })
+        .await
 }

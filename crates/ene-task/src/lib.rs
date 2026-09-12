@@ -15,6 +15,7 @@
 //! premises.
 
 mod context;
+mod delegation;
 mod orchestrate;
 mod repository;
 mod task;
@@ -23,7 +24,13 @@ mod workspace;
 pub use context::{
     TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
 };
-pub use orchestrate::{SteeringProposalPremise, TaskProposalOutcome, orchestrate_steering};
+pub use delegation::{
+    CreateDelegationCommand, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
+    DelegationOutcome, DelegationRef, DelegationScope, TaskAgentEphemeralId,
+};
+pub use orchestrate::{
+    SteeringProposalPremise, TaskProposalOutcome, orchestrate_delegation, orchestrate_steering,
+};
 pub use repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
 pub use task::{
     AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId,

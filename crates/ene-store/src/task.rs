@@ -8,23 +8,26 @@
 //! inside the same short transaction and, on success, forwards the D2
 //! snapshot, the new revision's adopted-purpose context entry, the adopted
 //! instruction entry when the premise carries one, and the D1 pointer
-//! atomically. Reads compose the committed rows or answer `None`: the current
-//! revision's adopted-purpose entry first, then every adopted instruction
-//! entry up to the current revision. A partial unit, a current row that
-//! disagrees with its revision snapshot, purpose, adopted-purpose entry, or
-//! assignee, an unknown item kind, and a kind/payload disagreement are
-//! technical errors, never fabricated.
+//! atomically. Delegation (AU3) compares the expected revision and the
+//! same-revision snapshot's assignee in one short transaction before
+//! inserting the correlation row. Reads compose the committed rows or answer
+//! `None`: the current revision's adopted-purpose entry first, then every
+//! adopted instruction entry up to the current revision. A partial unit, a
+//! current row that disagrees with its revision snapshot, purpose,
+//! adopted-purpose entry, or assignee, an unknown item kind, and a
+//! kind/payload disagreement are technical errors, never fabricated.
 
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use ene_primitive::WallClockWithTz;
 use ene_task::{
-    AssigneeRef, Task, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
-    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
-    TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskRevision,
-    TaskRevisionRecord, TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociation,
-    WorkspaceFolderRef,
+    AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
+    DelegationRef, DelegationScope, Task, TaskAgentEphemeralId, TaskCommitOutcome,
+    TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRecord,
+    TaskRef, TaskRepository, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
+    WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -63,6 +66,10 @@ const SQL_SELECT_TASK_CONTEXT: &str = "SELECT entry_id, revision, item_kind, pur
 const SQL_SELECT_ADOPTED_PURPOSE_ENTRY: &str = "SELECT purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND item_kind = ?3 ORDER BY rowid LIMIT 2";
 
 const SQL_SELECT_WORKSPACE_ASSOC: &str = "SELECT assoc_id, folder, save_target FROM workspace_assoc WHERE task_id = ?1 ORDER BY rowid LIMIT 1";
+
+const SQL_INSERT_DELEGATION: &str = "INSERT INTO delegation (delegation_id, task_id, task_revision, delegator, agent, scope_assoc, scope_folder, scope_save_target) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)";
+
+const SQL_SELECT_DELEGATION: &str = "SELECT task_id, task_revision, delegator, agent, scope_assoc, scope_folder, scope_save_target FROM delegation WHERE delegation_id = ?1";
 
 /// The context origin kinds this stage stores; an unknown stored value is an
 /// unreadable row and is rejected on read.
@@ -442,6 +449,117 @@ fn forward_steering_sync(
     }))
 }
 
+/// Commits one delegation correlation row (AU3).
+///
+/// The current Task row and the snapshot it points at are read inside one
+/// `Immediate` transaction, so the revision compare and the insert share a
+/// serialization boundary: a concurrent steering forward either precedes the
+/// delegation (which then answers stale) or follows it (the delegation stays
+/// bound to the revision it compared). Missing and stale return `Ok` without
+/// committing, so neither leaves a row; a missing snapshot or an assignee
+/// disagreement is a technical error and never a synthesized correspondence.
+/// The delegator is copied from the same row the compare read. The row's
+/// existence is a correlation, not proof that the agent is running or alive.
+fn create_delegation_sync(
+    conn: &Mutex<Connection>,
+    premise: DelegationCreationPremise,
+) -> Result<DelegationOutcome, TaskTechnicalError> {
+    let DelegationCreationPremise {
+        delegation,
+        task,
+        agent,
+        scope_copy,
+    } = premise;
+    let task_text = encode_id(task.task.as_raw());
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(task_unavailable)?;
+    let current: Option<RawTask> = tx
+        .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(current) = current else {
+        // No Task deletion path exists in this slice; the premise names state
+        // that was never committed. Missing is a domain outcome, not a storage
+        // failure, and the uncommitted transaction leaves zero rows.
+        return Ok(DelegationOutcome::MissingTask { task: task.task });
+    };
+    let current_revision = decode_revision(current.revision)?;
+    if current_revision != task.revision {
+        // The stale loser writes nothing: returning drops the transaction, so
+        // the winner's durable state is exactly as found.
+        return Ok(DelegationOutcome::StaleTaskRevision {
+            current: TaskRef {
+                task: task.task,
+                revision: current_revision,
+            },
+        });
+    }
+    // Fail-closed D1/D2 check: the delegation relies on this revision's
+    // snapshot, and the delegator copied below must be the assignee that
+    // snapshot records. A missing snapshot or a disagreement is an
+    // inconsistent unit; no correspondence is synthesized from either side.
+    let snapshot: RawTaskRevision = tx
+        .query_row(
+            SQL_SELECT_TASK_REVISION,
+            params![task_text, current.revision],
+            raw_revision_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?
+        .ok_or_else(|| {
+            task_unavailable("task revision snapshot missing for the delegated revision")
+        })?;
+    // Validate the stored identity text before copying it as the delegator: a
+    // malformed stored identity is an unreadable row, not a new value. Decode
+    // both rows so this check agrees with the other read paths instead of
+    // comparing one string form against another.
+    let current_assignee = decode_assignee(&current.assignee)?;
+    let snapshot_assignee = decode_assignee(&snapshot.assignee)?;
+    if snapshot_assignee != current_assignee {
+        return Err(task_unavailable(
+            "task revision assignee does not match the current assignee",
+        ));
+    }
+    let delegator = current_assignee;
+    // The scope is a copy of the boundary the delegator relied on, written
+    // verbatim; it records the boundary, not a permission.
+    let (scope_assoc, scope_folder, scope_save_target) = match &scope_copy.workspace {
+        None => (None, None, None),
+        Some(workspace) => (
+            Some(encode_id(workspace.assoc.as_raw())),
+            Some(workspace.folder.path.as_str()),
+            workspace
+                .save_target
+                .as_ref()
+                .map(|target| target.path.as_str()),
+        ),
+    };
+    tx.execute(
+        SQL_INSERT_DELEGATION,
+        params![
+            encode_id(delegation.as_raw()),
+            task_text,
+            current.revision,
+            current.assignee,
+            encode_id(agent.as_raw()),
+            scope_assoc,
+            scope_folder,
+            scope_save_target,
+        ],
+    )
+    .map_err(task_unavailable)?;
+    tx.commit().map_err(task_unavailable)?;
+    Ok(DelegationOutcome::Delegated(DelegationRef {
+        delegation,
+        task,
+        delegator,
+        agent,
+        scope: scope_copy,
+    }))
+}
+
 struct RawTask {
     revision: i64,
     purpose_adopted_revision: i64,
@@ -470,6 +588,16 @@ struct RawWorkspaceAssoc {
     save_target: Option<String>,
 }
 
+struct RawDelegation {
+    task: String,
+    task_revision: i64,
+    delegator: String,
+    agent: String,
+    scope_assoc: Option<String>,
+    scope_folder: Option<String>,
+    scope_save_target: Option<String>,
+}
+
 fn raw_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTask> {
     Ok(RawTask {
         revision: row.get(0)?,
@@ -484,6 +612,39 @@ fn raw_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTaskRevision
         purpose_text: row.get(1)?,
         assignee: row.get(2)?,
     })
+}
+
+fn raw_delegation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawDelegation> {
+    Ok(RawDelegation {
+        task: row.get(0)?,
+        task_revision: row.get(1)?,
+        delegator: row.get(2)?,
+        agent: row.get(3)?,
+        scope_assoc: row.get(4)?,
+        scope_folder: row.get(5)?,
+        scope_save_target: row.get(6)?,
+    })
+}
+
+/// Decodes the copied scope boundary. `NULL` association means no workspace,
+/// and then both path columns must be `NULL`; an association without its
+/// folder is as unreadable as a folder without an association.
+fn decode_delegation_scope(
+    scope_assoc: Option<String>,
+    scope_folder: Option<String>,
+    scope_save_target: Option<String>,
+) -> Result<DelegationScope, TaskTechnicalError> {
+    match (scope_assoc, scope_folder, scope_save_target) {
+        (None, None, None) => Ok(DelegationScope { workspace: None }),
+        (Some(assoc), Some(folder), save_target) => Ok(DelegationScope {
+            workspace: Some(DelegatedWorkspace {
+                assoc: WorkspaceAssocId::from_raw(decode_id(&assoc).map_err(task_unavailable)?),
+                folder: WorkspaceFolderRef { path: folder },
+                save_target: save_target.map(|path| WorkspaceFolderRef { path }),
+            }),
+        }),
+        _ => Err(task_unavailable("inconsistent delegation scope copy")),
+    }
 }
 
 fn decode_workspace(
@@ -668,6 +829,40 @@ fn load_task_sync(
     }))
 }
 
+/// Reads one delegation correlation row by decoding every stored column.
+///
+/// `None` means the identity has no stored delegation. A malformed identity
+/// or a scope copy that does not describe a boundary is a technical error,
+/// never a fabricated [`DelegationRef`]. Row existence is not liveness: it
+/// says only that the delegation was created against the stored revision.
+fn load_delegation_sync(
+    conn: &Mutex<Connection>,
+    delegation: DelegationId,
+) -> Result<Option<DelegationRef>, TaskTechnicalError> {
+    let guard = lock_shared(conn);
+    let stored: Option<RawDelegation> = guard
+        .query_row(
+            SQL_SELECT_DELEGATION,
+            params![encode_id(delegation.as_raw())],
+            raw_delegation_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(raw) = stored else {
+        return Ok(None);
+    };
+    Ok(Some(DelegationRef {
+        delegation,
+        task: TaskRef {
+            task: TaskId::from_raw(decode_id(&raw.task).map_err(task_unavailable)?),
+            revision: decode_revision(raw.task_revision)?,
+        },
+        delegator: decode_assignee(&raw.delegator)?,
+        agent: TaskAgentEphemeralId::from_raw(decode_id(&raw.agent).map_err(task_unavailable)?),
+        scope: decode_delegation_scope(raw.scope_assoc, raw.scope_folder, raw.scope_save_target)?,
+    }))
+}
+
 impl TaskRepository for Store {
     async fn create_task(
         &self,
@@ -688,5 +883,21 @@ impl TaskRepository for Store {
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || load_task_sync(&conn, task)).await
+    }
+
+    async fn create_delegation(
+        &self,
+        premise: DelegationCreationPremise,
+    ) -> Result<DelegationOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || create_delegation_sync(&conn, premise)).await
+    }
+
+    async fn load_delegation(
+        &self,
+        delegation: DelegationId,
+    ) -> Result<Option<DelegationRef>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || load_delegation_sync(&conn, delegation)).await
     }
 }

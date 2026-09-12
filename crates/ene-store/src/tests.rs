@@ -26,11 +26,13 @@ use ene_presence::{
 };
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskContextItem,
-    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
-    TaskInstructionAdoptionPremise, TaskPurpose, TaskPurposeAdoptionPremise, TaskPurposeRef,
-    TaskRef, TaskRepository, TaskRevision, TaskTechnicalError, WorkspaceAssocId,
-    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
+    AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
+    DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome, TaskCommitPremise,
+    TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
+    TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise, TaskPurpose,
+    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskRevision,
+    TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef,
+    WorkspaceNeedRef,
 };
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -1466,8 +1468,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(16)),
-        "migration must record version 16"
+        matches!(version, Ok(17)),
+        "migration must record version 17"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1790,7 +1792,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
+        Some(17),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1839,8 +1841,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(16)),
-        "reopened database must record schema version 16"
+        matches!(version, Ok(17)),
+        "reopened database must record schema version 17"
     );
 }
 
@@ -2605,8 +2607,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(16)),
-        "reopened database must record schema version 16"
+        matches!(version, Ok(17)),
+        "reopened database must record schema version 17"
     );
 }
 
@@ -3082,7 +3084,7 @@ async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
 /// gain token rows, so neither the History window nor lexical recall goes
 /// dark.
 #[tokio::test]
-async fn migration_v11_applies_v12_through_v16() {
+async fn migration_v11_applies_v12_through_v17() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
     let path = dir.path().join("app.db");
     let companion = RawId::new();
@@ -3146,8 +3148,8 @@ async fn migration_v11_applies_v12_through_v16() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
-        "a v11 database must converge on v16"
+        Some(17),
+        "a v11 database must converge on v17"
     );
     let projection = {
         let guard = match store.conn.lock() {
@@ -3245,8 +3247,8 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
-        "a v13 database must converge on v16"
+        Some(17),
+        "a v13 database must converge on v17"
     );
     let (projection, columns) = {
         let guard = match store.conn.lock() {
@@ -4169,7 +4171,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
+        Some(17),
         "migration advances the schema version"
     );
     assert!(
@@ -4211,8 +4213,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
-        "a v11 database must converge on v16"
+        Some(17),
+        "a v11 database must converge on v17"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -4283,7 +4285,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(16));
+    assert_eq!(read_schema_version(&path), Some(17));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
@@ -5185,8 +5187,8 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     let reopened = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
-        "a v14 database must converge on v16"
+        Some(17),
+        "a v14 database must converge on v17"
     );
     assert!(!table_columns(&path, "task").is_empty(), "task is created");
     assert!(
@@ -5348,8 +5350,8 @@ async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
         .expect("the V16 migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
-        "a v15 database must converge on v16"
+        Some(17),
+        "a v15 database must converge on v17"
     );
 
     // A fresh store in its own directory builds the schema and every
@@ -5503,7 +5505,7 @@ async fn migration_v16_fault_rolls_back_and_reopen_converges() {
         .expect("open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(16),
+        Some(17),
         "the retried migration must converge"
     );
     assert!(
@@ -7070,5 +7072,942 @@ async fn task_load_rejects_instruction_entries_beyond_the_current_revision() {
             Err(TaskTechnicalError::StorageUnavailable { .. })
         ),
         "an instruction entry beyond the current revision is a technical error"
+    );
+}
+
+// --- Delegation: AU3 creation / reload ---
+
+fn delegation_scope(workspace: Option<DelegatedWorkspace>) -> DelegationScope {
+    DelegationScope { workspace }
+}
+
+fn delegated_workspace(
+    assoc: WorkspaceAssocId,
+    folder: &str,
+    save_target: Option<&str>,
+) -> DelegatedWorkspace {
+    DelegatedWorkspace {
+        assoc,
+        folder: WorkspaceFolderRef {
+            path: folder.to_owned(),
+        },
+        save_target: save_target.map(|path| WorkspaceFolderRef {
+            path: path.to_owned(),
+        }),
+    }
+}
+
+fn delegation_premise(
+    delegation: DelegationId,
+    task: TaskRef,
+    agent: TaskAgentEphemeralId,
+    scope_copy: DelegationScope,
+) -> DelegationCreationPremise {
+    DelegationCreationPremise {
+        delegation,
+        task,
+        agent,
+        scope_copy,
+    }
+}
+
+/// One stored `delegation` row in column order:
+/// `(delegation_id, task_id, task_revision, delegator, agent, scope_assoc,
+/// scope_folder, scope_save_target)`.
+type DelegationRow = (
+    String,
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn delegation_row(store: &Store, delegation: DelegationId) -> Option<DelegationRow> {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .query_row(
+            "SELECT delegation_id, task_id, task_revision, delegator, agent, scope_assoc, scope_folder, scope_save_target FROM delegation WHERE delegation_id = ?1",
+            params![crate::codec::encode_id(delegation.as_raw())],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .expect("the delegation probe must read")
+}
+
+#[tokio::test]
+async fn delegation_creation_commits_with_and_without_a_workspace_scope() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+
+    // A delegation that uses no workspace freezes an empty scope: all three
+    // scope columns stay NULL.
+    let bare = DelegationId::generate();
+    let bare_agent = TaskAgentEphemeralId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            bare,
+            created,
+            bare_agent,
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(reference.delegation, bare);
+    assert_eq!(
+        reference.task, created,
+        "the relied-on revision travels in the reference"
+    );
+    assert_eq!(
+        reference.delegator, creation.assignee,
+        "the delegator is copied from the current Task row"
+    );
+    assert_eq!(reference.agent, bare_agent);
+    assert_eq!(reference.scope, delegation_scope(None));
+    assert_eq!(
+        delegation_row(&store, bare),
+        Some((
+            crate::codec::encode_id(bare.as_raw()),
+            crate::codec::encode_id(created.task.as_raw()),
+            1,
+            crate::codec::encode_id(creation.assignee.companion),
+            crate::codec::encode_id(bare_agent.as_raw()),
+            None,
+            None,
+            None,
+        )),
+        "a bare scope persists as three NULL columns"
+    );
+    assert_eq!(store.load_delegation(bare).await.unwrap(), Some(reference));
+
+    // A delegation that relied on a confirmed association freezes the
+    // association's projection into the scope columns.
+    let assoc = WorkspaceAssocId::generate();
+    let scope = delegation_scope(Some(delegated_workspace(
+        assoc,
+        "/srv/workspace/au3",
+        Some("/srv/workspace/au3/out"),
+    )));
+    let scoped = DelegationId::generate();
+    let scoped_agent = TaskAgentEphemeralId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            scoped,
+            created,
+            scoped_agent,
+            scope.clone(),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(reference.delegation, scoped);
+    assert_eq!(reference.task, created);
+    assert_eq!(reference.delegator, creation.assignee);
+    assert_eq!(reference.agent, scoped_agent);
+    assert_eq!(reference.scope, scope);
+    assert_eq!(
+        delegation_row(&store, scoped),
+        Some((
+            crate::codec::encode_id(scoped.as_raw()),
+            crate::codec::encode_id(created.task.as_raw()),
+            1,
+            crate::codec::encode_id(creation.assignee.companion),
+            crate::codec::encode_id(scoped_agent.as_raw()),
+            Some(crate::codec::encode_id(assoc.as_raw())),
+            Some(String::from("/srv/workspace/au3")),
+            Some(String::from("/srv/workspace/au3/out")),
+        )),
+        "the frozen boundary persists its association, folder, and save target"
+    );
+    assert_eq!(
+        store.load_delegation(scoped).await.unwrap(),
+        Some(reference)
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        2,
+        "each delegation keeps its own row"
+    );
+}
+
+#[tokio::test]
+async fn delegation_correspondence_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let (created, expected, before, scope) = {
+        let store = Store::open(&path).await.unwrap();
+        let creation = task_premise(Some(task_workspace(
+            "/srv/workspace/au3",
+            Some("/srv/workspace/au3/out"),
+        )));
+        let created = store.create_task(creation).await.unwrap();
+        let delegation = DelegationId::generate();
+        let scope = delegation_scope(Some(delegated_workspace(
+            WorkspaceAssocId::generate(),
+            "/srv/workspace/au3",
+            Some("/srv/workspace/au3/out"),
+        )));
+        let outcome = store
+            .create_delegation(delegation_premise(
+                delegation,
+                created,
+                TaskAgentEphemeralId::generate(),
+                scope.clone(),
+            ))
+            .await
+            .unwrap();
+        let DelegationOutcome::Delegated(expected) = outcome else {
+            panic!("expected Delegated, got {outcome:?}");
+        };
+        assert_eq!(
+            store.load_delegation(delegation).await.unwrap(),
+            Some(expected.clone())
+        );
+        let before = store.load_task(created.task).await.unwrap().unwrap();
+        (created, expected, before, scope)
+    };
+
+    let reopened = Store::open(&path).await.unwrap();
+    let after = reopened
+        .load_delegation(expected.delegation)
+        .await
+        .unwrap()
+        .expect("the delegation correspondence must survive reopen");
+    assert_eq!(
+        after, expected,
+        "the correlation survives reopen verbatim; it proves no liveness"
+    );
+    assert_eq!(after.scope, scope, "the frozen scope survives reopen");
+    assert_eq!(
+        reopened.load_task(created.task).await.unwrap(),
+        Some(before),
+        "reopen restores the task unit unchanged"
+    );
+    assert_eq!(
+        task_table_count(&reopened, "delegation"),
+        1,
+        "reopen fabricates no extra delegation"
+    );
+    assert_eq!(
+        task_table_count(&reopened, "task"),
+        1,
+        "reopen fabricates no extra task"
+    );
+    assert_eq!(
+        task_table_count(&reopened, "task_revision"),
+        1,
+        "reopen fabricates no extra revision"
+    );
+    assert_eq!(
+        reopened.load_delegation(DelegationId::generate()).await,
+        Ok(None),
+        "an absent correspondence is None, never fabricated"
+    );
+}
+
+#[tokio::test]
+async fn delegation_creation_is_stale_after_a_steering_forward() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation).await.unwrap();
+    let second = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("moved before the delegation")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = second else {
+        panic!("expected CommittedAs, got {second:?}");
+    };
+    assert_eq!(second.revision, TaskRevision::from_u64(2));
+
+    let before_current = task_current_row(&store, created.task);
+    let before_revisions = task_revision_rows(&store, created.task);
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(DelegationOutcome::StaleTaskRevision { current: second }),
+        "a moved revision is reported with the current one"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a stale delegation writes zero rows"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+    assert_eq!(
+        task_current_row(&store, created.task),
+        before_current,
+        "the failed delegation attempt never advances the task"
+    );
+    assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+}
+
+#[tokio::test]
+async fn delegation_creation_races_a_steering_forward_without_torn_state() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation).await.unwrap();
+    let delegation = DelegationId::generate();
+    let premise = delegation_premise(
+        delegation,
+        created,
+        TaskAgentEphemeralId::generate(),
+        delegation_scope(None),
+    );
+    let steering = TaskCommitPremise {
+        expected: created,
+        new_purpose: Some(task_purpose_adoption("racing steering")),
+        adopted_purpose_entry: TaskContextEntryId::generate(),
+        adopted_instruction: None,
+    };
+    let (steering, outcome) = tokio::join!(
+        store.forward_steering(steering),
+        store.create_delegation(premise)
+    );
+
+    // Delegation creation never advances the task revision, so the steering
+    // CAS always commits: the only interleavings are delegation-then-steering
+    // (the delegation stays bound to revision 1) and steering-then-delegation
+    // (the delegation answers stale for revision 2).
+    let steering = steering.unwrap();
+    let TaskCommitOutcome::CommittedAs(advanced) = steering else {
+        panic!("steering must commit at revision 2, got {steering:?}");
+    };
+    assert_eq!(advanced.revision, TaskRevision::from_u64(2));
+    match outcome {
+        Ok(DelegationOutcome::Delegated(reference)) => {
+            assert_eq!(
+                reference.task, created,
+                "the committed delegation froze the revision it compared"
+            );
+            assert_eq!(
+                delegation_row(&store, reference.delegation).map(|row| row.2),
+                Some(1),
+                "the durable row keeps the compared revision"
+            );
+            assert_eq!(
+                task_table_count(&store, "delegation"),
+                1,
+                "exactly the winner's row is durable"
+            );
+        }
+        Ok(DelegationOutcome::StaleTaskRevision { current }) => {
+            assert_eq!(
+                current, advanced,
+                "the stale loser reports the advanced revision"
+            );
+            assert_eq!(
+                task_table_count(&store, "delegation"),
+                0,
+                "the stale path leaves no partial delegation row"
+            );
+            assert_eq!(store.load_delegation(delegation).await, Ok(None));
+        }
+        other => panic!("unexpected delegation outcome: {other:?}"),
+    }
+    assert_eq!(
+        task_current_row(&store, created.task).0,
+        2,
+        "the steering forward advanced exactly once"
+    );
+    assert_eq!(
+        task_revision_rows(&store, created.task).len(),
+        2,
+        "no duplicate revision row exists"
+    );
+}
+
+#[tokio::test]
+async fn delegation_creation_reports_a_missing_task_as_a_domain_outcome() {
+    let store = open_memory().await.unwrap();
+    let missing = TaskId::generate();
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            TaskRef {
+                task: missing,
+                revision: TaskRevision::initial(),
+            },
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(DelegationOutcome::MissingTask { task: missing }),
+        "a missing Task is a domain outcome, not a storage failure"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a missing task writes zero delegation rows"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+}
+
+#[tokio::test]
+async fn delegation_multiple_rows_are_allowed_at_one_revision() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    let first = DelegationId::generate();
+    let second = DelegationId::generate();
+    assert_ne!(first, second, "re-delegation mints a new identity");
+    let first_agent = TaskAgentEphemeralId::generate();
+    let second_agent = TaskAgentEphemeralId::generate();
+    let first_outcome = store
+        .create_delegation(delegation_premise(
+            first,
+            created,
+            first_agent,
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let second_outcome = store
+        .create_delegation(delegation_premise(
+            second,
+            created,
+            second_agent,
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(first_ref) = first_outcome else {
+        panic!("expected Delegated, got {first_outcome:?}");
+    };
+    let DelegationOutcome::Delegated(second_ref) = second_outcome else {
+        panic!("expected Delegated, got {second_outcome:?}");
+    };
+    assert_eq!(first_ref.delegation, first);
+    assert_eq!(second_ref.delegation, second);
+    assert_eq!(first_ref.task, created);
+    assert_eq!(second_ref.task, created);
+    assert_eq!(first_ref.agent, first_agent);
+    assert_eq!(second_ref.agent, second_agent);
+    assert_eq!(
+        first_ref.delegator, creation.assignee,
+        "each row copies the Task row's assignee"
+    );
+    assert_eq!(second_ref.delegator, creation.assignee);
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        2,
+        "parallel delegations of one revision are not collapsed"
+    );
+    assert_eq!(
+        delegation_row(&store, first).map(|row| row.0),
+        Some(crate::codec::encode_id(first.as_raw()))
+    );
+    assert_eq!(
+        delegation_row(&store, second).map(|row| row.0),
+        Some(crate::codec::encode_id(second.as_raw()))
+    );
+    assert_eq!(
+        task_current_row(&store, created.task).0,
+        1,
+        "creating delegations never advances the task revision"
+    );
+}
+
+/// Seeds one Task, applies `corrupt`, and requires `create_delegation` to fail
+/// closed without writing a delegation row.
+async fn assert_create_delegation_rejects(label: &str, corrupt: impl Fn(&Store, TaskId)) {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    corrupt(&store, created.task);
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "create_delegation must reject {label}, got {outcome:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a rejected {label} writes zero delegation rows"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+}
+
+#[tokio::test]
+async fn delegation_creation_fails_closed_on_an_incoherent_task_unit() {
+    for (label, statement) in [
+        (
+            "a missing revision snapshot",
+            "DELETE FROM task_revision WHERE task_id = ?1",
+        ),
+        (
+            "a disagreeing revision assignee",
+            "UPDATE task_revision SET assignee = '11111111-1111-1111-1111-111111111111' WHERE task_id = ?1",
+        ),
+        (
+            "a malformed revision assignee",
+            "UPDATE task_revision SET assignee = 'not-an-id' WHERE task_id = ?1",
+        ),
+    ] {
+        assert_create_delegation_rejects(label, |store, task| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(statement, params![crate::codec::encode_id(task.as_raw())])
+                .expect("the incoherent-unit probe must run");
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn delegation_creation_accepts_equivalent_assignee_text_forms() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let stored: String = guard
+            .query_row(
+                "SELECT assignee FROM task_revision WHERE task_id = ?1",
+                params![crate::codec::encode_id(created.task.as_raw())],
+                |row| row.get(0),
+            )
+            .expect("the seeded revision row must read");
+        let simple = stored.replace('-', "");
+        guard
+            .execute(
+                "UPDATE task_revision SET assignee = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(created.task.as_raw()), simple],
+            )
+            .expect("the equivalent text form must update");
+    }
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(
+        reference.delegator, creation.assignee,
+        "both text forms decode to the same assignee"
+    );
+    assert_eq!(
+        delegation_row(&store, delegation).map(|row| row.3),
+        Some(crate::codec::encode_id(creation.assignee.companion)),
+        "the copied delegator keeps the canonical stored text"
+    );
+}
+
+#[tokio::test]
+async fn delegation_creation_at_a_later_revision_binds_that_revision() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let moved = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("delegated after the move")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(moved) = moved else {
+        panic!("expected CommittedAs, got {moved:?}");
+    };
+    assert_eq!(moved.revision, TaskRevision::from_u64(2));
+
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            moved,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(Some(delegated_workspace(
+                WorkspaceAssocId::generate(),
+                "/srv/workspace/moved",
+                None,
+            ))),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(
+        reference.task, moved,
+        "the delegation binds the relied-on revision, not the initial one"
+    );
+    assert_eq!(
+        delegation_row(&store, delegation).map(|row| row.2),
+        Some(2),
+        "the durable row stores the relied-on revision"
+    );
+    assert_eq!(
+        store.load_delegation(delegation).await,
+        Ok(Some(reference)),
+        "the correspondence round-trips at a later revision, folder-only scope included"
+    );
+}
+
+/// Seeds one Task and one scoped delegation, applies `corrupt`, and requires
+/// `load_delegation` to fail closed without deleting or rewriting the row.
+async fn assert_load_delegation_rejects(label: &str, corrupt: impl Fn(&Store, DelegationId)) {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(Some(delegated_workspace(
+                WorkspaceAssocId::generate(),
+                "/srv/workspace/corrupt",
+                Some("/srv/workspace/corrupt/out"),
+            ))),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, DelegationOutcome::Delegated(_)),
+        "the corruption probe needs a committed row, got {outcome:?}"
+    );
+    corrupt(&store, delegation);
+    let loaded = store.load_delegation(delegation).await;
+    assert!(
+        matches!(loaded, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "load_delegation must reject {label}, got {loaded:?}"
+    );
+    assert!(
+        delegation_row(&store, delegation).is_some(),
+        "a rejected read must not delete the {label} row"
+    );
+}
+
+#[tokio::test]
+async fn load_delegation_rejects_malformed_stored_values() {
+    for (label, statement) in [
+        (
+            "a malformed task id",
+            "UPDATE delegation SET task_id = 'not-an-id' WHERE delegation_id = ?1",
+        ),
+        (
+            "a negative task revision",
+            "UPDATE delegation SET task_revision = -1 WHERE delegation_id = ?1",
+        ),
+        (
+            "a malformed delegator",
+            "UPDATE delegation SET delegator = 'not-an-id' WHERE delegation_id = ?1",
+        ),
+        (
+            "a malformed agent",
+            "UPDATE delegation SET agent = 'not-an-id' WHERE delegation_id = ?1",
+        ),
+    ] {
+        assert_load_delegation_rejects(label, |store, delegation| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    statement,
+                    params![crate::codec::encode_id(delegation.as_raw())],
+                )
+                .expect("the malformed-identity probe must update");
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn load_delegation_rejects_inconsistent_scope_columns() {
+    for (label, statement) in [
+        (
+            "assoc NULL with a folder",
+            "UPDATE delegation SET scope_assoc = NULL, scope_folder = '/srv/orphan' WHERE delegation_id = ?1",
+        ),
+        (
+            "assoc NULL with a save target",
+            "UPDATE delegation SET scope_assoc = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
+        ),
+        (
+            "assoc NULL with a save target but no folder",
+            "UPDATE delegation SET scope_assoc = NULL, scope_folder = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
+        ),
+        (
+            "assoc without a folder",
+            "UPDATE delegation SET scope_folder = NULL WHERE delegation_id = ?1",
+        ),
+    ] {
+        assert_load_delegation_rejects(label, |store, delegation| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    statement,
+                    params![crate::codec::encode_id(delegation.as_raw())],
+                )
+                .expect("the scope probe must update");
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn delegation_creation_faults_roll_back_every_write() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute_batch(
+                "CREATE TRIGGER au3_abort BEFORE INSERT ON delegation BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+            )
+            .expect("the fault trigger must install");
+    }
+    let before_current = task_current_row(&store, created.task);
+    let before_revisions = task_revision_rows(&store, created.task);
+    let before_contexts = task_context_rows(&store, created.task);
+    let delegation = DelegationId::generate();
+    let premise = delegation_premise(
+        delegation,
+        created,
+        TaskAgentEphemeralId::generate(),
+        delegation_scope(Some(delegated_workspace(
+            WorkspaceAssocId::generate(),
+            "/srv/workspace/faulted",
+            None,
+        ))),
+    );
+    let failed = store.create_delegation(premise.clone()).await;
+    assert!(
+        matches!(failed, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a fault on the delegation insert must surface a storage failure, got {failed:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a failed delegation leaves no row"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+    assert_eq!(
+        task_current_row(&store, created.task),
+        before_current,
+        "the task rows are untouched by the fault"
+    );
+    assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+    assert_eq!(task_context_rows(&store, created.task), before_contexts);
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute_batch("DROP TRIGGER au3_abort;")
+            .expect("the fault trigger must drop");
+    }
+    let committed = store
+        .create_delegation(premise)
+        .await
+        .expect("the same premise succeeds after the fault clears");
+    assert!(
+        matches!(committed, DelegationOutcome::Delegated(_)),
+        "the retried premise commits, got {committed:?}"
+    );
+    assert_eq!(task_table_count(&store, "delegation"), 1);
+}
+
+// --- Delegation: V17 migration ---
+
+#[tokio::test]
+async fn delegation_migration_adds_the_table_to_a_v16_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let (creation, created, dropped) = {
+        let store = Store::open(&path).await.expect("a fresh store must open");
+        assert_eq!(
+            read_schema_version(&path),
+            Some(17),
+            "a fresh database converges on v17"
+        );
+        assert!(
+            !table_columns(&path, "delegation").is_empty(),
+            "a fresh database builds the delegation table"
+        );
+        let creation = task_premise(Some(task_workspace(
+            "/srv/workspace/au3-migration",
+            Some("/srv/workspace/au3-migration/out"),
+        )));
+        let created = store
+            .create_task(creation.clone())
+            .await
+            .expect("the seed task must commit");
+        let dropped = DelegationId::generate();
+        let outcome = store
+            .create_delegation(delegation_premise(
+                dropped,
+                created,
+                TaskAgentEphemeralId::generate(),
+                delegation_scope(None),
+            ))
+            .await
+            .expect("the seed delegation must commit");
+        assert!(
+            matches!(outcome, DelegationOutcome::Delegated(_)),
+            "the seed delegation must commit, got {outcome:?}"
+        );
+        (creation, created, dropped)
+    };
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
+        conn.execute_batch(
+            "DROP TABLE delegation;
+             PRAGMA user_version = 16;",
+        )
+        .expect("the version-16 rewind must apply");
+    }
+    assert_eq!(
+        read_schema_version(&path),
+        Some(16),
+        "the seed must sit at the v16 boundary"
+    );
+    assert!(
+        table_columns(&path, "delegation").is_empty(),
+        "the rewind drops the delegation table"
+    );
+
+    let reopened = Store::open(&path)
+        .await
+        .expect("the V17 migration must succeed");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(17),
+        "a v16 database converges on v17"
+    );
+    let columns = table_columns(&path, "delegation");
+    for column in [
+        "delegation_id",
+        "task_id",
+        "task_revision",
+        "delegator",
+        "agent",
+        "scope_assoc",
+        "scope_folder",
+        "scope_save_target",
+    ] {
+        assert!(
+            columns.contains(&String::from(column)),
+            "the migrated delegation table has {column}"
+        );
+    }
+
+    // The rewind dropped only the delegation table: the pre-existing task
+    // unit still loads, and the dropped correspondence never resurrects.
+    let record = reopened
+        .load_task(created.task)
+        .await
+        .unwrap()
+        .expect("the pre-migration task must survive");
+    assert_eq!(record.task.reference, created);
+    assert_eq!(record.revision.purpose_text, creation.purpose);
+    assert_eq!(
+        reopened.load_delegation(dropped).await,
+        Ok(None),
+        "the rewound correspondence is gone, not fabricated"
+    );
+
+    // The re-created table answers create and load, including a scope copied
+    // from the association that survived the migration.
+    let association = record
+        .workspace
+        .as_ref()
+        .expect("the confirmed association survives");
+    let workspace = delegated_workspace(
+        association.assoc,
+        &association.folder.path,
+        association
+            .save_target
+            .as_ref()
+            .map(|target| target.path.as_str()),
+    );
+    let fresh = DelegationId::generate();
+    let outcome = reopened
+        .create_delegation(delegation_premise(
+            fresh,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(Some(workspace.clone())),
+        ))
+        .await
+        .expect("creation must work after the migration");
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(reference.task, created);
+    assert_eq!(reference.delegator, creation.assignee);
+    assert_eq!(reference.scope, delegation_scope(Some(workspace)));
+    assert_eq!(
+        reopened.load_delegation(fresh).await.unwrap(),
+        Some(reference)
     );
 }

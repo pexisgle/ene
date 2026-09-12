@@ -1,7 +1,10 @@
-//! The durable boundary for Task creation, steering, and reload.
+//! The durable boundary for Task creation, steering, delegation, and reload.
 
 use thiserror::Error;
 
+use crate::delegation::{
+    DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
+};
 use crate::task::{TaskCommitPremise, TaskCreationPremise, TaskId, TaskRecord, TaskRef};
 
 /// Technical failure for Task persistence.
@@ -82,4 +85,37 @@ pub trait TaskRepository: Send + Sync {
     /// beyond the current revision are never composed into a [`TaskRecord`];
     /// that is a technical error.
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError>;
+
+    /// Creates one delegation correspondence for a Task revision (AU3).
+    ///
+    /// [`orchestrate_delegation`](crate::orchestrate_delegation) mints the
+    /// delegation and agent identities and passes them in the premise; the
+    /// repository never re-allocates them. Inside the atomic compare the
+    /// current Task row is read at exactly `premise.task.revision`, and the
+    /// assignee copied into the delegation is that row's assignee, checked
+    /// against the same revision's `task_revision` snapshot (a missing or
+    /// disagreeing snapshot is a technical error, never a composed value). A
+    /// missing Task returns [`DelegationOutcome::MissingTask`] and a revision
+    /// mismatch returns [`DelegationOutcome::StaleTaskRevision`], both
+    /// `Ok`-side domain outcomes with zero writes.
+    ///
+    /// Creation never advances the Task revision and imposes no single
+    /// delegation constraint: multiple delegations of the same Task revision
+    /// are valid, and each is a new identity.
+    async fn create_delegation(
+        &self,
+        premise: DelegationCreationPremise,
+    ) -> Result<DelegationOutcome, TaskTechnicalError>;
+
+    /// Loads the correspondence of one delegation.
+    ///
+    /// `None` means the identity has no stored delegation. Malformed or
+    /// impossible rows are a technical error and are never composed into a
+    /// [`DelegationRef`]. Row existence is not liveness: the ephemeral agent
+    /// behind an existing row may already be gone, and this read infers no
+    /// delegation lifecycle state.
+    async fn load_delegation(
+        &self,
+        delegation: DelegationId,
+    ) -> Result<Option<DelegationRef>, TaskTechnicalError>;
 }
