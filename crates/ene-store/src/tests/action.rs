@@ -8,6 +8,7 @@ use ene_action::{
     ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds,
     OperationKind, RealTargetRef,
 };
+use ene_permission::ActionPermissionEvaluationId;
 
 fn attempt_premise(
     attempt: ActionAttemptId,
@@ -25,6 +26,7 @@ fn attempt_premise(
         workspace: workspace.as_raw(),
         real_target: RealTargetRef::from_canonical_path(target.to_owned()),
         operation,
+        relied_evaluation: ActionPermissionEvaluationId::from_raw(RawId::new()),
     }
 }
 
@@ -73,17 +75,17 @@ async fn action_attempt_records_the_durable_correlation() {
     let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
     let attempt = ActionAttemptId::generate();
     let target = target_path("report.md");
+    let premise = attempt_premise(
+        attempt,
+        delegation,
+        created,
+        assoc,
+        &target,
+        OperationKind::Create,
+    );
+    let evaluation = premise.relied_evaluation;
     assert_eq!(
-        store
-            .insert_attempt_if_current(attempt_premise(
-                attempt,
-                delegation,
-                created,
-                assoc,
-                &target,
-                OperationKind::Create,
-            ))
-            .await,
+        store.insert_attempt_if_current(premise).await,
         Ok(ActionStartOutcome::Started)
     );
     let record = store
@@ -98,6 +100,10 @@ async fn action_attempt_records_the_durable_correlation() {
     assert_eq!(record.workspace, assoc.as_raw());
     assert_eq!(record.real_target.as_path(), target.as_str());
     assert_eq!(record.operation, OperationKind::Create);
+    assert_eq!(
+        record.relied_evaluation, evaluation,
+        "the single-use evaluation is part of the durable correlation"
+    );
     assert_eq!(
         record.certainty,
         ActionCertainty::Unknown,
@@ -366,6 +372,63 @@ async fn duplicate_attempt_identity_is_a_technical_error() {
 }
 
 #[tokio::test]
+async fn a_reused_evaluation_is_a_technical_error() {
+    let store = open_memory().await.unwrap();
+    let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
+    let evaluation = ActionPermissionEvaluationId::from_raw(RawId::new());
+    let mut first = attempt_premise(
+        ActionAttemptId::generate(),
+        delegation,
+        created,
+        assoc,
+        &target_path("report.md"),
+        OperationKind::Create,
+    );
+    first.relied_evaluation = evaluation;
+    assert_eq!(
+        store.insert_attempt_if_current(first).await,
+        Ok(ActionStartOutcome::Started)
+    );
+    let mut second = attempt_premise(
+        ActionAttemptId::generate(),
+        delegation,
+        created,
+        assoc,
+        &target_path("other.md"),
+        OperationKind::Create,
+    );
+    second.relied_evaluation = evaluation;
+    let reused = store.insert_attempt_if_current(second).await;
+    assert!(
+        matches!(reused, Err(ActionTechnicalError::StorageUnavailable { .. })),
+        "an evaluation authorizes exactly one start, got {reused:?}"
+    );
+    assert_eq!(task_table_count(&store, "action_attempt"), 1);
+}
+
+#[tokio::test]
+async fn a_list_attempt_records_its_operation() {
+    let store = open_memory().await.unwrap();
+    let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
+    let attempt = ActionAttemptId::generate();
+    assert_eq!(
+        store
+            .insert_attempt_if_current(attempt_premise(
+                attempt,
+                delegation,
+                created,
+                assoc,
+                &target_path("workspace-dir"),
+                OperationKind::List,
+            ))
+            .await,
+        Ok(ActionStartOutcome::Started)
+    );
+    let record = store.load_attempt(attempt).await.unwrap().unwrap();
+    assert_eq!(record.operation, OperationKind::List);
+}
+
+#[tokio::test]
 async fn certainty_cas_only_moves_unknown_forward() {
     let store = open_memory().await.unwrap();
     let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
@@ -494,6 +557,7 @@ async fn action_attempt_reads_fail_closed_on_corrupt_rows() {
         "UPDATE action_attempt SET certainty = 'confirmed_success', grounds = NULL;",
         "UPDATE action_attempt SET grounds = 'agent_reported_success';",
         "UPDATE action_attempt SET real_target = 'relative/path.md';",
+        "UPDATE action_attempt SET relied_evaluation = 'not-an-id';",
         "UPDATE action_attempt SET task_revision = -1;",
         "UPDATE action_attempt SET started_at = 'not a clock';",
     ];
@@ -571,6 +635,7 @@ async fn action_attempt_migration_creates_the_table() {
         "workspace_assoc_id",
         "real_target",
         "operation",
+        "relied_evaluation",
         "certainty",
         "grounds",
         "started_at",

@@ -17,6 +17,7 @@ use ene_action::{
     OperationKind, WorkspaceActionCommand, WorkspaceRoot, WorkspaceRootError,
     orchestrate_workspace_action,
 };
+use ene_permission::ActionEvaluationTracker;
 use ene_primitive::RevisionInner;
 use ene_store::Store;
 use ene_task::{DelegationId, TaskId, TaskRef, TaskRepository, TaskTechnicalError};
@@ -112,7 +113,8 @@ pub async fn run_workspace_action(
         requested_path,
         content,
     };
-    match orchestrate_workspace_action(store, command)
+    let mut tracker = ActionEvaluationTracker::new();
+    match orchestrate_workspace_action(store, &mut tracker, command)
         .await
         .map_err(action_unavailable)?
     {
@@ -256,7 +258,10 @@ mod tests {
         };
         assert_eq!(effect.certainty, ActionCertainty::ConfirmedSuccess);
         assert_eq!(effect.grounds, EffectGrounds::ObservedAtTarget);
-        assert_eq!(effect.output.as_deref(), Some(&b"notes"[..]));
+        assert_eq!(
+            effect.output,
+            Some(ene_action::ActionOutput::Bytes(b"notes".to_vec()))
+        );
         assert!(fact_recorded);
         let record = host
             .store
@@ -328,6 +333,44 @@ mod tests {
         }
         assert_ne!(attempt, create_attempt);
         assert_ne!(create_attempt, edit_attempt);
+    }
+
+    #[tokio::test]
+    async fn lists_the_workspace_and_records_the_attempt() {
+        let host = host().await;
+        std::fs::write(host.workspace.path().join("a.txt"), b"a").expect("fixture file");
+        std::fs::create_dir(host.workspace.path().join("sub")).expect("fixture dir");
+        let outcome = run_workspace_action(
+            &host.store,
+            host.delegation,
+            OperationKind::List,
+            String::new(),
+            None,
+        )
+        .await
+        .expect("a listing answers a domain outcome");
+        let WorkspaceActionHostOutcome::Completed {
+            attempt,
+            effect,
+            fact_recorded,
+        } = outcome
+        else {
+            panic!("the listing must complete, got {outcome:?}");
+        };
+        assert!(fact_recorded);
+        assert_eq!(effect.certainty, ActionCertainty::ConfirmedSuccess);
+        let Some(ene_action::ActionOutput::Listing(entries)) = effect.output else {
+            panic!("a listing observes entries");
+        };
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["a.txt", "sub"]);
+        let record = host
+            .store
+            .load_attempt(attempt)
+            .await
+            .unwrap()
+            .expect("the list attempt is durable");
+        assert_eq!(record.operation, OperationKind::List);
     }
 
     #[tokio::test]

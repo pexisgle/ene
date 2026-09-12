@@ -18,6 +18,7 @@
 //! for this stage. Future stages may widen it, but only by extending the
 //! explicit match in [`check_live_authorization`], never by default-allow.
 
+mod action;
 mod intent;
 
 use std::collections::HashMap;
@@ -25,6 +26,10 @@ use std::collections::HashMap;
 use ene_primitive::{RawId, RevisionInner};
 use thiserror::Error;
 
+pub use action::{
+    ActionAuthorizationDecision, ActionEvaluationTracker, ActionKind, ActionPermissionEvaluationId,
+    ActionUseCandidate, CurrentActionPremise, authorize_action_use,
+};
 pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
 
 /// Single-use authorization token for one inference use.

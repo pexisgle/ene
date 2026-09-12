@@ -1,11 +1,11 @@
 //! Orchestration of one Workspace-contained filesystem Action.
 //!
-//! The order is fixed by AU5 and the Action Execution design:
-//! input bounds and path resolution happen before any durable claim (a
-//! refused or malformed request never leaves an attempt row), the attempt
-//! insert is the start linearization point inside the repository, and the
-//! filesystem effect runs only after [`ActionStartOutcome::Started`], outside
-//! every transaction.
+//! The order is fixed by K-B.1 and AU5: input bounds and path resolution
+//! happen before any durable claim (a refused or malformed request never
+//! leaves an attempt row), the permission-owned live decision is taken for
+//! exactly the resolved target, the attempt insert is the start linearization
+//! point inside the repository, and the filesystem effect runs only after
+//! [`ActionStartOutcome::Started`], outside every transaction.
 //!
 //! The observed effect is always returned once the attempt started, even when
 //! recording the fact fails technically: an external effect must never be
@@ -15,6 +15,10 @@
 //! This orchestration never adopts the effect into a Task, never completes
 //! the Task, and never re-executes an unknown outcome.
 
+use ene_permission::{
+    ActionAuthorizationDecision, ActionEvaluationTracker, ActionKind, ActionUseCandidate,
+    CurrentActionPremise, authorize_action_use,
+};
 use ene_primitive::{RawId, RevisionInner};
 
 use crate::attempt::{
@@ -76,10 +80,16 @@ pub enum ActionNotStarted {
     Rejected(TargetRejection),
     /// Create/edit arrived without content.
     MissingContent,
-    /// Read arrived with content.
+    /// List/read arrived with content.
     ContentNotAllowed,
     /// The payload exceeds [`MAX_ACTION_FILE_BYTES`].
     ContentTooLarge,
+    /// The permission-owned candidate disagrees with the current premise; the
+    /// caller reloads current state and rebuilds the request.
+    NeedsRevalidation,
+    /// The evaluation id was unknown, already consumed, or bound to a
+    /// different candidate fingerprint.
+    EvaluationConsumed,
 }
 
 /// The result of one start-and-execute request.
@@ -103,13 +113,16 @@ pub enum ActionRunOutcome {
 /// Starts and executes one Workspace-contained filesystem action.
 ///
 /// Input bounds and path resolution are checked first, so a refused request
-/// leaves no attempt row. The repository's claim decides start versus
-/// [`ActionNotStarted::StalePremise`]; only `Started` executes. The effect is
-/// observed from the executor's own operation (read-back for writes), never
-/// from an agent self-report, and its certainity is recorded with a
-/// compare-and-set from `Unknown`.
+/// leaves no attempt row. The resolved target then goes through the
+/// permission-owned [`authorize_action_use`], whose single-use evaluation is
+/// consumed before the durable claim; the repository's claim decides start
+/// versus [`ActionNotStarted::StalePremise`], and only `Started` executes. The
+/// effect is observed from the executor's own operation (read-back for
+/// writes), never from an agent self-report, and its certainty is recorded
+/// with a compare-and-set from `Unknown`.
 pub async fn orchestrate_workspace_action(
     repository: &impl ActionAttemptRepository,
+    tracker: &mut ActionEvaluationTracker,
     command: WorkspaceActionCommand,
 ) -> Result<ActionRunOutcome, ActionTechnicalError> {
     if let Some(not_started) = input_check(&command) {
@@ -126,6 +139,36 @@ pub async fn orchestrate_workspace_action(
             )));
         }
     };
+    // The live decision binds this operation to the exact resolved target and
+    // the current premise; only its single-use evaluation may start the
+    // attempt.
+    let candidate = ActionUseCandidate {
+        delegation: command.delegation,
+        task: command.task,
+        task_revision: command.task_revision,
+        workspace: command.workspace,
+        operation: action_kind(command.operation),
+        resolved_target: target.as_path().to_owned(),
+    };
+    let current = CurrentActionPremise {
+        delegation: command.delegation,
+        task: command.task,
+        task_revision: command.task_revision,
+        workspace: command.workspace,
+    };
+    let evaluation = match authorize_action_use(&candidate, &current, tracker) {
+        ActionAuthorizationDecision::AllowForThisUse(evaluation) => evaluation,
+        ActionAuthorizationDecision::NeedsRevalidation => {
+            return Ok(ActionRunOutcome::NotStarted(
+                ActionNotStarted::NeedsRevalidation,
+            ));
+        }
+    };
+    if !tracker.consume(&evaluation, &candidate) {
+        return Ok(ActionRunOutcome::NotStarted(
+            ActionNotStarted::EvaluationConsumed,
+        ));
+    }
     let attempt = ActionAttemptId::generate();
     let outcome = repository
         .insert_attempt_if_current(AttemptCommitPremise {
@@ -136,6 +179,7 @@ pub async fn orchestrate_workspace_action(
             workspace: command.workspace,
             real_target: target.clone(),
             operation: command.operation,
+            relied_evaluation: evaluation,
         })
         .await?;
     if outcome == ActionStartOutcome::StalePremise {
@@ -163,9 +207,20 @@ pub async fn orchestrate_workspace_action(
     })
 }
 
+/// Total mapping from the Action-owned operation kind to the permission-owned
+/// capability vocabulary; the closed worlds must grow together.
+fn action_kind(operation: OperationKind) -> ActionKind {
+    match operation {
+        OperationKind::List => ActionKind::List,
+        OperationKind::Read => ActionKind::Read,
+        OperationKind::Create => ActionKind::Create,
+        OperationKind::Edit => ActionKind::Edit,
+    }
+}
+
 fn input_check(command: &WorkspaceActionCommand) -> Option<ActionNotStarted> {
     match command.operation {
-        OperationKind::Read => command
+        OperationKind::List | OperationKind::Read => command
             .content
             .is_some()
             .then_some(ActionNotStarted::ContentNotAllowed),
@@ -297,10 +352,18 @@ mod tests {
             operation,
             requested_path: String::from(path),
             content: match operation {
-                OperationKind::Read => None,
+                OperationKind::List | OperationKind::Read => None,
                 OperationKind::Create | OperationKind::Edit => Some(Vec::new()),
             },
         }
+    }
+
+    async fn run(
+        attempts: &FakeAttempts,
+        command: WorkspaceActionCommand,
+    ) -> Result<ActionRunOutcome, ActionTechnicalError> {
+        let mut tracker = ene_permission::ActionEvaluationTracker::new();
+        orchestrate_workspace_action(attempts, &mut tracker, command).await
     }
 
     #[tokio::test]
@@ -309,7 +372,7 @@ mod tests {
         let attempts = FakeAttempts::default();
         let mut command = command(root, OperationKind::Create, "report.md");
         command.content = Some(b"# report".to_vec());
-        let outcome = orchestrate_workspace_action(&attempts, command)
+        let outcome = run(&attempts, command)
             .await
             .expect("domain outcomes are not technical errors");
         let ActionRunOutcome::Completed {
@@ -331,10 +394,39 @@ mod tests {
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].operation, OperationKind::Create);
         assert!(starts[0].real_target.as_path().ends_with("report.md"));
+        assert_ne!(
+            starts[0].relied_evaluation.as_raw(),
+            ene_primitive::RawId::new(),
+            "the claim carries the permission-owned evaluation id"
+        );
         let updates = attempts.updates();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].1, ActionCertainty::ConfirmedSuccess);
         assert_eq!(updates[0].2, EffectGrounds::ObservedAtTarget);
+    }
+
+    #[tokio::test]
+    async fn list_starts_then_observes_the_directory() {
+        let (directory, root) = workspace();
+        std::fs::write(directory.path().join("a.txt"), b"a").expect("fixture write");
+        let attempts = FakeAttempts::default();
+        let outcome = run(&attempts, command(root, OperationKind::List, ""))
+            .await
+            .expect("a listing answers a domain outcome");
+        let ActionRunOutcome::Completed {
+            effect,
+            fact_recorded,
+            ..
+        } = outcome
+        else {
+            panic!("the listing must complete on the started attempt");
+        };
+        assert!(fact_recorded);
+        assert_eq!(effect.certainty, ActionCertainty::ConfirmedSuccess);
+        assert!(matches!(
+            effect.output,
+            Some(crate::filesystem::ActionOutput::Listing(_))
+        ));
     }
 
     #[tokio::test]
@@ -344,7 +436,7 @@ mod tests {
         attempts.set_start(ActionStartOutcome::StalePremise);
         let mut command = command(root, OperationKind::Create, "report.md");
         command.content = Some(b"# report".to_vec());
-        let outcome = orchestrate_workspace_action(&attempts, command)
+        let outcome = run(&attempts, command)
             .await
             .expect("stale is a domain outcome");
         assert_eq!(
@@ -361,7 +453,7 @@ mod tests {
         let attempts = FakeAttempts::default();
         let mut command = command(root, OperationKind::Read, "../escape.txt");
         command.content = None;
-        let outcome = orchestrate_workspace_action(&attempts, command)
+        let outcome = run(&attempts, command)
             .await
             .expect("a rejection is a domain outcome");
         assert_eq!(
@@ -384,7 +476,7 @@ mod tests {
             ..command(root.clone(), OperationKind::Read, "input.txt")
         };
         assert_eq!(
-            orchestrate_workspace_action(&attempts, read_with_content)
+            run(&attempts, read_with_content)
                 .await
                 .expect("domain outcome"),
             ActionRunOutcome::NotStarted(ActionNotStarted::ContentNotAllowed)
@@ -393,7 +485,7 @@ mod tests {
         let mut write_without_content = command(root.clone(), OperationKind::Edit, "input.txt");
         write_without_content.content = None;
         assert_eq!(
-            orchestrate_workspace_action(&attempts, write_without_content)
+            run(&attempts, write_without_content)
                 .await
                 .expect("domain outcome"),
             ActionRunOutcome::NotStarted(ActionNotStarted::MissingContent)
@@ -402,9 +494,7 @@ mod tests {
         let mut oversized = command(root, OperationKind::Create, "report.md");
         oversized.content = Some(vec![b'x'; crate::filesystem::MAX_ACTION_FILE_BYTES + 1]);
         assert_eq!(
-            orchestrate_workspace_action(&attempts, oversized)
-                .await
-                .expect("domain outcome"),
+            run(&attempts, oversized).await.expect("domain outcome"),
             ActionRunOutcome::NotStarted(ActionNotStarted::ContentTooLarge)
         );
         assert!(attempts.starts().is_empty());
@@ -417,7 +507,7 @@ mod tests {
         attempts.set_update(CertaintyUpdateOutcome::MissingAttempt);
         let mut command = command(root, OperationKind::Create, "report.md");
         command.content = Some(b"# report".to_vec());
-        let outcome = orchestrate_workspace_action(&attempts, command)
+        let outcome = run(&attempts, command)
             .await
             .expect("a missing attempt row is a domain outcome");
         let ActionRunOutcome::Completed {

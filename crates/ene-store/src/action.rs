@@ -23,6 +23,7 @@ use ene_action::{
     ActionStartOutcome, ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome,
     EffectGrounds, OperationKind, RealTargetRef,
 };
+use ene_permission::ActionPermissionEvaluationId;
 use ene_primitive::{RevisionInner, WallClockWithTz};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -30,12 +31,17 @@ use crate::Store;
 use crate::codec::{decode_id, decode_u64, encode_id, encode_u64, lock_shared};
 use crate::run_blocking;
 
-const SQL_INSERT_ATTEMPT: &str = "INSERT INTO action_attempt (attempt_id, task_id, task_revision, delegation_id, workspace_assoc_id, real_target, operation, certainty, grounds, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+const SQL_INSERT_ATTEMPT: &str = "INSERT INTO action_attempt (attempt_id, task_id, task_revision, delegation_id, workspace_assoc_id, real_target, operation, relied_evaluation, certainty, grounds, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
 
-const SQL_SELECT_ATTEMPT: &str = "SELECT task_id, task_revision, delegation_id, workspace_assoc_id, real_target, operation, certainty, grounds, started_at FROM action_attempt WHERE attempt_id = ?1";
+const SQL_SELECT_ATTEMPT: &str = "SELECT task_id, task_revision, delegation_id, workspace_assoc_id, real_target, operation, relied_evaluation, certainty, grounds, started_at FROM action_attempt WHERE attempt_id = ?1";
 
 const SQL_SELECT_ATTEMPT_EXISTS: &str =
     "SELECT attempt_id FROM action_attempt WHERE attempt_id = ?1";
+
+/// Attempt identities and K-B.1 evaluations are both single-use; the probe
+/// answers a reused evaluation as a technical error instead of a stale start.
+const SQL_SELECT_EVALUATION_EXISTS: &str =
+    "SELECT attempt_id FROM action_attempt WHERE relied_evaluation = ?1";
 
 const SQL_SELECT_CERTAINTY: &str = "SELECT certainty FROM action_attempt WHERE attempt_id = ?1";
 
@@ -71,14 +77,15 @@ fn insert_attempt_sync(
     let task_text = encode_id(premise.task);
     let delegation_text = encode_id(premise.delegation);
     let workspace_text = encode_id(premise.workspace);
+    let evaluation_text = encode_id(premise.relied_evaluation.as_raw());
     let revision_raw = encode_u64(premise.task_revision.as_u64()).map_err(action_unavailable)?;
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(action_unavailable)?;
-    // Attempt identities are single-use. An explicit pre-check answers a
-    // duplicate deterministically; the primary-key constraint below only
-    // covers a writer that committed between this read and the insert.
+    // Attempt identities and evaluations are single-use. Explicit pre-checks
+    // answer duplicates deterministically; the constraints below only cover a
+    // writer that committed between these reads and the insert.
     let existing: Option<String> = tx
         .query_row(SQL_SELECT_ATTEMPT_EXISTS, params![attempt_text], |row| {
             row.get(0)
@@ -87,6 +94,17 @@ fn insert_attempt_sync(
         .map_err(action_unavailable)?;
     if existing.is_some() {
         return Err(action_unavailable("duplicate action attempt id"));
+    }
+    let used_evaluation: Option<String> = tx
+        .query_row(
+            SQL_SELECT_EVALUATION_EXISTS,
+            params![evaluation_text],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(action_unavailable)?;
+    if used_evaluation.is_some() {
+        return Err(action_unavailable("action evaluation already used"));
     }
     // (1) The delegation row exists and its relied revision equals the
     // premise. A disagreement is an inconsistent correlation, never a
@@ -167,6 +185,7 @@ fn insert_attempt_sync(
             workspace_text,
             premise.real_target.as_path(),
             premise.operation.as_str(),
+            evaluation_text,
             ActionCertainty::Unknown.as_str(),
             Option::<String>::None,
             started_at,
@@ -176,9 +195,11 @@ fn insert_attempt_sync(
         Err(error)
             if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
         {
-            // The explicit pre-check answered a duplicate; this only covers a
-            // writer that committed between that read and this insert.
-            return Err(action_unavailable("duplicate action attempt id"));
+            // The explicit pre-checks answered a duplicate; this only covers a
+            // writer that committed between those reads and this insert.
+            return Err(action_unavailable(
+                "duplicate action attempt id or evaluation",
+            ));
         }
         Err(error) => return Err(action_unavailable(error)),
     }
@@ -251,6 +272,7 @@ struct RawAttempt {
     workspace: String,
     real_target: String,
     operation: String,
+    relied_evaluation: String,
     certainty: String,
     grounds: Option<String>,
     started_at: String,
@@ -264,9 +286,10 @@ fn raw_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAttempt> {
         workspace: row.get(3)?,
         real_target: row.get(4)?,
         operation: row.get(5)?,
-        certainty: row.get(6)?,
-        grounds: row.get(7)?,
-        started_at: row.get(8)?,
+        relied_evaluation: row.get(6)?,
+        certainty: row.get(7)?,
+        grounds: row.get(8)?,
+        started_at: row.get(9)?,
     })
 }
 
@@ -326,6 +349,9 @@ fn decode_attempt_record(
         workspace: decode_id(&raw.workspace).map_err(action_unavailable)?,
         real_target: RealTargetRef::from_canonical_path(raw.real_target),
         operation,
+        relied_evaluation: ActionPermissionEvaluationId::from_raw(
+            decode_id(&raw.relied_evaluation).map_err(action_unavailable)?,
+        ),
         certainty,
         grounds,
         started_at: WallClockWithTz::parse_rfc3339(&raw.started_at).map_err(action_unavailable)?,

@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ene-permission = { path = "../ene-permission" }
 ene-primitive = { path = "../ene-primitive" }
 tempfile.workspace = true
 thiserror.workspace = true

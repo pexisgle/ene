@@ -534,12 +534,12 @@ fn backfill_inference_attempt_consumers(tx: &rusqlite::Transaction<'_>) -> Resul
 
 /// Introduces `action_attempt`: one durable Action try per `attempt_id`, with
 /// the delegation/task/workspace correlation compared inside the insert
-/// transaction (AU5). The row is append-only for its start facts and changes
-/// only through the certainty compare-and-set. `grounds` is NULL until an
-/// observation is reported; a started attempt reads `certainty = 'unknown'`.
-/// The relied permission evaluation, effect stage, hold, and generation-tag
-/// columns are absent on purpose: their producers do not exist yet, and no
-/// placeholder column is added for them.
+/// transaction (AU5) and the K-B.1 single-use evaluation bound to the row.
+/// The row is append-only for its start facts and changes only through the
+/// certainty compare-and-set. `grounds` is NULL until an observation is
+/// reported; a started attempt reads `certainty = 'unknown'`. The effect
+/// stage, hold, and generation-tag columns are absent on purpose: their
+/// producers do not exist yet, and no placeholder column is added for them.
 const MIGRATION_V19: &str = "
 CREATE TABLE IF NOT EXISTS action_attempt (
 attempt_id TEXT PRIMARY KEY,
@@ -549,6 +549,7 @@ delegation_id TEXT NOT NULL,
 workspace_assoc_id TEXT NOT NULL,
 real_target TEXT NOT NULL,
 operation TEXT NOT NULL,
+relied_evaluation TEXT NOT NULL UNIQUE,
 certainty TEXT NOT NULL,
 grounds TEXT NULL,
 started_at TEXT NOT NULL

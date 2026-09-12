@@ -2,22 +2,25 @@
 //!
 //! A [`WorkspaceRoot`] is a canonicalized folder. [`WorkspaceRoot::resolve`]
 //! turns one requested workspace-relative path into a [`RealTargetRef`]: a
-//! canonical absolute path proven to be inside the folder at resolution time.
-//! Absolute paths, parent-directory components, and symlink resolutions that
-//! leave the folder are refused; string equality of the request is never
-//! treated as identity.
+//! canonical absolute path proven to be inside the folder and on the same
+//! filesystem entity at resolution time. Absolute paths, parent-directory
+//! components, symlink resolutions that leave the folder, and targets that
+//! cross a mount/reparse/volume boundary are refused; string equality of the
+//! request is never treated as identity.
 //!
 //! [`WorkspaceRoot::execute`] re-verifies containment immediately before the
 //! effect and publishes writes atomically in the destination directory
 //! (`persist_noclobber` for create, `persist` for edit), then reads the
-//! destination back. Confirmed success means the executor observed the
-//! intended content at the target; an agent self-report is never a ground.
+//! destination back. `List` observes a non-recursive directory enumeration.
+//! Confirmed success means the executor observed the intended result at the
+//! target; an agent self-report is never a ground.
 //!
 //! The guarantee is against the agent-requested path, not against an
 //! unbounded concurrent local writer: a same-user process swapping directory
 //! components mid-operation is outside the container the OS gives this
 //! process, and an `openat2`-style syscall boundary is platform work this
-//! slice does not claim.
+//! slice does not claim. The mount/reparse check is a static boundary check
+//! of the resolved path, not a live mount-table watcher.
 
 use std::fs;
 use std::io::Write;
@@ -45,6 +48,33 @@ pub enum WorkspaceRootError {
     NotADirectory,
 }
 
+/// One directory entry observed by a `List`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListEntry {
+    pub name: String,
+    pub kind: ListEntryKind,
+}
+
+/// The kind of one listed directory entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListEntryKind {
+    File,
+    Directory,
+    Symlink,
+    /// A special file (device, socket, ...) or an entry whose type could not
+    /// be read; it is reported without being followed.
+    Other,
+}
+
+/// The observed output of one action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionOutput {
+    /// The bytes read by a `Read`.
+    Bytes(Vec<u8>),
+    /// The entries observed by a `List`, sorted by name.
+    Listing(Vec<ListEntry>),
+}
+
 /// Why one requested path was refused before any attempt was claimed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetRejection {
@@ -54,15 +84,23 @@ pub enum TargetRejection {
     /// The canonical resolution left the workspace folder (including symlinks).
     #[error("requested path escapes the workspace")]
     OutsideWorkspace,
-    /// Read/edit named a target that does not exist.
+    /// The resolved target crosses the workspace root's filesystem entity (a
+    /// nested mount, reparse point, or volume boundary), or the boundary could
+    /// not be determined on this platform.
+    #[error("requested target crosses the workspace filesystem boundary")]
+    CrossFilesystem,
+    /// List named a target that does not exist.
     #[error("requested target does not exist")]
     MissingTarget,
     /// Create named a target whose parent directory does not exist.
     #[error("requested target parent does not exist")]
     MissingParent,
-    /// The resolved target is not a regular file.
+    /// Read/edit named a non-regular file.
     #[error("requested target is not a regular file")]
     NotAFile,
+    /// List named a non-directory.
+    #[error("requested target is not a directory")]
+    NotADirectory,
     /// Create named a target that already exists.
     #[error("requested target already exists")]
     AlreadyExists,
@@ -101,18 +139,25 @@ impl WorkspaceRoot {
 
     /// Resolves one requested workspace-relative path to a real target.
     ///
-    /// Read/edit require an existing regular file inside the folder; create
-    /// requires an existing directory parent inside the folder and a
-    /// destination that does not exist yet. The returned target is the
-    /// canonical absolute path, which is what execution uses.
+    /// List accepts an empty request or `.` to enumerate the workspace root.
+    /// Read/edit require an existing regular file inside the folder; list
+    /// requires an existing directory; create requires an existing directory
+    /// parent inside the folder and a destination that does not exist yet. The
+    /// returned target is the canonical absolute path, which is what
+    /// execution uses.
     pub fn resolve(
         &self,
         requested: &str,
         operation: OperationKind,
     ) -> Result<RealTargetRef, TargetRejection> {
-        let names = requested_components(requested).ok_or(TargetRejection::MalformedPath)?;
+        let names =
+            if operation == OperationKind::List && (requested.is_empty() || requested == ".") {
+                Vec::new()
+            } else {
+                requested_components(requested).ok_or(TargetRejection::MalformedPath)?
+            };
         match operation {
-            OperationKind::Read | OperationKind::Edit => {
+            OperationKind::List | OperationKind::Read | OperationKind::Edit => {
                 let mut joined = self.root.clone();
                 for name in &names {
                     joined.push(name);
@@ -122,12 +167,25 @@ impl WorkspaceRoot {
                     return Err(TargetRejection::OutsideWorkspace);
                 }
                 let metadata = fs::metadata(&canonical).map_err(|error| map_io_error(&error))?;
-                if !metadata.is_file() {
-                    return Err(TargetRejection::NotAFile);
+                if !self.boundary_holds(&canonical, &metadata) {
+                    return Err(TargetRejection::CrossFilesystem);
                 }
-                if operation == OperationKind::Read && metadata.len() > MAX_ACTION_FILE_BYTES as u64
-                {
-                    return Err(TargetRejection::TooLarge);
+                match operation {
+                    OperationKind::List => {
+                        if !metadata.is_dir() {
+                            return Err(TargetRejection::NotADirectory);
+                        }
+                    }
+                    _ => {
+                        if !metadata.is_file() {
+                            return Err(TargetRejection::NotAFile);
+                        }
+                        if operation == OperationKind::Read
+                            && metadata.len() > MAX_ACTION_FILE_BYTES as u64
+                        {
+                            return Err(TargetRejection::TooLarge);
+                        }
+                    }
                 }
                 Ok(canonical_target(canonical))
             }
@@ -152,6 +210,11 @@ impl WorkspaceRoot {
                 if !canonical_parent.is_dir() {
                     return Err(TargetRejection::MissingParent);
                 }
+                let parent_metadata =
+                    fs::metadata(&canonical_parent).map_err(|error| map_io_error(&error))?;
+                if !self.boundary_holds(&canonical_parent, &parent_metadata) {
+                    return Err(TargetRejection::CrossFilesystem);
+                }
                 let destination = canonical_parent.join(file_name);
                 match fs::symlink_metadata(&destination) {
                     Ok(_) => return Err(TargetRejection::AlreadyExists),
@@ -165,13 +228,13 @@ impl WorkspaceRoot {
 
     /// Executes one already-resolved operation and observes the effect.
     ///
-    /// Reads return the observed bytes. Writes publish atomically in the
-    /// destination directory and read the destination back; a verified
-    /// read-back is the confirmed-success ground, a refusal before publishing
-    /// is a confirmed failure, and anything the executor cannot verify stays
-    /// [`ActionCertainty::Unknown`].
+    /// Reads return the observed bytes, listings return the observed entries.
+    /// Writes publish atomically in the destination directory and read the
+    /// destination back; a verified read-back is the confirmed-success ground,
+    /// a refusal before publishing is a confirmed failure, and anything the
+    /// executor cannot verify stays [`ActionCertainty::Unknown`].
     ///
-    /// `content` is required for create/edit and ignored for read; the
+    /// `content` is required for create/edit and ignored for list/read; the
     /// orchestration checks this before any durable claim.
     #[must_use]
     pub fn execute(
@@ -181,19 +244,21 @@ impl WorkspaceRoot {
         content: Option<&[u8]>,
     ) -> ObservedEffect {
         match operation {
+            OperationKind::List => self.list_directory(target),
             OperationKind::Read => {
-                // Re-check the bound at the effect moment: a file that grew
-                // after resolution must not turn into an unbounded read.
-                let too_large = fs::metadata(target.as_path())
-                    .is_ok_and(|metadata| metadata.len() > MAX_ACTION_FILE_BYTES as u64);
-                if too_large {
+                let Ok(metadata) = fs::metadata(target.as_path()) else {
+                    return refused();
+                };
+                if !self.boundary_holds(Path::new(target.as_path()), &metadata)
+                    || metadata.len() > MAX_ACTION_FILE_BYTES as u64
+                {
                     return refused();
                 }
                 match fs::read(target.as_path()) {
                     Ok(bytes) => ObservedEffect {
                         certainty: ActionCertainty::ConfirmedSuccess,
                         grounds: EffectGrounds::ObservedAtTarget,
-                        output: Some(bytes),
+                        output: Some(ActionOutput::Bytes(bytes)),
                     },
                     Err(_) => refused(),
                 }
@@ -202,6 +267,43 @@ impl WorkspaceRoot {
                 self.write_atomically(target, content.unwrap_or_default(), false)
             }
             OperationKind::Edit => self.write_atomically(target, content.unwrap_or_default(), true),
+        }
+    }
+
+    /// Observes one directory as a sorted, non-recursive entry listing.
+    ///
+    /// Entry types are read without following symlinks: a link is reported as
+    /// a link, never traversed. A partial read of the directory is a confirmed
+    /// refusal (a listing changes nothing).
+    fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
+        let Ok(metadata) = fs::metadata(target.as_path()) else {
+            return refused();
+        };
+        if !metadata.is_dir() || !self.boundary_holds(Path::new(target.as_path()), &metadata) {
+            return refused();
+        }
+        let Ok(entries) = fs::read_dir(target.as_path()) else {
+            return refused();
+        };
+        let mut listing = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return refused();
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let kind = match entry.file_type() {
+                Ok(file_type) if file_type.is_file() => ListEntryKind::File,
+                Ok(file_type) if file_type.is_dir() => ListEntryKind::Directory,
+                Ok(file_type) if file_type.is_symlink() => ListEntryKind::Symlink,
+                _ => ListEntryKind::Other,
+            };
+            listing.push(ListEntry { name, kind });
+        }
+        listing.sort_by(|left, right| left.name.cmp(&right.name));
+        ObservedEffect {
+            certainty: ActionCertainty::ConfirmedSuccess,
+            grounds: EffectGrounds::ObservedAtTarget,
+            output: Some(ActionOutput::Listing(listing)),
         }
     }
 
@@ -271,39 +373,140 @@ impl WorkspaceRoot {
     /// Best-effort re-verification immediately before the effect.
     ///
     /// Edit requires the target to still canonicalize to itself inside the
-    /// root; create requires the canonical parent to still be inside the root
+    /// root and remain on the root's filesystem entity; create requires the
+    /// canonical parent to still be inside the root and on the same entity,
     /// and the destination to still be absent.
     fn reverifies_at_effect(&self, destination: &Path, replace: bool) -> bool {
         if replace {
-            match fs::canonicalize(destination) {
-                Ok(canonical) => canonical == destination && canonical.starts_with(&self.root),
-                Err(_) => false,
+            match (fs::canonicalize(destination), fs::metadata(destination)) {
+                (Ok(canonical), Ok(metadata)) => {
+                    canonical == destination
+                        && canonical.starts_with(&self.root)
+                        && self.boundary_holds(&canonical, &metadata)
+                }
+                _ => false,
             }
         } else {
             let Some(parent) = destination.parent() else {
                 return false;
             };
-            match fs::canonicalize(parent) {
-                Ok(canonical_parent) => {
+            match (fs::canonicalize(parent), fs::metadata(parent)) {
+                (Ok(canonical_parent), Ok(metadata)) => {
                     canonical_parent == parent
                         && canonical_parent.starts_with(&self.root)
+                        && self.boundary_holds(&canonical_parent, &metadata)
                         && fs::symlink_metadata(destination).is_err()
                 }
-                Err(_) => false,
+                _ => false,
             }
         }
     }
+
+    /// Whether `target` is on the same filesystem entity as the workspace root
+    /// and no nested mount/reparse boundary lies between them.
+    ///
+    /// Linux: root and target must share a device, and no mount point from
+    /// `/proc/self/mountinfo` may sit strictly below the root on the target's
+    /// path (an unreadable mount table fails closed). Other Unix: device
+    /// equality. Windows: volume serial equality. Undeterminable boundaries
+    /// are refused, never assumed inside.
+    fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
+        self.boundary_holds_impl(target, metadata)
+    }
+
+    #[cfg(unix)]
+    fn boundary_holds_impl(&self, target: &Path, metadata: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(root_metadata) = fs::metadata(&self.root) else {
+            return false;
+        };
+        if root_metadata.dev() != metadata.dev() {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            match linux_mount_points() {
+                Ok(mounts) => !crosses_linux_mount(&self.root, target, &mounts),
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Device equality is the available boundary judgment on non-Linux
+            // Unix; same-device nested mounts are not distinguishable here.
+            let _ = target;
+            true
+        }
+    }
+
+    #[cfg(windows)]
+    fn boundary_holds_impl(&self, _target: &Path, metadata: &fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt;
+
+        let root_volume = fs::metadata(&self.root)
+            .ok()
+            .and_then(|root| root.volume_serial_number());
+        let target_volume = metadata.volume_serial_number();
+        matches!((root_volume, target_volume), (Some(left), Some(right)) if left == right)
+    }
+}
+
+/// Reads the Linux mount table's mount points, decoded.
+#[cfg(target_os = "linux")]
+fn linux_mount_points() -> Result<Vec<PathBuf>, std::io::Error> {
+    let content = fs::read_to_string("/proc/self/mountinfo")?;
+    Ok(content.lines().filter_map(parse_mount_point).collect())
+}
+
+/// One mountinfo line's mount point (field 5) as a path.
+///
+/// The field is the mount point in the mount namespace; `\040`, `\011`,
+/// `\012`, and `\134` are the kernel's space/tab/newline/backslash escapes.
+#[cfg(target_os = "linux")]
+fn parse_mount_point(line: &str) -> Option<PathBuf> {
+    let field = line.split_whitespace().nth(4)?;
+    if field.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(decode_mountinfo_escape(field)))
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_escape(field: &str) -> String {
+    let mut decoded = field.to_owned();
+    for (escape, character) in [
+        ("\\040", " "),
+        ("\\011", "\t"),
+        ("\\012", "\n"),
+        ("\\134", "\\"),
+    ] {
+        decoded = decoded.replace(escape, character);
+    }
+    decoded
+}
+
+/// True when a mount point strictly below `root` sits on the `target` path.
+///
+/// The root itself may be a mount point; mount points above the root are
+/// outside the workspace's own boundary.
+#[cfg(target_os = "linux")]
+fn crosses_linux_mount(root: &Path, target: &Path, mounts: &[PathBuf]) -> bool {
+    mounts
+        .iter()
+        .any(|mount| mount != root && mount.starts_with(root) && target.starts_with(mount))
 }
 
 /// One observed execution result.
 ///
-/// `output` carries the read bytes and is redacted from [`core::fmt::Debug`]
-/// so diagnostic output never leaks file content.
+/// `output` carries read bytes or a listing and is redacted from
+/// [`core::fmt::Debug`] so diagnostic output never leaks file content or
+/// private names.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ObservedEffect {
     pub certainty: ActionCertainty,
     pub grounds: EffectGrounds,
-    pub output: Option<Vec<u8>>,
+    pub output: Option<ActionOutput>,
 }
 
 impl core::fmt::Debug for ObservedEffect {
@@ -314,11 +517,11 @@ impl core::fmt::Debug for ObservedEffect {
             .field("grounds", &self.grounds)
             .field(
                 "output",
-                &self.output.as_ref().map(|bytes| {
-                    if bytes.is_empty() {
-                        String::from("<0 bytes>")
-                    } else {
-                        format!("<{} bytes redacted>", bytes.len())
+                &self.output.as_ref().map(|output| match output {
+                    ActionOutput::Bytes(bytes) if bytes.is_empty() => String::from("<0 bytes>"),
+                    ActionOutput::Bytes(bytes) => format!("<{} bytes redacted>", bytes.len()),
+                    ActionOutput::Listing(entries) => {
+                        format!("<{} entries redacted>", entries.len())
                     }
                 }),
             )
@@ -376,9 +579,14 @@ fn requested_components(requested: &str) -> Option<Vec<String>> {
 mod tests {
     use std::fs;
 
+    use std::path::PathBuf;
+
     use tempfile::tempdir;
 
-    use super::{MAX_ACTION_FILE_BYTES, TargetRejection, WorkspaceRoot};
+    use super::{
+        ActionOutput, ListEntry, ListEntryKind, MAX_ACTION_FILE_BYTES, TargetRejection,
+        WorkspaceRoot,
+    };
     use crate::attempt::OperationKind;
 
     fn workspace() -> (tempfile::TempDir, WorkspaceRoot) {
@@ -524,7 +732,7 @@ mod tests {
             .resolve("input.txt", OperationKind::Read)
             .expect("read target");
         let read = root.execute(&read_target, OperationKind::Read, None);
-        assert_eq!(read.output.as_deref(), Some(&b"hello"[..]));
+        assert_eq!(read.output, Some(ActionOutput::Bytes(b"hello".to_vec())));
         assert!(crate::attempt::certainty_grounds_pair_is_valid(
             read.certainty,
             read.grounds
@@ -623,10 +831,134 @@ mod tests {
         let effect = super::ObservedEffect {
             certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
             grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
-            output: Some(b"secret file body".to_vec()),
+            output: Some(ActionOutput::Bytes(b"secret file body".to_vec())),
         };
         let rendered = format!("{effect:?}");
         assert!(!rendered.contains("secret file body"));
         assert!(rendered.contains("bytes redacted"));
+    }
+
+    #[test]
+    fn debug_redacts_listing_names() {
+        let effect = super::ObservedEffect {
+            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
+            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
+            output: Some(ActionOutput::Listing(vec![ListEntry {
+                name: String::from("private-notes.md"),
+                kind: ListEntryKind::File,
+            }])),
+        };
+        let rendered = format!("{effect:?}");
+        assert!(!rendered.contains("private-notes.md"));
+        assert!(rendered.contains("entries redacted"));
+    }
+
+    #[test]
+    fn list_requires_a_directory_and_observes_a_sorted_listing() {
+        let (directory, root) = workspace();
+        fs::write(directory.path().join("b.txt"), b"b").expect("fixture write");
+        fs::write(directory.path().join("a.txt"), b"a").expect("fixture write");
+        fs::create_dir(directory.path().join("sub")).expect("fixture directory");
+        assert_eq!(
+            root.resolve("a.txt", OperationKind::List),
+            Err(TargetRejection::NotADirectory)
+        );
+        assert_eq!(
+            root.resolve("missing", OperationKind::List),
+            Err(TargetRejection::MissingTarget)
+        );
+        let target = root
+            .resolve("", OperationKind::List)
+            .expect("an empty request lists the workspace root");
+        assert_eq!(target.as_path(), root.as_path().to_string_lossy());
+        let effect = root.execute(&target, OperationKind::List, None);
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedSuccess
+        );
+        assert_eq!(
+            effect.output,
+            Some(ActionOutput::Listing(vec![
+                ListEntry {
+                    name: String::from("a.txt"),
+                    kind: ListEntryKind::File,
+                },
+                ListEntry {
+                    name: String::from("b.txt"),
+                    kind: ListEntryKind::File,
+                },
+                ListEntry {
+                    name: String::from("sub"),
+                    kind: ListEntryKind::Directory,
+                },
+            ]))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_reports_symlink_entries_without_following_them() {
+        let (directory, root) = workspace();
+        let outside = tempdir().expect("outside directory");
+        fs::write(outside.path().join("secret.txt"), b"secret").expect("outside fixture");
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("escape"))
+            .expect("escape symlink");
+        let target = root
+            .resolve(".", OperationKind::List)
+            .expect("root listing");
+        let effect = root.execute(&target, OperationKind::List, None);
+        assert_eq!(
+            effect.output,
+            Some(ActionOutput::Listing(vec![ListEntry {
+                name: String::from("escape"),
+                kind: ListEntryKind::Symlink,
+            }]))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_mount_boundary_rejects_nested_mount_points() {
+        use super::crosses_linux_mount;
+
+        let root = PathBuf::from("/srv/workspace");
+        let mounts = vec![
+            PathBuf::from("/srv"),
+            PathBuf::from("/srv/workspace/nested"),
+        ];
+        assert!(!crosses_linux_mount(
+            &root,
+            &PathBuf::from("/srv/workspace"),
+            &mounts
+        ));
+        assert!(!crosses_linux_mount(
+            &root,
+            &PathBuf::from("/srv/workspace/file"),
+            &mounts
+        ));
+        assert!(crosses_linux_mount(
+            &root,
+            &PathBuf::from("/srv/workspace/nested"),
+            &mounts
+        ));
+        assert!(crosses_linux_mount(
+            &root,
+            &PathBuf::from("/srv/workspace/nested/file"),
+            &mounts
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_mountinfo_lines_decode_kernel_escapes() {
+        use super::{decode_mountinfo_escape, parse_mount_point};
+
+        let line = "36 35 98:0 /mnt1 /srv/my\\040workspace rw,noatime master:1 - ext3 /dev/root rw,errors=continue";
+        assert_eq!(
+            parse_mount_point(line),
+            Some(PathBuf::from("/srv/my workspace"))
+        );
+        assert_eq!(decode_mountinfo_escape("/a\\134b"), "/a\\b");
+        assert_eq!(parse_mount_point("too short"), None);
     }
 }

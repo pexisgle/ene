@@ -11,6 +11,7 @@
 //! ([`RawId`] / [`RevisionInner`]) so this crate never imports another
 //! domain's newtype; the owner maps them at the composition root.
 
+use ene_permission::ActionPermissionEvaluationId;
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use thiserror::Error;
 
@@ -40,12 +41,15 @@ impl ActionAttemptId {
 
 /// The kind of external operation one attempt performs.
 ///
-/// The closed world for this slice is read/create/edit: the Stage 4 workspace
-/// boundary permits list/read/create/edit only. Delete and execute require
-/// their producers (Owner confirmation, extension acceptance) and are added
-/// by the slice that can produce them; there is no inert variant for them.
+/// The closed world for this slice is list/read/create/edit: the Stage 4
+/// workspace boundary permits listing, reading, creating, and editing only.
+/// Delete and execute require their producers (Owner confirmation, extension
+/// acceptance) and are added by the slice that can produce them; there is no
+/// inert variant for them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperationKind {
+    /// Non-recursive directory enumeration.
+    List,
     Read,
     Create,
     Edit,
@@ -56,6 +60,7 @@ impl OperationKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::List => "list",
             Self::Read => "read",
             Self::Create => "create",
             Self::Edit => "edit",
@@ -66,6 +71,7 @@ impl OperationKind {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "list" => Some(Self::List),
             "read" => Some(Self::Read),
             "create" => Some(Self::Create),
             "edit" => Some(Self::Edit),
@@ -202,6 +208,8 @@ impl RealTargetRef {
 ///
 /// The orchestration mints `attempt`; the repository never re-allocates it.
 /// The correlation values are owner-defined opaque values (CM §4.3).
+/// `relied_evaluation` is the K-B.1 single-use judgment this start relies on;
+/// the repository refuses a second attempt using the same identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptCommitPremise {
     pub attempt: ActionAttemptId,
@@ -213,6 +221,8 @@ pub struct AttemptCommitPremise {
     /// The target resolved immediately before the start request.
     pub real_target: RealTargetRef,
     pub operation: OperationKind,
+    /// The permission-owned evaluation that authorized exactly this use.
+    pub relied_evaluation: ActionPermissionEvaluationId,
 }
 
 /// The domain result of one attempt insertion.
@@ -265,6 +275,8 @@ pub struct ActionAttemptRecord {
     pub workspace: RawId,
     pub real_target: RealTargetRef,
     pub operation: OperationKind,
+    /// The K-B.1 evaluation this attempt started under.
+    pub relied_evaluation: ActionPermissionEvaluationId,
     pub certainty: ActionCertainty,
     /// `None` only for an attempt that has not reported an observation yet.
     pub grounds: Option<EffectGrounds>,
@@ -338,6 +350,7 @@ mod tests {
     #[test]
     fn operation_names_round_trip_as_a_closed_world() {
         for operation in [
+            OperationKind::List,
             OperationKind::Read,
             OperationKind::Create,
             OperationKind::Edit,
