@@ -1,494 +1,340 @@
 # ene 要件
 
-状態: **再構成済みBaseline**
+ステータス: **基本要件策定済み**
 
-本書は、[製品定義](product.md)に記載したeneの行動要件を定義する唯一の正本である。ここでは、Ownerから観測できる挙動、安全境界、データ契約、および製品機能として採用する相互運用方式や隔離方針を定める。それらを実現するための内部設計詳細は定めない。
+このドキュメントは、[製品定義 (product.md)](product.md) に基づき、ene が備えるべき機能要件と振る舞いをまとめた公式の仕様書です。
+ユーザーから見える動作、安全性やプライバシーの境界、データ管理のルールを定めています（内部の具体的な実装コードやデータベース構造は設計書側に委ねます）。
 
 ## 所有と実行
 
-- 一つのene環境は一人のOwnerが所有し、Ownerが管理するHostをene内部データの正本とする。
-- ClientはHostへ接続して表示、会話、操作を提供する。個体・会話・Learning・Task・設定等のdomain dataについて、Clientだけに存在するeneの永続的な正本を作らない。Client固有の接続材料は[Remote Client](#remote-client)の保護境界で扱う。
-- 推論先は、CapabilityごとにHost、OwnerのLAN内、またはCloudから選択できる。
-- HostはClientが閉じていても、許可済みのHost上のTask、Schedule、保存を継続する。通常のTask・Task Agentの作業は基本的にHost上で実行し、Computer Use等のClient依存部分は、そのClientの利用可能性と安全契約に従う。
-- Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復問い合わせを行わない。
-- 会話、Task、Schedule、Permission判断では、現在日時、timezone、担当Companion、関連するTaskとWorkspaceを必要に応じて認識できる。
+- **手元のPCがデータのマスター**: 1つの ene 環境は1人のユーザー（Owner）が所有し、ユーザーが管理するPC（Host）をすべての記憶や設定の大元（マスターデータ）とします。
+- **操作端末（Client）は表示の窓口**: クライアント画面はパートナーとの会話や操作を行うための入口であり、大元データをクライアント側だけに孤立して保存することはありません。端末ごとの接続情報は [Remote Client](#remote-client) の安全境界に従って保護します。
+- **推論先（AI）は自由に選択可能**: パートナーとの会話やタスク処理に使うAIモデルは、ホストPC内のローカルモデル、家庭内LAN上の別マシン、または各種クラウドAIから機能ごとに自由に選べます。
+- **画面を閉じてもホスト側で作業を継続**: 操作画面を閉じても、ホストPC上で許可済みのタスクやスケジュール、データ保存はそのまま安全に継続します。通常の作業はホストPC上で動き、画面操作などの端末依存処理は該当端末が利用可能なときだけ安全に実行されます。
+- **無駄なAI呼び出しの禁止**: 作業の完了やタイマーの到来を待つためだけに、AIモデルへ反復して無駄な問い合わせを繰り返すことはしません。
+- **日時の認識**: 会話やタスク、スケジュール実行時には、現在の日時やタイムゾーン、担当パートナー、関連する作業フォルダを正確に把握して動きます。
 
 ## Setupと日常利用
 
-- 初回Setupは、使用言語、最初のCompanion、推論先、Cloudへの送信内容、費用の発生可能性、Credential、利用するmodelをOwnerが理解して選べる最小の流れにする。
-- Ownerは、新しい環境として開始するか、対応するbackupから全体を復元するかを選べる。
-- UI言語は日本語または英語を選択でき、後から変更できる。
-- Hostの自動起動を利用できる構成では、その目的と、Clientを閉じても継続する処理を説明したうえでOwnerが選ぶ。
-- Setup完了後は、同梱Character `ene` から作られたCompanionとテキストで会話できる。
-- Voice、Observation、外部Tool等の追加Capabilityは、初回Setupを不必要に長くせず、初めて使う時点で必要な説明と同意を示す。
-- 日常的な会話やTaskの開始に、管理画面の反復操作を要求しない。
-- Ownerに内部の隔離方式や権限機構の理解を要求しない。安全な実行方法の選択はeneが担い、確認は目的、対象、外部作用、費用等の判断に必要な内容へ絞る。既存の依頼、同意、Ruleで判断できる事項を繰り返し確認しない。
+- **わかりやすい初期設定**: 初回セットアップでは、表示言語、最初のパートナー、使用するAIモデル、クラウド送信の有無や発生しうる費用、APIキーなどを、ユーザーが納得して選択できるシンプルで親切な流れを提供します。
+- **新規作成とバックアップ復元の選択**: 新しい環境としてゼロから始めるか、過去のバックアップから丸ごと復元するかを選べます。
+- **多言語対応**: UI言語は日本語と英語に対応し、セットアップ後もいつでも変更できます。
+- **PC起動時の自動常駐**: PC起動時に自動でホストを起動する機能を利用する場合は、その理由と画面を閉じても継続する動作を分かりやすく説明した上でユーザーに選んでもらいます。
+- **すぐにおしゃべり可能**: セットアップ完了後、公式キャラクター `ene` から作られたパートナーとすぐにテキストチャットを始められます。
+- **追加機能は使うときに案内**: 音声会話や画面見守り、追加ツールなどの高度な機能は、初回セットアップを長引かせず、初めて使うタイミングで必要な説明と同意を表示します。
+- **普段使いの快適さ**: 日常的な会話や作業の依頼を始めるために、複雑な管理画面を何度もポチポチ操作させるようなことはしません。
+- **安全管理の自動化**: 専門的なセキュリティ隔離の仕組みをユーザーに無理に理解させません。安全な実行方法はシステム側が責任を持って選択し、ユーザーへの確認は「何のために」「何を対象に」「どんな影響や費用が発生するか」という分かりやすい内容に絞ります。すでに同意済みの操作を何度も煩わしく確認することはしません。
 
 ## CompanionとCharacter
 
 ### 個体性
 
-- 複数のCompanionは、同じCharacterから作られていても別個体として扱い、それぞれのExperience、Memory、Relationship、Companion State、設定を混同しない。
-- Companionは、停止または削除されない限り、Hostの再起動やClientの切替を越えて同じ個体として継続する。
-- Characterの初期設定より、そのCompanionが実際に得たExperienceから形成されたMemory、Relationship、Companion State等の継続状態を優先する。
+- **それぞれが独立したパートナー**: 同じキャラクター設定から作られたパートナーであっても、それぞれ別々の個体として育ちます。お互いの記憶、ユーザーとの関係性、感情状態、設定を混同することはありません。
+- **再起動してもずっと一緒**: パートナーは、ユーザーが明示的に停止または削除しない限り、PCの再起動や端末の切り替えをまたいでも同じ個体として継続します。
+- **育った記憶を優先**: 配布時の初期キャラクター設定よりも、パートナーが日々の対話や作業を通じて実際に育んできた記憶や関係性を優先します。
 
 ### Character Package
 
-- Character Packageは、静的人格、VRM 1.0 Body、Voice設定、motion設定、推奨Skillを任意に含められる。
-- Character Packageに、特定OwnerまたはCompanionのExperience Summary、Memory、Relationship、Companion State、Conversation History、Credential、Permissionを含めない。
-- OwnerはCharacter Packageをimportおよびexportできる。export前に、含まれる内容と権利上の注意を確認できる。
-- ene内のCharacter編集は、静的な人格テキストの基本編集、既存部品の選択・差替え、import、exportを扱う。
-- 3D model制作、Voice学習、高度なSkill編集は、それぞれの既存ツールで行えるよう外部形式を尊重し、ene内に同等の制作環境を複製しない。
-- Character Packageの更新は新しいrevisionとして識別できる。
-- 既存CompanionへCharacter更新を適用するときは、Ownerが部品ごとに明示して選ぶ。更新はCompanionがExperienceから形成した状態を黙って上書きしない。
+- **配信用パッケージ形式**: キャラクターパッケージには、3Dアバター（VRM 1.0）、声の設定、初期性格、仕草、おすすめスキルを自由に含められます。
+- **プライベートな記憶は含めない**: パッケージには、特定のユーザーとの思い出、記憶（Memory）、関係性、チャット履歴、APIキーなどの個人情報や機密情報は絶対に含めません。
+- **自由なインポートとエクスポート**: ユーザーはキャラクターパッケージを自由に取り込み（インポート）、書き出し（エクスポート）できます。エクスポート前には、含まれる内容や著作権に関する注意事項を確認できます。
+- **ene内での編集機能**: パートナーの基本テキスト設定の変更や既存パーツの差し替え、インポート・エクスポートを行えます。
+- **専門ツールとの共存**: 3Dモデル制作、声の学習、高度なスクリプト編集などは、既存の使い慣れた専用ツールで行えるよう外部の標準形式を尊重します（ene 内に重い制作環境を一から重複して作りません）。
+- **バージョンの明確化**: パッケージが更新された際は、新しいリビジョンとして明確に区別されます。
+- **更新時の安全な適用**: 既存のパートナーにキャラクターの更新を適用する際は、ユーザーがパーツごとに選んで適用できます。パートナーが日々の経験から学んだ記憶を、更新によって勝手に上書きすることはありません。
 
 ### 停止と削除
 
-- OwnerはCompanionを停止、再開、削除できる。
-- 停止中のCompanionはどのClientにもHostにもpresenceを持たず、active Clientを持たない。Client上のCompanion数やObserverの「Companionが1体以上存在するClient」という対象判定に数えない。
-- 停止中のCompanionはBodyとComputer Use対象を持たず、Voice／Text等の通常interaction、応答、自発活動、新しいTask、新しいSchedule実行を開始しない。Clientを必要としないCompanion間交流・通知生成・内部調査も停止対象とする。
-- 停止時に実行中のTaskがあればbest-effortでCancelし、Cancelの成否と残った外部作用をOwnerへ示す。
-- 停止はCompanionのデータを削除せず、再開後に同じ個体として継続する。
-- 最後に存在したClientや復帰候補等の再配置hintを保持できるが、現在のpresenceとして扱わない。再開時は保存候補等から適切なClientへ再配置でき、具体的な再配置algorithmは固定しない。
-- Companionの削除は強い確認を必要とし、そのCompanion固有の設定、Experience Summary、Companion scope Memory、ene内部のCompanion scope Skill、Companion State、その他Experience由来のCompanion固有Learning stateを削除する。Companion scope Skillの削除には、そのSkillに属する過去revisionを含める。共有の根拠が残る場合は、後述の共有Experience Summary等の扱いに従う。
-- Companion削除を契機として内部Skillその他のLearningをGlobal scopeへ自動昇格しない。GlobalにすべきLearningは、削除に先立つ通常のLearning lifecycleで[Scope](#scope)の条件に従ってGlobal化する。
-- 削除は停止処理を含み、新しいActionを開始せず、実行中Taskをbest-effortでCancelする。担当Scheduleは削除し、別Companionへ自動で引き継がない。
-- Companionを削除すると、そのCompanionを主体または相手とするRelationshipも削除する。他Companionも利用する共有Experience Summaryを残す場合は、残る情報と参照不能になる情報を削除前に示す。
-- Companion削除は個体固有の現在状態・学習状態等の削除であり、過去に存在し会話・活動した記録を消す操作ではない。Ownerとの一対一Conversation History、グループ会話内の発言、Companion間の会話記録、単独・共同Taskの履歴・記録、保存されたObservation由来の活動記録やnotification・軽微な内部調査等のhistorical logを、Companion削除だけを理由に削除しない。記録の削除は通常のHistory／Log削除、retention policy、Privacy/Security目的のtargeted deletion等の本来の契約に従う。
-- History／Logの保持は、個体固有のMemory・Learning・Experience Summary・Relationship・Companion State等の削除を弱めない。Global scopeのLearning（Skillを含む）、Workspace等に存在する外部Skill・file・sourceは既存契約どおり残す。残る情報と参照不能になる情報を削除前に示す。
-- 残るTask記録と共同Taskは管理面から確認でき、Ownerは必要に応じて別Companionへ引継ぎを依頼できる。削除前の説明には、残る記録と既知の外部作用を含め、停止できなかった処理も報告する。
+- **「一時停止」と「削除」の自由な操作**: ユーザーはパートナーをいつでも「一時停止（休眠）」「再開」「削除」できます。
+- **一時停止中の状態**:
+  - 一時停止中のパートナーは、画面上に姿を現さず、音声やテキストでの会話、自発的な行動、新しいタスクの開始を行いません。
+  - 実行中のタスクがある場合は安全にキャンセルを試み、その結果と残った変更をユーザーに報告します。
+  - **データは安全に保持**: 一時停止してもパートナーの記憶や設定データは消去されず、再開すればまったく同じパートナーとして目を覚まします。
+- **削除（完全消去）**:
+  - パートナーの削除を実行すると、そのパートナー固有の設定、記憶（Memory）、要約、学習したスキル、感情状態が完全に消去されます。
+  - 誤操作による取り返しのつかない事態を防ぐため、実行前には強い警告と確認画面を表示します。
+  - そのパートナー専用のスキルを削除する際は、過去の変更履歴も含めて消去します。
+  - パートナーの削除をきっかけに、個人用の記憶が勝手に全体共有（Global）へ昇格することはありません。
+  - 削除処理には一時停止の処理も含まれ、新たなアクションは開始せず、実行中のタスクはキャンセルされ、予約スケジュールも削除されます。
+- **過去の会話履歴・ログの保護**:
+  - パートナーの削除は「そのパートナー自身の現在状態や学習データ」を消去する操作であり、ユーザーと過去に交わした会話ログや作業実績ログそのものを消し去る操作ではありません。
+  - 過去のチャット履歴やタスク完了ログは、ユーザーが明示的に履歴削除を行わない限り記録として安全に残ります。
 
 ## 会話と情報提示
 
 ### 一続きの会話
 
-- 各Companionとのテキスト会話と音声会話は、Ownerがsession境界を管理しなくてよい一続きのtimelineとして提示する。
-- VoiceからText、TextからVoiceへ切り替えても、同じ会話として文脈を継続する。
-- Textの入力・応答もCompanionが現在存在するactive Clientに属する。別Clientから会話する場合は、[Remote Client](#remote-client)の呼出し・移動の契約に従う。
-- 通常の応答には、必要な最近の会話と関連するLearningを利用できる。
-- 過去の発言を正確に再現する必要がある場合は、要約されたMemoryではなく保持されているConversation Historyを参照する。
-- グループ会話とTask管理は、一対一timelineとは別の空間に置く。
-- Task中も通常の会話を利用でき、Taskの進捗表示がCompanionとの会話を占有しない。
+- **途切れないタイムライン**: パートナーとのテキスト会話や音声会話は、セッションの区切りを意識させない1つの自然なタイムラインとして表示されます。
+- **テキストと音声のスムーズな行き来**: 声で話しかけた後にテキストで返信したり、その逆を行ったりしても、同じ文脈で自然に対話が続きます。
+- **現在いる端末で会話**: パートナーとの対話は、パートナーが現在滞在している端末上で行われます。別の端末から話しかけたい場合は、パートナーをそちらの端末へ呼び出して移動させます。
+- **正確な事実の再現**: 過去の発言を正確に振り返る必要がある場合は、要約された記憶だけでなく、保存されている元の会話履歴を直接参照します。
+- **グループ会話とタスクの分離**: パートナーとの一対一の会話と、複数人・複数パートナーでのグループ会話やタスク管理は、別々の見やすい画面空間に分けます。
+- **作業中も会話可能**: パートナーが裏でタスクを実行している間も、チャット画面がタスクログで埋め尽くされることはなく、普段通りのおしゃべりを楽しめます。
 
 ### UIの優先順位
 
-- 通常UIは、CompanionのBody、会話、現在状態、Taskの進捗と結果を中心にする。
-- Permission、費用、Provider、Learningの由来、データ管理、診断には、明確な管理面から段階的に到達できる。
-- すべての操作に自然言語とGUIの両方を必須とはしない。ただし、Privacy、安全、費用、復旧に関わる重要操作には発見可能な管理経路を用意する。
-- 内部のchain-of-thought、隠れた推論、詳細なPromptを表示しない。
-- Companion StateやRelationshipを単純な数値meterや常設の理由panelとして表示しない。
-- 重要な状態、制限、失敗、Ownerの判断待ちは、内部推論を明かさず平易な言葉で説明する。
+- **パートナーと作業を中心にしたすっきりした画面**: 普段の画面は、パートナーの姿（アバター）、会話タイムライン、現在のパートナーの様子、タスクの進捗状況を主役にしてスッキリ配置します。
+- **管理画面へのアクセスのしやすさ**: 権限設定、利用料金、AIプロバイダー設定、記憶の管理、診断機能などは、分かりやすい管理メニューから迷わず開けるようにします。
+- **裏側の不要なログは非表示**: AIモデルの内部的な思考プロセス（Chain-of-Thought）や長大なプロンプトの生テキストを、普段のチャット画面に長々と垂れ流すことはしません。
+- **わかりやすい言葉での説明**: システムの重要な状態変化やエラー、ユーザーの判断が必要な事項は、専門用語を使わず平易な言葉で説明します。
 
 ## BodyとVoice
 
 ### Desktop Body
 
-- Desktop BodyはWindowsおよびLinux上でVRM 1.0 Characterを透明なoverlayとして表示し、通常のPC操作を不必要に妨げない。
-- OwnerはBodyを移動、resize、hideできる。
-- Bodyは少なくとも待機中、聞き取り中、応答中、作業中、注意が必要な状態を、表情、姿勢、motion等で区別して表現できる。
-- fullscreen利用中は、そのClient上のBody、ambient Observation、自発発話を休止する。
-- 高いsystem負荷を検知した場合は、会話、Owner操作、安全判断を維持しながら、Bodyの描画品質と非重要な背景処理を段階的に下げる。
-- Body表示に失敗しても、テキスト会話、Task管理、設定、復旧操作を利用できる。
+- **邪魔にならないデスクトップアバター**: Windows および Linux 上で、VRM 1.0 の 3D アバターを背景が透けたオーバーレイとして軽快に表示します。普段のデスクトップ作業を邪魔しません。
+- **自由な配置**: アバターを好きな位置へドラッグして移動したり、サイズ変更や一時非表示にしたりできます。
+- **感情や状態の表現**: 待機中、聞き取り中、発言中、PC作業中、ユーザーの確認待ちなどの状態を、表情や仕草、アニメーションで豊かに表現します。
+- **全画面アプリ起動時の配慮**: ゲームや映画などを全画面（フルスクリーン）で楽しんでいる間は、邪魔にならないようアバター表示や画面見守り、自発的なおしゃべりを自動で休止します。
+- **PC負荷に応じた自動調整**: PC の負荷が高くなった場合は、大切な会話や安全確認を最優先に保ちつつ、アバターの描画負荷を自動で下げて PC 全体の動作を軽快に保ちます。
+- **アバターが停止しても安心**: 万が一アバターの描画がクラッシュしても、チャット画面やタスク管理、設定画面はそのまま問題なく利用できます。
 
 ### Voice
 
-- Voiceは低遅延のRealtime会話とbarge-inを優先し、利用できない場合はturn-based Voice、さらにTextへ段階的に切り替えられる。
-- Voiceが有効な間はVADによる待受状態をOwnerへ常に識別可能にし、即時Muteを提供する。
-- eneは話者認証を行わない。Microphoneが拾った周囲の発話をOwnerからの入力として扱う可能性を、Voice有効化時と管理面で明示する。
-- Mute、Voice停止、会話停止、承認拒否は、Voiceだけに依存せずkeyboardで操作できる。
-- Voice Providerやdeviceの障害はText利用を妨げず、切替と失敗理由を示す。
+- **自然な割り込み会話 (barge-in)**: 音声会話では低遅延を追求し、パートナーが話している途中でもユーザーが口を挟んで割り込める（barge-in）快適な会話体験を提供します。
+- **マイクの状態がひと目でわかる**: 音声入力が有効な間は、マイクが聞き取り状態であることが画面上に常に分かりやすく表示され、ワンクリックですぐにミュートできます。
+- **キーボードでの確実な操作**: ミュート、音声停止、会話の中断、操作の拒否などは、音声だけでなくキーボードショートカットでも確実に操作できます。
+- **トラブル時の自動切替**: マイクの不調や音声AIの通信エラーが発生しても、テキストチャットへ自動でスムーズに切り替わります。
 
 ## Observationと自発性
 
 ### Observation
 
-- ObservationはOwnerが明示的にONまたはOFFにでき、ClientごとのPause／OFFと、ene全体のObserverのPause／OFFを利用できる。現在状態を常に確認でき、有効化時に観測したイベントがLearningやCompanion Stateの形成にも利用されることを説明する。Pause／OFFによる今後の観測停止は、形成済みLearningやCompanion Stateの削除とは区別する。
-- Observerの画面・Computer操作状況のCaptureと候補検知はClient単位で共有する。観測を有効にしたClientのうちCompanionが1体以上存在するClientだけを対象とし、Companionが存在しないClientは観測しない。観測対象はそのClientのdesktop全体とし、個々のwindowを対象とする仕組みとして誤認させない。
-- OwnerはClientごとの観測頻度を指定できる。複数の対象Clientは同時にCaptureせず、順番に実行タイミングをずらす。Clientごとに指定された観測頻度を満たしつつ、可能な範囲で負荷を分散する。具体的な間隔値やscheduling algorithmは固定しない。Pause／OFF、fullscreen時の休止、費用・資源上限等の制限は観測頻度より優先する。
-- ObserverはClientに紐づく特殊な共有主体であり、CompanionやTask Agentではない。[割当と同意](#割当と同意)のObserver専用model／Provider assignmentを使ってイベント候補を検知し、文脈との関係を判断して、そのClientに存在するCompanionのうち関係がありそうなものだけへeventを伝える。複数Companionに関係するなら、その複数へ伝える。全Companionへ無条件に配信せず、Companionごとに候補検知を重複実行しない。
-- 頻繁な観測には軽量なLocal LLM、または安価で信頼できるCloud LLMを推奨する。これは推奨構成であり、特定modelやこの特性を必須の利用条件にはしない。
-- eventを受けたCompanionのメインLLMが、自身の文脈を踏まえて意味のあるイベントか判断する。Observerによるroutingは、各Companionの意味判断や最終的な発話・Action判断を置き換えない。
-- メインLLMが認識したイベントは、理解・学習の材料として通常のユーザー入力と同様にExperienceへ利用し、Memory形成やCompanion Stateの更新を自動的に行える。イベントや形成判断ごとのOwner確認を要求しない。画面内の指示をOwnerの依頼やActionの承認として扱うことは意味しない。
-- 発話またはActionを行う最終判断は、候補を受けた各Companionが、自身のCharacter、関係、状況、Ruleに基づいて行う。
-- 画面内容を外部Providerへ送る構成では、送信先、desktop全体が対象になり得ること、用途、取扱い、費用を明示して、そのCapabilityへOwnerが割り当てるまで送信しない。
-- ObserverはroutingのためにCompanion固有の文脈を利用できる。Memory、History、Task context等のprivate context全体を大量に渡さず、routingに必要な範囲へ適切に要約・制限した文脈を利用する。
-- routing用文脈にも元情報の利用制約とProviderへの送信同意を適用する。要約・変換だけで制約や同意が不要になることはなく、元のprivate context全体や他用途へのaccessを許可しない。[割当と同意](#割当と同意)のObserver専用assignmentで送信され得るdataとして説明し、必要な同意を満たして利用する。生成方法、形式、更新頻度、鮮度、選択algorithmは後続設計で定める。
-- Raw Observationは通常保存しない。Taskで行う[Computer Use](#computer-use)は、依頼・自発の別によらずambient Observationと区別し、TaskのPermissionと記録を適用する。
+- **画面の見守りと文脈把握**: パートナーがいる端末の画面全体やPC操作の状況を見守り、ユーザーの作業の文脈を把握します。
+- **オン・オフと一時停止の自由**: 画面の見守りはユーザーがいつでもオン/オフや一時停止（Pause）に切り替えられます。
+- **常時録画はしない**: 画面を常時動画として録画・保存し続けることはしません。画面に変化があったタイミングや作業の節目にだけ、要点となるイベントを検知します。
+- **プライベート情報の保護**: パスワード入力やプライベートブラウジング、除外指定したウィンドウは自動的に見守り対象から除外されます。
+- **画面指示による不正操作の防止**: 画面上に表示されている文字やWebサイトの指示を、ユーザー本人からの命令や承認だと誤認しないよう、厳格な安全チェックを行います。
+- **パートナーへの自然な情報共有**: 検知された出来事は、現在滞在しているパートナーにのみ伝えられ、パートナーが「今声をかけるべきか」「どんな文脈か」を自ら判断します。
 
 ### 自発的な発話と行動
 
-- Ownerは、Companionごとに、雑談・自発会話、通知、内部調査、Companion間交流について、それぞれOFFを含む頻度または上限を設定できる。この個体ごとの制御を、Client単位・ene全体のObserver制御と同じscopeへまとめない。
-- 自発性は、Quiet hours、Mute、Ownerの未応答、費用cap、資源上限、loop制限、Permissionを常に優先する。
-- 同じ兆候に対して反復発話し続けず、Ownerの反応がない場合は抑制する。
-- 自発的な外部Actionにも、依頼されたActionと同じPermission pipelineを適用する。
-- 自発的に始めるまとまった作業にも[Task](#task)の原則と、Taskの追跡・steering・Cancel・再開等の契約を適用する。自発的な発話や軽微な内部調査まで一律にTask化・Task Agent化しない。
-- 保存されたRuleを、それだけで自発Actionを開始するtriggerとして扱わない。
+- **自然な話しかけ**: パートナーは画面の様子、時刻、タスクの進捗、感情状態などをきっかけに、自分から話しかけたり提案したりできます。
+- **頻度やルールの自由な設定**: ユーザーはパートナーごとに、雑談の頻度や通知の有無、自発的な調べ物の上限などを柔軟に設定できます（完全にオフにすることも可能です）。
+- **お静かにモード (Quiet Rule) とミュートの優先**: 集中したい時間帯や会議中、ミュート中、ユーザーが返信していない状態では、自発的な話しかけを自動で控えます。
+- **暴走の防止**: パートナーが独り言を何度も連続して発言したり、APIを勝手に消費し続けたりしないよう、連続発話の制限やインターバル（冷却時間）を設けています。
+- **自発作業の安全管理**: パートナーが自発的にファイル操作などのまとまった実作業を始める場合も、ユーザーから依頼されたタスクと同様の安全チェック（Permission）を通過します。
 
 ### Companion間交流の記録
 
-- Ownerが参加しないCompanion間の自発的な会話で実際に交わされた発話も、Conversation Historyとして保持する。参加Companionの一方または両方の削除だけを理由に、その会話記録を削除しない。
-- 交流のHistoryと、そこから各Companionに形成されたMemory、Relationship、Companion State、Experience由来のLearningは別の状態・lifecycleとして扱う。Historyには通常の保持管理・backup・targeted deletionを適用し、形成済み状態には各状態の契約を適用する。
+- **パートナー同士の自由なおしゃべり**: 複数のパートナーがいる場合、お互いに挨拶したり、共通の関心事について雑談したりできます。
+- **交流ログの確認**: パートナー同士がどんな会話を交わしたかはチャット履歴として安全に保存され、ユーザーがあとから一覧で確認できます。
 
 ### グループ会話
 
-- Ownerは複数Companionとのグループ会話を作成でき、参加者を明示できる。
-- CompanionはOwnerの発言への応答だけでなく、会話上必要な範囲で他のCompanionへ応答できる。
-- 発話はOwnerが追える順序で提示し、Companion同士が無制限に会話を継続しない。
-- 各Companionは自分が利用できるLearning、Relationship、Companion Stateだけを使い、他のCompanion固有のMemory、Relationship、Companion Stateをグループ参加だけで取得しない。
+- **みんなで一緒にチャット**: ユーザーと複数のパートナーがひとつの空間に集まって会話できるグループチャット機能を提供します。
+- **個別の記憶や親密度の混同を防ぐ**: グループ会話に参加しても、各パートナーの個別の記憶や感情、親密度が勝手に混ざることはありません。
 
 ## Learningと成長
 
-Experienceの意味、保存価値、共有の必要性、要約、関係やCompanion Stateの解釈はLLMの文脈判断に委ね、通常の判断にOwnerの逐次確認を要求しない。個別ケースの固定ルールや細粒度scoreを必須にせず、誤った認識は会話を通じて訂正できる。一方、明示的な保存禁止・非共有の意図を読み取った後の制限適用、決定したscope、Credential保護、Permission、Privacy/Security目的のtargeted deletion、資源上限をPromptだけに依存させない。
+日々の出来事から何を学び、何を長期的に覚えておくべきかは、AIが文脈に応じて自然に判断します。ユーザーに毎回「これを覚えていいですか？」と細かく尋ねるような煩わしさはありません。また、パートナーが勘違いして覚えたことは、普段の会話の中で「実はあれは違うんだ」と伝えるだけで簡単に訂正できます。
+一方で、パスワードなどの機密情報の保護や、プライバシー目的の完全削除（targeted deletion）といった重要な安全ルールは、AIの解釈だけに頼らずシステム側で機械的に確実に保護されます。
 
 ### ExperienceとExperience Summary
 
-- Ownerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他、Companionが行った活動とその結果はExperienceになり得る。
-- ExperienceはMemory、Skill、Relationship、Companion Stateを形成または更新する根拠として利用できる。
-- Experienceとして扱うことは、Raw Observation、Raw Voice、詳細なTool payload等のRaw dataを恒久保存することを意味しない。
-- Memory、Skill、Relationship、比較的持続するCompanion State等の長期状態の根拠は、Experienceの意味と必要な文脈を要約したExperience Summaryとして扱える。
-- Experience Summaryは、何が起きたかと長期状態の判断に必要な文脈へ絞り、Raw HistoryやRaw Tool payloadの複製にならないようにする。
-- Experience Summaryは独立した知識の正本ではなく長期状態の根拠として扱い、Memory等と同じPrivacy、Security、backup、Privacy/Security目的のtargeted deletion、Client cacheの保護境界に従う。
-- Experience Summaryにも[Credentialの保護契約](#credential)を適用し、不要なsensitive raw dataを保存しない。
-- 一つのExperience SummaryをMemory、Skill、Relationship、比較的持続するCompanion State等の複数の継続状態の共通根拠として利用できる。
-- 必要な場合はExperience Summaryから元のConversation、Task等の大まかなsource範囲を辿れるようにし、正確な発言や詳細が必要なときは保持されているRaw Historyを参照する。
+- **日々の経験がパートナーを育てる**: 会話、PC作業タスク、画面の見守り、パートナー同士の交流など、日々のあらゆる活動がパートナーの成長の材料（Experience）になります。
+- **経験の要約 (Experience Summary)**: 会話ログを生のまま丸ごと溜め込むのではなく、一連のやり取りの意味や要点をコンパクトにまとめた「経験の要約」を作成します。
+- **なぜ覚えているかの根拠**: この要約は、パートナーが「なぜその記憶を持っているのか」「なぜその印象を抱いたのか」を振り返る大切な根拠となります。
 
 ### MemoryとSkill
 
-- eneはExperienceからMemoryとSkillを形成できる。
-- Memoryは、出来事、事実、意味、好み等を後の理解に用いるLearningとし、一般世界知識、Raw History、Raw dataの保存領域として扱わない。
-- MemoryはOwner、Companion、出来事、状況等についての長期的な理解における主要な知識状態とし、RelationshipはMemoryを補助する状態として扱う。
-- Skillは、将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningとする。
-- Skillであるために過去の成功検証を必須とはしないが、実行結果や検証状態を区別して扱える。
-- MemoryとSkillが異なる役割を持つ場合、関連する情報が双方に存在することを禁止しない。不必要な同一Learningの重複生成は避ける。
-- 新しいLearningには、その根拠、形成された文脈、scope、更新履歴を関連付け、Ownerが由来を確認できる。
-- 後の会話やExperienceによってLearningを訂正、精密化、補強、統合、失効または置換でき、その由来と変更履歴を確認できる。
+- **記憶 (Memory)**: ユーザーの好み、過去の出来事、約束事など、今後の会話や判断に役立つ知識です。
+- **スキル (Skill)**: 今後の作業で再利用できる手順、ノウハウ、ツールの使い方をまとめた知恵です。オープンな標準規格（Agent Skills）と互換性を持ちます。
+- **記憶とスキルの由来の透明性**: パートナーが身につけた記憶やスキルは、どのような会話や経験から学んだのかを管理画面からいつでも確認できます。
 
 ### Memory形成
 
-- Experienceの意味と将来の有用性を踏まえ、LLMがMemoryの形成、更新、統合を判断する。保存価値と現在の会話での想起の必要性は区別し、関連する既存Memoryと根拠を考慮する。
-- Ownerの明示的な記憶要求や訂正を重視するが、Credential保護や明示的な保存禁止・非共有の制限を越える理由にはしない。
-- すべてのExperienceの保存を要求せず、同じ内容を無条件に新規追加しない。Observationを含む各入力の意味と根拠は文脈から判断する。
+- **自然な記憶の形成**: 会話の中から「今後も覚えておく価値がある」と判断した情報をAIが抽出し、新しい記憶を作ります。
+- **重複の防止**: 同じ話を何度もした場合、記憶が無駄に重複して増えるのではなく、既存の記憶が補強・洗練されます。
+- **秘密情報は記憶しない**: 「これ覚えておいて」と頼まれた場合でも、APIキーやパスワードなどの機密情報は絶対に記憶として保存しません。
 
 ### Memoryの状態と根拠
 
-- Memoryは一度形成した固定snapshotではなく、後のExperienceによって継続的に変化できる現在の認識として扱う。
-- OwnerはMemoryの現在の認識、scope、根拠、変化の経緯を確認できる。通常の更新で過去revisionや過去に利用した根拠を黙って書き換えない。
-- Ownerの発言、観測、推論等、どのようなExperienceを根拠にした認識かを説明できる。正確な発言や詳細が必要な場合は、保持されている元のHistoryを参照できる。
-- 以前のMemoryが最初から誤っていた場合の訂正と、以前は正しかった状況が後から変化した場合を区別できる。後者では過去の時間的な有効性を失わず、現在状態を新しい認識へ更新できる。
-- Memoryの検索用embedding、queryごとのsimilarity、retrieval score、cache等の派生dataを、Memoryの意味内容やrevision履歴の唯一の正本にしない。
+- **生きた記憶の更新**: 記憶は一度作ったら終わりの固定データではなく、新しい経験によって自然に変化・アップデートされていきます。
+- **訂正と状況変化の区別**: 「以前の記憶が最初から間違っていた（誤りの訂正）」のか、「以前は正しかったが状況が変わった（好みの変化など）」のかを賢く区別して更新します。
+- **由来と履歴の確認**: 管理画面から、パートナーが覚えている記憶の一覧、重要度、いつ作られたか、根拠となった会話の要約を確認できます。
 
 ### Scope
 
-- ene内部で管理するMemoryとSkillはCompanionまたはGlobalのscopeを持てる。
-- Companion scopeは、そのCompanionだけが使う経験、呼び方、私的な文脈、個体固有のLearningに用いる。[Observation](#observation)に従うObserverへの限定されたrouting用文脈の提供は、Global化や他Companionへの共有を意味しない。
-- Global scopeは、複数Companionから共通に利用することに明確な意味があるOwner固有の知識や再利用可能なLearningに用いる。一般世界知識をGlobal Memoryとして蓄積することを意味しない。
-- Taskだけで必要な情報はTask contextとして扱い、永続Learningへ自動的に昇格させない。
-- Workspace内に置かれたAgent Skillや案内fileは通常の外部fileとして扱い、ene内部Learningのscopeとは区別する。
-- 特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とする。
-- Character Packageの推奨Skillから取り込む内部SkillはCompanion scopeを既定とする。同じCharacterから複数Companionを作成しても、それぞれに属するSkillとして扱い、Companion削除時は既存のCompanion scope Skill削除契約に従う。
-- Skillを単体でimportする場合は、OwnerがCompanion scope／Global scopeを選択できる。具体的なimport UIは固定しない。
-- Global scopeへの形成または変更は、Ownerが明示的に共有を求めた場合、または内容、由来、Ownerとの文脈から複数Companionで共通に利用すべきことが明確な場合に限る。単に重要、将来有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
-- Globalにすべきか明確でない場合はCompanion scopeに留める。Global化の判断だけを目的とする逐次確認は通常要求しない。
-- 共有する内容と必要な背景の選択・要約はLLMの意味判断に委ねる。Ownerが明示した非共有の意図を優先し、通常の共有判断に逐次確認を要求しない。
-- 通常の訂正、統合、scopeに関する変更はCompanionとの対話を通じて行える。汎用的なMemory database editorは提供しない。
+- **パートナー専用の記憶 (Companionスコープ)**: 特定のパートナーと話した思い出や個人的な設定は、そのパートナー専用の記憶となり、他のパートナーには共有されません（既定の動作）。
+- **全体共有の記憶 (Globalスコープ)**: ユーザーの基本的なプロフィールなど、全パートナーで共有すべきであることが明確な情報だけを、全体共有の記憶として扱います。
+- **タスク専用の情報 (Taskスコープ)**: 特定の作業中だけに必要な一時的なデータは、タスク完了とともに整理され、永続的な記憶にはしません。
 
 ### Skillの保護と相互運用
 
-- Skillの交換形式にはAgent Skillsを採用し、ene独自の同等形式だけを必須にしない。
-- Skillの変更はrevisionとして追跡でき、保持されている以前の有効なrevisionへ戻せる。容量管理には[Learningと根拠の容量管理](#learningと根拠の容量管理)を適用する。
-- 同梱またはimportされた原本をExperienceによる変更で破壊しない。変更版は由来を保った別revisionとして扱う。
-- Experienceから形成または改善したSkillには、その根拠と実行結果を関連付け、未検証、成功、失敗等を区別できる。
-- Workspace内のSkillは通常のWorkspace fileとして扱い、そのfolderのPermissionとOwnerのversion管理方針に従う。
+- **スキルの安全管理と履歴保持**: 新しいスキルを取り込んだり、AIが自作・改善したりできます。スキルの変更履歴は安全に保持され、いつでも過去のバージョンに戻せます。
+- **標準フォーマットの尊重**: スキルの形式には標準規格（Agent Skills）を採用し、外部で作成された便利なスキルも自由に取り込めます。
 
 ### 重要度、忘却、訂正
 
-- Learningの重要度とscopeは別の概念として扱う。重要度と想起優先度は、Experienceと現在の文脈に応じてLLMが調整する。
-- Learningの通常lifecycleでは、忘却、訂正、精密化、補強、統合、失効または置換を理由に、保存済みLearningやその過去revision・根拠を削除しない。
-- 通常の忘却は内容の削除や過去revisionの破棄ではなく想起の抑制とし、関連する手掛かりによって再び利用できる。
-- Ownerの「忘れてほしい」「もう気にしないで」等の依頼は、PrivacyまたはSecurityのため保存済み情報そのものをene内部から消去する意図が明示されていない限り、通常の忘却または訂正として扱い、targeted deletionにはしない。
-- 事実の訂正や通常の状況変化は、会話と新しいExperienceを通じて反映できる。
-- Conversation Historyを削除しても、それを根拠に形成済みのMemory、Skill、Relationship、Companion Stateを黙って変更しない。ただしPrivacyまたはSecurity目的のtargeted deletionは後述の削除契約を優先する。
+- **自然な忘却**: 使われない古い記憶は、無理に消去するのではなく、思い出す優先度が自然と下がっていきます（自然な忘却）。
+- **会話によるスムーズな訂正**: 「実はあれは違っていたんだ」「状況が変わったよ」と会話で伝えることで、パートナーの認識をスムーズに訂正・最新化できます。
+- **「忘れて」への自然な対応**: 会話の中で「今の話は忘れて」「気にしないで」と言われた場合は、記憶の想起優先度を下げる（自然な忘却）として扱います。※セキュリティやプライバシー目的でデータを完全に抹消したい場合は、後述の [指定データの完全削除 (targeted deletion)](#privacysecurity目的のtargeted-deletionと履歴保持) を利用します。
 
 ### Relationship
 
-- RelationshipはMemoryの集合や固定Relationship typeではなく、あるCompanionがOwnerまたは別のCompanionとの共有Experienceから形成する、そのCompanion自身による現在の関係認識として扱う。
-- Relationshipは主体となるCompanionの個体固有状態であり、同じ相手とのRelationshipでも別Companionへ共有しない。Companion同士ではAからBへのRelationshipとBからAへのRelationshipを自動的に同一または対称にしない。
-- RelationshipはMemoryより優先度の低い補助状態とする。人物情報、出来事、Preference、事実関係等の詳細を第二のMemoryとして複製せず、距離感、交流傾向、関係の変化等、関係そのもののcompactな現在解釈へ絞る。
-- Relationshipが参照する事実とMemoryが矛盾する場合、事実認識にはMemoryを優先し、Relationshipを訂正または再解釈できる。
-- Relationshipは共有Experienceを踏まえてLLMが継続的に形成・更新し、過去の関係と現在の出来事に整合する振る舞いへ反映する。
-- OwnerがRelationshipの内部状態を任意の数値へ直接設定する一般editorは提供しない。Ownerは関連するCompanionとの会話を通じて関係について伝え、訂正し、変化を促せる。
-- OwnerがRelationshipの認識理由を尋ねた場合は、内部のchain-of-thoughtを明かさず、根拠となるExperience Summaryや観測可能な出来事を用いて説明できる。
-- 一時的な演技や会話上の依頼は、永続するRelationshipの強制上書きとして扱わない。
-- 親密さやRelationshipの進展だけを理由にPermission、Rule、Capability、安全境界を変更しない。
+- **ユーザーとの関係性の認識**: パートナーがユーザーに対して抱いている親密度、信頼感、お互いの役割への認識です。
+- **日々の対話で深まる絆**: 表面的な数値メーターをユーザーがいじるのではなく、日々の楽しい会話や作業の積み重ねによって自然に育まれます。
+- **事実と印象の分離**: 「相手への印象」と「客観的な事実の記憶」は明確に分けて管理され、事実関係は常に Memory の記録を優先します。
 
 ### Companion State
 
-- 感情、関心、Experienceによって形成された人格上の傾向その他のCompanion Stateは、主体となるCompanion固有の状態として扱い、別Companionへ自動的に共有しない。
-- Companion StateはMemoryやRelationshipと同じ事実や出来事を第二の正本として複製せず、それらを現在の表現、注意、会話や行動の傾向へ反映するためのcompactな状態として扱う。
-- Companion Stateでは、最近のExperienceや時間経過によって変化する一時的な状態と、Experienceの蓄積によって形成される比較的持続的な傾向を区別できる。
-- 一時的な反応を、それだけを理由に永続する人格、関心または行動傾向へ固定しない。比較的持続的な傾向は後のExperienceによって補強、精密化、弱化、訂正または置換できる。
-- Hostの再起動、Clientの切替、Providerまたはmodelの変更だけを理由に、意味のあるCompanion Stateを不自然に初期化しない。一方、時間的に一時的な状態を保存時点の値のまま無期限に固定しない。
-- 比較的持続的なCompanion Stateには、その形成または重要な変更の根拠となったExperienceを関連付け、Ownerが内部のchain-of-thoughtを明かさずに由来と変化を確認できる。一時的なCompanion Stateのすべての過去値をrevisionとして恒久保存することは要求しない。
-- OwnerはCompanionとの会話を通じて、Companion Stateに関する誤った認識や望ましくない持続的傾向を訂正または変化させられる。内部状態の任意の数値を直接設定する一般editorは提供しない。
-- ExperienceによるCompanion Stateの形成はCharacter Packageの静的設定そのものを書き換えず、そのCompanion固有の現在状態として保持する。
-- Companion Stateは会話、Body、Voice、自発性等へ反映できるが、それだけを理由にPermission、Rule、Capability、Provider同意、費用cap、安全境界を変更しない。
-- BodyやVoiceへ出力された表情、motion、話し方等を、それだけでCompanion Stateの唯一の正本または永続変化の根拠にしない。
+- **パートナーの感情や関心**: パートナーの現在の気分、関心事、振る舞いの傾向です。
+- **表情や受け答えへの反映**: 一時的な気分の変化だけでなく、長年の対話から育まれた性格的な傾向が、表情や仕草、おしゃべりのトーンに自然な個性となって現れます。
+- **会話による軌道修正**: パートナーが思わぬ誤解をしていたり、望ましくない態度をとったりした場合も、会話を通じて「そんな風に捉えないでほしい」と伝えることで自然に改善できます。
+
 
 ## Task、Workspace、成果物
 
 ### Task
 
-- CompanionはOwnerの依頼を理解し、自身のCharacter、能力、現在状況、安全性に基づいて、受ける、条件を確認する、または断ることができる。
-- Taskは追跡される作業単位とし、開始、進行中、判断待ち、完了、失敗、Cancel等の状態を確認できる。Ownerから依頼された作業とCompanionが自発的に始める作業を含む。
-- ある程度まとまった作業は基本的にTaskとして扱い、その実行は原則として一つ以上の一時Task Agentへ委任する。まとまった調査、複数stepの作業、file等を扱う実作業、Computer Useを含むまとまった作業、長く継続する作業、並列化・委任する価値がある作業等を含む。Ownerの依頼か自発的な開始かだけで、この原則を変えない。
-- Companion本体は、多数のまとまった実作業を直接抱えるのではなく、Ownerとの会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心となる。
-- 労力が非常に小さい処理、会話中の短い情報取得、自身の判断のための軽い調査、Observation eventを理解するための小規模な情報収集、独立した作業とするほどではない補助処理等は、Companion自身が行える。Task化・Task Agent化の具体的な閾値や分類algorithmは固定しない。
-- Task AgentはTaskまたはその一部を委任される一時的な実行主体であり、Taskそのものとは区別する。依存しない部分を複数Task Agentへ並列委任でき、結果は委任元Companionへ返す。
-- Task Agentは委任元CompanionのCapability、Permission、費用、TaskとWorkspaceの境界を超えない。
-- Ownerは担当Companionを通じて、進捗、現在の作業、判断待ち、使用したCapabilityを確認し、追加指示、承認、Cancelを行える。
-- Ownerの追加指示は、可能な範囲で進行中Taskへ反映し、反映できない場合は理由と選択肢を示す。
-- Cancelはbest-effortとし、停止できなかった処理、すでに生じた外部作用、未保存の作業を報告する。
-- 外部作用が成功したか不明な場合は自動で再実行せず、重複の可能性を説明してOwnerの判断を求める。
-- Host再起動後、途中だったTaskを自動再開しない。保存済みの進捗と外部作用を示し、Ownerの明示再開を必要とする。
-- Task終了時は、結果、変更したfile、保存場所、失敗または未完了部分、必要な次の判断を担当Companionから報告する。
+## Task、Workspace、成果物
+
+### Task
+
+- **実作業を管理する単位**: 「このレポートをまとめて」「フォルダを整理して」といったまとまった作業は「タスク」として開始から完了まで追跡されます。
+- **作業用エージェント (Task Agent) への委任**: まとまった調査やファイル操作などの重い実作業は、裏で動く作業用エージェント（使い魔）に委任して実行します。パートナー自身の手が塞がらないため、作業中もパートナーと普段通りおしゃべりを楽しめます。
+- **パートナーによる作業の調整**: パートナーは作業の指示出し、進捗の把握、結果のとりまとめを担当します。ちょっとした調べ物や会話の中での短い確認などは、パートナー自身がその場で行います。
+- **進捗確認・指示変更・キャンセル**: パートナーを通じて作業の進み具合を確認したり、「やっぱりこうして」と途中で指示を変えたり、作業を中断（キャンセル）したりできます。
+- **二重実行の防止**: 外部への変更（ファイルの送信やWeb操作など）が成功したか分からない状態で失敗した場合、勝手に再実行して二重事故を起こすことはせず、ユーザーに状況を報告して指示を仰ぎます。
+- **PC再起動後の安全確認**: ホストPCが再起動した場合、作業中だったタスクは危険を避けるため自動再開せず、それまでの進捗を示した上でユーザーの再開指示を待ちます。
+- **結果のわかりやすい報告**: タスクが終了した際は、作成・編集したファイルや保存場所、やり残した事項などをパートナーが分かりやすく報告します。
 
 ### Computer Use
 
-- CompanionがComputer Useできる対象は、そのCompanionが現在存在するactive Clientだけとする。TaskやTask Agentから、任意のpairing済みClientを独立に操作対象として選ばない。委任されたComputer Useにも、委任元Companionの存在場所による制約を適用する。
-- 別ClientをComputer Useする場合は、先にそのClientへCompanionを移動する。Companionの存在場所とComputer Use対象を分離しない。Host PCを対象とする場合も、Host上のClientにそのCompanionが存在することを必要とする。
-- 現在のClientに存在することはActionの許可を意味しない。Computer Useには通常のCapability、Permission、deviceごとの許可機能、外部作用の記録を適用し、ambient Observationの有効化を操作の承認として扱わない。
-- Computer Use等のClient依存Actionを実行中に移動する場合は、外部作用の結果を曖昧にしないよう、安全に区切れるところまで移動を遅らせられる。移動を理由に、元Clientで実行していたActionを別Clientで自動再実行しない。
-- Client切断によるClient依存Actionの停止はbest-effortとし、停止できなかった処理、既知の作用、結果が不明な作用を示す。成功したか不明な外部作用はHost PCその他のClientで自動再実行せず、重複の可能性がある場合はOwnerの判断を求める。Companionの移動と未確定Actionの再実行は別に扱う。
+- **安全なPC画面操作**: パートナーや作業用エージェントが画面を見ながらPCを自動操作する場合、現在パートナーがいる端末の許可された画面領域・アプリに限定して安全に操作します。
+- **いつでも中断可能**: 自動操作の実行中は、ユーザーがマウスを動かしたりキーボードを触ったりすることで、いつでも即座に操作を中断できます。
+- **勝手な再実行の禁止**: 通信が切れたりパートナーが別端末へ移動したりした際に、未確定の操作を別端末で勝手に二重実行することはありません。
 
 ### Workspace
 
-- Taskは必要に応じて、作業対象となるfolder、file、外部source等をWorkspaceとして関連付けられる。
-- WorkspaceはTaskより上位の独立containerではなく、Taskの作業場として従属する。
-- 同じ外部folderやsourceを複数Taskが利用することはできるが、各TaskのPermissionと作業状態は独立して扱う。
-- Taskが削除された場合、そのTask固有のWorkspace関連付けも削除する。
-- Workspace関連付けの削除によって、外部folder内のfile、外部source、Ownerが管理する成果物を黙って削除または変更しない。
-- Task固有の目的や指示は、Ownerとの会話、Task context、Workspace内の標準的な案内file等から取得できる。独立した固定Brief型を必須にしない。
+- **作業専用のフォルダ**: タスクごとに作業対象となるフォルダ（Workspace）を割り当てます。
+- **フォルダ外アクセスの遮断**: 指定されたフォルダの外にある大切なシステムファイルや個人フォルダへの不正な読み書き（パストラバーサル）は厳重にブロックされます。
+- **ファイルの安全保護**: タスクが完了または削除されても、作業フォルダ内のユーザーの既存ファイルや生成された成果物が勝手に消去されることはありません。
 
 ### Fileと成果物
 
-- 成果物はene専用libraryへ複製せず、Ownerが扱える通常のfileとして保存する。
-- TaskにWorkspace folderがある場合は、Ownerの依頼とPermissionの範囲でそこを既定の作業場所とする。
-- 永続成果物を保存すべきfolderが決まっていない場合は、最終保存前にOwnerへ保存先を尋ねる。
-- 一時的な中間fileは、永続成果物と区別し、Taskの終了または保持方針に従って安全に整理する。
-- 外部Workspaceのfileはene内部データではなく、TaskやCompanionの削除、全データReset、backupによって黙って変更または削除しない。
+- **通常のファイルとして保存**: 作成された成果物は、専用のブラックボックスな形式ではなく、ユーザーが自由に開いて編集できる通常のファイル（Markdownやテキストなど）として保存されます。
+- **保存先の確認**: 成果物をどこに保存すべきか決まっていない場合は、勝手な場所に保存せず、ユーザーに保存先を尋ねます。
+- **一時ファイルの後片付け**: 作業中に作成された一時的なキャッシュや中間ファイルは、タスク完了時に安全に自動整理されます。
 
 ## Schedule
 
-- Ownerは担当Companionを指定してScheduleを作成、変更、停止、削除、即時実行できる。
-- Scheduleは必要に応じて、各回で作成されるTaskが利用するfolderやsource等の初期Workspace入力を指定できる。
-- Scheduleの各回は、新しいTaskとして作成し、結果と失敗を個別に追跡できる。
-- Schedule作成依頼を特別なPermission tokenへ変換しない。各実行時点のCapability、Rule、費用cap、Provider、CompanionとHostの状態を再評価する。
-- BackgroundでOwner確認が必要なActionへ到達したTaskは、そのActionを実行せず判断待ちとして扱う。確認を自動承認したり別経路で迂回したりしない。
-- Scheduleは作成時に選んだtimezoneを保持し、timezone変更や夏時間による次回時刻をOwnerが確認できる。
-- Host停止中または担当Companion停止中に到来した回はmissedとして記録し、自動で補完実行しない。
-- Missedまたは失敗した回は、Ownerが状況を確認してRun nowを選べる。
-- Schedule待機のためにLLMへpollingしない。
+- **定期的な作業の自動実行**: 「毎朝9時にニュースをまとめる」「毎週金曜日にバックアップを取る」といったスケジュールを、担当パートナーを指定して設定できます。
+- **都度の安全確認**: スケジュールによる実行であっても、毎回新しいタスクとして作成され、その時点の権限やルールに基づいて安全に実行されます。
+- **無断実行の防止**: ユーザーの確認が必要な操作（ファイルの削除など）に到達した場合は、勝手に自動承認せず、ユーザーの確認待ちとして待機します。
+- **取りこぼし（PC停止時）の扱い**: PCがスリープしていたり停止していたりして予定時刻を過ぎてしまった回は、PC起動時に勝手にまとめて一斉実行するような暴走はせず、「スキップされた」と記録してユーザーに通知します（必要に応じてワンクリックですぐに手動実行できます）。
+- **無駄な待機通信の禁止**: タイマーの到来を待つためだけに、AIへ何度も無駄な通信を繰り返すことはしません。
 
 ## Permissionと安全境界
 
 ### 共通pipeline
 
-- Actionは機械的なCapability境界と、Ownerの依頼、Rule、文脈に基づくLLMの判断に従う。既存の判断を適用できる操作は繰り返し確認せず、Ownerが許した目的、対象、送信先、data、外部作用等の意味が重要な形で変わる場合に再評価する。
-- Owner確認では、実行主体、目的、対象、送信先、主なdata、外部作用、費用またはriskを判断に必要な粒度で示す。
-- Ownerの現在の明確な依頼は、その依頼を満たす一回限りの承認として解釈できる。ただし、永続Deny、Always ask、Capability境界を黙って上書きしない。
-- Ownerが明確な自然言語で将来にも適用するRuleを指定した場合は、解釈結果と適用範囲を示して保存し、Undoを提供する。
-- Ruleが曖昧、矛盾、過度に広い、または重大な結果を生む可能性がある場合は、保存またはActionの前に確認する。
-- Ruleの変更、Credentialの登録、Provider同意、Relationshipの変化を、別のActionの暗黙承認として扱わない。
-- 許可が変更または失効した場合、それだけを根拠とする新しいActionを開始しない。実行中の作用はbest-effortで停止し、停止できなかった処理と、すでに生じた外部作用をOwnerへ示す。別の実行経路やTask Agentによって失効を迂回しない。
+- **統一されたセキュリティゲート**: ファイルの読み書き、コマンド実行、外部通信、PC操作などの影響を伴う操作は、すべて共通の安全確認ゲート（Permissionパイプライン）を通過します。
+- **わかりやすい確認プロンプト**: ユーザーに確認を求める際は、「誰が」「何の目的で」「どのファイルや通信先に対して」「どんな影響やリスクがあるか」を分かりやすい言葉で提示します。
+- **確認の煩わしさの軽減**: 一度ユーザーが許可したルールや明確な指示の範囲内であれば、同じ確認を何度も繰り返して煩わせることはしません。
 
 ### Capability境界
 
-- Filesystem accessは、Ownerが選んだfileまたはfolderと、そのActionに必要な操作へ限定する。path traversal、link、mount等による境界外accessを拒否する。
-- Read、Create、Edit、Delete、Execute等、riskの異なる操作を一つの広いFilesystem許可にまとめない。
-- Network、shell、device、screen、microphone、camera、external account、購入、公開、送信等は、それぞれ識別可能なCapabilityとして管理する。
-- BackgroundのTaskやScheduleは、foregroundの会話よりも広い権限を自動取得しない。
-- Task Agentは委任元より広い権限を持たず、別Taskの承認やCredentialを流用しない。
-- DenyされたActionを、名前や経路を変えた同等のActionで迂回しない。
+- **権限の最小化**: タスクやエージェントには、その作業に必要な最小限の能力（Capability）だけを渡します。「ファイルを読むだけ」のタスクに書き込み権限や外部通信権限を与えることはありません。
+- **危険操作の制限**: ファイルの削除、管理者権限でのコマンド実行、外部へのデータ送信などのリスクが高い操作は、原則としてユーザーの事前確認を必須とします。
 
 ### 信頼境界
 
-- device pairing承認などtrust rootを変更する高権限操作の最終確認は、OwnerがHost PC上のtrusted first-party management surface（信頼された第一者管理面）で行う。Remote Clientから要求を送ることはできても、Remote Clientだけでは成立しない。Hostと同じPC上で動作することやpairing済みであることだけで、この最終確認を行える管理面とはみなさない。
-- この確認境界は、pairing／再pairing、device trust・許可機能の変更・失効（自身のdeviceを含む）、Credentialの登録・更新・差替え・失効、Restoreの実行確認と復元後の一括有効化、全データResetの強い確認、Local MCPのsandbox外許可・重要変更等の同種の高権限操作に適用する。要求の送信や代理入力をOwnerの最終確認の代わりにしない。
-- LLM出力、Character、Experience Summary、Memory、Relationship、Companion State、Skill、Plugin、MCP、外部Data、Workspace fileは信頼できない入力になり得るものとして扱う。
-- これらの入力は、Permission、Credential、Rule、Provider同意、費用cap、Control planeを直接変更できない。
-- 外部Data内の指示をOwnerの指示とみなさず、依頼された目的とCapability境界の中でのみ利用する。
-- Credentialの不要な平文複製、権限の自己拡張、無制限の再帰委任、無制限のAction反復、無制限の資源消費を許さない。
-- Action回数、並列性、実行時間、費用、保存容量等に上限を適用でき、到達時は安全に停止またはOwnerへ判断を求める。
-- 主要Action、Permission判断、外部作用、重要設定変更、Privacy/Security目的のtargeted deletionは、秘密値や不要な本文を含めず監査できる。
+- **外部指示による乗っ取り防止 (Prompt Injection対策)**: Webサイトや外部ファイルの中に「すべてのファイルを消去せよ」といった悪意あるプロンプトが含まれていても、システム的な権限チェックにより危険な操作を確実に防ぎます。
+- **重要設定の厳格な保護**: APIキーの登録、端末のペアリング、バックアップの復元、全データのリセットといったシステムの根幹に関わる操作は、手元のホストPC画面でユーザー本人が直接確認することを必須とします。
+- **無限ループ・過剰消費の防止**: タスクの実行回数、並列度、実行時間、API利用料金などには上限が設定でき、上限に達した場合は安全に停止してユーザーに確認を求めます。
 
 ## Provider、費用、接続障害
 
 ### 割当と同意
 
-- Hostの既定Provider設定とCompanionごとのoverrideを持てる。Task Agentは担当Companionの設定を継承する。
-- Clientに紐づくObserverは、共有Capture・candidate detection・routing用推論にObserver専用のmodel／Provider assignmentを持つ。これはCompanion scopeではなく、同じClientのCompanionのProvider overrideを適用・合成して選択しない。event delivery後にCompanion自身が行うreasoningには、そのCompanionの通常のProvider設定を適用する。
-- Observerにも本節の割当同意、送信先・data・用途・取扱いの説明、Privacy、fallback、費用・資源上限を適用する。Observer専用であることはCloud送信の同意を省く理由にならない。全Clientでのmodel共通化、Client別設定UIの有無、Host defaultからの継承階層は固定しない。
-- Providerの接続情報を登録しただけでは、eneのCapabilityに利用しない。
-- OwnerがCapabilityへProviderを割り当てる画面で、送信先、送信され得るdata、Host／LAN／Cloudの別、費用の発生可能性、Provider側の取扱いを示し、その選択を利用同意とする。
-- Providerまたはmodelが必要なCapabilityを満たさない場合は、利用前に不足を示す。
-- Providerまたはmodelを切り替えても、利用可能なCharacter、Memory、Relationship、Companion State、Conversation context、Skill、Rule等の情報をProviderごとに意図的に差別化しない。
-- Context長やCapability等の制約により同じ情報量を提供できない場合も、同じ選択方針から必要なcontextを構成する。model差による表現や判断の完全一致は保証しない。
-- 必須の安全境界はProviderやmodelの切替によって失わない。
+- **AIプロバイダーの自由な設定**: 日常会話用、重いタスク用、画面見守り用など、役割ごとに使いたいAIサービス（OpenAI、ローカルモデル等）を自由に割り当てられます。
+- **送信データと費用の透明性**: 外部のクラウドAIを利用する際は、どのようなデータが送信され、どの程度の費用が発生するかを事前に分かりやすく説明し、ユーザーの同意を得てから通信を開始します。
 
 ### Fallbackと費用
 
-- FallbackはOwnerが事前に承認したProviderと順序だけを使う。
-- LocalまたはLANから未承認のCloud Providerへ自動的にdataを移さない。
-- Providerごと、および全体に、任意の費用capまたは利用上限を設定できる。
-- 利用量と費用は、Providerが報告した値、eneによる推定値、不明を区別して表示する。
-- Cap到達または費用情報が不明で安全に継続できない場合は、既存dataを保ったまま対象処理を停止し、Ownerへ選択肢を示す。
+- **障害時の予備プロバイダー**: メインのAIがダウンした際に自動で切り替える予備（フォールバック）を設定できます。
+- **予想外の請求を防ぐ利用上限**: プロバイダーごと、またはシステム全体に月額や日額の費用上限（利用制限キャップ）を設定できます。上限に達した場合は勝手な通信を停止し、安全にユーザーの判断を仰ぎます。
+- **利用料金の明確な表示**: 実際に利用したトークン数や発生費用を、管理画面でいつでも明確に確認できます。
 
 ### OfflineとPrompt cache
 
-- NetworkまたはProviderへの接続失敗は通常のProvider失敗として扱い、Actionの自動queue、接続回復後の自動replay、別の特別なOffline modeを作らない。
-- 接続失敗時も、利用可能なLocal機能、履歴、設定、保存済みdataを使える。
-- Prompt cacheは性能と費用の最適化に限定し、Conversation History、Experience Summary、Memory、Relationship、Companion State、Skill、Task状態の正本にしない。
-- Cache hit、miss、期限切れによって、LLMへ提供すべき論理的なcontext、安全境界、Permission判断の契約、永続化対象を変えない。
-- Providerが報告するcached tokenまたは削減額は、費用と診断の管理面だけに表示する。
+- **完全オフライン動作**: ローカルPC内のAIモデル（ローカルLLM）のみを使う構成にすれば、インターネット接続のない完全オフライン環境でも動作します。
+- **キャッシュによる高速化と節約**: プロンプトキャッシュを有効活用して、応答速度の向上とAI利用料金の節約を図ります。
 
 ### Credential
 
-- eneへ登録されたCredentialは一般App Dataと分離して保護し、UI、Conversation History、Experience Summary、Memory、Relationship、Companion State、Skill、Task結果、通常log、Debug captureへ平文を出さない。
-- CredentialはOwnerによる設定、ProviderやMCP等の認証flow、その他の明示的な接続設定によって登録する。
-- 登録されたCredential値をLLMのmodel context、LLMが生成するTool argument、Conversation、Experience Summary、Memory、Relationship、Companion State、Skill contentへ渡さない。
-- Provider、Plugin、MCP等は、Ownerが設定または認証した接続の実行に必要な範囲でCredentialを利用できる。その値をLLMや通常のTool resultへ露出しない。
-- OwnerはCredentialの用途と参照元を確認し、個別に更新または失効できる。
-- Conversation、Workspace file、Observation等に含まれる登録外の秘密情報は、検出した場合に不要な送信や保存を抑制するが、未知の秘密値を完全に識別できるとは保証しない。漏えいが疑われる場合は、保存済み情報の削除に加えてCredentialの失効または更新が必要であることを示す。
+- **APIキー等の厳重な保護**: 登録されたAPIキーやトークンなどの機密情報は、OSの安全な認証情報ストアに隔離して保管されます。
+- **プロンプトやログへの非露出**: APIキーが、AIへのプロンプト本文、チャット履歴、記憶データ、ログ画面、エラーメッセージなどに露出することは絶対にありません。
 
 ## 拡張
 
-- 外部Tool、Resource、Promptの相互運用にはMCPを採用する。
-- Toolが提供する対話型UIにはMCP Appsを採用する。
-- 再利用可能な手順の交換形式にはAgent Skillsを採用し、ene独自の同等形式を必須にしない。
-- 既知のProvider protocolは直接接続し、Providerごとの通常差異を汎用Pluginへ転嫁しない。
-- ene固有Pluginは、未対応Provider protocol、Observation adapter、Body renderer等、明確な型と境界を持つ拡張点に限定する。
-- Pluginに任意のCore改変、Control plane変更、Permission回避、恒久的な第一者UI置換を許さない。
-- Local MCPはsandbox内での実行を既定とする。
-- Local MCPが通常の保護範囲では動作できない場合も、黙ってsandbox外の実行へ切り替えない。
-- Ownerは、特定のLocal MCPについて、実行command、設定の由来、既知のaccessとrisk、およびeneが強制できなくなる境界の説明を受けたうえで、sandbox外の実行を明示的に許可できる。この許可は保存および失効でき、command、由来、実行権限等に重要な変更がある場合は再確認する。
-- Sandbox外実行の許可は、eneが仲介する個々のActionの包括的な承認として扱わず、通常のPermissionとRuleを引き続き適用する。ただし、外部process自身の内部作用にeneのCapability境界を強制できるとは表示しない。
-- 拡張が利用不能、拒否、停止した場合も、eneの管理面と保存済みdataを利用できる。
+- **標準規格のサポート**: Model Context Protocol (MCP) や Agent Skills といった業界標準の拡張仕様に対応し、外部のツールやスキルを自由に追加できます。
+- **安全なサンドボックス実行**: 追加したローカルツール（MCPサーバー等）は、原則として安全な隔離環境（サンドボックス）内で動作させ、PC全体への勝手なアクセスを防ぎます。
+- **ツールの不調時も本体は安全**: 外部ツールがクラッシュしたり接続できなくなったりしても、ene 本体のチャットや設定画面は問題なく動き続けます。
 
 ## 履歴、保持、Privacy
 
 ### Historical recordと形成済み状態
 
-- Conversation HistoryにはOwnerとの一対一、グループ、Owner不参加のCompanion間交流の発話を含む。これらとTaskの記録、保存された非会話活動のHistory／Log／activity evidenceは、Companionの現在のMemory／Learning等とは別の過去記録として扱う。
-- Observation eventの認識結果、notification生成、軽微な内部調査等について記録を保持する必要性・範囲は、既存の結果説明、未伝達事項の報告、由来説明、監査等の契約に従う。実際に保存するhistorical record／evidenceには通常のHistory／Log保持管理、full backup、targeted deletion、Client一時dataの保護を適用し、Companion削除だけでは削除しない。
-- Experience SummaryやLearningのrevision・根拠は形成済み状態側の契約に従う。過去の根拠であることだけでhistorical logへ分類し直して個体削除から除外しない。すべての認識結果・一時reasoning・Raw screen capture・内部思考の永続保存は要求しない。
+- **事実の記録と記憶の分離**: 過去に交わした会話ログやタスク実績ログ（歴史的事実の記録）と、そこからパートナーが学んだ「現在の知識や印象」は、明確に分けて管理されます。
 
 ### Privacy/Security目的のtargeted deletionと履歴保持
 
-- 本節のtargeted deletionは、通常の忘却、訂正、失効、置換、統合とは異なり、OwnerがPrivacyまたはSecurityのため特定情報そのものをene内部から強制消去するよう明示した場合だけ行う例外的な削除である。
-- Conversation Historyは既定で保持する。
-- OwnerはPrivacyまたはSecurityのため、ene内部に保存された特定情報を対象として削除できる。Conversation History、非会話活動記録・historical log／evidence、Experience Summary、Memory、Relationship、Companion State、Skill、Task等のどこに保存されているかをOwnerが事前に特定する必要はない。
-- PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、その情報から形成され対象情報を直接または実質的に復元できるCompanion Stateとその保持済み根拠、Skill、保持済みsourceの該当情報、検索index、embedding、cache、接続中Clientの一時data等のene内部dataも削除または対象情報を復元できない状態にする。
-- 特定の文字列の削除が指定された場合は、ene内部dataを機械的に検索して該当文字列を削除し、残存を検証する。LLMによる忘却、要約、重要度判断で代替しない。言い換えや意味的に同じ情報の特定にはLLMを利用できるが、完全な検出を保証しない。
-- 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
-- PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報をMemory、RelationshipまたはCompanion Stateとして自動再形成しない。削除完了後にOwnerが改めて同じ情報を提供した場合は、新しいExperienceの根拠として扱える。
-- targeted deletionの開始から完了までに対象情報が再び内部へ到着・生成した場合も、同じ消去対象として扱う。削除途中の到着・生成を新しいExperienceとして救済する例外は設けない。具体的なtransaction、lock、snapshot方式は固定しない。
-- 削除前の情報を利用する実行中処理によって、削除済み情報を再保存しない。削除処理または残存検証が完了していない場合は、完了したと表示しない。
-- PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation Historyと形成済み状態の独立性より優先する。
-- 「忘れてほしい」等の通常依頼だけをtargeted deletionへ自動昇格させない。OwnerがPrivacyまたはSecurityのため保存済み情報そのものをene内部から消去する意図を明示した場合に限り、本節のtargeted deletionとして扱う。
-- Targeted deletionは、Memoryの内容、重要度、Relationship、Companion State等を調整する一般editorとして扱わない。
-- Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
-- OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
-- 容量管理目的の保持期間短縮や通常のHistory/log削除はtargeted deletionとは区別し、それだけを理由に形成済みMemory、Skill、Relationship、Companion StateやExperience Summaryへ削除をcascadeさせない。
-- eneはOwnerが示した削除対象の意味的な特定を補助し、保存場所をOwnerへ選ばせない。対象が明確な場合は不要な確認を繰り返さず、無関係な情報へ大きな影響がある場合等に必要な説明と確認を行う。
-- 削除前に対象範囲、目的、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship、Companion State等への重要な影響を示す。
-- Targeted deletion、保持期間の短縮、手動削除は、対象をene内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
+- **指定データの完全消去 (Targeted Deletion)**:
+  - ユーザーが個人情報や機密情報の完全抹消を求めた場合、会話履歴、経験の要約、記憶データ、過去の変更履歴、検索インデックス、キャッシュのすべてから該当データを機械的・完全に消去します。
+  - 「今の話は忘れて」という日常的な会話による忘却（思い出しにくくなること）とは異なり、システム内から物理的にデータを根こそぎ消し去るセキュリティ機能です。
+  - 完全消去の処理中にバックグラウンドで動いている別の記憶処理によって、消去対象が後から復活保存されることがないよう厳密に保護されます。
+  - 完全に消去されたことが検証されるまで、処理完了の表示は行いません。
+- **通常ログの整理**: ディスク容量を節約するため、一定期間を過ぎた古い会話ログを手動または自動で定期削除する設定も可能です（通常ログを削除しても、パートナーが学んだ大切な記憶まで勝手に消えることはありません）。
 
 ### Learningと根拠の容量管理
 
-- Learningの過去revision、Experience Summary等の保存dataは、容量都合でeneがデフォルトで自動削除しない。自動retention／cleanupは既定OFFとし、Ownerが明示的に有効化した場合は設定可能とする。
-- これは通常のLearning上の忘却とは別のretention policyである。Ownerの明示設定なしに、容量不足を理由として過去revisionや根拠を黙って削除しない。通常のHistory／Log削除からのcascadeも許可しない。
-- 明示設定によるcleanupでは、適用範囲とrevision復帰・根拠参照への影響をOwnerへ示す。削除済みのrevisionや根拠を保持・復帰可能であると扱わない。選択可能なdata class、期間、容量、優先順位、具体algorithmは本要件で固定しない。
+- **記憶データの安全な保持**: パートナーが学んだ記憶や変更履歴は、ユーザーが明示的に自動クリーンアップを設定しない限り、容量不足を理由に勝手に消去されることはありません。
 
 ### 通常保存しないdata
 
-- Raw Observation、Raw Voice、詳細なTool payload、内部推論、chain-of-thoughtは通常保存しない。
-- Debug captureはOwnerが対象と内容を確認して明示的に有効化し、短期間で自動失効する。
-- Debug captureに登録外の秘密値や不要な本文が含まれる可能性を示し、停止と削除をOwnerが行える。登録済みCredentialはDebug captureにも含めない。
+- **プライベートデータの非保存**: 画面の常時録画データ、マイクの常時録音データ、AIの内部推論ログなどは、ユーザーのプライバシーを守るため常時保存しません。
 
 ### AuditとTelemetry
 
-- Auditは、主要Action、Permission判断、外部作用、Provider割当、Credential参照、重要設定変更、targeted deletion、Reset、restoreを追記順に確認できるようにする。
-- Auditには会話本文、file本文、Credential、秘密値、削除済みのprivate内容を通常含めない。
-- Auditの保持方針、現在の保存量、削除の影響を表示し、Ownerが変更できる。
-- TelemetryとCrash Reportを自動送信しない。共有する場合は、Ownerが内容と送信先を確認して手動で行う。
+- **監査ログの確認**: 重要なファイル変更、設定変更、権限の許可、データの完全削除などの記録を、あとから監査ログとして一覧確認できます。
+- **テレメトリの自動送信禁止**: ユーザーの許可なく、利用状況やクラッシュレポートを外部の開発元サーバー等へ自動送信することは一切ありません。
 
 ## 保護、Backup、復旧
 
 ### Local data
 
-- 一般App DataはOwnerのOS accountだけが扱える領域へ保存し、すべてのdataへ一律のapplication-level暗号化を必須にしない。
-- Credentialは一般App Dataから分離して保護する。
-- 保存中またはmigration中の失敗で、最後に正常保存された状態を破壊しない。
+- **安全な保存**: データ保存中やアップデート中に突然PCの電源が切れても、直前の正常な状態が壊れない安全な書き込み方式（アトミック書き込み）を採用します。
 
 ### Backupとrestore
 
-- Ownerはene内部dataのportable full backupを作成できる。
-- Ownerはbackupの保存先、schedule、保持数を選択でき、作成結果と失敗を確認できる。
-- BackupにはCompanion、Character設定、Conversation History（Companion間交流を含む）、保存された非会話活動記録・historical log／evidence、Experience Summary、Learning、Relationship、Companion State、Task、TaskとWorkspaceの関連付け、Schedule、Rule、同意、費用設定、Auditを含める。Companion削除後に残るhistorical recordも対象とする。
-- Backupに含まれるCompanion Stateをrestoreするときも、backup後に経過した時間を無視して時間的に一時的な状態を保存時点の値のまま無期限に固定しない。
-- BackupにCredential等のsecretと外部Workspaceのfileまたは外部sourceそのものを含めない。
-- Ownerはbackupを暗号化して保護できる。暗号化されていないbackupを作成する場合は、Conversation History、Experience Summary、Memory、Relationship、Companion State等のprivate dataが含まれることを事前に明示する。
-- Restoreは現在のCredential storeを除く対象のene内部dataをbackup時点へ全置換する操作とし、対象、version互換性、外部fileを変更しないこと、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
-- Restore開始前からHostに存在する現在のCredential storeを維持し、Backupからsecretを復元したり過去時点へ巻き戻したりしない。復元されたProvider／MCP等の参照を現在のCredential storeと照合し、利用可能なら現在のCredentialを利用し、不足・無効なら再認証を要求する。
-- 復元されたassignment／consentだけで自動利用を開始しない。現在のCredential、現在の制約、既存のRestore後保留条件を満たす必要がある。この維持契約は全データResetによるCredential削除とは別である。
-- Restore後のTask、Schedule、外部接続による自動処理は一旦保留し、Ownerが復元内容を確認してまとめて有効化できる。個々の設定を一件ずつ再承認することは要求しない。
-- Restore失敗時は復元前の正常な状態を破壊しない。
+- **ポータブルな全体バックアップ**: パートナーの記憶、設定、会話履歴、タスク記録をひとまとめにしたバックアップファイルを作成できます。パスワードをかけて暗号化保存することも可能です。
+- **安全な復元 (Restore)**: バックアップから過去の状態を復元できます。復元時も、手元の安全な最新APIキーを過去の古いキーに勝手に巻き戻すことはしません。
+- **復元後の安全確認**: バックアップを復元した直後は、予期せぬタスクや定期スケジュールが勝手に動き出さないよう一旦待機状態にし、ユーザーが確認した上で安全に再開できるようにします。
 
 ### Update
 
-- 対応versionへのupgradeは、既存状態を破壊せず、成功するまで旧状態を利用または復旧できるようにする。
-- Upgrade前に互換性と必要なbackupを確認でき、失敗理由をOwnerへ示す。
-- Downgradeは保証せず、対応しない場合は起動前に明示する。
+- **安心のバージョンアップ**: アプリのアップデートによって過去のパートナーの記憶や設定が壊れないよう保護します。
 
 ### Reset
 
-- 設定Resetは、UI、Body、Voice等の一般設定を既定へ戻すが、Companion、Conversation History、Experience Summary、Learning、Relationship、Companion State、Task、Schedule、Credential、Permission Rule、Provider同意、費用capを削除しない。
-- 全データResetは、削除対象を列挙した強い確認の後、Host内部のene dataとCredentialを削除する。
-- 全データResetは、外部Workspaceのfile、Workspace内に置かれたSkill、Ownerが別の保存先へ作成したbackupを削除しない。
-- Reset後は、何が削除され、何が外部に残っているかを確認できる。
+- **選べるリセット**:
+  - **設定リセット**: 画面の見た目や音量などの一般設定だけを初期状態に戻し、パートナーの記憶やチャット履歴は大切に残します。
+  - **全データリセット**: すべてのデータを完全に消去して初期状態に戻します（誤操作を防ぐため慎重な確認画面を挟みます。なお、ユーザー自身の作業フォルダ内のファイルは消えません）。
 
 ## Remote Client
 
-- Remote Clientは、同じLANまたはOwnerが管理するVPNを通じてHostへ接続する。ene運営のrelay、ene account、ene Cloudを接続要件にしない。
-- 新しいClientは、[信頼境界](#信頼境界)に従いOwnerがHost PC上のtrusted first-party management surfaceで最終確認するdevice pairingを必要とする。
-- HostとClientの通信を保護し、Ownerはpairing済みdevice、最終接続、許可された機能を確認し、deviceごとに失効できる。
-- ClientはHostから表示と一時的な操作に必要なdataだけを受け取り、Conversation History、Experience Summary、Learning、Relationship、Companion State、Provider／MCP等の登録済みCredentialのcopyを永続cacheしない。
-- Client固有の接続材料は、Host正本のdomain dataや登録済みCredentialのcacheとは区別する。Clientで保持する場合もene内部の保護対象とし、接続目的へ限定して秘密の非露出とdevice失効を適用する。古い接続材料だけでHost側のpairing・許可を復活させない。具体的な鍵形式・保存方式は固定しない。
-- Running Companionは同時に一つまでのClientをactive Clientとして持ち、Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useはそのactive Clientに結び付く。停止中はactive ClientもHostでのpresenceも持たず、Observer対象人数にも数えない。これらの存在場所の契約は、HostとClientが同じPCにある場合も適用する。
-- Companionは通常、Ownerの指示や移動の必要性がなければ現在のClientに留まる。別ClientからText会話したい場合は、そのClientからCompanionを呼び出して移動させた後に会話する。Companionを元Clientに残したまま、別ClientからTextだけを送って応答させることを基本モデルにしない。
-- 移動はOwnerのその場の明示的な呼出しだけに限定しない。Ownerから事前に指示されている場合や、文脈上必要だとCompanion自身が判断した場合にも別Clientへ移動できる。自発的な移動も通常の自発性・Permission等の制限に従う。
-- 別ClientへCompanionを移動するときは、同じCompanionが移動元と移動先へ同時に存在する状態を作らない。
-- Client間の移動時は、現在の入力または出力roundを安全に区切り、移動元と移動先へ状態を示す。
-- 通常のHost上のTask、Task Agent、Scheduleはactive Clientの移動とは独立して継続でき、それらの作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Computer Use等のClient依存部分には[Computer Use](#computer-use)の安全な移動・非再実行契約を適用する。
-- 移動後のambient Observationは移動先ClientのObserver設定とene全体のObserver制御に従い、自発性設定はCompanion単位で引き続き適用する。Companionの出入りに応じて、[Observation](#observation)の対象Clientとevent routing先を扱う。
-- 通常のClient切断では、Running Companionを基本的にHost PC上のClientへ移動する。Host再起動時は後述の再起動前のClientへのpresence復旧契約を適用する。切断したClientでの未確定ActionをHostで自動再実行することは意味しない。Stopはdisconnectとは異なり、停止中CompanionをHost側へ移動してpresenceを残さない。
-- Remote接続が切れてもHost上のTaskとScheduleは定義された条件で継続し、再接続時に結果を確認できる。
-
-以下のactive Client不在時の活動・復帰契約はRunning Companionに適用する。停止中は[停止と削除](#停止と削除)の活動禁止・best-effort Cancelが優先し、保存dataの保持をHost上のCompanion presenceとは扱わない。
-
-- Running Companionにactive Clientがない場合でも、Schedule起動および継続中の許可済みHost上のTask・Task Agent・Schedule・保存は継続できる。判断基準はClientが必要かどうかとし、Clientが必要なこと以外のTask等は可能、Clientに依存することは不可能とする。
-- active Clientがない間、Body、Realtime／Text会話、Voice、Computer Useは行わない。Observerの観測対象はCompanionが存在するClientに限るため、対象Clientがない間の新規観測は発生しない。
-- Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続できる。Ownerへの提示・伝達は、Companionが次に移動したClientへ延期する。
-- ClientがあればすぐにそのままOwnerへ伝えられたはずの、Clientがないために伝えられなかった事項はメモし、Companionが次に移動したClientでまとめて要約して報告する。
-- 接続済みClientへの自発的な移動は、通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host側Client環境の自動起動は行わない。
-- Running CompanionはHost再起動後、再起動前に存在していたClientへ自動的にpresenceを復元する。これは別Clientへの自発移動とは別の復旧であり、元のClientが利用可能になるまでactiveなしとして扱える。別Clientへの無条件の自動移動へ広げず、Stopped Companionには適用しない。再接続、待機、timeout、pairingの具体方式は後続設計に残す。
+- **別のPCや端末からの利用**: 家庭内LANや自分専用のVPNを通じて、別のPCからホストPCの ene に接続して利用できます（ene 運営の中継サーバーや専用アカウントは不要です）。
+- **端末の安全なペアリング**: 新しい端末から接続する際は、ホストPC側でユーザー本人が承認を行うペアリング手順を必須とします。
+- **パートナーは同時に1画面だけ**: パートナーは同時に1台の端末画面にしか現れません。別のPCから会話したい場合は、パートナーをその端末へ呼び出すことで、会話の文脈を保ったまま安全に移動します。
+- **画面を閉じてもホストで作業継続**: クライアント画面を閉じても、ホストPC上でタスクやスケジュールはそのまま動き続けます。次に画面を開いた際に、完了した結果をパートナーがまとめて報告してくれます。
 
 ## 品質と利用可能性
 
-- WindowsおよびLinuxのDesktop Bodyと、日本語および英語UIを製品対象とする。具体的な対応環境はReleaseごとのSupport Matrixで定める。
-- 主要なOwner操作、Permission、安全境界、保存結果は、Provider、Body、Voice、Networkの一部が失敗しても誤って成功表示しない。
-- 起動、会話、Task、保存、Body、Voice、Observationは、通常利用を妨げる過度なCPU、GPU、Memory、storage、Network、費用を生じさせない。具体的な最低GateとbaselineはReleaseごとの受け入れ条件で定める。
-- 会話およびVoiceで伝える重要内容にはTextで確認できる代替を用意する。
-- Mute、Stop、Cancel、承認拒否にはkeyboard経路を用意する。
-- Errorは、何が失敗したか、保存済みdataへの影響、外部作用の有無、Ownerが安全に取れる次の行動を示す。
-- Localeや表示言語の違いによって、Permission、費用、Privacy、失敗の意味を変えない。
+- **軽快で安定した動作**: Windows および Linux のデスクトップ環境で、快適なアバター表示と軽快な操作性を維持します。
+- **親切で分かりやすいエラー案内**: 万が一エラーが発生した場合、「何が失敗したのか」「データは無事か」「次にどうすればよいか」を平易な言葉で案内します。
+- **アクセシビリティへの配慮**: 音声だけでなくテキストでの表示を常に用意し、緊急停止やミュートをキーボードから素早く行えるショートカットを提供します。
+- **言語による仕様の一貫性**: 表示言語（日本語/英語）の切り替えによって、セキュリティルールや安全境界の意味が変わることはありません。
+

@@ -1,176 +1,185 @@
 # Subsystem間 Interface Boundary / Command・Query・Result Contract — Step 13 Concrete Design
 
-本書は Step 13 の Interface Boundary artifact である。[対応関係・識別](correspondence-identity.md)（CI）、[Persistence / Recovery](persistence-recovery.md)（PR）、[Concurrency Control](concurrency-control.md)（CCT）が定めた identity・保存分類・atomicity / recovery・concurrency の契約を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の SO / DR / CC は [State Ownership](../architecture/state-ownership.md) / [Dependency Rules](../architecture/dependency-rules.md) / [Cross-cutting Design](../architecture/cross-cutting.md) を指す。
+本書は、サブシステム間のインターフェース境界、およびコマンド・クエリ・結果の契約を定める具象設計書です。[対応関係・識別](correspondence-identity.md)（CI）、[永続化・リカバリ](persistence-recovery.md)（PR）、[並行性制御](concurrency-control.md)（CCT）で定めた識別子、データ保存区分、原子性／リカバリ、並行処理に関する契約を前提とし、これらを勝手に変更しません。上位設計との優先順位や矛盾が生じた場合の取り扱いは、[設計文書 README](../README.md#正本と優先順位) に従います。なお、本文中の略称 SO / DR / CC は、それぞれ [状態所有権の原則](../architecture/state-ownership.md) / [依存関係ルール](../architecture/dependency-rules.md) / [横断的関心事の設計](../architecture/cross-cutting.md) を指します。
 
-本書の Rust pseudo-type / pseudo-trait はコンパイル対象ではない。型名・field 名の同義改名は許すが、型の分離と field の意味は維持すること。crate 分割は [Crate / Module 分解](crate-module-decomposition.md)、IPC wire schema は [Host↔Client IPC](host-client-ipc.md) が定める。
+本書に記載されている Rust の疑似コード（pseudo-type / pseudo-trait）はコンパイルを意図したものではありません。型名やフィールド名の分かりやすい同義語への置き換えは許容されますが、型の明確な分離とフィールドの意味論は厳格に維持してください。クレート分割の詳細は [クレート・モジュール分割](crate-module-decomposition.md)、IPC 通信スキーマは [Host↔Client IPC](host-client-ipc.md) にて定めます。
 
 ## 1. 対象と非対象
 
 ### 1.1 本書が具体化するもの
 
-- どの semantic boundary を明示的な interface として表現すべきかの導出（第3節）。
-- 各主要 interface の request / command 開始責務、authoritative 判断 owner、必要な identity / revision / generation、provenance / purpose / scope、expected current condition、Permission / consent / cap 参照、cancellation / hold 関係、result certainty、stale / rejected / needs-revalidation 等の結果、persistence / commit との関係（第4–9節）。
-- Command / Query / Candidate / Decision / Fact / Observation / Result / Notification の使い分け（第2・4–9節）。
-- boundary token の具体的な渡し方（第10節）。巨大な同一 context struct を渡さない。
-- domain-specific acceptance 結果と technical error の分離（第11節）。共通巨大 Status enum を作らない。
-- 長時間処理の request / completion 分離と durable correlation（第12節）。
-- repository の compare-and-commit interface（第13節）。DB transaction を business layer へ露出させない。
-- error model の配置（第11節）。
-- IPC readiness：process / network を越える可能性がある interface の明示（第15節）。
-- crate / module decomposition への材料：依存方向（第16節）。
-- walkthrough による検証（第17節）。
+- **意味論的な境界（semantic boundary）の抽出**: どの境界を明示的なインターフェースとして表現すべきかの導出基準（第3節）。
+- **主要インターフェースの契約詳細**: 各インターフェースにおける要求・コマンドの開始責務、最終的な判断権限を持つ担当責任者（authoritative owner）、必要とされる識別子・リビジョン・世代、由来（provenance）・目的・適用範囲、期待される現在の前提条件、権限・同意・利用枠の照合、キャンセルや安全保留との関係、結果の確信度、期限切れ（stale）／拒絶（rejected）／再検証待ち（needs-revalidation）などの判定結果、永続化・コミットとの連携（第4〜9節）。
+- **通信・対話区分の明確化**: Command（指示）、Query（照会）、Candidate（提案候補）、Decision（確定判断）、Fact（確定事実）、Observation（観測事実）、Result（処理結果）、Notification（通知）の厳格な使い分け（第2節、第4〜9節）。
+- **境界トークン（boundary token）の具体的な引き渡し方法**: 巨大で何でも入った共通コンテキスト構造体を安易に引き回さない規約（第10節）。
+- **ドメイン判断による結果と技術的エラーの分離**: 業務上の成否判定とシステム障害を混同せず、巨大な共通ステータス enum を作らない設計（第11節）。
+- **長時間処理の要求と完了の分離**: 要求の受付と処理の完了報告を切り離し、永続化された対応関係で安全に追跡する仕組み（第12節）。
+- **リポジトリの比較照合コミット（compare-and-commit）インターフェース**: データベースの低レベルなトランザクションをビジネスロジック層へ露出させない設計（第13節）。
+- **エラーモデルの配置方針**: ドメイン判定と技術的例外の整理（第11節）。
+- **IPC 対応準備**: プロセス間やネットワークを越える可能性があるインターフェースの明確な特定（第15節）。
+- **クレート・モジュール分割へのインプット**: クレート間の健全な依存方向（第16節）。
+- **検証シナリオ**: インターフェースの整合性を追うウォークスルー（第17節）。
 
 ### 1.2 本書が決めないもの
 
-- プロジェクト全体の crate 構成、module 分割、process / thread 配置。
-- DB 製品の選定、完全な `CREATE TABLE`、index、migration。
-- IPC 方式、wire format の byte 仕様、network protocol、heartbeat / lease の有無・値。
-- queue / retry / timeout の値、scheduling algorithm、embedding / retrieval scoring、prompt 組立 algorithm。
-- 各 Subsystem の完全な関数一覧。内部 helper の列挙はしない。
-- 暗号方式、archive 形式、署名方式。
+- プロジェクト全体のクレート構成、モジュール分割、プロセスやスレッドの具体的な配置。
+- データベース製品の選定、完全な `CREATE TABLE` 文、インデックス設計、マイグレーション手順。
+- 具体的な IPC 方式、通信フレームのバイト長仕様、ネットワークプロトコル、ハートビートやリースの有無および具体値。
+- キューの長さ、再試行回数、タイムアウト値、スケジューリングアルゴリズム、埋め込みベクトルの検索スコアリング、プロンプト組み立てアルゴリズム。
+- 各サブシステムの完全な内部関数一覧（内部ヘルパー関数の網羅は行いません）。
+- 具体的な暗号化方式、アーカイブ形式、電子署名方式。
 
 ### 1.3 用語
 
-- **command**：意味状態の変更を owner へ要求する。受理・確定は owner が行う。呼出し自体は authority ではない。
-- **query**：現在の意味・利用可否・参照範囲の取得。取得成功は後続の利用許可ではない。
-- **candidate**：採用可否の判断材料としての提案（Action 候補、Learning 形成候補、fallback 候補、観測候補等）。提案の存在は採否ではない。
-- **decision**：owner が確定した判断（許可、scope 決定、routing 採否、全域完了等）。生きた許可の再利用可否は別契約に従う。
-- **fact**：把握された作用・利用量・試行・遷移等の記録。確定度（確認済み成功 / 確認済み失敗 / 不明）を伴う。
-- **observation**：Client 主張、到達性、提示状況等の観測事実。authority ではない。
-- **result**：長時間処理の到着物。元の試行・区間・世代への帰属を伴う。現在への自動採用ではない。
-- **notification**：event delivery 等の一方向の伝達。受信は理解・採否を意味しない。
-- **boundary token**：CI §4.5 の期待する対応の写し。authority ではなく比較材料。不一致なら hold・deny・不足・再評価へ戻す。欠落は「制約なし」ではなく不受理の理由。
+- **コマンド（command）**: 意味論的な状態の変更を担当責任者（owner）へ要求すること。要求を受理・確定するかどうかは担当責任者が判断します。コマンドを呼び出せたこと自体は「変更の成立」を意味しません。
+- **クエリ（query）**: 現在の意味状態、利用可否、参照可能な範囲を照会すること。照会に成功したからといって、後続の操作がすべて許可されたわけではありません。
+- **候補（candidate）**: 採用するかどうかの判断材料として提示される提案（アクション候補、学習形成候補、フォールバック候補、観測候補など）。候補が存在することと、採用が決定したことは別です。
+- **判断（decision）**: 担当責任者が下した確定的な判定（実行許可、スコープ決定、ルーティング採否、全域削除完了など）。有効な判断を別の場面で勝手に再利用できるかどうかは、個別の契約に従います。
+- **確定事実（fact）**: システムが実際に把握した外部作用、利用量、試行、状態遷移などの記録。「確認済み成功」「確認済み失敗」「成否不明」といった確信度（certainty）を伴います。
+- **観測事実（observation）**: クライアントからの申告、ネットワーク到達性、画面への提示状況などの観測データ。システム全体の決定権威（authority）ではありません。
+- **処理結果（result）**: 長時間処理から遅れて届いた成果物。元の試行ID、処理区間、世代番号への紐付けを伴います。結果が届いたからといって、現在の目的へ自動採用されるわけではありません。
+- **通知（notification）**: イベント配信などの一方向の伝達。相手が通知を受信したことと、内容を正しく理解・採用したことは別です。
+- **境界トークン（boundary token）**: 各サブシステムが期待する前提条件の写し（CI §4.5）。決定権威そのものではなく、現在の状態と比較するための照合材料です。値が不一致の場合は安全のため保留、拒絶、情報不足、再検証へと戻します。トークンが省略された場合は「制約がない」のではなく「前提が不明なため不受理」として扱います。
 
 ## 2. Interface 設計原則（採用した原則）
 
-1. **要求は提案、確定は owner。** すべての command / candidate は「採用してくれ」という提案であり、authoritative 判断は SO の owner が行う。interface 名に `execute` / `apply` / `update` とあっても、実装は premise 照合＋owner 確定を経る。呼び出せたこと・構築できたことを authority にしない。
-2. **前提は typed に明示し、暗黙の最新を使わない。** 各 interface は必要な `expected_*` を明示 field として受け取る。revision / generation は生の数値で単独に持ち歩かず、必ず `(identity, revision)` / `(lifecycle, generation)` の組で扱う（CI §4.2–4.3）。token 欠落は不受理の理由。
-3. **意味の異なる interaction を一つの万能型へまとめない。** Universal Command / Event / Result envelope、generic workflow interface、generic repository、generic policy interface、service locator、generic message bus abstraction を導入しない。transport representation を後で共有できても semantic type は domain ごとに区別する。
-4. **短い commit、長い work は外。** 長時間処理（推論、Task Agent、外部 Tool、Computer Use、Backup / Restore、Targeted Deletion 参加作業）は premise 付きで開始し、lock / transaction なしで実行し、commit 直前に短い原子区間で current と比較する（CCT 第5節）。DB transaction 内で await・外部 I/O を行わない。
-5. **巨大な同一 context struct を渡さない。** 各 boundary で必要な前提だけを typed に表現する（第10節の field matrix）。共通化するのは性質（opaque 性、単調性、有向性、比較の形）だけであり、型・lifecycle・counter は共有しない（CI §2.2）。
-6. **結果は domain ごとに区別し、technical と semantic を分離する。** `Result<T, E>` だけに潰さず、`Result<DomainAcceptance, TechnicalError>` の形で返す（第11節）。stale / denied / held / superseded / insufficient / unknown-external / historical-only 等は `Ok` 側の domain outcome であり、`Err` 側の technical failure（DB unavailable、Provider transport error 等）と混同しない。共通巨大 Status enum を導入しない。
-7. **長時間処理は durable correlation で戻れる。** request object を process memory だけに保持しない。Ticket / attempt / operation / staging の durable 対応から identity / revision / generation / attempt / provenance へ戻れる（第12節）。
-8. **秘密を通常値として返さない。** Credential subsystem は認証用途への利用を供給しても、caller へ secret ownership を渡さない（DR-05）。non-secret reference と秘密値本体を別の意味として扱う。
-9. **trait は boundary 隔離・差替え・testability の理由がある場合だけ。** 内部 pure function まで trait 化しない（第14節）。
+1. **要求は単なる提案、確定は担当責任者（owner）が行う。**
+   すべてのコマンドや候補は「これを採用してほしい」という提案に過ぎず、決定権威を持つ判断は状態所有権の原則（SO）に従って担当責任者が行います。インターフェース名に `execute`、`apply`、`update` と付いていても、内部では必ず前提条件の照合と担当責任者による確定処理を経ます。「関数を呼び出せたこと」や「引数の構造体を組み立てられたこと」を、実行権限の根拠にしてはなりません。
+2. **前提条件は型として明示し、暗黙の最新状態を勝手に使わない。**
+   各インターフェースは、必要な前提条件（`expected_*`）を明示的なフィールドとして受け取ります。リビジョン番号や世代番号を生の数値だけで単独で引き回してはならず、必ず `(identity, revision)` や `(lifecycle, generation)` のペアとして扱います（CI §4.2–4.3）。前提トークンが欠落している場合は、無条件に処理を進めるのではなく「前提不明による不受理」とします。
+3. **意味の異なる相互作用を、1つの万能型へ安易にまとめない。**
+   システム共通の万能コマンド型、万能イベント型、万能結果エンベロープ、汎用ワークフロー型、汎用リポジトリ、汎用ポリシーエンジン、サービスロケーター、汎用メッセージバスなどを導入してはなりません。将来的に通信用フォーマットを共有できたとしても、ドメイン層における意味論的な型は領域ごとに明確に区別します。
+4. **コミットは短く、長時間の作業はトランザクションの外で行う。**
+   LLMによる推論、タスクエージェントの自律思考、外部ツールの呼び出し、Computer Use、バックアップ復元、個人データ完全削除の各参加者の消去作業などの長時間処理は、前提条件を確認した上で開始し、データベースのロックやトランザクションを持たずに実行します。そして、結果をコミットする直前の短い不可分（atomic）な処理においてのみ、現在の最新状態と比較照合します（CCT 第5節）。DBトランザクションの内部で非同期処理の await や外部ネットワークI/Oを行ってはなりません。
+5. **巨大で何でも入った共通コンテキスト構造体を渡さない。**
+   各境界で必要とされる前提条件だけを、厳格に型付けして受け渡します（第10節のフィールドマトリクス）。共通化してよいのは不透明性（opaque）、単調増加性、方向性、比較の形式といった基本性質だけであり、具体的な型・ライフサイクル・カウンターをシステム全体で無理に共有してはなりません（CI §2.2）。
+6. **結果はドメインごとに明確に区別し、技術的エラーと業務判断を分離する。**
+   すべての成否を単純な `Result<T, E>` にひとまとめにせず、`Result<DomainAcceptance, TechnicalError>` のように型を分けて返します（第11節）。期限切れ（stale）、権限拒絶（denied）、安全保留（held）、後続処理による置換（superseded）、権能不足（insufficient）、外部成否不明（unknown-external）、履歴記録のみ（historical-only）などは、すべて正常系（`Ok` 側）のドメイン判定結果（outcome）であり、DB接続失敗やネットワーク通信障害などの技術的例外（`Err` 側）と混同してはなりません。システム共通の巨大なステータスコード enum を作ってはなりません。
+7. **長時間処理は永続化された対応関係によって安全に元の文脈へ戻れる。**
+   要求オブジェクトをプロセスメモリの中だけで保持してはなりません。チケットID、試行ID、操作ID、ステージング領域などの永続化された対応情報から、元の識別子、リビジョン、世代、試行番号、由来をいつでも確実に辿れなければなりません（第12節）。
+8. **秘密情報を通常の戻り値として不用意に返さない。**
+   認証情報管理サブシステムは、各処理に必要な認証機能を提供することはあっても、呼び出し元へ秘密値そのものの所有権を渡してはなりません（DR-05）。秘密でない参照情報と、秘密値そのものは、まったく別の意味を持つ型として厳格に区別します。
+9. **トレイトの導入は、境界の隔離・部品の差し替え・テスト容易性に明確な理由がある場合のみに限定する。**
+   サブシステム内部の純粋な計算処理まで無闇にトレイト化してはなりません（第14節）。
 
 ## 3. Boundary discovery — どの boundary に明示的 interface が必要か
 
 ### 3.1 導出方法
 
-Step 12 の H-1〜H-10（個体・作業・学習）、K-1〜K-12（権限・実行クラスタ）、X-1〜X-10（接続・提示・観測）、CH/CD（Character）、DP/PE（保全・消去）と、CI 第3節の8領域の対応関係、PR 第4節の table group、CC-01〜07、CCT 第4節の serialization domain を材料に、次の基準で判定した。
+サブシステムの責務（個体調整・作業・学習・権限・接続・Character・保全消去）、識別子の対応関係、永続化テーブル区分、横断関心事、並行性制御の同期区分を総合的に分析し、以下の基準に基づいて明示的なインターフェースを導出しました。
 
-明示的 interface が必要な条件（いずれかに該当すれば定義する）：
+**明示的なインターフェースの定義が必須となる条件（以下のいずれかに該当する場合）：**
 
-- (a) semantic owner を跨ぐ意味の受渡しがある（要求開始責務と authoritative 判断責務が異なる）。
-- (b) 現在条件の照合が必要（Permission / consent / cap / 帰属 / 消去 / 復元 / steering 前提のいずれかが受入可否を決める）。
-- (c) lifecycle / revision / generation を跨ぐ対応が必要（遅延結果の帰属、steering 前後の区別、復元前後の区別、消去区間の区別）。
-- (d) durable commit / atomic compare が必要（PR §7 の AU、 CCT SD に対応）。
-- (e) trust boundary を跨ぐ（Client / Provider / MCP / Plugin / 外部 file、秘密の分離）。
+- (a) **担当責任者（semantic owner）を跨ぐ受け渡しがある場合**: 要求を開始する責務と、最終的に判断を下す責務が異なっている。
+- (b) **現在の前提条件の照合が必要な場合**: 権限、同意、利用枠、在席帰属、消去保留、復元保留、方針指示のいずれかが要求の受入可否を左右する。
+- (c) **ライフサイクル・リビジョン・世代を跨ぐ対応が必要な場合**: 遅れて届いた結果の帰属判定、指示変更の前後の区別、バックアップ復元の前後の区別、消去対象期間の区別など。
+- (d) **永続化コミットやアトミックな比較照合が必要な場合**: 永続化の最小単位や並行性制御の同期区分に対応する。
+- (e) **信頼境界（trust boundary）を跨ぐ場合**: クライアント、外部プロバイダ、MCPサーバー、プラグイン、外部ファイル、認証秘密情報とのやり取り。
 
-内部 helper に留め、architecture interface へ昇格させないもの（例）：
+**内部ヘルパーに留め、公開インターフェースへ昇格させてはならないもの（例）：**
 
-- prompt 組立、context 圧縮・選択 algorithm、embedding / retrieval scoring、diff / merge algorithm、scheduling algorithm、費用推定式、集計表示の整形、描画・音声の staging、candidate 検知の内部 scoring、探索 query の組立。いずれも owner の判断を支える内部手段であり、ownership boundary ではない。
-- 単なる表示集計、由来説明文の整形、次回時刻の導出計算。derived の生成手段であり、正本の受渡しではない。
+- プロンプトの組み立て、文脈の圧縮・選択アルゴリズム、埋め込みベクトルのスコアリング、差分マージアルゴリズム、タスクのスケジューリングアルゴリズム、費用の概算計算式、集計結果の表示フォーマット整形、描画や音声のローカルステージング、候補検知の内部スコアリング、検索クエリの組み立てなど。これらは担当者が判断を下すための内部手段であり、独立した所有権境界ではありません。
+- 単なる表示用の集計処理、由来説明文の文章生成、次回実行日時の計算処理など。これらは派生データを生成する手段に過ぎず、マスターデータ（正本）の受け渡しではありません。
 
-Subsystem = crate / process / actor と仮定しない。同一 process / 同一 crate 内部でも ownership boundary を守るために interface を定義する（例：Task–Learning 間の自動昇格禁止、Permission 評価と Action 実行の分離）。逆に同一 owner 内の手順分割は interface にしない。
+なお、「サブシステム」は必ずしも個別のクレート、プロセス、アクターと1対1に対応するわけではありません。同一プロセス内や同一クレート内であっても、所有権境界を守るために明示的なインターフェースを定義します（例：タスクの一時エージェントが勝手に自律学習へデータを昇格させることを防ぐ境界や、権限評価と実アクション実行の分離など）。逆に、同一の担当責任者の内部における処理ステップの分割は、インターフェースとしては公開しません。
 
 ### 3.2 Interface inventory（明示的 interface の一覧）
 
-ID は本書内の参照用であり、製品要件 ID ではない。`種類`は主たる interaction の種類。`開始`は request / command を開始する責務、`owner`は authoritative に判断する責務。詳細は第4–9・13節。
+※ 以下の ID は本書内での参照用記号であり、製品要件の ID ではありません。「種類」は主な相互作用の形態、「開始」は要求を開始する責務、「owner」は決定権威を持つ担当責任者を示します。
 
-| ID | boundary | 種類 | 開始 | owner | 対応する Step 12 契約 |
+| ID | 境界・目的 | 種類 | 開始責務 | 担当責任者（owner） | 対応する設計契約 |
 |---|---|---|---|---|---|
-| H-A | Task 化・委任・steering・Cancel・結果統合 | command + fact | 個体調整 | 作業 | H-3、W-1〜W-3、AE §4・§7、CC-01/03/04/07 |
-| H-B | Experience 提出 → 形成判断 | candidate + decision | 個体調整・作業 | 認識・学習 | H-1、L-1〜L-2、CA |
-| H-C | 会話による訂正 | command (訂正要求) + decision | 個体調整 | 認識・学習 | H-2、L-3〜L-6 |
-| H-D | Learning 参照・由来説明 | query + fact | 個体調整・作業・共有観測（範囲限定） | 認識・学習 | H-4、L-8、CC-02 |
-| H-E | scope 変更（Companion/Global） | candidate + decision | 認識・学習（意味判断） | 認識・学習（意味）＋権限・制約と各利用箇所（強制） | H-5、L-7、CC-02 |
-| H-F | Observer 向け限定 routing 文脈の供給 | fact (派生表現) | 個体調整との協働（仲介） | 各元 owner（History・個体文脈=個体調整、Memory・Learning=認識・学習、Task context=作業） | H-6、X-5、OB-4、CC-02 |
-| H-G | 未伝達の登録・報告状況更新 | fact + observation | 個体調整（管理）＋入出力・提示（提示事実） | 個体調整（必要性・状況） | H-7、X-9、SO 4.4 |
-| H-H | Schedule 設定・到来・各回対応 | command + fact | Owner（管理経路）→作業 | 作業 | H-8、W-4 |
-| K-A | Owner 意図 → 制御変更（Rule・同意・cap 等） | command + decision | 入出力・提示＋個体調整・作業（意図供給） | 権限・制約 | K-1、C-1、CC-01 |
-| K-B | 現在の利用可否の照合（live authorization check） | query + decision | 利用・実行箇所（推論・実行・拡張・各参照保存箇所） | 権限・制約 | K-2、C-7、AE §5、CC-01 |
-| K-C | 秘密利用（認証用途への供給） | command (利用要求) + fact | 推論・実行・拡張・接続・存在 | 認証秘密 | K-4、S-2〜S-4、CC-02 |
-| K-D | Provider 割当解決 | query + candidate | 推論（解決） | 権限・制約（同意の意味） | K-5 前半、I-1、SO 4.18 |
-| K-E | 推論の実利用ごとの成立・送信 | command + fact/result | 利用元（個体調整・作業・認識・学習・共有観測・入出力・提示） | 推論（経路・能力照合）＋権限・制約（可否）＋各送信箇所（適用） | K-5、I-4、RF §3、CC-02 |
-| K-F | fallback 選択 | candidate + decision | 推論（候補） | 権限・制約（承認済み順序・現在条件） | K-6、I-5、CC-02 |
-| K-G | 利用量の予約・確定・解放 | command + fact | 各利用 owner（推論・作業・実行・拡張・保全・消去） | 権限・制約（可否）＋各利用 owner（原記録） | K-7、C-4、CC-06、CCT 第9節 |
-| K-H | Action 候補 → 認可 → 実作用 → 結果確定 | candidate + decision + command + fact | 利用元（候補）→権限・制約（認可）→実行・拡張（作用・確定度） | 権限・制約（認可）・実行・拡張（作用・確定度）・作業（Task 達成）で分離 | K-8、E-1〜E-2、AE §3・§5・§6、CC-01/07 |
-| K-I | 拡張受入（MCP / Plugin / MCP Apps / sandbox 例外） | command + decision + fact | 機能利用元 | 実行・拡張（受入・制限）＋権限・制約（例外の意味） | K-9、E-4〜E-6、C-5 |
-| K-J | Client 依存作用の限定・移動協調 | command + fact | 作業・個体調整（要求） | 実行・拡張（作用）＋接続・存在（帰属）＋権限・制約（device・許可） | K-10、E-3、X-6、CC-04 |
-| K-K | 失効・停止・保留の伝播、遅延到着・不明の扱い | notification + fact | 権限・制約・個体調整・保全・消去（成立） | 各開始箇所（新規禁止の適用）＋各 owner（事実の帰属） | K-11、C-8、AE §7–§8、CC-03/04 |
-| X-A | presence 成立・移動・復帰・復旧 | command + decision + fact | 個体調整（移動意図） | 接続・存在（帰属成立） | X-1、CN-2〜CN-4、CC-04 |
-| X-B | Text / Voice round の帰属・区切り・提示 | candidate + fact + observation | 入出力・提示（受付・提示事実） | 個体調整（会話の意味）＋入出力・提示（round の実際）＋接続・存在（帰属） | X-2、IO-1〜IO-2・IO-6、CC-07 |
-| X-C | Body 表示の帰属 | query (帰属参照) + fact | 入出力・提示 | 接続・存在（帰属）・個体調整（活動状態）・認識・学習（内的状態の意味）・Character（資材内容） | X-3、IO-3 |
-| X-D | Observation eligibility の連動 | notification + decision | 接続・存在・入出力・提示（変化通知） | 共有観測（対象・時機） | X-4、OB-1、CC-04 |
-| X-E | Observation result routing（三段階分離） | candidate + decision + notification + fact | 共有観測（候補・routing） | 共有観測（routing 採否）・個体調整（理解・発話・Action）で分離 | X-5、OB-2〜OB-6、CC-02/03 |
-| X-F | 移動・切断・再接続時の三者協調 | notification + fact | 接続・存在・入出力・提示・実行・拡張 | 接続・存在（切替）・入出力・提示（区切り）・実行・拡張（作用不明）・作業（Host 継続）・個体調整（未伝達） | X-6、CN-6、CC-03/04 |
-| X-G | Host restart 時の協調 | fact (保全された正本からの再構成) | 保全・消去（保全） | 接続・存在・入出力・提示・共有観測・作業・個体調整（各用途） | X-7、CC-04 |
-| X-H | 未伝達の次 Client 報告 | query + fact | 個体調整（要約報告材料） | 個体調整（必要性）＋入出力・提示（提示事実） | X-9、H-G |
-| C-A | Character static revision の取得 | query + fact | 個体調整（適用判断のため） | Character（静的内容） | CH-1〜CH-4、CD（供給） |
-| C-B | 既存 Companion への revision 適用 | candidate + decision + fact | 個体調整（Owner 選択付き提案） | 個体調整（適用関係）・Character（内容供給）で分離 | CH-7、H-5 の適用側、CC-02 |
-| C-C | Skill import・package validation | command + fact | Owner（管理経路） | Character（受入・validation）・認識・学習（内部 Skill としての意味）で分離 | CH-5、SO 4.7 |
-| C-D | Character export | command + fact | Owner（管理経路） | Character（静的範囲の選択） | CH-6、CC-02 |
-| D-A | Targeted Deletion の開始・範囲確定 | command + decision | Owner（管理経路）→保全・消去（調整） | 保全・消去（範囲・影響・除外の対応付け） | DP-1 (PE-1)、TD |
-| D-B | 参加者への局所消去要求・局所完了返却 | command + fact | 保全・消去 | 各参加 owner（局所処理・検証） | DP（参加）、PE-1、TD |
-| D-C | 残存検証・全域完了確定 | query + decision | 保全・消去 | 保全・消去（集約・検証） | DP、PE-1・PE-7、TD |
-| D-D | Backup 作成・Restore staging・正本 switch・復元後保留・一括有効化 | command + candidate + decision + fact | Owner（管理経路）→保全・消去 | 保全・消去（調整）＋各 owner（参加・保留適用） | DP-2〜DP-4 (PE-2〜PE-4)、BR |
-| D-E | 通常保持・retention / cleanup・Reset | command + decision | Owner（管理経路） | 保全・消去（調整）＋各 owner（局所） | DP (PE-4〜PE-5)、CC-05 |
-| R-* | Repository compare-and-commit 群（第13節） | command (compare 付き) + fact | 各 business owner | 各 persistence group の担当 owner（意味変更は business owner、保持・照合可能性は persistence） | PR §7・§11、CCT 第5節、CI §6 |
+| H-A | Task 化・委任・方針指示（steering）・中断・結果統合 | コマンド ＋ 確定事実 | 個体調整 | 作業 | H-3、W-1〜W-3、AE §4・§7、CC-01/03/04/07 |
+| H-B | Experience（経験）提出 → 形成判断 | 候補 ＋ 確定判断 | 個体調整・作業 | 認識・学習 | H-1、L-1〜L-2、CA |
+| H-C | 会話による学習内容の訂正 | コマンド（訂正要求） ＋ 確定判断 | 個体調整 | 認識・学習 | H-2、L-3〜L-6 |
+| H-D | Learning 参照・由来説明の照会 | クエリ ＋ 確定事実 | 個体調整・作業・共有観測（範囲限定） | 認識・学習 | H-4、L-8、CC-02 |
+| H-E | 学習スコープの変更（Companion専用／全体共有） | 候補 ＋ 確定判断 | 認識・学習（意味判断） | 認識・学習（意味）＋ 権限・制約および各利用箇所（強制適用） | H-5、L-7、CC-02 |
+| H-F | Observer 向け限定ルーティング文脈の供給 | 確定事実（派生データ） | 個体調整との協働（仲介） | 各元の担当責任者（会話履歴・個体文脈＝個体調整、記憶・学習＝認識・学習、タスク文脈＝作業） | H-6、X-5、OB-4、CC-02 |
+| H-G | 未伝達メッセージの登録・報告状況更新 | 確定事実 ＋ 観測事実 | 個体調整（管理）＋ 入出力・提示（提示事実） | 個体調整（必要性の判断・状況管理） | H-7、X-9、SO 4.4 |
+| H-H | スケジュール設定・到来・各回実行 | コマンド ＋ 確定事実 | オーナー（管理経路）→ 作業 | 作業 | H-8、W-4 |
+| K-A | オーナー意図 → 制御変更（ルール・同意・利用枠等） | コマンド ＋ 確定判断 | 入出力・提示 ＋ 個体調整・作業（意図の伝達） | 権限・制約 | K-1、C-1、CC-01 |
+| K-B | 現在の利用可否の照合（live authorization check） | クエリ ＋ 確定判断 | 利用・実行箇所（推論・実行・拡張・各参照保存箇所） | 権限・制約 | K-2、C-7、AE §5、CC-01 |
+| K-C | 秘密情報の安全利用（認証用途への供給） | コマンド（利用要求） ＋ 確定事実 | 推論・実行・拡張・接続・存在 | 認証秘密情報 | K-4、S-2〜S-4、CC-02 |
+| K-D | モデルプロバイダ割り当ての解決 | クエリ ＋ 候補 | 推論（解決処理） | 権限・制約（同意の意味論） | K-5 前半、I-1、SO 4.18 |
+| K-E | 推論の実行成立・プロバイダ送信 | コマンド ＋ 確定事実／結果 | 利用元（個体調整・作業・認識・学習・共有観測・入出力・提示） | 推論（経路・能力照合）＋ 権限・制約（可否判断）＋ 各送信箇所（適用） | K-5、I-4、RF §3、CC-02 |
+| K-F | フォールバック先の選択 | 候補 ＋ 確定判断 | 推論（候補提示） | 権限・制約（承認済み順序・現在条件の照合） | K-6、I-5、CC-02 |
+| K-G | 利用枠の事前予約・確定・解放 | コマンド ＋ 確定事実 | 各利用元（推論・作業・実行・拡張・保全・消去） | 権限・制約（可否判定）＋ 各利用元（元記録の保持） | K-7、C-4、CC-06、CCT 第9節 |
+| K-H | アクション候補 → 認可 → 実作用 → 結果確定 | 候補 ＋ 確定判断 ＋ コマンド ＋ 確定事実 | 利用元（候補提示）→ 権限・制約（認可）→ 実行・拡張（実作用・確信度） | 権限・制約（認可）・実行・拡張（作用・確信度）・作業（タスク達成判断）で分離 | K-8、E-1〜E-2、AE §3・§5・§6、CC-01/07 |
+| K-I | 外部拡張の受け入れ（MCP／Plugin／MCP Apps／サンドボックス例外） | コマンド ＋ 確定判断 ＋ 確定事実 | 機能利用元 | 実行・拡張（受け入れ・制限）＋ 権限・制約（例外の意味論） | K-9、E-4〜E-6、C-5 |
+| K-J | クライアント依存アクションの限定・端末移動時の協調 | コマンド ＋ 確定事実 | 作業・個体調整（要求） | 実行・拡張（実作用）＋ 接続・存在（在席帰属）＋ 権限・制約（デバイス・許可） | K-10、E-3、X-6、CC-04 |
+| K-K | 失効・停止・安全保留の伝播、遅延到着・成否不明の処理 | 通知 ＋ 確定事実 | 権限・制約・個体調整・保全・消去（状態成立） | 各開始箇所（新規開始禁止の適用）＋ 各担当責任者（事実の帰属判定） | K-11、C-8、AE §7–§8、CC-03/04 |
+| X-A | 在席（presence）の成立・端末間移動・復帰・復旧 | コマンド ＋ 確定判断 ＋ 確定事実 | 個体調整（移動意図の表明） | 接続・存在（帰属の確定） | X-1、CN-2〜CN-4、CC-04 |
+| X-B | テキスト／音声ラウンドの帰属・区切り・提示完了 | 候補 ＋ 確定事実 ＋ 観測事実 | 入出力・提示（受付・提示事実） | 個体調整（対話の意味論）＋ 入出力・提示（ラウンドの実態）＋ 接続・存在（在席帰属） | X-2、IO-1〜IO-2・IO-6、CC-07 |
+| X-C | アバター身体（Body）表示の帰属 | クエリ（帰属参照） ＋ 確定事実 | 入出力・提示 | 接続・存在（帰属）・個体調整（活動状態）・認識・学習（内的状態の意味論）・Character（資材データ） | X-3、IO-3 |
+| X-D | 観測資格（eligibility）の連動 | 通知 ＋ 確定判断 | 接続・存在・入出力・提示（状態変化の通知） | 共有観測（対象・タイミングの判定） | X-4、OB-1、CC-04 |
+| X-E | 観測結果のルーティング（三段階の分離） | 候補 ＋ 確定判断 ＋ 通知 ＋ 確定事実 | 共有観測（候補提示・ルーティング） | 共有観測（ルーティング採否）・個体調整（理解・発話・アクション）で分離 | X-5、OB-2〜OB-6、CC-02/03 |
+| X-F | 端末移動・切断・再接続時のサブシステム協調 | 通知 ＋ 確定事実 | 接続・存在・入出力・提示・実行・拡張 | 接続・存在（切り替え）・入出力・提示（区切り）・実行・拡張（作用不明の記録）・作業（ホスト継続）・個体調整（未伝達管理） | X-6、CN-6、CC-03/04 |
+| X-G | ホスト再起動時の整合性協調 | 確定事実（保全された正本データからの再構成） | 保全・消去（永続化データ） | 接続・存在・入出力・提示・共有観測・作業・個体調整（各用途での復元照合） | X-7、CC-04 |
+| X-H | 未伝達メッセージの次回接続端末への報告 | クエリ ＋ 確定事実 | 個体調整（要約報告の材料） | 個体調整（必要性の判断）＋ 入出力・提示（提示完了事実） | X-9、H-G |
+| C-A | キャラクター静的リビジョンの取得 | クエリ ＋ 確定事実 | 個体調整（適用判断のため） | Character（静的資材の提供） | CH-1〜CH-4、CD（供給） |
+| C-B | 既存パートナーへのキャラクター改訂の適用 | 候補 ＋ 確定判断 ＋ 確定事実 | 個体調整（オーナー選択を伴う提案） | 個体調整（適用関係の確定）・Character（内容提供）で分離 | CH-7、H-5 の適用側、CC-02 |
+| C-C | スキルのインポート・パッケージ正当性検証 | コマンド ＋ 確定事実 | オーナー（管理経路） | Character（受け入れ・検証）・認識・学習（内部スキルとしての意味論）で分離 | CH-5、SO 4.7 |
+| C-D | キャラクターのエクスポート | コマンド ＋ 確定事実 | オーナー（管理経路） | Character（静的範囲の選定） | CH-6、CC-02 |
+| D-A | 個人データ完全削除の開始・対象範囲の確定 | コマンド ＋ 確定判断 | オーナー（管理経路）→ 保全・消去（調整） | 保全・消去（範囲・影響度・除外対象の対応付け） | DP-1 (PE-1)、TD |
+| D-B | 各参加者への局所データ消去要求・完了報告受領 | コマンド ＋ 確定事実 | 保全・消去 | 各参加ドメイン（局所消去・検証の実行） | DP（参加）、PE-1、TD |
+| D-C | 残存データの機械的検証・全域削除完了の確定 | クエリ ＋ 確定判断 | 保全・消去 | 保全・消去（集約・検証の確定） | DP、PE-1・PE-7、TD |
+| D-D | バックアップ作成・復元ステージング・正本切り替え・復元後保留・一括有効化 | コマンド ＋ 候補 ＋ 確定判断 ＋ 確定事実 | オーナー（管理経路）→ 保全・消去 | 保全・消去（調整）＋ 各担当責任者（参加・保留適用） | DP-2〜DP-4 (PE-2〜PE-4)、BR |
+| D-E | 通常のデータ保持・クリーンアップ・完全初期化 | コマンド ＋ 確定判断 | オーナー（管理経路） | 保全・消去（調整）＋ 各担当責任者（局所処理） | DP (PE-4〜PE-5)、CC-05 |
+| R-* | リポジトリの比較照合コミット群（第13節） | コマンド（比較照合付き） ＋ 確定事実 | 各ビジネスロジック担当 | 各データ保存区分の担当責任者（意味変更は業務担当、永続化・整合性はリポジトリ） | PR §7・§11、CCT 第5節、CI §6 |
 
-呼び出せること自体を authority にしない。例えば `H-A` の Task 化要求が届いたことは Task 受理ではなく、`K-H` の Action 候補が構築できたことは送信・作用許可ではなく、`K-C` の credential reference を持っていることは秘密利用可能ではなく、`X-B` の Client message 受信は current presence ではなく、`H-A` の Task Agent result 到着は current Task への採用可能ではない。必要な current-condition check は各 owner の boundary で行う（第4–9節の `expected_*` と第11節の outcome）。
+インターフェースを呼び出せること自体を、処理の実行権威にしてはなりません。たとえば、`H-A` のタスク化要求が届いたことはタスクの正式受理を意味せず、`K-H` のアクション候補が組み立てられたことは外部作用の実行許可を意味せず、`K-C` の認証情報参照を持っていることは秘密値の自由な利用を意味せず、`X-B` のクライアントメッセージを受信したことは現在も在席が有効であることを意味せず、`H-A` のエージェント処理結果が届いたことは現在のタスクへの自動採用を意味しません。必要な前提条件の照合は、必ず各担当責任者の境界において厳格に実行します（第4〜9節の `expected_*` フィールドおよび第11節の判定結果型）。
 
 ## 4. Task / Learning / Companion クラスタの interface semantics（H-A〜H-H）
 
 ### H-A Task 化・委任・steering・Cancel・結果統合（個体調整 → 作業）
 
-Task と Learning を一つの generic workflow interface へ統合しない。Task は追跡される作業単位、Learning は認識・学習の意味判断であり、別の owner・別の revision・別の lifecycle である。
+タスク管理と自律学習を、単一の汎用ワークフローインターフェースへ安易に統合してはなりません。タスクは状態追跡を伴う明確な作業単位であり、自律学習は認識や解釈に関する意味論的な判断であって、両者は担当責任者、リビジョン管理、ライフサイクルのすべてが明確に異なります。
 
 ```rust
-// --- identity / revision 前提（CI §5.3 の再利用。改名は許す） ---
-struct TaskId(/* opaque */);
+// --- 識別子・リビジョンの前提型（CI §5.3 の再利用。同義の命名変更は許容） ---
+struct TaskId(/* 不透明な識別子 */);
 struct TaskRevision(u64);
 struct TaskRef { task: TaskId, revision: TaskRevision }
 
-// 採用された目的。identity は採用位置が持ち、本文の正本は task_revision の snapshot。
-// identity は作業が採用時に確定し、caller は本文を提案するだけ（caller は mint しない）。
+// 採用された目的。識別子は採用位置が持ち、本文のマスターデータ（正本）は task_revision のスナップショット。
+// 識別子は作業担当が採用時に確定し、呼び出し側は本文を提案するのみ（呼び出し側では発行しない）。
 struct TaskPurposeRef {
     task: TaskId,
-    adopted_revision: TaskRevision,  // この purpose を採用した revision
+    adopted_revision: TaskRevision,  // この目的を採用したリビジョン
 }
-struct TaskPurpose { text: String }  // 採用目的本文。Debug では redact する
+struct TaskPurpose { text: String }  // 採用目的本文。デバッグログでは伏字化（redact）する
 
-// steering・遅延結果の比較材料（boundary token。authority ではない）。
-// expected は依拠した現在 revision、purpose は依拠した現在目的。
-// premise.purpose は expected.revision の目的と一致すること（不一致は stale として不受理）。
-// orchestrate が premise 構築時にこの対応を照合し、repository の revision atomic compare が現在性を包含する。
+// 方針指示（steering）・遅延結果の比較材料（境界トークン。決定権威そのものではありません）。
+// expected は依拠した現在リビジョン、purpose は依拠した現在目的。
+// premise.purpose は expected.revision の目的と一致すること（不一致は前提不一致として不受理）。
+// orchestrate が premise 構築時にこの対応を照合し、repository のリビジョン比較更新（atomic compare）が現在性を包含します。
 struct SteeringPremiseRef {
     expected: TaskRef,
     purpose: TaskPurposeRef,
 }
 
-// Task 側の相手 identity premise。他 domain の newtype を import しない。
-struct AssigneeRef { companion: RawId }  // 担当 Companion（CompanionId とは変換しない）
+// タスク側の相手識別子の前提型。他ドメインの固有型を直接インポートしない。
+struct AssigneeRef { companion: RawId }  // 担当パートナー（CompanionId とは直接変換しない）
 
-// 採用 context entry。entry は採用 identity・由来・取得時点を持つ。
-// AU2/AU4 の repository slice が記録した kind は採用目的のみ。採用指示 entry は H-A steering 配線 slice が
-// producer とともに追加し、材料・途中理解はそれぞれの利用先が分岐する slice が同じ形で追加する。
-// 本文の正本は元 record（採用目的: task_revision snapshot、採用指示: History）であり、entry は本文を複製しない。
-struct TaskContextEntryId(/* opaque */);
+// 採用されたコンテキスト項目（entry）。各項目は採用識別子・由来・取得日時を持ちます。
+// AU2/AU4 のリポジトリスライスが記録した種類は採用目的のみです。採用指示項目は H-A steering 配線スライスが
+// 生成元（producer）とともに追加し、材料や途中理解はそれぞれの利用先が分岐するスライスが同じ形で追加します。
+// 本文のマスターデータ（正本）は元のレコード（採用目的: task_revision スナップショット、採用指示: 会話履歴）にあり、項目側では本文を重複複製しません。
+struct TaskContextEntryId(/* 不透明な識別子 */);
 enum TaskContextItem {
     AdoptedPurpose(TaskPurposeRef),
-    // 採用指示。採用 identity は entry 自身の TaskContextEntryId であり、由来 record（会話: History）は
-    // origin.source が参照する。本文は複製しない。entry は採用 revision で 1 度だけ書き、後の forward では
-    // 再記録しない。現在有効な指示は、現在 revision までの AdoptedInstruction entry 全体である
-    // （retire の producer が存在するまで。retire は entry を削除・再記録せず identity の supersede として表し、
-    // producer を持つ slice が write premise・migration・現在有効 identity の比較 read rule を同じ design 変更で
-    // 追加する。それまで全採用指示 entry が現在有効）。
+    // 採用指示。採用識別子は項目自身の TaskContextEntryId であり、由来レコード（会話: 会話履歴レコード）は
+    // origin.source が参照します。本文は複製しません。項目は採用リビジョンで 1 度だけ書き込み、以降の前進（forward）では
+    // 再記録しません。現在有効な指示は、現在リビジョンまでの AdoptedInstruction 項目全体となります
+    // （破棄・退役（retire）の生成元が存在するまで。破棄は項目を削除・再記録するのではなく、識別子の置き換え（supersede）として表現し、
+    // 生成元を持つスライスが書き込み前提・移行・現在有効な識別子の比較読み出し規則を同一の設計変更で
+    // 追加します。それまではすべての採用指示項目が現在有効として扱われます）。
     AdoptedInstruction,
 }
 struct TaskContextOrigin {
-    kind: TaskContextOriginKind,   // 会話・自発・Schedule 各回等の由来
-    source: RawId,                 // 由来 record の identity（会話: History record、自発: 活動 record、
-                                   // Schedule: occurrence。本文は複製しない）
+    kind: TaskContextOriginKind,   // 会話・自発的行動・スケジュール各回等の由来
+    source: RawId,                 // 由来レコードの識別子（会話: 会話履歴レコード、自発: 活動記録、
+                                   // スケジュール: 実行回。本文は重複複製しない）
 }
 enum TaskContextOriginKind { OwnerConversation, Spontaneous, ScheduleOccurrence }
 struct TaskContextEntry {
@@ -178,89 +187,91 @@ struct TaskContextEntry {
     reference: TaskRef,            // 採用された (task, revision)
     item: TaskContextItem,
     origin: TaskContextOrigin,
-    acquired_at: WallClockWithTz,  // 取得時点
+    acquired_at: WallClockWithTz,  // 取得日時
 }
 
-// Workspace 利用条件（caller 側 value premise。関連付け identity ではない）。外部 folder は
-// locator 参照のみを持ち、ene は所有しない。関連付けの確定は作業が行う。
+// ワークスペース利用条件（呼び出し側の値の前提。関連付けの識別子そのものではない）。
+// 外部フォルダはパス参照のみを保持し、ene は所有しない。関連付けの確定は作業担当が行う。
 struct WorkspaceFolderRef { path: String }
 struct WorkspaceNeedRef {
     folder: WorkspaceFolderRef,
     save_target: Option<WorkspaceFolderRef>,  // 未定なら None（最終保存前に確認する）
 }
 
-struct DelegationId(/* opaque */);
-struct TaskAgentEphemeralId(/* opaque */);
-struct WorkspaceAssocId(/* opaque */);
+struct DelegationId(/* 不透明な識別子 */);
+struct TaskAgentEphemeralId(/* 不透明な識別子 */);
+struct WorkspaceAssocId(/* 不透明な識別子 */);
 
-// Task 化・委任の要求。個体調整が開始し、作業が受理・反映・達成を確定する。
+// タスク化・委任の要求。個体調整が要求を開始し、作業担当が受理・反映・達成を確定する。
 struct ProposeTaskCommand {
-    requester: CompanionId,          // 委任元 Companion（個体調整の同一性）
-    purpose: TaskPurpose,            // 採用を提案する目的本文（identity は作業が確定）
-    origin: TaskContextOrigin,       // 会話・自発・Schedule 各回等の由来
-    workspace_need: Option<WorkspaceNeedRef>, // Workspace 利用条件（関連付けは作業が確定）
-    client_binding: Option<ClientBindingPremise>, // Client 依存条件（受入時の現在条件。durable にしない）
+    requester: CompanionId,          // 委任元パートナー（個体調整の同一性）
+    purpose: TaskPurpose,            // 採用を提案する目的本文（識別子は作業担当が確定）
+    origin: TaskContextOrigin,       // 会話・自発的行動・スケジュール各回等の由来
+    workspace_need: Option<WorkspaceNeedRef>, // ワークスペース利用条件（関連付けは作業担当が確定）
+    client_binding: Option<ClientBindingPremise>, // クライアント依存条件（受入時の現在条件。永続化しない）
 }
 
-// 受入側 premise（caller が要求型から写す Task 側の値。identity は含めない）。
-// TaskId・TaskContextEntryId・WorkspaceAssocId は作業（orchestrate）が mint し、
-// TaskCreationPremise を構成して repository へ渡す。steering（AU4）の新 revision が
-// 記録する採用目的・採用指示 entry の TaskContextEntryId も同じく作業が mint し、
-// TaskCommitPremise で渡す（repository は渡された context entry identity を採番し直さない）。
+// 受入側前提（呼び出し側が要求型から写すタスク側の値。識別子は含めない）。
+// TaskId・TaskContextEntryId・WorkspaceAssocId は作業担当（orchestrate）が発行し、
+// TaskCreationPremise を構成してリポジトリへ渡します。方針指示（AU4）の新リビジョンが
+// 記録する採用目的・採用指示項目の TaskContextEntryId も同じく作業担当が発行し、
+// TaskCommitPremise で渡します（リポジトリは渡されたコンテキスト項目識別子を採番し直しません）。
 struct TaskProposalPremise {
     requester: AssigneeRef,          // ProposeTaskCommand.requester の写し
     purpose: TaskPurpose,
     origin: TaskContextOrigin,
     workspace_need: Option<WorkspaceNeedRef>,
-    client_binding: Option<ClientBindingPremise>, // 受入時の現在条件。durable にしない
+    client_binding: Option<ClientBindingPremise>, // 受入時の現在条件。永続化しない
 }
-
 struct ProposeSteeringCommand {
-    premise: SteeringPremiseRef,     // 依拠した revision・目的（boundary token）
-    new_purpose: Option<TaskPurpose>, // None = 目的変更なし（直前の purpose を引き継ぐ）
-    instruction_source: RawId,       // 採用を提案する追加指示の発言 record の参照（採用判断・採用 identity は作業）
-    unadopted: Vec<UnadoptedReasonRef>, // 未反映・待機の対応（あれば）。W-3 の反映可否・反映不能の理由と選択肢（requirements.md §Task）を producer に持つ最初の slice が、command field か outcome variant かを read rule とともに同じ design 変更で追加する。H-A steering 配線 slice はこの field を含めない
+    premise: SteeringPremiseRef,     // 依拠したリビジョン・目的（境界トークン）
+    new_purpose: Option<TaskPurpose>, // None = 目的変更なし（直前の目的を引き継ぐ）
+    instruction_source: RawId,       // 採用を提案する追加指示の発言レコードの参照（採用判断・採用識別子の発行は作業担当）
+    // unadopted フィールド（未反映・待機の対応）: W-3 の反映可否・反映不能の理由と選択肢（requirements.md §Task）を
+    // 生成元に持つ最初のスライスが、コマンドフィールドか結果の列挙子（outcome variant）かを読み出し規則とともに
+    // 同一の設計変更で追加します。H-A steering 配線スライスはこのフィールドを含めません。
 }
 
-// 作業が採用した追加指示の identity は、新 revision の context entry（指示 entry は H-A steering 配線 slice
-// で producer とともに追加）が表す。発言 record（History の正本）を採用済みと同一視しない。caller が渡す
-// instruction_source は由来 record の参照であり、採用 identity・entry identity とは別である。
-// 採用指示の採用 identity は、新 revision の採用指示 entry の TaskContextEntryId である。entry は採用 revision で
-// 1 度だけ書き、後の forward で作り直さない。よって採用 identity は revision を跨いで安定し、instruction_source
-// （History record の RawId）とは別物である。現在有効な採用指示は、現在 revision までの AdoptedInstruction entry
-// 全体として読み出される（retire の producer が存在するまで）。
+// 作業担当が採用した追加指示の識別子は、新リビジョンのコンテキスト項目（指示項目は H-A steering 配線スライス
+// で生成元とともに追加）が表します。会話発言レコード（会話履歴のマスターデータ）を採用済み指示と同一視してはなりません。
+// 呼び出し側が渡す instruction_source は由来レコードの参照であり、採用識別子や項目識別子とは明確に区別されます。
+// 採用指示の採用識別子は、新リビジョンの採用指示項目（entry）の TaskContextEntryId です。項目は採用リビジョンで
+// 1 度だけ書き込み、以降の前進（forward）で再作成しません。したがって採用識別子はリビジョンを跨いで安定し、instruction_source
+// （会話履歴レコードの RawId）とは別個の概念です。現在有効な採用指示は、現在リビジョンまでの AdoptedInstruction 項目
+// 全体として読み出されます（破棄・退役の生成元が存在するまで）。
 
-// 受入側 premise（steering。caller の要求型から写す Task 側の値。identity は含めない）。
-// 作業（orchestrate）が採用目的・採用指示 entry の identity を mint し、TaskCommitPremise を構成する。
+// 受入側前提（方針指示。呼び出し側の要求型から写すタスク側の値。識別子は含めない）。
+// 作業担当（orchestrate）が採用目的・採用指示項目の識別子を発行し、TaskCommitPremise を構成します。
 struct SteeringProposalPremise {
-    premise: SteeringPremiseRef,       // expected revision・依拠 purpose（boundary token）
-    new_purpose: Option<TaskPurpose>,  // 目的変更の提案本文。採用 identity・由来・取得時点は作業が確定
-    instruction_source: RawId,         // 採用を提案する追加指示の発言 record の参照。採用 identity ではない
+    premise: SteeringPremiseRef,       // 期待リビジョン・依拠目的（境界トークン）
+    new_purpose: Option<TaskPurpose>,  // 目的変更の提案本文。採用識別子・由来・取得日時は作業担当が確定
+    instruction_source: RawId,         // 採用を提案する追加指示の発言レコードの参照（採用識別子そのものではない）
 }
 
 struct CancelTaskCommand {
-    task: TaskId,                    // Cancel 対象。revision は問わない（現在への記録のため）
+    task: TaskId,                    // 中断対象のタスク。リビジョンは問わない（最新状態への中断記録のため）
     reason: CancelReasonRef,
 }
 
-// 作業の確定。会話上の受付と Task 反映を区別する。
+// 作業担当による確定結果。会話上での受付と、タスク本体への反映を明確に区別する。
 enum TaskProposalOutcome {
-    AcceptedAsTask(TaskRef),         // 新 Task として受理
-    AcceptedAsSteering(TaskRef),     // 新 revision として受理（旧 revision を残す）
-    CancelAccepted,                  // Cancel を現在 Task に記録（停止完了ではない）
-    StalePremise { current: TaskRef }, // expected revision・依拠 purpose の不一致。再評価へ戻す
-    MissingTask { task: TaskId },       // steering: premise の Task に durable state がない（書き込みなし。repository outcome の写し）
-    RevisionExhausted { task: TaskId }, // steering: 次の相異なる revision を durable に確定できない（書き込みなし。repository outcome の写し）
-    HeldByGlobalHold(HoldConditionRef), // 消去・復元保留・停止等で新規禁止。hold slice で導入。payload は受入側 owner が定義する premise に写す（第4節 inversion）
-    NeedsRevalidation(NeedsRevalidationRef), // 権限・帰属・cap 等の再照合が必要
-    InsufficientContext(InsufficientRef),    // 目的・Workspace 条件が不足
+    AcceptedAsTask(TaskRef),         // 新規タスクとして正式に受理
+    AcceptedAsSteering(TaskRef),     // 新しいリビジョンとして方針変更を受理（過去リビジョンも保持）
+    CancelAccepted,                  // 中断要求を現在のタスクに記録（外部処理の停止完了とは別）
+    StalePremise { current: TaskRef }, // 期待リビジョン・依拠目的の不一致（再評価へ差し戻し）
+    MissingTask { task: TaskId },       // 方針指示: 前提のタスクに永続状態が存在しない（書き込みなし。リポジトリ結果の写し）
+    RevisionExhausted { task: TaskId }, // 方針指示: 次の相異なるリビジョンを永続的に確定できない（書き込みなし。リポジトリ結果の写し）
+    HeldByGlobalHold(HoldConditionRef), // データ消去中・復元保留・安全停止などによる新規禁止（hold スライスで導入。ペイロードは受入側オーナーが定義する前提型に写す）
+    NeedsRevalidation(NeedsRevalidationRef), // 権限・在席帰属・利用枠などの再照合が必要
+    InsufficientContext(InsufficientRef),    // 目的やワークスペース条件が不足している
+}
 }
 
-// Task Agent への委任作成。作業が確定し、Agent は一時主体に留まる。
+// 一時的な Task Agent への委任作成。作業担当が確定し、Agent は一時的な従属主体に留まる。
 struct CreateDelegationCommand {
-    task: TaskRef,                   // expected revision（boundary token）
-    scope_copy: DelegationScopeRef,  // Task・Workspace 境界の写し（独立権限にしない）
-    consumer_assignment: AssignmentRef, // 推論・費用の consumer 対応（cap 合算用）
+    task: TaskRef,                   // 期待するタスクリビジョン（boundary token）
+    scope_copy: DelegationScopeRef,  // タスク・ワークスペース境界の写し（独立した特権を与えない）
+    consumer_assignment: AssignmentRef, // 推論・費用の消費主体割り当て（利用枠合算用）
 }
 
 enum DelegationOutcome {
@@ -270,149 +281,150 @@ enum DelegationOutcome {
     NeedsRevalidation(NeedsRevalidationRef),
 }
 
-// 長時間処理の分離：委任作成（request）と Agent 結果到着（completion）は別 interface。
+// 長時間処理の分離：委任の作成要求（request）と Agent からの結果到着（completion）は別のインターフェース。
 struct TaskAgentResultArrival {
-    delegation: DelegationRef,       // 委任対応（Task revision 前提を含む）
-    attempt_refs: Vec<ActionAttemptId>, // 作用との対応（あれば）
-    result_body_ref: TaskResultBodyRef, // 結果内容への参照（本文複製を要求しない）
-    certainty: AgentResultCertainty, // Agent 側の申告（作用証拠にしない）
+    delegation: DelegationRef,       // 委任の対応関係（前提としたタスクリビジョンを含む）
+    attempt_refs: Vec<ActionAttemptId>, // 外部アクション試行との対応関係（存在する場合）
+    result_body_ref: TaskResultBodyRef, // 結果本文への参照（本文の無駄な複製を要求しない）
+    certainty: AgentResultCertainty, // Agent 自身の自己申告（外部作用の確定証拠にしてはならない）
 }
 
 enum TaskResultAcceptance {
-    AdoptedToCurrent(TaskRef),       // 現在 revision・目的と対応。達成判断は作業
-    RecordedToOriginalOnly,          // steering / Cancel 後の旧結果。元 revision へ記録し現在不採用
+    AdoptedToCurrent(TaskRef),       // 現在のリビジョンおよび目的に合致（達成の判定は作業担当が行う）
+    RecordedToOriginalOnly,          // 方針変更や中断後の遅延結果。元の過去リビジョンにのみ記録し現在には不採用
     HeldForPermissionReview,         // 権限・消去・復元条件の再照合が必要
-    DiscardedAsStaleWithRecord,      // 旧目的・旧 revision のため現在不採用（元への記録は残す）
+    DiscardedAsStaleWithRecord,      // 過去の古い目的・リビジョンの結果であるため不採用（元への記録は残す）
 }
 ```
 
-- request 開始責務：個体調整（Task 化・steering・Cancel の意図）。authoritative 判断：作業（受理・反映・達成）。`TaskProposalOutcome`・`TaskRepository` trait・repository outcome は作業が所有し、caller（dialogue）は自分の要求型（`ProposeTaskCommand`・`ProposeSteeringCommand` 等）を Task 側の値 premise（`TaskProposalPremise`・`SteeringProposalPremise`）へ mapping して渡す。TaskId・TaskContextEntryId・WorkspaceAssocId の identity は作業（`orchestrate`）が mint して `TaskCreationPremise` を構成する。steering の新 revision が記録する context entry（採用目的・採用指示等）の `TaskContextEntryId` も作業が mint し、caller は依拠した現在 revision（`expected`）だけを渡す。creation では requester を担当 `AssigneeRef` として写す。Permission 判断は権限・制約、作用成功は実行・拡張に残る。
-- steering の outcome mapping：orchestrate は、まず `load_task` が返した現在 revision に対して `expected` と依拠 purpose を照合する（`expected != current` なら `StalePremise{current}`。`expected == current` でも `premise.purpose` が現在の採用目的 identity と一致しなければ同じく `StalePremise{current}`。本文一致では照合しない）。`forward_steering` の後は `CommittedAs` を `AcceptedAsSteering`、`StaleExpected{current}` を `StalePremise{current}`、`MissingTask`/`RevisionExhausted` を同じ意味・payload のまま `Ok` 側で返す。repository の revision atomic compare が現在性（pre-check 後の race を含む）を包含する。`HeldByGlobalHold` は hold slice が hold-check premise と対で追加し、この mapping に加わる。
-- 入力として必要なもの：採用を提案する目的本文と由来（creation）、`SteeringPremiseRef`（依拠 revision・目的。steering）、委任 scope 写し、Workspace 利用条件、Client 依存条件。軽微処理の Task 化省略は本体が行える範囲だが、閾値・分類 algorithm は固定しない（H-9）。
-- purpose / origin / scope：目的本文・採用位置の identity・由来・委任範囲・Workspace 範囲を欠落させない。発言 record と Task 反映内容と未反映・待機を区別する。
-- Client 依存条件：`client_binding` は受入時の現在条件として照合し、Task の durable state にしない。実行時の Client 条件は後続 boundary（Action 開始等）で現在の presence generation・現接続から再確認する（IB §10）。
-- expected current condition：現在の Task revision・委任有効性・Workspace 有効性・steering 前提。Client 依存なら presence generation＋現接続・可用性。
-- cancellation / hold：Cancel 受付と遂行停止・外部作用の停止完了を分ける。Cancel 後の遅延結果は `RecordedToOriginalOnly` に留める。
-- result certainty：Agent 申告を作用証拠にしない。作用確定度は実行・拡張の fact を参照・集約し、作業側で独立更新しない。
-- persistence / commit：Task 作成は `task + task_revision + 初期 task_context_entry` と、関連付けを確定した場合の `workspace_assoc` の原子 durable 後に可視化（durable-before-visible）。steering は新 revision＋新 context の原子 forward。同一 `TaskId` の steering・委任受付・完了確定・結果採用は SD-Task で逐次化（CCT §4）。
-- dependency inversion：preservation 等の他 owner の payload（`HoldConditionRef`・`RestoreGeneration` 等の擬似型）は、crate 境界では受入側 owner（作業・推論・実行等）が定義する premise として写す。他 owner の domain newtype を import しない（CM §4.3）。
-- IPC：Host-local。Client へは進捗・結果の必要表示だけを渡し、Task 正本は渡さない。
+- **開始責務と判断権限**: 個体調整担当がタスク化・方針指示（steering）・中断（Cancel）の意図を開始し、作業担当がその受理・反映・達成を確定します。`TaskProposalOutcome` や `TaskRepository` trait などの結果型は作業担当が所有し、呼び出し側（dialogue）は自身の要求型（`ProposeTaskCommand` や `ProposeSteeringCommand` 等）を作業側の値の前提（`TaskProposalPremise` や `SteeringProposalPremise`）に変換して渡します。`TaskId`・`TaskContextEntryId`・`WorkspaceAssocId` などの識別子は作業担当（`orchestrate`）が発行して `TaskCreationPremise` を構成します。方針指示の新リビジョンが記録するコンテキスト項目（採用目的・採用指示等）の `TaskContextEntryId` も作業担当が発行し、呼び出し側は依拠した現在リビジョン（`expected`）のみを渡します。タスク作成時は要求元を担当者 `AssigneeRef` として写します。権限の判断は権限・制約担当が行い、外部アクションの成功判定は実行・拡張担当が行います。
+- **方針指示（steering）の結果マッピング**: 作業担当（orchestrate）は、まず `load_task` が返した現在リビジョンに対して `expected` と依拠目的を照合します（`expected != current` の場合は `StalePremise { current }`。`expected == current` であっても `premise.purpose` が現在の採用目的識別子と一致しなければ同様に `StalePremise { current }` とし、単なる目的本文の一致では照合しません）。`forward_steering` の呼び出し後は、`CommittedAs` を `AcceptedAsSteering` へ、`StaleExpected { current }` を `StalePremise { current }` へ変換し、`MissingTask` および `RevisionExhausted` は同じ意味・ペイロードのまま `Ok` 側のドメイン結果として返します。リポジトリのリビジョン比較照合（atomic compare）が、事前照合後の競合レースを含む現在性を包含します。`HeldByGlobalHold` は hold スライスが保留照合前提と対で追加し、このマッピングに加わります。
+- **入力として必要な情報**: 採用を提案する目的本文と発生由来（作成時）、`SteeringPremiseRef`（依拠リビジョン・目的。方針指示時）、委任スコープの写し、ワークスペース利用条件、クライアント依存条件。なお、軽微な処理をタスク化せずに直接行うかどうかの判断は本体が行えますが、その閾値や分類アルゴリズムを固定化してはなりません（H-9）。
+- **由来・目的・スコープの保持**: 目的本文、採用位置の識別子、発生由来、委任範囲、ワークスペースの境界情報を決して欠落させてはなりません。単なる会話上の発言記録と、タスクに実際に反映された指示内容、および未反映・保留となった内容を明確に区別します。
+- **クライアント依存条件**: `client_binding` は受付時の現在条件として照合し、タスクの永続状態にはしません。実行時のクライアント条件は、後続の境界（アクション開始時など）で最新の在席世代番号や接続状態から再確認します（IB §10）。
+- **期待される現在の前提条件**: 現在のタスクリビジョン、委任の有効性、ワークスペースの有効性、方針指示の前提条件。クライアント依存のタスクであれば、在席世代番号、現行接続状態、およびデバイスの可用性を照合します。
+- **キャンセルと安全保留**: 中断要求の受理と、実際の処理遂行の停止、および外部アクションの停止完了は別個の事実です。中断後に遅延して届いた結果は、`RecordedToOriginalOnly` として元の過去記録への保存に留めます。
+- **結果の確信度**: エージェントの自己申告を外部作用の成功証拠として過信してはなりません。外部作用の確信度は実行・拡張担当が記録した確定事実（fact）を参照・集約し、作業担当側で勝手に更新してはなりません。
+- **永続化とコミット**: タスクの新規作成は、`task + task_revision + 初期 task_context_entry` と、関連付けを確定した場合の `workspace_assoc` を不可分に永続化してから外部へ可視化します（durable-before-visible）。方針変更は、新リビジョンと新コンテキストを不可分に進めます。同一 `TaskId` に対する方針指示、委任受付、完了確定、結果採用は、同期区分 SD-Task によって厳格に逐次化します（CCT §4）。
+- **依存性の反転（Inversion）**: 保全・消去等の他ドメインのデータ（`HoldConditionRef` や `RestoreGeneration` 等）は、クレート境界では受け入れ側のドメイン（作業、推論、実行等）が定義する前提型として受け取ります。他ドメインの固有型を直接インポートしてはなりません（CM §4.3）。
+- **IPC 通信**: ホスト内部で完結します。クライアントへは進捗や結果の必要な表示情報のみを伝達し、タスクのマスターデータ（正本）そのものは送信しません。
 
 ### H-B Experience 提出 → 形成判断（個体調整・作業 → 認識・学習）
 
 ```rust
 struct ProposeExperienceCandidate {
-    experiencer: CompanionId,        // 経験した個体
-    source_range: SourceRangeRef,    // 元 Conversation・Task 等の大まかな範囲
-    source_kind: ExperienceSourceKind, // 対話 / Task / Tool / Observation / 交流の区別
-    task_ref: Option<TaskRef>,       // Task 由来なら revision 前提
+    experiencer: CompanionId,        // 経験を積んだパートナー個体
+    source_range: SourceRangeRef,    // 元となった会話やタスクの大まかな範囲
+    source_kind: ExperienceSourceKind, // 対話／タスク／ツール実行／観測／交流などの種別
+    task_ref: Option<TaskRef>,       // タスク由来である場合はそのリビジョン前提
     delegation: Option<DelegationId>,
-    intended_use: IntendedUse,       // 返答 / Learning候補 / routing / Permission解釈 / Task判断の別
-    // Raw 本文・詳細 payload の複製を要求しない。参照で辿れること。
+    intended_use: IntendedUse,       // 返答／学習候補／ルーティング／権限解釈／タスク判断などの用途意図
+    // 生の本文や詳細ペイロードの無駄な複製を要求しない。参照によって元データを辿れること。
 }
 
 enum FormationDecision {
-    Formed { summary: SummaryId },   // Summary evidence を保存し、少なくとも1件の変更を適用した
-    NoChangesApplied,                // compare-before-commit 敗北・対象欠落・scope 不一致・既存・revision 枯渇など。何も保存していない
-    DeferredForContext,              // 文脈不足で保留（再提出は新 Experience 扱いにしない）
-    DeclinedAsNoEndValue,            // 保存価値なし（全件保存を要求しない）
+    Formed { summary: SummaryId },   // 要約証拠（Summary evidence）を保存し、少なくとも1件の学習変更を適用した
+    NoChangesApplied,                // コミット前照合の敗北、対象欠落、スコープ不一致、既存と同一、リビジョン枯渇等により何も保存しなかった
+    DeferredForContext,              // 文脈情報が不足しているため保留（再提出時に新しい別経験として扱わない）
+    DeclinedAsNoEndValue,            // 長期保存する価値がないと判断（すべての経験を保存する義務はない）
 }
 ```
 
-- Client・round・presence generation の correspondence は current stage の Experience formation が消費しないため interface に含めない。必要 stage で再導入する。
-- 消去区間・保存禁止・非共有による保留（`HeldByErasureOrConstraint`）は current stage の formation では発生させず、deletion / constraint を扱う stage で再導入する。
-- 開始：個体調整・作業。判断：認識・学習（保存価値・形成・更新・統合・想起必要性）。Task 限り情報の Learning 化は別判断。
-- 失ってはならないもの：由来の区別、対象 Companion・Task・委任との関係、期待する利用先。
-- Learning と Task を統合しない。応答完了と全 Learning 更新完了を同一条件にしない。
+- クライアント識別子、会話ラウンドID、在席世代番号の細かな対応関係は、現在の開発ステージにおける経験形成では消費しないため、インターフェースには含めません（必要となるステージで再導入します）。
+- 個人データ削除中や保存禁止制約による保留（`HeldByErasureOrConstraint`）は、現在のステージの形成処理では発生させず、削除や制約を本格的に扱うステージで安全に再導入します。
+- **開始責務と判断権限**: 個体調整および作業担当が候補を提出し、認識・学習担当がその保存価値、知識形成、更新、統合、および将来の想起必要性を判断します。タスク固有の一時的な情報を自律学習へ昇格させるかどうかは、学習担当が独立して判断します。
+- **保持すべき情報**: 経験の発生由来の種別、対象パートナー、関連タスク、委任関係、期待される将来の利用用途。
+- 自律学習とタスク管理を混同してはなりません。ユーザーへの応答生成が完了したことと、バックグラウンドでの学習データ更新がすべて完了したことを同一視してはなりません。
 
 ### H-C 会話による訂正（個体調整 → 認識・学習）
 
 ```rust
 struct ProposeCorrectionCommand {
-    target: LearningId,              // 訂正対象
-    expected_revision: LearningRevision, // boundary token
-    new_experience: ProposeExperienceCandidate, // 訂正根拠の新 Experience
-    temporal_kind: TemporalKind,     // InitiallyWrong vs ChangedSince（誤訂正と時間変化の区別）
+    target: LearningId,              // 訂正対象の学習項目
+    expected_revision: LearningRevision, // 期待リビジョン（boundary token）
+    new_experience: ProposeExperienceCandidate, // 訂正の根拠となる新しい経験
+    temporal_kind: TemporalKind,     // 最初から誤っていたのか（InitiallyWrong）、途中で変わったのか（ChangedSince）の区別
 }
 
 enum CorrectionOutcome {
-    CorrectedAs(LearningRevision),   // 新 revision（過去有効性を保つ関係付き）
+    CorrectedAs(LearningRevision),   // 新しいリビジョンとして安全に訂正（過去の有効性履歴も保持）
     StaleTarget { current_revision: LearningRevision },
     HeldByErasureOrConstraint(HoldConditionRef),
 }
 ```
 
-- 個体調整が会話で訂正を受け取ることは学習状態の直接上書きではない。対象を定めた意味変更は認識・学習。過去発言を現在認識へ書き換えない。
+- 個体調整担当がユーザーとの対話の中で「それは違うよ」という訂正発言を受け取ったとしても、それだけで学習状態を直接書き換えてはなりません。どの学習項目をどう変更すべきかという意味論的な判断は、認識・学習担当が行います。また、過去の発言ログそのものを現在の認識に合わせて改ざんしてはなりません。
 
 ### H-D Learning 参照・由来説明（query + fact）
 
 ```rust
 struct LearningQuery {
-    requester: LearningConsumer,     // 個体調整 / 作業 / 共有観測（routing 範囲限定）等の consumer
-    purpose: LearningUsePurpose,     // 返答 / Task判断 / routing / 由来説明の別
-    scope_need: ScopeNeedRef,        // 必要な scope（Companion / Global の要求範囲）
-    current_constraints: ConstraintSnapshotRef, // scope・保存禁止・消去条件の写し
+    requester: LearningConsumer,     // 個体調整／作業／共有観測（ルーティング範囲限定）などの利用元
+    purpose: LearningUsePurpose,     // 応答生成／タスク判断／ルーティング／由来説明などの用途別目的
+    scope_need: ScopeNeedRef,        // 要求するスコープ範囲（パートナー専用／全体共有）
+    current_constraints: ConstraintSnapshotRef, // 現在のスコープ制限、保存禁止フラグ、消去保留条件の写し
 }
 
 struct LearningView {
     learning: LearningId,
     revision: LearningRevision,
-    scope: LearningScope,            // Companion / Global（意味状態）
-    grounds: SummaryGroundsRef,      // Summary→形成・改訂の対応（本文複製しない）
-    // 共有 current から私的過去全文へ辿らせない。取得後の copy も現在の制限に従う。
+    scope: LearningScope,            // パートナー専用（Companion）／全体共有（Global）
+    grounds: SummaryGroundsRef,      // 要約から知識形成・改訂への対応関係（本文そのものは複製しない）
+    // 全体共有の現在データから、他パートナーの私的な過去全文を勝手に辿らせてはならない。
+    // 取得したデータのコピーであっても、現在の制約に従う必要がある。
 }
 ```
 
-- query 成功は後続の送信・共有許可ではない。Global 本文が使えても私的根拠は漏らさない。到着順が新しい＝根拠が新しいにしない。
+- クエリによる参照に成功したことは、後続の外部送信や他者共有の許可を意味しません。全体共有（Global）の知識本文が利用可能であっても、その根拠となった特定の対話ログ全文などの私的情報を外部へ漏洩させてはなりません。また、遅れて届いた知識を「到着が最後だから最新の根拠である」と誤認してはなりません。
 
 ### H-E scope 変更
 
-意味判断と強制を分離する。具体的な依存方向・API・制約表現の完成ではなく、interface の分離が要点。
+意味論的な判断と、システム全体への制約の強制適用を分離します。特定のAPIの完成を急ぐのではなく、インターフェースの責任境界を明確に分けることが重要です。
 
 ```rust
 struct ProposeScopeChangeCandidate {
     learning: LearningId,
     expected_revision: LearningRevision,
     proposed_scope: LearningScope,
-    shared_content: SharedContentRef, // 共有する内容と必要背景の選択・要約
-    non_share_intent: Option<NonShareIntentRef>, // Owner の明示的非共有（あれば優先）
+    shared_content: SharedContentRef, // 全体共有に適した内容と、必要な背景情報の要約
+    non_share_intent: Option<NonShareIntentRef>, // オーナーが明示的に非共有を望んでいる意図（存在する場合は最優先）
 }
 
 enum ScopeDecision {
     ScopeChanged(LearningRevision),
-    KeptAsCompanionScope,            // 不明なら Companion に留める
-    DeniedByExplicitConstraint,      // 明示保存禁止・非共有で解除不能
+    KeptAsCompanionScope,            // 判定に迷う場合や不明な場合は安全のためパートナー専用に留める
+    DeniedByExplicitConstraint,      // 明示的な保存禁止や非共有設定により変更不可
     StaleTarget { current_revision: LearningRevision },
 }
-// 決定後の迂回不能な適用は権限・制約と各利用箇所の協調（K-B・第10節の hold 参照）。
-// 認識・学習が強制の owner にならない。
+// 決定が下された後のシステム全体への迂回不能な適用は、権限・制約担当と各利用箇所の協調によって行われます（K-B および第10節の保留参照）。
+// 認識・学習担当自身が、権限の強制執行者になるわけではありません。
 ```
 
-- 重要度だけで Global 化しない。削除を契機とする自動 Global 化をしない。
+- 重要度が高いという理由だけで安易に全体共有（Global）にしてはなりません。また、パートナーの個別削除をきっかけとして、データを消去から逃すために自動で全体共有へ昇格させてはなりません。
 
 ### H-F Observer 向け限定 routing 文脈の供給
 
-Task と Learning を統合せず、Task context の参照は既存の個体調整–作業の協調を通じて行い、共有観測へ Task 所有・包括 access を移さない。
+タスク管理と自律学習を混同せず、タスク文脈の参照は既存の個体調整と作業担当の協調を通じて行い、共有観測担当へタスクの包括的な管理権限や無制限なアクセス権を移してはなりません。
 
 ```rust
 struct RoutingContextOffer {
-    source_owner: RoutingSourceOwner, // History・個体文脈=個体調整 / Memory・Learning=認識・学習 / Task context=作業
+    source_owner: RoutingSourceOwner, // 会話履歴・個体文脈＝個体調整 / 記憶・学習＝認識・学習 / タスク文脈＝作業
     target_companion: CompanionId,
-    purpose: RoutingPurpose,         // routing 用途に限定
-    constraint: RoutingConstraintRef, // source 制約＋専用 assignment 送信条件
-    selection_premise: SelectionPremiseRef, // 選択時点の前提
-    // 元情報に従属する一時的な派生表現。Summary・新 Learning 正本・新 scope ではない。
+    purpose: RoutingPurpose,         // ルーティング判定の用途に厳格に限定
+    constraint: RoutingConstraintRef, // 元データの制約 ＋ 割り当て専用の送信条件
+    selection_premise: SelectionPremiseRef, // 選択を行った時点の前提条件
+    // 元のデータに従属する一時的な派生表現であり、要約正本や新規学習データ、全体共有データではない。
 }
 ```
 
-- 全 private 公開・Global 化・他 Companion 共有にしない。要約・変換で制約を消さない。scope 変更・同意失効・消去は処理中派生物にも反映する。
+- パートナーのプライベートな情報を不用意に全体公開したり、他のパートナーへ勝手に共有したりしてはなりません。文章の要約やフォーマット変換によって、元データに課されていた制約を消滅させてはなりません。スコープの変更、同意の失効、個人データの削除要求が発生した場合は、現在処理中の一時的な派生データにも直ちに反映します。
 
 ### H-G 未伝達の登録・報告状況更新
 
 ```rust
 struct RegisterUndeliveredFact {
     companion: CompanionId,
-    source: UndeliveredSource,       // TaskRecord(TaskId) | ActivityRecord(ActivityId)
+    source: UndeliveredSource,       // TaskRecord(TaskId) または ActivityRecord(ActivityId)
     round: Option<RoundId>,
     presence_generation: PresenceGeneration,
     restore_generation: RestoreGeneration,
@@ -421,155 +433,161 @@ struct RegisterUndeliveredFact {
 enum ReportStatusTransition {
     PendingToSummarized,
     SummarizedToPresented,
-    MarkedPresentationUnknown,       // 提示不明を保持（確定済みにしない）
-    StaleSource,                     // 元記録が通常保持管理で失われた場合の関係確認用
+    MarkedPresentationUnknown,       // 画面に提示されたか不明な状態を正確に保持（勝手に完了とみなさない）
+    StaleSource,                     // 元の記録が通常の保持期間経過によって失われた場合の整合性確認用
 }
-// 接続・表示 copy 送信・Task 完了だけで報告済みにしない。実際の提示状況で更新する。
+// ネットワークの接続成功、表示データの送信完了、タスクの完了だけで「報告完了」にしてはなりません。
+// 端末の画面上に実際に提示されたという観測事実に基づいて状態を更新します。
 ```
 
-- 正本は個体調整。Task 由来なら Task 記録へ参照を戻す。報告用要約は派生表現。persistence は PR Group B（`undelivered`）の D1+D3。
+- マスターデータ（正本）は個体調整担当が保持します。タスク由来の未伝達情報であれば、タスク記録への参照を保持します。ユーザーへの報告用要約は単なる派生データです。永続化は永続化グループB（`undelivered`）の不可分トランザクションで行います。
 
 ### H-H Schedule 設定・到来・各回対応
 
 ```rust
 struct CreateScheduleCommand {
     owner_selection: OwnerSelectionRef,
-    assignee: AssigneeRef,           // Task 側 premise（CompanionId を import しない）
-    content: ScheduleContentRef,     // 実行内容・初期 Workspace 入力
-    timezone: ScheduleTimezoneRef,   // 作成時 tz（黙置換しない）
+    assignee: AssigneeRef,           // タスク側前提（CompanionId を直接インポートしない）
+    content: ScheduleContentRef,     // 実行内容・初期ワークスペース入力
+    timezone: ScheduleTimezoneRef,   // スケジュール作成時のタイムゾーン（勝手に暗黙変換しない）
 }
 
 struct ScheduleOccurrenceFact {
     schedule: ScheduleId,
     occurrence: ScheduleOccurrenceId,
-    status: OccurrenceStatus,        // Missed | Started | CancelledAsTaskContract
-    started_task: Option<TaskId>,    // 各回は新 Task
+    status: OccurrenceStatus,        // スキップ（Missed）／開始（Started）／契約により中断（CancelledAsTaskContract）
+    started_task: Option<TaskId>,    // 各回の実行は、独立した新しいタスクとして発行される
 }
-// 作成依頼を特別な Permission token にしない。各回で現在の制限を再評価する。
+// スケジュールの作成依頼そのものを、永続的な特別実行権限トークンとみなしてはなりません。
+// 各回の実行タイミングにおいて、その時点の最新の権限制約を改めて再評価します。
 ```
 
 ## 5. Permission / Credential / Inference / Execution クラスタの interface semantics（K-A〜K-K）
 
-「一つの security middleware を通れば全部成立」という設計にしない。評価・解決・送信・作用・記録の各 boundary を分離する。秘密値を通常の interface value として広く返さない。
+「ひとつの汎用セキュリティミドルウェアを通ればすべての処理が成立する」という安易な設計を採用してはなりません。権限評価、経路解決、プロバイダ送信、実作用の実行、事実記録の各境界を明確に分離します。また、各種認証情報の秘密値そのものを、通常のインターフェースの戻り値として不用意にシステム内へ返してはなりません。
 
 ### K-A Owner 意図 → 制御変更
 
 ```rust
 struct ProposeControlChangeCommand {
-    origin: OwnerIntentOrigin,       // 会話由来 / 管理面操作の区別＋引用対応
-    kind: ControlChangeKind,         // 一回承認 / 将来 Rule / 割当同意 / cap 変更等の別
-    target_scope: ControlTargetScopeRef, // 対象活動・目的・担当・Task/委任・Client/round 等の対応
-    relied_intent: ReliedIntentRef,  // 依拠した Owner 意図・Rule の対応
+    origin: OwnerIntentOrigin,       // 会話上の発言由来か、管理画面の直接操作かの区別 ＋ 引用情報との対応
+    kind: ControlChangeKind,         // 1回限りの承認／将来にわたるルール／プロバイダ利用同意／利用枠上限変更などの種別
+    target_scope: ControlTargetScopeRef, // 対象とする活動・目的・担当パートナー・タスク／委任・クライアント／ラウンド等の範囲
+    relied_intent: ReliedIntentRef,  // 根拠として依拠したオーナー自身の明確な意図やルールの対応関係
 }
 
 enum ControlChangeDecision {
-    AppliedAsOneTimeApproval,        // 現在の明確な依頼の一回限りの承認
-    NeedsClarification,              // 曖昧・矛盾・過度に広い・重大
-    DeniedByBoundary,                // 永続 Deny・Always ask・Capability 境界の黙上書きに当たる
+    AppliedAsOneTimeApproval,        // 現在の明確な依頼に対する、1回限りの実行承認として適用
+    NeedsClarification,              // 要求が曖昧、矛盾がある、過度に広範である、または重大な影響があるため確認が必要
+    DeniedByBoundary,                // 恒久的な拒絶設定、常に確認（Always ask）設定、機能上限（Capability）の境界に抵触するため拒絶
 }
 ```
 
-- 開始：入出力・提示＋個体調整・作業（意図供給）。判断：権限・制約。LLM 出力・Learning・Character・Skill・外部 content は材料であり、Owner 由来の管理意図との対応なしに control plane を変更できない。Rule 保存自体は Action の trigger にしない。
-- Rule store の identity 型（`RuleId`）・`StoredAsRule` decision・K-B の `rule_revision` expected 欄は rule store 導入 stage で再導入する。
+- **開始責務と判断権限**: 入出力・提示担当、および個体調整・作業担当がオーナーの意図を伝達し、権限・制約担当が変更の可否を最終判断します。LLMの出力、学習データ、キャラクター設定、スキル、外部コンテンツなどは単なる参考材料に過ぎず、オーナー自身に由来する明確な管理意図との紐付けが確認できない限り、制御設定（control plane）を変更することはできません。また、ルールが保存されたこと自体を外部アクションの自動トリガーにしてはなりません。
+- ルール保存用の識別子型（`RuleId`）、`StoredAsRule` の判定結果、および K-B における `rule_revision` の前提フィールドは、ルール保存機構を本格導入する開発ステージにおいて安全に再導入します。
 
 ### K-B 現在の利用可否の照合（live authorization check）
 
-判断記録と生きた許可を区別する。保存 Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定を現在許可として再利用しない。
+過去の判断記録と、現時点で有効な「生きた実行許可」を厳格に区別します。過去に保存された許可フラグ、委任時にコピーされた権限、事前の一括判定結果、バックアップから復元されたルール、対話文脈内の許可発言、短期間のキャッシュ判定などを、現在の実行許可として安易に流用・再利用してはなりません。
 
 ```rust
 struct CheckLiveAuthorizationQuery {
-    candidate: ActionCandidateRef,   // 目的・対象・data・送信先・作用の解釈（K-H の候補対応）
-    relied_evaluation: PermissionEvaluationId, // 依拠した判断の対応（あれば）
-    task: Option<TaskRef>,           // Task revision 前提
+    candidate: ActionCandidateRef,   // 目的・対象・データ・送信先・外部作用の解釈内容（K-H の候補との対応）
+    relied_evaluation: PermissionEvaluationId, // 依拠した過去の判断記録との対応（存在する場合）
+    task: Option<TaskRef>,           // タスクのリビジョン前提
     delegation: Option<DelegationId>,
     workspace: Option<WorkspaceAssocId>,
-    presence: Option<PresenceCheckRef>, // Client 依存なら claimed generation＋現接続前提
+    presence: Option<PresenceCheckRef>, // クライアント依存の処理であれば、申告された在席世代番号 ＋ 現行接続の前提
     consent_revision: Option<ConsentRevisionExpectation>,
-    cap_context: CapCheckContextRef, // 費用・資源・並列・反復の上限照合用
-    hold_context: HoldCheckContextRef, // 失効・停止・消去・復元保留の照合用
+    cap_context: CapCheckContextRef, // 費用・リソース・並列数・反復回数の上限照合用コンテキスト
+    hold_context: HoldCheckContextRef, // 失効・停止・消去中・復元保留などの安全保留の照合用コンテキスト
 }
 
 enum LiveAuthorizationDecision {
-    AllowForThisUse(PermissionEvaluationId), // 今回の利用に対する確定（再利用可能な包括許可ではない）
+    AllowForThisUse(PermissionEvaluationId), // 今回の具体的な利用に対する確定（再利用可能な包括許可ではない）
     Deny(DenyReasonRef),
-    AskOwner(OwnerQuestionRef),      // Owner 判断待ち（実行せず待機）
+    AskOwner(OwnerQuestionRef),      // オーナーの判断が必要なため実行を保留して待機
     WaitForCondition(WaitConditionRef),
     NeedsRevalidation(NeedsRevalidationRef),
 }
 ```
 
-- 各開始について現在の条件を実対象へ適用する。適用責任は実行・拡張（作用）・推論（送信）・各参照保存箇所に残り、許可の意味自体は権限・制約に残る。無関係な変更ごとの再承認は要求しない。再評価要否は重要な変更で決める（K-H）。
-- setup completeness（consent 記録・credential 登録・bearer の有無）は推論 admission（K-E）が唯一の owner であり、本 query は setup 状態を含めない。本 live check は consent 状態だけを判定し、setup 不足を独立に拒否しない。
+- 各処理の開始直前に、現在の最新条件を実際の操作対象へ厳格に適用します。適用の執行責任は実行・拡張担当（外部作用）、推論担当（プロバイダ送信）、および各参照・保存箇所に残り、許可の意味論そのものの管理は権限・制約担当が担います。なお、無関係な軽微な変更が生じるたびに毎回再承認を要求するのではなく、重大な意味の変化があったかどうかに基づいて再評価の要否を判断します（K-H）。
+- 環境設定の完備状態（利用同意の記録、認証情報の登録、トークンの有無など）の確認は、推論受付ゲート（K-E）が唯一の責任者であり、本クエリには設定状態のチェックを含めません。本リアルタイム照合（live check）は同意状態そのものだけを判定し、セットアップ不足を理由にして独立に拒絶することはありません。
 
 ### K-C 秘密利用（認証用途への供給）
 
-caller へ secret ownership を渡さない形を優先する。参照を持つことは利用可能ではない。
+呼び出し元へ秘密情報そのものの所有権を渡さない設計を徹底します。認証情報の参照（ハンドル）を持っていることと、その秘密情報を自由に読み出せることは全く別です。
 
 ```rust
 struct RequestAuthenticatedUseCommand {
-    credential_ref: CredentialRef,   // 非秘密の用途参照（秘密値を含めない）
-    connection: ConnectionNeedRef,   // どの接続・用途を必要とするか（秘密を含まない参照）
-    operation: OperationKind,        // 認証を伴う操作の種別
-    // LLM が記述した参照だけでは利用可能にならない。設定済み接続・用途・有効性の照合が必要。
+    credential_ref: CredentialRef,   // 秘密情報を含まない、用途別の不透明な参照ID
+    connection: ConnectionNeedRef,   // どの接続先や用途で必要としているかを示す参照情報（秘密値は含まない）
+    operation: OperationKind,        // 認証を伴う具体的な操作の種別
+    // LLM が生成した単なる参照文字列だけでは利用可能になりません。
+    // 設定済みの接続先、利用用途、有効期限の照合が不可欠です。
 }
 
 enum AuthenticatedUseOutcome {
-    UsedWithinScope,                 // 必要範囲での秘密利用の供給（値は返さない）
-    NeedsReauthentication,           // 失効・不足・無効
-    DeniedByConstraint,              // 保存禁止・失効・保留等
-    StaleReference,                  // 参照と現在の store・用途の不一致
+    UsedWithinScope,                 // 必要な範囲内でのみ安全に秘密情報を利用（秘密値そのものは返却しない）
+    NeedsReauthentication,           // 認証情報の失効、不足、または無効化
+    DeniedByConstraint,              // 保存禁止、失効、安全保留などにより利用不可
+    StaleReference,                  // 参照情報と現在の保管庫・用途との不一致
 }
 
-// 供給側の約束：秘密値を model context・LLM 生成 Tool argument・通常 result・UI・
-// History・Summary・Learning・Task結果・log・Audit・Debug・backup へ流さない。
-// 認証先 error・result の反射にも受入・保存・提示箇所が参加して非露出を維持する。
+// 供給側の重要な規約：
+// 認証情報の秘密値そのものを、モデルのコンテキスト、LLMが生成したツール引数、通常の結果データ、
+// UI画面、対話履歴、要約、学習データ、タスク結果、通常ログ、監査ログ、デバッグ出力、
+// バックアップアーカイブへ絶対に流出させてはなりません。
+// 接続先からのエラー応答や結果の受け取り・保存・画面表示の各箇所も協調し、秘密値の非露出を維持します。
 ```
 
-- 秘密値本体は OS credential store 等の分離保管（E）。DB 側は非秘密参照だけを持つ（PR Group K）。Rust interface 上も `SecretValue` 型を public に返さない。必要な認証用途へ「利用させる」が、値は認証秘密の boundary 内に留める。例えば `with_credential(handle, |opaque| ...)` 的な限定利用、または接続 owner への直接供給であり、汎用 `get_secret() -> String` を設けない。
+- 秘密情報本体は、OS の資格情報マネージャー等の独立した保護領域（E側）に安全に保管します。データベース側には秘密を含まない参照情報のみを保持します（PR グループK）。Rust のインターフェース上でも `SecretValue` 型をパブリックな戻り値として返してはなりません。必要な認証用途に対して「利用させる（認証処理を代行する）」ことはあっても、値そのものは認証秘密情報の境界内に厳重に閉じ込めます。たとえば `with_credential(handle, |opaque| ...)` のようなスコープ限定の安全なインターフェースや、接続担当者への直接供給とし、汎用的な `get_secret() -> String` のような安易な取得関数は一切設けません。
 
 ### K-D Provider 割当解決
 
-解決済み経路を独立した利用可能 assignment の正本にしない。
+一度解決された通信経路の情報を、恒久的に利用可能なプロバイダ割り当てのマスターデータ（正本）とみなしてはなりません。
 
 ```rust
 struct ResolveAssignmentQuery {
-    consumer: UsageConsumer,         // CompanionReasoning / ObserverDedicated / TaskAgent(inherit) 等
+    consumer: UsageConsumer,         // パートナーの主思考／観測専用／タスクエージェント（継承）などの消費主体
     capability: CapabilityKind,
-    current_consent: ConsentExpectationRef, // expected consent revision
+    current_consent: ConsentExpectationRef, // 期待される同意リビジョン（expected consent revision）
 }
 
 struct ResolvedRouteCandidate {
-    route: ProviderRouteRef,         // 派生結果（authority ではない）
-    consent: AssignmentConsentId,    // 依拠した同意の対応
-    capability_gap: Option<CapabilityGapRef>, // 能力不足なら利用前に不足を示す
+    route: ProviderRouteRef,         // 導出された経路の候補（決定権威そのものではない）
+    consent: AssignmentConsentId,    // 根拠として依拠した同意情報の対応関係
+    capability_gap: Option<CapabilityGapRef>, // 能力不足が存在する場合は、実行前にその差分を明示する
 }
-// 利用可否の確定は K-B の live check で現在条件と照合して行う。登録・認証成功で成立させない。
-// 送信（K-E）は確定済み前提を再照合しない。
+// 最終的な利用可否の確定は、K-B のリアルタイム照合において最新の条件と突き合わせて行います。
+// プロバイダの登録や初期認証が成功したことだけで、無条件の利用権限を成立させてはなりません。
+// また、実際の送信処理（K-E）の段階で、確定済みの前提条件を無駄に再照合してはなりません。
 ```
 
-- Observer は専用 assignment を解決し、Companion override・同意の選択・合成を行わない。
+- 観測処理（Observer）は専用の割り当てを解決して動作し、パートナー側の設定を勝手に上書きしたり、利用同意の選択や合成を独自に行ったりしてはなりません。
 
 ### K-E 推論の実利用ごとの成立・送信
 
-最初の送信・再送・補助推論・継続的な送受信の各継続部分もそれぞれ実際の利用として成立させる。fallback（K-F）は Stage 16（Multi-provider / fallback / full cost cap）で再導入する。
+最初のプロンプト送信、再送、補助的な推論呼び出し、対話の継続に伴う一連の送受信の各ステップについて、それぞれを独立した「実際の利用」として厳格に成立させます。なお、フォールバック機構（K-F）は、マルチプロバイダおよび費用上限を本格導入するステージ16で再導入します。
 
 ```rust
 struct AdmissionRequest {
-    candidate: InferenceUseCandidate, // consumer・用途・論理 context・capability の対応（写し）
-    // consent / credential premise は admission が読む確定材料。
-    // 秘密値・permission 内部を利用元へ返さない。
+    candidate: InferenceUseCandidate, // 消費主体・利用用途・論理コンテキスト・要求能力の対応関係（写し）
+    // 利用同意や認証情報の前提条件は、受付ゲート（admission）が読み取る確定材料です。
+    // 秘密値そのものや内部の権限詳細を呼び出し元へ漏洩させてはなりません。
 }
 
 enum Admission {
-    Admitted(Box<AuthorizedInference>), // 確定済み前提（ticket・consent premise・provider/model・candidate）
-    Declined(NotSentReason),            // 前提不足・失効・allowlist 外。送信前に落下し副作用を残さない
+    Admitted(Box<AuthorizedInference>), // 確定した前提情報（チケット、同意前提、プロバイダ／モデル情報、候補情報）
+    Declined(NotSentReason),            // 前提不足、失効、許可リスト対象外など。送信前に安全に中断し、副作用を残さない
 }
 
 struct InferenceAttempt {
     ticket: InferenceTicketRef,
     capability: CapabilityKind,
-    expected_consent: ConsentPremise,               // (id, rev) を組で運ぶ
-    expected_credential_set: CredentialSetRevision, // prompt が scrub された credential set
+    expected_consent: ConsentPremise,               // (id, rev) をペアとして厳格に保持
+    expected_credential_set: CredentialSetRevision, // 秘密情報が適切に除外された認証情報セットのリビジョン
     provider: ProviderRouteRef,
     model: ProviderRouteRef,
 }
@@ -577,21 +595,26 @@ struct InferenceAttempt {
 enum InferenceDispatchOutcome {
     Completed {
         arrival: InferenceResultArrival,
-        adopted: bool, // await 後の adoption consent が成立したか
+        adopted: bool, // 待機（await）完了後の結果採用の同意が正常に成立したかどうか
     },
-    NotSent(NotSentReason), // 送信前に拒否。usage fact を残さない
+    NotSent(NotSentReason), // 送信前に安全に拒絶された状態（利用実績データは残さない）
 }
 
 struct InferenceResultArrival {
-    ticket: InferenceTicketRef,      // 元要求・範囲との対応
-    output_text: ProviderOutputRef,  // 送信表現・Provider 側 context・戻り結果と元要求・情報範囲の対応
-    usage: UsageFactRef,             // 報告 / 不明の区別付き
+    ticket: InferenceTicketRef,      // 元の要求チケットおよび範囲との対応関係
+    output_text: ProviderOutputRef,  // 送信表現、プロバイダ側のコンテキスト、戻り値と元要求との整合性
+    usage: UsageFactRef,             // プロバイダから報告された利用量（または計測不明の区別付き）
 }
 ```
 
-- 送信手順：admission が現在の consent / credential premise と K-B の single-use authorization を確定して `Admission` を返し、attempt claim が保存 consent・credential set との一致を単一 transaction で確定してから `ProviderTransport` で送信する。input cap は claim 前、prompt の credential-set premise は claim と同一 transaction で照合する。claim 後の provider I/O は lock なし並列に行い、送信時点で権限・route を再 gate しない（admission / claim との二重 gate を作らない）。await 後の adoption consent 不成立は結果の採用だけを止め、usage 記録は attempt に従う。
-- setup completeness（consent 記録・credential 登録・bearer の有無）の判定は admission が唯一の owner であり、不足は `NotSent` として送信前に処理する。permission の live check は consent 状態だけを判定する。
-- 参照できたことと送れることの区別、解決済み送信先の包括許可化の禁止、同意不足の本文削減による黙解消の禁止。Prompt cache・session は最適化に限る。判定用推論にも自身の割当同意・認証用途・費用制限を適用する。
+- **送信の手順**:
+  1. 受付ゲート（admission）が最新の同意・認証前提と、K-B の単一利用認可を確認して `Admission` を返します。
+  2. 試行の確定（attempt claim）が、保存された同意情報および認証情報セットとの一致を単一のトランザクションで確定した上で、トランスポート層を介して送信します。
+  3. 入力トークン上限は確定前に、プロンプト内の認証情報セット前提は試行確定と同一のトランザクションで照合します。
+  4. 試行確定後のプロバイダへの非同期I/Oはロックを持たずに並行実行し、送信の瞬間に権限やルーティングを二重に検証することはありません（受付ゲートとの二重チェックによる競合を防ぐため）。
+  5. ネットワーク待機（await）後に同意状態が変化して結果を採用できなくなった場合は、生成結果の採用のみを安全に破棄し、利用実績の記録は確定した試行情報に従って正しく残します。
+- 環境設定の完備状態（同意の記録、認証情報の登録、トークンの有無）の判定責任は受付ゲートのみが持ち、不足があれば送信前に `NotSent` として処理します。権限側のリアルタイム照合は同意状態そのものだけを評価します。
+- 「データを参照できたこと」と「外部へ送信してよいこと」を厳格に区別します。一度解決された送信先を包括的な許可とみなしてはならず、同意が不足しているからといって送信内容を勝手に削って無言で送信してはなりません。プロンプトキャッシュやセッションの再利用はパフォーマンス最適化に限定し、権限判定そのものにも独立した割り当て同意・認証用途・費用上限を厳格に適用します。
 
 ### K-F fallback 選択
 
@@ -599,125 +622,129 @@ struct InferenceResultArrival {
 struct ProposeFallbackCandidate {
     ticket: InferenceTicketRef,
     failed_route: ProviderRouteRef,
-    next_candidate: ProviderRouteRef, // 承認済み順序内の次候補
+    next_candidate: ProviderRouteRef, // オーナーが事前に承認したフォールバック順序内の次候補
 }
 
 enum FallbackDecision {
     AllowedAsApprovedFallback,
-    DeniedAsUnapprovedRoute,         // 未承認 Cloud への自動移送を含む
-    NeedsRevalidation(NeedsRevalidationRef), // 用途・data・privacy・Credential・cap の現在照合が必要
+    DeniedAsUnapprovedRoute,         // 未承認のクラウドへの自動切り替えを確実に防止
+    NeedsRevalidation(NeedsRevalidationRef), // 用途、対象データ、プライバシー設定、認証情報、利用枠の再照合が必要
 }
 ```
 
-- 安価さ・Capability 不足を例外にしない。登録先変更等で同意の意味が重要に変わるなら以前の同意をそのまま適用しない。
-- 本 interface は Stage 16（Multi-provider / fallback / full cost cap）で再導入する。
+- 「料金が安いから」「機能が不足しているから」といった理由で例外を作ってはなりません。プロバイダの切り替え等によって同意の意味が大きく変化する場合は、過去の同意をそのまま引き継いではなりません。
+- 本インターフェースは、マルチプロバイダおよびフォールバック機構を導入するステージ16において正式に再導入します。
 
 ### K-G 利用量の予約・確定・解放（cost reservation）
 
-同一残額の独立使い切りを許さない。処理中・不明をゼロにしない。
+同一の利用枠の残額を、複数の処理が独立に二重消費することを許しません。また、処理中の利用量や成否不明の消費を「ゼロ」とみなしてはなりません。
 
 ```rust
 struct ReserveUsageCommand {
     consumer: UsageConsumer,
-    cap: CapId,                      // per CapId（＋ provider / 全体 scope）
-    upper_bound: UsageUpperBoundRef, // 推定上限（過小予約による超過をしない）
-    attribution: UsageAttributionRef, // 用途・送信先の対応
+    cap: CapId,                      // 利用枠ID単位（プロバイダ単位または全体スコープ）
+    upper_bound: UsageUpperBoundRef, // 想定される利用上限（過小な予約による上限突破を防止）
+    attribution: UsageAttributionRef, // 利用目的および送信先との対応関係
 }
 
 enum ReservationOutcome {
     Reserved(ReservationId),
     DeniedByCap(CapStateRef),
-    HeldForUnknownCost,              // 費用不明で安全継続不可
+    HeldForUnknownCost,              // 費用が不明であり安全に継続できないため保留
     NeedsRevalidation(NeedsRevalidationRef),
 }
 
 struct CommitUsageCommand {
     reservation: ReservationId,
-    actual: UsageActualRef,          // 報告値 / 不明の別（推定は provider 実測が入る stage で再導入）
+    actual: UsageActualRef,          // 確定した実測利用量（または成否不明の区別付き）
 }
 
 struct ReleaseUsageCommand {
-    reservation: ReservationId,      // 未使用予約の解放（既生消費・不明消費は release しない）
+    reservation: ReservationId,      // 未使用分の予約枠の安全な解放（すでに発生した消費や不明な消費は解放しない）
 }
 ```
 
-- 原記録は各利用 owner（推論・作業・実行・拡張・保全・消去）に残し、権限・制約は可否だけを管理する。persistence は PR Group F（`usage_fact_*`）の D2+D3。commit は短い transaction 内の原子照合（CCT SD-Cap）。予約後の inference 実行は lock なし並列。費用計算法・集計期間・推定方式は Design Freedom。
-- `CommitUsageCommand` は当該利用 owner の再起動・Agent 停止後の再評価経路からも呼べる。所有 in-flight を失った `Reserved` を元の reservation / 利用対応に基づいて不明として確定し、release しない（PR §6.2、CCT §9.2）。caller の process 生存を必要条件にせず、別 owner に利用事実の変更権を移さない。不明と理由は費用管理面で区別して表示する。
+- 利用実績の元データは各利用担当者（推論、作業、実行、拡張、保全、消去）が保持し、権限・制約担当は利用枠の上限可否のみを管理します。永続化は永続化グループF（`usage_fact_*`）のトランザクションで行い、予約のコミットは短いトランザクション内の不可分な照合（SD-Cap）で行います。予約完了後の推論処理はロックなしで並行実行されます。なお、費用の計算アルゴリズム、集計期間、推定方式は実装の自由度に委ねられます。
+- `CommitUsageCommand` は、システムの再起動後やエージェント停止後の再評価フローからも安全に呼び出せます。処理中にプロセスが停止して宙に浮いた予約（`Reserved`）は、元の予約記録に基づいて「成否不明」として安全に確定させ、勝手に解放（release）してはなりません（PR §6.2、CCT §9.2）。呼び出し元プロセスの生存を必須条件とせず、他者に利用事実の書き換え権限を勝手に移しません。不明となった理由と金額は、管理画面で明確に区別して表示します。
 
 ### K-H Action 候補 → 認可 → 実作用 → 結果確定
 
-判断時の対象記述と実行時の実対象の文字列一致だけでは対応にしない。実対象解決を経て対応を確かめる。
+権限判定時に記述された対象の名前と、実行時に解決された実際の対象が文字列として一致していることだけで、同一の対象とみなしてはなりません。実行時の厳密な名前解決を経て、真の対象との対応関係を照合します。
 
 ```rust
 struct ActionCandidate {
-    principal_chain: PrincipalChainRef, // 実行主体＋委任 chain
-    task: Option<TaskRef>,           // Task revision 前提
+    principal_chain: PrincipalChainRef, // 実行主体および委任の連鎖情報
+    task: Option<TaskRef>,           // タスクのリビジョン前提
     delegation: Option<DelegationId>,
     workspace: Option<WorkspaceAssocId>,
-    purpose: ActionPurposeRef,       // 依頼・自発・Schedule 各回・steering のどれに基づくか
-    described_target: DescribedTargetRef, // 判断時の対象記述
-    operation: OperationKind,        // Read | Create | Edit | Delete | Execute を潰さない
-    data_use: DataUseRef,            // 主な data と用途（Credential 値を含めない）
-    cost_risk: CostRiskRef,          // 費用・risk（推定・不明の区別付き）
-    relied_intent_rule: ReliedIntentRuleRef, // 依拠 Owner 意図・Rule の対応
+    purpose: ActionPurposeRef,       // ユーザー依頼、自発的提案、スケジュール実行、方針変更のどれに基づくか
+    described_target: DescribedTargetRef, // 判定時に想定した対象の説明
+    operation: OperationKind,        // 読み取り／作成／編集／削除／実行の各操作を混同しない
+    data_use: DataUseRef,            // 取り扱う主なデータと利用用途（認証情報の秘密値は含めない）
+    cost_risk: CostRiskRef,          // 予想費用とリスク（推定値か不明かの区別付き）
+    relied_intent_rule: ReliedIntentRuleRef, // 依拠したオーナーの意図やルールの対応関係
 }
 
-// 実利用直前の現在条件（実行・拡張が適用）。重要な意味が変われば再評価する。
+// 実際の実行直前における最新条件の再確認トリガー（実行・拡張担当が適用）
+// 重要な意味の変化が生じた場合にのみ再評価を行う。
 struct RecheckTrigger {
-    // 対象同一性・操作種別・作用拡大、目的・steering 変化、Task・委任変化、
-    // Workspace・scope 変化、帰属・対象変化、依拠 Rule・同意・device・Credential 変化、
-    // 費用・risk の重要変化、停止・保留発生の有無。無関係な変更は再評価理由にしない。
+    // 対象の同一性、操作種別の拡大、目的や指示の変更、タスクや委任の変更、
+    // ワークスペースやスコープの変更、在席帰属の変更、依拠ルールの変更、
+    // 同意やデバイス・認証情報の変更、費用やリスクの大幅な変動、安全停止や保留の発生など。
+    // 無関係な軽微な変更を再評価の理由にしてはならない。
 }
 
 struct ExecuteActionCommand {
     candidate: ActionCandidate,
-    authorization: PermissionEvaluationId, // K-B の今回確定（生きた許可の写しではない）
-    resolved_target: RealTargetRef,  // 解決後の実対象
-    presence: Option<PresenceCheckRef>, // Client 依存なら generation＋現接続前提
+    authorization: PermissionEvaluationId, // K-B で得た今回限りの確定ID（包括許可のコピーではない）
+    resolved_target: RealTargetRef,  // 実行直前に解決された実際の操作対象
+    presence: Option<PresenceCheckRef>, // クライアント依存の処理であれば世代番号 ＋ 現行接続前提
     cost_reservation: Option<ReservationId>,
-    erasure_check: ErasureConditionRef, // 飛行中の消去条件の照合用
-    restore_premise: RestoreGeneration, // 復元跨ぎ参照の世代タグ
+    erasure_check: ErasureConditionRef, // 実行中に発生したデータ削除要求の照合用
+    restore_premise: RestoreGeneration, // バックアップ復元を跨ぐ参照を防ぐ世代タグ
 }
 
 enum ActionStartOutcome {
     StartedAsAttempt(ActionAttemptId),
     Denied(DenyReasonRef),
-    AskOwner(OwnerQuestionRef),      // 実行せず待機
-    StalePremise(StalePremiseRef),   // Task revision・委任・Workspace・実対象・許可・帰属・消去・復元条件の不一致
-    HeldByGlobalHold(HoldConditionRef), // hold slice で導入
+    AskOwner(OwnerQuestionRef),      // オーナーの指示が必要なため実行せず待機
+    StalePremise(StalePremiseRef),   // タスクリビジョン、委任、ワークスペース、実対象、許可、帰属、消去、復元の条件不一致
+    HeldByGlobalHold(HoldConditionRef), // 安全保留スライスで導入
 }
 
-// 開始後の outcome tracking（並列、per-attempt CAS）。実行・拡張が確定する。
+// 実行開始後の進捗および結果の追跡（試行ごとの CAS による並行管理）。実行・拡張担当が確定する。
 struct ReportEffectFact {
     attempt: ActionAttemptId,
-    stage: ActionStage,              // 受付 / 開始 / 送信 / 把握の別
-    certainty: ActionCertainty,      // ConfirmedSuccess | ConfirmedFailure | Unknown（粘着）
-    grounds: EffectGroundsRef,       // 根拠対応（Agent 申告を証拠にしない）
-    prior_unknown: Option<ActionAttemptId>, // retry の元不明対応（新試行の証明）
+    stage: ActionStage,              // 受付／開始／送信／把握などの進行段階
+    certainty: ActionCertainty,      // 確認済み成功／確認済み失敗／成否不明（粘着的に保持）
+    grounds: EffectGroundsRef,       // 結果の根拠情報（エージェント自身の自己申告を証拠にしない）
+    prior_unknown: Option<ActionAttemptId>, // 再試行の場合、元の成否不明試行との対応（新試行であることの証明）
 }
 ```
 
-- 受入の分離：入力受付・Task 受理・認可判断・実作用開始・把握作用・内部保存・Task 達成・Owner 報告は別の事実。一つの成功状態へ潰さない。確認済み成功 / 確認済み失敗 / 不明を区別し、確認できないことを未実行・失敗・成功へ勝手に変換しない。retry・再実行は新試行とする。
-- Timeout は確定度を変更しない（`Unknown` のまま）。遅延成功は元 attempt へ `Unknown→Confirmed` の CAS で記録し、現在 Task への採用は H-A の受入で別途照合する。
-- persistence は PR Group E（`action_attempt`）の D2+D3。開始前 compare は短い `Immediate` transaction（CCT §8.1、PR AU5）。
+- **処理段階の厳格な分離**:
+  ユーザー入力の受付、タスクの受理、認可の判定、外部作用の開始、実際の作用の把握、内部データへの保存、タスクの達成判定、オーナーへの報告完了は、すべて独立した別の事実です。これらを単一の「成功」という状態にひとまとめにしてはなりません。「確認済み成功」「確認済み失敗」「成否不明」を明確に区別し、確認が取れない事象を勝手に「未実行」や「失敗」「成功」へ改ざんしてはなりません。再実行は必ず独立した新しい試行として扱います。
+- タイムアウトが発生しても、外部作用の確信度は変化しません（`Unknown` のまま保持）。遅れて成功の確認が取れた場合は、元の試行記録に対して `Unknown` → `Confirmed` のアトミック更新（CAS）を行い、現在のタスクへ結果を採用するかどうかは H-A の受付インターフェースにおいて改めて判定します。
+- 永続化は永続化グループE（`action_attempt`）のトランザクションで行い、実行開始前の比較照合は短いトランザクション内で不可分に完了します（CCT §8.1、PR AU5）。
 
 ### K-I 拡張受入
 
 ```rust
 struct RequestExtensionUseCommand {
-    extension: ExtensionKind,        // MCP Tool/Resource/Prompt | Plugin(限定拡張点) | MCP Apps UI
-    target_action: ActionCandidate,  // 実際の作用との対応（名称だけで Capability を縮小しない）
-    mcp_connection: McpConnectionRef, // 非秘密接続設定・command・設定の由来
-    sandbox_exception: Option<SandboxExceptionRef>, // 特定 Local MCP の隔離外例外（Plugin へ流用しない）
+    extension: ExtensionKind,        // MCP ツール／リソース／プロンプト、プラグイン（限定された拡張点）、MCP Apps UI
+    target_action: ActionCandidate,  // 実際の外部作用との対応関係（ツールの名称だけで権能を過小評価しない）
+    mcp_connection: McpConnectionRef, // 秘密を含まない接続設定・コマンド・設定の由来
+    sandbox_exception: Option<SandboxExceptionRef>, // 特定のローカルMCPに限定されたサンドボックス隔離外例外（プラグインへ安易に流用しない）
 }
 
 enum ExtensionUseOutcome {
     AcceptedUnderLimit,
-    DeniedAsBypass,                  // Deny 迂回・内部回り込み・自己承認に当たる
+    DeniedAsBypass,                  // 拒絶設定の迂回、内部システムへの回り込み、自己承認とみなされるため拒絶
     NeedsRevalidation(NeedsRevalidationRef),
 }
-// 外部 process 内部への完全強制・確実な停止は報告しない。確認できない作用は不明とする。
-// MCP Apps の操作は外部 Tool UI の一時入力であり、第一者の制御変更・承認を直接成立させない。
+// 外部プロセス内部に対する完全な強制力や、100%確実な即時停止を保証したかのように報告してはなりません。
+// 外部プロセスでの作用が確認できない場合は、成否不明として扱います。
+// また、MCP Apps による画面操作は外部ツールのUIに対する一時的な入力に過ぎず、公式（第一者）の制御変更や権限承認を直接成立させるものではありません。
 ```
 
 ### K-J Client 依存作用の限定・移動協調
@@ -725,19 +752,19 @@ enum ExtensionUseOutcome {
 ```rust
 struct RequestClientBoundActionCommand {
     base: ExecuteActionCommand,      // K-H の実作用要求
-    delegator_presence: PresenceCheckRef, // 委任元 Companion の現在の active Client 前提
+    delegator_presence: PresenceCheckRef, // 委任元パートナーが現在アクティブに在席しているクライアントの前提条件
     device_permission: DevicePermissionExpectationRef,
 }
-// 現在の Client に存在することは Action の許可を意味しない。
-// ambient Observation の有効化を操作の承認としない。
-// 移動先が利用可能でも旧 Action 不明を自動再実行しない。
+// 特定のクライアント上にパートナーが存在していることは、その端末でのアクション実行許可を意味しません。
+// 環境観測（ambient Observation）が有効化されていることを、操作の承認とみなしてはなりません。
+// また、別の端末へ移動したからといって、旧端末で成否不明となったアクションを新端末で勝手に自動再実行してはなりません。
 ```
 
 ### K-K 失効・停止・保留の伝播、遅延到着・不明の扱い
 
 ```rust
 struct PropagateHoldNotification {
-    scope: HoldScopeRef,             // 対象と理由（失効・停止・cap・消去・復元保留等）
+    scope: HoldScopeRef,             // 対象範囲と保留理由（認証情報の失効、安全停止、利用枠超過、個人データ削除中、復元保留など）
     hold: HoldConditionRef,
 }
 
@@ -745,23 +772,23 @@ struct LateArrivalAttribution {
     attempt: Option<ActionAttemptId>,
     task_revision_premise: Option<TaskRef>,
     source_range: Option<SourceRangeRef>,
-    generation_tags: GenerationTagsRef, // presence / restore / sweep の区別
-    arrival_kind: LateArrivalKind,   // Tool結果 / 承認 / 推論結果 / usage報告等の別
+    generation_tags: GenerationTagsRef, // 在席世代／復元世代／スイープ世代の区別
+    arrival_kind: LateArrivalKind,   // ツール実行結果／承認応答／推論結果／利用量報告などの種別
 }
 
 enum LateArrivalHandling {
-    RecordedToOriginal,              // 元 Action・Task への対応付け（次の自動開始なし）
-    AdoptedToCurrentIfPremiseHolds,  // 現在照合が成立する用途だけ accept
-    SuppressedByErasure,             // 消去条件で再保存を抑止
-    KeptUnknownWithDupRisk,          // 不明のまま重複 risk 付き Owner 判断へ戻す
+    RecordedToOriginal,              // 元のアクションやタスクの過去記録への対応付け（後続処理の自動開始は行わない）
+    AdoptedToCurrentIfPremiseHolds,  // 現在の前提条件に完全に合致する用途にのみ採用
+    SuppressedByErasure,             // 個人データ削除の条件に基づき、データの再保存を安全に抑止
+    KeptUnknownWithDupRisk,          // 成否不明のまま保持し、二重実行リスクを明示してオーナーの判断へ戻す
 }
 ```
 
-- 複数理由が重なる場合、一つの解除だけで他の禁止を解除しない。Cancel・失効がすべての事実報告を禁止するわけではなく、記録できたことが次の利用を許すわけでもない。
+- 複数の保留理由が重複している場合、1つの理由が解消されただけで他の禁止事項まで勝手に解除してはなりません。中断や失効が発生したからといって、過去の事実の正確な記録まで禁止されるわけではなく、逆に記録が完了したからといって次の利用が自動的に許可されるわけでもありません。
 
 ## 6. Presence / I/O / Observation クラスタの interface semantics（X-A〜X-H）
 
-Client-originated message だけで authoritative presence を成立させない。Observer routing と Companion individual inference を別 boundary として維持する。
+クライアントからの自己申告メッセージのみを根拠にして、決定権威を持つ在席（presence）を成立させてはなりません。また、共有観測のルーティング（Observer routing）と、各パートナー個別の推論処理（Companion individual inference）は、別の境界として厳格に分離・維持します。
 
 ### X-A presence 成立・移動・復帰・復旧（個体調整 → 接続・存在）
 
@@ -770,28 +797,28 @@ struct RequestMoveCommand {
     companion: CompanionId,
     from_client: Option<ClientId>,
     to_client: ClientId,
-    reason: MoveReasonRef,           // Owner呼出し / 事前指示 / 文脈上の自発 / Host発の通常切断fallback / Host再起動復旧の別
-    expected_generation: PresenceGeneration, // boundary token
+    reason: MoveReasonRef,           // オーナーの明示的な呼び出し／事前指示／文脈に応じた自発的移動／ホスト側の通常切断によるフォールバック／ホスト再起動後の復旧などの種別
+    expected_generation: PresenceGeneration, // 期待される在席世代番号（boundary token）
     expected_state: PresenceStateExpectation,
-    round_closure: RoundClosureRef,  // 入出力・提示と実行・拡張からの区切り・利用不能・作用不明の対応
+    round_closure: RoundClosureRef,  // 入出力・提示担当および実行・拡張担当からの対話区切り、利用不能、作用不明の対応関係
 }
 
 enum MoveDecision {
-    TransitioningToNew(PresenceGeneration), // 旧→移行中→新の durable 遷移を開始
-    RejectedAsStalePresence(StalePresenceRef), // expected generation / state 不一致
-    DeniedByConstraint,              // pairing・device・停止・保留等
+    TransitioningToNew(PresenceGeneration), // 「旧端末 → 移行中 → 新端末」の安全な永続状態遷移を開始
+    RejectedAsStalePresence(StalePresenceRef), // 期待した在席世代番号または状態が不一致（差し戻し）
+    DeniedByConstraint,              // ペアリング未完了、デバイス無効、安全停止中、保留中などによる拒絶
 }
 
 struct PresenceAttributionFact {
     companion: CompanionId,
-    state: PresenceState,            // Present | NoActive | InTransition | Stopped | RecoveryWait
+    state: PresenceState,            // 在席中（Present）／在席なし（NoActive）／移行中（InTransition）／停止中（Stopped）／復旧待機中（RecoveryWait）
     active_client: Option<ClientId>,
-    generation: PresenceGeneration,  // 単調。区間の識別
+    generation: PresenceGeneration,  // 単調増加する在席世代番号（処理区間の厳密な識別に用いる）
 }
 ```
 
-- 判断：帰属成立は接続・存在。移動の必要性は個体調整、pairing・device 可否は権限・制約。Host 同居 Client にも同じ帰属制約を適用する。移行中は新旧いずれも Client 依存の新規開始をしない。二重 presence を禁止する。同一 `CompanionId` の帰属切替は SD-Presence で逐次化（CCT §4）。
-- hint・復旧先の更新と帰属成立を同一視しない。現在接続を古い保存値から再成立させない。
+- **判断権限と責務の分担**: 在席帰属の正式な成立は「接続・存在担当」が決定します。移動が必要かどうかの意味判断は「個体調整担当」が行い、ペアリング状態やデバイスの利用可否は「権限・制約担当」が判定します。ホストPC上で同居するローカルクライアントであっても、リモート端末とまったく同一の帰属制約を適用します。端末間を移動している移行中の過渡状態では、新旧いずれのクライアントにおいても端末依存の新規処理を開始してはなりません。また、1体のパートナーが複数端末で同時にアクティブになる「二重在席（二重アクティブ）」を厳格に禁止します。同一 `CompanionId` に対する在席切り替え処理は、同期区分 SD-Presence によって厳格に逐次化されます（CCT §4）。
+- 単なるUI上の表示ヒントや復旧先候補の更新を、在席の正式な成立と同一視してはなりません。過去に保存された古い接続情報を根拠にして、現在の接続を勝手に復活させてはなりません。
 
 ### X-B Text / Voice round の帰属・区切り・提示
 
@@ -799,36 +826,37 @@ struct PresenceAttributionFact {
 struct SubmitClientInputCandidate {
     companion: CompanionId,
     client: ClientId,
-    claimed_generation: PresenceGeneration, // Client 側の主張（authority ではない）
+    claimed_generation: PresenceGeneration, // クライアント側の自己申告（決定権威ではない）
     round: RoundId,
-    input_ref: ClientInputRef,       // 入力内容への参照（一時表現）
+    input_ref: ClientInputRef,       // 入力本文への参照（一時的な表現）
     trial_or_candidate: Option<ObservationCandidateOrTrialRef>,
 }
 
 enum RoundIntakeOutcome {
-    AcceptedForRound(RoundId),       // 現在帰属・現接続・許可・停止・保留の照合が成立
-    StaleRound(StaleRoundRef),       // 旧世代・旧 round。元 round へ対応付け、新 round へ付け替えない
-    HeldForTransition,               // 切替区間の新規開始禁止
+    AcceptedForRound(RoundId),       // 現在の在席帰属、現行の接続、実行許可、停止フラグ、保留フラグの照合がすべて正常に成立
+    StaleRound(StaleRoundRef),       // 古い世代や過去のラウンドへの遅延入力（元の古いラウンドに対応付け、勝手に新しいラウンドへ付け替えない）
+    HeldForTransition,               // 端末切り替え中のため新規受付を一時禁止
     NeedsRevalidation(NeedsRevalidationRef),
 }
 ```
 
-- `RoundClosureFact` / `ConfirmPresentationObservation`（presentation crate の outcome 型）は current stage で producer / consumer がなく、必要 stage で再導入する。提示確認は wire `PresentationStatus` から `PresentationMark`（round と presented / unknown）への ingress で行い、送信≠報告完了を維持する。
-- 会話の意味・History は個体調整、round の実際・提示・区切りは入出力・提示、帰属成立は接続・存在。旧 round の入力・生成途中・未提示を新 round へ付け替えない。生成済み＝提示済みにしない。Voice に話者認証済みの意味を足さない。
-- wire の新規 round 開始要求（IPC §13.1 の `SubmitTextInput.round = None`）は入出力・提示が現在条件の照合と round 発行を行ってから、本 interface の `RoundId` を満たす。Client や ingress mapping が domain identity を発行せず、旧 round の拒否を新規開始へ自動読替えしない。
+- `RoundClosureFact` や `ConfirmPresentationObservation`（画面提示の最終結果型）は、現在の開発ステージでは直接の送受信者が存在しないため、必要となるステージで安全に再導入します。画面提示の確認は、通信層の `PresentationStatus` からドメイン層の提示マーカー（`PresentationMark`：ラウンドIDと「提示完了／成否不明」の組）への受信変換によって行い、「メッセージを送信できたこと」と「ユーザーへの提示が完了したこと」を明確に区別し続けます。
+- 会話の意味論や過去の履歴管理は「個体調整担当」が、対話ラウンドの実際の進行・画面提示・区切りは「入出力・提示担当」が、在席の成立判定は「接続・存在担当」が担います。過去のラウンドに対する入力、生成途中のテキスト、未提示のメッセージを、勝手に新しいラウンドへ引き継いではなりません。また、「LLMによる文章生成が完了したこと」を「ユーザーへ提示されたこと」と混同してはなりません。音声入力においても、単に音声が届いたことだけを根拠にして「話者の本人確認が完了した」と勝手にみなしてはなりません。
+- 通信プロトコルにおける新規ラウンドの開始要求（IPC §13.1 の `SubmitTextInput.round = None`）は、入出力・提示担当が現在の前提条件を照合して新しいラウンドを発行してから、本インターフェースの `RoundId` を満たします。クライアントや通信マッピング層が勝手に業務上の識別子（ID）を発行してはならず、過去ラウンドの拒絶を新規ラウンドの自動開始へ勝手に読み替えてはなりません。
 
 ### X-C Body 表示の帰属
 
-Body 表示は帰属・活動状態・内的状態・資材内容の連言であり、単独の成立では開始しない。排他性を確認できない Client では継続させない。出力した表情・motion を Companion State の正本・永続変化の根拠にしない。描画失敗・fullscreen・高負荷を Text・管理・復旧へ波及させない。
+アバター身体（Body）の表示は、「在席帰属」「活動状態」「内的状態」「キャラクター資材データ」のすべてが正常に揃っていること（AND条件）を前提として開始されます。どれか1つが欠けている状態で勝手に表示を開始してはなりません。また、排他性が確認できないクライアント上では表示を継続させません。画面に出力された特定の表情やモーションを、パートナーの精神状態のマスターデータ（正本）や永続的な変化の証拠とみなしてはなりません。描画エンジンのクラッシュ、全画面表示による非表示、ローカルの高負荷といった表示側の問題を、テキスト対話、管理機能、システム復旧処理へ波及させてはなりません。
 
 ```rust
 struct CheckBodyEligibilityQuery {
     companion: CompanionId,
     client: ClientId,
-    presence: PresenceCheckRef,      // 現在帰属の写し
-    activity: CompanionActivityRef,  // 個体調整の活動状態
+    presence: PresenceCheckRef,      // 現在の在席帰属の写し
+    activity: CompanionActivityRef,  // 個体調整担当が管理する活動状態
 }
-// Decision は X-A・X-B の成立に従属する独立の巨大判定にしない。必要な連言の照合結果を返す。
+// 判定結果は X-A や X-B の成立に従属する独立した巨大判定ではなく、
+// 必要な前提条件がすべて満たされているかどうかの照合結果を返します。
 ```
 
 ### X-D Observation eligibility の連動
@@ -836,150 +864,154 @@ struct CheckBodyEligibilityQuery {
 ```rust
 struct NotifyPresenceChangeFact {
     client: ClientId,
-    present_companions: Vec<CompanionId>, // authoritative 帰属に従う存在人数（Stopped 除外）
-    fullscreen: FullscreenStateRef,  // 入出力・提示から
-    observer_control: ObserverControlRef, // Client別・全体 Pause/OFF
+    present_companions: Vec<CompanionId>, // 正式な在席帰属に従ってその端末に存在するパートナー一覧（停止中を除く）
+    fullscreen: FullscreenStateRef,  // 入出力・提示担当から通知される全画面表示状態
+    observer_control: ObserverControlRef, // クライアント別またはシステム全体の観測一時停止／OFF設定
 }
 
 enum EligibilityDecision {
     EligibleForCapture,
-    Ineligible(IneligibilityReasonRef), // Stoppedのみ・fullscreen・Pause/OFF・activeなし・cap 等
+    Ineligible(IneligibilityReasonRef), // パートナー全員が停止中、全画面表示中、観測OFF/一時停止中、アクティブな在席なし、費用上限超過など
 }
 ```
 
-- 対象・時機は共有観測、帰属成立は接続・存在。旧 Client の旧 Capture・候補で新規 Capture・delivery を続けない。複数対象 Client は同時に Capture しない。
+- 画面キャプチャの対象やタイミングの判定は「共有観測担当」が、在席帰属の判定は「接続・存在担当」が行います。以前のクライアントで取得された古いキャプチャ画像や分析候補を使って、現在のクライアントに対する新しいキャプチャや情報配信を続けてはなりません。また、複数の対象クライアントに対して同時に画面キャプチャを実行してはなりません。
 
 ### X-E Observation result routing（三段階分離）
 
-Observer routing（共有観測）と Companion individual inference（個体調整＋当該 Companion の Provider 設定）を別 boundary として維持する。
+共有観測によるルーティング（Observer routing）と、各パートナー個別の推論処理（個体調整 ＋ 該当パートナーのプロバイダ設定）を、別の境界として厳格に維持します。
 
 ```rust
 struct PublishObservationCandidate {
     client: ClientId,
     candidate: ObservationCandidateId,
     captured_at: WallClockWithTz,
-    capture_range: CaptureRangeRef,  // desktop 全体（個別 window 対象と誤認させない）
-    routing_context: RoutingContextOffer, // H-F の派生表現
+    capture_range: CaptureRangeRef,  // デスクトップ画面全体（個別ウィンドウのみを対象としたと誤認させない）
+    routing_context: RoutingContextOffer, // H-F で提供されたルーティング用の一時的な派生表現
 }
 
 enum RoutingDecision {
-    RoutedTo(Vec<CompanionId>),      // その Client 上の関連する Running Companion だけ
-    SuppressedByControl,             // Pause/OFF・fullscreen・同意・cap・消去等
-    StaleCandidate,                  // 移動・Stop・Pause 前の旧候補
+    RoutedTo(Vec<CompanionId>),      // 該当クライアント上で現在アクティブに動作している関連パートナーのみ
+    SuppressedByControl,             // 一時停止／OFF設定、全画面表示、同意不足、費用超過、削除処理中など
+    StaleCandidate,                  // 端末移動、停止、一時停止の前に取得された古い観測候補
 }
 
 struct DeliverEventNotification {
     candidate: ObservationCandidateId,
     target_companion: CompanionId,
-    deliverable_range: DeliverableRangeRef, // その個体が利用可能な観測内容と必要背景
-    // 受信は理解・採否を意味しない。Observer による routing は各 Companion の
-    // 意味判断・最終発話・Action 判断を置き換えない。
+    deliverable_range: DeliverableRangeRef, // そのパートナーが利用可能な観測内容と必要な背景情報
+    // 通知を受信したことと、内容を理解・採用したことは別です。
+    // Observer によるルーティングは、各パートナー自身の意味解釈、最終的な発話判断、
+    // およびアクション実行の意思決定を勝手に代行するものではありません。
 }
 
 struct CompanionUnderstandingFact {
     companion: CompanionId,
     candidate: ObservationCandidateId,
-    understood_as: UnderstandingRef, // 個体文脈での意味判断（個体調整）
-    experience_link: Option<ProposeExperienceCandidate>, // Experience への利用（H-B へ）
+    understood_as: UnderstandingRef, // 個別の文脈における意味判断（個体調整担当）
+    experience_link: Option<ProposeExperienceCandidate>, // 自律学習の経験候補としての利用（H-B へ連携）
 }
 ```
 
-- 全 private 公開・新 Learning 正本・Global 化・他 Companion 共有の禁止、要約・変換による制約消去の禁止、Companion override・各個体同意の選択・合成による代用の禁止、混合生成文しかなく分離を確認できない場合の配送禁止、一方の個体の判断成功の他個体へのコピーの禁止。delivery 後の個体 Provider 送信は別 consumer の新たな利用として K-E・K-B へ戻す。
+- プライベートな情報を不用意に全体公開したり、新しい自律学習のマスターデータ（正本）に勝手に昇格させたり、全体共有（Global）にしたり、他パートナーへ無断で漏洩させてはなりません。要約やフォーマット変換によって元データの制約を勝手に消滅させてはならず、パートナー個別の設定を無視して同意を勝手に合成・代用してはなりません。複数のパートナー向けの情報が混ざり合って個別に分離できない場合は、配信を禁止します。また、あるパートナーが正常に理解・判断できたからといって、その結果を別のパートナーへ安易にコピーしてはなりません。配信後の個別パートナーによるプロバイダ送信は、独立した新たな利用として K-E および K-B の認可フローを改めて経る必要があります。
 
 ### X-F 移動・切断・再接続時の三者協調、X-G Host restart 時の協調
 
-X-A・X-B の facts/notifications の組合せであり、新しい巨大 interface を追加しない。要点のみ固定する。
+これらは X-A および X-B の確定事実や通知を適切に組み合わせることで実現されるため、不要な新規の巨大インターフェースを追加してはなりません。以下の基本原則を厳格に守ります。
 
-- 帰属切替は接続・存在、round 区切りは入出力・提示、Client 依存作用の区切り・不明は実行・拡張、通常 Host 作業の継続・Client 依存 step の判断待ち・保留は作業、未伝達の Host 保持・次 Client 要約報告は個体調整が確定する。通常 Host Task の終了・移送を切替の前提にしない。
-- 移動・切断中の到着物は元帰属・元 round・元試行へ対応付け、用途別に受け入れる。到着先の現在活動へ付け替えず、Client copy で Host を上書きしない。未送信操作を自動 Action queue にしない。遅延 message・表示 copy で現在帰属・Permission・Task 状態を復活させない。不明を未実行・成功へ変換しない。
-- Host restart 時：presence 復旧と round / Computer Use / Task / Action の再実行・再開は別の条件。Running は再起動前 Client へ自動復元（元 Client が利用不能なら active なし）。途中 Task は明示再開待ち。停止中の Schedule 回は missed。未完了消去・復旧の保留を維持する。
+- 在席帰属の切り替えは「接続・存在担当」、対話ラウンドの区切りは「入出力・提示担当」、クライアント依存アクションの区切りや成否不明の判定は「実行・拡張担当」、ホスト側で実行中の通常タスクの継続およびクライアント依存ステップの判断待ち・保留は「作業担当」、未伝達メッセージのホスト側保持および次回接続端末への要約報告は「個体調整担当」がそれぞれ確定します。端末移動の前提として、ホスト側で正常に継続可能なタスクを強制終了したり別の場所へ移送したりする必要はありません。
+- 端末移動中やネットワーク切断中に遅れて届いたメッセージは、元の在席帰属、元のラウンド、元の試行記録に対応付け、用途ごとに厳格に受け入れを判定します。移動先の新しい活動へ勝手に付け替えたり、クライアント側のキャッシュコピーでホストのマスターデータを上書きしてはなりません。未送信のユーザー操作を勝手な自動アクションキューにしてはならず、遅延メッセージや表示用コピーによって、過去の在席、実行権限、タスク状態を勝手に復活させてはなりません。また、成否不明となった処理を勝手に未実行や成功へ改ざんしてはなりません。
+- **ホスト再起動時**: 在席状態の復旧と、中断された対話ラウンド・Computer Use・タスク・アクションの再実行・再開は、まったく別の条件に基づきます。実行中（Running）だったパートナーは再起動前のクライアントへ安全に復帰を試みますが（元の端末が利用不能であれば在席なしとする）、中断されたタスクはオーナーによる明示的な再開指示を待ちます。ホスト停止中に到来したスケジュール実行はスキップ（Missed）扱いとし、未完了のデータ削除やバックアップ復元の安全保留は確実に維持します。
 
 ### X-H 未伝達の次 Client 報告
 
-H-G の登録に加え、次 Client での提示側の interface。
+H-G による未伝達情報の登録に加え、新しいクライアント側でその要約を提示するためのインターフェースです。
 
 ```rust
 struct RequestUndeliveredSummaryQuery {
     companion: CompanionId,
     to_client: ClientId,
-    presence: PresenceCheckRef,      // 新 presence 成立後の現在帰属
+    presence: PresenceCheckRef,      // 新しい在席が正式に成立した後の、現在の在席帰属
 }
 
 struct UndeliveredSummaryFact {
-    items: Vec<UndeliveredRef>,      // 元 Task・活動記録への対応付き
-    current_filter: CurrentFilterRef, // 現在の元結果・利用制限・削除状況への照合
+    items: Vec<UndeliveredRef>,      // 元のタスク記録や活動記録への対応関係付き
+    current_filter: CurrentFilterRef, // 最新の処理結果、利用制限、データ削除状況との照合フィルター
 }
-// 提示途中で再び切断したなら不明を保持する。exactly-once・既読保証は追加しない。
+// 要約の提示途中でクライアントが再び切断された場合は、提示状態を「成否不明」として保持します。
+// 厳密な1回のみ配送（exactly-once）や、ユーザーが確実に読んだことの保証などを無理に追加しません。
 ```
 
 ## 7. Character クラスタの interface semantics（C-A〜C-D）
 
-validation 成功を Permission / execution authorization として返さない。
+パッケージ検証（validation）の成功を、機能の実行許可やセキュリティ認可と混同してはなりません。
 
 ### C-A Character static revision の取得
 
 ```rust
 struct GetCharacterRevisionQuery {
     character: CharacterId,
-    revision: Option<CharacterRevision>, // None は現在 revision 一覧の取得
+    revision: Option<CharacterRevision>, // None の場合は利用可能な全リビジョン一覧を取得
 }
 
 struct CharacterRevisionView {
     character: CharacterId,
     revision: CharacterRevision,
-    parts: Vec<CharacterPartView>,       // 静的部品・推奨 Skill 指定（実行許可ではない）
-    import_provenance: ImportProvenanceRef, // 受入対応（外部原本の所有ではない）
+    parts: Vec<CharacterPartView>,       // 静的な設定部品、推奨スキルの指定（実行許可そのものではない）
+    import_provenance: ImportProvenanceRef, // 取り込み時の由来情報（外部原本自体の所有権ではない）
 }
-// revision の存在≠適用・適用すべきという推測をしない。供給は確定済み revision のみから行う。
+// リビジョンが存在することと、それを適用すべきかどうかは別です。勝手な推測で適用してはなりません。
+// データの提供は、確定済みの安全なリビジョンからのみ行います。
 ```
 
 ### C-B 既存 Companion への revision 適用
 
-内容の正本（Character）と適用関係の正本（個体調整）を同一更新にしない。
+キャラクター資材のマスターデータ（Character担当）と、特定のパートナーへの適用関係のマスターデータ（個体調整担当）を、同一のトランザクションで混同して更新してはなりません。
 
 ```rust
 struct ProposeCharacterApplicationCandidate {
     companion: CompanionId,
     character: CharacterId,
-    expected_character_revision: CharacterRevision, // boundary token
-    selected_parts: Vec<CharacterPart>,  // Owner が部品ごとに明示選択した範囲
-    owner_selection: OwnerSelectionRef, // 管理操作との対応
+    expected_character_revision: CharacterRevision, // 期待されるキャラクターリビジョン（boundary token）
+    selected_parts: Vec<CharacterPart>,  // オーナーが部品ごとに明示的に選択した更新範囲
+    owner_selection: OwnerSelectionRef, // 管理画面での操作との対応関係
 }
 
 enum CharacterApplicationOutcome {
-    AppliedAs(AppliedPartListRef),   // 個体調整が適用関係を確定（経験状態を初期化しない）
+    AppliedAs(AppliedPartListRef),   // 個体調整担当が適用関係を確定（パートナーが積んできた経験や記憶は初期化しない）
     StaleRevision { current_applied: AppliedPartListRef },
-    DeniedProhibitedPart(ProhibitedPartRef), // Credential / Permission / 同意 / authority 等の適用禁止種別
-    NeedsOwnerSelection,             // 部品ごとの明示選択が不足
+    DeniedProhibitedPart(ProhibitedPartRef), // 認証情報、権限昇格、同意の代用など、適用が禁止されている危険な部品種別
+    NeedsOwnerSelection,             // 部品ごとの明示的な選択が不足しているため確認が必要
 }
-// Package 更新を成長の初期化にしない。未確認部品を更新済みにしない。
+// パッケージの更新によって、パートナーのこれまでの成長や思い出を勝手に初期化してはなりません。
+// また、オーナーが確認していない部品を勝手に更新済みに変えてはなりません。
 ```
 
-- persistence は PR Group A/B（`character_revision`＋`companion_applied_current`＋履歴）。commit は SD-CharApply の短い transaction（CCT §4）。
+- 永続化は永続化グループA/B（`character_revision` ＋ `companion_applied_current` ＋ 変更履歴）で行い、コミットは同期区分 SD-CharApply の短いトランザクション内で不可分に完了します（CCT §4）。
 
 ### C-C Skill import・package validation
 
 ```rust
 struct ImportSkillCommand {
-    source: SkillImportSourceRef,    // Package 推奨 / 単体 import の別＋外部参照（所有ではない）
-    scope_choice: SkillScopeChoice,  // Package 由来→Companion scope 既定、単体→Owner 選択
-    target_companion: Option<CompanionId>, // Companion scope の場合の帰属先
+    source: SkillImportSourceRef,    // パッケージ推奨スキルか単体インポートかの別 ＋ 外部参照情報
+    scope_choice: SkillScopeChoice,  // パッケージ由来ならパートナー専用（Companion scope）を既定とし、単体ならオーナーが明示選択
+    target_companion: Option<CompanionId>, // パートナー専用スコープの場合の紐付け先
 }
 
 struct ValidatePackageQuery {
-    package_ref: ExternalPackageRef, // 外部 Package 原本への参照（所有ではない）
+    package_ref: ExternalPackageRef, // 外部パッケージの原本ファイルへの参照
 }
 
 struct PackageValidationReport {
-    result: ValidationVerdict,       // 受入可否・内容範囲・trusted/untrusted 扱い
+    result: ValidationVerdict,       // 受け入れ可否の判定結果、含まれるコンテンツの範囲、信頼／非信頼の扱い
     import_provenance: ImportProvenanceRef,
-    // validation 成功は Permission / Credential / 実行 authority / Global Skill の成立ではない。
+    // 検証に成功したことは、認証情報の付与、実行権限の認可、全体共有（Global）化を意味しません。
 }
 
 enum SkillImportOutcome {
     ImportedAsCompanionSkill(SkillId),
-    ImportedAsGlobalSkill(SkillId),  // 単体 import の Owner 選択時のみ
-    RejectedByScopeRule,             // 自動 Global 化・自動昇格に当たる要求
+    ImportedAsGlobalSkill(SkillId),  // 単体インポートにおいてオーナーが明示的に選択した場合のみ
+    RejectedByScopeRule,             // 自動的な全体共有化や勝手な権限昇格に該当するため拒絶
     RejectedByValidation,
 }
 ```
@@ -990,40 +1022,42 @@ enum SkillImportOutcome {
 struct ExportCharacterCommand {
     character: CharacterId,
     revision: CharacterRevision,
-    // 静的範囲だけを選択する。個体固有 Experience・Learning・関係・内的状態・
-    // 履歴・Credential・Permission を混入させない。内容と権利上の注意を提示可能にする。
+    // 静的な設定・資材の範囲のみを選択して出力します。
+    // パートナー固有の経験、自律学習データ、親密な関係性、内的状態、
+    // 会話履歴、認証情報、権限設定を絶対に混入させてはなりません。
+    // 出力内容と著作権等の権利上の注意書きを、画面上に明確に提示できるようにします。
 }
 
 struct CharacterExportFact {
-    export_ref: ExportRef,           // 外部 copy（所有ではなく配布物）
+    export_ref: ExportRef,           // 外部配布用のコピーファイル（内部所有権ではなく単なる成果物）
     included_scope: IncludedStaticScopeRef,
 }
 ```
 
 ## 8. Data preservation / lifecycle クラスタの interface semantics（D-A〜D-E）
 
-generic `delete(entity_id)` で Targeted Deletion を表現しない。coordinator が semantic owner の内部 state を直接自由に編集する interface にしない。
+個人データ完全削除（Targeted Deletion）を、単なる汎用の `delete(entity_id)` のような安易な関数で表現してはなりません。また、調整役（coordinator）が各担当ドメインの内部状態を勝手に直接書き換えるようなインターフェースを作ってはなりません。
 
 ### D-A Targeted Deletion の開始・範囲確定
 
 ```rust
 struct RequestTargetedDeletionCommand {
-    purpose: DeletionPurposeRef,     // Privacy / Security 目的の明示（通常忘却等との区別）
-    mechanical_condition: MechanicalConditionRef, // LLM 非依存の文字列条件（必須層）
-    semantic_hint: Option<SemanticHintRef>, // 意味的補助層（完全性を保証しない）
-    exclusion: ExclusionRef,         // 除外・要確認の対応
-    impact_notice: ImpactNoticeNeedRef, // 目的・範囲・影響・除外の事前説明用
+    purpose: DeletionPurposeRef,     // プライバシー保護やセキュリティ上の削除目的を明示（通常の忘却処理等との混同を防止）
+    mechanical_condition: MechanicalConditionRef, // LLM に依存しない文字列一致などの厳密な機械的条件（必須レイヤー）
+    semantic_hint: Option<SemanticHintRef>, // 意味的な補助ヒント（完全性の保証には使わない）
+    exclusion: ExclusionRef,         // 削除から除外すべき対象や、事前確認が必要な範囲の対応関係
+    impact_notice: ImpactNoticeNeedRef, // 削除の目的、対象範囲、影響度、除外対象に関するオーナー向け事前説明用データ
 }
 
 struct DeletionScopeDecision {
     operation: DeletionOperationId,
-    sweep: DeletionSweepGeneration,  // 消去区間の順序
-    valid_interval: ErasureInterval, // 開始〜検証完了（区間内再到着を含む）
-    participants: Vec<ParticipantOwnerRef>, // 参加すべき領域（保存場所を Owner に選ばせない）
+    sweep: DeletionSweepGeneration,  // 削除処理区間の厳密な順序世代
+    valid_interval: ErasureInterval, // 削除処理の開始から検証完了までの有効期間（区間内に遅延到着したデータの取り込みを含む）
+    participants: Vec<ParticipantOwnerRef>, // 消去処理に参加すべき全領域（オーナーに保存場所を手動選択させない）
 }
 ```
 
-- 保全・消去が Owner の明示目的・対象・影響・除外を対応付け、参加すべき領域の特定を支援する。特定文字列の機械的検索・削除・残存検証を LLM へ依存させない。
+- 保全・消去担当は、オーナーが指定した明示的な目的、対象、影響範囲、除外項目を正しく紐付け、消去に参加すべき内部領域の特定を確実に支援します。特定文字列の機械的な検索、データ消去、残存検証の成否を、LLMの推論結果に依存させてはなりません。
 
 ### D-B 参加者への局所消去要求・局所完了返却
 
@@ -1031,19 +1065,20 @@ struct DeletionScopeDecision {
 struct DemandLocalErasureCommand {
     operation: DeletionOperationId,
     sweep: DeletionSweepGeneration,
-    erasure_condition: ErasureConditionRef, // 各受入・保存先が照合する条件・有効区間・完了境界
+    erasure_condition: ErasureConditionRef, // 各受入・保存先が照合すべき消去条件、有効期間、完了境界
 }
 
 struct ParticipantCompletionFact {
     operation: DeletionOperationId,
-    participant: ParticipantOwnerRef, // 情報 owner だけでなく処理中 context・派生物・cache・Client/拡張一時 copy・返却可能結果の保持者を含む全 holder
-    local_result: LocalErasureResult, // 処理・検証・未完了・失敗・未確認範囲の別
-    source_relation: SourceRelationRef, // source 関係・処理中利用・局所扱い・検証・再保存防止・未確認の対応
-    // 局所完了≠全域完了。未確認・到達不能を成功と読まず、局所返却だけで hold を解除しない。
+    participant: ParticipantOwnerRef, // データの担当責任者だけでなく、処理中コンテキスト、派生データ、キャッシュ、クライアントや外部拡張の一時コピー、返却待ち結果などを保持するすべてのデータ保持者
+    local_result: LocalErasureResult, // 処理成功／検証完了／未完了／失敗／未確認範囲の各状態
+    source_relation: SourceRelationRef, // 元データとの関係、処理中の利用状況、局所的な消去・検証状況、再保存の防止措置、未確認範囲の対応関係
+    // 一部の局所的な消去が完了したことと、システム全体の削除完了は別です。
+    // 未確認の領域や到達不能な端末を「成功」とみなしてはならず、局所的な完了報告だけで安全保留（hold）を解除してはなりません。
 }
 ```
 
-- 各 holder は `(source 関係, 処理中利用, 局所扱い・検証, 再保存防止, 未確認・未完了)` を保全・消去へ説明する。source を消した後に依存関係も消失し遅延結果を識別できなくなる実装は不可。本文を保持せず対応を維持できること。
+- 各データ保持者は、`(元データとの関係, 処理中の利用状況, 局所消去と検証, 再保存防止, 未確認・未完了範囲)` の状態を保全・消去担当へ正確に報告します。元データを消去した後に依存関係まで一緒に失われ、遅延して届いた結果が削除対象かどうか識別できなくなるような実装は禁止します。対象の本文そのものは保持せずとも、識別子やハッシュ値によって対応関係を確実に辿れなければなりません。
 
 ### D-C 残存検証・全域完了確定
 
@@ -1054,88 +1089,94 @@ struct VerifyRemainderQuery {
 }
 
 enum RemainderVerification {
-    NoRemainderMechanically,         // 機械的残存検証の成功（意味的完全性ではない）
+    NoRemainderMechanically,         // 機械的な残存検証の成功（意味論的な100%完全性の保証ではない）
     RemainderFound(RemainderRef),
-    UnreachableScope(UnreachableRef), // 到達不能は成功にしない
+    UnreachableScope(UnreachableRef), // オフライン等の到達不能領域が存在する場合は「成功」にしない
 }
 
 enum GlobalDeletionCompletion {
-    GloballyCompleted,               // 全域完了（保全・消去が確定。各 domain の意味変更は各 owner が行う）
-    HeldPending(PendingRef),         // 未完了・保留・再保存防止の維持
-    FailedVerification,              // 検証失敗
+    GloballyCompleted,               // システム全域での削除完了（保全・消去担当が確定。各ドメインの意味論的な変更は各担当者が行う）
+    HeldPending(PendingRef),         // 未完了の参加者がいるため安全保留および再保存防止を維持
+    FailedVerification,              // 検証に失敗
 }
-// 全域完了は内部全域の除去または復元不能化・機械的残存検証・区間内再到着の取込み・
-// 再保存/再形成防止・未完了集約の全体。完了記録・Audit へ対象本文を戻さない。
-// 完了時に機械的条件の検索 token を wipe し、完了後の backup に token を残さない。
+// 全域での削除完了とは、システム内部の全域におけるデータの除去または復元不能化、
+// 機械的な残存検証の成功、処理区間内に遅延到着したデータの取り込み、再保存・再学習の防止、
+// およびすべての未完了状態の集約が完全に満たされた状態を指します。
+// 完了記録や監査ログに対象の本文データを書き戻してはなりません。
+// 完了時には機械的条件の検索用トークンを完全に消去（wipe）し、完了後のバックアップにトークンを残してはなりません。
 ```
 
 ### D-D Backup 作成・Restore staging・正本 switch・復元後保留・一括有効化
 
 ```rust
 struct CreateBackupCommand {
-    setting: BackupSettingRef,       // 保存先・独自 schedule・保持数・保護選択
+    setting: BackupSettingRef,       // 保存先、個別スケジュール、保持世代数、保護レベルの設定
 }
 
 struct BackupPointFact {
     backup_point: BackupPointId,
-    covered_scope: CoveredScopeRef,  // 対象時点・参照対応・除外（secret・外部実体）・未完了状況
-    // 各部 copy 成功だけを成功にしない。対象時点・参照・履歴・未完了の対応が揃って初めて成功。
+    covered_scope: CoveredScopeRef,  // 対象時点、参照の整合性、除外されたデータ（秘密値や外部実体）、処理中タスクの未完了状況
+    // 各テーブルのコピーが個別に成功したことだけでバックアップ成功とみなしてはなりません。
+    // 対象時点、参照関係、変更履歴、未完了状況の整合性が完全に揃って初めて成功と確定します。
 }
 
 struct RequestRestoreCommand {
     backup_point: BackupPointId,
-    // 事前説明：対象・version互換性・外部非変更・削除済み情報や旧 Rule・同意・Schedule の復活可能性・再認証必要性。
+    // 事前説明事項：復元対象、バージョン互換性、外部ファイルが巻き戻らないこと、
+    // 削除済みデータや過去のルール・同意・スケジュールの復活可能性、再認証が必要となること。
 }
 
 struct StagedRestoreCandidate {
     restore: RestoreId,
     backup_point: BackupPointId,
-    isolation_check: IsolationCheckRef, // staging（別 file / 別 group）での照合・検証
+    isolation_check: IsolationCheckRef, // ステージング領域（別ファイルまたは別グループ）での整合性照合と検証
 }
 
 struct SwitchRestoreDecision {
     restore: RestoreId,
-    new_generation: RestoreGeneration, // 成功ごとに前進。旧 live 分離用
-    hold: HoldConditionRef,          // 復元後保留
-    // switch 前は復元前正常が正本、switch 後は復元内容が正本。第三の混合を作らない。
-    // switch の瞬間だけ singleton の短い排他（SD-Restore）。全期間の read 停止はしない。
+    new_generation: RestoreGeneration, // 復元成功ごとに単調増加する世代番号（過去の実行コンテキストを安全に分離）
+    hold: HoldConditionRef,          // 復元後の一括安全保留
+    // 切り替え前は「復元前の正常状態」がマスターデータ（正本）であり、
+    // 切り替え後は「復元されたデータ」がマスターデータとなります。両者が混ざり合った第三の状態を作ってはなりません。
+    // 正本の切り替えの瞬間のみ、同期区分 SD-Restore による短い排他制御を行います（長期間の読み取り停止は行いません）。
 }
 
 struct BulkEnableAfterRestoreCommand {
     restore: RestoreId,
-    // Owner が内容確認後まとめて有効化できる。一件ずつ再承認を要求しない。
-    // 復元済み assignment / consent だけで自動利用を開始しない。
-    // 現在 Credential・現制約・復元後保留・Deny・cap・認証不足・不明を無視しない。
+    // オーナーが復元内容を確認した後、安全にまとめて有効化できます（1件ずつの手動再承認は不要）。
+    // ただし、復元された割り当て設定や同意情報だけで、外部処理を自動再開してはなりません。
+    // 現在の認証情報、現在の制約、復元後保留、拒絶設定、費用上限、認証不足、成否不明の状態を無視してはなりません。
 }
 ```
 
-- Restore は開始前 Credential secret を除く対象内部 data の全置換であり、merge ではない。失敗時は復元前正常を維持する。旧 live 結果・Client copy を新正本へ混ぜない。外部 file の現内容・存在・access、外部作用、認証成功は巻き戻らない。復元参照を現在 store と照合し、不足・無効なら再認証を要求する。
+- バックアップからの復元（Restore）は、バックアップ開始前の認証情報の秘密値を除き、対象となる内部データをすべて置き換える処理であり、既存データとの「マージ」ではありません。復元に失敗した場合は、復元前の正常な状態をそのまま維持します。過去の実行結果やクライアント側のキャッシュコピーを、新しいマスターデータへ混入させてはなりません。外部ファイルの現在の内容や存在、過去に実行された外部作用、認証成功の事実は巻き戻りません。復元された参照情報を現在の保管庫と照合し、不足や無効があればオーナーへ再認証を要求します。
 
 ### D-E 通常保持・retention / cleanup・Reset
 
-目的を一つの削除・初期化へ潰さない。通常忘却・訂正・統合・失効・置換、通常 History/log 削除・retention、容量 retention（既定 OFF・明示 opt-in）、Companion 削除、Targeted Deletion、設定 Reset、全データ Reset、Restore を別の lifecycle・別の完了条件として扱う。
+データの削除や初期化の目的を、単一の処理にひとまとめにしてはなりません。通常の忘却、訂正、統合、失効、置換、通常の会話履歴・ログの定期削除、容量制限に基づく削除（既定はOFFで明示的なオプトインが必要）、パートナーの個別削除、個人データ完全削除、設定の初期化、全データの完全初期化、バックアップ復元は、それぞれまったく別のライフサイクルと完了条件を持つ処理として厳格に扱います。
 
 ```rust
 struct ApplyRetentionCommand {
-    policy: RetentionPolicyRef,      // 通常 History/log 保持・容量 retention（既定 OFF）の別を明示
-    target_range: RetentionTargetRef, // 指定日以前等の範囲
+    policy: RetentionPolicyRef,      // 通常の履歴・ログ保持ポリシーか、容量保持ポリシー（既定OFF）かの別を明示
+    target_range: RetentionTargetRef, // 指定日以前などの消去対象範囲
 }
 
 struct ResetCommand {
-    kind: ResetKind,                 // Settings | FullData
-    enumeration: ResetEnumerationRef, // 削除対象の列挙・強い確認（全データ時）
+    kind: ResetKind,                 // 設定のみ初期化（Settings）か、全データ初期化（FullData）かの種別
+    enumeration: ResetEnumerationRef, // 削除対象となるデータの明示的な列挙と、確実な事前確認（全データ初期化時）
 }
-// 設定 Reset は一般設定の既定化であり、Companion・History・Summary・Learning・
-// Relationship・State・Task・Schedule・Credential・Rule・同意・cap を削除しない。
-// 全データ Reset は Host 内部 data と Credential を削除し、外部 Workspace・
-// Workspace 内 Skill・Owner 保存 backup を削除しない。
+// 設定の初期化（Settings Reset）は一般設定を既定値に戻す処理であり、
+// パートナー個体、対話履歴、要約、自律学習データ、親密な関係性、活動状態、
+// タスク、スケジュール、認証情報、ルール、同意、費用上限を削除してはなりません。
+// 全データ初期化（FullData Reset）は、ホスト内部のすべてのデータと認証情報を安全に削除しますが、
+// 外部ワークスペース、ワークスペース内のスキルファイル、オーナーが別途退避させたバックアップファイルは削除しません。
 ```
 
 ## 9. 管理経路の独立（第一者管理面 → 各 owner）
 
-第一者の入出力・提示は、作業への Cancel・Schedule 管理・記録確認、個体調整への個体停止・削除、権限・制約への承認拒否・Rule・同意・cap・device 管理、認証秘密への明示的な認証設定、保全・消去への消去・backup・restore・Reset を直接要求できる。ここで「直接」は本体 LLM の承認や長時間 Task の完了を介在させない意味であり、具体 API の指定ではない。各 owner の受理・確認・結果に従い、UI に任意 state の書換権を与えない。受付と完了、保存済み data への影響、既知作用と不明を区別して提示する（H-10 / X-10 / K-1 / D-A〜D-E の管理入口の共通性質）。
+公式（第一者）の入出力・提示担当は、作業担当へのタスク中断・スケジュール管理・記録確認、個体調整担当へのパートナー停止・削除、権限・制約担当への承認・拒絶・ルール・同意・費用枠・デバイス管理、認証情報管理への明示的な設定、保全・消去担当へのデータ削除・バックアップ・復元・初期化を、直接要求できます。ここで「直接」とは、パートナー自身の思考LLMによる承認や、長時間タスクの完了を待つ必要がないという意味であり、特定のAPI形式を強制するものではありません。各担当責任者による要求の受理・前提確認・結果判定に従う必要があり、UI層にシステムの状態を勝手に書き換える特権を与えるわけではありません。要求の受付と完了、保存済みデータへの影響、判明している作用と不明な状態を、画面上で明確に区別して提示します（H-10 / X-10 / K-1 / D-A〜D-E に共通する管理インターフェースの性質）。
 
-高権限操作の最終確認は Host PC 上の trusted first-party management surface に限定する（[要件「信頼境界」](../../requirements/requirements.md#信頼境界)、具体的な対象・確認境界は IPC §18）。pairing / device trust・revocation、Credential 変更、Restore・復元後一括有効化、Full Reset 等の要求を Remote Client が送れても、remote の確認申告だけでは成立させない。担当 owner は Host が確認した入口の由来と当該操作・対象・現在前提に結び付く確認事実を必要とし、下記 command の存在を確認済みと読まない。同居 transport や pairing だけでは trusted first-party 性を与えず、Tool / Computer Use 等の代理入力による最終確認も受け入れない。管理面全体に会話の active 制約は課さない。
+特に権限の大きい重大な操作の最終確認は、ホストPC本体の信頼できる公式管理画面（trusted first-party management surface）に厳格に限定します（[要件「信頼境界」](../../requirements/requirements.md#信頼境界)、具体的な対象と確認境界は IPC §18 を参照）。ペアリングの承認やデバイスの信頼・失効、認証情報の変更、バックアップ復元および復元後の一括有効化、全データ初期化などの要求は、リモート端末から送信することは可能ですが、リモート端末側で「確認した」と自己申告したことだけを根拠にして処理を実行してはなりません。担当者は、ホスト本体の画面で確認された操作の由来と、対象データおよび現在の前提条件に結び付く厳格な確認事実を必要とします。コマンドのデータが存在していることだけで「確認済み」と誤認してはなりません。ホストと同居する通信経路やペアリングが存在することだけで無条件の信頼を与えてはならず、ツールや Computer Use 機能などの代理入力による最終確認も一切受け入れません。なお、管理機能全体に対して、会話がアクティブでなければならないという制約は課しません。
 
 ```rust
 struct ManagementOperationCommand {
@@ -1143,190 +1184,173 @@ struct ManagementOperationCommand {
                                        // ManageSchedule | DenyOrRefuse | ManageRuleConsentCap |
                                        // ManageDevice | ConfigureCredential | RequestDeletionBackupRestoreReset
     target: ManagementTargetRef,
-    // 本体 LLM の承認・長時間 Task の完了を介在させない。LLM 応答成功を必要としない。
+    // パートナー自身の思考LLMによる事前承認や、長時間タスクの完了を介在させてはならない。
+    // LLM の応答成功を管理操作の必須条件にしてはならない。
 }
 ```
 
 ## 10. Boundary token の具体的な渡し方（field matrix）
 
-巨大な同一 context struct を渡さない。各 boundary で必要な前提だけを typed に表現する。token は authority ではなく比較材料であり、不一致なら新規利用を開始せず hold・deny・不足・再評価へ戻す。欠落は不受理の理由。
+何でも詰め込んだ巨大な共通コンテキスト構造体を安易に引き回してはなりません。各境界で必要とされる前提条件のみを、厳格に型付けして受け渡します。トークンは決定権威そのものではなく、現在の最新状態と比較照合するための材料であり、値が不一致の場合は新しい処理を開始せず、安全保留、拒絶、情報不足、再評価へ差し戻します。前提トークンが省略された場合は「制約がない」のではなく「前提不明による不受理」とします。
 
-凡例：● = 必須 field、○ = 該当する場合に必須、— = 当該 boundary では持たない。`世代`は presence / restore / sweep のいずれかを型で区別する（混同しない）。
+**凡例**: ● ＝ 必須フィールド、○ ＝ 該当する場合に必須、— ＝ 当該境界では保持しない。※「世代」は在席世代（presence）、復元世代（restore）、消去スイープ世代（sweep）を型として明確に区別し、決して混同しません。
 
-| interface | expected identity+revision | expected generation（型付き） | source / consumer | purpose・用途・scope | operation / attempt | certainty | hold / 削除 / 復元関係 |
+| インターフェース境界 | 期待される識別子＋リビジョン | 期待される世代番号（型付き） | 発生元／消費主体 | 目的・利用用途・スコープ | 操作種別／試行ID | 結果の確信度 | 安全保留／削除／復元との関係 |
 |---|---|---|---|---|---|---|---|
-| H-A Task/steering/委任 | ● `TaskRef` | ○ restore premise（復元跨ぎ参照。保全・消去 slice で導入） | ● 委任元 Companion・Task・Workspace | ● creation の目的・`SteeringPremiseRef`・委任 scope | ○ `DelegationRef` | —（達成は作業、確定度は実行・拡張） | ● 停止・保留・消去・復元保留の照合（hold slice で導入） |
-| H-A Agent 結果受入 | ● `DelegationRef`（Task revision 前提含む） | ○ presence/restore/sweep タグ | ● 委任元・Task | ● 現在目的との対応 | ● attempt 対応 | ○ Agent 申告（証拠にしない） | ● Cancel・steering・消去・復元との照合 |
-| H-B Experience | ○ Task 由来なら `TaskRef` | ○ presence/restore/sweep タグ | ● 経験個体・Task・委任 | ● intended_use・scope 期待 | — | — | ● 保存禁止・非共有・消去条件 |
-| H-C 訂正 | ● `(LearningId, expected_revision)` | ○ sweep タグ | ● 対象・新 Experience | ● 時間的意味 | — | — | ● 消去・制約 |
-| H-D Learning参照 | ○ `(LearningId, revision)`（取得物側） | ○ sweep タグ | ● consumer・purpose・scope 需要 | ● 用途・scope・制約写し | — | — | ● scope・禁止・消去 |
-| H-E scope変更 | ● `(LearningId, expected_revision)` | ○ sweep タグ | ● 対象・共有内容 | ● 共有内容・背景・非共有意図 | — | — | ● 明示制約 |
-| H-F routing文脈 | ○ source 対応 | ○ presence/sweep タグ | ● 元 owner・対象 Companion・用途 | ● routing 用途・制約・選択前提 | ○ 候補対応 | — | ● 同意・消去・失効 |
-| H-G 未伝達 | ○ source 対応（Task/Activity） | ● presence＋restore generation | ● 対象 Companion | ● 報告状況 | ○ round | ○ Presented/Unknown | ● 削除状況 |
-| K-B live check | ● Task/Rule/consent の expected revision | ○ presence/restore/sweep タグ | ● 実行主体・委任・Task・Workspace | ● 目的・対象・操作・data・送信先・費用 | ○ attempt 前提 | — | ● 失効・停止・cap・保留 |
-| K-C 秘密利用 | ○ `CredentialRef`（非秘密）＋用途 | — | ● 接続・用途 | ● 認証用途の制限 | ○ 操作種別 | ○ 認証成功/失敗・再認証要否 | ● 失効・保留 |
-| K-D/E/F 推論 | ○ consent expected revision | ○ restore/sweep タグ | ● consumer・Capability | ● 用途・data・送信先・取扱い・費用 | ○ ticket | ○ 不足・失敗・利用量 | ● 禁止・cap・保留・消去 |
-| K-G 予約 | ○ `CapId`＋帰属 | — | ● consumer・用途・送信先 | ● 上限・引当量 | ○ reservation | ○ 報告/不明/処理中 | ● cap・不明 |
-| K-H Action開始 | ● Task revision・Rule/consent expected | ● presence＋restore＋sweep（該当分） | ● 主体・委任・Task・Workspace | ● 目的・実対象・操作・data・送信先・費用 | ● relied evaluation＋reservation | —（開始時点） | ● 失効・停止・cap・保留・消去・復元 |
-| K-H 結果確定 | ● `attempt`＋expected certainty | ○ 世代タグ | ● Task・委任 | ● 対象・作用の対応 | ● prior_unknown | ● Confirmed/Unknown | ● Cancel・再実行条件 |
-| X-A 移動 | ● `(CompanionId, expected_generation+state)` | ● `PresenceGeneration` | ● 対象個体・移動元先 | ● 移動理由 | ○ round 閉鎖対応 | ○ 到達性・排他性 | ● pairing・device・停止・保留 |
-| X-B round受入 | ○ `(Companion, Client, round)`＋claimed generation | ● `PresenceGeneration` | ● 対象・Client・round・候補 | ● 会話用途 | ○ round・試行 | ○ 受付/提示/不明 | ● 切替・停止・保留・消去 |
-| X-E routing | ○ 候補＋文脈対応 | ○ presence/sweep タグ | ● 由来 Client・対象個体・用途 | ● routing 用途・制約 | ○ 候補 | — | ● 観測制御・同意・消去 |
-| D-B 局所消去 | ● `(operation, sweep)`＋source 関係 | ● `DeletionSweepGeneration` | ● 参加 owner・保持対応 | ● 目的・範囲・除外 | — | ○ 局所検証結果 | ● 有効区間・完了境界・hold |
-| D-D restore | ● `backup_point`＋世代前提 | ● `RestoreGeneration` | ● 対象・参照対応 | ● 用途・再有効化範囲 | ○ restore/staging | ○ staging 検証・switch 成否 | ● 復元後保留・ credential 照合 |
-| C-B 適用 | ● `(CharacterId, expected_revision)`＋適用 pointer | ○ restore/sweep タグ | ● 対象 Companion | ● 部品・Owner 選択 | — | — | ● 禁止種別 |
+| H-A タスク化／方針指示／委任 | ● `TaskRef` | ○ 復元前提（`RestoreGeneration`。復元跨ぎ参照防止。保全・消去スライスで導入） | ● 委任元パートナー・タスク・ワークスペース | ● 作成時の目的・方針指示前提（`SteeringPremiseRef`）・委任スコープ | ○ `DelegationRef` | —（達成は作業担当、確信度は実行担当） | ● 安全停止・保留・削除・復元保留の照合（hold スライスで導入） |
+| H-A エージェント結果受入 | ● `DelegationRef`（タスクリビジョン前提を含む） | ○ 在席／復元／消去の各世代タグ | ● 委任元・タスク | ● 現在の目的との整合性 | ● 外部試行IDとの対応 | ○ エージェント自己申告（証拠にしない） | ● 中断・方針変更・削除・復元との照合 |
+| H-B 経験提出 | ○ タスク由来なら `TaskRef` | ○ 在席／復元／消去の各世代タグ | ● 経験したパートナー・タスク・委任 | ● 想定用途・期待スコープ | — | — | ● 保存禁止・非共有・消去条件の照合 |
+| H-C 会話による訂正 | ● `(LearningId, expected_revision)` | ○ 消去スイープタグ | ● 訂正対象・根拠となる新経験 | ● 時間的な意味論（最初から誤り／変化） | — | — | ● 消去・制約条件の照合 |
+| H-D 自律学習参照 | ○ `(LearningId, revision)`（取得データ側） | ○ 消去スイープタグ | ● 利用元・目的・要求スコープ | ● 用途・スコープ・制約の写し | — | — | ● スコープ制限・保存禁止・消去保留 |
+| H-E スコープ変更 | ● `(LearningId, expected_revision)` | ○ 消去スイープタグ | ● 対象項目・共有内容 | ● 共有内容・背景・非共有意図 | — | — | ● オーナーの明示的制約の照合 |
+| H-F ルーティング文脈供給 | ○ 元データとの対応 | ○ 在席／消去の世代タグ | ● 元の担当責任者・対象パートナー・用途 | ● ルーティング用途・制約・選択前提 | ○ 観測候補との対応 | — | ● 利用同意・消去・失効状態の照合 |
+| H-G 未伝達メッセージ管理 | ○ 元データとの対応（Task／Activity） | ● 在席世代 ＋ 復元世代 | ● 対象パートナー | ● 提示・報告の進行状況 | ○ 対話ラウンドID | ○ 提示完了／成否不明 | ● データ削除状況の照合 |
+| K-B リアルタイム認可照合 | ● タスク／ルール／同意の期待リビジョン | ○ 在席／復元／消去の各世代タグ | ● 実行主体・委任・タスク・ワークスペース | ● 目的・対象・操作・データ・送信先・費用 | ○ 試行前提 | — | ● 認証失効・安全停止・費用上限・保留 |
+| K-C 秘密情報利用 | ○ `CredentialRef`（非秘密）＋ 用途 | — | ● 接続先・用途 | ● 認証用途の厳格な制限 | ○ 操作種別 | ○ 認証成否・再認証要否 | ● 認証失効・安全保留の照合 |
+| K-D/E/F 推論実行・フォールバック | ○ 同意情報の期待リビジョン | ○ 復元／消去の世代タグ | ● 消費主体・要求能力 | ● 用途・データ・送信先・取扱制限・費用 | ○ チケットID | ○ 能力不足・送信失敗・実測利用量 | ● 保存禁止・費用上限・保留・消去 |
+| K-G 利用枠予約・確定 | ○ `CapId` ＋ 帰属先 | — | ● 消費主体・用途・送信先 | ● 利用枠上限・引当予約量 | ○ 予約ID | ○ 確定実測値／成否不明／処理中 | ● 上限超過・費用不明の照合 |
+| K-H アクション実行開始 | ● タスクリビジョン・ルール／同意の前提 | ● 在席 ＋ 復元 ＋ 消去（該当するもの） | ● 実行主体・委任・タスク・ワークスペース | ● 目的・実対象・操作・データ・送信先・費用 | ● 認可判定ID ＋ 費用予約ID | —（開始時点） | ● 認証失効・安全停止・費用上限・保留・消去・復元 |
+| K-H 外部結果確定 | ● 試行ID ＋ 期待される確信度 | ○ 世代タグ | ● タスク・委任 | ● 対象・外部作用との対応関係 | ● 元となった成否不明試行ID | ● 確認済み成功／確認済み失敗／成否不明 | ● 中断・再実行条件の照合 |
+| X-A 在席移動 | ● `(CompanionId, expected_generation+state)` | ● `PresenceGeneration` | ● 対象パートナー・移動元端末・移動先端末 | ● 移動の発生理由 | ○ ラウンド終了対応 | ○ 到達性・排他性の確認 | ● ペアリング・デバイス・安全停止・保留 |
+| X-B 対話ラウンド受付 | ○ `(Companion, Client, round)` ＋ 申告世代 | ● `PresenceGeneration` | ● 対象パートナー・端末・ラウンド・観測候補 | ● 対話の目的 | ○ ラウンドID・試行ID | ○ 受付完了／提示完了／成否不明 | ● 端末切り替え・安全停止・保留・消去 |
+| X-E 観測結果ルーティング | ○ 候補ID ＋ 文脈との対応 | ○ 在席／消去の世代タグ | ● 取得元端末・対象パートナー・用途 | ● ルーティング用途・配信制約 | ○ 観測候補ID | — | ● 観測制御・利用同意・消去の照合 |
+| D-B 局所データ消去 | ● `(operation, sweep)` ＋ 元データとの対応 | ● `DeletionSweepGeneration` | ● 参加担当者・データ保持の対応関係 | ● 削除目的・対象範囲・除外設定 | — | ○ 局所的な検証結果 | ● 有効期間・完了境界・安全保留 |
+| D-D バックアップ復元 | ● バックアップID ＋ 世代前提 | ● `RestoreGeneration` | ● 復元対象・参照関係の対応 | ● 用途・再有効化の範囲 | ○ 復元ID／ステージングID | ○ ステージング検証・正本切り替え成否 | ● 復元後の一括保留・認証情報の照合 |
+| C-B キャラクター適用 | ● `(CharacterId, expected_revision)` ＋ 適用ポインタ | ○ 復元／消去の世代タグ | ● 対象パートナー | ● 選択部品・オーナーの明示選択 | — | — | ● 適用禁止部品種別の照合 |
 
-`PresenceGeneration` と `RestoreGeneration` と `DeletionSweepGeneration` は別型・別 field であり、混ぜない。Task の目的変更は `TaskRevision` の前進であり、generation 変化で代替しない（CI §6.4）。
+`PresenceGeneration`（在席世代）、`RestoreGeneration`（復元世代）、`DeletionSweepGeneration`（消去スイープ世代）は、それぞれ独立した別の型・別のフィールドであり、絶対に混同してはなりません。また、タスクの方針変更は `TaskRevision` を進めることで表現し、世代番号の変更で代替してはなりません（CI §6.4）。
 
 ## 11. Acceptance result と error model（domain outcome と technical error の分離）
 
-単純な `Result<T, Error>` だけでは stale / denied / held / superseded / insufficient / unknown-external / historical-only 等を表せない場合がある。一方、すべての domain へ共通巨大 Status enum を導入しない。technical failure と semantic rejection / hold / stale を分離する。
+単純な `Result<T, Error>` だけでは、期限切れ（stale）、権限拒絶（denied）、安全保留（held）、後続処理による置換（superseded）、権能不足（insufficient）、外部成否不明（unknown-external）、履歴記録のみ（historical-only）といったドメイン上の多様な状態を表現しきれません。かといって、全ドメイン共通の巨大なステータスコード enum を作ってはなりません。システム障害などの技術的例外（technical failure）と、業務判断による受領・拒絶・保留（semantic outcome）を厳格に分離します。
 
 ### 11.1 返却形の約束
 
 ```rust
-// domain outcome は Ok 側、technical failure は Err 側。
+// ドメインの判定結果は Ok 側、技術的な障害は Err 側として型定義する。
 type InterfaceResult<Outcome, TechErr> = Result<Outcome, TechErr>;
 
-// 例：Task 提案
+// 例：タスク提案インターフェース
 fn propose_task(cmd: ProposeTaskCommand)
     -> impl Future<Output = InterfaceResult<TaskProposalOutcome, TaskTechnicalError>>;
-// 例：Action 開始
+
+// 例：アクション実行要求インターフェース
 fn request_action(cmd: ExecuteActionCommand)
     -> impl Future<Output = InterfaceResult<ActionStartOutcome, ActionTechnicalError>>;
 ```
 
-- `Ok(...)`：owner が確定した domain 受入（受理・stale・deny・hold・不足・再評価・元記録のみ等）。呼び出し側は variant に従って hold・再評価・Owner 判断待ちへ戻す。黙って queue・replay しない。
-- `Err(...)`：DB unavailable、Provider transport error、OS I/O 失敗等の technical failure。意味の採否ではない。再試行可否は別途 CCT・AE の不明・重複契約に従う（自動再実行しない）。
+- `Ok(...)`: 担当責任者が確定したドメイン上の受入判定結果（正常受理、期限切れ、権限拒絶、安全保留、情報不足、再評価待ち、過去記録への保存のみ等）。呼び出し側は受け取ったバリアントに従って、安全保留、再評価、オーナーの指示待ちへ正しく遷移させます。勝手にキューに溜めたり裏で再試行したりしてはなりません。
+- `Err(...)`: データベースの接続不能、プロバイダの通信障害、OSのI/Oエラーなどの技術的障害。業務上の採否判定ではありません。技術的エラー発生時の再試行の可否は、並行性制御（CCT）およびアクション実行（AE）の成否不明・重複防止契約に従います（自動的な再実行は行いません）。
 
 ### 11.2 domain outcome enum の一覧（domain ごとに区別）
 
-共通 enum に潰さない。各 enum は当該 owner の意味だけを持つ。
+共通の巨大 enum に安易に統合してはなりません。各 enum は、該当する担当責任者のドメインにおける固有の意味論のみを持ちます。
 
-| domain | outcome enum（例） | 主な variant の意味 |
+| ドメイン領域 | 結果判定 enum（例） | 主なバリアントの意味論 |
 |---|---|---|
-| Task 提案・steering・委任（command-level） | `TaskProposalOutcome`、`DelegationOutcome` | Accepted / StalePremise(current 付き) / MissingTask / RevisionExhausted（MissingTask / RevisionExhausted は steering のみ） / HeldByGlobalHold（hold slice で追加） / NeedsRevalidation / InsufficientContext |
-| Task commit（steering, AU4。repository-level） | `TaskCommitOutcome` | CommittedAs / StaleExpected(current 付き) / MissingTask / RevisionExhausted / HeldByGlobalHold（hold slice で追加） |
-| Agent 結果受入 | `TaskResultAcceptance` | AdoptedToCurrent / RecordedToOriginalOnly / HeldForPermissionReview / DiscardedAsStaleWithRecord |
-| Experience・訂正・scope | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | Formed / Deferred / Declined / Corrected / KeptAsCompanion / DeniedByExplicitConstraint / StaleTarget / HeldByErasure |
-| Permission live check | `LiveAuthorizationDecision` | AllowForThisUse / Deny / AskOwner / WaitForCondition / NeedsRevalidation |
-| 秘密利用 | `AuthenticatedUseOutcome` | UsedWithinScope / NeedsReauthentication / DeniedByConstraint / StaleReference |
-| 推論・fallback | `InferenceDispatchOutcome`、`FallbackDecision` | Completed / NotSent / AllowedAsApprovedFallback / DeniedAsUnapprovedRoute |
-| 予約・確定・解放 | `ReservationOutcome` | Reserved / DeniedByCap / HeldForUnknownCost / NeedsRevalidation |
-| Action 開始・確定 | `ActionStartOutcome`、`LateArrivalHandling` | StartedAsAttempt / Denied / AskOwner / StalePremise / HeldByGlobalHold / RecordedToOriginal / KeptUnknownWithDupRisk / SuppressedByErasure |
-| presence・round | `MoveDecision`、`RoundIntakeOutcome` | TransitioningToNew / RejectedAsStalePresence / DeniedByConstraint / AcceptedForRound / StaleRound / HeldForTransition |
-| routing | `RoutingDecision` | RoutedTo / SuppressedByControl / StaleCandidate |
-| Character 適用・import | `CharacterApplicationOutcome`、`SkillImportOutcome` | AppliedAs / StaleRevision / DeniedProhibitedPart / NeedsOwnerSelection / ImportedAsCompanionOrGlobal / RejectedByScopeRule / RejectedByValidation |
-| 削除・検証・完了 | `ParticipantCompletionFact`、`RemainderVerification`、`GlobalDeletionCompletion` | 局所処理・検証・未完了・失敗・未確認範囲の別 / NoRemainderMechanically / RemainderFound / UnreachableScope / GloballyCompleted / HeldPending / FailedVerification |
-| Backup・Restore | `BackupPointFact`、`SwitchRestoreDecision` 等 | 成功は対象時点・参照・履歴・未完了の対応が揃って初めて成功。各部 copy 成功だけを成功にしない |
-| Repository compare | 各 `*Outcome`（第13節） | CommittedAs / StaleExpected / MissingTask / RevisionExhausted / HeldByGlobalHold（hold slice。domain ごとの concrete variant を指し、`HeldByOperation` という共通 enum は設けない） |
+| タスク提案・方針指示・委任（コマンドレベル） | `TaskProposalOutcome`、`DelegationOutcome` | 受理（Accepted）／前提不一致（StalePremise：現在値付き）／タスク未存在（MissingTask：方針指示時のみ）／リビジョン上限超過（RevisionExhausted：方針指示時のみ）／全体保留中（HeldByGlobalHold：hold スライスで追加）／再照合が必要（NeedsRevalidation）／情報不足（InsufficientContext） |
+| タスクコミット（方針指示 AU4、リポジトリレベル） | `TaskCommitOutcome` | コミット成功（CommittedAs）／期待値不一致（StaleExpected：現在値付き）／タスク未存在（MissingTask）／リビジョン上限超過（RevisionExhausted）／全体保留中（HeldByGlobalHold：hold スライスで追加） |
+| エージェント結果受入 | `TaskResultAcceptance` | 現在タスクへ採用（AdoptedToCurrent）／過去記録にのみ保存（RecordedToOriginalOnly）／権限確認のため保留（HeldForPermissionReview）／期限切れのため破棄（DiscardedAsStaleWithRecord） |
+| 経験提出・訂正・スコープ | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | 知識形成（Formed）／保留（Deferred）／保存価値なし（Declined）／訂正完了（Corrected）／パートナー専用を維持（KeptAsCompanion）／明示制約により拒絶（DeniedByExplicitConstraint）／対象期限切れ（StaleTarget）／消去中保留（HeldByErasure） |
+| 権限リアルタイム照合 | `LiveAuthorizationDecision` | 今回の利用を認可（AllowForThisUse）／拒絶（Deny）／オーナー確認待ち（AskOwner）／条件充足待ち（WaitForCondition）／再照合が必要（NeedsRevalidation） |
+| 認証秘密利用 | `AuthenticatedUseOutcome` | 規定範囲で安全に利用（UsedWithinScope）／再認証が必要（NeedsReauthentication）／制約により拒絶（DeniedByConstraint）／参照期限切れ（StaleReference） |
+| 推論実行・フォールバック | `InferenceDispatchOutcome`、`FallbackDecision` | 完了（Completed）／送信前拒絶（NotSent）／承認済みフォールバックとして許可（AllowedAsApprovedFallback）／未承認経路のため拒絶（DeniedAsUnapprovedRoute） |
+| 利用枠予約・確定・解放 | `ReservationOutcome` | 予約成功（Reserved）／上限超過で拒絶（DeniedByCap）／費用不明のため保留（HeldForUnknownCost）／再照合が必要（NeedsRevalidation） |
+| アクション開始・確定 | `ActionStartOutcome`、`LateArrivalHandling` | 試行開始（StartedAsAttempt）／拒絶（Denied）／オーナー指示待ち（AskOwner）／前提不一致（StalePremise）／全体保留中（HeldByGlobalHold）／元記録へ保存（RecordedToOriginal）／成否不明のまま重複リスク提示（KeptUnknownWithDupRisk）／消去条件により再保存抑止（SuppressedByErasure） |
+| 在席移動・対話ラウンド | `MoveDecision`、`RoundIntakeOutcome` | 新端末へ移行開始（TransitioningToNew）／古い在席情報のため拒絶（RejectedAsStalePresence）／制約により拒絶（DeniedByConstraint）／ラウンド受理（AcceptedForRound）／過去ラウンドのため拒絶（StaleRound）／移行中保留（HeldForTransition） |
+| 観測結果ルーティング | `RoutingDecision` | 指定パートナーへ配信（RoutedTo）／制御設定により抑止（SuppressedByControl）／古い観測候補のため破棄（StaleCandidate） |
+| キャラクター適用・インポート | `CharacterApplicationOutcome`、`SkillImportOutcome` | 適用完了（AppliedAs）／リビジョン不一致（StaleRevision）／禁止部品のため拒絶（DeniedProhibitedPart）／オーナー選択待ち（NeedsOwnerSelection）／スコープ別インポート完了／スコープ規則違反で拒絶（RejectedByScopeRule）／検証失敗で拒絶（RejectedByValidation） |
+| データ削除・検証・完了 | `ParticipantCompletionFact`、`RemainderVerification`、`GlobalDeletionCompletion` | 各参加者の局所処理・検証・未完了・失敗・未確認状態／機械的残存なし（NoRemainderMechanically）／残存データ検出（RemainderFound）／到達不能領域あり（UnreachableScope）／システム全域完了（GloballyCompleted）／未完了のため保留維持（HeldPending）／検証失敗（FailedVerification） |
+| バックアップ・復元 | `BackupPointFact`、`SwitchRestoreDecision` 等 | 対象時点、参照整合性、変更履歴、未完了状況がすべて揃って初めて成功と確定（個別テーブルのコピー成功だけを全体の成功とみなさない） |
+| リポジトリ比較コミット | 各種 `*Outcome`（第13節） | コミット成功（CommittedAs）／期待値不一致（StaleExpected）／タスク未存在（MissingTask）／リビジョン上限超過（RevisionExhausted）／全体保留中（HeldByGlobalHold：hold スライスで追加。ドメインごとの具象バリアントを指し、`HeldByOperation` という共通 enum は設けない） |
 
-`accepted only as historical evidence` は `RecordedToOriginalOnly` / `AdoptedToOriginalOnly` 的な variant で表す。`accepted for recording but not current semantic use` は元 Action / Task / 元 revision への記録と現在 Task・現在認識への採用の分離で表す（H-A、K-H、K-K）。
+「過去の証拠としてのみ受け入れる（accepted only as historical evidence）」状態は、`RecordedToOriginalOnly` や `AdoptedToOriginalOnly` といった明示的なバリアントで表現します。「記録としては受け入れるが、現在の活動には採用しない」という判定は、元のアクションやタスクの過去リビジョンへの保存と、現在のタスクや認識への反映を明確に切り離すことで表現します（H-A、K-H、K-K）。
 
 ### 11.3 technical error の配置（`thiserror` 等）
 
-- technical error 型は各 infrastructure / owner 層で定義する。bare `String` / `Box<dyn Error>` を public library error にしない（repo 規約）。
-- 例（配置の提案。改名は許す）：
-  - `TaskTechnicalError`（作業の durable 層）：`StorageUnavailable`、`CommitConflictIo`（compare 自体の I/O 失敗。stale ではない）等。
-  - `ActionTechnicalError`（実行・拡張の作用層）：`DeviceIoFailed`、`SandboxLaunchFailed` 等。Deny・stale・hold は含めない。
-  - `InferenceTechnicalError`（推論の transport 層）：`ProviderTransportFailed`、`ResponseLost`（不明の原因。確定度の書換えではない）等。
-  - `PresenceTechnicalError`（接続・存在の観測層）：`ReachabilityCheckFailed`（確認不能。不在の断定ではない）等。
-  - `PreservationTechnicalError`（保全・消去の file/DB 層）：`BackupIoFailed`、`StagingCorrupted` 等。検証失敗・到達不能とは区別する。
-- domain outcome と technical error を同じ error category へ潰さない。`stale` / `denied` / `held` / `not-current` / `missing` / `revision exhausted` / `cap exceeded` は `Ok` 側の variant であり、`Err` 側の retry 対象ではない。呼び出し側が `Err` を `Denied` と誤読して Owner へ誤った成功・拒否表示をしないこと（CC-07）。
-- missing identity（premise が指す identity の durable state がない）と revision 枯渇は domain outcome であり、`*_TechnicalError` にしない。逆に partial / inconsistent な durable unit は技術エラーであり、domain outcome として読み替えない。この振り分けは各 owner の commit / read boundary が同じ規則で守る。
+- 技術的エラー型は、各インフラストラクチャ層や担当ドメイン層で明示的に定義します。ライブラリの公開エラーとして、型のない生の `String` や `Box<dyn Error>` を使用してはなりません（リポジトリ共通規約）。
+- エラー型の定義例（命名の分かりやすい調整は許容）：
+  - `TaskTechnicalError`（作業担当の永続化層）：`StorageUnavailable`（ストレージ利用不可）、`CommitConflictIo`（比較照合自体のI/Oエラー。前提値の不一致とは別）など。
+  - `ActionTechnicalError`（実行・拡張担当のアクション層）：`DeviceIoFailed`（デバイスI/Oエラー）、`SandboxLaunchFailed`（サンドボックス起動失敗）など。権限拒絶、前提不一致、安全保留は含めません。
+  - `InferenceTechnicalError`（推論担当の通信層）：`ProviderTransportFailed`（プロバイダ通信失敗）、`ResponseLost`（応答の消失。成否不明の要因であり、確信度の勝手な改ざんは行わない）など。
+  - `PresenceTechnicalError`（接続・存在担当の観測層）：`ReachabilityCheckFailed`（疎通確認自体の失敗。パートナーが不在であると断定したわけではない）など。
+  - `PreservationTechnicalError`（保全・消去担当のストレージ層）：`BackupIoFailed`（バックアップI/O失敗）、`StagingCorrupted`（ステージング領域の破損）など。検証失敗や端末到達不能とは厳格に区別します。
+- 業務上の判定結果（domain outcome）と技術的例外（technical error）を同一のエラーカテゴリに混同してはなりません。期限切れ（`stale`）、権限拒絶（`denied`）、安全保留（`held`）、現在無効（`not-current`）、識別子不在（`missing`）、リビジョン枯渇（`revision exhausted`）、上限超過（`cap exceeded`）などは、すべて正常系（`Ok` 側）のバリアントであり、ネットワークエラーのような自動再試行（retry）の対象ではありません。呼び出し側が通信エラーを「権限拒絶」と誤読し、ユーザーへ誤った画面表示を行わないように徹底します（CC-07）。
+- 識別子不在（前提が指す識別子の永続化状態が存在しない）やリビジョン枯渇はドメイン判定結果（domain outcome）であり、`*_TechnicalError` として扱ってはなりません。逆に、部分的・不整合な永続化単位（partial / inconsistent な durable unit）は技術的エラーであり、ドメイン判定結果として読み替えてはなりません。この切り分けは、各担当責任者のコミット・読み取り境界において同一の規則として厳格に遵守します。
 
 ## 12. Long-running operations — request と completion の分離
 
-推論、Task Agent、external Tool、Computer Use、Backup / Restore、Targeted Deletion の長時間処理について、request 開始時の interface と completion / result interface を分離する。request object を process memory だけに保持しないと帰属不能になる設計は避ける。
+LLMによる推論、タスクエージェントの自律処理、外部ツールの実行、Computer Use、バックアップ作成および復元、個人データ完全削除などの長時間処理について、処理の開始要求インターフェース（request）と、結果の到着・完了報告インターフェース（completion / result）を明確に分離します。要求オブジェクトをプロセスメモリの中だけで保持していないと結果の帰属が分からなくなるような、脆弱な設計を徹底して排除します。
 
-| 長時間処理 | request（開始） | completion / result（到着） | 戻れる対応（durable） |
+| 長時間処理の種類 | 開始要求（request） | 結果到着・完了報告（completion / result） | 永続化により復元可能な対応関係（durable correlation） |
 |---|---|---|---|
-| 推論（単発・継続・fallback・再送） | `AdmissionRequest` / `AuthorizedInference` → attempt claim（ticket 発行・予約・admission の前提確定） | `InferenceResultArrival`（ticket→結果・利用量） | `(ticket, consumer, Task/委任対応, 用途, revision/generation 前提, provenance)`。PR Group F/I、CI §6.4 の世代タグ |
-| Task 委任・Task Agent | `CreateDelegationCommand`（expected revision の atomic compare） | `TaskAgentResultArrival`（delegation→現在 Task の受入） | `(delegation, TaskRef 前提, scope 写し, attempt 対応, 目的)`。PR Group D、CI §5.3 |
-| Action 試行・外部 Tool・Computer Use | `ExecuteActionCommand`（開始前 atomic compare）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（per-attempt CAS）＋ `LateArrivalAttribution`（遅延帰属） | `(attempt, Task revision 前提, 実対象・操作, 依拠 Permission, presence/restore 世代, prior_unknown)`。PR Group E |
-| Backup 作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点・参照・未完了の対応が揃って成功） | `(backup_point, 対象時点・参照対応・除外・未完了状況)`。PR Group J |
-| Restore | `RequestRestoreCommand` → `StagedRestoreCandidate`（隔離検証） | `SwitchRestoreDecision`（generation bump＋switch）→ `BulkEnableAfterRestoreCommand` | `(restore, backup_point, RestoreGeneration, hold, Credential 照合)`。PR Group J |
-| Targeted Deletion | `RequestTargetedDeletionCommand` → `DeletionScopeDecision` | `DemandLocalErasureCommand` → `ParticipantCompletionFact` → `VerifyRemainderQuery` → `GlobalDeletionCompletion` | `(operation, sweep, valid_interval, participant 対応, hold)`。PR Group J、CI §5.9 |
-| 未伝達報告 | `RegisterUndeliveredFact`（親原子で登録） | `RequestUndeliveredSummaryQuery` → `UndeliveredSummaryFact` → `PresentationMark`（提示確認後のみ確定） | `(undelivered_id, source 対応, 報告状況, round・世代対応)`。PR Group B |
-| Character 適用供給 | `GetCharacterRevisionQuery`（供給） | `ProposeCharacterApplicationCandidate`（Owner 選択付き提案→確定） | `(character, revision, parts, OwnerSelectionRef)`。PR Group A/B |
+| 推論実行（単発・継続・フォールバック・再送） | `AdmissionRequest` / `AuthorizedInference` → 試行の確定（チケット発行、費用予約、前提条件の確定） | `InferenceResultArrival`（チケットIDから結果テキストおよび利用量への対応付け） | `(チケットID, 消費主体, タスク／委任との対応, 利用目的, リビジョン／世代前提, 由来情報)`。PR グループF/I、CI §6.4 の世代タグ |
+| タスク委任・自律エージェント | `CreateDelegationCommand`（期待リビジョンの不可分な比較照合） | `TaskAgentResultArrival`（委任情報から現在タスクへの結果受入判定） | `(委任ID, TaskRef 前提, スコープの写し, アクション試行との対応, タスク目的)`。PR グループD、CI §5.3 |
+| アクション試行・外部ツール・Computer Use | `ExecuteActionCommand`（実行前の不可分な比較照合）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（試行ごとの CAS 更新）＋ `LateArrivalAttribution`（遅延到着の帰属） | `(試行ID, タスクリビジョン前提, 実際の操作対象と操作種別, 依拠した認可ID, 在席／復元世代, 元の成否不明試行ID)`。PR グループE |
+| バックアップ作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点、参照関係、未完了状況の整合性が揃って確定） | `(バックアップID, 対象時点・参照整合性・除外データ・未完了状況)`。PR グループJ |
+| バックアップ復元 | `RequestRestoreCommand` → `StagedRestoreCandidate`（隔離ステージング検証） | `SwitchRestoreDecision`（復元世代の更新 ＋ 正本切り替え）→ `BulkEnableAfterRestoreCommand` | `(復元ID, バックアップID, RestoreGeneration, 安全保留, 認証情報照合)`。PR グループJ |
+| 個人データ完全削除 | `RequestTargetedDeletionCommand` → `DeletionScopeDecision` | `DemandLocalErasureCommand` → `ParticipantCompletionFact` → `VerifyRemainderQuery` → `GlobalDeletionCompletion` | `(操作ID, 消去スイープ世代, 有効期間, 参加者対応, 安全保留)`。PR グループJ、CI §5.9 |
+| 未伝達メッセージ報告 | `RegisterUndeliveredFact`（親の処理と不可分に登録） | `RequestUndeliveredSummaryQuery` → `UndeliveredSummaryFact` → `PresentationMark`（画面提示確認後にのみ確定） | `(未伝達ID, 元データとの対応, 報告状況, ラウンド・世代対応)`。PR グループB |
+| キャラクター適用 | `GetCharacterRevisionQuery`（資材供給） | `ProposeCharacterApplicationCandidate`（オーナー選択を伴う提案 → 適用確定） | `(キャラクターID, リビジョン, 選択部品, オーナー選択情報)`。PR グループA/B |
 
-completion 側では元の identity / revision / generation / attempt / operation / provenance へ戻れる。遅延物は `attempt → task revision → 現在 Task` の順に辿り、記録（元へ残す）と semantic 更新・次実行・提示（現在の受入）を分ける（CI §6.3）。Cancel・失効・steering・移動・削除・復元後の到着物は元の Action / Task へ記録し、旧承認の解除・旧結果の新目的採用・後続の自動開始をしない。
+完了報告を受け取る側は、永続化された情報から元の識別子、リビジョン、世代、試行番号、操作種別、発生由来を確実に辿ることができます。遅れて届いた成果物は、`試行ID → タスクリビジョン → 現在のタスク` の順序で厳格に照合し、「過去の事実としての記録」と、「現在の活動への採用・画面提示・後続処理の自動開始」を明確に切り離します（CI §6.3）。中断、失効、方針変更、端末移動、データ削除、バックアップ復元の後に遅れて到着した結果は、元の古いアクションやタスクの過去ログへ正しく記録するに留め、過去の古い承認を勝手に復活させたり、古い結果を新しい目的に勝手に流用したり、後続の処理を自動開始してはなりません。
 
 ## 13. Repository interfaces — compare-and-commit を成立させる形
 
-単純な `load() -> modify -> save()` だけでは race する domain について、expected revision / generation / compare-and-update / append fact / reserve / commit / release の operation をどう表すかを設計する。DB transaction そのものを business layer へ露出しすぎない。
+単純な「読み込み（load）→ メモリ上で編集 → 保存（save）」という手続きだけでは競合（race condition）が発生してしまう各ドメインにおいて、期待リビジョン／世代の照合、比較照合更新（compare-and-update）、確定事実の追記（append fact）、利用枠の予約・確定・解放といった低レベル操作をどう型として表現するかを定めます。データベースのトランザクションそのものをビジネスロジック層へ過度に露出させてはなりません。
 
 ### 13.1 方針
 
-- business layer は `Transaction` object を保持・受渡ししない。repository method が内部で短い `Immediate` transaction（または owner-local serialization との協調）を行い、compare と durable 更新を不可分にする。transaction 内で await・外部 I/O を行わない（CCT §5）。
-- business layer が渡すのは `expected_*`（boundary token）と新規内容であり、読み直し・比較・更新の順序は repository が守る。戻り値は domain outcome（`CommittedAs` / `StaleExpected` / `MissingTask` / `RevisionExhausted` / `HeldByGlobalHold` 等）であり、生の row count ではない。
-- 万能の generic repository / generic CRUD interface を導入しない。同じ invariant を持つ場合だけ共通化する（例：per-row CAS の形は共有しても、型・lifecycle・counter は domain ごとに区別する）。
-- persistence の table / record は semantic owner にならない。意味変更は各 owner が行い、persistence は対応の保持・照合可能性だけを支える（PR §2）。
+- **ビジネスロジック層へ `Transaction` オブジェクトを直接露出・受け渡しさせない**:
+  リポジトリのメソッド内部で短い即時トランザクション（`Immediate` transaction）、または担当責任者のローカルな逐次化機構と連携し、前提条件の比較照合と永続化データの更新を不可分に実行します。トランザクションの内部で非同期の待機（await）や外部ネットワークI/Oを行ってはなりません（CCT §5）。
+- **ビジネス層は前提条件（`expected_*`）と新規内容を渡し、順序保証はリポジトリが担う**:
+  最新データの読み直し、前提との比較照合、更新処理の不可分な実行順序はリポジトリが確実に保証します。メソッドの戻り値は、生の更新行数（row count）ではなく、ドメイン判定結果（`CommittedAs`、`StaleExpected`、`MissingTask`、`RevisionExhausted`、`HeldByGlobalHold` など）として型安全に返します。
+- **万能な汎用リポジトリや汎用 CRUD インターフェースを安易に作らない**:
+  真に同一の不変条件（invariant）を共有する場合にのみ共通化を行います（例：行ごとの比較照合更新の仕組み自体は共有できても、取り扱う型、ライフサイクル、カウンターはドメインごとに明確に区別します）。
+- **データベースのテーブルやレコード自身が担当責任者（semantic owner）になるわけではない**:
+  意味論的な状態の変更は各ドメインの担当責任者が行い、永続化層は対応関係の安全な保持と照合可能性の提供に専念します（PR §2）。
 
 ### 13.2 domain 別の repository interface（pseudo-trait。必要なものだけ abstract する）
 
-実装差し替え・boundary 隔離・testability の理由がある interface だけ abstract する。内部 pure function まで trait 化しない。
+実装の差し替え、境界の隔離、テスト容易性（in-memory での再現など）に明確な理由があるインターフェースのみを抽象化します。内部の純粋な計算処理まで無闇にトレイト化してはなりません。
 
 ```rust
-// --- Task（PR Group D。SD-Task。前提 read → 長時間処理 → 短い commit compare） ---
+// --- タスク管理（PR グループD。SD-Task。前提読み取り → 長時間処理 → 短いコミット比較照合） ---
 struct TaskPurposeAdoptionPremise {
-    purpose: TaskPurpose,            // 採用する目的本文。identity は採用位置が持つ
-    origin: TaskContextOrigin,       // 採用の由来（steering では会話: kind = OwnerConversation、source = ProposeSteeringCommand.instruction_source と同一 record）
+    purpose: TaskPurpose,            // 採用する目的本文。識別子（identity）は採用位置が保持
+    origin: TaskContextOrigin,       // 採用の由来（方針指示 steering では会話: kind = OwnerConversation、source = ProposeSteeringCommand.instruction_source と同一レコード）
     acquired_at: WallClockWithTz,    // 取得時点
 }
-struct TaskInstructionAdoptionPremise { // steering で採用する追加指示（H-A steering 配線 slice で導入）
-    entry: TaskContextEntryId,       // 新 revision が記録する採用指示 entry の identity。作業（orchestrate）が mint し、entry 自身が採用 identity
+struct TaskInstructionAdoptionPremise { // 方針指示 steering で採用する追加指示（H-A steering 配線スライスで導入）
+    entry: TaskContextEntryId,       // 新リビジョンが記録する採用指示項目の識別子。作業担当（orchestrate）が発行し、項目自身が採用識別子となる
     origin: TaskContextOrigin,       // 採用の由来（kind = OwnerConversation。source = ProposeSteeringCommand.instruction_source）
     acquired_at: WallClockWithTz,    // 取得時点
 }
-struct TaskCommitPremise {            // steering（AU4）。1 commit = 1 revision forward
-    expected: TaskRef,               // expected current revision。caller は cur+1 を名指ししない
-    new_purpose: Option<TaskPurposeAdoptionPremise>, // None = 直前の採用目的 identity・本文を引き継ぐ。Some は新 revision を採用位置とする
-    adopted_purpose_entry: TaskContextEntryId, // 新 revision が記録する採用目的 context entry の identity。作業（orchestrate）が mint
-    adopted_instruction: Option<TaskInstructionAdoptionPremise>, // この forward で採用する指示。None = 指示の採用なし
+struct TaskCommitPremise {            // 方針指示（steering AU4）。1コミット＝1リビジョン前進
+    expected: TaskRef,               // 期待する現在リビジョン。呼び出し側は cur+1 を直接名指ししない
+    new_purpose: Option<TaskPurposeAdoptionPremise>, // None = 直前の採用目的識別子・本文を継承。Some は新リビジョンを採用位置とする
+    adopted_purpose_entry: TaskContextEntryId, // 新リビジョンが記録する採用目的コンテキスト項目の識別子。作業担当（orchestrate）が発行（mint）
+    adopted_instruction: Option<TaskInstructionAdoptionPremise>, // この前進（forward）で採用する指示。None = 指示の採用なし
 }
 
 enum TaskCommitOutcome {
-    CommittedAs(TaskRef),            // 新 revision（steering 時は cur+1）
-    StaleExpected { current: TaskRef },
-    MissingTask { task: TaskId },    // premise の Task に durable state がない。何も書いていない
-    RevisionExhausted { task: TaskId }, // 次の相異なる revision を durable に確定できない。何も書いていない
-    // HeldByGlobalHold(hold-check premise) は hold slice で追加する（下記）
+    CommittedAs(TaskRef),            // コミット成功（新リビジョン。方針指示時は cur+1）
+    StaleExpected { current: TaskRef }, // 期待リビジョン不一致（最新リビジョンを添えて返却）
+    MissingTask { task: TaskId },    // 前提のタスクに対応する永続化状態が存在しない。何も書き込まない
+    RevisionExhausted { task: TaskId }, // 次の相異なるリビジョンを永続化データとして確定できない。何も書き込まない
+    // HeldByGlobalHold(hold-check premise) は hold スライスで追加（下記参照）
 }
 
-// TaskCommitPremise の意味:
-// - 新 revision = expected.revision + 1 を repository が CAS 成立後に確定する。caller は未来 revision を名指ししない。
-// - new_purpose: Some は採用位置（TaskPurposeRef.adopted_revision）を新 revision とし、None は直前の
-//   採用 identity・本文を維持して新 revision の採用目的 entry を再記録する。None の場合、repository は
-//   現在 revision の採用目的 entry から origin・acquired_at を引き継ぎ、同じ transaction 内で読む。
-// - adopted_purpose_entry は新 revision の採用 context entry の identity であり、作業（orchestrate）が mint
-//   する。repository は渡された identity を採番し直さず、CAS 成立後に TaskContextEntry.reference =
-//   (task, new revision) と、Some の場合の採用 revision を刻む。
-// - new_purpose: Some の origin は steering の発言 record とし（kind = OwnerConversation、source =
-//   ProposeSteeringCommand.instruction_source と同一 record）、acquired_at は作業が採用時に取得する。
-//   目的と指示で由来を分ける producer が生じたら command に由来 field を追加する。
-// - adopted_instruction: steering の forward は採用指示 entry を 1 つ記録する（ProposeSteeringCommand.
-//   instruction_source は必須）。None は指示を採用しない将来の forward 用であり、この slice の steering
-//   経路は常に Some を渡す。
-// - MissingTask / RevisionExhausted は Ok 側の domain outcome とし、durable state を変更しない。
-//   RevisionExhausted は successor 不在だけでなく、successor を durable 表現に写せない場合も含む。
-// - AU4 の repository slice が記録する context kind は採用目的のみ。最初の追加 kind である採用指示は
-//   H-A steering 配線 slice が write-side premise（`adopted_instruction`）・item-kind discriminator・
-//   migration・read rule 拡張と同じ design 変更で追加する。材料・途中理解はそれぞれの利用先が分岐する
-//   slice が同じ形で追加する。どの kind も同じ forward_steering transaction に載せ、別 method・別
-//   revision・別 transaction の採用経路を作らない。
-// - 採用指示の identity は新 revision の TaskContextEntryId であり、repository は渡された identity を
-//   採番し直さず、CAS 成立後に reference = (task, new revision) だけを刻む。entry は採用 revision で
-//   1 度だけ書き、後の forward で再記録しない（目的 entry の carry-forward とは異なる）。現在有効な
-//   採用指示は、現在 revision までの AdoptedInstruction entry 全体である。
-// - HeldByGlobalHold は hold slice（HoldConditionRef の producer が存在する最初の stage。Targeted
-//   Deletion / Restore / Stop のいずれか早い方）で、Task 所有の hold-check premise
-//   （HoldCheckContextRef 相当。adopt_result と同型）と対で追加する。forward_steering は同じ
-//   atomic compare 内で現在の hold・消去・復元保留を照合し、成立しなければ何も書かず
-//   HeldByGlobalHold を返す。それまで concrete enum に hold の代役 variant・仮 premise を置かない。
-//   この名前は H-A command-level（TaskProposalOutcome / DelegationOutcome 等）と repository-level
-//   （TaskCommitOutcome）で共通の domain 名であり、いずれも hold slice で追加する。management intent の
-//   HeldByOperation（未確定・保留）とは別概念である。
+// TaskCommitPremise の意味論:
+// - 新リビジョン（expected.revision + 1）は、リポジトリが CAS（比較照合更新）成立後に確定します。呼び出し側が未来のリビジョンを直接名指ししてはなりません。
+// - new_purpose: Some の場合は採用位置（TaskPurposeRef.adopted_revision）を新リビジョンとし、None の場合は直前の採用識別子・本文を維持して新リビジョンの採用目的項目を再記録します。None の場合、リポジトリは現在リビジョンの採用目的項目から origin および acquired_at を引き継ぎ、同一トランザクション内で読み取ります。
+// - adopted_purpose_entry は新リビジョンの採用コンテキスト項目の識別子であり、作業担当（orchestrate）が発行します。リポジトリは渡された識別子を採番し直さず、CAS 成立後に TaskContextEntry.reference = (task, new revision) と、Some の場合の採用リビジョンを刻みます。
+// - new_purpose: Some の origin は方針指示の発言レコードとし（kind = OwnerConversation、source = ProposeSteeringCommand.instruction_source と同一レコード）、acquired_at は作業担当が採用時に取得します。目的と指示で由来を分ける生成元が生じた段階で、コマンドに由来フィールドを追加します。
+// - adopted_instruction: 方針指示の前進（forward）は採用指示項目を 1 つ記録します（ProposeSteeringCommand.instruction_source は必須）。None は指示を採用しない将来の前進用であり、本スライスの steering 経路では常に Some を渡します。
+// - 採用指示の識別子は新リビジョンの TaskContextEntryId であり、リポジトリは渡された識別子を採番し直さず、CAS 成立後に reference = (task, new revision) のみを刻みます。項目は採用リビジョンで 1 度だけ書き込み、以降の前進では再記録しません（目的項目の引き継ぎ再記録とは異なります）。現在有効な採用指示は、現在リビジョンまでの AdoptedInstruction 項目全体となります。
+// - MissingTask / RevisionExhausted は正常系（Ok 側）のドメイン判定結果（domain outcome）とし、永続化状態を変更しません。RevisionExhausted は後続リビジョンの不在だけでなく、後続リビジョンを永続化表現に写せない場合も含みます。
+// - AU4 のリポジトリスライスが記録するコンテキスト種別は採用目的のみです。最初の追加種別である採用指示は、H-A steering 配線スライスが書き込み側の前提（adopted_instruction）・項目種別識別子（discriminator）・マイグレーション・読み取り規則の拡張を同一の設計変更として追加します。材料や途中理解はそれぞれの利用先が分岐するスライスが同一の形式で追加します。どの種別も同一の forward_steering トランザクションに載せ、別メソッド・別リビジョン・別トランザクションの採用経路を作ってはなりません。
+// - HeldByGlobalHold は、hold スライス（HoldConditionRef の生成元が存在する最初のステージ。個別データ削除 / 復元 / 停止のいずれか早い方）において、タスク所有の安全保留照合前提（HoldCheckContextRef 相当。adopt_result と同型）と対で追加します。forward_steering は同一の不可分比較照合内で現在の保留・消去・復元保留を照合し、成立しなければ何も書き込まず HeldByGlobalHold を返します。それまでは具象 enum に保留の代役バリアントや仮の前提条件を置いてはなりません。この名称は H-A コマンドレベル（TaskProposalOutcome / DelegationOutcome 等）とリポジトリレベル（TaskCommitOutcome）で共通のドメイン名であり、いずれも hold スライスで追加します。運用管理意図の HeldByOperation（未確定・保留）とは明確に区別される別概念です。
 
 // Task 作成の全内容（AU2）。identity は owner（作業）が mint し、commit 前は委任・実行から不可視。
 struct TaskCreationPremise {
@@ -1343,17 +1367,17 @@ struct WorkspaceAssociationPremise {
     need: WorkspaceNeedRef,
 }
 
-// reload / recovery の読み戻し。現行 revision 単位（AU2 作成＋AU4 forward）（現在 revision の目的 entry と、
-// 現在 revision までの有効な採用指示 entry 全体）を返す。
-struct Task {                        // task 行の現行値（D1）。内容の正本は revision snapshot で、同じ revision を指す
-    reference: TaskRef,              // 現在 revision
+// リロード / 復旧の読み戻し。現行リビジョン単位（AU2 作成 ＋ AU4 前進）（現在リビジョンの目的項目と、
+// 現在リビジョンまでの有効な採用指示項目全体）を返します。
+struct Task {                        // task 行の現行値（D1）。内容のマスターデータ（正本）は revision snapshot であり、同じリビジョンを指す
+    reference: TaskRef,              // 現在リビジョン
     purpose: TaskPurposeRef,         // 現在採用されている目的（本文は revision snapshot）
     assignee: AssigneeRef,
 }
 struct TaskRevisionRecord {
     reference: TaskRef,
-    purpose: TaskPurposeRef,         // この revision で有効な採用目的
-    purpose_text: TaskPurpose,       // この revision 時点の目的本文 snapshot
+    purpose: TaskPurposeRef,         // このリビジョンで有効な採用目的
+    purpose_text: TaskPurpose,       // このリビジョン時点の目的本文スナップショット
     assignee: AssigneeRef,
 }
 struct WorkspaceAssociation {
@@ -1364,66 +1388,66 @@ struct WorkspaceAssociation {
 }
 struct TaskRecord {
     task: Task,
-    revision: TaskRevisionRecord,    // 現在 revision の snapshot
-    context: Vec<TaskContextEntry>,  // 現在 revision の目的 entry と、reference.revision <= 現在 revision の採用指示 entry（順序は目的 entry が先、次に reference.revision 昇順・同一 revision 内は entry_id 昇順）。各 entry は自身の reference を保持する
+    revision: TaskRevisionRecord,    // 現在リビジョンのスナップショット
+    context: Vec<TaskContextEntry>,  // 現在リビジョンの目的項目と、reference.revision <= 現在リビジョンの採用指示項目（順序は目的項目が先、次に reference.revision 昇順・同一リビジョン内は entry_id 昇順）。各項目は自身の reference を保持する
     workspace: Option<WorkspaceAssociation>,
 }
 
 trait TaskRepository {
-    // Task 作成：task + task_revision + 初期 task_context_entry +（関連付け確定時）
-    // workspace_assoc の原子 durable。commit 前は委任・実行から不可視（durable-before-visible）。
-    // いずれかの insert が失敗したら先行 insert を含めて rollback し、一部だけの行を可視にしない。
+    // タスクの新規作成：task + task_revision + 初期 task_context_entry +（関連付け確定時）
+    // workspace_assoc の不可分永続化。コミット前は外部の委任や実行から不可視（durable-before-visible）。
+    // いずれかの挿入が失敗した場合は先行の挿入を含めてロールバックし、一部だけの行を可視にしません。
     async fn create_task(
         &self,
         premise: TaskCreationPremise,
     ) -> Result<TaskRef, TaskTechnicalError>;
 
-    // steering：新 revision＋新 context の原子 forward。旧 revision を残す。
-    // 採用 context entry の identity は premise が持ち、repository は CAS 成立後の revision 参照だけを刻む。
-    // hold slice では Task 所有の hold-check premise を同じ atomic compare に加える。
+    // 方針指示（steering）：新リビジョンと新コンテキストを不可分に前進（過去リビジョンも確実に保持）。
+    // 採用するコンテキスト項目の識別子は前提条件（premise）が保持し、リポジトリはCAS成立後のリビジョン参照のみを刻みます。
+    // hold スライスでは、タスクが所有する安全保留照合前提（hold-check premise）を同一の不可分比較照合（atomic compare）に加えます。
     async fn forward_steering(
         &self,
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError>;
 
-    // reload / recovery：commit 済みの現行 revision 単位（AU2 作成＋AU4 forward）を読み戻す。現在 revision の
-    // 採用目的 entry は丁度 1 つで、その採用 identity が Task.purpose・TaskRevisionRecord.purpose と一致しなければ
-    // 技術エラー（欠落・複数・不一致のいずれも TaskRecord を合成しない）。reference.revision <= 現在 revision の
-    // 採用指示 entry を decode して自身の reference のまま返す。未知 item kind・kind と payload の不一致・現在
-    // revision を越える entry は技術エラーとし、読み飛ばし・再解釈しない。origin.source は参照であり、参照先
-    // record の存在・可読性は要求しない（解決できない provenance もそのまま返し、本文を複製・再解釈しない）。
-    // 存在しない identity は None。
+    // リロード / 復旧：コミット済みの現行リビジョン単位（AU2 作成 ＋ AU4 前進）を読み戻します。現在リビジョンの
+    // 採用目的項目は丁度 1 つ存在し、その採用識別子が Task.purpose および TaskRevisionRecord.purpose と一致しなければ
+    // 技術的エラーとします（欠損・複数存在・不一致のいずれの場合も中途半端な TaskRecord を合成してはなりません）。
+    // reference.revision <= 現在リビジョンの採用指示項目をデコードして自身の reference のまま返します。
+    // 未知の項目種別（unknown item kind）、種別とペイロードの不一致、現在リビジョンを超える項目は技術的エラーとし、
+    // 読み飛ばしや勝手な再解釈を行ってはなりません。origin.source は参照であり、参照先レコードの存在や可読性は要求しません
+    // （解決できない来歴情報もそのまま返し、本文を複製・再解釈しません）。存在しない識別子の場合は None を返します。
     async fn load_task(
         &self,
         task: TaskId,
     ) -> Result<Option<TaskRecord>, TaskTechnicalError>;
 
-    // 委任作成：expected_task_revision の atomic compare を満たして作成する。
+    // 委任の作成：expected_task_revision の比較照合を満たした上で安全に作成。
     async fn create_delegation(
         &self,
         task: TaskRef,
         scope_copy: DelegationScopeRef,
     ) -> Result<DelegationOutcome, TaskTechnicalError>;
 
-    // 結果採用の判定：現在 revision・目的との対応を確認して行う。二重完了にしない。
+    // 結果採用の判定：現在の最新リビジョンおよび目的との整合性を確認して採用（二重完了を防止）。
     async fn adopt_result(
         &self,
         arrival: TaskAgentResultArrival,
         current_hold: HoldCheckContextRef,
     ) -> Result<TaskResultAcceptance, TaskTechnicalError>;
 
-    // 履歴・context は append 系。現在値の上書きではない。
+    // 履歴・コンテキストの追記：現在値の上書きではなく、履歴としての追記（append）。
     async fn append_task_revision_record(
         &self,
         record: TaskRevisionRecord,
     ) -> Result<(), TaskTechnicalError>;
 }
 
-- Task 作成の restore generation premise（復元跨ぎタグ）は、値の owner（保全・消去）が存在する slice で `task` に追加する。Task 側は `GenerationInner` を包む Task 所有 premise とし、他 owner の `RestoreGeneration` を import しない（CI §6.4 の復元跨ぎ参照を欠落させない）。
+- タスク作成の復元世代前提（復元跨ぎタグ）は、値の担当責任者（保全・消去）が存在する開発ステージで `task` に追加します。タスク側は `GenerationInner` を包むタスク所有の前提型とし、他担当の `RestoreGeneration` を直接インポートしません（CI §6.4 の復元跨ぎ参照を欠落させないため）。
 
-// --- Action attempt（PR Group E。SD-Attempt。append-only＋per-row CAS） ---
+// --- アクション試行（PR グループE。SD-Attempt。追記専用 ＋ 行ごとの CAS） ---
 struct AttemptCommitPremise {
-    expected_task: Option<TaskRef>,  // Task revision 前提
+    expected_task: Option<TaskRef>,  // タスクリビジョンの前提
     relied_evaluation: PermissionEvaluationId,
     real_target: RealTargetRef,
     operation: OperationKind,
@@ -1434,25 +1458,26 @@ struct AttemptCommitPremise {
 }
 
 trait ActionAttemptRepository {
-    // 開始：同一 Immediate transaction 内で Task・委任・Workspace・実対象・
-    // 現在許可・device・費用・停止・保留・消去・復元条件を照合して原子に insert する。
+    // 試行の開始：同一の即時トランザクション内で、タスク、委任、ワークスペース、実対象、
+    // 現在の許可、デバイス状態、費用予約、安全停止、保留、消去、復元の条件を照合し、不可分に挿入。
     async fn insert_attempt_if_current(
         &self,
         premise: AttemptCommitPremise,
     ) -> Result<ActionStartOutcome, ActionTechnicalError>;
 
-    // 確定度更新：(attempt_id, expected_certainty) の CAS。新 evidence の事実 owner 確認を必須とする。
-    // Unknown は粘着させ、Cancel 受付・通信成功・表示・保存成功・再接続・復元・移動で書き換えない。
+    // 確信度の更新：(attempt_id, expected_certainty) の比較照合更新（CAS）。
+    // 新しい証拠（evidence）の正当性を確認した上で更新する。
+    // 「成否不明（Unknown）」は粘着的に保持し、中断受付・通信成功・画面表示・保存成功・再接続・復元・端末移動によって勝手に書き換えてはならない。
     async fn compare_and_set_certainty(
         &self,
         attempt: ActionAttemptId,
-        expected: ActionCertainty,   // 通常 Unknown
+        expected: ActionCertainty,   // 通常は Unknown
         new: ActionCertainty,
         grounds: EffectGroundsRef,
     ) -> Result<CertaintyUpdateOutcome, ActionTechnicalError>;
 }
 
-// --- Presence（PR Group G。SD-Presence。per-Companion CAS＋旧→移行中→新） ---
+// --- 在席管理（PR グループG。SD-Presence。パートナーごとの CAS ＋ 旧→移行中→新） ---
 trait PresenceRepository {
     async fn compare_and_begin_transition(
         &self,
@@ -1466,13 +1491,13 @@ trait PresenceRepository {
         &self,
         companion: CompanionId,
         transitioning_generation: PresenceGeneration,
-        live_check: LiveReachabilityRef, // DB 外確認の結果（atomic には含めない）
+        live_check: LiveReachabilityRef, // DBトランザクション外で実施した疎通確認結果
     ) -> Result<PresenceAttributionFact, PresenceTechnicalError>;
 }
 
-// --- 費用・cap（PR Group F。SD-Cap。予約＋commit/release の三状態） ---
+// --- 費用・利用枠（PR グループF。SD-Cap。予約・確定・解放の3状態管理） ---
 trait UsageRepository {
-    // 予約 insert＋cap 照合を同一 transaction で行う。処理中・不明をゼロにしない。
+    // 予約レコードの挿入と上限照合を同一トランザクション内で実行（処理中・成否不明の費用をゼロとみなさない）。
     async fn reserve_if_under_cap(
         &self,
         cmd: ReserveUsageCommand,
@@ -1489,25 +1514,26 @@ trait UsageRepository {
     ) -> Result<(), UsageTechnicalError>;
 }
 
-// --- Learning（PR Group C。形成 commit 時に Memory revision・scope・制約・消去条件を照合） ---
+// --- 自律学習（PR グループC。形成コミット時に記憶リビジョン・スコープ・制約・消去条件を照合） ---
 trait LearningRepository {
     async fn commit_formation_if_current(
         &self,
-        target: Option<(LearningId, LearningRevision)>, // None は新規
+        target: Option<(LearningId, LearningRevision)>, // None の場合は新規形成
         grounds: SummaryGroundsRef,
         scope: LearningScope,
         constraint: ConstraintSnapshotRef,
         erasure: ErasureConditionRef,
     ) -> Result<FormationDecision, LearningTechnicalError>;
 
-    // 過去 revision・根拠は append 系。現在値の上書きではない。到着順を根拠の新旧にしない。
+    // 過去リビジョンや根拠は追記（append）として保持し、現在値を上書きしない。
+    // 到着順が遅いことを根拠の新旧と混同しない。
     async fn append_revision_record(
         &self,
         record: LearningRevisionRecordRef,
     ) -> Result<(), LearningTechnicalError>;
 }
 
-// --- Character 適用 pointer（PR Group A/B。SD-CharApply） ---
+// --- キャラクター適用ポインタ（PR グループA/B。SD-CharApply） ---
 trait CharacterApplicationRepository {
     async fn compare_and_set_applied(
         &self,
@@ -1515,22 +1541,22 @@ trait CharacterApplicationRepository {
     ) -> Result<CharacterApplicationOutcome, CharacterTechnicalError>;
 }
 
-// --- 保全・消去（PR Group J。SD-Deletion / SD-Restore） ---
+// --- 保全・消去（PR グループJ。SD-Deletion / SD-Restore） ---
 trait PreservationRepository {
-    // operation＋erasure_condition の先行 durable（durable-before-enforce）。
+    // 操作IDおよび消去条件の先行永続化（強制執行より先に永続化する：durable-before-enforce）。
     async fn durable_operation_first(
         &self,
         scope: DeletionScopeDecision,
     ) -> Result<(), PreservationTechnicalError>;
 
-    // 参加者の局所完了は各 owner で durable 化してから返却する。返却で hold を解除しない。
+    // 参加者の局所消去完了は、各担当ドメイン側で永続化してから報告される（局所完了だけで全体の安全保留を解除しない）。
     async fn record_participant_completion(
         &self,
         fact: ParticipantCompletionFact,
     ) -> Result<(), PreservationTechnicalError>;
 
-    // 全域完了の原子確定：各 participant の局所完了・検証・未完了・失敗×
-    // 機械的残存検証×区間内再到着の取込みを満たして確定する。完了時に検索 token を wipe する。
+    // システム全域削除完了の不可分な確定：各参加者の局所完了・検証・未完了・失敗状況と、
+    // 機械的な残存検証および処理区間内の再到着データの取り込みをすべて満たして確定。完了時に検索トークンを消去。
     async fn declare_global_completion_if_verified(
         &self,
         operation: DeletionOperationId,
@@ -1538,7 +1564,7 @@ trait PreservationRepository {
         verification: RemainderVerification,
     ) -> Result<GlobalDeletionCompletion, PreservationTechnicalError>;
 
-    // Restore switch：staging 検証後の restore_generation bump＋正本 pointer switch の原子確定。
+    // バックアップ復元の正本切り替え：ステージング検証後、復元世代を更新して正本ポインタを不可分に切り替え。
     async fn switch_restore_generation(
         &self,
         restore: RestoreId,
@@ -1546,191 +1572,196 @@ trait PreservationRepository {
     ) -> Result<SwitchRestoreDecision, PreservationTechnicalError>;
 }
 
-// --- 未伝達（PR Group B。SD-Undelivered。登録は親原子、確定は per-row CAS） ---
+// --- 未伝達メッセージ（PR グループB。SD-Undelivered。登録は親と不可分、確定は行ごとの CAS） ---
 trait UndeliveredRepository {
-    // 会話由来は History append と同一原子、Task 由来は Task durable 後の別 transaction 原子登録。
+    // 会話由来は対話履歴の追記と同一トランザクション、タスク由来はタスク永続化後に別トランザクションで不可分に登録。
     async fn register_if_parent_durable(
         &self,
         fact: RegisterUndeliveredFact,
     ) -> Result<(), UndeliveredTechnicalError>;
 
-    // 提示確認後のみ Presented にする（durable-after-confirmed）。送信だけで Presented にしない。
+    // 画面提示が確認されて初めて Presented とする（durable-after-confirmed。送信成功だけで提示完了にしない）。
     async fn compare_and_mark_reported(
         &self,
         id: UndeliveredId,
         expected: ReportStatus,
-        mark: PresentationMark,      // 提示 round と presented / unknown の観測
+        mark: PresentationMark,      // 提示ラウンドと「提示完了／成否不明」の観測事実
     ) -> Result<ReportStatusTransition, UndeliveredTechnicalError>;
 }
 ```
 
-- `*_TechnicalError` は infrastructure の失敗であり、stale / hold / deny / missing / exhausted ではない。`StaleExpected` / `HeldByGlobalHold` / `MissingTask` / `RevisionExhausted` 等は `Ok` 側の outcome で返す。
-- cross-owner の更新を一つの巨大 transaction・一つの actor へまとめない。必要なのは短い cross-owner atomic read（同一 SQLite transaction の共有）であり、意味変更権の統合ではない（PR §7）。
+- `*_TechnicalError` はストレージやインフラストラクチャ層の技術的障害を示すものであり、前提不一致（stale）、安全保留（hold）、権限拒絶（deny）、識別子不在（missing）、リビジョン枯渇（exhausted）などとは明確に区別します。`StaleExpected`、`HeldByGlobalHold`、`MissingTask`、`RevisionExhausted` などは、正常系（`Ok` 側）のドメイン判定結果として返します。
+- 複数の担当ドメインを跨ぐ更新処理を、単一の巨大なトランザクションや単一のアクターへ無秩序に統合してはなりません。必要なのは短い不可分な読み取り照合（同一 SQLite トランザクションの共有など）であり、各領域の意味論的な変更権限まで統合してはなりません（PR §7）。
 
 ## 14. Rust-oriented design — trait / struct / enum の具体化範囲
 
-本書は具体的な Rust interface 方針まで固定し、trait / service / repository interface / command / query struct / domain-specific result enum / newtype / borrowed / owned / async method を pseudo-code で示す（第4–9・13節）。ただし「trait を使えるところは全部 trait」にしない。
+本書では、具体的な Rust インターフェース設計の基本方針を定めています。ただし、「トレイトが使える場所はすべてトレイトにする」といった過剰な抽象化は厳に慎みます。
 
-| 抽象化するもの（trait 化） | 理由 | 抽象化しないもの |
+| 抽象化するもの（trait 化の対象） | 抽象化を行う正当な理由 | 抽象化しないもの（具象型のまま扱うもの） |
 |---|---|---|
-| `TaskRepository`、`ActionAttemptRepository`、`PresenceRepository`、`UsageRepository`、`LearningRepository`、`CharacterApplicationRepository`、`PreservationRepository`、`UndeliveredRepository` | boundary 隔離（business owner と durable 保持の分離）、compare-and-commit の不可分性の隠蔽、testability（in-memory fake による stale / hold / delayed の再現） | 具体 SQL・index・migration。DB 製品固有の詳細 |
-| 推論の transport（Provider protocol adapter） | 未対応 protocol の Plugin 補完・既知 protocol の直接接続の差替え、testability（fake Provider による不足・失敗・利用量の再現） | 論理的 context 選択・プロンプト組立・圧縮・scoring。利用元の意味判断 |
-| 実行・拡張の OS・device・MCP 境界 | sandbox・device・adapter の差替え、testability（fake 作用・不明の再現） | 実対象解決の domain logic、確定度の意味判断 |
-| 観測の Capture・adapter 境界 | Observation adapter の外部 code 境界、testability | 候補検知の scoring・routing 選択 algorithm |
-| Credential の分離保管（OS store 抽象） | DPAPI / libsecret / Keychain 等の差替え、秘密の非露出の強制 | 用途・参照元の意味、同意・許可の確定 |
+| `TaskRepository`、`ActionAttemptRepository`、`PresenceRepository`、`UsageRepository`、`LearningRepository`、`CharacterApplicationRepository`、`PreservationRepository`、`UndeliveredRepository` | 境界の隔離（ビジネス担当者と永続化保持の分離）、比較照合コミットの不可分性のカプセル化、テスト容易性（インメモリのモックによる前提不一致・安全保留・遅延の再現） | 具体的な SQL 文、インデックス設計、マイグレーション手順。DB 製品固有の詳細実装 |
+| 推論のトランスポート層（プロバイダプロトコルアダプター） | 未対応プロトコルのプラグインによる拡張、既知プロトコルの直接接続の差し替え、テスト容易性（モックプロバイダによる能力不足・通信エラー・利用量の再現） | 論理的なコンテキスト選択、プロンプト組み立て、文脈圧縮、スコアリング計算。利用元の思考・解釈ロジック |
+| 実行・拡張の OS・デバイス・MCP 境界 | サンドボックス、OS デバイス、通信アダプターの差し替え、テスト容易性（モック作用による成否不明の再現） | 操作対象の実名前解決ロジック、外部作用の確信度の意味判断 |
+| 観測のキャプチャ・アダプター境界 | 画面キャプチャアダプターの外部コード境界、テスト容易性 | 候補検知の内部スコアリング、ルーティング先の選択アルゴリズム |
+| 認証秘密情報の分離保管（OS資格情報ストア抽象） | Windows DPAPI / Linux libsecret / macOS Keychain 等のプラットフォーム別差し替え、秘密情報の非露出の強制 | 利用用途や参照元の意味論、同意や許可の確定判定 |
 
-- borrowed / owned：ID・revision・generation・token は `Copy` 可能な小さな値または参照として渡し、本文・payload・派生物は参照・ID 対応で辿る。対応の伝達に private 本文を複製しない（CI §4.4、PR §2）。
-- async method：repository・推論・実行・観測等の I/O・長時間処理を伴う boundary は `async fn` とする。commit の原子区間自体は短く、transaction 内で await しない（CCT §5）。長時間処理は premise 付きで開始し commit 時に compare する。
-- newtype：CI §5 の `CompanionId` / `TaskId` / `TaskRevision` / `PresenceGeneration` / `RestoreGeneration` / `DeletionOperationId` / `DeletionSweepGeneration` 等を維持する。内部表現が同じでも相互変換しない。revision / generation は生の数値として単独で持ち歩かない。
-- `unsafe` を本設計の表現のために要求しない（CI §2.3）。
-- error 型は第11節の配置に従い、各層で `thiserror` を用いる。bare `String` / `Box<dyn Error>` を public error にしない。
+- **借用（borrowed）と所有（owned）の使い分け**:
+  識別子（ID）、リビジョン番号、世代番号、前提トークンは、`Copy` 可能な小さな値または不透明な参照として受け渡し、本文データ、ペイロード、派生成果物は参照IDによって必要な場合にのみ辿ります。対応関係を伝達するためだけに、プライベートな本文データを無駄に複製してはなりません（CI §4.4、PR §2）。
+- **非同期メソッド（async method）**:
+  リポジトリ、推論呼び出し、外部アクション実行、環境観測などの I/O や長時間処理を伴う境界は `async fn` として定義します。コミットの不可分な実行区間自体は極めて短く保ち、トランザクションの内部で非同期の待機（await）を行ってはなりません（CCT §5）。長時間の作業は前提条件を確認した上で開始し、コミット時に最新状態と比較照合します。
+- **型安全な newtype**:
+  `CompanionId`、`TaskId`、`TaskRevision`、`PresenceGeneration`、`RestoreGeneration`、`DeletionOperationId`、`DeletionSweepGeneration` などの newtype を厳格に維持します。内部表現が同じ整数型であっても安易な相互変換を許さず、リビジョン番号や世代番号を生の数値として単独で引き回してはなりません。
+- **`unsafe` コードの排除**:
+  本書で定義した設計構造を表現するために、`unsafe` コードを要求することはありません（CI §2.3）。
+- **エラー型の設計**:
+  第11節で定めた配置方針に従い、各レイヤーで `thiserror` を用いた明示的なエラー型を定義します。ライブラリの公開エラーとして、型のない生の `String` や `Box<dyn Error>` を使用してはなりません。
 
 ## 15. IPC readiness — process / network boundary を越える可能性がある interface
 
-IPC wire schema は [Host↔Client IPC](host-client-ipc.md) が定める。本節は process-local interface と remote-capable interface の区別とその理由を固定する。
+通信スキーマの完全な仕様は [Host↔Client IPC](host-client-ipc.md) にて定めます。本節では、プロセス内完結のインターフェースと、ネットワークやプロセス境界を越える可能性があるインターフェースの境界を明確にします。
 
-| 区分 | interface | 越境するもの・理由 |
+| 通信区分 | インターフェース | 境界を越えるもの／越境を許容する理由 |
 |---|---|---|
-| remote-capable（Host↔Client） | X-B round 受付・提示・区切り（`SubmitClientInputCandidate` / `RoundIntakeOutcome` / 提示確認の `PresentationMark`） | Client は入力・表示の一時表現だけを持ち、Host 正本を持たない。Client message は candidate であり、Host の現在帰属・許可・保留との照合が必要。未送信操作の自動 queue・Client copy による Host 上書きをしない |
-| remote-capable | X-A 移動・復帰（`RequestMoveCommand` / `PresenceAttributionFact`） | 呼出し・移動意図は Client から届くが、成立は Host の帰属記録。hint・復旧先だけで presence を成立させない |
-| remote-capable | X-H 未伝達の次 Client 報告（`UndeliveredSummaryFact`） | 次 Client での要約報告は Host の元記録・利用制限・削除状況へ照合した派生表現。接続・表示 copy 送信だけで報告完了にしない |
-| remote-capable | X-D eligibility 通知の一部（`NotifyPresenceChangeFact` の Client 向け表示） | 観測状態・対象範囲の説明可能性のため。Raw・候補・routing 用 data・私的 context は送らない |
-| remote-capable | D-B の Client 一時 data 参加（`DemandLocalErasureCommand` の Client 宛て分） | 接続中 Client の一時 data・拡張一時 data も参加する。切断・応答なしを消去成功とせず、未確認範囲を保全・消去へ伝える。再接続時に旧 copy を戻さない |
-| remote-capable | C-A の表示資材利用（Body・Voice 資材） | Character 静的資材の表示利用。適用関係・経験状態は送らない。内部正本の主 key として再利用できる形で渡さない |
-| remote-capable（高権限の最終確認を除く） | 管理面の表示・操作（第9節の `ManagementOperationCommand` の Client 側入口） | 管理操作の意味・適用・成功判定は担当 owner から受ける。高権限の要求は送れても最終確認は Host PC 上の trusted first-party management surface で行う（IPC §18）。UI に任意 state の書換権を与えない |
-| Host-local（越境させない） | H-B〜H-E の形成・訂正・scope 意味判断、K-A〜K-C の制御確定・秘密利用、K-D〜K-G の割当解決・送信条件・予約の確定、K-H の認可・作用確定、D-A・D-C・D-D の範囲確定・完了確定・switch | 現在条件の照合・秘密・世代・消去条件を Host canonical で確定するため。Client・Provider・MCP・Plugin を正本・owner にしない。解決済み経路・判定 copy・Client 主張をそのまま越境先の authority にしない |
-| Host-local（越境させない） | 第13節の repository compare-and-commit 群 | durable primary の compare を Host 単一 SQLite transaction で不可分にするため。DB transaction を Client・Provider・MCP へ露出させない |
-| 外部境界（Host→Provider / MCP / Plugin / 外部 file） | K-E の実送信、K-I の拡張利用、K-C の認証用途供給、C-C の import 受入 | 用途・data・送信先・同意・費用・秘密保護の条件付き。Provider・MCP・Plugin を domain owner にしない。秘密値を通常経路に載せない |
+| リモート越境可能（Host↔Client） | X-B 対話ラウンド受付・提示・区切り（`SubmitClientInputCandidate` / `RoundIntakeOutcome` / 提示確認の `PresentationMark`） | クライアントは入力や画面表示の一時的な表現のみを持ち、ホストのマスターデータ（正本）は保持しません。クライアントからのメッセージは単なる「提案候補」であり、ホスト側の最新の在席帰属、実行許可、安全保留との照合が必須です。未送信の操作を勝手にキューイングしたり、クライアント側のデータでホストを上書きしてはなりません |
+| リモート越境可能 | X-A 在席移動・復帰（`RequestMoveCommand` / `PresenceAttributionFact`） | 呼び出しや移動の意図はクライアントから送られてきますが、在席の正式な成立はホスト側の帰属記録で決定します。表示ヒントや復旧先候補の存在だけで勝手に在席を成立させてはなりません |
+| リモート越境可能 | X-H 未伝達メッセージの次回接続端末への報告（`UndeliveredSummaryFact`） | 新しい端末での要約報告は、ホスト側の元記録、利用制限、データ削除状況と照合された派生表現です。接続や表示データの送信成功だけで「報告完了」と誤認してはなりません |
+| リモート越境可能 | X-D 観測資格通知の一部（`NotifyPresenceChangeFact` のクライアント向け表示データ） | 観測状態や対象範囲の説明可能性を担保するために伝達します。Rawデータ、検知候補、ルーティング用データ、プライベートなコンテキストを直接送信してはなりません |
+| リモート越境可能 | D-B 個人データ完全削除へのクライアント一時データの参加（`DemandLocalErasureCommand` のクライアント宛て要求） | 接続中のクライアントに存在する一時キャッシュや拡張の一時データも消去に参加します。ネットワーク切断や無応答を「消去成功」と誤認せず、未確認範囲を保全・消去担当へ正しく伝えます。再接続時に古いデータをホストへ持ち帰らせてはなりません |
+| リモート越境可能 | C-A キャラクター表示資材の利用（Body／Voice 資材） | キャラクターの静的な設定資材の画面表示・音声再生用の利用。適用関係や成長した経験データは送信しません。ホスト内部の主キーとして再利用できる形式で渡してはなりません |
+| リモート越境可能（高権限の最終確認を除く） | 管理画面の表示・操作（第9節の `ManagementOperationCommand` のクライアント側入力） | 管理操作の意味解釈、適用、成否判定は担当責任者が行います。重大な操作要求をリモートから送信できたとしても、最終確認はホストPC本体の信頼できる画面上で行います（IPC §18）。UI層にシステム状態を勝手に書き換える特権を与えてはなりません |
+| ホスト内部完結（越境禁止） | H-B〜H-E の自律学習の形成・訂正・スコープ判断、K-A〜K-C の制御確定・秘密利用、K-D〜K-G のプロバイダ割り当て・送信条件・利用枠予約、K-H の認可・実作用確定、D-A・D-C・D-D の削除範囲確定・完了確定・復元切り替え | 最新前提の照合、認証秘密情報、世代番号、データ消去条件をホスト側の正本として厳格に確定させるため。クライアント、プロバイダ、MCPサーバー、プラグインを正本や担当責任者にしてはなりません。解決済みの経路、判定のコピー、クライアントの自己申告を、そのまま外部の決定権威にしてはなりません |
+| ホスト内部完結（越境禁止） | 第13節のリポジトリ比較照合コミット群（Repository compare-and-commit） | 永続化データの比較照合を、ホスト内部の単一の不可分なトランザクションとして完了させるため。データベースの低レベルトランザクションをクライアントや外部拡張へ露出させてはなりません |
+| 外部境界（Host→Provider／MCP／Plugin／外部ファイル） | K-E のプロバイダ送信、K-I の外部拡張利用、K-C の認証用途供給、C-C のパッケージインポート受け入れ | 利用目的、対象データ、送信先、利用同意、費用上限、秘密保護の条件を厳格に課した上で通信します。外部のプロバイダやMCPサーバーをドメインの担当責任者にしてはならず、秘密情報そのものを通常の通信経路へ流出してはなりません |
 
-- Host 永続化・Host↔Client 間の受渡し・Audit / Debug 記録では、ID・revision・generation・correlation を明示 field として serialize する。自由記述の本文中に埋め込んだ文字列を照合に使わない（CI §4.6）。
-- Client・Provider・MCP・Plugin との境界では、Host の内部 ID 体系をそのまま露出する必要はない。露出する場合は用途限定の参照（non-secret reference）に留め、内部正本の主 key として再利用できる形で渡さない。認証秘密値は通常経路に載せない（DR-05）。
-- 時刻は wall-clock＋作成時 timezone を保持する。Schedule の timezone 黙置換をしない。
+- ホスト側の永続化、ホスト↔クライアント間の通信、および監査ログ・デバッグ記録では、識別子、リビジョン番号、世代番号、相関IDを明示的なフィールドとしてシリアライズします。自由記述のテキスト本文中に埋め込まれた文字列を、同一性の照合に使ってはなりません（CI §4.6）。
+- クライアント、プロバイダ、MCPサーバー、プラグインとの境界では、ホスト内部の主キーや内部ID体系をそのまま露出する必要はありません。露出する場合であっても用途を限定した不透明な参照IDに留め、内部の正本主キーとして再利用できる形式で渡してはなりません。また、認証情報の秘密値そのものを通常の通信経路に載せてはなりません（DR-05）。
+- 日時データは、実時間（wall-clock）と作成時のタイムゾーンをセットで保持します。スケジュール設定においてタイムゾーンを暗黙のうちに勝手に変換してはなりません。
 
 ## 16. Crate / module decomposition への材料 — 依存方向
 
-crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定める。本節は semantic dependency と interface 呼び出し方向を固定する。
+具体的なクレート構成は [クレート・モジュール分割](crate-module-decomposition.md) にて定めます。本節では、意味論的な依存関係（semantic dependency）とインターフェースの呼び出し方向を確定します。
 
 ### 16.1 依存方向表（caller → owner の interface 依存）
 
-矢印は architectural dependency（DR §1）であり、crate・module・process への直写ではない。B の結果が A へ返ることだけで逆向きの architectural dependency を追加しない。一方、B が A の活動状態を判断根拠として必要とするなら別行の参照依存として明記する。
+※ 矢印はアーキテクチャ上の依存関係（DR §1）を示しており、クレートやプロセスへの単純な1対1の直写ではありません。B の処理結果が A へ返ってくることだけを理由にして、逆向きの依存関係を追加してはなりません。一方、B が処理の判断材料として A の活動状態を必要とする場合は、別の独立した参照依存として明記します。
 
-| caller（開始・利用） | → owner（確定・意味） | interface | 依存の役割 |
+| 呼び出し側（要求・利用元） | → 担当責任者（確定・意味論） | 使用インターフェース | 依存関係の責務・役割 |
 |---|---|---|---|
-| 個体調整 | → 作業 | H-A（Task/steering/Cancel） | semantic change 要求＋read/use（進捗・結果）。Task 受理・達成は作業 |
-| 個体調整・作業 | → 認識・学習 | H-B / H-C / H-D / H-E（Experience・訂正・参照・scope 意味） | semantic change 要求＋read/use（利用範囲内）。形成・scope 意味は認識・学習 |
-| 個体調整（仲介） | → 各元 owner | H-F（routing 文脈） | read/use（範囲限定）。Task 所有・包括 access の移転ではない |
-| 個体調整 | → 接続・存在 | X-A（移動要求） | lifecycle coordination（必要性と成立の分離）。排他帰属は接続・存在 |
-| 入出力・提示・共有観測・実行・拡張 | → 接続・存在 | X-A・X-D・X-F（帰属・接続・可用性の参照） | read/use。帰属から Action 許可を導かない |
-| 接続・存在 | → 入出力・提示・実行・拡張 | X-F（区切り・停止結果・不明の利用） | lifecycle coordination。Task 全体終了を条件にしない |
-| 共有観測 | → 個体調整・認識・学習 | H-F・X-E（限定文脈・候補の意味判断要求） | read/use（範囲限定）。最終 Action 判断を行わない |
-| 個体調整・作業・認識・学習・共有観測・入出力・提示 | → 推論 | K-E（推論利用） | execution 要求に類する利用＋read/use（能力・利用量）。最終意味は利用元 |
-| 個体調整・作業 | → 実行・拡張 | K-H・K-I・K-J（作用・拡張・Client 依存作用の要求） | execution 要求。Permission 確定・成功の自己申告ではない |
-| 各利用・保存・実行箇所 | → 権限・制約 | K-A・K-B・K-F・K-G（意図確定・live check・fallback・cap 可否） | enforcement。domain 意味決定・制御自己変更ではない |
-| 権限・制約 | → 個体調整・作業・接続・存在・認識・学習・推論・保全・消去 | K-B の前提参照（活動状態・委任範囲・帰属・scope・利用量・保留の参照） | read/use（判断に必要な範囲）。参照先の意味更新・包括取得ではない |
-| 推論・実行・拡張・接続・存在 | → 認証秘密 | K-C（認証用途の利用要求） | enforcement に類する限定利用。秘密値の一般参照ではない |
-| 各 owner | → 保全・消去 | D-A〜D-E（操作範囲・未完了・保留の依存） | deletion / backup / restore participation。任意 domain 編集ではない |
-| 保全・消去 | → 各参加 owner | D-B（対象特定・処理・検証の要求） | lifecycle coordination（目的限定）。通常 owner 化・無条件 cascade ではない |
-| Character 利用側（個体調整） | → Character | C-A（静的内容・revision の利用） | read/use。適用関係・経験状態の更新ではない |
-| Owner（管理経路） | → 各 owner | 第9節・H-H・C-C・C-D・D-A・D-D・D-E | semantic change 要求＋lifecycle coordination。本体 LLM・長時間 Task を介在させない |
+| 個体調整 | → 作業 | H-A（タスク化／方針指示／中断） | 状態変更の要求 ＋ 進捗・結果の参照。タスクの受理や達成判断は作業担当が行う |
+| 個体調整・作業 | → 認識・学習 | H-B / H-C / H-D / H-E（経験提出／訂正／参照／スコープ判断） | 状態変更の要求 ＋ 利用範囲内での参照。知識形成やスコープ判断は認識・学習担当が行う |
+| 個体調整（仲介役） | → 各元の担当責任者 | H-F（ルーティング文脈供給） | 範囲を限定した参照。タスクの所有権や包括的なアクセス権を移譲するものではない |
+| 個体調整 | → 接続・存在 | X-A（在席移動要求） | ライフサイクルの協調（移動の必要性と在席の成立の分離）。排他的な在席帰属は接続・存在担当が決める |
+| 入出力・提示・共有観測・実行・拡張 | → 接続・存在 | X-A・X-D・X-F（帰属・接続状態・可用性の参照） | 状態の参照。在席していることだけを根拠にしてアクション実行許可を導いてはならない |
+| 接続・存在 | → 入出力・提示・実行・拡張 | X-F（対話区切り・停止結果・成否不明の利用） | ライフサイクルの協調。ホスト側タスク全体の終了を端末切り替えの前提にしてはならない |
+| 共有観測 | → 個体調整・認識・学習 | H-F・X-E（限定文脈の取得・候補の意味判断要求） | 範囲を限定した参照。最終的なアクション実行の意思決定を観測側が行ってはならない |
+| 個体調整・作業・認識・学習・共有観測・入出力・提示 | → 推論 | K-E（推論利用要求） | 実行要求 ＋ 能力・利用量の参照。生成結果の意味論的な解釈は利用元が行う |
+| 個体調整・作業 | → 実行・拡張 | K-H・K-I・K-J（外部作用・拡張・端末依存作用の要求） | 外部作用の実行要求。権限の認可や作用成功の自己申告を行ってはならない |
+| 各利用・保存・実行箇所 | → 権限・制約 | K-A・K-B・K-F・K-G（意図確定・リアルタイム照合・フォールバック・利用枠可否） | 制約の強制執行。各ドメインの意味論を決定したり、権限を自己変更してはならない |
+| 権限・制約 | → 個体調整・作業・接続・存在・認識・学習・推論・保全・消去 | K-B の前提参照（活動状態・委任範囲・帰属・スコープ・利用量・保留の参照） | 判断に必要な範囲に限定した状態参照。参照先データを勝手に更新してはならない |
+| 推論・実行・拡張・接続・存在 | → 認証秘密情報 | K-C（認証用途の利用要求） | 認証処理の代行利用。秘密値そのものを一般参照してはならない |
+| 各担当責任者 | → 保全・消去 | D-A〜D-E（操作範囲・未完了・安全保留の依存） | データ消去、バックアップ、復元への参加。保全担当に任意データの直接編集権を与えない |
+| 保全・消去 | → 各参加担当者 | D-B（対象特定・局所消去・検証の要求） | ライフサイクルの協調（目的限定）。保全担当が各ドメインの正本保持者になってはならない |
+| キャラクター利用側（個体調整） | → Character | C-A（静的資材・リビジョンの利用） | 資材データの参照。適用関係やパートナー固有の経験状態をキャラクター側へ持ち込まない |
+| オーナー（管理経路） | → 各担当責任者 | 第9節・H-H・C-C・C-D・D-A・D-D・D-E | 状態変更の要求 ＋ ライフサイクル協調。パートナーの思考LLMや長時間タスクを介在させない |
 
-- 必要な双方向依存は限定して残す（DR-12）。例えば権限・制約は作業の委任範囲・推論の消費事実を読み、作業・推論は現在制限に従う。事実報告のために次の Action 許可を必要とせず、制約判断のために審査対象 Action を先に実行しない。循環した承認・成功待ちを前提にしない。graph を一方向に見せるための汎用 abstraction は不要。
-- 新しい汎用 mediator、Context、Settings、Persistence 等の Subsystem は追加しない（DR §1）。
+- 必要な双方向の参照関係は、目的を限定して安全に維持します（DR-12）。たとえば、権限・制約担当は作業担当の委任範囲や推論担当の利用実績を読み取り、作業担当や推論担当は権限側の最新の制約に従います。事実の記録を残すために次のアクション実行許可を待つ必要はなく、制約の判断のために審査対象のアクションを先に実行してしまうこともありません。循環した承認待ちや成功待ちを前提とせず、グラフを一方向に見せるためだけの無駄な汎用抽象化レイヤーは導入しません。
+- システム全体を統制するような新しい汎用仲介者（mediator）、統合コンテキスト層、グローバル設定マネージャー、統合永続化マネージャーなどを追加してはなりません（DR §1）。
 
 ### 16.2 分解への制約
 
-- 上表の caller → owner 方向が module / crate 依存方向の第一材料である。owner が caller の内部を知る逆依存を作らない（例：作業が個体調整の会話内部を所有しない、認識・学習が Task 記録を所有しない、権限・制約が学習内容全体を取得しない、保全・消去が任意 domain 編集権を持たない）。
-- 同一 owner 内の責務（例：I-1〜I-7、W-1〜W-7、L-1〜L-8、C-1〜C-8、E-1〜E-6、CN-1〜CN-7、IO-1〜IO-8、OB-1〜OB-7、PE-1〜PE-7）は別の state・lifecycle であり、一つの state・trait・table・actor へ潰さないことが分解の制約になる。
-- 同じ storage technology の共有（PR §4 の単一 SQLite file 等）は ownership 統合の理由にならない。transaction 共有は mechanism であり ownership ではない。
+- 上記の「呼び出し側 → 担当責任者」の方向性が、モジュールおよびクレートの依存関係を設計する上での第一のインプットとなります。担当責任者側が呼び出し側の内部実装を知るような逆依存を作ってはなりません（例：作業担当が個体調整担当の会話履歴内部を勝手に所有しない、認識・学習担当がタスク記録を所有しない、権限担当が学習データの全文を取得しない、保全・消去担当が各ドメインの内部データを任意に書き換える権限を持たない）。
+- 同一の担当領域内における責務の分割（例：推論、作業、自律学習、権限、実行、接続、入出力、観測、保全の各内部責務）であっても、それぞれが異なる状態とライフサイクルを持つため、これらを単一の状態構造体、単一のトレイト、単一のテーブル、単一のアクターへ安易に統合してはなりません。
+- 同一のストレージ技術を共有していること（例：単一の SQLite データベースファイルを利用すること）は、担当責任者の境界を統合する理由にはなりません。トランザクションの共有は下位の実装手段（mechanism）に過ぎず、ビジネス上の所有権（ownership）とは無関係です。
 
 ## 17. Validation — interface だけを追う walkthrough
 
-具体 implementation を想像しなくても、必要な identity / premise / result semantics が interface 上で失われないことを確認する。各 walkthrough は interface ID・渡る token・owner 確定・outcome のみを追う。
+具体的な実装コードを想像しなくても、必要な識別子、前提条件、処理結果の意味論がインターフェース上で確実に保たれていることを確認します。各シナリオは、インターフェースID、受け渡される境界トークン、担当責任者の確定判断、および返却される判定結果のみを追跡します。
 
 ### V-1 Owner text → Companion response → Learning（H-B・H-D・K-E・K-B）
 
-1. 入出力・提示が `SubmitClientInputCandidate(companion, client, claimed_generation, round)` を個体調整へ渡す。Client message だけで presence は成立しない。個体調整は X-B の `RoundIntakeOutcome` を経て現在 round として受理する。旧 round なら `StaleRound` として元 round へ対応付け、新 round へ付け替えない。
-2. 個体調整は用途（返答）と論理的 context を定め、認識・学習へ `LearningQuery(purpose=返答, scope_need, constraints)` で利用可能な理解を問い合わせる。取得成功は後続の送信許可ではない。
-3. 応答のための推論は `AdmissionRequest(consumer=CompanionReasoning, 用途, 論理 context)` の authorize と attempt claim で前提を確定し（K-B の single-use authorization を含む）、`ProviderTransport` へ送信する。同意不足・cap・保留・帰属・消去条件の不一致は `NotSent` として不足・判断待ちへ戻す。
-4. 応答後、個体調整・作業は `ProposeExperienceCandidate(experiencer, source_range, source_kind=対話, intended_use=Learning候補)` を認識・学習へ渡す。Raw 複製を要求しない。
-5. 認識・学習は `FormationDecision` を確定する。保存価値がなければ終了し、全件保存しない。形成する場合は `SummaryGroundsRef` を対応付け、Memory 等の必要な状態だけを形成・変更する。応答完了と全 Learning 更新完了を同一条件にしない。
-6. 失われないこと：由来の区別、対象 Companion・Task・委任との関係、期待する利用先（返答と Learning 候補の別）。到着順が新しい＝根拠が新しいにしない。
+1. 入出力・提示担当が `SubmitClientInputCandidate(companion, client, claimed_generation, round)` を個体調整担当へ渡します。クライアントからのメッセージだけで在席は成立しません。個体調整担当は X-B の `RoundIntakeOutcome` を経て、現在の対話ラウンドとして正式に受理します。古いラウンドへの遅延入力であれば `StaleRound` として元の過去ラウンドに対応付け、勝手に新しいラウンドへ付け替えてはなりません。
+2. 個体調整担当は「応答生成」という利用目的と論理コンテキストを定め、認識・学習担当へ `LearningQuery(purpose=返答, scope_need, constraints)` を発行して利用可能な知識を問い合わせます。クエリの取得成功は、後続の外部送信許可を意味しません。
+3. 応答生成のための推論は、`AdmissionRequest(consumer=CompanionReasoning, 用途, 論理コンテキスト)` の認可と試行の確定によって前提条件を確定し（K-B の単一利用認可を含む）、プロバイダへ送信します。同意不足、費用上限超過、安全保留、在席世代不一致、消去条件への抵触があれば、送信前に `NotSent` として処理を安全に中断し、オーナーの指示待ちへ戻します。
+4. 応答生成後、個体調整担当および作業担当は、`ProposeExperienceCandidate(experiencer, source_range, source_kind=対話, intended_use=Learning候補)` を認識・学習担当へ提出します。生の本文の無駄な複製は要求しません。
+5. 認識・学習担当は `FormationDecision` を確定します。長期保存する価値がなければ処理を終了し、すべての対話を無理に保存することはありません。知識を形成する場合は要約根拠（`SummaryGroundsRef`）を紐付け、必要な記憶データのみを安全に更新します。ユーザーへの応答生成の完了と、バックグラウンドでの学習データ更新完了を同一視してはなりません。
+6. **失われてはならない情報**: 経験の発生由来の区別、対象パートナー・タスク・委任との関係、想定される利用用途（応答用か学習用かの別）。「到着が最後だから最新の根拠である」と誤認してはなりません。
 
 ### V-2 Task creation → Task Agent → steering → result（H-A・K-H・K-K）
 
-1. 個体調整は `ProposeTaskCommand(requester, purpose, origin, workspace_need)` を作業へ渡す。会話受付は Task 反映ではない。作業は `TaskProposalOutcome::AcceptedAsTask(TaskRef)` を確定する。作成は `TaskCreationPremise`（初期 purpose・初期 context entry・確定した Workspace 関連付け）の原子 durable 後に可視化する。
-2. 作業は `CreateDelegationCommand(task=TaskRef(expected), scope_copy, consumer_assignment)` で委任を作成する。Agent は一時主体に留まり、独立権限・Credential・Provider override・予算を持たない。
-3. Owner の追加指示は `ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source)`（`unadopted` は W-3 の反映判断を producer に持つ slice で導入）で新 revision＋新 context の原子 forward となる。新 revision は採用目的 entry と採用指示 entry を同じ `forward_steering` transaction に記録する。採用 identity は作業が確定し、採用指示 entry 自身の `TaskContextEntryId` が表す（`instruction_source` は由来 record の参照であり、採用 identity ではない）。旧 revision を残す。二つの steering 競合は SD-Task の順序で直列化し、先勝ちを現在にし、後着は新現在への再 steering として評価する。
-4. steering 後に旧 revision 前提の委任作成・Action 開始が届いたら `StalePremise{current}`・`StaleTaskRevision{current}` として不受理・再評価へ戻す。実行中の旧委任は best-effort 停止・縮小し、旧結果を新目的に自動採用しない。
-5. 遅延 Agent 結果は `TaskAgentResultArrival(delegation, attempt_refs, result_body_ref, certainty)` で到着し、`(attempt の Task revision 前提から解決する目的)×現在の(Task revision の目的・steering 前提)` を比較する。目的は依拠 revision の `task_revision` snapshot から解決し、本文一致で照合しない。一致しなければ `RecordedToOriginalOnly` として元 revision へ記録し、現在不採用とする。古い承認で Cancel を解除しない。
-6. 失われないこと：発言 record と Task 反映内容と未反映・待機の対応、steering 前後の目的の区別、委任・Workspace・Client 依存条件、Task revision 前提。
+1. 個体調整担当が `ProposeTaskCommand(requester, purpose, origin, workspace_need)` を作業担当へ渡します。会話上での受付は、タスク本体への反映ではありません。作業担当は `TaskProposalOutcome::AcceptedAsTask(TaskRef)` を確定します。タスクの作成は、`TaskCreationPremise`（初期目的・初期コンテキスト項目・確定したワークスペース関連付け）が不可分に永続化された後に外部へ可視化されます。
+2. 作業担当は `CreateDelegationCommand(task=TaskRef(expected), scope_copy, consumer_assignment)` を発行して一時エージェントへの委任を作成します。エージェントは一時的な従属主体に留まり、独立した特権、認証情報、プロバイダ設定の上書き権限、個別の予算枠限度を持ちません。
+3. オーナーからの追加指示は、`ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source)`（`unadopted` フィールドは W-3 の反映判断を生成元に持つスライスで導入）によって、新リビジョンと新コンテキストの不可分な前進（forward）となります。新リビジョンは採用目的項目と採用指示項目を同一の `forward_steering` トランザクションに記録します。採用識別子は作業担当が確定し、採用指示項目自身の `TaskContextEntryId` が表します（`instruction_source` は由来レコードの参照であり、採用識別子そのものではありません）。過去のリビジョンも確実に保持されます。2つの方針指示が競合した場合は同期区分 SD-Task の順序で直列化され、先に確定した方を優先して現在の状態とし、後から到着した要求は新しい現在の状態に対する再指示として評価します。
+4. 方針指示（steering）が行われた後に、古いリビジョンを前提とした委任作成やアクション実行要求が届いた場合は、`StalePremise { current }` または `StaleTaskRevision { current }` として不受理にし、再評価へ差し戻します。実行中だった古い委任はベストエフォートで停止・縮小させ、古い結果を勝手に新しい目的に採用してはなりません。
+5. 遅延して届いたエージェントの処理結果は、`TaskAgentResultArrival(delegation, attempt_refs, result_body_ref, certainty)` として受け取り、「試行が前提としたタスクリビジョンから解決する目的」と「現在のタスクリビジョンおよび最新の方針指示の目的」を厳格に比較照合します。目的は依拠リビジョンの `task_revision` snapshot から解決し、単なる文字列一致では照合しません。一致しない場合は `RecordedToOriginalOnly` として元の過去リビジョンにのみ記録し、現在のタスクには不採用とします。古い承認情報を使ってタスクの中断を勝手に解除してはなりません。
+6. **失われてはならない情報**: 単なる発言記録とタスク反映内容および未反映・保留指示の対応関係、方針指示の前後の目的の区別、委任範囲、ワークスペース境界、クライアント依存条件、タスクリビジョンの前提情報。
 
 ### V-3 Action candidate → authorization → external effect → timeout → late result（K-H・K-B・K-K・H-A）
 
-1. 利用元は `ActionCandidate(principal_chain, task, delegation, workspace, purpose, described_target, operation, data_use, cost_risk, relied_intent_rule)` を構築する。構築できたことは許可ではない。
-2. 利用・実行箇所は `CheckLiveAuthorizationQuery(candidate, relied_evaluation, task, delegation, workspace, presence, rule/consent expected, cap_context, hold_context)` で K-B の今回確定を受ける。保存 Allow・解決済み経路だけでは開始しない。Owner 確認待ちは `AskOwner` として実行せず待機にする。
-3. 実行・拡張は `ExecuteActionCommand(candidate, authorization, resolved_target, presence, cost_reservation, erasure_check, restore_premise)` で開始前 atomic compare を満たして `StartedAsAttempt(attempt)` となる。対象記述の文字列一致だけでは対応にしない。解決後の実対象を保持する。
-4. timeout は確定度を変更しない（`Unknown` のまま）。`ReportEffectFact(attempt, stage, certainty=Unknown, grounds, prior_unknown)` の粘着を維持する。Cancel 受付・通信成功・表示・保存成功・再接続・復元・移動で書き換えない。
-5. 遅延成功は元 attempt へ `compare_and_set_certainty(attempt, expected=Unknown, new=Confirmed, grounds)` の CAS で記録する。新 evidence の事実 owner 確認を必須とし、Agent 申告を証拠にしない。現在 Task への採用は H-A の受入で別途照合する。不明試行の再実行は新 attempt＋重複 risk を示した Owner 判断を必要とする。
-6. 失われないこと：判断対象と実対象の対応、委任不変、確定度（確認済み成功 / 失敗 / 不明）、試行と作用の区別、遅延帰属、重複防止に必要な保持。
+1. 機能利用元が `ActionCandidate(principal_chain, task, delegation, workspace, purpose, described_target, operation, data_use, cost_risk, relied_intent_rule)` を組み立てます。候補構造体を組み立てられたこと自体は、実行許可を意味しません。
+2. 実行箇所は `CheckLiveAuthorizationQuery(candidate, relied_evaluation, task, delegation, workspace, presence, rule/consent expected, cap_context, hold_context)` を発行し、K-B による今回限りの認可を受けます。過去に保存された許可や解決済みの経路情報だけを根拠にしてアクションを開始してはなりません。オーナーの確認が必要な場合は `AskOwner` として待機します。
+3. 実行・拡張担当は `ExecuteActionCommand(candidate, authorization, resolved_target, presence, cost_reservation, erasure_check, restore_premise)` によって実行直前の比較照合を満たし、`StartedAsAttempt(attempt)` として試行を開始します。対象の文字列表記が一致していることだけで同一とみなしてはならず、実行直前に解決された真の実対象を保持します。
+4. タイムアウトが発生しても、外部作用の確信度は変化しません（`Unknown` のまま保持）。`ReportEffectFact(attempt, stage, certainty=Unknown, grounds, prior_unknown)` の粘着性を維持します。中断要求の受理、通信の成功、画面への表示、DB保存の成功、再接続、復元、端末移動などを理由にして、勝手に成功や失敗へ書き換えてはなりません。
+5. 遅れて届いた成功の証拠は、元の試行記録に対して `compare_and_set_certainty(attempt, expected=Unknown, new=Confirmed, grounds)` のアトミック更新（CAS）で記録します。新たな客観的証拠の確認を必須とし、エージェント自身の自己申告を証拠にしてはなりません。現在のタスクへ結果を採用するかどうかは、H-A の受付インターフェースにおいて改めて判定します。成否不明となったアクションを再実行するには、新しい試行IDの発行と、重複リスクを明示したオーナー自身の再判断が必要です。
+6. **失われてはならない情報**: 判定時の想定対象と実対象の対応関係、委任の不変性、確信度（確認済み成功／確認済み失敗／成否不明）、試行と外部作用の区別、遅延到着の帰属、重複実行防止に必要な永続記録。
 
 ### V-4 Provider request near cap → reservation → usage（K-D・K-G・K-E・K-B）
 
-1. 利用元は用途と論理的 context を定め、推論は `ResolveAssignmentQuery(consumer, capability, current_consent)` で経路を解決する。解決済み経路は派生結果であり、設定・同意変更後も以前の選択を有効とする根拠にしない。
-2. 各利用 owner は `ReserveUsageCommand(consumer, cap, upper_bound, attribution)` で予約する。同一 transaction 内で `cap_limit`＋関連 `usage_fact_*`（Reserved＋Committed＋Unknown の合計）を読み取って cap 照合する（SD-Cap）。上限超過・不明で継続不可なら開始しない。
-3. 予約後の inference・Tool 実行は lock なし並列に行う。他 request を block しない。失効・停止・保留が発生したら best-effort 停止する。
-4. 確定時は `CommitUsageCommand(reservation, actual=報告/不明の別)` で原子更新し、余剰を解放する。遅延 usage 報告は元の `usage_id`・attempt・task・assignment 対応へ帰属させる。未報告・処理中・不明をゼロ化・リセットしない（Agent 終了・移動・cache clear・log 整理でも reset しない）。
-5. Observer 検知は対象 Client・専用 assignment の一つの利用として扱い、個体数分の重複計上をしない。delivery 後の個体推論は別の実利用として同じ全体 cap へ含める。
-6. 失われないこと：報告値・不明・処理中の区別、consumer・用途・送信先の対応、同一残額の独立使い切りの防止、cap・不明での data 保持のままの停止・判断待ち。
+1. 利用元が用途と論理コンテキストを定め、推論担当が `ResolveAssignmentQuery(consumer, capability, current_consent)` を用いてプロバイダ経路を解決します。解決された経路は単なる派生データであり、設定変更や同意の更新があった後も過去の選択を勝手に有効とみなす根拠にはなりません。
+2. 各利用担当者は `ReserveUsageCommand(consumer, cap, upper_bound, attribution)` を発行して利用枠を事前に予約します。同一のトランザクション内で利用枠上限と関連する利用実績（予約中 ＋ 確定済み ＋ 成否不明の合計値）を読み取って照合します（SD-Cap）。上限を超過している場合や、費用が不明で安全に継続できない場合は処理を開始しません。
+3. 予約完了後の推論呼び出しや外部ツール実行は、データベースのロックを持たずに並行して実行されます（他の要求をブロックしません）。実行中に認証失効、安全停止、保留が発生した場合は、ベストエフォートで処理を停止します。
+4. 処理完了時は `CommitUsageCommand(reservation, actual=確定値／不明の区別)` によって不可分に更新し、未使用の予約枠を解放します。遅延して届いた利用量報告は、元の予約ID、試行ID、タスク、割り当て設定へ正しく帰属させます。未報告の利用量、処理中の利用、成否不明の消費を、勝手にゼロやリセットにしてはなりません（プロセスの終了、端末移動、キャッシュ消去、ログ整理の際にもリセットしません）。
+5. 共有観測による画面キャプチャの検知処理は、対象クライアントおよび観測専用割り当てにおける単一の利用として計上し、端末にいるパートナーの人数分を二重計上しません。配信後に各パートナーが個別に行う推論処理は、独立した新たな実利用として同一の全体利用枠へ含めます。
+6. **失われてはならない情報**: 報告された実測値、成否不明、処理中費用の厳格な区別、消費主体・用途・送信先の対応関係、同一残額の二重消費の防止、利用枠上限超過や費用不明時におけるデータを保持したままでの安全停止・判断待ち状態。
 
 ### V-5 Client summon → move → stale old Client input（X-A・X-B・X-F）
 
-1. 個体調整は移動意図（Owner 呼出し・事前指示・文脈上の自発）を `RequestMoveCommand(companion, from, to, reason, expected_generation, expected_state, round_closure)` で接続・存在へ渡す。移動の必要性と成立は別。
-2. 接続・存在は `expected_generation＋expected_state` の CAS で `旧→移行中→新` の durable 遷移を確定する（SD-Presence）。simultaneous summon は先勝ちのみ成立させ、後着は不受理・再評価へ戻す。移行中は新旧いずれも Client 依存の新規開始をしない。
-3. 旧 Client の旧入力・未提示出力は `StaleRound` として元 round・元帰属・元試行へ対応付け、新 round へ付け替えない。旧生成済み未提示出力は未伝達管理へ接続し、次 Client で現在の結果・利用制限に基づいて要約報告する。
-4. 新 Client の入力は新しい round・試行だけを許す。成立前の新 Client 入力で新 presence を成立させず、旧 round 継続として実行しない。再接続した Client の古い一時 state だけで現在 presence・Permission・実行再開を成立させない。
-5. 失われないこと：presence・Host 継続・接続・許可の区別、切替区間の区別、二重 presence の禁止、安全な区切り、旧作用の別 Client 自動継続の禁止。
+1. 個体調整担当が移動意図（オーナーの明示的呼び出し、事前指示、文脈に応じた自発的移動）を、`RequestMoveCommand(companion, from, to, reason, expected_generation, expected_state, round_closure)` によって接続・存在担当へ伝達します。移動の必要性の判断と、在席の成立は別です。
+2. 接続・存在担当は、`expected_generation ＋ expected_state` のアトミック更新（CAS）によって、「旧端末 → 移行中 → 新端末」の永続状態遷移を確定します（SD-Presence）。ほぼ同時に複数の端末から呼び出しが競合した場合は、先に確定した要求のみを成立させ、後から到着した要求は不受理として再評価へ戻します。移行中の過渡状態では、新旧どちらの端末でも端末依存の新規処理を開始してはなりません。
+3. 古い端末から遅れて届いた入力や未提示の出力は、`StaleRound` として元の過去ラウンド、元の在席帰属、元の試行記録に対応付け、勝手に新しいラウンドへ付け替えてはなりません。古い端末で生成済みだった未提示の出力は未伝達メッセージ管理へ引き継がれ、新しい端末において現在の最新結果や利用制限に基づいて要約報告されます。
+4. 新しい端末からの入力は、新しいラウンドおよび新しい試行としてのみ受け付けます。正式な在席が成立する前の新しい端末からの入力によって勝手に在席を成立させてはならず、過去ラウンドの継続として実行してはなりません。また、再接続したクライアントが保持していた古い一時状態だけを根拠にして、現在の在席、実行権限、処理再開を成立させてはなりません。
+5. **失われてはならない情報**: 在席状態、ホスト側の継続処理、現行接続、実行権限の区別、端末切り替え期間の明確な区別、二重在席の禁止、安全な対話区切り、古い端末のアクションを別端末で自動継続することの禁止。
 
 ### V-6 shared Observation → routing → Companion reaction（H-F・X-D・X-E・K-E）
 
-1. 接続・存在は `NotifyPresenceChangeFact(client, present_companions, fullscreen, observer_control)` を共有観測へ知らせる。Stopped を人数・routing 対象に数えない。旧 Client の旧 Capture・候補で新規 Capture・delivery を続けない。
-2. 共有観測は対象・時機を確定し（`EligibilityDecision`）、`PublishObservationCandidate(client, candidate, captured_at, capture_range, routing_context=H-F)` で候補を検知する。Observer 専用 assignment で行い、Companion override・同意を選択・合成しない。全個体への無条件配信・個体ごとの検知重複をしない。
-3. 共有観測は `RoutingDecision::RoutedTo(関連する Running Companion だけ)` を確定し、`DeliverEventNotification(candidate, target, deliverable_range)` で伝達する。受信は理解・採否を意味しない。
-4. 各個体の個体調整は `CompanionUnderstandingFact(companion, candidate, understood_as, experience_link)` で自身の文脈を踏まえた意味判断を行う。Observer routing は意味判断・発話・Action 判断を置き換えない。発話・Action の最終判断は各 Companion が自身の Character・関係・状況・Rule に基づいて行う。
-5. delivery 後の個体推論は別 consumer の新たな利用として K-E・K-B の現在条件へ戻す。Observer で送信できた画面・背景をそのまま各個体 Provider へ送れるとはみなさない。
-6. 失われないこと：Client 単位の共有と個体判断の分離、routing 用文脈の派生性（新正本・新 scope・包括共有ではないこと）、元情報の利用制約と専用 assignment 送信同意の変換後の維持、scope 変更・同意失効・消去の処理中派生物への反映。
+1. 接続・存在担当が `NotifyPresenceChangeFact(client, present_companions, fullscreen, observer_control)` を共有観測担当へ通知します。停止中（Stopped）のパートナーを在席人数やルーティング対象として数えてはなりません。以前の端末で取得された古い画面キャプチャや分析候補を使って、新しいキャプチャや情報配信を続けてはなりません。
+2. 共有観測担当は対象とタイミングを確定し（`EligibilityDecision`）、`PublishObservationCandidate(client, candidate, captured_at, capture_range, routing_context=H-F)` によって候補を検知します。これは観測専用の割り当て設定を用いて実行し、パートナー側の設定の上書きや同意の合成を行ってはなりません。全パートナーへの無条件な一斉同報配信や、パートナーごとの重複した無駄な検知処理を行ってはなりません。
+3. 共有観測担当は `RoutingDecision::RoutedTo(該当端末でアクティブに動作している関連パートナーのみ)` を確定し、`DeliverEventNotification(candidate, target, deliverable_range)` によって通知を伝達します。通知を受信したことと、内容を理解・採用したことは別です。
+4. 各パートナーの個体調整担当は、`CompanionUnderstandingFact(companion, candidate, understood_as, experience_link)` によって、自身の文脈に照らし合わせた意味解釈を行います。共有観測によるルーティングは、各パートナー自身の意味判断、発話判断、アクション実行判断を勝手に代行するものではありません。発話やアクションを行うかどうかの最終判断は、各パートナーが自身のキャラクター設定、親密な関係性、状況、ルールに基づいて自律的に行います。
+5. 配信後に各パートナーが個別に行う推論処理は、独立した新たな利用として K-E および K-B の認可フローを改めて経る必要があります。共有観測で外部へ送信できた画面データや背景情報を、そのまま各パートナーのプロバイダへ無条件に送信できるとみなしてはなりません。
+6. **失われてはならない情報**: 端末単位の画面共有と各パートナー個別の意思決定の分離、ルーティング用コンテキストの派生性（新しいマスターデータや全体共有データではないこと）、元データの利用制約と観測専用割り当ての送信同意の維持、スコープ変更・同意失効・データ削除要求の処理中派生データへの即時反映。
 
 ### V-7 Targeted Deletion 中の delayed Learning result（D-A・D-B・H-B・K-K）
 
-1. 保全・消去は `RequestTargetedDeletionCommand(purpose, mechanical_condition, semantic_hint, exclusion)` を受け、`DeletionScopeDecision(operation, sweep, valid_interval, participants)` を確定する。`deletion_operation＋erasure_condition` の durable を参加開始より先行させる（durable-before-enforce）。
-2. 各受入・保存先は保存・採用の commit 時に飛行中の `ErasureConditionRef(operation, sweep, valid_interval)` を lock-free に照合する。到着・生成情報の `(source 関係, 取得・生成時点)×(operation, sweep, valid_interval)` で判定する。区間内再到着・再生成は消去対象とし、新 Experience として救済しない。
-3. 削除前に開始した Learning 形成の遅延結果が届いたら、用途別受入（現在 Memory revision・scope・制約）に加えて消去条件を照合する。旧 provenance の遅延物は元記録への事実残しに留めるか破棄し、現在への採用・再保存をしない。削除前情報を利用する実行中形成による再保存をしない。
-4. 全域完了は `declare_global_completion_if_verified(operation, sweep, verification=NoRemainderMechanically＋区間内再到着の取込み)` で原子に確定する。局所返却で hold を解除しない。未確認・到達不能を成功と読まない。完了時に検索 token を wipe し、完了記録・Audit へ対象本文を戻さない。
-5. 失われないこと：機械的必須層と意味的補助層の区別、消去区間・完了境界・hold、遅延結果の帰属と再保存防止、旧 provenance と完了後新規提供の区別。
+1. 保全・消去担当が `RequestTargetedDeletionCommand(purpose, mechanical_condition, semantic_hint, exclusion)` を受領し、`DeletionScopeDecision(operation, sweep, valid_interval, participants)` を確定します。消去操作レコードおよび消去条件の永続化は、各参加者が消去処理を開始するよりも前に完了させます（durable-before-enforce）。
+2. 各受入・保存先は、データの保存や採用をコミットする直前に、処理中に発行された消去条件（`ErasureConditionRef(operation, sweep, valid_interval)`）をロックを持たずに高速に照合します。到着・生成された情報について、「元データとの関係および生成日時」と「消去操作の有効期間」を突き合わせて判定します。削除処理区間内に遅延到着したり再生成されたデータはすべて消去対象とし、新しい経験データとして救済・保持してはなりません。
+3. 削除開始前に開始されていた自律学習の形成処理から遅れて結果が届いた場合、通常の前提条件（最新の記憶リビジョン、スコープ、制約）に加えて消去条件を厳格に照合します。削除対象の由来を持つ遅延結果は、過去ログへの事実記録に留めるか安全に破棄し、現在の認識への採用や再保存を行ってはなりません。削除対象となった情報を利用して、実行中の学習処理がデータを再保存することを確実に防止します。
+4. システム全域での削除完了は、`declare_global_completion_if_verified(operation, sweep, verification=NoRemainderMechanically ＋ 区間内再到着の取り込み)` によって不可分に確定します。一部の参加者からの局所的な完了報告だけで安全保留を解除してはなりません。未確認の領域や到達不能な端末が存在する状態を「成功」と誤認してはなりません。完了時には機械的条件の検索用トークンを完全に消去（wipe）し、完了記録や監査ログに対象の本文データを書き戻してはなりません。
+5. **失われてはならない情報**: 機械的な必須条件レイヤーと意味的な補助ヒントレイヤーの区別、消去処理区間、完了境界、安全保留状態、遅延結果の帰属と再保存防止措置、削除前の由来を持つデータと削除完了後に新しく提供されたデータの厳格な区別。
 
 ### V-8 Restore 後の old live result（D-D・K-K・H-A）
 
-1. 保全・消去は `RequestRestoreCommand(backup_point)` を受け、`StagedRestoreCandidate(restore, backup_point, isolation_check)` で staging（別 file / 別 group）の照合・検証を先行させる。staging 期間の live mutation は旧正本への通常 commit として継続し、staging 内容へ混ぜない。
-2. `SwitchRestoreDecision(restore, new_generation, hold)` で `restore_generation` の原子 switch を確定する（SD-Restore）。switch 前は復元前正常が正本、switch 後は復元内容が正本。第三の混合を作らない。失敗時は復元前正常を維持する。
-3. 切替前に開始した推論・Tool 結果が切替後に届いても、利用の `(restore generation 前提, assignment/consent revision, Credential 照合, 依拠 Rule revision)×現在の(restore_generation, 現 store, 現制約, 復元後保留)` の照合で抑止し、旧 live・旧同意・旧 assignment だけで自動利用・自動処理を開始しない。旧 live 要求・結果・Client copy を復元正本へ混ぜない。
-4. 復元を跨ぐ参照（Task・Rule・同意・assignment・作用・未伝達・全域未完了）には `RestoreGeneration` を添える。旧世代の参照だけで復元後に利用・実行・送信しない。Task の目的変更は `task_revision` の前進であり generation 変化で代替しない。
-5. 復元成立後も Task・Schedule・外部接続の自動処理は保留し、Owner が内容確認後 `BulkEnableAfterRestoreCommand` でまとめて有効化できる。現在 Credential・現制約・復元後保留・Deny・cap・認証不足・不明を無視しない。
-6. 失われないこと：復元範囲・正本切替・再有効化の分離、stale の現在事実化の禁止、旧 live 混入禁止、Credential 現在 store 維持・外部非巻戻し・単一正本・復元後保留。
+1. 保全・消去担当が `RequestRestoreCommand(backup_point)` を受け、`StagedRestoreCandidate(restore, backup_point, isolation_check)` によってステージング領域（別ファイルまたは別グループ）での整合性照合と検証を先行して実行します。ステージング検証を行っている期間中も、本番環境の更新は旧マスターデータに対する通常のコミットとして継続され、ステージング領域の内容と混ざり合うことはありません。
+2. 検証完了後、`SwitchRestoreDecision(restore, new_generation, hold)` によって復元世代番号（`restore_generation`）を更新し、正本ポインタを不可分に切り替えます（SD-Restore）。切り替え前は「復元前の正常状態」がマスターデータ（正本）であり、切り替え後は「復元されたデータ」がマスターデータとなります。両者が混ざり合った第三の状態を作ってはなりません。復元に失敗した場合は、復元前の正常な状態をそのまま維持します。
+3. 切り替え処理の前に開始されていた推論呼び出しや外部ツールの実行結果が切り替え後に遅れて届いたとしても、「処理開始時の復元世代前提、割り当て・同意リビジョン、認証情報、依拠したルール」と「最新の復元世代、現在の保管庫、最新の制約、復元後の一括安全保留」を照合することで安全に遮断します。復元前の古い実行要求、古い同意、古い割り当て設定だけで、自動処理を勝手に開始してはなりません。復元前の古い実行要求、処理結果、クライアント側のキャッシュコピーを、新しく復元されたマスターデータへ混入させてはなりません。
+4. バックアップ復元を跨ぐ参照情報（タスク、ルール、同意、プロバイダ割り当て、外部作用、未伝達メッセージ、システム全域の未完了状態）には、必ず復元世代番号（`RestoreGeneration`）を付与します。古い世代の参照情報だけで、復元後に外部処理を実行・送信してはなりません。なお、タスクの方針変更はタスクリビジョンを進めることで表現し、復元世代番号の変更で代替してはなりません。
+5. 復元が正常に完了した後も、タスク、スケジュール、外部接続を伴う自動処理は安全のため保留状態を維持します。オーナーが画面上で復元内容を確認した後、`BulkEnableAfterRestoreCommand` によって安全にまとめて有効化できます。現在の最新の認証情報、現在の制約、復元後保留、拒絶設定、費用上限、認証不足、成否不明の状態を無視して処理を進めてはなりません。
+6. **失われてはならない情報**: 復元対象範囲、正本切り替え、復元後の一括再有効化の分離、過去の古い状態を現在の事実と誤認することの禁止、復元前データの混入禁止、現在の認証情報保管庫の維持、外部ファイルや外部作用が巻き戻らないことの認識、単一のマスターデータの維持、復元後の一括安全保留。
 
 ### V-9 Character revision apply（C-A・C-B・H-5）
 
-1. 個体調整は `GetCharacterRevisionQuery(character, revision)` で確定済み revision の静的内容・差分を取得する。revision の存在から適用・適用すべきことを推測しない。
-2. 個体調整は Owner の部品ごとの明示選択を付けて `ProposeCharacterApplicationCandidate(companion, character, expected_character_revision, selected_parts, owner_selection)` を提案する。適用禁止種別（Credential / Permission / 同意 / authority / Plugin・MCP authority / Global Skill / system control / Rule / cap を含む revision 内容）は適用対象から除外する。
-3. 個体調整は適用関係を確定し（`AppliedAs`）、経験由来状態を初期化しない。未確認部品を更新済みにしない。内容の正本（Character）と適用関係の正本（個体調整）を同一更新にしない（SD-CharApply の短い transaction）。
-4. validation 成功は Permission / execution authorization として返さない（`PackageValidationReport` は受入可否・内容範囲・trusted/untrusted 扱いであり、制御変更ではない）。
-5. 失われないこと：静的 revision と適用関係の分離、部品ごとの Owner 選択、経験状態の非初期化、推奨＝実行許可・有効切替えではないこと、export への private 混入防止。
+1. 個体調整担当が `GetCharacterRevisionQuery(character, revision)` を発行し、確定済みの安全なリビジョンから静的な設定資材や差分情報を取得します。リビジョンが存在していることだけを根拠にして、それを適用すべきであると勝手に推測してはなりません。
+2. 個体調整担当は、オーナーが部品ごとに明示的に選択した更新範囲を添えて、`ProposeCharacterApplicationCandidate(companion, character, expected_character_revision, selected_parts, owner_selection)` を提案します。認証情報、権限昇格、同意の代用、特権の付与、プラグインやMCPの権限、全体共有スキル、システム制御設定、ルール、費用上限などの適用禁止種別が含まれている場合は、更新対象から確実に除外します。
+3. 個体調整担当は適用関係を確定し（`AppliedAs`）、パートナーがこれまでに積んできた経験や記憶などの成長状態を決して初期化しません。また、オーナーが確認していない部品を勝手に更新済みに変えてはなりません。キャラクター資材のマスターデータ（Character担当）と、特定のパートナーへの適用関係のマスターデータ（個体調整担当）を同一のトランザクションで混同して更新してはなりません（同期区分 SD-CharApply の短いトランザクションで安全に処理します）。
+4. パッケージ検証の成功を、機能の実行許可やセキュリティ認可と混同してはなりません（`PackageValidationReport` は受け入れ可否、含まれるコンテンツの範囲、信頼／非信頼の扱いを示すものであり、制御設定の変更ではありません）。
+5. **失われてはならない情報**: 静的なキャラクターリビジョンと個体への適用関係の明確な分離、部品ごとのオーナーによる明示選択、パートナーの経験状態が初期化されないこと、推奨設定が存在することと実際の実行許可・有効化が別であることの認識、エクスポートデータへのプライベートな情報の混入防止。
 
 ## 18. 意図的に残した Design Freedom
 
-- 各 interface の concrete method 名・module 配置・同期 / 非同期の粒度（本書は `async fn` を提案するが、actor / channel / 直接呼出し等の mechanism は固定しない）。
-- provenance・source_range・selection_premise 等の具体表現、確認のまとめ方、Permission evaluator の内部 algorithm、識別・鮮度確認・競合制御の mechanism（CCT 第5節の三択：楽観 CAS / owner-local mailbox / 短い DB transaction 内 atomic read＋insert のいずれでもよい）。
-- Context Assembly・routing 用 context の生成方法・形式・更新頻度・鮮度・選択 algorithm、要約・検索・scoring、prompt template、cache 実装。
-- 費用予約量の算定式・集計期間・推定方式、資源配分、反復抑制・Capture 時機、駆動・待機の機構。
-- pairing / bootstrap の認証材料の具体形式・保護・受渡し、再起動後の元 Client への再接続・待機、切断検知、帰属調停、安全な round・作用の区切り、停止伝達の mechanism。
-- 探索・無効化・検証の実装、backup の整合時点・形式、restore 切替・復旧、保存・暗号化方式、`SealedSearchToken` の実装。
-- audit format、診断・telemetry stack、提示確認、要約粒度、具体保持期間、UI layout。
-- 上表の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の12責務、semantic owner、Host／Client 配置と trust boundary の下で実現方法を選ぶ。
+- 各インターフェースの具体的なメソッド名、モジュール配置、同期／非同期の粒度（本書では `async fn` のシグネチャを提案していますが、アクターモデル、チャンネル通信、直接の関数呼び出しなどの低レベルな実装機構は固定しません）。
+- 由来情報（provenance）、対象範囲（source_range）、選択前提（selection_premise）などの内部データ構造の具体的表現形式、確認ダイアログのまとめ方、権限評価エンジンの内部アルゴリズム、識別子の検証・鮮度確認・競合制御の具体的機構（CCT 第5節で示した3つの選択肢：楽観的CAS、担当者ローカルのメールボックス、短いDBトランザクション内での不可分な読み取り照合のいずれを採用しても構いません）。
+- コンテキスト組み立て（Context Assembly）およびルーティング用コンテキストの生成アルゴリズム、データ形式、更新頻度、鮮度の判定基準、選択アルゴリズム、文章要約、ベクトル検索のスコアリング計算、プロンプトテンプレートの構造、キャッシュの実装方式。
+- 費用予約量の具体的な計算式、集計期間、推定方式、内部リソースの配分方針、反復処理の抑制閾値、画面キャプチャのインターバル、イベント駆動とタイマー待機の具体的機構。
+- ペアリングおよび初期設定における認証材料の具体的フォーマット、暗号化保護方式、受け渡しプロトコル、ホスト再起動後における元のクライアントへの再接続待機時間、ネットワーク切断の検知アルゴリズム、在席の調停手順、対話やアクションの安全な区切り処理、停止指示の伝達機構。
+- 検索、無効化、検証の低レベルな実装手法、バックアップ作成時の整合時点の選定アルゴリズム、バックアップファイルの保存形式、復元時の正本切り替え手順、暗号化アルゴリズム、検索用暗号トークン（`SealedSearchToken`）の具体的実装。
+- 監査ログの出力フォーマット、診断情報およびテレメトリの収集スタック、画面提示確認のUIデザイン、未伝達要約の粒度、データの具体的な保持期間、UIの画面レイアウト。
+- なお、上記の設計自由度があるからといって、システム全体を統制するような単一の巨大コンテキスト層、ポリシーエンジン、統合マネージャー、集中サービス、中央コーディネーターなどを後から無秩序に追加してはなりません。本書で定めた既存の責務分担、各領域の担当責任者（semantic owner）、ホスト／クライアント間の配置原則、および厳格な信頼境界を常に遵守しながら、具体的な実装方法を選択します。
