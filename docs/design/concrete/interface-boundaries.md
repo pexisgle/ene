@@ -333,6 +333,23 @@ enum TaskResultAcceptance {
 struct TaskAgentTurnPremise {
     delegation: DelegationId,        // 実行する委任。行の存在は生存の証明ではない
 }
+struct TaskAgentInferencePremise {   // port 入力。prompt は SecretScrubber の出力のみ
+    delegation: DelegationId,
+    task: TaskRef,                   // 依拠タスクリビジョン
+    prompt: ScrubbedText,
+}
+enum TaskAgentInferenceOutcome {
+    Produced { output: TaskAgentOutput, adoption_consent_current: bool },
+    StaleTaskPremise,                // タスク前提の不一致。provider へ送信していない
+    NotSent(TaskAgentNotSent),
+}
+struct TaskAgentOutput;              // provider 出力本文。Debug では伏字化し、アクセサ経由でのみ読む
+enum TaskAgentNotSent { SetupIncomplete, NotInAllowlist, ConsentStale, OverLimit, EvaluationConsumed }
+enum TaskAgentInferenceError { InferenceUnavailable { reason: String } } // 技術的失敗（本文・秘密を含めない）
+trait TaskAgentInference: Send + Sync {
+    async fn infer(&self, premise: TaskAgentInferencePremise)
+        -> Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>;
+}
 enum TaskAgentTurnOutcome {
     Produced {                       // provider 出力が返った事実。タスク完了・採用・外部作用成功ではない
         delegation: DelegationId,
@@ -345,8 +362,10 @@ enum TaskAgentTurnOutcome {
     MissingDelegation { delegation: DelegationId },
     NotSent(TaskAgentNotSent),       // setup 不足・許可リスト外・同意失効・入力上限・認証情報前提不一致
 }
-// TaskAgentNotSent は推論側 `NotSentReason` と同じ意味の語彙を作業側に写したもの。
-// `TaskPremiseStale` は作業側が現在のタスクを再読込して StaleTaskRevision / MissingTask へ写す。
+// `TaskAgentNotSent` / `TaskAgentInferenceError` は推論側 `NotSentReason` / `InferenceTechnicalError`
+// と同じ意味の語彙を作業側に写したもの。`StaleTaskPremise` は作業側が委任と現在のタスクを再読込し、
+// 委任が不在なら MissingDelegation、タスクが不在なら MissingTask、タスクリビジョンが前進していれば
+// StaleTaskRevision { current } へ写す（判定の所有は作業担当に残る）。
 ```
 
 ### H-B Experience 提出 → 形成判断（個体調整・作業 → 認識・学習）
@@ -626,7 +645,7 @@ enum Admission {
 
 struct InferenceAttempt {
     ticket: InferenceTicketRef,
-    consumer: UsageConsumer,                         // 消費主体（Companion / Observer専用 / Task Agent 継承）
+    consumer: UsageConsumer,                         // 消費主体（closed world は許可リストが所有。`TaskAgent` 等）
     capability: CapabilityKind,
     purpose: PurposeKind,                            // 利用目的（この試行が何のための利用か）
     expected_consent: ConsentPremise,               // (id, rev) をペアとして厳格に保持
@@ -646,7 +665,7 @@ struct InferenceAttempt {
 struct TaskAgentAttemptPremise {
     delegation: RawId,               // 委任の対応関係（durable correlation）
     task: RawId,                     // 依拠タスク（不透明 ID）
-    task_revision: u64,              // 依拠リビジョン（(task, revision) のペアとして扱う）
+    task_revision: RevisionInner,    // 依拠リビジョン（(task, revision) のペアとして扱う）
 }
 
 enum InferenceDispatchOutcome {
@@ -664,7 +683,7 @@ struct InferenceResultArrival {
 }
 ```
 
-- `NotSentReason` と試行確定の結果は、Task Agent のタスク前提不一致（`TaskPremiseStale`）を同意・認証情報の失効（`ConsentStale` / `Stale`）とは別の列挙子として持ち、技術的エラーへ吸収しません。作業側は `TaskPremiseStale` を受けて現在のタスクを再読込し、`StaleTaskRevision { current }` または `MissingTask` へ写します（判定の所有は作業担当に残ります）。
+- `NotSentReason` と試行確定の結果は、Task Agent のタスク前提不一致（`TaskPremiseStale`）を同意・認証情報の失効（`ConsentStale` / `Stale`）とは別の列挙子として持ち、技術的エラーへ吸収しません。作業側は `TaskPremiseStale` を受けて委任と現在のタスクを再読込し、`MissingDelegation` / `MissingTask` / `StaleTaskRevision { current }` へ写します（判定の所有は作業担当に残ります）。
 
 - **送信の手順**:
   1. 受付ゲート（admission）が最新の同意・認証前提と、K-B の単一利用認可を確認して `Admission` を返します。Task Agent の admission は `(TaskAgent, Dialogue, TaskAgentTurn)` を固定した専用経路（`admit_task_agent`）のみで作り、`admit_dialogue` / `admit_learning` の代用を許しません。

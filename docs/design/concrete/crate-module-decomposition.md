@@ -299,6 +299,7 @@ flowchart TB
   presence --> presv
   learn --> prim
   learn --> cfg
+  learn --> cred
   learn --> presv
   action --> prim
   action --> cfg
@@ -335,6 +336,7 @@ flowchart TB
   comp --> presence
   comp --> infer
   comp --> action
+  comp --> cred
   comp --> presv
   store --> prim
   store --> cfg
