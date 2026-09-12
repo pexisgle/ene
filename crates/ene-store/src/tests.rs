@@ -1473,7 +1473,7 @@ PRAGMA user_version = 2;",
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(18)),
-        "migration must record version 17"
+        "migration must record version 18"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1846,7 +1846,7 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(18)),
-        "reopened database must record schema version 17"
+        "reopened database must record schema version 18"
     );
 }
 
@@ -2615,7 +2615,7 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
         matches!(version, Ok(18)),
-        "reopened database must record schema version 17"
+        "reopened database must record schema version 18"
     );
 }
 

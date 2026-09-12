@@ -287,6 +287,8 @@ async fn inference_attempt_reads_fail_closed_on_corrupt_correlation() {
     let cases = [
         "UPDATE inference_attempt SET task_revision = NULL;",
         "UPDATE inference_attempt SET delegation_id = NULL, task_id = NULL, task_revision = NULL;",
+        "UPDATE inference_attempt SET consumer = NULL;",
+        "UPDATE inference_attempt SET purpose = NULL;",
         "UPDATE inference_attempt SET consumer = 'companion_dialogue';",
         "UPDATE inference_attempt SET consumer = 'not_a_consumer';",
         "UPDATE inference_attempt SET purpose = 'not_a_purpose';",

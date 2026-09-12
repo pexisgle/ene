@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-use ene_permission::{ConsumerKind, PurposeKind};
+use ene_permission::{CapabilityKind, ConsumerKind, PurposeKind};
 use ene_primitive::WallClockWithTz;
 
 use crate::codec::{decode_id, encode_consumer, encode_purpose};
@@ -444,14 +444,33 @@ ALTER TABLE inference_attempt ADD COLUMN task_revision INTEGER NULL;
 ";
 
 /// The V18 migration re-runs safely on a version-only rewind (the migration
-/// tests rely on every migration being idempotent): the columns are added
-/// only when absent, and the backfill touches only rows that have no
+/// tests rely on every migration being idempotent): an all-present column
+/// set skips the ALTER, and the backfill touches only rows that have no
 /// attribution yet, so a re-run never overwrites an existing consumer
-/// attribution or its correlation.
+/// attribution or its correlation. A partial additive state is unsupported
+/// and fails closed instead of guessing which columns remain.
 fn migrate_v18(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
-    if !column_exists(tx, "inference_attempt", "consumer")? {
-        tx.execute_batch(MIGRATION_V18_ALTER)
-            .map_err(|error| error.to_string())?;
+    const ADDED_COLUMNS: [&str; 6] = [
+        "consumer",
+        "purpose",
+        "credential_set_rev",
+        "delegation_id",
+        "task_id",
+        "task_revision",
+    ];
+    let mut present = 0;
+    for column in ADDED_COLUMNS {
+        if column_exists(tx, "inference_attempt", column)? {
+            present += 1;
+        }
+    }
+    match present {
+        0 => {
+            tx.execute_batch(MIGRATION_V18_ALTER)
+                .map_err(|error| error.to_string())?;
+        }
+        n if n == ADDED_COLUMNS.len() => {}
+        _ => return Err(String::from("partial V18 inference_attempt schema")),
     }
     backfill_inference_attempt_consumers(tx)
 }
@@ -491,16 +510,16 @@ fn backfill_inference_attempt_consumers(tx: &rusqlite::Transaction<'_>) -> Resul
         .prepare("UPDATE inference_attempt SET consumer = ?1, purpose = ?2 WHERE ticket = ?3")
         .map_err(|error| error.to_string())?;
     for (ticket, capability) in &rows {
-        let (consumer, purpose) = match capability.as_str() {
-            "dialogue" => (
+        let (consumer, purpose) = match CapabilityKind::from_name(capability) {
+            Some(CapabilityKind::Dialogue) => (
                 ConsumerKind::CompanionDialogue,
                 PurposeKind::DialogueResponse,
             ),
-            "learning" => (
+            Some(CapabilityKind::Learning) => (
                 ConsumerKind::CompanionLearning,
                 PurposeKind::MemoryFormation,
             ),
-            _ => return Err(String::from("unknown inference capability during backfill")),
+            None => return Err(String::from("unknown inference capability during backfill")),
         };
         update
             .execute(rusqlite::params![

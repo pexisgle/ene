@@ -81,9 +81,9 @@ pub enum ConsumerKind {
 }
 
 impl ConsumerKind {
-    /// Stable wire and storage name. One owner for the vocabulary: the
-    /// management grammar, the consent table, and the inference attempt all
-    /// render consumers through this function.
+    /// Stable storage name. One owner for the vocabulary: the inference
+    /// attempt correlation and the consent accounting render consumers
+    /// through this function.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
