@@ -283,10 +283,17 @@ pub async fn begin_turn(
 /// accounting is already decided inside the inference boundary. An adopted
 /// reply appends with its undelivered registration in the same atomic
 /// section; any other reply outcome is interrupted. Provider deltas are
-/// pushed to `sink` as they arrive; display is never a durable
-/// adoption, so an interrupted stream leaves partial display and no reply.
-/// After the durable append, the Experience premise is pinned for the
-/// post-response Learning pass.
+/// pushed to `sink` as they arrive, each gated on a current presentation
+/// premise; a delta shown before an invalidation stays as historical
+/// partial presentation, never rewound. `is_current` runs once more after
+/// provider completion, immediately before the durable append: the last
+/// delta may have been current while the reply it belongs to is already
+/// superseded, and no further delta would trip the gate. Durable premises
+/// (generation, consent, credential set, lifecycle) ride the append's
+/// atomic compare; `is_current` covers the transient presentation premise
+/// outside that transaction, so a superseded reply interrupts instead of
+/// appending. After the durable append, the Experience premise is pinned
+/// for the post-response Learning pass.
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
@@ -294,6 +301,7 @@ pub async fn finish_turn(
     learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
     sink: &mut (dyn ene_inference::DeltaSink + Send),
+    is_current: &(dyn Fn() -> bool + Send + Sync),
 ) -> DialogueOutcome {
     let DialogueTurn {
         input,
@@ -324,6 +332,16 @@ pub async fn finish_turn(
             let Ok(text) = scrubber.scrub(&arrival.output_text).await else {
                 return DialogueOutcome::Interrupted;
             };
+            // The provider completed after the last gated delta: confirm
+            // the round is still the presented one before anything
+            // durable. Generation, consent, credential set, and lifecycle
+            // ride the append's atomic compare below; the Host-owned open
+            // round lives outside that transaction, so only this check can
+            // refuse a reply superseded with no further delta to trip the
+            // gate.
+            if !is_current() {
+                return DialogueOutcome::Interrupted;
+            }
             let reply = AppendHistoryCommand {
                 companion: input.companion,
                 round: input.round,

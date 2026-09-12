@@ -345,8 +345,10 @@ impl HostHandle {
     /// projection): an exact retry replays the stored accept ack verbatim
     /// without re-appending or re-streaming anything, including after a
     /// restart, while a different request answers a typed wire rejection
-    /// (`ConflictingCommand`), never an intake outcome. Response text is never
-    /// presented unless its reply append committed. Stream outcome replay is
+    /// (`ConflictingCommand`), never an intake outcome. Provider deltas may
+    /// be presented before durable reply adoption while the presentation
+    /// premise remains current. Durable completion/replay is reported only
+    /// after the final reply append succeeds. Stream outcome replay is
     /// explicitly out of scope: only the accept ack replays.
     pub(crate) async fn submit_text(
         &self,
@@ -714,15 +716,29 @@ impl HostHandle {
                     tx: stream_tx.clone(),
                     seq: 0,
                 };
-                let outcome = finish_turn(
-                    turn,
-                    &self.store,
-                    &executor,
-                    &self.store,
-                    &scrubber,
-                    &mut gate,
-                )
-                .await;
+                let outcome = {
+                    // The open round is Host-owned transient state the
+                    // companion must never read directly: hand finish_turn
+                    // a sync predicate instead. It runs after provider
+                    // completion, immediately before the durable append, so
+                    // a superseding submit refuses the old reply even when
+                    // no further delta arrives to trip the presentation
+                    // gate.
+                    let is_current = || {
+                        self.open_round_for(&live.client_ref, &companion_key)
+                            .is_none_or(|open| open.round == accepted)
+                    };
+                    finish_turn(
+                        turn,
+                        &self.store,
+                        &executor,
+                        &self.store,
+                        &scrubber,
+                        &mut gate,
+                        &is_current,
+                    )
+                    .await
+                };
                 match outcome {
                     DialogueOutcome::Completed { experience, .. } => {
                         // The durable reply is the client-visible completion:
