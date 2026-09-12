@@ -804,6 +804,7 @@ struct ReportEffectFact {
   ユーザー入力の受付、タスクの受理、認可の判定、外部作用の開始、実際の作用の把握、内部データへの保存、タスクの達成判定、オーナーへの報告完了は、すべて独立した別の事実です。これらを単一の「成功」という状態にひとまとめにしてはなりません。「確認済み成功」「確認済み失敗」「成否不明」を明確に区別し、確認が取れない事象を勝手に「未実行」や「失敗」「成功」へ改ざんしてはなりません。再実行は必ず独立した新しい試行として扱います。
 - タイムアウトが発生しても、外部作用の確信度は変化しません（`Unknown` のまま保持）。遅れて成功の確認が取れた場合は、元の試行記録に対して `Unknown` → `Confirmed` のアトミック更新（CAS）を行い、現在のタスクへ結果を採用するかどうかは H-A の受付インターフェースにおいて改めて判定します。
 - 永続化は永続化グループE（`action_attempt`）のトランザクションで行い、実行開始前の比較照合は短いトランザクション内で不可分に完了します（CCT §8.1、PR AU5）。
+- **本スライス（Task Agent の Workspace 内ファイルシステム限定）の具体契約**: 認可の境界は、現在の `workspace_assoc`（Task につき 0..1 の不変な関連付け）と closed な `OperationKind`（`Read / Create / Edit`。`Delete / Execute` はユーザー確認・外部拡張の producer を持つスライスが追加）です。この段階では Action 用の `PermissionEvaluationId` を発行する評価 producer が存在しないため、代役の評価識別子を premise や試行行に置きません。委任の `scope_copy` は依拠時点の写し（provenance）であり、開始時に照合する生きた境界は現在の `workspace_assoc` です。実際の対象の解決（`RealTargetRef`）は実行・拡張担当が実行直前に行い、入力文字列の一致を同一性の根拠にしません。結果採用・タスク達成はこのスライスに含めません（H-A の受付インターフェースが担当）。
 
 ### K-I 拡張受入
 
@@ -1551,35 +1552,61 @@ trait TaskRepository {
 - 委任作成のオーケストレーション（作業担当）: `load_task` による事前照合（欠如は `MissingTask`、リビジョン不一致は `StaleTaskRevision { current }`）→ `DelegationId`・`TaskAgentEphemeralId` の発行 → `DelegationCreationPremise` の構成 → `create_delegation` 呼び出し、の順に進みます。事前照合は現在性の保証ではなく、`create_delegation` のリビジョン比較照合が事前照合後の競合レースを包含します。リポジトリの結果は変更不能のまま写像します。
 
 // --- アクション試行（PR グループE。SD-Attempt。追記専用 ＋ 行ごとの CAS） ---
+// このスライスの read / create / edit は、既存の依拠タスクリビジョンと現在の
+// workspace_assoc を前提とします。依拠権限評価・在席・費用予約・消去・復元の前提は、
+// それぞれの producer を持つスライスがフィールドと比較を同じ設計変更で追加し、
+// それまで代役値や placeholder 列を置きません（AU2/AU14 と同じ規則）。
+// 他ドメインの newtype を直接 import せず、素の ID ＋ 世代数値で受け取ります（CM §4.3）。
 struct AttemptCommitPremise {
-    expected_task: Option<TaskRef>,  // タスクリビジョンの前提
-    relied_evaluation: PermissionEvaluationId,
-    real_target: RealTargetRef,
-    operation: OperationKind,
-    presence: Option<PresenceCheckRef>,
-    erasure: ErasureConditionRef,
-    restore_generation: RestoreGeneration,
-    reservation: Option<ReservationId>,
+    attempt: ActionAttemptId,        // 識別子はオーケストレーションが発行し、リポジトリは採番しない
+    delegation: RawId,               // 依拠する委任対応
+    task: RawId,                     // 依拠タスク
+    task_revision: RevisionInner,    // 依拠タスクリビジョン（(task, revision) の対で運ぶ）
+    workspace: RawId,                // 現在の workspace_assoc の識別子
+    real_target: RealTargetRef,      // 実行直前に解決された実際の対象
+    operation: OperationKind,        // Read | Create | Edit（このスライスの closed world）
+}
+
+enum ActionStartOutcome {
+    Started,                         // 試行行は durable。実行はトランザクション外
+    StalePremise,                    // 委任・タスク・ワークスペース前提の欠如/前進。書き込みゼロ
+}
+
+// 確定度の CAS 結果。Updated 以外は書き込みなしのドメイン結果。
+enum CertaintyUpdateOutcome {
+    Updated,
+    StaleCurrent { current: ActionCertainty },
+    MissingAttempt,
 }
 
 trait ActionAttemptRepository {
-    // 試行の開始：同一の即時トランザクション内で、タスク、委任、ワークスペース、実対象、
-    // 現在の許可、デバイス状態、費用予約、安全停止、保留、消去、復元の条件を照合し、不可分に挿入。
+    // 試行の開始：同一の即時トランザクション内で、委任対応、依拠タスクリビジョン、
+    // 現在のタスクリビジョン、現在の workspace_assoc、委任の scope_assoc を照合し、
+    // 不可分に挿入する（AU5）。委任行と premise の不一致、複数行の関連付け、
+    // 未知の操作種別は技術的エラーとし、推測で stale に丸めない。
     async fn insert_attempt_if_current(
         &self,
         premise: AttemptCommitPremise,
     ) -> Result<ActionStartOutcome, ActionTechnicalError>;
 
-    // 確信度の更新：(attempt_id, expected_certainty) の比較照合更新（CAS）。
-    // 新しい証拠（evidence）の正当性を確認した上で更新する。
-    // 「成否不明（Unknown）」は安全に維持し、中断受付・通信成功・画面表示・保存成功・再接続・復元・端末移動によって勝手に書き換えてはならない。
+    // 確定度の更新：(attempt_id, expected=Unknown) の比較照合更新（CAS）。
+    // unknown → confirmed_success / confirmed_failure、または証拠不能時の
+    // unknown → unknown（grounds=outcome_unverified）のみ許可する。
+    // 確定済みの値は書き換えない。エージェント自身の自己申告は証拠にできない。
     async fn compare_and_set_certainty(
         &self,
         attempt: ActionAttemptId,
         expected: ActionCertainty,   // 通常は Unknown
         new: ActionCertainty,
-        grounds: EffectGroundsRef,
+        grounds: EffectGrounds,
     ) -> Result<CertaintyUpdateOutcome, ActionTechnicalError>;
+
+    // 再起動後の帰属読み出し：attempt_id を境界にした bounded read。
+    // 行の存在は実行中・成功・生存の証明ではない。操作の自動 replay の根拠にしない。
+    async fn load_attempt(
+        &self,
+        attempt: ActionAttemptId,
+    ) -> Result<Option<ActionAttemptRecord>, ActionTechnicalError>;
 }
 
 // --- 在席管理（PR グループG。SD-Presence。パートナーごとの CAS ＋ 旧→移行中→新） ---
@@ -1803,11 +1830,11 @@ trait UndeliveredRepository {
 ### V-3 Action candidate → authorization → external effect → timeout → late result（K-H・K-B・K-K・H-A）
 
 1. 機能利用元が `ActionCandidate(principal_chain, task, delegation, workspace, purpose, described_target, operation, data_use, cost_risk, relied_intent_rule)` を組み立てます。候補構造体を組み立てられたこと自体は、実行許可を意味しません。
-2. 実行箇所は `CheckLiveAuthorizationQuery(candidate, relied_evaluation, task, delegation, workspace, presence, rule/consent expected, cap_context, hold_context)` を発行し、K-B による今回限りの認可を受けます。過去に保存された許可や解決済みの経路情報だけを根拠にしてアクションを開始してはなりません。オーナーの確認が必要な場合は `AskOwner` として待機します。
-3. 実行・拡張担当は `ExecuteActionCommand(candidate, authorization, resolved_target, presence, cost_reservation, erasure_check, restore_premise)` によって実行直前の比較照合を満たし、`StartedAsAttempt(attempt)` として試行を開始します。対象の文字列表記が一致していることだけで同一とみなしてはならず、実行直前に解決された真の実対象を保持します。
-4. タイムアウトが発生しても、外部作用の確信度は変化しません（`Unknown` のまま保持）。`ReportEffectFact(attempt, stage, certainty=Unknown, grounds, prior_unknown)` の状態を確実に維持します。中断要求の受理、通信の成功、画面への表示、DB保存の成功、再接続、復元、端末移動などを理由にして、勝手に成功や失敗へ書き換えてはなりません。
-5. 遅れて届いた成功の証拠は、元の試行記録に対して `compare_and_set_certainty(attempt, expected=Unknown, new=Confirmed, grounds)` のアトミック更新（CAS）で記録します。新たな客観的証拠の確認を必須とし、エージェント自身の自己申告を証拠にしてはなりません。現在のタスクへ結果を採用するかどうかは、H-A の受付インターフェースにおいて改めて判定します。成否不明となったアクションを再実行するには、新しい試行IDの発行と、重複リスクを明示したオーナー自身の再判断が必要です。
-6. **失われてはならない情報**: 判定時の想定対象と実対象の対応関係、委任の不変性、確信度（確認済み成功／確認済み失敗／成否不明）、試行と外部作用の区別、遅延到着の帰属、重複実行防止に必要な永続記録。
+2. 本スライス（Task Agent の Workspace 内ファイルシステム限定）では、現在の `workspace_assoc`（Task につき 0..1 の不変な関連付け）と closed な `OperationKind`（`Read / Create / Edit`）が実行の authorization 境界です。委任の `scope_copy` は依拠時点の写しであり、生きた境界として使い回しません。Action 用の `CheckLiveAuthorizationQuery` / `PermissionEvaluationId` / `AskOwner` は、Action 評価の producer（評価テーブルと評価ロジック）を持つ権限スライスが同じ設計変更で導入し、このスライスは代役の許可証を premise に置きません。オーナーの確認が必要な操作（削除・外部送信等）は producer が導入されるまで開始経路が存在しません。
+3. 実行・拡張担当は現在の関連付けのフォルダを実行直前に解決し、`RealTargetRef`（canonical な実対象）を得ます。対象の文字列表記が一致していることだけでは同一とみなしません。`AttemptCommitPremise(attempt, delegation, task, task_revision, workspace, real_target, operation)` を `insert_attempt_if_current` に渡し、同一の短い `Immediate` トランザクションで委任対応・依拠タスクリビジョン・現在のタスクリビジョン・現在の `workspace_assoc`・委任の `scope_assoc` を照合します（AU5）。`Started` の場合のみトランザクション外で解決済みの対象に作用し、欠如・前進は `StalePremise` として書き込みも実行も行いません。
+4. 作用の確定度は実行・拡張担当が実行そのものの観測から記録します。`ConfirmedSuccess` は対象の事後確認（例: 書き込み後の読み戻し一致）を根拠とし、エージェント自身の「成功しました」という自己申告を証拠にしません。作用が起き得なかったことが確認できた場合は `ConfirmedFailure`、確認できない場合は `Unknown` のまま保持し、中断要求の受理、通信の成功、画面への表示、DB保存の成功、再接続、復元、端末移動などを理由にして勝手に成功や失敗へ書き換えません。試行行は開始時に `Unknown` で挿入され、確定度は行ごとの CAS でのみ更新します。
+5. 遅れて届いた成功の証拠は、元の試行記録に対して `compare_and_set_certainty(attempt, expected=Unknown, new=Confirmed, grounds)` のアトミック更新（CAS）で記録します。新たな客観的証拠の確認を必須とし、エージェント自身の自己申告を証拠にしてはなりません。現在のタスクへ結果を採用するかどうかは、H-A の受付インターフェースにおいて改めて判定します（このスライスは採用を行いません）。成否不明となったアクションを再実行するには、新しい試行IDの発行と、重複リスクを明示したオーナー自身の再判断が必要です。
+6. **失われてはならない情報**: 判定時の想定対象と解決済み実対象の対応関係、委任の不変性、確定度（確認済み成功／確認済み失敗／成否不明）、試行と外部作用の区別、遅延到着の帰属、重複実行防止に必要な永続記録。
 
 ### V-4 Provider request near cap → reservation → usage（K-D・K-G・K-E・K-B）
 
