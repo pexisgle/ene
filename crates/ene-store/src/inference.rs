@@ -17,7 +17,7 @@ use crate::codec::{
 use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
 
-const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consumer, purpose, consent_id, consent_rev, provider, model, started_at, delegation_id, task_id, task_revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consumer, purpose, consent_id, consent_rev, credential_set_rev, provider, model, started_at, delegation_id, task_id, task_revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 
 const SQL_SELECT_ATTEMPT: &str = "SELECT capability, consumer, purpose, provider, model, delegation_id, task_id, task_revision FROM inference_attempt WHERE ticket = ?1";
 
@@ -35,8 +35,21 @@ impl InferenceAttemptRepository for Store {
     ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
+            // The consumer and its correlation are one premise: a Task Agent
+            // attempt without one would skip the delegation/revision compare,
+            // and a non-Task-Agent attempt with one would persist a
+            // correlation it has no right to. The public trait is callable
+            // directly, so the claim enforces the pairing itself instead of
+            // trusting `AuthorizedInference`'s construction path.
+            if (attempt.consumer == ConsumerKind::TaskAgent) != attempt.task_agent.is_some() {
+                return Err(inference_unavailable(String::from(
+                    "task agent consumer and correlation disagree",
+                )));
+            }
             let rev_raw =
                 encode_u64(attempt.expected_consent.1.as_u64()).map_err(inference_unavailable)?;
+            let credential_set_raw = encode_u64(attempt.expected_credential_set.as_u64())
+                .map_err(inference_unavailable)?;
             let ticket_text = encode_id(attempt.ticket.0);
             let correlation = encode_task_agent(attempt.task_agent)?;
             let mut guard = lock_shared(&conn);
@@ -87,6 +100,7 @@ impl InferenceAttemptRepository for Store {
                     encode_purpose(attempt.purpose),
                     attempt.expected_consent.0,
                     rev_raw,
+                    credential_set_raw,
                     attempt.provider,
                     attempt.model,
                     started_text,

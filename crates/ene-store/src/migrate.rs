@@ -1,8 +1,9 @@
 use rusqlite::{Connection, TransactionBehavior};
 
+use ene_permission::{ConsumerKind, PurposeKind};
 use ene_primitive::WallClockWithTz;
 
-use crate::codec::decode_id;
+use crate::codec::{decode_id, encode_consumer, encode_purpose};
 
 const CURRENT_VERSION: u64 = 18;
 
@@ -424,17 +425,19 @@ scope_save_target TEXT NULL
 );
 ";
 
-/// Adds the inference attempt's consumer/purpose attribution and the Task
-/// Agent delegation/task correlation. All five columns are nullable only so
-/// that pre-existing attempts can be backfilled in this same transaction;
-/// new claims always write the whole group, and the read path fails closed on
-/// a partial group or a consumer/group disagreement. The task revision stays
-/// a copied premise (never a second master): the delegation row remains the
-/// correspondence, and the copy lets a delayed result resolve its relied
-/// revision without a second read.
+/// Adds the inference attempt's consumer/purpose attribution, the persisted
+/// credential-set premise, and the Task Agent delegation/task correlation.
+/// All columns are nullable only so that pre-existing attempts can be
+/// backfilled in this same transaction; new claims always write the whole
+/// group, and the read path fails closed on a partial group or a
+/// consumer/group disagreement. The task revision stays a copied premise
+/// (never a second master): the delegation row remains the correspondence,
+/// and the copy lets a delayed result resolve its relied revision without a
+/// second read.
 const MIGRATION_V18_ALTER: &str = "
 ALTER TABLE inference_attempt ADD COLUMN consumer TEXT NULL;
 ALTER TABLE inference_attempt ADD COLUMN purpose TEXT NULL;
+ALTER TABLE inference_attempt ADD COLUMN credential_set_rev INTEGER NULL;
 ALTER TABLE inference_attempt ADD COLUMN delegation_id TEXT NULL;
 ALTER TABLE inference_attempt ADD COLUMN task_id TEXT NULL;
 ALTER TABLE inference_attempt ADD COLUMN task_revision INTEGER NULL;
@@ -443,17 +446,13 @@ ALTER TABLE inference_attempt ADD COLUMN task_revision INTEGER NULL;
 /// The V18 migration re-runs safely on a version-only rewind (the migration
 /// tests rely on every migration being idempotent): the columns are added
 /// only when absent, and the backfill touches only rows that have no
-/// attribution yet, so a re-run never overwrites an agent/observer
+/// attribution yet, so a re-run never overwrites an existing consumer
 /// attribution or its correlation.
 fn migrate_v18(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
     if !column_exists(tx, "inference_attempt", "consumer")? {
         tx.execute_batch(MIGRATION_V18_ALTER)
             .map_err(|error| error.to_string())?;
     }
-    tx.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_inference_attempt_delegation ON inference_attempt (delegation_id);",
-    )
-    .map_err(|error| error.to_string())?;
     backfill_inference_attempt_consumers(tx)
 }
 
@@ -493,12 +492,22 @@ fn backfill_inference_attempt_consumers(tx: &rusqlite::Transaction<'_>) -> Resul
         .map_err(|error| error.to_string())?;
     for (ticket, capability) in &rows {
         let (consumer, purpose) = match capability.as_str() {
-            "dialogue" => ("companion_dialogue", "dialogue_response"),
-            "learning" => ("companion_learning", "memory_formation"),
+            "dialogue" => (
+                ConsumerKind::CompanionDialogue,
+                PurposeKind::DialogueResponse,
+            ),
+            "learning" => (
+                ConsumerKind::CompanionLearning,
+                PurposeKind::MemoryFormation,
+            ),
             _ => return Err(String::from("unknown inference capability during backfill")),
         };
         update
-            .execute(rusqlite::params![consumer, purpose, ticket])
+            .execute(rusqlite::params![
+                encode_consumer(consumer),
+                encode_purpose(purpose),
+                ticket
+            ])
             .map_err(|error| error.to_string())?;
     }
     Ok(())

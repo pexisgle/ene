@@ -229,7 +229,7 @@ impl SecretScrubber for FakeScrubber {
         {
             FakeScrubReply::Scrubbed => Ok(ScrubbedText {
                 text: format!("[scrubbed] {text}"),
-                credential_set: CredentialSetRevision::initial(),
+                credential_set: CredentialSetRevision::from_u64(7),
             }),
             FakeScrubReply::Failed(error) => Err(error),
         }
@@ -333,7 +333,7 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     );
     assert_eq!(
         received.prompt.credential_set,
-        CredentialSetRevision::initial(),
+        CredentialSetRevision::from_u64(7),
         "the scrub premise crosses unchanged"
     );
     assert_eq!(

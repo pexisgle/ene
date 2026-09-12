@@ -1426,6 +1426,16 @@ mod dispatch_tests {
         assert_eq!(claimed[0].purpose, PurposeKind::TaskAgentTurn);
         assert_eq!(claimed[0].capability, CapabilityKind::Dialogue);
         assert_eq!(claimed[0].task_agent, Some(premise));
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(facts.len(), 1, "the task agent turn records its usage");
+        assert_eq!(facts[0].ticket, claimed[0].ticket);
+        assert_eq!(
+            facts[0].source,
+            UsageSource::Unknown,
+            "a provider without reported counts records unknown, never zero"
+        );
+        assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].output_tokens, None);
     }
 
     #[tokio::test]

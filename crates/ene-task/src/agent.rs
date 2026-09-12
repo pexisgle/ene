@@ -16,9 +16,9 @@
 
 use ene_credential::{ScrubbedText, SecretScrubber};
 
-use crate::delegation::DelegationId;
+use crate::delegation::{DelegationId, DelegationRef};
 use crate::repository::{TaskRepository, TaskTechnicalError};
-use crate::task::{TaskId, TaskRef};
+use crate::task::{TaskId, TaskRecord, TaskRef};
 
 /// One turn request from the caller; carries no liveness claim.
 ///
@@ -238,23 +238,16 @@ pub async fn orchestrate_task_agent_turn(
     scrubber: &impl SecretScrubber,
     premise: TaskAgentTurnPremise,
 ) -> Result<TaskAgentTurnOutcome, TaskAgentTurnError> {
-    let Some(delegation) = repository
-        .load_delegation(premise.delegation)
-        .await
-        .map_err(storage_error)?
-    else {
-        return Ok(TaskAgentTurnOutcome::MissingDelegation {
-            delegation: premise.delegation,
-        });
-    };
-    let Some(record) = repository
-        .load_task(delegation.task.task)
-        .await
-        .map_err(storage_error)?
-    else {
-        return Ok(TaskAgentTurnOutcome::MissingTask {
-            task: delegation.task.task,
-        });
+    let (delegation, record) = match load_premise(repository, premise.delegation).await? {
+        PremiseLoad::Loaded(loaded) => (loaded.delegation, loaded.record),
+        PremiseLoad::MissingDelegation => {
+            return Ok(TaskAgentTurnOutcome::MissingDelegation {
+                delegation: premise.delegation,
+            });
+        }
+        PremiseLoad::MissingTask { task } => {
+            return Ok(TaskAgentTurnOutcome::MissingTask { task });
+        }
     };
     if record.task.reference != delegation.task {
         return Ok(TaskAgentTurnOutcome::StaleTaskRevision {
@@ -288,26 +281,18 @@ pub async fn orchestrate_task_agent_turn(
             adoption_consent_current,
         }),
         TaskAgentInferenceOutcome::StaleTaskPremise => {
-            let Some(delegation) = repository
-                .load_delegation(premise.delegation)
-                .await
-                .map_err(storage_error)?
-            else {
-                return Ok(TaskAgentTurnOutcome::MissingDelegation {
-                    delegation: premise.delegation,
-                });
-            };
-            let Some(record) = repository
-                .load_task(delegation.task.task)
-                .await
-                .map_err(storage_error)?
-            else {
-                return Ok(TaskAgentTurnOutcome::MissingTask {
-                    task: delegation.task.task,
-                });
-            };
-            TaskAgentTurnOutcome::StaleTaskRevision {
-                current: record.task.reference,
+            match load_premise(repository, premise.delegation).await? {
+                PremiseLoad::Loaded(loaded) => TaskAgentTurnOutcome::StaleTaskRevision {
+                    current: loaded.record.task.reference,
+                },
+                PremiseLoad::MissingDelegation => {
+                    return Ok(TaskAgentTurnOutcome::MissingDelegation {
+                        delegation: premise.delegation,
+                    });
+                }
+                PremiseLoad::MissingTask { task } => {
+                    return Ok(TaskAgentTurnOutcome::MissingTask { task });
+                }
             }
         }
         TaskAgentInferenceOutcome::NotSent(reason) => TaskAgentTurnOutcome::NotSent(reason),
@@ -320,6 +305,46 @@ fn storage_error(error: TaskTechnicalError) -> TaskAgentTurnError {
             TaskAgentTurnError::StorageUnavailable { reason }
         }
     }
+}
+
+/// One durable premise load, shared by the precheck and the stale re-read.
+///
+/// The loaded payload is boxed so the rejection variants stay small.
+enum PremiseLoad {
+    Loaded(Box<LoadedPremise>),
+    MissingDelegation,
+    MissingTask { task: TaskId },
+}
+
+struct LoadedPremise {
+    delegation: DelegationRef,
+    record: TaskRecord,
+}
+
+async fn load_premise(
+    repository: &impl TaskRepository,
+    delegation: DelegationId,
+) -> Result<PremiseLoad, TaskAgentTurnError> {
+    let Some(delegation) = repository
+        .load_delegation(delegation)
+        .await
+        .map_err(storage_error)?
+    else {
+        return Ok(PremiseLoad::MissingDelegation);
+    };
+    let Some(record) = repository
+        .load_task(delegation.task.task)
+        .await
+        .map_err(storage_error)?
+    else {
+        return Ok(PremiseLoad::MissingTask {
+            task: delegation.task.task,
+        });
+    };
+    Ok(PremiseLoad::Loaded(Box::new(LoadedPremise {
+        delegation,
+        record,
+    })))
 }
 
 fn inference_error(error: TaskAgentInferenceError) -> TaskAgentTurnError {

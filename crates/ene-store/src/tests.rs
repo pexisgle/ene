@@ -3091,7 +3091,7 @@ async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
 /// gain token rows, so neither the History window nor lexical recall goes
 /// dark.
 #[tokio::test]
-async fn migration_v11_applies_v12_through_v17() {
+async fn migration_v11_applies_v12_through_v18() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
     let path = dir.path().join("app.db");
     let companion = RawId::new();
@@ -3156,7 +3156,7 @@ async fn migration_v11_applies_v12_through_v17() {
     assert_eq!(
         read_schema_version(&path),
         Some(18),
-        "a v11 database must converge on v17"
+        "a v11 database must converge on v18"
     );
     let projection = {
         let guard = match store.conn.lock() {
@@ -3255,7 +3255,7 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     assert_eq!(
         read_schema_version(&path),
         Some(18),
-        "a v13 database must converge on v17"
+        "a v13 database must converge on v18"
     );
     let (projection, columns) = {
         let guard = match store.conn.lock() {
@@ -4221,7 +4221,7 @@ async fn migration_v11_adds_the_owner_recency_index() {
     assert_eq!(
         read_schema_version(&path),
         Some(18),
-        "a v11 database must converge on v17"
+        "a v11 database must converge on v18"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -5204,7 +5204,7 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     assert_eq!(
         read_schema_version(&path),
         Some(18),
-        "a v14 database must converge on v17"
+        "a v14 database must converge on v18"
     );
     assert!(!table_columns(&path, "task").is_empty(), "task is created");
     assert!(
@@ -5367,7 +5367,7 @@ async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
     assert_eq!(
         read_schema_version(&path),
         Some(18),
-        "a v15 database must converge on v17"
+        "a v15 database must converge on v18"
     );
 
     // A fresh store in its own directory builds the schema and every
@@ -7903,7 +7903,7 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         assert_eq!(
             read_schema_version(&path),
             Some(18),
-            "a fresh database converges on v17"
+            "a fresh database converges on v18"
         );
         assert!(
             !table_columns(&path, "delegation").is_empty(),
@@ -7958,7 +7958,7 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
     assert_eq!(
         read_schema_version(&path),
         Some(18),
-        "a v16 database converges on v17"
+        "a v16 database converges on v18"
     );
     let columns = table_columns(&path, "delegation");
     for column in [

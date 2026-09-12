@@ -95,6 +95,24 @@ async fn task_agent_claim_records_the_durable_correlation() {
         Some(premise),
         "the durable correlation keeps the delegation and the relied TaskRef"
     );
+    // The chain a delayed result walks: ticket -> attempt -> delegation ->
+    // delegator. The delegator is read from the delegation row, not copied
+    // onto the attempt.
+    let loaded_delegation = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .expect("the delegation correspondence must load");
+    assert_eq!(loaded_delegation.task, created);
+    let task = store
+        .load_task(created.task)
+        .await
+        .unwrap()
+        .expect("the task must load");
+    assert_eq!(
+        loaded_delegation.delegator, task.task.assignee,
+        "the attribution walks back to the delegator"
+    );
     store
         .record_usage(UsageFact {
             ticket,
@@ -266,28 +284,30 @@ async fn inference_attempt_reads_fail_closed_on_corrupt_correlation() {
     seed_dialogue_consent(&store).await;
     let (created, delegation) = seed_delegation(&store).await;
     let premise = task_agent_attempt_premise(delegation, created);
-    let ticket = InferenceTicketId(RawId::new());
-    assert_eq!(
-        store
-            .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
-            .await,
-        Ok(AttemptBeginOutcome::Started)
-    );
-    let corrupt = |sql: &str| {
-        let guard = match store.conn.lock() {
-            Ok(locked) => locked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard.execute_batch(sql).expect("the corruption must apply");
-    };
-    for sql in [
+    let cases = [
         "UPDATE inference_attempt SET task_revision = NULL;",
+        "UPDATE inference_attempt SET delegation_id = NULL, task_id = NULL, task_revision = NULL;",
         "UPDATE inference_attempt SET consumer = 'companion_dialogue';",
         "UPDATE inference_attempt SET consumer = 'not_a_consumer';",
         "UPDATE inference_attempt SET purpose = 'not_a_purpose';",
         "UPDATE inference_attempt SET capability = 'not_a_capability';",
-    ] {
-        corrupt(sql);
+    ];
+    for (index, sql) in cases.iter().enumerate() {
+        let ticket = InferenceTicketId(RawId::new());
+        assert_eq!(
+            store
+                .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+                .await,
+            Ok(AttemptBeginOutcome::Started),
+            "corruption case {index} must seed a fresh claim"
+        );
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.execute_batch(sql).expect("the corruption must apply");
+        }
         assert!(
             matches!(
                 store.load_inference_attempt(ticket).await,
@@ -389,7 +409,33 @@ async fn multiple_delegations_keep_distinct_attempt_correlations() {
         second_record.task_agent.map(|premise| premise.delegation),
         Some(second.as_raw())
     );
-    assert_ne!(first_record.ticket, second_record.ticket);
+    store
+        .record_usage(UsageFact {
+            ticket: first_ticket,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            source: UsageSource::Reported,
+        })
+        .await
+        .expect("usage for the first delegation records");
+    store
+        .record_usage(UsageFact {
+            ticket: second_ticket,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            input_tokens: Some(2),
+            output_tokens: Some(2),
+            source: UsageSource::Reported,
+        })
+        .await
+        .expect("usage for the second delegation records");
+    assert_eq!(
+        task_table_count(&store, "usage_fact"),
+        2,
+        "parallel delegations keep distinct usage rows"
+    );
 }
 
 #[tokio::test]
@@ -451,9 +497,9 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     {
         let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
         conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
-             ALTER TABLE inference_attempt DROP COLUMN consumer;
+            "ALTER TABLE inference_attempt DROP COLUMN consumer;
              ALTER TABLE inference_attempt DROP COLUMN purpose;
+             ALTER TABLE inference_attempt DROP COLUMN credential_set_rev;
              ALTER TABLE inference_attempt DROP COLUMN delegation_id;
              ALTER TABLE inference_attempt DROP COLUMN task_id;
              ALTER TABLE inference_attempt DROP COLUMN task_revision;
@@ -475,6 +521,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     for column in [
         "consumer",
         "purpose",
+        "credential_set_rev",
         "delegation_id",
         "task_id",
         "task_revision",
@@ -522,9 +569,9 @@ async fn inference_attempt_migration_fails_closed_on_an_unknown_capability() {
     {
         let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
         conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
-             ALTER TABLE inference_attempt DROP COLUMN consumer;
+            "ALTER TABLE inference_attempt DROP COLUMN consumer;
              ALTER TABLE inference_attempt DROP COLUMN purpose;
+             ALTER TABLE inference_attempt DROP COLUMN credential_set_rev;
              ALTER TABLE inference_attempt DROP COLUMN delegation_id;
              ALTER TABLE inference_attempt DROP COLUMN task_id;
              ALTER TABLE inference_attempt DROP COLUMN task_revision;
@@ -540,5 +587,9 @@ async fn inference_attempt_migration_fails_closed_on_an_unknown_capability() {
         read_schema_version(&path),
         Some(17),
         "the failed migration rolls back to the pre-migration version"
+    );
+    assert!(
+        !table_columns(&path, "inference_attempt").contains(&String::from("consumer")),
+        "the failed migration also rolls back the added columns"
     );
 }
