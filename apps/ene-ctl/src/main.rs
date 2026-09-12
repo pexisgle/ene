@@ -136,12 +136,13 @@ async fn run_command(
         }
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
         cmds::Command::Watch { round } => {
-            let view = request_history(&mut session, cmds::DEFAULT_HISTORY_LIMIT).await?;
-            emit(&cmds::render_round_history(&view, &round))
+            let items =
+                request_history(&mut session, Some(&round), cmds::DEFAULT_HISTORY_LIMIT).await?;
+            emit(&cmds::render_history(&items))
         }
         cmds::Command::History { limit } => {
-            let view = request_history(&mut session, limit).await?;
-            emit(&cmds::render_history(&view))
+            let items = request_history(&mut session, None, limit).await?;
+            emit(&cmds::render_history(&items))
         }
         cmds::Command::Memory {
             after,
@@ -188,20 +189,45 @@ async fn request_view(
     }
 }
 
+/// One explicit History read. A successful empty result is distinct from an
+/// invalid request, an unreadable store, and a rotated companion projection;
+/// each failure keeps its own meaning and exit class instead of being shown
+/// as an empty timeline.
+fn history_items(
+    response: ene_api::v1::round::HistoryResponse,
+) -> Result<Vec<ene_api::v1::round::HistoryItem>, CliError> {
+    use ene_api::v1::round::HistoryResponse;
+    match response {
+        HistoryResponse::Items(items) => Ok(items),
+        HistoryResponse::InvalidRequest => Err(CliError::ServerRejected(String::from(
+            "invalid history request; correct the request fields and retry",
+        ))),
+        HistoryResponse::Unavailable => Err(CliError::ServerOutcome(String::from(
+            "history is unavailable; retry later",
+        ))),
+        HistoryResponse::StaleCompanion => Err(CliError::ServerOutcome(String::from(
+            "companion projection is stale; re-sync presence and retry",
+        ))),
+    }
+}
+
 async fn request_history(
     session: &mut client::Client,
+    round: Option<&str>,
     limit: u64,
-) -> Result<ene_api::v1::round::HistoryView, CliError> {
+) -> Result<Vec<ene_api::v1::round::HistoryItem>, CliError> {
     let companion = session.companion_ref();
+    let request = match round {
+        Some(round) => cmds::round_history_request(&companion, round, limit),
+        None => cmds::history_request(&companion, limit),
+    };
     match session
-        .request(WirePayload::HistoryRequest(cmds::history_request(
-            &companion, limit,
-        )))
+        .request(WirePayload::HistoryRequest(request))
         .await?
     {
-        WirePayload::HistoryView(view) => Ok(view),
+        WirePayload::HistoryResponse(response) => history_items(response),
         unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while reading history; expected HistoryView",
+            "unexpected {} while reading history; expected HistoryResponse",
             unexpected.message_type()
         ))),
     }
@@ -555,6 +581,40 @@ mod tests {
             assert!(
                 error.exit_code() == std::process::ExitCode::FAILURE,
                 "usage and technical failures must exit 1, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_failures_keep_distinct_meanings() {
+        use ene_api::v1::round::HistoryResponse;
+
+        assert!(
+            super::history_items(HistoryResponse::Items(Vec::new())).is_ok(),
+            "an empty read is a success"
+        );
+        for (response, expected, what) in [
+            (
+                HistoryResponse::InvalidRequest,
+                std::process::ExitCode::FAILURE,
+                "invalid request",
+            ),
+            (
+                HistoryResponse::Unavailable,
+                std::process::ExitCode::from(2),
+                "unavailable",
+            ),
+            (
+                HistoryResponse::StaleCompanion,
+                std::process::ExitCode::from(2),
+                "stale projection",
+            ),
+        ] {
+            let error = super::history_items(response)
+                .expect_err("a failure variant must not answer items");
+            assert!(
+                error.exit_code() == expected,
+                "{what} must keep its exit class, got {error:?}"
             );
         }
     }

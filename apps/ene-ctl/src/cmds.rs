@@ -28,7 +28,7 @@ use ene_api::v1::refs::{
     RoundWireId, TextLangWire,
 };
 use ene_api::v1::round::{
-    HistoryRequest, HistoryRole, HistoryView, RoundIntakeOutcomeWire, SubmitTextInput, TextBodyWire,
+    HistoryItem, HistoryRequest, HistoryRole, RoundIntakeOutcomeWire, SubmitTextInput, TextBodyWire,
 };
 
 use crate::errors::{CliError, USAGE};
@@ -425,6 +425,19 @@ pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
         companion: CompanionWireRef(companion.to_string()),
         since: None,
         limit,
+        round: None,
+    }
+}
+
+/// Round-scoped history: the Host filters by the stored round projection, so
+/// the round is addressable even after a Host restart dropped its transient
+/// wire map, and the result does not depend on the overall recent window.
+pub fn round_history_request(companion: &str, round: &str, limit: u64) -> HistoryRequest {
+    HistoryRequest {
+        companion: CompanionWireRef(companion.to_string()),
+        since: None,
+        limit,
+        round: Some(RoundWireId(round.to_string())),
     }
 }
 
@@ -545,18 +558,9 @@ pub fn role_label(role: HistoryRole) -> &'static str {
 }
 
 /// One `[role] text` line per item, oldest first.
-pub fn render_history(view: &HistoryView) -> String {
-    view.items
+pub fn render_history(items: &[HistoryItem]) -> String {
+    items
         .iter()
-        .map(|item| format!("[{}] {}", role_label(item.role), item.text))
-        .collect::<Vec<String>>()
-        .join("\n")
-}
-
-pub fn render_round_history(view: &HistoryView, round: &str) -> String {
-    view.items
-        .iter()
-        .filter(|item| item.round.0 == round)
         .map(|item| format!("[{}] {}", role_label(item.role), item.text))
         .collect::<Vec<String>>()
         .join("\n")
@@ -638,14 +642,14 @@ mod tests {
     use ene_api::v1::management::{ManagementOutcome, ManagementView, ViewSection};
     use ene_api::v1::refs::{BaseViewMark, CommandWireId, ViewMarkWire};
     use ene_api::v1::refs::{RevalidationReasonWire, RoundWireId};
-    use ene_api::v1::round::{HistoryItem, HistoryRole, HistoryView, RoundIntakeOutcomeWire};
+    use ene_api::v1::round::{HistoryItem, HistoryRole, RoundIntakeOutcomeWire};
 
     use super::{
         CAPABILITY_DIALOGUE, CAPABILITY_LEARNING, DEFAULT_HISTORY_LIMIT, HOST_MEMORY_SECTION,
         HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for,
         credential_id_for, credential_intent, credential_target_for, describe_intake,
         describe_management, history_request, memory_view_request, new_local_id, parse_command,
-        render_history, render_round_history, render_view, setup_view_request, submit_input,
+        render_history, render_view, round_history_request, setup_view_request, submit_input,
     };
     use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
 
@@ -1106,23 +1110,21 @@ mod tests {
         );
     }
 
-    fn fixture_history() -> HistoryView {
-        HistoryView {
-            items: vec![
-                HistoryItem {
-                    round: RoundWireId(String::from("round-1")),
-                    role: HistoryRole::Owner,
-                    text: String::from("first words"),
-                    at: String::from("2026-09-08T12:00:00+09:00"),
-                },
-                HistoryItem {
-                    round: RoundWireId(String::from("round-2")),
-                    role: HistoryRole::Companion,
-                    text: String::from("second words"),
-                    at: String::from("2026-09-08T12:01:00+09:00"),
-                },
-            ],
-        }
+    fn fixture_history() -> Vec<HistoryItem> {
+        vec![
+            HistoryItem {
+                round: RoundWireId(String::from("round-1")),
+                role: HistoryRole::Owner,
+                text: String::from("first words"),
+                at: String::from("2026-09-08T12:00:00+09:00"),
+            },
+            HistoryItem {
+                round: RoundWireId(String::from("round-2")),
+                role: HistoryRole::Companion,
+                text: String::from("second words"),
+                at: String::from("2026-09-08T12:01:00+09:00"),
+            },
+        ]
     }
 
     #[test]
@@ -1131,19 +1133,6 @@ mod tests {
         assert!(
             rendered == "[owner] first words\n[companion] second words",
             "history must render `[role] text` lines, got {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn render_round_history_filters_by_round() {
-        let rendered = render_round_history(&fixture_history(), "round-2");
-        assert!(
-            rendered == "[companion] second words",
-            "round history must keep only that round, got {rendered:?}"
-        );
-        assert!(
-            render_round_history(&fixture_history(), "round-9").is_empty(),
-            "an unknown round must render to nothing"
         );
     }
 
@@ -1297,6 +1286,15 @@ mod tests {
         assert!(
             history.companion.0 == "companion-1" && history.limit == 7,
             "history echoes the learned companion: {history:?}"
+        );
+        assert!(
+            history.round.is_none(),
+            "plain history reads the whole timeline: {history:?}"
+        );
+        let scoped = round_history_request("companion-1", "round-9", 7);
+        assert!(
+            scoped.round == Some(RoundWireId(String::from("round-9"))),
+            "round-scoped history carries the projection: {scoped:?}"
         );
         let input = submit_input(
             "companion-1",

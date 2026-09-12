@@ -202,15 +202,42 @@ impl core::fmt::Debug for HistoryItem {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryRequest {
     pub companion: CompanionWireRef,
-    /// Items at or after this wall-clock rendering, if bounded.
+    /// Items at or after this wall-clock rendering, if bounded. The Host
+    /// parses it as RFC 3339 and compares instants; a different UTC offset is
+    /// therefore respected, never compared as plain text.
     pub since: Option<String>,
+    /// Maximum number of items, oldest first. Zero requests no items; the
+    /// Host applies the bound to the storage query, not after reading.
     pub limit: u64,
+    /// Restrict to one Host-issued round projection, or [`None`] for the
+    /// whole companion timeline. The projection travels opaquely: the Host
+    /// resolves it against stored history, so a round stays addressable
+    /// across restarts even though the transient wire map is gone.
+    #[serde(default)]
+    pub round: Option<RoundWireId>,
 }
 
+/// Outcome of an explicit History read (owner-requested, never the optional
+/// background retrieval used while assembling a dialogue prompt).
+///
+/// A successful read may be empty: empty is a fact about the timeline, not a
+/// failure. Failure variants are typed and operation-level only and carry no
+/// History body, secret, or raw backend error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryView {
-    /// Oldest first.
-    pub items: Vec<HistoryItem>,
+pub enum HistoryResponse {
+    /// The read succeeded; `items` is oldest first and may be empty.
+    Items(Vec<HistoryItem>),
+    /// The request itself is unusable (for example `since` is not an RFC 3339
+    /// instant). Retrying the identical bytes fails identically; the Client
+    /// corrects the request.
+    InvalidRequest,
+    /// The Host could not read the requested timeline. The same request may
+    /// succeed later; nothing about the stored timeline is implied.
+    Unavailable,
+    /// The companion projection is unknown or rotated. The Client re-reads
+    /// presence/the current projection and retries instead of showing an
+    /// empty timeline.
+    StaleCompanion,
 }
 
 #[cfg(test)]

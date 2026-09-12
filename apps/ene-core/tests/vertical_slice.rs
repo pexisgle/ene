@@ -26,7 +26,9 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId, DeviceWireId, ManagementTargetWire};
-use ene_api::v1::round::{PresentationStatus, RoundIntakeOutcomeWire, StreamClose};
+use ene_api::v1::round::{
+    HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
+};
 use ene_companion::{CompanionRepository, UndeliveredRepository};
 use ene_core::conn;
 use ene_core::serve::{CredStore, HostHandle};
@@ -303,15 +305,18 @@ async fn history_count(client: &mut Client) -> Result<(usize, bool, bool), Strin
     )
     .await;
     assert!(
-        matches!(&history, Ok(WirePayload::HistoryView(_))),
+        matches!(
+            &history,
+            Ok(WirePayload::HistoryResponse(HistoryResponse::Items(_)))
+        ),
         "history must answer, got {history:?}"
     );
-    let Ok(WirePayload::HistoryView(view)) = history else {
+    let Ok(WirePayload::HistoryResponse(HistoryResponse::Items(items))) = history else {
         return Err(String::from("history answered nothing usable"));
     };
     let mut owner_seen = false;
     let mut companion_seen = false;
-    for item in &view.items {
+    for item in &items {
         if item.role == ene_api::v1::round::HistoryRole::Owner {
             owner_seen = true;
         }
@@ -319,7 +324,7 @@ async fn history_count(client: &mut Client) -> Result<(usize, bool, bool), Strin
             companion_seen = true;
         }
     }
-    Ok((view.items.len(), owner_seen, companion_seen))
+    Ok((items.len(), owner_seen, companion_seen))
 }
 
 async fn pending_empty(dir: &std::path::Path) -> bool {
@@ -1584,10 +1589,10 @@ async fn stage3_history(dir: &std::path::Path) -> String {
         "history",
     )
     .await;
-    let Ok(WirePayload::HistoryView(view)) = answer else {
-        panic!("history must answer a view: {answer:?}");
+    let Ok(WirePayload::HistoryResponse(HistoryResponse::Items(items))) = answer else {
+        panic!("history must answer items: {answer:?}");
     };
-    cmds::render_history(&view)
+    cmds::render_history(&items)
 }
 
 /// Polls the read-only Memory view until `expected` appears.
