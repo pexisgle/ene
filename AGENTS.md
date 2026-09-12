@@ -47,9 +47,26 @@ No `default-members`: bare `cargo test` / `cargo clippy` cover the workspace.
 - Never re-execute an external effect automatically while its outcome is
   unknown.
 
+## Implementation invariants
+
+- Read-only operations must not perform unrelated durable mutations as an
+  initialization side effect. Split startup, repair, sweep, or migration work
+  from state opening when the caller does not require that mutation.
+- A public `limit`, page size, or cursor should bound upstream work as far as
+  practical, not only the final response. Avoid full scans, full decode, or
+  unbounded allocation followed by truncation when the owning query/storage
+  boundary can apply the bound directly.
+- Atomic publication and concurrent-writer serialization are separate
+  guarantees. Temp-file + sync + atomic rename can prevent torn publication,
+  but a read-modify-write state still needs a single writer, lock, CAS, or
+  transaction when concurrent writers could otherwise lose updates.
+
 ## Comments
 
 Comments explain what code cannot express: invariants, ordering constraints,
 provenance, or why a simpler implementation is incorrect. Do not restate code,
 leave changelogs in comments, or park commented-out code. Public rustdoc
-documents contracts.
+documents contracts. A comment can document an invariant but cannot enforce
+one; correctness that depends on serialization, currentness, atomicity, or a
+similar premise must be enforced by the owning API/code path and covered by a
+test.
