@@ -595,6 +595,7 @@ enum ManagementOutcome {
 ```
 
 - Host は intent を `ProposeControlChangeCommand` 等の domain premise へ mapping し、各 owner の確定を経て `ManagementOutcome` を返す。Client の送信成功・表示更新を確定にしない。
+- `ManagementOutcome::HeldByOperation` は management intent の判断がまだ記録されていないことを示し、domain の `HeldByGlobalHold`（IB §13.2）とは別の意味である。domain hold の Client 提示は、それを必要とする slice が自身の DTO として追加する。
 - Client が受け取る view（rule 概要・consent 概要・cap・device・audit 概要等）は filtered display fact であり、正本ではない。secret・判定 copy・内部 permission 条件の全文は送らない。view の revision 表示は correlation の写しであり、Client がそれを権限の根拠にしない。
 
 ## 19. Body / presentation resources
