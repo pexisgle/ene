@@ -22,10 +22,11 @@ mod workspace;
 pub use context::{
     TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
 };
-pub use repository::{TaskRepository, TaskTechnicalError};
+pub use repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
 pub use task::{
-    AssigneeRef, Task, TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRecord,
-    TaskRef, TaskRevision, TaskRevisionRecord,
+    AssigneeRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId, TaskPurpose,
+    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRecord, TaskRef, TaskRevision,
+    TaskRevisionRecord,
 };
 pub use workspace::{
     WorkspaceAssocId, WorkspaceAssociation, WorkspaceAssociationPremise, WorkspaceFolderRef,

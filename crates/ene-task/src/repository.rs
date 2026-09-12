@@ -1,13 +1,14 @@
-//! The durable boundary for Task creation and reload.
+//! The durable boundary for Task creation, steering, and reload.
 
 use thiserror::Error;
 
-use crate::task::{TaskCreationPremise, TaskId, TaskRecord, TaskRef};
+use crate::task::{TaskCommitPremise, TaskCreationPremise, TaskId, TaskRecord, TaskRef};
 
-/// Infrastructure failure for Task persistence.
+/// Technical failure for Task persistence.
 ///
-/// Domain acceptance is never this error; missing identities are [`None`]
-/// on the `Ok` side of reads.
+/// Domain acceptance is never this error; a stale expected revision is
+/// [`TaskCommitOutcome::StaleExpected`] on the `Ok` side, and missing
+/// identities are [`None`] on the `Ok` side of reads.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TaskTechnicalError {
     #[error("task storage unavailable: {reason}")]
@@ -15,6 +16,19 @@ pub enum TaskTechnicalError {
         /// Backend-supplied cause. Never Task content.
         reason: String,
     },
+    #[error("steering premise references a Task with no durable state")]
+    UnknownTask,
+}
+
+/// The domain result of one steering commit (AU4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCommitOutcome {
+    /// The commit created exactly one new revision.
+    CommittedAs(TaskRef),
+    /// The expected revision no longer matches; nothing was changed.
+    StaleExpected { current: TaskRef },
+    /// No representable next revision exists; nothing was changed.
+    RevisionExhausted,
 }
 
 /// Durable Task boundary.
@@ -36,6 +50,20 @@ pub trait TaskRepository: Send + Sync {
         &self,
         premise: TaskCreationPremise,
     ) -> Result<TaskRef, TaskTechnicalError>;
+
+    /// Commits one steering forward at exactly `premise.expected.revision`.
+    ///
+    /// The expected revision is compared against the current row inside the
+    /// commit, so concurrent steering serializes: the winner advances by one
+    /// revision and the loser returns [`TaskCommitOutcome::StaleExpected`]
+    /// without changing anything. A successful commit writes the new
+    /// revision snapshot, the new revision's adopted-purpose context entry,
+    /// and the current pointer atomically; older revisions and context
+    /// entries are retained.
+    async fn forward_steering(
+        &self,
+        premise: TaskCommitPremise,
+    ) -> Result<TaskCommitOutcome, TaskTechnicalError>;
 
     /// Loads the committed AU2 unit of one Task at its current revision.
     ///
