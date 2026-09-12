@@ -6,9 +6,10 @@ use crate::task::{TaskCommitPremise, TaskCreationPremise, TaskId, TaskRecord, Ta
 
 /// Technical failure for Task persistence.
 ///
-/// Domain acceptance is never this error; a stale expected revision is
-/// [`TaskCommitOutcome::StaleExpected`] on the `Ok` side, and missing
-/// identities are [`None`] on the `Ok` side of reads.
+/// Domain acceptance is never this error; stale, missing, and exhausted
+/// commits are [`TaskCommitOutcome`] on the `Ok` side, and missing identities
+/// are [`None`] on the `Ok` side of reads. Integrity failures that a forward
+/// must not normalize are reported here.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TaskTechnicalError {
     #[error("task storage unavailable: {reason}")]
@@ -16,8 +17,6 @@ pub enum TaskTechnicalError {
         /// Backend-supplied cause. Never Task content.
         reason: String,
     },
-    #[error("steering premise references a Task with no durable state")]
-    UnknownTask,
 }
 
 /// The domain result of one steering commit (AU4).
@@ -27,8 +26,10 @@ pub enum TaskCommitOutcome {
     CommittedAs(TaskRef),
     /// The expected revision no longer matches; nothing was changed.
     StaleExpected { current: TaskRef },
+    /// The premise names a Task with no durable state; nothing was changed.
+    MissingTask { task: TaskId },
     /// No representable next revision exists; nothing was changed.
-    RevisionExhausted,
+    RevisionExhausted { task: TaskId },
 }
 
 /// Durable Task boundary.
@@ -56,10 +57,11 @@ pub trait TaskRepository: Send + Sync {
     /// The expected revision is compared against the current row inside the
     /// commit, so concurrent steering serializes: the winner advances by one
     /// revision and the loser returns [`TaskCommitOutcome::StaleExpected`]
-    /// without changing anything. A successful commit writes the new
-    /// revision snapshot, the new revision's adopted-purpose context entry,
-    /// and the current pointer atomically; older revisions and context
-    /// entries are retained.
+    /// without changing anything. A missing Task returns
+    /// [`TaskCommitOutcome::MissingTask`] with no change. A successful commit
+    /// writes the new revision snapshot, the new revision's adopted-purpose
+    /// context entry, and the current pointer atomically; older revisions and
+    /// context entries are retained.
     async fn forward_steering(
         &self,
         premise: TaskCommitPremise,

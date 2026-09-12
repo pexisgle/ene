@@ -194,10 +194,10 @@ fn forward_steering_sync(
         .optional()
         .map_err(task_unavailable)?;
     let Some(current) = current else {
-        // No Task deletion path exists in this slice, so a missing row is a
-        // premise referencing state that was never committed; there is no
-        // current revision a domain outcome could carry.
-        return Err(TaskTechnicalError::UnknownTask);
+        // No Task deletion path exists in this slice; the premise names
+        // state that was never committed. Missing is a domain outcome, not a
+        // storage failure, and there is no current revision to compare.
+        return Ok(TaskCommitOutcome::MissingTask { task });
     };
     let current_revision = decode_revision(current.revision)?;
     if current_revision != premise.expected.revision {
@@ -211,14 +211,37 @@ fn forward_steering_sync(
         });
     }
     let Some(next_revision) = current_revision.checked_next() else {
-        return Ok(TaskCommitOutcome::RevisionExhausted);
+        return Ok(TaskCommitOutcome::RevisionExhausted { task });
     };
     let Ok(next_raw) = encode_u64(next_revision.as_u64()) else {
         // The revision column is a signed integer; the first successor it
         // cannot hold exhausts the durable sequence rather than aliasing.
-        return Ok(TaskCommitOutcome::RevisionExhausted);
+        return Ok(TaskCommitOutcome::RevisionExhausted { task });
     };
     let current_adopted = decode_revision(current.purpose_adopted_revision)?;
+    // The forward must never normalize a D1/D2 pair that every read rejects,
+    // so the current unit is validated before any write like the read path.
+    let snapshot: RawTaskRevision = tx
+        .query_row(
+            SQL_SELECT_TASK_REVISION,
+            params![task_text, current.revision],
+            raw_revision_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?
+        .ok_or_else(|| {
+            task_unavailable("task revision snapshot missing for the current revision")
+        })?;
+    if decode_revision(snapshot.purpose_adopted_revision)? != current_adopted {
+        return Err(task_unavailable(
+            "task revision purpose does not match the current purpose",
+        ));
+    }
+    if decode_assignee(&snapshot.assignee)? != decode_assignee(&current.assignee)? {
+        return Err(task_unavailable(
+            "task revision assignee does not match the current assignee",
+        ));
+    }
     // The adopted-purpose entry is the only context kind AU4 records. On a
     // purpose change its identity is the new revision, which only exists
     // after CAS, so the repository stamps it here; on a carry-forward the old
@@ -234,22 +257,6 @@ fn forward_steering_sync(
                 adoption.acquired_at.to_rfc3339(),
             ),
             None => {
-                let snapshot: RawTaskRevision = tx
-                    .query_row(
-                        SQL_SELECT_TASK_REVISION,
-                        params![task_text, current.revision],
-                        raw_revision_row,
-                    )
-                    .optional()
-                    .map_err(task_unavailable)?
-                    .ok_or_else(|| {
-                        task_unavailable("task revision snapshot missing for the current revision")
-                    })?;
-                if decode_revision(snapshot.purpose_adopted_revision)? != current_adopted {
-                    return Err(task_unavailable(
-                        "task revision purpose does not match the current purpose",
-                    ));
-                }
                 // Carrying the purpose forward carries the provenance and
                 // acquisition of the entry that adopted it; the identity in
                 // `item` is unchanged even though a new row records it.
@@ -270,11 +277,14 @@ fn forward_steering_sync(
                             "task adopted purpose entry missing for the current revision",
                         )
                     })?;
+                // Fail closed on an unreadable stored kind instead of copying
+                // corruption into the new revision.
+                decode_origin_kind(&predecessor.0)?;
                 (
                     current_adopted,
                     snapshot.purpose_text,
                     TaskContextEntryId::generate(),
-                    encode_origin_kind(decode_origin_kind(&predecessor.0)?).to_owned(),
+                    predecessor.0,
                     predecessor.1,
                     predecessor.2,
                 )
