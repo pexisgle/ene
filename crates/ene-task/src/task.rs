@@ -47,6 +47,16 @@ impl TaskRevision {
     pub fn as_u64(&self) -> u64 {
         self.0.as_u64()
     }
+
+    /// Returns the successor revision, or [`None`] at [`u64::MAX`].
+    ///
+    /// Exhaustion is reported rather than hidden: a silent maximum step would
+    /// make a new revision indistinguishable from its predecessor and break
+    /// compare-before-commit.
+    #[must_use]
+    pub fn checked_next(&self) -> Option<Self> {
+        self.0.checked_next().map(Self)
+    }
 }
 
 /// One Task identity together with the revision of its state.
@@ -149,6 +159,39 @@ pub struct TaskCreationPremise {
     pub workspace: Option<WorkspaceAssociationPremise>,
 }
 
+/// A purpose adoption proposed by one steering commit (AU4).
+///
+/// The repository stamps the adopted revision (`expected.revision + 1`) after
+/// the CAS succeeds; the caller supplies the text and the provenance, and
+/// never names a future revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPurposeAdoptionPremise {
+    pub purpose: TaskPurpose,
+    pub origin: TaskContextOrigin,
+    pub acquired_at: WallClockWithTz,
+}
+
+/// The premise for one steering commit (AU4).
+///
+/// Advances the Task by exactly one revision. The repository writes the new
+/// revision snapshot, the new revision's adopted-purpose context entry, and
+/// the current pointer in one atomic commit; every older revision and context
+/// entry is retained. The adopted-purpose entry is the only context kind AU4
+/// records, so there is no caller-supplied context list yet: the first
+/// additional kind arrives with the producer that can identify it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCommitPremise {
+    pub expected: TaskRef,
+    /// `Some` adopts a new purpose at the new revision; `None` carries the
+    /// current purpose and its adopted-purpose context entry forward.
+    pub new_purpose: Option<TaskPurposeAdoptionPremise>,
+    /// Identity of the context entry the new revision records for the adopted
+    /// purpose, in both the change and carry-forward branches. The Task owner
+    /// mints it; the repository never allocates it and stamps only the
+    /// post-CAS `(task, revision)` reference and adopted revision.
+    pub adopted_purpose_entry: TaskContextEntryId,
+}
+
 #[cfg(test)]
 mod tests {
     use ene_primitive::RawId;
@@ -160,6 +203,15 @@ mod tests {
         assert_eq!(TaskRevision::initial().as_u64(), 1);
         assert_eq!(TaskRevision::from_u64(7).as_u64(), 7);
         assert_ne!(TaskRevision::initial(), TaskRevision::from_u64(2));
+    }
+
+    #[test]
+    fn revision_successor_reports_exhaustion_instead_of_aliasing_the_maximum() {
+        assert_eq!(
+            TaskRevision::initial().checked_next(),
+            Some(TaskRevision::from_u64(2))
+        );
+        assert_eq!(TaskRevision::from_u64(u64::MAX).checked_next(), None);
     }
 
     #[test]

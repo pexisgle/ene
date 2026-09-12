@@ -57,7 +57,9 @@ pub enum TaskContextOriginKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskContextEntry {
     pub entry: TaskContextEntryId,
-    /// The revision the item was adopted under.
+    /// The revision the entry belongs to. The adopted identity in `item` may
+    /// point at an earlier revision (a carried-forward purpose), so the two
+    /// are never compared by revision equality.
     pub reference: TaskRef,
     pub item: TaskContextItem,
     pub origin: TaskContextOrigin,

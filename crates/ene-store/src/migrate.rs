@@ -337,8 +337,8 @@ CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_importance ON learning_mem
 ";
 
 /// Introduces the Task group. `task` is the D1 current row, `task_revision`
-/// the D2 history, `task_context_entry` the adopted context (AU2: the adopted
-/// purpose entry), and `workspace_assoc` holds a row only when a workspace
+/// the D2 history, `task_context_entry` the adopted context (AU2/AU4: the
+/// adopted purpose entry), and `workspace_assoc` holds a row only when a workspace
 /// association was confirmed at creation. Creation writes all present rows in
 /// one transaction, so a crash leaves no partial AU2 unit.
 const MIGRATION_V15: &str = "
