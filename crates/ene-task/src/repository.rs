@@ -60,21 +60,26 @@ pub trait TaskRepository: Send + Sync {
     /// without changing anything. A missing Task returns
     /// [`TaskCommitOutcome::MissingTask`] with no change. A successful commit
     /// writes the new revision snapshot, the new revision's adopted-purpose
-    /// context entry, and the current pointer atomically; older revisions and
-    /// context entries are retained.
+    /// context entry, the adopted-instruction context entry when
+    /// `premise.adopted_instruction` is `Some`, and the current pointer
+    /// atomically; older revisions and context entries are retained.
     ///
-    /// The caller mints the new revision's adopted-purpose entry identity;
-    /// the repository persists it and stamps only the post-CAS `(task,
-    /// revision)` reference and the adopted revision.
+    /// The caller mints the new revision's context entry identities; the
+    /// repository persists them and stamps only the post-CAS `(task,
+    /// revision)` reference and the adopted revision. An adopted-instruction
+    /// entry is written once and is not re-recorded by a later forward.
     async fn forward_steering(
         &self,
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError>;
 
-    /// Loads the committed AU2 unit of one Task at its current revision.
+    /// Loads the committed current unit of one Task: the current revision's
+    /// snapshot and adopted-purpose entry, plus every adopted-instruction
+    /// entry in force (each entry keeps its own adoption reference).
     ///
     /// `None` means the identity has no stored Task. Partial or inconsistent
-    /// rows are never composed into a [`TaskRecord`]; that is a technical
-    /// error.
+    /// rows, unknown context item kinds, kind/payload mismatches, and entries
+    /// beyond the current revision are never composed into a [`TaskRecord`];
+    /// that is a technical error.
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError>;
 }

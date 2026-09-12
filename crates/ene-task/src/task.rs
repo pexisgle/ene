@@ -100,6 +100,22 @@ pub struct TaskPurposeRef {
     pub adopted_revision: TaskRevision,
 }
 
+/// A steering caller's relied-on Task revision and purpose.
+///
+/// This is comparison material, not authority: the Task owner compares it
+/// against the durable current state and returns a stale outcome on
+/// mismatch. `purpose` must be the purpose identity in force at
+/// `expected.revision`; [`orchestrate_steering`](crate::orchestrate_steering)
+/// checks that correspondence before committing, and a purpose text match is
+/// never used as identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SteeringPremiseRef {
+    /// The current revision the caller relied on.
+    pub expected: TaskRef,
+    /// The purpose identity the caller relied on at `expected.revision`.
+    pub purpose: TaskPurposeRef,
+}
+
 /// The Companion a Task is assigned to, as a Task-owned premise.
 ///
 /// Carries [`RawId`] and is never converted from or into another domain's
@@ -131,13 +147,19 @@ pub struct TaskRevisionRecord {
     pub assignee: AssigneeRef,
 }
 
-/// The committed AU2 unit of one Task at its current revision.
+/// The committed current unit of one Task: the AU2 creation plus every AU4
+/// steering forward.
+///
+/// The context spans the current revision's adopted-purpose entry and the
+/// adopted-instruction entries in force (adopted at or before the current
+/// revision); each entry keeps its own adoption reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRecord {
     pub task: Task,
     /// The snapshot of the current revision.
     pub revision: TaskRevisionRecord,
-    /// The context entries recorded for the current revision.
+    /// The current revision's adopted-purpose entry, followed by every
+    /// adopted-instruction entry in force.
     pub context: Vec<TaskContextEntry>,
     pub workspace: Option<WorkspaceAssociation>,
 }
@@ -163,7 +185,10 @@ pub struct TaskCreationPremise {
 ///
 /// The repository stamps the adopted revision (`expected.revision + 1`) after
 /// the CAS succeeds; the caller supplies the text and the provenance, and
-/// never names a future revision.
+/// never names a future revision. For steering, `origin` is the same
+/// utterance record as the adopted instruction's: kind
+/// [`TaskContextOriginKind::OwnerConversation`](crate::TaskContextOriginKind::OwnerConversation)
+/// with `source` equal to the steering proposal's instruction source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPurposeAdoptionPremise {
     pub purpose: TaskPurpose,
@@ -171,14 +196,33 @@ pub struct TaskPurposeAdoptionPremise {
     pub acquired_at: WallClockWithTz,
 }
 
+/// An instruction adoption proposed by one steering commit (AU4).
+///
+/// `entry` is the adoption identity itself: the Task owner's orchestration
+/// mints it and passes it in [`TaskCommitPremise::adopted_instruction`]; the
+/// repository never re-mints it and stamps only the post-CAS `(task,
+/// revision)` reference. The entry is written once at the adoption revision
+/// and never re-recorded by a later forward. `origin.source` references the
+/// utterance record and never copies its body; steering always uses kind
+/// [`TaskContextOriginKind::OwnerConversation`](crate::TaskContextOriginKind::OwnerConversation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskInstructionAdoptionPremise {
+    /// Identity of the context entry recording the adopted instruction.
+    pub entry: TaskContextEntryId,
+    pub origin: TaskContextOrigin,
+    pub acquired_at: WallClockWithTz,
+}
+
 /// The premise for one steering commit (AU4).
 ///
 /// Advances the Task by exactly one revision. The repository writes the new
-/// revision snapshot, the new revision's adopted-purpose context entry, and
-/// the current pointer in one atomic commit; every older revision and context
-/// entry is retained. The adopted-purpose entry is the only context kind AU4
-/// records, so there is no caller-supplied context list yet: the first
-/// additional kind arrives with the producer that can identify it.
+/// revision snapshot, the new revision's adopted-purpose context entry, the
+/// adopted-instruction context entry when one is proposed, and the current
+/// pointer in one atomic commit; every older revision and context entry is
+/// retained. The caller never names the successor revision: it supplies the
+/// relied-on `expected` revision and the repository stamps the post-CAS
+/// `(task, revision)` references. Other context kinds arrive with the
+/// producers that can identify them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCommitPremise {
     pub expected: TaskRef,
@@ -190,6 +234,14 @@ pub struct TaskCommitPremise {
     /// mints it; the repository never allocates it and stamps only the
     /// post-CAS `(task, revision)` reference and adopted revision.
     pub adopted_purpose_entry: TaskContextEntryId,
+    /// The instruction adopted by this forward. Steering always passes
+    /// `Some`: the instruction source is mandatory in the steering proposal,
+    /// and its origin is the same utterance record as a purpose change (kind
+    /// [`TaskContextOriginKind::OwnerConversation`](crate::TaskContextOriginKind::OwnerConversation),
+    /// source equal to the instruction source). `None` is for a future
+    /// forward that adopts no instruction; the entry is written once and
+    /// never re-recorded.
+    pub adopted_instruction: Option<TaskInstructionAdoptionPremise>,
 }
 
 #[cfg(test)]

@@ -304,6 +304,7 @@ dependencies = [
  "ene-learning",
  "ene-presence",
  "ene-primitive",
+ "ene-task",
  "thiserror",
  "tokio",
 ]
@@ -471,6 +472,7 @@ version = "0.1.0"
 dependencies = [
  "ene-primitive",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

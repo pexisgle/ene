@@ -9,5 +9,8 @@ publish.workspace = true
 ene-primitive = { path = "../ene-primitive" }
 thiserror.workspace = true
 
+[dev-dependencies]
+tokio.workspace = true
+
 [lints]
 workspace = true

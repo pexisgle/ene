@@ -27,10 +27,10 @@ use ene_presence::{
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskContextItem,
-    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId, TaskPurpose,
-    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskRevision,
-    TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef,
-    WorkspaceNeedRef,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
+    TaskInstructionAdoptionPremise, TaskPurpose, TaskPurposeAdoptionPremise, TaskPurposeRef,
+    TaskRef, TaskRepository, TaskRevision, TaskTechnicalError, WorkspaceAssocId,
+    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
 };
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -1466,8 +1466,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(15)),
-        "migration must record version 15"
+        matches!(version, Ok(16)),
+        "migration must record version 16"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1696,6 +1696,27 @@ fn table_columns(path: &std::path::Path, table: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Every main-schema table name except SQLite's own internals, sorted.
+/// Comparing a migrated file against a fresh one proves the rebuild left no
+/// staging table behind; the fresh list is never hand-maintained.
+fn schema_table_names(path: &std::path::Path) -> Vec<String> {
+    let Ok(conn) = rusqlite::Connection::open(path) else {
+        return Vec::new();
+    };
+    let Ok(mut query) = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    ) else {
+        return Vec::new();
+    };
+    query
+        .query_map((), |row| row.get(0))
+        .map(|rows| {
+            rows.filter_map(std::result::Result::ok)
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn migration_failure_rolls_back_and_reopen_recovers() {
     let dir = tempfile::tempdir();
@@ -1769,7 +1790,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(15),
+        Some(16),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1818,8 +1839,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(15)),
-        "reopened database must record schema version 15"
+        matches!(version, Ok(16)),
+        "reopened database must record schema version 16"
     );
 }
 
@@ -2584,8 +2605,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(15)),
-        "reopened database must record schema version 15"
+        matches!(version, Ok(16)),
+        "reopened database must record schema version 16"
     );
 }
 
@@ -3055,12 +3076,13 @@ async fn recall_candidate_lookup_is_index_backed_not_a_scan() {
     );
 }
 
-/// A v11 database migrates through v12 and v13 into v15 in one chain:
+/// A v11 database migrates through the later chains into the current
+/// version in one open:
 /// history rows gain the canonical UTC projection and pre-index memories
 /// gain token rows, so neither the History window nor lexical recall goes
 /// dark.
 #[tokio::test]
-async fn migration_v11_applies_v12_then_v13_then_v14_and_v15() {
+async fn migration_v11_applies_v12_through_v16() {
     let dir = tempfile::tempdir().expect("a temp dir must open");
     let path = dir.path().join("app.db");
     let companion = RawId::new();
@@ -3124,8 +3146,8 @@ async fn migration_v11_applies_v12_then_v13_then_v14_and_v15() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(15),
-        "a v11 database must converge on v15"
+        Some(16),
+        "a v11 database must converge on v16"
     );
     let projection = {
         let guard = match store.conn.lock() {
@@ -3223,8 +3245,8 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(15),
-        "a v13 database must converge on v15"
+        Some(16),
+        "a v13 database must converge on v16"
     );
     let (projection, columns) = {
         let guard = match store.conn.lock() {
@@ -4147,7 +4169,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(15),
+        Some(16),
         "migration advances the schema version"
     );
     assert!(
@@ -4189,8 +4211,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(15),
-        "a v11 database must converge on v15"
+        Some(16),
+        "a v11 database must converge on v16"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -4261,7 +4283,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(15));
+    assert_eq!(read_schema_version(&path), Some(16));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
@@ -5163,8 +5185,8 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     let reopened = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(15),
-        "a v14 database must converge on v15"
+        Some(16),
+        "a v14 database must converge on v16"
     );
     assert!(!table_columns(&path, "task").is_empty(), "task is created");
     assert!(
@@ -5208,6 +5230,302 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     );
 }
 
+// --- Task: V16 item-kind migration ---
+
+/// A realistic v15 database: the Task group is written through the production
+/// path, then `task_context_entry` is rewound to its pre-V16 shape (no item
+/// kind, non-null purpose payload) and `user_version` is lowered to 15. The
+/// unit holds a purpose entry carried from revision 1 to revision 2.
+struct V15TaskSeed {
+    task: TaskId,
+    assignee: AssigneeRef,
+    creation_entry: TaskContextEntryId,
+    carried_entry: TaskContextEntryId,
+    origin: TaskContextOrigin,
+    acquired_at: WallClockWithTz,
+}
+
+async fn seed_v15_task_database(path: &std::path::Path) -> V15TaskSeed {
+    let creation = task_premise(Some(task_workspace(
+        "/srv/workspace/v16",
+        Some("/srv/workspace/v16/out"),
+    )));
+    let carried_entry = TaskContextEntryId::generate();
+    {
+        let store = Store::open(path).await.expect("the seed store must open");
+        let created = store
+            .create_task(creation.clone())
+            .await
+            .expect("the seed creation must commit");
+        let outcome = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose: None,
+                adopted_purpose_entry: carried_entry,
+                adopted_instruction: None,
+            })
+            .await
+            .expect("the seed forward must commit");
+        assert!(
+            matches!(outcome, TaskCommitOutcome::CommittedAs(_)),
+            "the seed forward must commit, got {outcome:?}"
+        );
+    }
+    {
+        let conn = rusqlite::Connection::open(path).expect("the rewind must open");
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_task_context_entry_task;
+             CREATE TABLE task_context_entry_v15 (
+               entry_id TEXT PRIMARY KEY,
+               task_id TEXT NOT NULL,
+               revision INTEGER NOT NULL,
+               purpose_adopted_revision INTEGER NOT NULL,
+               origin_kind TEXT NOT NULL,
+               origin_source TEXT NOT NULL,
+               acquired_at TEXT NOT NULL
+             );
+             INSERT INTO task_context_entry_v15 (entry_id, task_id, revision, purpose_adopted_revision, origin_kind, origin_source, acquired_at)
+               SELECT entry_id, task_id, revision, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry;
+             DROP TABLE task_context_entry;
+             ALTER TABLE task_context_entry_v15 RENAME TO task_context_entry;
+             CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
+             PRAGMA user_version = 15;",
+        )
+        .expect("the version-15 rewind must apply");
+    }
+    V15TaskSeed {
+        task: creation.task,
+        assignee: creation.assignee,
+        creation_entry: creation.entry,
+        carried_entry,
+        origin: creation.origin,
+        acquired_at: creation.acquired_at,
+    }
+}
+
+/// Every raw `task_context_entry` row in its v15 column order, by rowid:
+/// `(entry, task, revision, adopted, origin, source, at)`.
+type V15ContextRow = (String, String, i64, i64, String, String, String);
+
+fn v15_context_rows(path: &std::path::Path) -> Vec<V15ContextRow> {
+    let Ok(conn) = rusqlite::Connection::open(path) else {
+        return Vec::new();
+    };
+    let Ok(mut query) = conn.prepare(
+        "SELECT entry_id, task_id, revision, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry ORDER BY rowid",
+    ) else {
+        return Vec::new();
+    };
+    query
+        .query_map((), |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .map(|rows| rows.filter_map(std::result::Result::ok).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let seed = seed_v15_task_database(&path).await;
+    assert_eq!(
+        read_schema_version(&path),
+        Some(15),
+        "the seed must sit at the v15 boundary"
+    );
+
+    let reopened = Store::open(&path)
+        .await
+        .expect("the V16 migration must succeed");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(16),
+        "a v15 database must converge on v16"
+    );
+
+    // A fresh store in its own directory builds the schema and every
+    // migration from zero, so its table list is the current permanent
+    // shape. Comparing against it proves the V16 rebuild left no staging
+    // table behind without a hand-maintained list to edit per migration.
+    let fresh_dir = tempfile::tempdir().unwrap();
+    let fresh_path = fresh_dir.path().join("store.db");
+    let _fresh = Store::open(&fresh_path)
+        .await
+        .expect("a fresh store must open");
+    assert_eq!(
+        schema_table_names(&path),
+        schema_table_names(&fresh_path),
+        "the rebuild must leave no staging table behind"
+    );
+
+    // The carried purpose row (adopted revision 1 recorded at revision 2)
+    // keeps its own payload, provenance, and acquisition time.
+    let rows = task_context_rows(&reopened, seed.task);
+    assert_eq!(rows.len(), 2, "both seeded purpose rows stay");
+    assert_eq!(
+        rows[0],
+        (
+            1,
+            Some(1),
+            crate::codec::encode_id(seed.creation_entry.as_raw()),
+            String::from("adopted_purpose"),
+            String::from("owner_conversation"),
+            crate::codec::encode_id(seed.origin.source),
+            seed.acquired_at.to_rfc3339(),
+        ),
+        "the revision-1 purpose row is backfilled unchanged"
+    );
+    assert_eq!(
+        rows[1],
+        (
+            2,
+            Some(1),
+            crate::codec::encode_id(seed.carried_entry.as_raw()),
+            String::from("adopted_purpose"),
+            String::from("owner_conversation"),
+            crate::codec::encode_id(seed.origin.source),
+            seed.acquired_at.to_rfc3339(),
+        ),
+        "the carried purpose row is backfilled as adopted purpose"
+    );
+
+    let record = reopened
+        .load_task(seed.task)
+        .await
+        .unwrap()
+        .expect("the migrated unit must load");
+    assert_eq!(record.task.reference.revision, TaskRevision::from_u64(2));
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: seed.task,
+            adopted_revision: TaskRevision::initial(),
+        }
+    );
+    assert_eq!(record.revision.assignee, seed.assignee);
+    assert_eq!(
+        record.context.len(),
+        1,
+        "only the current revision's purpose entry is current context"
+    );
+    let entry = &record.context[0];
+    assert_eq!(entry.entry, seed.carried_entry);
+    assert_eq!(entry.reference, record.task.reference);
+    assert_eq!(
+        entry.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(entry.origin, seed.origin);
+    assert_eq!(
+        entry.acquired_at.to_rfc3339(),
+        seed.acquired_at.to_rfc3339()
+    );
+    let workspace = record
+        .workspace
+        .expect("the upgraded unit keeps its association");
+    assert_eq!(workspace.task, seed.task);
+    assert_eq!(workspace.folder.path, "/srv/workspace/v16");
+    assert_eq!(
+        workspace
+            .save_target
+            .expect("the save target survives")
+            .path,
+        "/srv/workspace/v16/out"
+    );
+}
+
+#[tokio::test]
+async fn migration_v16_fault_rolls_back_and_reopen_converges() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let seed = seed_v15_task_database(&path).await;
+    let before = v15_context_rows(&path);
+    assert_eq!(before.len(), 2, "the seed carries two purpose rows");
+
+    // Hold a SHARED read transaction so V16's statements execute but its
+    // COMMIT cannot take the EXCLUSIVE lock. The migration is one
+    // transaction, so the failure must roll back every DDL and DML
+    // statement and leave the v15 shape and rows exactly as they were.
+    // This faults the migration independently of the rebuild's staging
+    // table name, which is not part of the contract.
+    //
+    // The fault relies on the store's connection carrying rusqlite's
+    // implicit ~5 s busy timeout: COMMIT retries against the held SHARED
+    // lock, then fails with SQLITE_BUSY when the timeout expires. The
+    // outcome is identical with the timeout disabled (COMMIT fails with
+    // SQLITE_BUSY immediately), and the lock mechanics are deterministic
+    // on Linux and Windows, so the assertions never depend on the retry
+    // duration, only on the failure and rollback.
+    let blocker = rusqlite::Connection::open(&path).expect("the blocker must open");
+    blocker
+        .execute_batch("BEGIN")
+        .expect("the SHARED transaction must open");
+    let held: i64 = blocker
+        .query_row("SELECT COUNT(*) FROM task_context_entry", (), |row| {
+            row.get(0)
+        })
+        .expect("the read must take the SHARED lock");
+    assert_eq!(held, 2);
+
+    let failed = Store::open(&path).await;
+    assert!(failed.is_err(), "a faulted V16 migration must fail open");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(15),
+        "a failed migration must not advance the version"
+    );
+    assert!(
+        !table_columns(&path, "task_context_entry").contains(&String::from("item_kind")),
+        "the failed rebuild must roll back its DDL"
+    );
+    assert_eq!(
+        v15_context_rows(&path),
+        before,
+        "the failed rebuild must keep every v15 row"
+    );
+
+    blocker
+        .execute_batch("ROLLBACK")
+        .expect("the read transaction must close");
+    drop(blocker);
+
+    let reopened = Store::open(&path)
+        .await
+        .expect("open must recover after the fault clears");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(16),
+        "the retried migration must converge"
+    );
+    assert!(
+        table_columns(&path, "task_context_entry").contains(&String::from("item_kind")),
+        "the retried rebuild must apply the kind discriminator"
+    );
+    let rows = task_context_rows(&reopened, seed.task);
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter().all(|row| row.3 == "adopted_purpose"),
+        "the retried backfill must mark both rows as adopted purpose"
+    );
+    let record = reopened
+        .load_task(seed.task)
+        .await
+        .unwrap()
+        .expect("the recovered unit must load");
+    assert_eq!(record.task.reference.revision, TaskRevision::from_u64(2));
+    assert_eq!(record.context.len(), 1);
+    assert_eq!(record.context[0].entry, seed.carried_entry);
+}
+
 // --- Task: AU4 steering / CAS forward ---
 
 fn task_purpose_adoption(text: &str) -> TaskPurposeAdoptionPremise {
@@ -5218,6 +5536,18 @@ fn task_purpose_adoption(text: &str) -> TaskPurposeAdoptionPremise {
         origin: TaskContextOrigin {
             kind: TaskContextOriginKind::OwnerConversation,
             source: RawId::new(),
+        },
+        acquired_at: fixture_clock(),
+    }
+}
+
+/// One adopted-instruction premise sourced from the given utterance record.
+fn task_instruction_adoption(source: RawId) -> TaskInstructionAdoptionPremise {
+    TaskInstructionAdoptionPremise {
+        entry: TaskContextEntryId::generate(),
+        origin: TaskContextOrigin {
+            kind: TaskContextOriginKind::OwnerConversation,
+            source,
         },
         acquired_at: fixture_clock(),
     }
@@ -5276,18 +5606,20 @@ fn task_revision_rows(store: &Store, task: TaskId) -> Vec<(i64, i64, String)> {
         .expect("the revision probe must read")
 }
 
-/// Every stored context entry by row order: `(revision, adopted, entry, origin, source, at)`.
-fn task_context_rows(
-    store: &Store,
-    task: TaskId,
-) -> Vec<(i64, i64, String, String, String, String)> {
+/// One stored context entry:
+/// `(revision, adopted, entry, kind, origin, source, at)`. The adopted
+/// revision is `None` for entries whose kind carries no purpose payload.
+type ContextRow = (i64, Option<i64>, String, String, String, String, String);
+
+/// Every stored context entry by row order.
+fn task_context_rows(store: &Store, task: TaskId) -> Vec<ContextRow> {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
     };
     let mut statement = guard
         .prepare(
-            "SELECT revision, purpose_adopted_revision, entry_id, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 ORDER BY rowid",
+            "SELECT revision, purpose_adopted_revision, entry_id, item_kind, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 ORDER BY rowid",
         )
         .expect("the context probe must prepare");
     statement
@@ -5299,6 +5631,7 @@ fn task_context_rows(
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
+                row.get(6)?,
             ))
         })
         .expect("the context probe must query")
@@ -5319,6 +5652,7 @@ async fn task_steering_with_a_new_purpose_adopts_it_at_the_new_revision() {
             expected: created,
             new_purpose: Some(adoption.clone()),
             adopted_purpose_entry: adopted_entry,
+            adopted_instruction: None,
         })
         .await
         .expect("the steering commit must run");
@@ -5417,6 +5751,7 @@ async fn task_purpose_preserving_forward_carries_the_adopted_purpose_entry() {
             expected: created,
             new_purpose: None,
             adopted_purpose_entry: carried_entry,
+            adopted_instruction: None,
         })
         .await
         .expect("the steering commit must run");
@@ -5485,7 +5820,7 @@ async fn task_purpose_preserving_forward_carries_the_adopted_purpose_entry() {
     );
     let contexts = task_context_rows(&store, created.task);
     assert_eq!(contexts.len(), 2);
-    assert_eq!(contexts[0].1, 1);
+    assert_eq!(contexts[0].1, Some(1));
     assert_eq!(
         contexts[0].2,
         crate::codec::encode_id(creation.entry.as_raw()),
@@ -5493,17 +5828,18 @@ async fn task_purpose_preserving_forward_carries_the_adopted_purpose_entry() {
     );
     assert_eq!(contexts[1].0, 2);
     assert_eq!(
-        contexts[1].1, 1,
+        contexts[1].1,
+        Some(1),
         "the carried entry keeps the old adopted identity"
     );
     assert_eq!(
         contexts[1].2,
         crate::codec::encode_id(carried_entry.as_raw())
     );
-    assert_eq!(contexts[1].3, contexts[0].3, "the origin kind is carried");
-    assert_eq!(contexts[1].4, contexts[0].4, "the origin source is carried");
+    assert_eq!(contexts[1].4, contexts[0].4, "the origin kind is carried");
+    assert_eq!(contexts[1].5, contexts[0].5, "the origin source is carried");
     assert_eq!(
-        contexts[1].5, contexts[0].5,
+        contexts[1].6, contexts[0].6,
         "the acquisition time is carried verbatim"
     );
 }
@@ -5517,6 +5853,7 @@ async fn task_steering_stale_expected_changes_nothing() {
             expected: created,
             new_purpose: Some(task_purpose_adoption("winner")),
             adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
         })
         .await
         .unwrap();
@@ -5525,11 +5862,14 @@ async fn task_steering_stale_expected_changes_nothing() {
     let before_current = task_current_row(&store, created.task);
     let before_revisions = task_revision_rows(&store, created.task);
     let before_contexts = task_context_rows(&store, created.task);
+    // The stale loser carries an adopted instruction: a rejected forward must
+    // not leave that entry behind either.
     let stale = store
         .forward_steering(TaskCommitPremise {
             expected: created,
             new_purpose: Some(task_purpose_adoption("loser")),
             adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
         })
         .await
         .unwrap();
@@ -5551,21 +5891,31 @@ async fn task_steering_stale_expected_changes_nothing() {
         2,
         "no third revision is created"
     );
+    assert!(
+        !task_context_rows(&store, created.task)
+            .iter()
+            .any(|row| row.3 == "adopted_instruction"),
+        "the stale loser must not leave an adopted-instruction row"
+    );
 }
 
 #[tokio::test]
 async fn concurrent_task_steering_commits_exactly_one_revision() {
     let store = open_memory().await.unwrap();
     let created = store.create_task(task_premise(None)).await.unwrap();
+    let left_instruction = task_instruction_adoption(RawId::new());
+    let right_instruction = task_instruction_adoption(RawId::new());
     let left = TaskCommitPremise {
         expected: created,
         new_purpose: Some(task_purpose_adoption("concurrent left")),
         adopted_purpose_entry: TaskContextEntryId::generate(),
+        adopted_instruction: Some(left_instruction.clone()),
     };
     let right = TaskCommitPremise {
         expected: created,
         new_purpose: Some(task_purpose_adoption("concurrent right")),
         adopted_purpose_entry: TaskContextEntryId::generate(),
+        adopted_instruction: Some(right_instruction.clone()),
     };
     let (left, right) = tokio::join!(store.forward_steering(left), store.forward_steering(right));
     let left = left.unwrap();
@@ -5599,12 +5949,56 @@ async fn concurrent_task_steering_commits_exactly_one_revision() {
         2,
         "no duplicate revision row exists"
     );
-    assert_eq!(task_context_rows(&store, created.task).len(), 2);
-    store
+    // Exactly the winner's instruction lands; the stale loser's entry id is
+    // nowhere in the durable context.
+    let (winner_instruction, loser_instruction) = match (&left, &right) {
+        (TaskCommitOutcome::CommittedAs(_), TaskCommitOutcome::StaleExpected { .. }) => {
+            (&left_instruction, &right_instruction)
+        }
+        (TaskCommitOutcome::StaleExpected { .. }, TaskCommitOutcome::CommittedAs(_)) => {
+            (&right_instruction, &left_instruction)
+        }
+        _ => panic!("exactly one winner expected: {left:?} / {right:?}"),
+    };
+    let contexts = task_context_rows(&store, created.task);
+    assert_eq!(
+        contexts.len(),
+        3,
+        "one purpose entry plus exactly one instruction entry"
+    );
+    assert_eq!(
+        contexts[2].3, "adopted_instruction",
+        "the winner's instruction is the third row"
+    );
+    assert_eq!(
+        contexts[2].2,
+        crate::codec::encode_id(winner_instruction.entry.as_raw()),
+        "the winner's caller-minted instruction entry is the one recorded"
+    );
+    assert!(
+        contexts
+            .iter()
+            .all(|row| row.2 != crate::codec::encode_id(loser_instruction.entry.as_raw())),
+        "the stale loser's instruction entry must not exist"
+    );
+    assert_eq!(
+        contexts[2].6,
+        winner_instruction.acquired_at.to_rfc3339(),
+        "the winner's acquisition time is stored"
+    );
+    let record = store
         .load_task(created.task)
         .await
         .unwrap()
         .expect("the winning revision loads");
+    assert_eq!(record.context.len(), 2);
+    assert_eq!(
+        record.context[1].item,
+        TaskContextItem::AdoptedInstruction,
+        "the loaded context carries the winner's instruction"
+    );
+    assert_eq!(record.context[1].entry, winner_instruction.entry);
+    assert_eq!(record.context[1].origin, winner_instruction.origin);
 }
 
 #[tokio::test]
@@ -5616,8 +6010,12 @@ async fn task_steering_faults_roll_back_every_write() {
             "CREATE TRIGGER au4_abort_revision BEFORE INSERT ON task_revision BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
         ),
         (
-            "au4_abort_context",
-            "CREATE TRIGGER au4_abort_context BEFORE INSERT ON task_context_entry BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+            "au4_abort_purpose_entry",
+            "CREATE TRIGGER au4_abort_purpose_entry BEFORE INSERT ON task_context_entry WHEN NEW.item_kind = 'adopted_purpose' BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+        ),
+        (
+            "au4_abort_instruction_entry",
+            "CREATE TRIGGER au4_abort_instruction_entry BEFORE INSERT ON task_context_entry WHEN NEW.item_kind = 'adopted_instruction' BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
         ),
         (
             "au4_abort_current",
@@ -5635,13 +6033,17 @@ async fn task_steering_faults_roll_back_every_write() {
                 .execute_batch(statement)
                 .expect("the fault trigger must install");
         }
-        let failed = store
-            .forward_steering(TaskCommitPremise {
-                expected: created,
-                new_purpose: Some(task_purpose_adoption("faulted")),
-                adopted_purpose_entry: TaskContextEntryId::generate(),
-            })
-            .await;
+        // The forward adopts both a new purpose and an instruction, so each
+        // insert position is exercised by its own trigger case. The premise
+        // is retried unchanged after the fault clears: the failed forward
+        // wrote nothing, so the CAS premise is still current.
+        let premise = TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("faulted")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        };
+        let failed = store.forward_steering(premise.clone()).await;
         assert!(
             matches!(failed, Err(TaskTechnicalError::StorageUnavailable { .. })),
             "a fault on {trigger} must surface a storage failure, got {failed:?}"
@@ -5655,7 +6057,12 @@ async fn task_steering_faults_roll_back_every_write() {
             crate::codec::encode_id(creation.assignee.companion)
         );
         assert_eq!(task_revision_rows(&store, created.task).len(), 1);
-        assert_eq!(task_context_rows(&store, created.task).len(), 1);
+        let after_fault = task_context_rows(&store, created.task);
+        assert_eq!(after_fault.len(), 1, "only the AU2 purpose entry remains");
+        assert!(
+            !after_fault.iter().any(|row| row.3 == "adopted_instruction"),
+            "a fault on {trigger} must leave no instruction row"
+        );
         let record = store
             .load_task(created.task)
             .await
@@ -5673,14 +6080,20 @@ async fn task_steering_faults_roll_back_every_write() {
                 .expect("the fault trigger must drop");
         }
         let committed = store
-            .forward_steering(TaskCommitPremise {
-                expected: created,
-                new_purpose: Some(task_purpose_adoption("recovered")),
-                adopted_purpose_entry: TaskContextEntryId::generate(),
-            })
+            .forward_steering(premise)
             .await
-            .expect("steering succeeds after the fault clears");
-        assert!(matches!(committed, TaskCommitOutcome::CommittedAs(_)));
+            .expect("the same premise succeeds after the fault clears");
+        let TaskCommitOutcome::CommittedAs(committed) = committed else {
+            panic!("expected CommittedAs, got {committed:?}");
+        };
+        assert_eq!(committed.revision, TaskRevision::from_u64(2));
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        assert_eq!(
+            record.context.len(),
+            2,
+            "the retried premise records the purpose and instruction entries"
+        );
+        assert_eq!(record.context[1].item, TaskContextItem::AdoptedInstruction);
     }
 }
 
@@ -5696,6 +6109,7 @@ async fn task_steering_survives_reopen() {
                 expected: created,
                 new_purpose: Some(task_purpose_adoption("persisted steering")),
                 adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
             })
             .await
             .unwrap();
@@ -5752,7 +6166,7 @@ async fn task_steering_reports_revision_exhaustion_without_writing() {
             .expect("the exhaustion snapshot must insert");
         guard
             .execute(
-                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, origin_kind, origin_source, acquired_at) SELECT ?3, task_id, ?2, purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = 1",
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) SELECT ?3, task_id, ?2, purpose_adopted_revision, 'adopted_purpose', origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = 1",
                 params![
                     crate::codec::encode_id(created.task.as_raw()),
                     exhausted,
@@ -5774,6 +6188,7 @@ async fn task_steering_reports_revision_exhaustion_without_writing() {
             },
             new_purpose: Some(task_purpose_adoption("exhausted")),
             adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
         })
         .await
         .unwrap();
@@ -5799,6 +6214,7 @@ async fn task_steering_reports_a_missing_task_as_a_domain_outcome() {
             },
             new_purpose: None,
             adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
         })
         .await;
     assert_eq!(
@@ -5837,6 +6253,7 @@ async fn task_steering_refuses_an_inconsistent_current_unit() {
             expected: created,
             new_purpose: Some(task_purpose_adoption("must not normalize")),
             adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
         })
         .await;
     assert!(
@@ -5882,6 +6299,7 @@ async fn task_purpose_preserving_forward_fails_closed_on_an_unreadable_predecess
                 expected: created,
                 new_purpose: None,
                 adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
             })
             .await;
         assert!(
@@ -5892,6 +6310,114 @@ async fn task_purpose_preserving_forward_fails_closed_on_an_unreadable_predecess
         assert_eq!(task_revision_rows(&store, created.task), before_revisions);
         assert_eq!(task_context_rows(&store, created.task), before_contexts);
     }
+}
+
+/// Runs one fail-closed probe in both forward branches: seed a revision-1
+/// unit, apply `corrupt` to its creation purpose entry, and require the
+/// forward to reject the unit without writing anything.
+async fn assert_forward_rejects_corrupted_purpose(label: &str, corrupt: impl Fn(&Store, TaskId)) {
+    for adopt in [false, true] {
+        let store = open_memory().await.unwrap();
+        let created = store.create_task(task_premise(None)).await.unwrap();
+        corrupt(&store, created.task);
+        let before_current = task_current_row(&store, created.task);
+        let before_revisions = task_revision_rows(&store, created.task);
+        let before_contexts = task_context_rows(&store, created.task);
+        let new_purpose = if adopt {
+            Some(task_purpose_adoption("probe purpose"))
+        } else {
+            None
+        };
+        let outcome = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose,
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a forward must fail closed on {label} with new_purpose={adopt}, got {outcome:?}"
+        );
+        assert_eq!(task_current_row(&store, created.task), before_current);
+        assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+        assert_eq!(task_context_rows(&store, created.task), before_contexts);
+    }
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_duplicate_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a duplicate current purpose entry", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) SELECT ?1, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?2 AND item_kind = 'adopted_purpose'",
+                params![
+                    crate::codec::encode_id(TaskContextEntryId::generate().as_raw()),
+                    crate::codec::encode_id(task.as_raw()),
+                ],
+            )
+            .expect("the duplicate-purpose probe must insert");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_missing_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a missing current purpose entry", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(task.as_raw())],
+            )
+            .expect("the missing-purpose probe must delete");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_mismatched_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose(
+        "a current purpose entry that disagrees with the pointer",
+        |store, task| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    "UPDATE task_context_entry SET purpose_adopted_revision = 99 WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                    params![crate::codec::encode_id(task.as_raw())],
+                )
+                .expect("the mismatched-purpose probe must update");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_payload_free_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a current purpose entry without its payload", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = NULL WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(task.as_raw())],
+            )
+            .expect("the payload-free-purpose probe must update");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -5905,6 +6431,7 @@ async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_ent
             expected: created,
             new_purpose: Some(adoption.clone()),
             adopted_purpose_entry: adopted_entry,
+            adopted_instruction: None,
         })
         .await
         .unwrap();
@@ -5917,6 +6444,7 @@ async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_ent
             expected: second,
             new_purpose: None,
             adopted_purpose_entry: carried_entry,
+            adopted_instruction: None,
         })
         .await
         .unwrap();
@@ -5960,14 +6488,587 @@ async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_ent
     let contexts = task_context_rows(&store, created.task);
     assert_eq!(contexts.len(), 3);
     assert_eq!(contexts[2].0, 3);
-    assert_eq!(contexts[2].1, 2);
+    assert_eq!(contexts[2].1, Some(2));
     assert_eq!(
         contexts[2].2,
         crate::codec::encode_id(carried_entry.as_raw())
     );
     assert_eq!(
-        contexts[2].4,
+        contexts[2].5,
         crate::codec::encode_id(adoption.origin.source),
         "the revision-2 adoption source is carried, not revision 1's"
+    );
+}
+
+// --- Task: AU4 adopted instructions ---
+
+#[tokio::test]
+async fn task_instruction_adoption_round_trips_at_one_revision() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    let adoption = task_purpose_adoption("purpose with instruction");
+    let purpose_entry = TaskContextEntryId::generate();
+    let instruction = task_instruction_adoption(RawId::new());
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: purpose_entry,
+            adopted_instruction: Some(instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(committed) = outcome else {
+        panic!("expected CommittedAs, got {outcome:?}");
+    };
+    assert_eq!(committed.revision, TaskRevision::from_u64(2));
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.task.reference, committed);
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: created.task,
+            adopted_revision: committed.revision,
+        }
+    );
+    assert_eq!(
+        record.context.len(),
+        2,
+        "the purpose entry comes first, then the instruction entry"
+    );
+    let purpose = &record.context[0];
+    assert_eq!(purpose.entry, purpose_entry);
+    assert_eq!(purpose.reference, committed);
+    assert_eq!(
+        purpose.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(purpose.origin, adoption.origin);
+    let adopted = &record.context[1];
+    assert_eq!(
+        adopted.entry, instruction.entry,
+        "the repository persists the caller-minted instruction identity"
+    );
+    assert_eq!(
+        adopted.reference, committed,
+        "the instruction belongs to the forward's revision"
+    );
+    assert_eq!(adopted.item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(adopted.origin, instruction.origin);
+    assert_eq!(
+        adopted.acquired_at.to_rfc3339(),
+        instruction.acquired_at.to_rfc3339()
+    );
+
+    let rows = task_context_rows(&store, created.task);
+    assert_eq!(
+        rows.len(),
+        3,
+        "the AU2 purpose entry plus the forward's purpose and instruction entries"
+    );
+    assert_eq!(rows[1].0, 2);
+    assert_eq!(rows[1].1, Some(2));
+    assert_eq!(rows[1].2, crate::codec::encode_id(purpose_entry.as_raw()));
+    assert_eq!(rows[1].3, "adopted_purpose");
+    assert_eq!(rows[2].0, 2);
+    assert_eq!(
+        rows[2].1, None,
+        "an instruction entry carries no purpose payload"
+    );
+    assert_eq!(
+        rows[2].2,
+        crate::codec::encode_id(instruction.entry.as_raw())
+    );
+    assert_eq!(rows[2].3, "adopted_instruction");
+    assert_eq!(rows[2].4, "owner_conversation");
+    assert_eq!(
+        rows[2].5,
+        crate::codec::encode_id(instruction.origin.source)
+    );
+    assert_eq!(rows[2].6, instruction.acquired_at.to_rfc3339());
+    assert_eq!(
+        task_revision_rows(&store, created.task).len(),
+        2,
+        "the old revision snapshot is retained"
+    );
+}
+
+#[tokio::test]
+async fn task_instruction_only_forward_carries_the_purpose_entry_and_keeps_prior_instructions() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+
+    // Revision 2 adopts a new purpose and an instruction.
+    let adoption = task_purpose_adoption("in force at revision 2");
+    let purpose_entry = TaskContextEntryId::generate();
+    let first_instruction = task_instruction_adoption(RawId::new());
+    let second = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: purpose_entry,
+            adopted_instruction: Some(first_instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = second else {
+        panic!("expected CommittedAs, got {second:?}");
+    };
+
+    // Revision 3 adopts a second instruction only, sourced from the same
+    // utterance record as the first. The purpose entry is carried from the
+    // in-force revision-2 purpose entry, not re-adopted, and the store must
+    // return both instruction entries rather than deduplicating by
+    // provenance.
+    let carried_entry = TaskContextEntryId::generate();
+    let second_instruction = task_instruction_adoption(first_instruction.origin.source);
+    let third = store
+        .forward_steering(TaskCommitPremise {
+            expected: second,
+            new_purpose: None,
+            adopted_purpose_entry: carried_entry,
+            adopted_instruction: Some(second_instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(third) = third else {
+        panic!("expected CommittedAs, got {third:?}");
+    };
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.task.reference, third);
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: created.task,
+            adopted_revision: second.revision,
+        },
+        "the carried purpose keeps its revision-2 adoption identity"
+    );
+    assert_eq!(record.revision.purpose_text, adoption.purpose);
+    assert_eq!(
+        record.context.len(),
+        3,
+        "the current purpose entry plus both instruction entries"
+    );
+    assert_eq!(record.context[0].entry, carried_entry);
+    assert_eq!(record.context[0].reference, third);
+    assert_eq!(
+        record.context[0].item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(record.context[0].origin, adoption.origin);
+    assert_eq!(record.context[1].entry, first_instruction.entry);
+    assert_eq!(record.context[1].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(
+        record.context[1].reference, second,
+        "the earlier instruction keeps its own adoption reference"
+    );
+    assert_eq!(record.context[2].entry, second_instruction.entry);
+    assert_eq!(record.context[2].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(record.context[2].reference, third);
+    assert_eq!(record.context[2].origin, second_instruction.origin);
+    assert_eq!(
+        record.context[1].origin.source, record.context[2].origin.source,
+        "a shared source must not collapse the two instruction entries"
+    );
+
+    let rows = task_context_rows(&store, created.task);
+    assert_eq!(
+        rows.len(),
+        5,
+        "every revision and adopted entry is retained"
+    );
+    assert_eq!(rows[4].0, 3);
+    assert_eq!(rows[4].1, None);
+    assert_eq!(
+        rows[4].2,
+        crate::codec::encode_id(second_instruction.entry.as_raw())
+    );
+    assert_eq!(rows[4].3, "adopted_instruction");
+}
+
+#[tokio::test]
+async fn task_instruction_context_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let (task, before) = {
+        let store = Store::open(&path).await.unwrap();
+        let created = store.create_task(task_premise(None)).await.unwrap();
+        let adoption = task_purpose_adoption("reopened purpose");
+        let first_instruction = task_instruction_adoption(RawId::new());
+        let second = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose: Some(adoption),
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: Some(first_instruction),
+            })
+            .await
+            .unwrap();
+        let TaskCommitOutcome::CommittedAs(second) = second else {
+            panic!("expected CommittedAs, got {second:?}");
+        };
+        let second_instruction = task_instruction_adoption(RawId::new());
+        let third = store
+            .forward_steering(TaskCommitPremise {
+                expected: second,
+                new_purpose: None,
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: Some(second_instruction),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(third, TaskCommitOutcome::CommittedAs(_)),
+            "the second instruction must commit, got {third:?}"
+        );
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        (created.task, record)
+    };
+
+    let reopened = Store::open(&path).await.unwrap();
+    let after = reopened
+        .load_task(task)
+        .await
+        .unwrap()
+        .expect("the instruction context survives reopen");
+    assert_eq!(after, before, "every loaded field survives reopen");
+    assert_eq!(after.task.reference.revision, TaskRevision::from_u64(3));
+    assert_eq!(after.context.len(), 3);
+    assert_eq!(
+        after.context[0].item,
+        TaskContextItem::AdoptedPurpose(after.task.purpose)
+    );
+    assert_eq!(after.context[1].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(after.context[2].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(
+        task_revision_rows(&reopened, task).len(),
+        3,
+        "older revision snapshots survive reopen"
+    );
+    assert_eq!(
+        task_context_rows(&reopened, task).len(),
+        5,
+        "old purpose and instruction rows stay on disk"
+    );
+}
+
+#[tokio::test]
+async fn task_purpose_carry_ignores_instruction_entries() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+
+    // Revision 2 carries the purpose and adopts an instruction whose
+    // provenance differs from the purpose's.
+    let carried_in_force = TaskContextEntryId::generate();
+    let instruction = task_instruction_adoption(RawId::new());
+    assert_ne!(
+        instruction.origin.source, creation.origin.source,
+        "the probe needs distinct provenance"
+    );
+    let second = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: None,
+            adopted_purpose_entry: carried_in_force,
+            adopted_instruction: Some(instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = second else {
+        panic!("expected CommittedAs, got {second:?}");
+    };
+
+    // Physically move the revision-2 purpose row behind the instruction row,
+    // so a carry-forward that forgets the kind discriminator cannot pass by
+    // rowid luck.
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE entry_id = ?1",
+                params![crate::codec::encode_id(carried_in_force.as_raw())],
+            )
+            .expect("the purpose row must delete");
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, 2, 1, 'adopted_purpose', 'owner_conversation', ?3, ?4)",
+                params![
+                    crate::codec::encode_id(carried_in_force.as_raw()),
+                    crate::codec::encode_id(created.task.as_raw()),
+                    crate::codec::encode_id(creation.origin.source),
+                    creation.acquired_at.to_rfc3339(),
+                ],
+            )
+            .expect("the purpose row must reinsert");
+    }
+
+    let carried = TaskContextEntryId::generate();
+    let third = store
+        .forward_steering(TaskCommitPremise {
+            expected: second,
+            new_purpose: None,
+            adopted_purpose_entry: carried,
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(third) = third else {
+        panic!("expected CommittedAs, got {third:?}");
+    };
+    assert_eq!(third.revision, TaskRevision::from_u64(3));
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.context.len(), 2);
+    let purpose = &record.context[0];
+    assert_eq!(purpose.entry, carried);
+    assert_eq!(
+        purpose.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(
+        purpose.origin, creation.origin,
+        "the carry copies the purpose row's provenance, not the instruction's"
+    );
+    assert_eq!(
+        purpose.acquired_at.to_rfc3339(),
+        creation.acquired_at.to_rfc3339(),
+        "the carry copies the purpose row's acquisition time"
+    );
+    assert_eq!(
+        record.context[1].item,
+        TaskContextItem::AdoptedInstruction,
+        "the instruction row is still part of the current context"
+    );
+    assert_eq!(record.context[1].entry, instruction.entry);
+    assert_eq!(record.context[1].origin, instruction.origin);
+
+    let rows = task_context_rows(&store, created.task);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        rows[1].3, "adopted_instruction",
+        "the physically first revision-2 row is the instruction"
+    );
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[2].3, "adopted_purpose");
+    assert_eq!(rows[2].1, Some(1));
+    assert_eq!(rows[3].0, 3);
+    assert_eq!(rows[3].3, "adopted_purpose");
+    assert_eq!(
+        rows[3].5,
+        crate::codec::encode_id(creation.origin.source),
+        "the revision-3 purpose row carries revision 1's source"
+    );
+}
+
+// --- Task: context item-kind read rules ---
+
+#[tokio::test]
+async fn task_load_rejects_an_unknown_context_item_kind() {
+    let store = open_memory().await.unwrap();
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET item_kind = 'unknown' WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the kind probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an unknown stored item kind is a technical error, never skipped"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_context_kind_payload_mismatches() {
+    // A purpose entry without its purpose identity payload.
+    let store = open_memory().await.unwrap();
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = NULL WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the payload probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an adopted-purpose entry without a payload is a technical error"
+    );
+
+    // An instruction entry that carries a purpose payload.
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("with instruction")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, TaskCommitOutcome::CommittedAs(_)),
+        "the probe forward must commit, got {outcome:?}"
+    );
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = 2 WHERE item_kind = 'adopted_instruction' AND task_id = ?1",
+                params![crate::codec::encode_id(created.task.as_raw())],
+            )
+            .expect("the payload probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an adopted-instruction entry with a purpose payload is a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_missing_or_duplicate_current_purpose_entries() {
+    // The current revision's purpose entry is missing.
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("missing probe")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, TaskCommitOutcome::CommittedAs(_)));
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1 AND revision = 2 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(created.task.as_raw())],
+            )
+            .expect("the missing-purpose probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an instruction row must not stand in for the missing purpose entry"
+    );
+
+    // The current revision carries two purpose entries.
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("duplicate probe")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, TaskCommitOutcome::CommittedAs(_)));
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, 2, 2, 'adopted_purpose', 'owner_conversation', ?3, ?4)",
+                params![
+                    crate::codec::encode_id(TaskContextEntryId::generate().as_raw()),
+                    crate::codec::encode_id(created.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                    fixture_clock().to_rfc3339(),
+                ],
+            )
+            .expect("the duplicate-purpose probe must insert");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "two current purpose entries are a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_instruction_entries_beyond_the_current_revision() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("current probe")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, TaskCommitOutcome::CommittedAs(_)));
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, 3, NULL, 'adopted_instruction', 'owner_conversation', ?3, ?4)",
+                params![
+                    crate::codec::encode_id(TaskContextEntryId::generate().as_raw()),
+                    crate::codec::encode_id(created.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                    fixture_clock().to_rfc3339(),
+                ],
+            )
+            .expect("the future-instruction probe must insert");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an instruction entry beyond the current revision is a technical error"
     );
 }

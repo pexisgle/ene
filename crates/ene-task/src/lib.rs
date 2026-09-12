@@ -15,6 +15,7 @@
 //! premises.
 
 mod context;
+mod orchestrate;
 mod repository;
 mod task;
 mod workspace;
@@ -22,11 +23,12 @@ mod workspace;
 pub use context::{
     TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
 };
+pub use orchestrate::{SteeringProposalPremise, TaskProposalOutcome, orchestrate_steering};
 pub use repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
 pub use task::{
-    AssigneeRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId, TaskPurpose,
-    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRecord, TaskRef, TaskRevision,
-    TaskRevisionRecord,
+    AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId,
+    TaskInstructionAdoptionPremise, TaskPurpose, TaskPurposeAdoptionPremise, TaskPurposeRef,
+    TaskRecord, TaskRef, TaskRevision, TaskRevisionRecord,
 };
 pub use workspace::{
     WorkspaceAssocId, WorkspaceAssociation, WorkspaceAssociationPremise, WorkspaceFolderRef,

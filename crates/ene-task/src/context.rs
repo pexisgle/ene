@@ -27,11 +27,23 @@ impl TaskContextEntryId {
 
 /// Which adopted identity one context entry records.
 ///
-/// AU2 records the adopted purpose. Instruction, material, and working
-/// understanding entries arrive with the slices that adopt them.
+/// AU2 and AU4 record the adopted purpose. The H-A steering wiring records
+/// the adopted instruction; material and working understanding entries arrive
+/// with the slices that adopt them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskContextItem {
     AdoptedPurpose(TaskPurposeRef),
+    /// An additional instruction adopted by the Owner conversation.
+    ///
+    /// The adoption identity is the enclosing [`TaskContextEntryId`]; the
+    /// `origin.source` of the entry references the utterance record, whose
+    /// body stays canonical there and is never copied into the entry. The
+    /// entry is written once at the adoption revision and never re-recorded
+    /// by a later forward. Currently effective instructions are every
+    /// `AdoptedInstruction` entry up to the current revision; retire exists
+    /// only in a later producer slice and works by superseding the entry
+    /// identity rather than deleting or rewriting it.
+    AdoptedInstruction,
 }
 
 /// Where an adopted item came from. The source identity is never a copy of

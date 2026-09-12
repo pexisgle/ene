@@ -13,6 +13,11 @@
 //! [`classify_replay`]): an exact retry answers from the stored marker
 //! without opening a turn, while a conflicting reuse rejects just as
 //! early.
+//!
+//! Steering follows the same caller-proposes split: [`propose_steering`]
+//! maps an accepted conversation command onto the Task owner's value premise
+//! and returns the owner's outcome unchanged. Adoption decisions and
+//! identities stay with `ene-task`.
 
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
@@ -26,6 +31,10 @@ use ene_learning::{
 };
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{
+    SteeringPremiseRef, SteeringProposalPremise, TaskProposalOutcome, TaskPurpose, TaskRepository,
+    TaskTechnicalError,
+};
 
 use crate::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, HistoryAppendOutcome,
@@ -656,4 +665,48 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
             }),
         }
     }
+}
+
+/// One steering proposal from the Owner conversation (H-A caller side).
+///
+/// A caller builds this from accepted conversation evidence and proposes it:
+/// the command carries no adoption identity. `premise` is the caller's
+/// relied-on boundary token (the current revision and the purpose identity in
+/// force there), `new_purpose` is the purpose text proposed for adoption
+/// ([`None`] keeps the current purpose), and `instruction_source` references
+/// the utterance record proposing the additional instruction — provenance,
+/// never the adoption identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposeSteeringCommand {
+    pub premise: SteeringPremiseRef,
+    /// Proposed purpose body; [`None`] means the purpose is unchanged.
+    pub new_purpose: Option<TaskPurpose>,
+    /// Reference to the utterance record proposing the additional
+    /// instruction. The Task owner mints a fresh adoption identity; this
+    /// reference is provenance only.
+    pub instruction_source: RawId,
+}
+
+/// Proposes one steering change to the Task owner and returns its decision.
+///
+/// The caller only proposes. This maps the command onto the Task owner's
+/// value premise and delegates to [`ene_task::orchestrate_steering`], which
+/// compares the relied-on revision and purpose, mints the new revision's
+/// context entry identities, and commits. The returned
+/// [`TaskProposalOutcome`] is the owner's outcome unchanged (accepted, stale,
+/// missing, or exhausted), never reinterpreted here. A caller never mints
+/// entry identities and never names `expected.revision + 1`.
+pub async fn propose_steering(
+    command: ProposeSteeringCommand,
+    repository: &impl TaskRepository,
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
+    ene_task::orchestrate_steering(
+        repository,
+        SteeringProposalPremise {
+            premise: command.premise,
+            new_purpose: command.new_purpose,
+            instruction_source: command.instruction_source,
+        },
+    )
+    .await
 }

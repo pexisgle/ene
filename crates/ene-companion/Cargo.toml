@@ -11,6 +11,7 @@ ene-presence = { path = "../ene-presence" }
 ene-credential = { path = "../ene-credential" }
 ene-inference = { path = "../ene-inference" }
 ene-learning = { path = "../ene-learning" }
+ene-task = { path = "../ene-task" }
 thiserror.workspace = true
 
 [dev-dependencies]
