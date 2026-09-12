@@ -13,7 +13,7 @@ use crate::errors::CliError;
 
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, missing_secret_guidance, new_incarnation,
-    pairing_frame, pending_guidance, proof_frame,
+    pairing_frame, pending_guidance, proof_frame, unreadable_device_file_guidance,
 };
 use super::session::{
     AuthDecision, FrameDecision, SessionState, decide_auth, decide_frame, stale_generation_of,
@@ -80,13 +80,25 @@ impl Client {
                 ))
             })?;
         let incarnation = new_incarnation();
-        let stored = device::load_stored_device(data_dir);
+        let file_state = device::load_stored_device(data_dir);
+        let stored_device = file_state.stored().cloned();
         let (secret, source) = device::resolve_device_secret(
-            stored
+            stored_device
                 .as_ref()
                 .and_then(|known| known.secret().map(str::to_string)),
             device::read_bootstrap_secret(),
         );
+        // A degraded file (unreadable/corrupt/blank secret) with no bootstrap
+        // secret cannot authenticate with anything: report the degraded state
+        // for recovery instead of taking the first-run provisioning path.
+        if secret.is_none()
+            && matches!(
+                file_state,
+                device::DeviceFileState::Unreadable | device::DeviceFileState::Malformed
+            )
+        {
+            return Err(CliError::ServerOutcome(unreadable_device_file_guidance()));
+        }
         let device_id = {
             write_frame(&mut stream, &pairing_frame(descriptor, incarnation)).await?;
             match read_frame(&mut stream).await?.payload {
@@ -110,22 +122,15 @@ impl Client {
                 }
             }
         };
-        // Persist whenever a secret is effective: first provision and
-        // one-shot rotation both overwrite the `0600` file (a `Stored` secret
-        // still rewrites alongside the fresh pairing device key; a `Rotated`
-        // secret replaces the file secret). `Missing` holds no secret, so
-        // there is nothing to persist.
-        match source {
-            device::SecretSource::Stored | device::SecretSource::Rotated => {
-                if let Some(secret_value) = secret.as_deref() {
-                    device::store_device(
-                        data_dir,
-                        &device::StoredDevice::new(device_id, secret_value.to_string()),
-                    )?;
-                }
-            }
-            device::SecretSource::Missing => {}
-        }
+        // Whether the effective secret must become durable client state is
+        // decided before authentication but executed only after the Host
+        // accepted the ownership proof: a first provision, a rotation, or a
+        // changed device identity writes; a plain `Stored` reconnect does not.
+        let must_persist = device::must_persist_after_acceptance(
+            source,
+            stored_device.as_ref().map(|known| known.device_id),
+            device_id,
+        );
         write_frame(
             &mut stream,
             &capability_frame(platform, incarnation, Some(device_id)),
@@ -168,6 +173,23 @@ impl Client {
             )));
         };
         session.authenticate(&challenge).await?;
+        // The ownership proof was Accepted: only now does a newly
+        // provisioned or rotated secret become the current durable client
+        // identity. A rejected proof returned above, so a wrong bootstrap
+        // value can never replace a working file.
+        if must_persist {
+            match session.state.pairing_secret() {
+                Some(secret_value) => device::store_device(
+                    data_dir,
+                    &device::StoredDevice::new(device_id, secret_value.to_owned()),
+                )?,
+                None => {
+                    return Err(CliError::Transport(String::from(
+                        "accepted authentication lost the client device secret",
+                    )));
+                }
+            }
+        }
         let fact = session.next_frame().await?;
         if !matches!(fact, WirePayload::PresenceAttribution(_)) {
             return Err(CliError::ServerRejected(format!(
