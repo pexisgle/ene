@@ -123,7 +123,7 @@
 
 ### 4.2 Revision（owner ごとの内容順序）
 
-- **性質。** 同一 identity に対する、意味 owner の判断による変更順序。単調増加。値の大小は同じ `(identity, owner)` の範囲でのみ意味を持つ。異なる identity 間・異なる owner 間で比較しない。
+- **性質。** 同一 identity に対する、意味 owner の判断による変更順序。単調増加。値の大小は同じ `(identity, owner)` の範囲でのみ意味を持つ。異なる identity 間・異なる owner 間で比較しない。revision 列は飽和・wrap・値の再利用をしない。次の相異なる revision を durable に確定できない場合（successor 不在、または successor を durable 表現に写せない場合）は、枯渇として `Ok` 側の domain outcome で報告し、technical error にも黙った最大値への張り付きにもしない。
 - **表現方針。** Rust では `Revision(u64)` のような共通の内部形を持ってもよいが、単独で持ち歩かず必ず `(Id, Revision)` の組で扱う。content digest（hash 等）は revision の代替ではなく検証用の付随情報として任意に添えられる。digest の一致を同一意味の証拠にしないし、不一致だけで無効ともしない。owner の確定が優先する。
 - **時刻との関係。** wall-clock・取得時点・timezone は revision の代替にならない。時刻は説明・表示・Schedule 計算のために保持し、現在性の判定は第6節の述語で行う。共通時計・全順序・固定 TTL を要求しない（CA §7.2）。
 
@@ -233,7 +233,7 @@ struct TaskRef {
 
 struct TaskPurposeRef {
     task: TaskId,
-    adopted_revision: TaskRevision, // 目的を採用した revision。本文の正本は task_revision snapshot
+    adopted_revision: TaskRevision, // 目的を採用した revision。本文の正本は task_revision snapshot。引き継いだ目的は現在 revision より前を指し得る
 }
 
 struct SteeringPremiseRef {
@@ -435,6 +435,7 @@ struct ParticipantCompletionRef { /* 参加者ごとの処理・検証・未完�
 ```
 
 - `DeletionOperationRef` の完了は保全・消去が全域として確定するが、各 domain の意味変更は各 owner が行う。coordinator は任意の通常変更権を取得しない（DR-09）。
+- `HoldConditionRef` は保全・消去が持つ全域操作の調整参照であり、個々の条件（失効・cap は権限・制約、消去は保全・消去、停止は個体調整）の現在有効性の判断は各 owner に残る。各受入箇所は他 owner の型を import せず、自 crate の hold-check premise に写して同じ commit compare で照合する（IB §4 dependency inversion、CM §4.3）。
 - 旧 backup の明示 Restore による復活は、自動再形成の例外ではなく別操作として事前説明・Audit・保留・再評価を経る（PE-3、BR §8）。
 
 ## 6. 現在性・照合単位（concurrency の比較内容）
