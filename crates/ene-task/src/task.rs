@@ -161,15 +161,12 @@ pub struct TaskCreationPremise {
 
 /// A purpose adoption proposed by one steering commit (AU4).
 ///
-/// The repository stamps the adopted revision (`expected.revision + 1`) and
-/// the context entry's `(task, revision)` reference after the CAS succeeds;
-/// the caller supplies the text, the entry identity, and the provenance, and
+/// The repository stamps the adopted revision (`expected.revision + 1`) after
+/// the CAS succeeds; the caller supplies the text and the provenance, and
 /// never names a future revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPurposeAdoptionPremise {
     pub purpose: TaskPurpose,
-    /// Identity of the context entry recorded at the new revision.
-    pub entry: TaskContextEntryId,
     pub origin: TaskContextOrigin,
     pub acquired_at: WallClockWithTz,
 }
@@ -188,6 +185,11 @@ pub struct TaskCommitPremise {
     /// `Some` adopts a new purpose at the new revision; `None` carries the
     /// current purpose and its adopted-purpose context entry forward.
     pub new_purpose: Option<TaskPurposeAdoptionPremise>,
+    /// Identity of the context entry the new revision records for the adopted
+    /// purpose, in both the change and carry-forward branches. The Task owner
+    /// mints it; the repository never allocates it and stamps only the
+    /// post-CAS `(task, revision)` reference and adopted revision.
+    pub adopted_purpose_entry: TaskContextEntryId,
 }
 
 #[cfg(test)]

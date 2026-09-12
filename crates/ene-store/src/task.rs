@@ -242,54 +242,49 @@ fn forward_steering_sync(
             "task revision assignee does not match the current assignee",
         ));
     }
-    // The adopted-purpose entry is the only context kind AU4 records. On a
-    // purpose change its identity is the new revision, which only exists
-    // after CAS, so the repository stamps it here; on a carry-forward the old
-    // adopted identity stays and only the entry's revision advances.
-    let (adopted_revision, purpose_text, entry, origin_kind, origin_source, acquired_at) =
-        match premise.new_purpose {
-            Some(adoption) => (
-                next_revision,
-                adoption.purpose.text,
-                adoption.entry,
-                encode_origin_kind(adoption.origin.kind).to_owned(),
-                encode_id(adoption.origin.source),
-                adoption.acquired_at.to_rfc3339(),
-            ),
-            None => {
-                // Carrying the purpose forward carries the provenance and
-                // acquisition of the entry that adopted it; the identity in
-                // `item` is unchanged even though a new row records it.
-                let predecessor: (String, String, String) = tx
-                    .query_row(
-                        SQL_SELECT_ADOPTED_PURPOSE_ENTRY,
-                        params![
-                            task_text,
-                            current.revision,
-                            current.purpose_adopted_revision
-                        ],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()
-                    .map_err(task_unavailable)?
-                    .ok_or_else(|| {
-                        task_unavailable(
-                            "task adopted purpose entry missing for the current revision",
-                        )
-                    })?;
-                // Fail closed on an unreadable stored kind instead of copying
-                // corruption into the new revision.
-                decode_origin_kind(&predecessor.0)?;
-                (
-                    current_adopted,
-                    snapshot.purpose_text,
-                    TaskContextEntryId::generate(),
-                    predecessor.0,
-                    predecessor.1,
-                    predecessor.2,
+    // The adopted-purpose entry is the only context kind AU4 records. Its
+    // identity comes from the premise in both branches: the repository only
+    // stamps the post-CAS reference and, on a change, the adopted revision.
+    // On a carry-forward the old adopted identity stays in `item`, while the
+    // provenance and acquisition are copied from the entry in force.
+    let (adopted_revision, purpose_text, origin_kind, origin_source, acquired_at) = match premise
+        .new_purpose
+    {
+        Some(adoption) => (
+            next_revision,
+            adoption.purpose.text,
+            encode_origin_kind(adoption.origin.kind).to_owned(),
+            encode_id(adoption.origin.source),
+            adoption.acquired_at.to_rfc3339(),
+        ),
+        None => {
+            let predecessor: (String, String, String) = tx
+                .query_row(
+                    SQL_SELECT_ADOPTED_PURPOSE_ENTRY,
+                    params![
+                        task_text,
+                        current.revision,
+                        current.purpose_adopted_revision
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-            }
-        };
+                .optional()
+                .map_err(task_unavailable)?
+                .ok_or_else(|| {
+                    task_unavailable("task adopted purpose entry missing for the current revision")
+                })?;
+            // Fail closed on an unreadable stored kind instead of copying
+            // corruption into the new revision.
+            decode_origin_kind(&predecessor.0)?;
+            (
+                current_adopted,
+                snapshot.purpose_text,
+                predecessor.0,
+                predecessor.1,
+                predecessor.2,
+            )
+        }
+    };
     let adopted_raw = encode_u64(adopted_revision.as_u64()).map_err(task_unavailable)?;
     tx.execute(
         SQL_INSERT_TASK_REVISION,
@@ -305,7 +300,7 @@ fn forward_steering_sync(
     tx.execute(
         SQL_INSERT_TASK_CONTEXT_ENTRY,
         params![
-            encode_id(entry.as_raw()),
+            encode_id(premise.adopted_purpose_entry.as_raw()),
             task_text,
             next_raw,
             adopted_raw,

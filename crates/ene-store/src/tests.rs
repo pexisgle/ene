@@ -5215,7 +5215,6 @@ fn task_purpose_adoption(text: &str) -> TaskPurposeAdoptionPremise {
         purpose: TaskPurpose {
             text: text.to_owned(),
         },
-        entry: TaskContextEntryId::generate(),
         origin: TaskContextOrigin {
             kind: TaskContextOriginKind::OwnerConversation,
             source: RawId::new(),
@@ -5296,10 +5295,12 @@ async fn task_steering_with_a_new_purpose_adopts_it_at_the_new_revision() {
     let creation = task_premise(Some(workspace.clone()));
     let created = store.create_task(creation.clone()).await.unwrap();
     let adoption = task_purpose_adoption("revised AU4 purpose");
+    let adopted_entry = TaskContextEntryId::generate();
     let outcome = store
         .forward_steering(TaskCommitPremise {
             expected: created,
             new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: adopted_entry,
         })
         .await
         .expect("the steering commit must run");
@@ -5332,7 +5333,10 @@ async fn task_steering_with_a_new_purpose_adopts_it_at_the_new_revision() {
         "the new revision records exactly its adopted purpose entry"
     );
     let entry = &record.context[0];
-    assert_eq!(entry.entry, adoption.entry);
+    assert_eq!(
+        entry.entry, adopted_entry,
+        "the repository persists the caller-minted entry identity"
+    );
     assert_eq!(entry.reference, committed);
     assert_eq!(
         entry.item,
@@ -5380,7 +5384,7 @@ async fn task_steering_with_a_new_purpose_adopts_it_at_the_new_revision() {
     assert_eq!(contexts[1].0, 2);
     assert_eq!(
         contexts[1].2,
-        crate::codec::encode_id(adoption.entry.as_raw())
+        crate::codec::encode_id(adopted_entry.as_raw())
     );
 }
 
@@ -5389,10 +5393,12 @@ async fn task_purpose_preserving_forward_carries_the_adopted_purpose_entry() {
     let store = open_memory().await.unwrap();
     let creation = task_premise(None);
     let created = store.create_task(creation.clone()).await.unwrap();
+    let carried_entry = TaskContextEntryId::generate();
     let outcome = store
         .forward_steering(TaskCommitPremise {
             expected: created,
             new_purpose: None,
+            adopted_purpose_entry: carried_entry,
         })
         .await
         .expect("the steering commit must run");
@@ -5426,6 +5432,10 @@ async fn task_purpose_preserving_forward_carries_the_adopted_purpose_entry() {
     assert_eq!(record.revision.assignee, creation.assignee);
     assert_eq!(record.context.len(), 1);
     let entry = &record.context[0];
+    assert_eq!(
+        entry.entry, carried_entry,
+        "the repository persists the caller-minted carried entry identity"
+    );
     assert_ne!(
         entry.entry, creation.entry,
         "a new row records the carried identity"
@@ -5472,7 +5482,10 @@ async fn task_purpose_preserving_forward_carries_the_adopted_purpose_entry() {
         contexts[1].1, 1,
         "the carried entry keeps the old adopted identity"
     );
-    assert_eq!(contexts[1].2, crate::codec::encode_id(entry.entry.as_raw()));
+    assert_eq!(
+        contexts[1].2,
+        crate::codec::encode_id(carried_entry.as_raw())
+    );
     assert_eq!(contexts[1].3, contexts[0].3, "the origin kind is carried");
     assert_eq!(contexts[1].4, contexts[0].4, "the origin source is carried");
     assert_eq!(
@@ -5489,6 +5502,7 @@ async fn task_steering_stale_expected_changes_nothing() {
         .forward_steering(TaskCommitPremise {
             expected: created,
             new_purpose: Some(task_purpose_adoption("winner")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
         })
         .await
         .unwrap();
@@ -5501,6 +5515,7 @@ async fn task_steering_stale_expected_changes_nothing() {
         .forward_steering(TaskCommitPremise {
             expected: created,
             new_purpose: Some(task_purpose_adoption("loser")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
         })
         .await
         .unwrap();
@@ -5531,10 +5546,12 @@ async fn concurrent_task_steering_commits_exactly_one_revision() {
     let left = TaskCommitPremise {
         expected: created,
         new_purpose: Some(task_purpose_adoption("concurrent left")),
+        adopted_purpose_entry: TaskContextEntryId::generate(),
     };
     let right = TaskCommitPremise {
         expected: created,
         new_purpose: Some(task_purpose_adoption("concurrent right")),
+        adopted_purpose_entry: TaskContextEntryId::generate(),
     };
     let (left, right) = tokio::join!(store.forward_steering(left), store.forward_steering(right));
     let left = left.unwrap();
@@ -5608,6 +5625,7 @@ async fn task_steering_faults_roll_back_every_write() {
             .forward_steering(TaskCommitPremise {
                 expected: created,
                 new_purpose: Some(task_purpose_adoption("faulted")),
+                adopted_purpose_entry: TaskContextEntryId::generate(),
             })
             .await;
         assert!(
@@ -5644,6 +5662,7 @@ async fn task_steering_faults_roll_back_every_write() {
             .forward_steering(TaskCommitPremise {
                 expected: created,
                 new_purpose: Some(task_purpose_adoption("recovered")),
+                adopted_purpose_entry: TaskContextEntryId::generate(),
             })
             .await
             .expect("steering succeeds after the fault clears");
@@ -5662,6 +5681,7 @@ async fn task_steering_survives_reopen() {
             .forward_steering(TaskCommitPremise {
                 expected: created,
                 new_purpose: Some(task_purpose_adoption("persisted steering")),
+                adopted_purpose_entry: TaskContextEntryId::generate(),
             })
             .await
             .unwrap();
@@ -5715,6 +5735,7 @@ async fn task_steering_reports_revision_exhaustion_without_writing() {
                 revision: TaskRevision::from_u64(u64::try_from(exhausted).unwrap()),
             },
             new_purpose: Some(task_purpose_adoption("exhausted")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
         })
         .await
         .unwrap();
@@ -5739,6 +5760,7 @@ async fn task_steering_reports_a_missing_task_as_a_domain_outcome() {
                 revision: TaskRevision::initial(),
             },
             new_purpose: None,
+            adopted_purpose_entry: TaskContextEntryId::generate(),
         })
         .await;
     assert_eq!(
@@ -5775,6 +5797,7 @@ async fn task_steering_refuses_an_inconsistent_current_unit() {
         .forward_steering(TaskCommitPremise {
             expected: created,
             new_purpose: Some(task_purpose_adoption("must not normalize")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
         })
         .await;
     assert!(
@@ -5791,20 +5814,24 @@ async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_ent
     let store = open_memory().await.unwrap();
     let created = store.create_task(task_premise(None)).await.unwrap();
     let adoption = task_purpose_adoption("adopted at revision 2");
+    let adopted_entry = TaskContextEntryId::generate();
     let changed = store
         .forward_steering(TaskCommitPremise {
             expected: created,
             new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: adopted_entry,
         })
         .await
         .unwrap();
     let TaskCommitOutcome::CommittedAs(second) = changed else {
         panic!("expected CommittedAs, got {changed:?}");
     };
+    let carried_entry = TaskContextEntryId::generate();
     let carried = store
         .forward_steering(TaskCommitPremise {
             expected: second,
             new_purpose: None,
+            adopted_purpose_entry: carried_entry,
         })
         .await
         .unwrap();
@@ -5837,8 +5864,12 @@ async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_ent
         entry.acquired_at.to_rfc3339(),
         adoption.acquired_at.to_rfc3339()
     );
+    assert_eq!(
+        entry.entry, carried_entry,
+        "the repository persists the caller-minted carried identity"
+    );
     assert_ne!(
-        entry.entry, adoption.entry,
+        entry.entry, adopted_entry,
         "the carried row identity is new"
     );
 
@@ -5849,6 +5880,10 @@ async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_ent
     assert_eq!(contexts.len(), 3);
     assert_eq!(contexts[2].0, 3);
     assert_eq!(contexts[2].1, 2);
+    assert_eq!(
+        contexts[2].2,
+        crate::codec::encode_id(carried_entry.as_raw())
+    );
     assert_eq!(
         contexts[2].4,
         crate::codec::encode_id(adoption.origin.source),

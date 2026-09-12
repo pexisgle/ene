@@ -62,6 +62,10 @@ pub trait TaskRepository: Send + Sync {
     /// writes the new revision snapshot, the new revision's adopted-purpose
     /// context entry, and the current pointer atomically; older revisions and
     /// context entries are retained.
+    ///
+    /// The caller mints the new revision's adopted-purpose entry identity;
+    /// the repository persists it and stamps only the post-CAS `(task,
+    /// revision)` reference and the adopted revision.
     async fn forward_steering(
         &self,
         premise: TaskCommitPremise,
