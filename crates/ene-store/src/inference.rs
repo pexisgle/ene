@@ -21,6 +21,8 @@ const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capabil
 
 const SQL_SELECT_ATTEMPT: &str = "SELECT capability, consumer, purpose, provider, model, delegation_id, task_id, task_revision FROM inference_attempt WHERE ticket = ?1";
 
+const SQL_SELECT_ATTEMPT_TICKET: &str = "SELECT ticket FROM inference_attempt WHERE ticket = ?1";
+
 const SQL_SELECT_DELEGATION_PREMISE: &str =
     "SELECT task_id, task_revision FROM delegation WHERE delegation_id = ?1";
 
@@ -56,6 +58,22 @@ impl InferenceAttemptRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
+            // Duplicate detection is the first check in the transaction: a
+            // re-claimed ticket is a duplicate no matter how the consent,
+            // credential set, delegation, or Task revision moved since the
+            // first claim, so the answer is always `Stale` instead of
+            // depending on which premise check happens to fail first. This
+            // also keeps the design rule "a duplicate claim never sends
+            // twice" independent of the premise state.
+            let already_claimed: Option<String> = tx
+                .query_row(SQL_SELECT_ATTEMPT_TICKET, params![ticket_text], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            if already_claimed.is_some() {
+                return Ok(AttemptBeginOutcome::Stale);
+            }
             // The linearization point: read, compare, and claim share one short
             // transaction that never spans provider I/O. A mutation that
             // committed first fails the compare (no byte leaves); a mutation
@@ -110,7 +128,9 @@ impl InferenceAttemptRepository for Store {
                 ],
             ) {
                 Ok(_) => {}
-                // A duplicate ticket re-claims an already-started attempt: stale
+                // The explicit pre-check already answered a duplicate, so this
+                // constraint violation only covers a writer that committed
+                // between that read and this insert (cross-process): stale
                 // (never send twice), never a storage error.
                 Err(error)
                     if error.sqlite_error_code()

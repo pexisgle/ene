@@ -184,6 +184,57 @@ async fn task_agent_claim_is_stale_after_a_steering_forward() {
 }
 
 #[tokio::test]
+async fn duplicate_ticket_is_stale_even_after_the_task_premise_moves() {
+    let store = open_memory().await.unwrap();
+    seed_dialogue_consent(&store).await;
+    let (created, delegation) = seed_delegation(&store).await;
+    let premise = task_agent_attempt_premise(delegation, created);
+    let ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
+        store
+            .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+            .await,
+        Ok(AttemptBeginOutcome::Started)
+    );
+    let advanced = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("moved after the first claim")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(advanced, TaskCommitOutcome::CommittedAs(_)));
+
+    // Duplicate-first ordering: the same ticket answers Stale even though the
+    // Task revision has moved since the original claim, so the outcome never
+    // depends on which premise check happens to fail first.
+    assert_eq!(
+        store
+            .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+            .await,
+        Ok(AttemptBeginOutcome::Stale),
+        "a duplicate ticket must answer Stale deterministically"
+    );
+    assert_eq!(
+        task_table_count(&store, "inference_attempt"),
+        1,
+        "a duplicate claim inserts nothing"
+    );
+    let record = store
+        .load_inference_attempt(ticket)
+        .await
+        .unwrap()
+        .expect("the original attempt stays readable");
+    assert_eq!(
+        record.task_agent,
+        Some(premise),
+        "the original correlation is untouched by the duplicate claim"
+    );
+}
+
+#[tokio::test]
 async fn task_agent_claim_is_stale_when_the_delegation_row_is_gone() {
     let store = open_memory().await.unwrap();
     seed_dialogue_consent(&store).await;
