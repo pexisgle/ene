@@ -1,11 +1,12 @@
 # AGENTS.md
 
 Repository-level guidance for coding agents working on the new implementation.
+Backward compatibility is explicitly out of scope: never design or implement
+for backward compatibility, migration layers, shims, or legacy workarounds.
+Always prioritize clean, correct, and uncompromising design and implementation
+over backward compatibility.
 Retired code under `.old/` is reference only: never depend on it, never copy
 behavior from it without a test, never treat it as requirements or design.
-Backward compatibility with past implementations or transitional versions is
-explicitly out of scope: prioritize clean, correct design and implementation
-over compatibility layers, shims, or migration workarounds.
 
 ## Source of truth
 
