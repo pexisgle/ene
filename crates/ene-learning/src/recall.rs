@@ -113,7 +113,9 @@ mod tests {
     use ene_primitive::RawId;
 
     use crate::recall::{RecallQuery, recall};
-    use crate::test_support::{FakeLearningRepository, forget_memory, seed_memory};
+    use crate::test_support::{
+        FakeLearningRepository, forget_memory, seed_memory, seed_memory_with_importance,
+    };
 
     fn query(companion: RawId, text: &str, limit: usize) -> RecallQuery {
         RecallQuery {
@@ -195,6 +197,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recalled.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn importance_breaks_ties_between_equally_relevant_memories() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        // Equal term overlap: the older memory is deliberately the more
+        // important one, so recency alone must not decide the order.
+        let _ = seed_memory_with_importance(
+            &repository,
+            companion,
+            "the owner likes tea",
+            crate::Importance::clamped(5),
+        )
+        .await;
+        let _ = seed_memory_with_importance(
+            &repository,
+            companion,
+            "the owner likes coffee",
+            crate::Importance::clamped(1),
+        )
+        .await;
+        let recalled = recall(&repository, query(companion, "the owner likes", 2))
+            .await
+            .unwrap();
+        assert_eq!(recalled.len(), 2);
+        assert!(
+            recalled[0].content.contains("tea"),
+            "equal overlap must order by importance before recency, got {:?}",
+            recalled[0].content
+        );
     }
 
     #[tokio::test]
