@@ -354,6 +354,17 @@ pub(crate) async fn seed_memory(
     companion: RawId,
     content: &str,
 ) -> (MemoryId, MemoryRevision) {
+    seed_memory_with_importance(repository, companion, content, crate::Importance::default()).await
+}
+
+/// Seeds one memory with an explicit importance, for tests that must
+/// distinguish the importance tie-break from recency.
+pub(crate) async fn seed_memory_with_importance(
+    repository: &FakeLearningRepository,
+    companion: RawId,
+    content: &str,
+    importance: crate::Importance,
+) -> (MemoryId, MemoryRevision) {
     let id = MemoryId::generate();
     let outcome = repository
         .commit_memory_change(MemoryChangeCommit {
@@ -363,7 +374,7 @@ pub(crate) async fn seed_memory(
                 target: MemoryTarget::New { id },
                 scope: LearningScope::companion(companion),
                 content: content.to_owned(),
-                importance: crate::Importance::default(),
+                importance,
                 temporal: crate::TemporalMeaning::Enduring,
                 change: crate::ChangeKind::Initial,
                 recall_suppressed: false,
