@@ -4,7 +4,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::decode_id;
 
-const CURRENT_VERSION: u64 = 14;
+const CURRENT_VERSION: u64 = 15;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -336,6 +336,46 @@ CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_newest ON learning_memory 
 CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 ";
 
+/// Introduces the Task group. `task` is the D1 current row, `task_revision`
+/// the D2 history, `task_context_entry` the adopted context (AU2: the adopted
+/// purpose entry), and `workspace_assoc` holds a row only when a workspace
+/// association was confirmed at creation. Creation writes all present rows in
+/// one transaction, so a crash leaves no partial AU2 unit.
+const MIGRATION_V15: &str = "
+CREATE TABLE IF NOT EXISTS task (
+task_id TEXT PRIMARY KEY,
+revision INTEGER NOT NULL,
+purpose_adopted_revision INTEGER NOT NULL,
+purpose_text TEXT NOT NULL,
+assignee TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_revision (
+task_id TEXT NOT NULL,
+revision INTEGER NOT NULL,
+purpose_adopted_revision INTEGER NOT NULL,
+purpose_text TEXT NOT NULL,
+assignee TEXT NOT NULL,
+PRIMARY KEY (task_id, revision)
+);
+CREATE TABLE IF NOT EXISTS task_context_entry (
+entry_id TEXT PRIMARY KEY,
+task_id TEXT NOT NULL,
+revision INTEGER NOT NULL,
+purpose_adopted_revision INTEGER NOT NULL,
+origin_kind TEXT NOT NULL,
+origin_source TEXT NOT NULL,
+acquired_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_context_entry_task ON task_context_entry (task_id, revision);
+CREATE TABLE IF NOT EXISTS workspace_assoc (
+assoc_id TEXT PRIMARY KEY,
+task_id TEXT NOT NULL,
+folder TEXT NOT NULL,
+save_target TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_assoc_task ON workspace_assoc (task_id);
+";
+
 /// Derives the recall token rows for pre-index memories inside the
 /// migration transaction, so an upgraded database answers lexical recall
 /// from the index immediately. Fresh databases backfill zero rows.
@@ -440,6 +480,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
         tx.execute_batch(MIGRATION_V14)
             .map_err(|error| error.to_string())?;
         backfill_recall_tokens(&tx)?;
+    }
+    if stored_version < 15 {
+        tx.execute_batch(MIGRATION_V15)
+            .map_err(|error| error.to_string())?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

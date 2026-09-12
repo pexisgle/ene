@@ -1,6 +1,9 @@
-//! Task identity, revision, and the reference pair.
+//! Task identity, purpose, current state, and revision records.
 
-use ene_primitive::{RawId, RevisionInner};
+use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
+
+use crate::context::TaskContextEntry;
+use crate::workspace::WorkspaceAssociation;
 
 /// Identity of one Task. Wraps [`RawId`]; never converted to any other domain
 /// newtype and never reused.
@@ -8,6 +11,11 @@ use ene_primitive::{RawId, RevisionInner};
 pub struct TaskId(RawId);
 
 impl TaskId {
+    #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self(raw)
+    }
+
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
@@ -57,9 +65,112 @@ pub struct TaskRef {
     pub revision: TaskRevision,
 }
 
+/// The adopted purpose text.
+///
+/// This is content, not identity: [`TaskPurposeRef`] identifies where the
+/// purpose was adopted, and the text is stored once in that revision's
+/// snapshot. Redacted from [`core::fmt::Debug`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct TaskPurpose {
+    pub text: String,
+}
+
+impl core::fmt::Debug for TaskPurpose {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("TaskPurpose")
+            .field("text", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Identity of a purpose adopted by one Task revision.
+///
+/// The purpose text is canonical in the `task_revision` snapshot at
+/// `adopted_revision`; a revision that does not change the purpose carries
+/// the predecessor's reference forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TaskPurposeRef {
+    pub task: TaskId,
+    pub adopted_revision: TaskRevision,
+}
+
+/// The Companion a Task is assigned to, as a Task-owned premise.
+///
+/// Wraps [`RawId`] and is never converted from or into another domain's
+/// Companion newtype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AssigneeRef {
+    pub companion: RawId,
+}
+
+impl AssigneeRef {
+    #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self { companion: raw }
+    }
+
+    #[must_use]
+    pub fn as_raw(self) -> RawId {
+        self.companion
+    }
+}
+
+/// The current durable state of one Task (D1).
+///
+/// The purpose text is not duplicated here; it is read from the current
+/// revision snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub reference: TaskRef,
+    pub purpose: TaskPurposeRef,
+    pub assignee: AssigneeRef,
+}
+
+/// One revision of a Task, kept as the change history (D2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRevisionRecord {
+    pub reference: TaskRef,
+    /// The adopted purpose in force at this revision.
+    pub purpose: TaskPurposeRef,
+    /// The purpose text snapshot for this revision.
+    pub purpose_text: TaskPurpose,
+    pub assignee: AssigneeRef,
+}
+
+/// The committed AU2 unit of one Task at its current revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRecord {
+    pub task: Task,
+    /// The snapshot of the current revision.
+    pub revision: TaskRevisionRecord,
+    /// The context entries recorded for the current revision.
+    pub context: Vec<TaskContextEntry>,
+    pub workspace: Option<WorkspaceAssociation>,
+}
+
+/// The premise for creating one Task (AU2).
+///
+/// Identities are minted by the Task owner before the repository call; the
+/// repository writes the whole premise in one atomic commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCreationPremise {
+    pub task: TaskId,
+    pub purpose: TaskPurpose,
+    /// Identity of the initial context entry adopting the purpose.
+    pub entry: crate::context::TaskContextEntryId,
+    pub origin: crate::context::TaskContextOrigin,
+    pub acquired_at: WallClockWithTz,
+    pub assignee: AssigneeRef,
+    /// The confirmed workspace association, when the Task has one.
+    pub workspace: Option<crate::workspace::WorkspaceAssociationPremise>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TaskId, TaskRef, TaskRevision};
+    use ene_primitive::RawId;
+
+    use super::{AssigneeRef, TaskId, TaskPurpose, TaskPurposeRef, TaskRef, TaskRevision};
 
     #[test]
     fn initial_task_revision_is_one() {
@@ -87,5 +198,37 @@ mod tests {
             first,
             "the revision stays part of the pair"
         );
+    }
+
+    #[test]
+    fn purpose_ref_identifies_the_adoption_revision() {
+        let task = TaskId::generate();
+        let first = TaskPurposeRef {
+            task,
+            adopted_revision: TaskRevision::initial(),
+        };
+        let second = TaskPurposeRef {
+            task,
+            adopted_revision: TaskRevision::from_u64(2),
+        };
+        assert_ne!(
+            first, second,
+            "the adoption revision stays part of the purpose identity"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_the_purpose_text() {
+        let purpose = TaskPurpose {
+            text: String::from("probe-task-purpose"),
+        };
+        let rendered = format!("{purpose:?}");
+        assert!(!rendered.contains("probe-task-purpose"));
+    }
+
+    #[test]
+    fn assignee_ref_carries_the_raw_companion_identity() {
+        let companion = RawId::new();
+        assert_eq!(AssigneeRef::from_raw(companion).as_raw(), companion);
     }
 }
