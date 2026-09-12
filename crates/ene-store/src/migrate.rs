@@ -4,7 +4,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::decode_id;
 
-const CURRENT_VERSION: u64 = 16;
+const CURRENT_VERSION: u64 = 17;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -404,6 +404,27 @@ ALTER TABLE task_context_entry_v16 RENAME TO task_context_entry;
 CREATE INDEX IF NOT EXISTS idx_task_context_entry_task ON task_context_entry (task_id, revision);
 ";
 
+/// Introduces `delegation`: the correlation row binding one ephemeral agent
+/// execution to the Task revision it was delegated against. Additive only —
+/// no existing row is backfilled, and no unique constraint is placed on
+/// `task_id`: AU3 allows multiple delegations of the same Task revision. The
+/// scope columns are a copied boundary from the workspace association the
+/// delegator relied on, not a permission: `scope_assoc` `NULL` means no
+/// workspace, and then `scope_folder`/`scope_save_target` must both be `NULL`.
+const MIGRATION_V17: &str = "
+CREATE TABLE IF NOT EXISTS delegation (
+delegation_id TEXT PRIMARY KEY,
+task_id TEXT NOT NULL,
+task_revision INTEGER NOT NULL,
+delegator TEXT NOT NULL,
+agent TEXT NOT NULL,
+scope_assoc TEXT NULL,
+scope_folder TEXT NULL,
+scope_save_target TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_delegation_task ON delegation (task_id);
+";
+
 /// Derives the recall token rows for pre-index memories inside the
 /// migration transaction, so an upgraded database answers lexical recall
 /// from the index immediately. Fresh databases backfill zero rows.
@@ -515,6 +536,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 16 {
         tx.execute_batch(MIGRATION_V16)
+            .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 17 {
+        tx.execute_batch(MIGRATION_V17)
             .map_err(|error| error.to_string())?;
     }
     let current =
