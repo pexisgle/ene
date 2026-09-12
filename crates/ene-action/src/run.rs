@@ -16,8 +16,8 @@
 //! the Task, and never re-executes an unknown outcome.
 
 use ene_permission::{
-    ActionAuthorizationDecision, ActionEvaluationTracker, ActionKind, ActionUseCandidate,
-    CurrentActionPremise, authorize_action_use,
+    ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
+    ActionUseCandidate, CurrentActionPremise, authorize_action_use,
 };
 use ene_primitive::{RawId, RevisionInner};
 
@@ -84,6 +84,8 @@ pub enum ActionNotStarted {
     ContentNotAllowed,
     /// The payload exceeds [`MAX_ACTION_FILE_BYTES`].
     ContentTooLarge,
+    /// The permission-owned decision refused this use.
+    Denied(ActionDenyCode),
     /// The permission-owned candidate disagrees with the current premise; the
     /// caller reloads current state and rebuilds the request.
     NeedsRevalidation,
@@ -158,6 +160,9 @@ pub async fn orchestrate_workspace_action(
     };
     let evaluation = match authorize_action_use(&candidate, &current, tracker) {
         ActionAuthorizationDecision::AllowForThisUse(evaluation) => evaluation,
+        ActionAuthorizationDecision::Deny(code) => {
+            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::Denied(code)));
+        }
         ActionAuthorizationDecision::NeedsRevalidation => {
             return Ok(ActionRunOutcome::NotStarted(
                 ActionNotStarted::NeedsRevalidation,

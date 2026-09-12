@@ -130,15 +130,30 @@ pub struct CurrentActionPremise {
 
 /// Result of one Action-use authorization query.
 ///
-/// `NeedsRevalidation` means the candidate disagrees with the current premise:
-/// reload the current state and rebuild the candidate, never proceed with the
-/// stale one. Deny/AskOwner variants arrive with the rules that produce them.
+/// `Deny` carries a permission-owned refusal code; `NeedsRevalidation` means
+/// the caller's view must be reloaded before retrying (its producer arrives
+/// with the rules that can invalidate a view). The explicit Stage 4 arm is the
+/// only allow path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionAuthorizationDecision {
     /// Allowed for exactly this use, under the carried evaluation id.
     AllowForThisUse(ActionPermissionEvaluationId),
-    /// The candidate and the current premise disagree; reload and retry.
+    /// Refused; the code says why.
+    Deny(ActionDenyCode),
+    /// The caller must reload current state and retry; no evaluation was
+    /// minted and nothing may proceed.
     NeedsRevalidation,
+}
+
+/// Why one Action-use query was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionDenyCode {
+    /// The operation is outside the explicit Stage 4 workspace arm (Delete /
+    /// Execute and later operations must be added by their producers).
+    NotInAllowlist,
+    /// The candidate disagrees with the current premise; the request must be
+    /// rebuilt from a fresh read, never started stale.
+    PremiseMismatch,
 }
 
 /// Tracks minted Action evaluation ids and enforces single use.
@@ -189,10 +204,11 @@ impl ActionEvaluationTracker {
 ///
 /// The explicit Stage 4 arm is the delegated workspace capability with
 /// `List / Read / Create / Edit`. A candidate whose correlation disagrees with
-/// the freshly re-read current premise answers [`ActionAuthorizationDecision::NeedsRevalidation`];
-/// a matching candidate earns a fresh single-use evaluation id. There is no
-/// default-allow path: widening the world means adding an explicit arm here,
-/// together with the rule/deny/ask producer that justifies it.
+/// the freshly re-read current premise is denied
+/// [`ActionDenyCode::PremiseMismatch`]; a matching candidate earns a fresh
+/// single-use evaluation id. There is no default-allow path: widening the
+/// world means adding an explicit arm here, together with the rule/deny/ask
+/// producer that justifies it.
 #[must_use]
 pub fn authorize_action_use(
     candidate: &ActionUseCandidate,
@@ -204,13 +220,17 @@ pub fn authorize_action_use(
         && candidate.task_revision == current.task_revision
         && candidate.workspace == current.workspace;
     if !premise_matches {
-        return ActionAuthorizationDecision::NeedsRevalidation;
+        return ActionAuthorizationDecision::Deny(ActionDenyCode::PremiseMismatch);
     }
     // The explicit operation arm: every ActionKind variant is currently
     // allowed, and widening the vocabulary forces an edit here rather than a
     // silent pass-through.
-    match candidate.operation {
-        ActionKind::List | ActionKind::Read | ActionKind::Create | ActionKind::Edit => {}
+    let in_allowlist = matches!(
+        candidate.operation,
+        ActionKind::List | ActionKind::Read | ActionKind::Create | ActionKind::Edit
+    );
+    if !in_allowlist {
+        return ActionAuthorizationDecision::Deny(ActionDenyCode::NotInAllowlist);
     }
     ActionAuthorizationDecision::AllowForThisUse(tracker.mint(candidate))
 }
@@ -220,8 +240,8 @@ mod tests {
     use ene_primitive::{RawId, RevisionInner};
 
     use super::{
-        ActionAuthorizationDecision, ActionEvaluationTracker, ActionKind, ActionUseCandidate,
-        CurrentActionPremise, authorize_action_use,
+        ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
+        ActionUseCandidate, CurrentActionPremise, authorize_action_use,
     };
 
     fn candidate() -> ActionUseCandidate {
@@ -275,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn a_candidate_that_disagrees_with_the_current_premise_needs_revalidation() {
+    fn a_candidate_that_disagrees_with_the_current_premise_is_denied() {
         let mut tracker = ActionEvaluationTracker::new();
         let candidate = candidate();
         for current in [
@@ -298,7 +318,7 @@ mod tests {
         ] {
             assert_eq!(
                 authorize_action_use(&candidate, &current, &mut tracker),
-                ActionAuthorizationDecision::NeedsRevalidation,
+                ActionAuthorizationDecision::Deny(ActionDenyCode::PremiseMismatch),
                 "a moved premise never mints an evaluation"
             );
         }

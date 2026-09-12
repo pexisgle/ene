@@ -27,8 +27,8 @@ use ene_primitive::{RawId, RevisionInner};
 use thiserror::Error;
 
 pub use action::{
-    ActionAuthorizationDecision, ActionEvaluationTracker, ActionKind, ActionPermissionEvaluationId,
-    ActionUseCandidate, CurrentActionPremise, authorize_action_use,
+    ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
+    ActionPermissionEvaluationId, ActionUseCandidate, CurrentActionPremise, authorize_action_use,
 };
 pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
 
