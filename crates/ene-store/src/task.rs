@@ -12,10 +12,10 @@
 //! same-revision snapshot's assignee in one short transaction before
 //! inserting the correlation row. Reads compose the committed rows or answer
 //! `None`: the current revision's adopted-purpose entry first, then every
-//! adopted instruction entry up to the current revision. A partial unit, a current row that
-//! disagrees with its revision snapshot, purpose, adopted-purpose entry, or
-//! assignee, an unknown item kind, and a kind/payload disagreement are
-//! technical errors, never fabricated.
+//! adopted instruction entry up to the current revision. A partial unit, a
+//! current row that disagrees with its revision snapshot, purpose,
+//! adopted-purpose entry, or assignee, an unknown item kind, and a
+//! kind/payload disagreement are technical errors, never fabricated.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -511,11 +511,6 @@ fn create_delegation_sync(
         .ok_or_else(|| {
             task_unavailable("task revision snapshot missing for the delegated revision")
         })?;
-    if snapshot.assignee != current.assignee {
-        return Err(task_unavailable(
-            "task revision assignee does not match the current assignee",
-        ));
-    }
     // Validate the stored identity text before copying it as the delegator: a
     // malformed stored identity is an unreadable row, not a new value. Decode
     // both rows so this check agrees with the other read paths instead of

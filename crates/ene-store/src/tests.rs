@@ -7602,6 +7602,55 @@ async fn delegation_creation_fails_closed_on_an_incoherent_task_unit() {
 }
 
 #[tokio::test]
+async fn delegation_creation_accepts_equivalent_assignee_text_forms() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let stored: String = guard
+            .query_row(
+                "SELECT assignee FROM task_revision WHERE task_id = ?1",
+                params![crate::codec::encode_id(created.task.as_raw())],
+                |row| row.get(0),
+            )
+            .expect("the seeded revision row must read");
+        let simple = stored.replace('-', "");
+        guard
+            .execute(
+                "UPDATE task_revision SET assignee = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(created.task.as_raw()), simple],
+            )
+            .expect("the equivalent text form must update");
+    }
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(
+        reference.delegator, creation.assignee,
+        "both text forms decode to the same assignee"
+    );
+    assert_eq!(
+        delegation_row(&store, delegation).map(|row| row.3),
+        Some(crate::codec::encode_id(creation.assignee.companion)),
+        "the copied delegator keeps the canonical stored text"
+    );
+}
+
+#[tokio::test]
 async fn delegation_creation_at_a_later_revision_binds_that_revision() {
     let store = open_memory().await.unwrap();
     let created = store.create_task(task_premise(None)).await.unwrap();
@@ -7688,7 +7737,7 @@ async fn assert_load_delegation_rejects(label: &str, corrupt: impl Fn(&Store, De
 }
 
 #[tokio::test]
-async fn load_delegation_rejects_malformed_identities() {
+async fn load_delegation_rejects_malformed_stored_values() {
     for (label, statement) in [
         (
             "a malformed task id",
@@ -7735,7 +7784,7 @@ async fn load_delegation_rejects_inconsistent_scope_columns() {
             "UPDATE delegation SET scope_assoc = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
         ),
         (
-            "assoc NULL with a folder and save target",
+            "assoc NULL with a save target but no folder",
             "UPDATE delegation SET scope_assoc = NULL, scope_folder = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
         ),
         (
