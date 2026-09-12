@@ -519,6 +519,9 @@ fn cas_task_steer(conn: &Connection, premise: TaskCommitPremise) -> Result<TaskC
         insert_task_revision(tx, &premise, &next)?;      // 新目的または直前値・担当
         update_task_current(tx, &premise, &next)?;       // 現在 purpose・目的本文（None は直前値）
         insert_task_context_entry(tx, premise.adopted_purpose_entry, &next)?; // reference は repository が刻む
+        if let Some(instruction) = &premise.adopted_instruction {
+            insert_task_context_entry(tx, instruction.entry, &next)?; // 同じ tx。由来・取得時点は premise が持つ
+        }
         Ok(TaskCommitOutcome::CommittedAs(TaskRef {
             task: premise.expected.task,
             revision: next,
