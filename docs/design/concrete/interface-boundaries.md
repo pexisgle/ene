@@ -276,10 +276,13 @@ enum TaskProposalOutcome {
 struct CreateDelegationCommand {
     task: TaskRef,                   // 期待するタスクリビジョン（boundary token）
     scope_copy: DelegationScope,     // 委任時のワークスペース境界の写し（独立した特権を与えない。タスク範囲は task が示す）
-    // consumer_assignment: AssignmentRef（推論・費用の消費主体割り当て）は、Task Agent の
-    // 推論・利用枠の producer が存在するスライスが、command・premise・マイグレーション・
-    // 読み出し規則を同じ設計変更で追加します。本スライスは producer のない placeholder を
-    // 置かず、フィールドを持ちません。
+    // consumer_assignment（推論・費用の消費主体割り当て）は、保存された identity としては持ちません。
+    // 割り当てを委任作成時に凍結せず（凍結した解決済み経路は権限ではありません）、Task Agent の推論受付
+    // （K-E）時に委任元 Companion の現在の同意から live に解決します。durable な帰属は推論試行
+    // （InferenceAttempt）の (consumer, purpose, delegation, 依拠 TaskRef) 対応が担い、費用は委任元と
+    // 同一の利用枠へ合算します。将来 producer（per-companion override・cap 等）が独立した assignment
+    // identity を必要とする場合は、その producer が command・premise・マイグレーション・読み出し規則を
+    // 同じ設計変更で追加します。
 }
 
 enum DelegationOutcome {
@@ -316,6 +319,7 @@ enum TaskResultAcceptance {
 - **キャンセルと安全保留**: 中断要求の受理と、実際の処理遂行の停止、および外部アクションの停止完了は別個の事実です。中断後に遅延して届いた結果は、`RecordedToOriginalOnly` として元の過去記録への保存に留めます。
 - **結果の確信度**: エージェントの自己申告を外部作用の成功証拠として過信してはなりません。外部作用の確信度は実行・拡張担当が記録した確定事実（fact）を参照・集約し、作業担当側で勝手に更新してはなりません。
 - **永続化とコミット**: タスクの新規作成は、`task + task_revision + 初期 task_context_entry` と、関連付けを確定した場合の `workspace_assoc` を不可分に永続化してから外部へ可視化します（durable-before-visible）。方針変更は、新リビジョンと新コンテキストを不可分に進めます。同一 `TaskId` に対する方針指示、委任受付、完了確定、結果採用は、同期区分 SD-Task によって厳格に逐次化します（CCT §4）。
+- **Task Agent の推論開始（K-E との接続）**: 委任された一時エージェントの推論は、依拠タスクリビジョンの前提を推論試行の確定（attempt claim）と同一の短いトランザクションで照合してから開始します。照合に失敗した場合は `TaskPremiseStale` として送信前に不受理とし、provider への I/O を行いません。確定済みの試行は、その後の方針指示（steering）によって開始を取り消されません（遅延結果は元リビジョンへの記録に留め、現在のタスクへ自動採用しません）。委任レコードの存在を実行中・生存の証拠にしてはなりません（CI §5.3）。
 - **依存性の反転（Inversion）**: 保全・消去等の他ドメインのデータ（`HoldConditionRef` や `RestoreGeneration` 等）は、クレート境界では受け入れ側のドメイン（作業、推論、実行等）が定義する前提型として受け取ります。他ドメインの固有型を直接インポートしてはなりません（CM §4.3）。
 - **IPC 通信**: ホスト内部で完結します。クライアントへは進捗や結果の必要な表示情報のみを伝達し、タスクのマスターデータそのものは送信しません。
 
@@ -576,6 +580,7 @@ struct ResolvedRouteCandidate {
 ```
 
 - 観測処理（Observer）は専用の割り当てを解決して動作し、パートナー側の設定を勝手に上書きしたり、利用同意の選択や合成を独自に行ったりしてはなりません。
+- Task Agent の割り当ては委任元 Companion の割り当てを継承します。`UsageConsumer` には Task Agent 継承の消費主体（`TaskAgent`）を追加し、委任元の推論経路が属する既存 Capability（`Dialogue`）と Task Agent のターン専用の Purpose（`TaskAgentTurn`）の組を明示的に許可リストへ追加します（default-allow は禁止）。割り当ての解決は受付ゲート（K-E）が委任元の現在の同意から live に行い、委任行や推論試行に独立した割り当て identity を保存しません。将来 Host 既定 → コンパニオン上書き → 継承の多段解決や per-companion override を導入するスライスが、割り当て identity と保存規則を同じ設計変更で追加します。
 
 ### K-E 推論の実利用ごとの成立・送信
 
@@ -595,11 +600,24 @@ enum Admission {
 
 struct InferenceAttempt {
     ticket: InferenceTicketRef,
+    consumer: UsageConsumer,                         // 消費主体（Companion / Observer専用 / Task Agent 継承）
     capability: CapabilityKind,
+    purpose: PurposeKind,                            // 利用目的（この試行が何のための利用か）
     expected_consent: ConsentPremise,               // (id, rev) をペアとして厳格に保持
     expected_credential_set: CredentialSetRevision, // 秘密情報が適切に除外された認証情報セットのリビジョン
     provider: ProviderRouteRef,
     model: ProviderRouteRef,
+    // Task Agent の利用では、委任の対応関係と依拠 TaskRef の前提（`(task_id, task_revision)`）を
+    // 試行確定と同一のトランザクションで照合し、試行行へ durable に保持します（他の利用では不在）。
+    // 結果到着・採用・確定度は試行行に持たせず、それぞれの producer が追加します。
+    task_agent: Option<TaskAgentAttemptPremise>,
+}
+
+// Task Agent 試行の受け入れ側前提（推論クレートが定義する）。推論クレートは作業側の具象型を
+// インポートせず、不透明 ID と revision 数値の前提として受け取ります（CM §4.3）。
+struct TaskAgentAttemptPremise {
+    delegation: DelegationId,        // 委任の対応関係（durable correlation）
+    task: TaskRef,                   // 依拠タスクリビジョン（(task_id, task_revision) 前提）
 }
 
 enum InferenceDispatchOutcome {
@@ -619,7 +637,7 @@ struct InferenceResultArrival {
 
 - **送信の手順**:
   1. 受付ゲート（admission）が最新の同意・認証前提と、K-B の単一利用認可を確認して `Admission` を返します。
-  2. 試行の確定（attempt claim）が、保存された同意情報および認証情報セットとの一致を単一のトランザクションで確定した上で、トランスポート層を介して送信します。
+  2. 試行の確定（attempt claim）が、保存された同意情報および認証情報セットとの一致を単一のトランザクションで確定した上で、トランスポート層を介して送信します。Task Agent の利用では、同じトランザクションで `delegation` 行と現在のタスクリビジョンも照合し、不一致は `TaskPremiseStale` として送信前に拒絶します。
   3. 入力トークン上限は確定前に、プロンプト内の認証情報セット前提は試行確定と同一のトランザクションで照合します。
   4. 試行確定後のプロバイダへの非同期I/Oはロックを持たずに並行実行し、送信の瞬間に権限やルーティングを二重に検証することはありません（受付ゲートとの二重チェックによる競合を防ぐため）。
   5. ネットワーク待機（await）後に同意状態が変化して結果を採用できなくなった場合は、生成結果の採用のみを安全に破棄し、利用実績の記録は確定した試行情報に従って正しく残します。
@@ -1294,7 +1312,7 @@ LLMによる推論、タスクエージェントの自律処理、外部ツー�
 
 | 長時間処理の種類 | 開始要求（request） | 結果到着・完了報告（completion / result） | 永続化により復元可能な対応関係（durable correlation） |
 |---|---|---|---|
-| 推論実行（単発・継続・フォールバック・再送） | `AdmissionRequest` / `AuthorizedInference` → 試行の確定（チケット発行、費用予約、前提条件の確定） | `InferenceResultArrival`（チケットIDから結果テキストおよび利用量への対応付け） | `(チケットID, 消費主体, タスク／委任との対応, 利用目的, リビジョン／世代前提, 由来情報)`。PR グループF/I、CI §6.4 の世代タグ |
+| 推論実行（単発・継続・フォールバック・再送） | `AdmissionRequest` / `AuthorizedInference` → 試行の確定（チケット発行、費用予約、前提条件の確定） | `InferenceResultArrival`（チケットIDから結果テキストおよび利用量への対応付け） | `(チケットID, 消費主体, タスク／委任との対応, 利用目的, リビジョン／世代前提, 由来情報)`。PR グループF/I、CI §6.4 の世代タグ。実装では推論試行行（`inference_attempt`）が ticket から消費主体・利用目的・委任・依拠 `TaskRef` を辿れるように保持し、利用実績（`usage_fact`）からの帰属は ticket 対応で解決します。結果到着・採用・確定度は試行行に持たせず、それぞれの producer が追加します。 |
 | タスク委任・自律エージェント | `CreateDelegationCommand`（期待リビジョンの不可分な比較照合。AU3 の作成スライスは委任 ID・依拠 TaskRef・委任元・ephemeral ID・スコープの写しを永続化） | `TaskAgentResultArrival`（委任情報から現在タスクへの結果受入判定） | `(委任ID, TaskRef 前提, スコープの写し, アクション試行との対応, タスク目的)`。アクション試行との対応と結果受入は PR グループE、目的は依拠リビジョンの `task_revision` snapshot から解決。PR グループD、CI §5.3 |
 | アクション試行・外部ツール・Computer Use | `ExecuteActionCommand`（実行前の不可分な比較照合）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（試行ごとの CAS 更新）＋ `LateArrivalAttribution`（遅延到着の帰属） | `(試行ID, タスクリビジョン前提, 実際の操作対象と操作種別, 依拠した認可ID, 在席／復元世代, 元の成否不明試行ID)`。PR グループE |
 | バックアップ作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点、参照関係、未完了状況の整合性が揃って確定） | `(バックアップID, 対象時点・参照整合性・除外データ・未完了状況)`。PR グループJ |
@@ -1726,9 +1744,9 @@ trait UndeliveredRepository {
 ### V-2 Task creation → Task Agent → steering → result（H-A・K-H・K-K）
 
 1. 個体調整担当が `ProposeTaskCommand(requester, purpose, origin, workspace_need)` を作業担当へ渡します。会話上での受付は、タスク本体への反映ではありません。作業担当は `TaskProposalOutcome::AcceptedAsTask(TaskRef)` を確定します。タスクの作成は、`TaskCreationPremise`（初期目的・初期コンテキスト項目・確定したワークスペース関連付け）が不可分に永続化された後に外部へ可視化されます。
-2. 作業担当は `CreateDelegationCommand(task=TaskRef(expected), scope_copy)` を発行して一時エージェントへの委任を作成します。作成は、期待リビジョンと現在のタスクリビジョンの不可分な比較照合（AU3）を満たした場合にのみ `DelegationRef` として永続化され、不一致の場合は `StaleTaskRevision { current }` として書き込みなしに再評価へ戻ります。エージェントは一時的な従属主体に留まり、独立した特権、認証情報、プロバイダ設定の上書き権限、個別の予算枠限度を持ちません。`consumer_assignment` は Task Agent の推論・利用枠の producer を持つスライスが同じ設計変更で追加します。
+2. 作業担当は `CreateDelegationCommand(task=TaskRef(expected), scope_copy)` を発行して一時エージェントへの委任を作成します。作成は、期待リビジョンと現在のタスクリビジョンの不可分な比較照合（AU3）を満たした場合にのみ `DelegationRef` として永続化され、不一致の場合は `StaleTaskRevision { current }` として書き込みなしに再評価へ戻ります。エージェントは一時的な従属主体に留まり、独立した特権、認証情報、プロバイダ設定の上書き権限、個別の予算枠限度を持ちません。`consumer_assignment` は保存された identity としては導入せず、Task Agent の推論受付時に委任元 Companion の現在の割り当てから live に解決します（durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` が担います）。
 3. オーナーからの追加指示は、`ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source)`（`unadopted` フィールドは W-3 の反映判断を生成元に持つスライスで導入）によって、新リビジョンと新コンテキストの不可分な前進（forward）となります。新リビジョンは採用目的項目と採用指示項目を同一の `forward_steering` トランザクションに記録します。採用識別子は作業担当が確定し、採用指示項目自身の `TaskContextEntryId` が表します（`instruction_source` は由来レコードの参照であり、採用識別子そのものではありません）。過去のリビジョンも確実に保持されます。2つの方針指示が競合した場合は同期区分 SD-Task の順序で直列化され、先に確定した方を優先して現在の状態とし、後から到着した要求は新しい現在の状態に対する再指示として評価します。
-4. 方針指示（steering）が行われた後に、古いリビジョンを前提とした委任作成やアクション実行要求が届いた場合は、`StalePremise { current }` または `StaleTaskRevision { current }` として不受理にし、再評価へ差し戻します。実行中だった古い委任はベストエフォートで停止・縮小させ、古い結果を勝手に新しい目的に採用してはなりません。
+4. 方針指示（steering）が行われた後に、古いリビジョンを前提とした委任作成やアクション実行要求が届いた場合は、`StalePremise { current }` または `StaleTaskRevision { current }` として不受理にし、再評価へ差し戻します。実行中だった古い委任はベストエフォートで停止・縮小させ、古い結果を勝手に新しい目的に採用してはなりません。Task Agent の推論開始も同じ照合に従い、依拠リビジョンと現在のタスクリビジョンの比較を推論試行の確定と同一の不分区間で行います（照合に失敗した新規推論は `TaskPremiseStale` として送信前に拒絶します）。
 5. 遅延して届いたエージェントの処理結果は、`TaskAgentResultArrival(delegation, attempt_refs, result_body_ref, certainty)` として受け取り、「試行が前提としたタスクリビジョンから解決する目的」と「現在のタスクリビジョンおよび最新の方針指示の目的」を厳格に比較照合します。目的は依拠リビジョンの `task_revision` snapshot から解決し、単なる文字列一致では照合しません。一致しない場合は `RecordedToOriginalOnly` として元の過去リビジョンにのみ記録し、現在のタスクには不採用とします。古い承認情報を使ってタスクの中断を勝手に解除してはなりません。
 6. **失われてはならない情報**: 単なる発言記録とタスク反映内容および未反映・保留指示の対応関係、方針指示の前後の目的の区別、委任範囲、ワークスペース境界、クライアント依存条件、タスクリビジョンの前提情報。
 
