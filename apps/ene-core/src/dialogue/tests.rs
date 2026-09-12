@@ -3061,17 +3061,21 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
         .expect("the row commits under the old set");
     drop(first);
 
-    // Restart: construction pins the rotated value, and the startup sweep
+    // Restart: construction pins the rotated value, and the serving boundary
     // must replace its occurrences and advance the revision before the
     // handle serves anything.
     let companion_store = EnvCredentialStore::from_lookup(|_| Some(String::from("rotated-bearer")));
     let restarted = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
         .await
         .expect("the restarted open must succeed");
+    restarted
+        .sweep_registered_values()
+        .await
+        .expect("the serve boundary must complete");
     let new_revision = restarted.store.current_set_revision().await.unwrap();
     assert!(
         new_revision > old_revision,
-        "the startup boundary must advance the revision"
+        "the serve boundary must advance the revision"
     );
     let timeline = restarted
         .store
@@ -3150,12 +3154,13 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
 
 /// A Stage 2 environment can hold a registered CredentialRef together with
 /// plaintext History stored before the scrub boundary. If the registered
-/// value cannot be read at startup, the Host must not open at all: skipping
-/// the sweep while advancing the revision would serve the plaintext under a
-/// fresh set. With the value readable, the same startup must redact it and
-/// advance the revision before serving.
+/// value cannot be read, the management open must still succeed (pending
+/// lists and device approval do not need provider secrets), and the explicit
+/// serving boundary must then fail closed instead of sweeping nothing and
+/// advancing past the boundary. With the value readable, that same boundary
+/// redacts it and advances the revision before serving.
 #[tokio::test]
-async fn startup_with_an_unreadable_registered_value_never_opens() {
+async fn management_open_never_sweeps_and_the_serve_boundary_fails_closed() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
     use ene_credential::CredentialSetRepository as _;
     use ene_presence::PresenceRepository as _;
@@ -3200,44 +3205,65 @@ async fn startup_with_an_unreadable_registered_value_never_opens() {
     let old_revision = first.store.current_set_revision().await.unwrap();
     drop(first);
 
-    // The registered ref is unreadable: the open must fail closed instead of
-    // sweeping nothing and advancing past the boundary.
-    let missing = HostHandle::open_with_cred_store(
+    // The registered ref is unreadable, but management does not need it: the
+    // read-only pending path opens and answers without touching credential
+    // state.
+    let management = HostHandle::open_with_cred_store(
         dir.path(),
         CredStore::Memory(MemoryCredentialStore::new()),
     )
-    .await;
+    .await
+    .expect("management open must not require a readable provider secret");
     assert!(
-        missing.is_err(),
-        "an unreadable registered value must keep the Host closed"
+        management.pending_devices().await.is_ok(),
+        "the pending device list is available without credential values"
     );
-
-    // The failed open leaves both the revision and the plaintext untouched.
-    let store = ene_store::Store::open(&dir.path().join("app.db"))
-        .await
-        .expect("the durable store stays readable");
     assert_eq!(
-        store.current_set_revision().await,
+        management.store.current_set_revision().await,
         Ok(old_revision),
-        "a failed open must not advance the credential-set revision"
+        "a management open must not advance the credential-set revision"
     );
-    let timeline = store.load_timeline(companion, None, 10).await.unwrap();
+    let timeline = management
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
     let legacy = timeline
         .iter()
         .find(|item| item.text.contains("legacy key"))
         .expect("the legacy row is still held");
-    assert_eq!(legacy.text, "the legacy key is test-bearer");
-    drop(store);
+    assert_eq!(
+        legacy.text, "the legacy key is test-bearer",
+        "a management open must not redact durable content"
+    );
 
-    // With the value readable the startup sweep completes before serving.
+    // The serving boundary is separate and fails closed while the value is
+    // unreadable; the revision and the plaintext stay untouched.
+    assert!(
+        management.sweep_registered_values().await.is_err(),
+        "the serve boundary must refuse an unreadable registered value"
+    );
+    assert_eq!(
+        management.store.current_set_revision().await,
+        Ok(old_revision),
+        "a failed serve boundary must not advance the revision"
+    );
+    drop(management);
+
+    // With the value readable the serve boundary redacts and advances before
+    // serving.
     let present = MemoryCredentialStore::new();
     present.insert(credential, "test-bearer");
     let reopened = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(present))
         .await
         .expect("a readable registered value lets the Host open");
+    reopened
+        .sweep_registered_values()
+        .await
+        .expect("the serve boundary completes with the value readable");
     assert!(
         reopened.store.current_set_revision().await.unwrap() > old_revision,
-        "the successful startup boundary advances the revision"
+        "the successful serve boundary advances the revision"
     );
     let timeline = reopened
         .store

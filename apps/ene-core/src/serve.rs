@@ -275,6 +275,13 @@ impl HostHandle {
     /// through [`Store::open`]. `Stage 2` owns directory creation: resolution
     /// stays pure in `ene-config` while the side effect lives here.
     ///
+    /// This is the state open, not the serving boundary: it performs no
+    /// credential sweep and changes no durable state. Callers that serve
+    /// requests run [`HostHandle::sweep_registered_values`] first; read-only
+    /// and local management paths (pending device lists, device approval)
+    /// open without touching registered credential content or the
+    /// credential-set revision.
+    ///
     /// # Errors
     ///
     /// Returns [`CoreError::Store`] when the directory cannot be ensured or
@@ -291,13 +298,14 @@ impl HostHandle {
     /// environment once when it is constructed). The device-auth file opens on
     /// `<data_dir>/device-auth.json` (created lazily on first approval) after
     /// the data directory is ensured, so the open always has its parent.
+    /// Like [`HostHandle::open`], the state open itself has no credential
+    /// side effects; the serving boundary is a separate, explicit step.
     ///
     /// # Errors
     ///
     /// [`CoreError::Store`] as in [`HostHandle::open`], plus when the
     /// device-auth file cannot be opened (unreadable, malformed, or wrongly
-    /// permissioned), or when a registered credential value cannot be read
-    /// and the startup sweep therefore cannot complete.
+    /// permissioned).
     pub async fn open_with_cred_store(
         data_dir: &Path,
         cred_store: CredStore,
@@ -309,7 +317,7 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))?;
         let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        let handle = Self {
+        Ok(Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
             open_rounds: StdMutex::new(HashMap::new()),
@@ -320,23 +328,26 @@ impl HostHandle {
             learning_queue: StdMutex::new(VecDeque::new()),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
-        };
-        // Startup boundary: the credential store has pinned its values (for
-        // the env store, read once), so sweep every registered value out of
-        // durable content and advance the revision together before serving.
-        // A failed sweep keeps the handle closed rather than serving content
-        // prepared under an unknown set.
-        handle.sweep_registered_values().await?;
-        Ok(handle)
+        })
     }
 
-    /// Sweeps every registered pinned value and advances the revision once.
+    /// Startup credential boundary: sweeps every registered pinned value out
+    /// of durable content and advances the revision once.
     ///
-    /// Runs before the handle serves anything. Every registered value must be
-    /// readable: an unreadable value fails the open instead of skipping the
-    /// sweep, because absence of the value cannot be proven and the Host must
-    /// not serve content that may still hold it in plaintext.
-    async fn sweep_registered_values(&self) -> Result<(), CoreError> {
+    /// The serving Host runs this before accepting any request, after the
+    /// state open and before the listener binds. Every registered value must
+    /// be readable: an unreadable value fails the boundary instead of
+    /// skipping the sweep, because absence of the value cannot be proven and
+    /// the Host must not serve content that may still hold it in plaintext.
+    /// A failure leaves the handle unusable for serving (the caller returns
+    /// without binding). Read-only and local management paths never call this:
+    /// they must not move the credential-set revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Store`] when the registered refs cannot be read
+    /// or a value cannot be read and the sweep therefore cannot complete.
+    pub(crate) async fn sweep_registered_values(&self) -> Result<(), CoreError> {
         let refs = self
             .store
             .list_refs()

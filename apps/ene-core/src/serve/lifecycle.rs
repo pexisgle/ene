@@ -55,6 +55,11 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 /// listener cannot run.
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let handle = HostHandle::open(data_dir).await?;
+    // Serving boundary, before the listener binds: sweep every registered
+    // value out of durable content and advance the credential-set revision
+    // together. A failed sweep keeps this Host from serving content prepared
+    // under an unknown credential set.
+    handle.sweep_registered_values().await?;
     // Base URL override for self-hosted endpoints and tests: production
     // keeps [`DEFAULT_BASE_URL`]. The test harness points a real `serve`
     // binary at a local fake Responses server through this variable (child
