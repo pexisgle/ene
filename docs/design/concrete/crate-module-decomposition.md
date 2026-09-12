@@ -241,9 +241,9 @@ Client が Host 側のドメインクレートに直接依存して、マスタ�
 
 | 依存元 | 依存先（許可された依存） | 理由（呼び出し側 caller → 状態所有者 owner / 機構の共有） |
 |---|---|---|
-| `ene-companion` | `ene-primitive`、`ene-config`、`ene-character`、`ene-task`、`ene-learning`、`ene-presence`、`ene-inference`、`ene-action`、`ene-preservation`（trait のみ） | 対話のオーケストレーションにおける呼び出し側 → 状態所有者の依存（H-A、H-B/C、X-A、K-E 軽い応答、K-H 軽い動作、D-B 削除参加）。`ene-inference` や `ene-action` への依存は `dialogue` モジュール内に隔離し、完全削除・バックアップ・利用量予約・アダプター選定などの詳細は知らせません。`ene-store`、秘密情報、個別アダプターへの依存は禁止します |
-| `ene-task` | `ene-primitive`、`ene-config`、`ene-learning`、`ene-action`、`ene-inference`、`ene-credential`（scrub 境界の非秘密型のみ）、`ene-preservation`（trait のみ） | 作業のオーケストレーションにおける呼び出し側 → 状態所有者の依存（H-B、K-H、K-E、D-B 参加）。Task Agent の推論ターンは、作業側が定義する port（`TaskAgentInference`）を Host 側アダプター（`InferenceExecutor` 実装）が実装する依存性の反転で接続し、権限・割り当ての解決ロジックや `ene-permission` の具象型を `ene-task` に持ち込みません。`ene-credential` への依存は `ScrubbedText` / `SecretScrubber` など秘密値を含まない scrub 境界型に限定します。`ene-companion`、`ene-presence`、`ene-permission` の具象クレートへの依存は禁止します（必要な情報は呼び出し元からの前提情報 premise 供給で受け取ります） |
-| `ene-learning` | `ene-primitive`、`ene-config`、`ene-preservation`（trait のみ） | 記憶形成・訂正・スコープ解釈の担当責任者。`ene-companion`、`ene-task`、`ene-permission`、`ene-presence` への依存は禁止します（会話履歴、タスク実績、権限制約、世代情報などはすべて呼び出し側から前提情報 premise として受け取ります） |
+| `ene-companion` | `ene-primitive`、`ene-config`、`ene-character`、`ene-task`、`ene-learning`、`ene-presence`、`ene-inference`、`ene-action`、`ene-credential`（scrub 境界の非秘密型のみ）、`ene-preservation`（trait のみ） | 対話のオーケストレーションにおける呼び出し側 → 状態所有者の依存（H-A、H-B/C、X-A、K-E 軽い応答、K-H 軽い動作、D-B 削除参加）。`ene-inference` や `ene-action` への依存は `dialogue` モジュール内に隔離し、完全削除・バックアップ・利用量予約・アダプター選定などの詳細は知らせません。`ene-store`、秘密情報、個別アダプターへの依存は禁止します |
+| `ene-task` | `ene-primitive`、`ene-config`、`ene-learning`、`ene-action`、`ene-inference`、`ene-credential`（scrub 境界の非秘密型のみ）、`ene-preservation`（trait のみ） | 作業のオーケストレーションにおける呼び出し側 → 状態所有者の依存（H-B、K-H、K-E、D-B 参加）。Task Agent の推論ターンは、作業側が定義する port（`TaskAgentInference`）を Host 結合ルート（`apps/ene-core`）のアダプター（`InferenceExecutor` 実装）が実装する依存性の反転で接続し、権限・割り当ての解決ロジックや `ene-permission` の具象型を `ene-task` に持ち込みません。`ene-credential` への依存は `ScrubbedText` / `SecretScrubber` / `SecretScrubError` など秘密値を含まない scrub 境界型に限定します。`ene-companion`、`ene-presence`、`ene-permission` の具象クレートへの依存は禁止します（必要な情報は呼び出し元からの前提情報 premise 供給で受け取ります） |
+| `ene-learning` | `ene-primitive`、`ene-config`、`ene-credential`（scrub 境界の非秘密型のみ）、`ene-preservation`（trait のみ） | 記憶形成・訂正・スコープ解釈の担当責任者。`ene-companion`、`ene-task`、`ene-permission`、`ene-presence` への依存は禁止します（会話履歴、タスク実績、権限制約、世代情報などはすべて呼び出し側から前提情報 premise として受け取ります） |
 | `ene-action` | `ene-primitive`、`ene-config`、`ene-permission`、`ene-credential`、`ene-preservation`（trait のみ） | K-B の実行直前検証、K-C の秘密利用、D-B の削除参加における呼び出し側 → 状態所有者の依存。`ene-task`、`ene-presence`、`ene-inference`、`ene-store` の具象クレートへの依存は禁止します |
 | `ene-inference` | `ene-primitive`、`ene-config`、`ene-permission`、`ene-credential`、`ene-preservation`（trait のみ） | K-B、K-C、D-B 参加における呼び出し側 → 状態所有者の依存。`ene-task`、`ene-action`、`ene-presence` の具象クレートへの依存は禁止します |
 | `ene-observer` | `ene-primitive`、`ene-config`、`ene-presence`、`ene-permission`、`ene-preservation`（trait のみ） | X-D/X-E の帰属先・同意・消去状況の確認における呼び出し側 → 状態所有者の依存。`ene-companion`、`ene-task`、`ene-learning` の具象クレートへの依存は禁止します（ルーティングに必要な文脈データは Host 側から渡されます） |
@@ -325,6 +325,7 @@ flowchart TB
   task --> learn
   task --> action
   task --> infer
+  task --> cred
   task --> presv
   comp --> prim
   comp --> cfg

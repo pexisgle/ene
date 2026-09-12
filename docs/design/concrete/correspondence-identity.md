@@ -301,7 +301,7 @@ enum OccurrenceStatus { Missed, Started, CancelledAsTaskContract }
 - タスクレコードの寿命は、担当コンパニオンへの参照によって勝手に決められるものではありません。担当コンパニオンが削除された後であっても、残されたタスクレコードには管理画面等から安全にアクセスできなければなりません。
 - 委任レコードの存在は、Task Agent のプロセス・コンテキスト・メモリが現在も生きていることを意味しません。再起動後は委任の対応関係のみを復元し、ephemeral な実行文脈は失われたものとして扱い、Agent の自動再起動やタスクの自動再開を行いません。委任の継続・停止・受領の状態を再構成するスライスは、それぞれの状態の producer と対で状態表現を追加します。
 - 同じタスクの同じリビジョンに対する複数の委任は許可され、単一委任の制約を課しません（並列委任は正当な実行形態です）。再委任やリトライは新しい委任 identity で開始し、既存の委任 identity を再利用しません。
-- 委任は割り当て（assignment）の identity を保存しません。Task Agent の推論割り当ては受付（K-E）時に委任元 Companion の現在の同意から live に解決し、durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` 対応が担います。解決済みの割り当て経路を、生きた許可として委任から再利用してはなりません。
+- 委任は割り当て（assignment）の identity を保存しません。Task Agent の推論割り当ては受付（K-E）時に委任元が依拠する現在の Capability 同意から live に解決し、durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` 対応が担います。解決済みの割り当て経路を、生きた許可として委任から再利用してはなりません。
 - すべての軽微な操作を無理にタスク化する必要はありませんが、まとまった一連の外部作業をタスク化せずに雑に実行することも禁止します。
 
 ### 5.4 アクション・試行・作用・確定度
@@ -345,7 +345,7 @@ struct DevicePermissionRef { /* 端末ごとの制御状態への参照 */ }
 struct SandboxExceptionRef { /* 特定のローカルMCPツールに与えられたサンドボックス例外の参照 */ }
 
 struct UsageAttributionRef {
-    consumer: UsageConsumer, // CompanionReasoning(CompanionId) | ObserverDedicated | ...
+    consumer: UsageConsumer, // CompanionReasoning(CompanionId) | ObserverDedicated | TaskAgent（委任元の割り当てを継承。利用主体の識別は委任対応が担う。実装の語彙は ConsumerKind の closed world） | ...
     // 報告値、成否不明、処理中を厳格に区別する。未報告や成否不明な枠を勝手にゼロとみなさない。
 }
 
