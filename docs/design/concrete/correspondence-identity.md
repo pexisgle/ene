@@ -231,6 +231,18 @@ struct TaskRef {
     revision: TaskRevision,
 }
 
+struct TaskPurposeRef {
+    task: TaskId,
+    adopted_revision: TaskRevision, // 目的を採用した revision。本文の正本は task_revision snapshot
+}
+
+struct SteeringPremiseRef {
+    expected: TaskRef,               // 依拠した現在 revision
+    purpose: TaskPurposeRef,         // 依拠した現在目的（比較材料。authority ではない）
+}
+
+struct TaskContextEntryId(/* opaque */);
+
 struct DelegationRef {
     delegation: DelegationId,
     task: TaskRef,               // 委任元 Task とその revision 前提
@@ -241,8 +253,8 @@ struct DelegationRef {
 
 struct TaskContextRef {
     task: TaskRef,
-    // 採用した目的・指示・材料・途中理解の identity 群。
-    // 内容の正本は Task record。本文複製を要求しない。
+    // 採用した目的・指示・材料・途中理解の identity 群（TaskContextEntry）。
+    // 採用 identity と由来・取得時点を持ち、内容の正本は Task record。本文複製を要求しない。
 }
 
 struct ScheduleOccurrenceRef {
@@ -465,7 +477,7 @@ mechanism を選ぶ前に、「何と何を比較すれば現在として受け�
 
 - retry・再送・fallback・再委任は新しい `ActionAttemptId`（または実行・拡張が定める試行系列の次要素）で試行する。重複し得る再送を「同じ試行の継続」として除外しない。
 - 不明は粘着させる。Cancel 受付・通信成功・表示・保存成功・再接続・復元・移動で不明を未実行・成功へ書き換えない。新しい evidence が事実 owner に確認されたときに限り確定度を更新する。
-- 遅延結果の帰属は `attempt → task revision → 現在 Task` の順に辿る。記録（元へ残す）と semantic 更新・次実行・提示（現在の受入）を分ける。
+- 遅延結果の帰属は `attempt → task revision → 現在 Task` の順に辿る。目的は依拠 revision の `task_revision` snapshot から解決し、本文の一致で照合しない。記録（元へ残す）と semantic 更新・次実行・提示（現在の受入）を分ける。
 
 ### 6.4 世代タグの付与規則
 

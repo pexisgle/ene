@@ -184,7 +184,7 @@ CI 第6節の述語を concurrency の commit 境界へ落としたものであ�
 
 ### 7.1 前提と serialization
 
-- Task 作成は `task + task_revision + 初期 context + workspace_assoc` の原子 durable（PR AU2）とし、commit 前は委任・実行から不可視にする（durable-before-visible）。
+- Task 作成は `task + task_revision + 初期 context` と、確定した場合の `workspace_assoc` の原子 durable（PR AU2）とし、commit 前は委任・実行から不可視にする（durable-before-visible）。
 - steering は新 revision＋新 context の原子 forward（PR AU4）とし、旧 revision を残す。旧目的の結果を新目的に自動採用しない。
 - 委任作成は `expected_task_revision` の atomic compare を満たして作成する（PR AU3）。
 - 同一 `TaskId` の steering・委任受付・完了確定・結果採用は SD-Task で逐次化する。異なる `TaskId` は並列でよい。
@@ -194,7 +194,7 @@ CI 第6節の述語を concurrency の commit 境界へ落としたものであ�
 - **instruction / steering revision 競合。** 二つの steering が同時到着したら SD-Task の順序で直列化し、先勝ちの revision を現在にし、後着は新現在に対する再 steering として評価する。上書き・merge をしない。発話 record（History）と Task 反映内容と未反映・待機を区別し、反映不可は理由と選択肢を示す。
 - **delegation relation 競合。** 委任は作成時点の `(task_id, expected_task_revision, scope 写し)` を保持する（`DelegationRef`）。steering 後に旧 revision 前提の委任作成が届いたら不受理・再評価へ戻す。実行中の委任が steering と交差したら、委任元は旧委任の停止・縮小を best-effort で行い、旧委任の結果を新目的に自動採用しない。
 - **cancellation 競合。** Cancel は SD-Task で現在 Task に記録し、委任・attempt へ best-effort の停止を伝える。Cancel 記録と停止完了を分け、停止不能・既作用・不明・未保存を残して報告する。Cancel 後の遅延 Agent 結果は元 revision への記録に留め、現在 Task の達成にしない。
-- **delayed Agent result。** 帰属は `attempt → task revision → 現在 Task` の順に辿る（CI §6.3）。到着時に `(attempt の Task revision 前提, 目的)` × 現在の `(Task revision, 目的・steering 前提)` を比較する。一致しなければ現在採用せず、元 Action / Task へ事実を残す。historical evidence としての保存（元 revision への記録）は許し、意味の異なる現在への採用はしない。
+- **delayed Agent result。** 帰属は `attempt → task revision → 現在 Task` の順に辿る（CI §6.3）。到着時に `(attempt の Task revision 前提, 目的)` × 現在の `(Task revision, 目的・steering 前提)` を比較する。目的は依拠 revision の `task_revision` snapshot から解決し、本文の一致で照合しない。一致しなければ現在採用せず、元 Action / Task へ事実を残す。historical evidence としての保存（元 revision への記録）は許し、意味の異なる現在への採用はしない。
 - **Task completion 競合。** 完了確定は SD-Task の短い transaction で「現在 revision が期待通りか＋未完了・判断待ち・不明の扱いが確定しているか」を確認して行う。二つの完了報告が交差したら先勝ちを現在にし、後着は元記録として残し二重完了にしない。
 - **retry / restart。** retry・再委任は新 revision 前提・新 attempt で開始する。Host restart 後の Task は保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにし、Agent を自動再起動しない。新委任は新 Task revision 前提で開始する。
 
@@ -502,7 +502,7 @@ fn cas_task_steer(
     conn: &Connection,
     task: TaskId,
     expected: TaskRevision,
-    next_purpose: SteeringPremiseRef,
+    next_purpose: Option<TaskPurpose>,  // None = 目的変更なし（直前の purpose を引き継ぐ）
 ) -> Result<CasOutcome> {
     with_immediate_tx(conn, |tx| {
         let cur: TaskRevision = query_task_revision(tx, &task)?;

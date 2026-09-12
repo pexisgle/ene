@@ -67,7 +67,7 @@
 | 会話 History・活動記録（個体調整） | —（現在値ではなく記録であるため D2 が正本） | History 原 record（参加者・文脈・時刻+tz）・非会話活動記録・evidence | 未完了の保持整理の進行（保全・消去と協調） | 報告用要約・由来説明・進捗表示 | Client 入力途中・表示 timeline・audio buffer | export 済み History copy |
 | 未伝達・報告状況（個体調整） | 未伝達の必要内容・対象・元対応（Task 由来→Task record 参照、活動由来→活動 record 参照、元なし通知は必要範囲の活動 record） | 報告状況の遷移履歴（要否に応じて。少なくとも現在状況は D3 として保全） | 報告状況（Pending/Summarized/Presented/Unknown）・提示不明の保持 | 報告用要約（派生表現） | 表示 copy 送信・接続状態 | — |
 | 進行中の意味判断（個体調整） | — | 残すべき発言・結果が History 等へ反映された後の記録 | —（進行中判断自体は永続化しない） | — | I-7 の進行中判断・推論・入出力の一時処理 | — |
-| Task・委任・context・Workspace・Schedule（作業） | Task 現在（目的・担当・進捗・待機・結果・未完了・次の判断・steering 前提）・委任対応（Task revision 前提・範囲・進捗・待機・停止・受領）・Workspace 関連付け・Schedule 設定（担当・内容・時刻条件・作成時 tz・初期入力） | Task revision 履歴・委任の対応履歴・Task context entry（由来・取得時点・用途・有効性）・Schedule 発生対応（missed/Started/Cancelled + 各回 Task 対応）・Task 記録（終了≠削除） | 途中 Task の明示再開待ち・判断待ち・委任停止・Schedule missed の未完了・Task 削除 vs log 整理の進行 | Task 進捗表示・次回 Schedule 表示・由来説明 | W-2 の Agent 一時 context・推論作業領域・詳細 payload 全量 | 外部 Workspace 実体・案内 file・Skill・成果物（通常 file）・外部 Skill 原本 |
+| Task・委任・context・Workspace・Schedule（作業） | Task 現在（現在 TaskPurposeRef と目的本文・担当・進捗・待機・結果・未完了・次の判断）・委任対応（Task revision 前提・範囲・進捗・待機・停止・受領）・Workspace 関連付け・Schedule 設定（担当・内容・時刻条件・作成時 tz・初期入力） | Task revision 履歴・委任の対応履歴・Task context entry（採用 identity・由来・取得時点）・Schedule 発生対応（missed/Started/Cancelled + 各回 Task 対応）・Task 記録（終了≠削除） | 途中 Task の明示再開待ち・判断待ち・委任停止・Schedule missed の未完了・Task 削除 vs log 整理の進行 | Task 進捗表示・次回 Schedule 表示・由来説明 | W-2 の Agent 一時 context・推論作業領域・詳細 payload 全量 | 外部 Workspace 実体・案内 file・Skill・成果物（通常 file）・外部 Skill 原本 |
 | Task 内部 copy・中間 file（作業） | 内部保持 copy の意味（由来・取得時点・用途）・中間 file の用途・期間・整理対象 | copy・中間 file の受入・整理の対応記録 | 整理待ち・保持方針との対応・targeted deletion 参加の未完了 | — | 実行中 buffer | 外部原本の現在値・成果物の外部実体 |
 | Learning Summary・根拠（認識・学習） | Summary 本体（圧縮 evidence）・形成判断と根拠の対応（Summary→Memory/Skill/Relationship/State revision） | Summary の履歴・根拠関係の履歴・source 範囲参照 | 形成中処理の保留・消去参加の未完了 | embedding / index / query 派生・検索 score | 一時 reasoning・Raw | — |
 | Memory・Skill・Relationship・State（認識・学習） | 各現在認識・有効 revision・scope・重要度・由来（Memory 主要知識、Skill 有効手順、Relationship 主体別解釈、State 一時/持続の区別） | 各過去 revision・変更経緯・利用根拠（誤訂正 vs 時間変化の区別を保つ） | 訂正・scope 変更の未完了・消去参加の未完了・再形成防止 hold | embedding / index / similarity / score・表示集計 | L の一時 buffer 的側面・検索中 context | — |
@@ -151,11 +151,11 @@ Skill の scope default（Package 由来→Companion scope、単体 import→Own
 
 | logical table | PK | 主な field | durability | deletion | reconstruction source |
 |---|---|---|---|---|---|
-| `task` | `task_id` | 現在 REV=`task_revision`、目的・担当・進捗・待機・完了・失敗・Cancel・結果・未完了・次の判断・steering 前提、CORR→`restore_generation` | D1 | Task 削除で固有 Workspace 関連付けを削除。形成済み・外部成果物へ cascade しない | restart 後に保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする |
-| `task_revision` | `(task_id, task_revision)` | 目的・採用指示・担当・委任前提の snapshot、steering 前後の区別。REV=`task_revision` | D2 | 同上 | 遅延結果の帰属（attempt→task revision→現在 Task）に使う |
+| `task` | `task_id` | 現在 REV=`task_revision`、現在 `TaskPurposeRef`・目的本文の現行値、担当、進捗・待機・完了・失敗・Cancel・結果・未完了・次の判断、CORR→`restore_generation`（保全・消去 slice で導入） | D1 | Task 削除で固有 Workspace 関連付けを削除。形成済み・外部成果物へ cascade しない | restart 後に保存済み進捗・既知作用・不明・未完了を示し明示再開待ちにする |
+| `task_revision` | `(task_id, task_revision)` | 目的本文・`TaskPurposeRef`・採用指示・担当・委任前提の snapshot、steering 前後の区別。REV=`task_revision` | D2 | 同上 | 遅延結果の帰属（attempt→task revision→現在 Task）に使う |
 | `delegation` | `delegation_id` | CORR→`(task_id, task_revision)` 前提・委任元 Companion・一時 Agent ephemeral id・scope 写し・進捗・待機・停止・受領 | D1+D2 | Agent 終了・担当削除で Task record を消さない | 委任の継続・停止・受領を再構成する。Agent 一時 context 消失を完了根拠にしない |
-| `task_context_entry` | `entry_id` | CORR→`(task_id, task_revision)`、採用した目的・指示・材料・途中理解の identity 群・由来・取得時点・用途・有効性。本文複製を要求しない | D1+D2 | Task 削除で固有分を削除。targeted deletion に参加する。Task 限り情報を Learning へ自動昇格しない | Task 判断・Observer 仲介（個体調整–作業協調経由）の材料として読む |
-| `workspace_assoc` | `assoc_id` | CORR→`task_id`、外部 folder/file/source 参照（E、所有ではない）、利用条件・保存先・待機 | D1 | Task 削除で関連付けを削除。外部実体へ cascade しない。backup は関連付けのみ含め実体を収集しない | 関連付けを再構成する |
+| `task_context_entry` | `entry_id` | CORR→`(task_id, task_revision)`、採用した目的・指示・材料・途中理解の identity 群・由来・取得時点。AU2 は採用目的の entry を持つ。用途は利用先が分岐する slice で、有効性は採用 revision が現在 revision かで解決して導入する。本文複製を要求しない | D1+D2 | Task 削除で固有分を削除。targeted deletion に参加する。Task 限り情報を Learning へ自動昇格しない | Task 判断・Observer 仲介（個体調整–作業協調経由）の材料として読む |
+| `workspace_assoc` | `assoc_id` | CORR→`task_id`、外部 folder/file/source 参照（E、所有ではない）、利用条件・保存先・待機。作成時は関連付けを確定した場合のみ row を持ち、folder と保存先を保存する。利用条件・待機はそれらを解決する slice で追加する | D1 | Task 削除で関連付けを削除。外部実体へ cascade しない。backup は関連付けのみ含め実体を収集しない | 関連付けを再構成する |
 | `internal_copy` | `copy_id` | CORR→`task_id`・元外部参照・由来・取得時点・用途、保管参照（DB inline または filesystem path）、削除 marker | D1 | Task 削除で整理。targeted deletion に参加する（外部所有を理由に除外しない） | 作業継続に必要な copy として読む。外部現在値と混同しない |
 | `intermediate_file` | `file_id` | 用途・必要期間・整理対象・保管参照（外部に置いた場合も外部作用として Permission に従う） | D1（一時作業物だが Task 終了まで durable） | Task 終了または保持方針で整理する。永久成果物と混同しない | 整理対象として読む |
 | `schedule` | `schedule_id` | 担当 Companion・実行内容・時刻条件・作成時 tz・停止等・初期 Workspace 入力、状態 | D1 | 担当削除で Schedule を削除し自動引継ぎしない。各回 Task 記録は残す | 将来回の通常判定として読む。作成依頼を token にしない |
@@ -259,9 +259,10 @@ device-auth の保護・検証材料保持は `ene-credential`、trust / 許可�
 struct TaskRow {
     task: TaskId,
     revision: TaskRevision,              // D1 現在 + D2 履歴の対応
-    restore_generation: RestoreGeneration, // 復元跨ぎ参照の世代タグ
-    purpose_steering_premise: SteeringPremiseRef,
-    assignee: CompanionId,
+    restore_generation: RestoreGeneration, // 復元跨ぎ参照の世代タグ（保全・消去 slice で導入）
+    purpose: TaskPurposeRef,             // 現在採用されている目的（steering 前後の区別）
+    purpose_text: TaskPurpose,           // 現在 revision の snapshot
+    assignee: AssigneeRef,
     progress: TaskProgress,              // 進捗・待機・完了・失敗・Cancel・結果・未完了・次の判断
     delegation_scope: DelegationScopeRef,
 }
@@ -379,7 +380,7 @@ Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の
 | 更新 | 整合していなければならない property | 要求する性質 | 備考（owner を統合しないための分離） |
 |---|---|---|---|
 | Conversation / History 記録と Learning 形成 | History 原 record・活動 record・Summary・Memory revision・根拠対応・scope・保存禁止・非共有・消去条件 | History append と未伝達登録（該当時）は同一 durable transaction で原子にする（§7.2 AU1）。Learning 形成は別 transaction とし、History durable 後に認識・学習が現在認識・根拠へ照合して採否を決める。到着順を根拠の新旧にしない | 会話受付・History・Learning 更新完了を同一条件にしない。全状態の同時更新を要求しない |
-| Task / delegation / steering | Task 現在・Task revision・Task context entry・Workspace 関連付け・委任 scope・steering 前提・Permission 現在条件 | Task 作成時は task + revision + 初期 context + 関連付けを原子にし、commit 前は委任・実行から不可視にする（durable-before-visible）。steering は新 revision + 新 context の原子 forward とし、旧目的の結果を新目的に自動採用しない。委任は `expected_task_revision` の atomic compare を満たして作成する | Task 達成判断（作業）と作用確定度（実行・拡張）と許可確定（権限・制約）を同一 transaction にしない。attempt 確定後に Task が別途読み取って達成を更新する |
+| Task / delegation / steering | Task 現在・Task revision・Task context entry・Workspace 関連付け・委任 scope・steering 前提・Permission 現在条件 | Task 作成時は task + task_revision + 初期 task_context_entry を原子にし、Workspace 関連付けを確定した場合は workspace_assoc を含める。commit 前は委任・実行から不可視にする（durable-before-visible）。steering は新 revision + 新 context の原子 forward とし、旧目的の結果を新目的に自動採用しない。委任は `expected_task_revision` の atomic compare を満たして作成する | Task 達成判断（作業）と作用確定度（実行・拡張）と許可確定（権限・制約）を同一 transaction にしない。attempt 確定後に Task が別途読み取って達成を更新する |
 | Action attempt / effect / outcome | attempt・Task revision 前提・委任 scope・実対象・操作種別・依拠 Permission・段階・確定度・根拠・hold・presence/restore generation | attempt insert は Task revision 前提・委任有効性・実対象解決・現在許可の照合を満たして原子にする。確定度 `Unknown→Confirmed` は新 evidence との原子更新とし、owner 以外は独立更新しない。retry は `prior_attempt` 対応付きの新 row とし旧 row を上書きしない | Task 側の確定度独立更新をしない。Agent 申告を証拠にしない。Task 達成・報告は別受入とする |
 | Permission / usage / cap | Rule revision・同意 revision・device・cap 定義・利用事実（報告/不明/処理中の別）・失効・停止・保留 | 評価時は保存 Allow・委任時 copy・事前判定・復元 Rule・context 内許可文・cache 判定を現在許可として再利用しない。並列消費は同一 SQLite transaction 内で利用事実の atomic insert + cap 照合を行い、同一残額の独立使い切りを許さない（mechanism 共有であり owner 統合ではない）。処理中・不明をゼロにしない | 利用事実の原記録は各 owner に残し、権限・制約は可否だけを管理する。Task・推論側に独立許可・使用実績の正本を作らない |
 | presence attribution / generation | 帰属 state・active_client・presence generation・現接続・許可・排他性・hint・復旧先 | 帰属切替は `expected_generation + expected_state` の atomic compare による `旧→移行中→新` の durable 遷移とし、新旧いずれも新規開始しない区間を保つ。hint・復旧先の更新と帰属成立を同一視しない。現在接続を古い保存値から再成立させない | 帰属成立（接続・存在）と移動必要性（個体調整）と許可確定（権限・制約）を同一更新にしない。live 到達性は DB 外の確認であり DB atomic に含めない |
@@ -394,7 +395,7 @@ Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の
 
 - AU1a（同 owner 原子）: `history_message` insert + `undelivered` insert（会話・交流由来の要時）。いずれかだけが残る中間を可視にしない。
 - AU1b（順序＋原子登録）: Task 由来の `undelivered` は Task 結果 durable 後に別 transaction で原子に登録する（Task durable→未伝達可視の順序。単一 transaction にまとめず、共有 SQLite transaction は mechanism として許す）。Task durable なしに未伝達だけが残る dangling、Task durable ありに未伝達なしの報告漏れのいずれも残さないよう、crash 後は Task 結果と未伝達の対応を照合して未登録を補完できること。
-- AU2（同 owner 原子）: `task` insert + `task_revision` insert + `task_context_entry` inserts + `workspace_assoc` insert。commit 前は委任・実行から不可視。
+- AU2（同 owner 原子）: `task` insert + `task_revision` insert + 初期 `task_context_entry` insert(s) +（Workspace 関連付けを確定した場合のみ `workspace_assoc` insert）。commit 前は委任・実行から不可視。
 - AU3（cross-owner atomic read）: `delegation` insert 時の `expected_task_revision` 照合（Task 現在 revision との compare）。不一致なら不受理・再評価へ戻す。
 - AU4（同 owner 原子）: steering 時の `task_revision` forward + `task` current pointer 更新 + 新 `task_context_entry`。旧 revision を残す。
 - AU5（同 owner 原子 + 別 owner 順序）: `action_attempt` insert（前提照合付き）。確定度更新は同 row の `expected_certainty + 新 evidence` の原子更新。Task 達成は別 transaction で attempt を読み取って更新する（durable-before-adopt）。
