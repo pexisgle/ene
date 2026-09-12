@@ -3465,6 +3465,7 @@ async fn dialogue_context_keeps_source_times_distinct_from_now() {
         expected_generation: generation,
         expected_consent: None,
         expected_credential_set: None,
+        expected_owner_message: None,
         command_id: None,
         round_wire: None,
         round_intent: None,
