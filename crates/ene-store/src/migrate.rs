@@ -1,8 +1,10 @@
 use rusqlite::{Connection, TransactionBehavior};
 
+use ene_primitive::WallClockWithTz;
+
 use crate::codec::decode_id;
 
-const CURRENT_VERSION: u64 = 12;
+const CURRENT_VERSION: u64 = 13;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -256,6 +258,55 @@ rev INTEGER NOT NULL
 INSERT OR IGNORE INTO credential_set (id, rev) VALUES (1, 0);
 ";
 
+/// Adds the canonical UTC timestamp projection that orders and range-filters
+/// history inside SQL: fixed-width `Z` renderings compare lexically exactly
+/// like the instants they represent, regardless of the creation offsets kept
+/// in `at`. The stored `at` stays the display/provenance rendering (offset
+/// included); `at_utc` is query material only. Existing rows are backfilled
+/// in Rust because SQLite's date functions would lose nanosecond precision.
+///
+/// (Introduced by the History SQL-window change ahead of this branch in the
+/// merge order; kept verbatim so v11 → v12 → v13 applies in one chain.)
+const MIGRATION_V12: &str = "
+ALTER TABLE history_message ADD COLUMN at_utc TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_history_message_companion_at ON history_message (companion_id, at_utc);
+";
+
+/// Backfills [`MIGRATION_V12`]'s `at_utc` for rows written before it.
+///
+/// Runs inside the migration transaction: a stored timestamp that cannot be
+/// parsed fails the migration instead of leaving a row invisible to `since`
+/// filters. The table is read once into memory; history is already bounded
+/// by retention in this stage.
+fn backfill_history_at_utc(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    let rows = {
+        let mut statement = tx
+            .prepare("SELECT message_id, at FROM history_message WHERE at_utc IS NULL")
+            .map_err(|error| error.to_string())?;
+        let mapped = statement
+            .query_map((), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|error| error.to_string())?);
+        }
+        rows
+    };
+    for (message_id, at) in rows {
+        let canonical = WallClockWithTz::parse_rfc3339(&at)
+            .map_err(|_| String::from("history timestamp cannot be normalized"))?
+            .to_rfc3339_utc();
+        tx.execute(
+            "UPDATE history_message SET at_utc = ?2 WHERE message_id = ?1",
+            rusqlite::params![message_id, canonical],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// Introduces the derived recall token index and the partial B-tree indexes
 /// behind `recall_candidates`.
 ///
@@ -263,17 +314,21 @@ INSERT OR IGNORE INTO credential_set (id, rev) VALUES (1, 0);
 /// §5 R): every row is recomputed from `learning_memory.content` by the same
 /// tokenizer the queries use, so the table is never the Memory's canonical
 /// record and a future Memory deletion must delete its token rows with it.
-/// The two partial indexes cover only non-suppressed rows, so each candidate
-/// arm walks at most `limit` live entries instead of stepping over the whole
-/// suppressed prefix. Token rows of suppressed memories stay in place;
-/// suppression is a recall-time filter, and clearing it needs no reindexing.
-const MIGRATION_V12: &str = "
+/// The primary key serves the lexical companion-plus-term lookup; the
+/// `memory_id` index serves the per-Memory refresh that rewrites one
+/// Memory's rows on every revision. The two partial indexes cover only
+/// non-suppressed rows, so each candidate arm walks at most `limit` live
+/// entries instead of stepping over the whole suppressed prefix. Token rows
+/// of suppressed memories stay in place; suppression is a recall-time
+/// filter, and clearing it needs no reindexing.
+const MIGRATION_V13: &str = "
 CREATE TABLE IF NOT EXISTS learning_memory_term (
 term TEXT NOT NULL,
 memory_id TEXT NOT NULL,
 companion_id TEXT NOT NULL,
 PRIMARY KEY (companion_id, term, memory_id)
 );
+CREATE INDEX IF NOT EXISTS idx_learning_memory_term_memory ON learning_memory_term (memory_id);
 CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
 CREATE INDEX IF NOT EXISTS idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 ";
@@ -371,6 +426,11 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 12 {
         tx.execute_batch(MIGRATION_V12)
+            .map_err(|error| error.to_string())?;
+        backfill_history_at_utc(&tx)?;
+    }
+    if stored_version < 13 {
+        tx.execute_batch(MIGRATION_V13)
             .map_err(|error| error.to_string())?;
         backfill_recall_tokens(&tx)?;
     }

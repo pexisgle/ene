@@ -46,6 +46,24 @@ impl WallClockWithTz {
         self.0.to_rfc3339()
     }
 
+    /// Canonical UTC rendering with fixed nanosecond precision.
+    ///
+    /// Every instant renders as `YYYY-MM-DDTHH:MM:SS.NNNNNNNNNZ`, so lexical
+    /// order equals chronological order and storage/query layers can compare
+    /// the rendered text without parsing. The display rendering
+    /// ([`to_rfc3339`](Self::to_rfc3339)) keeps the creation offset; this one
+    /// is for ordering and range filters only.
+    ///
+    /// (Needed by the v12 history backfill ahead of this branch in the merge
+    /// order; kept identical so the duplication drops at integration.)
+    #[must_use]
+    pub fn to_rfc3339_utc(&self) -> String {
+        use chrono::{SecondsFormat, Utc};
+        self.0
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Nanos, true)
+    }
+
     pub fn parse_rfc3339(value: &str) -> Result<Self, chrono::ParseError> {
         DateTime::parse_from_rfc3339(value).map(Self)
     }
@@ -85,5 +103,39 @@ mod tests {
             .expect("UTC timestamp must parse");
         let rebuilt = WallClockWithTz::from_datetime(clock.as_datetime());
         assert_eq!(rebuilt, clock);
+    }
+
+    #[test]
+    fn utc_rendering_is_canonical_and_converts_the_offset() {
+        let tokyo = WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00.123456789+09:00")
+            .expect("offset timestamp must parse");
+        assert_eq!(
+            tokyo.to_rfc3339_utc(),
+            "2026-09-12T01:00:00.123456789Z",
+            "the canonical rendering converts to UTC and keeps nanoseconds"
+        );
+        let utc = WallClockWithTz::parse_rfc3339("2026-09-12T01:00:00.123456789Z")
+            .expect("UTC timestamp must parse");
+        assert_eq!(tokyo.to_rfc3339_utc(), utc.to_rfc3339_utc());
+    }
+
+    #[test]
+    fn utc_rendering_lexical_order_matches_instant_order() {
+        let earlier = WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00+09:00")
+            .expect("offset timestamp must parse");
+        let later = WallClockWithTz::parse_rfc3339("2026-09-12T00:30:00-05:00")
+            .expect("offset timestamp must parse");
+        assert!(
+            earlier.as_datetime() < later.as_datetime(),
+            "fixture premise: the instants order this way"
+        );
+        assert!(
+            earlier.to_rfc3339_utc() < later.to_rfc3339_utc(),
+            "canonical UTC text orders exactly like the instants"
+        );
+        assert!(
+            earlier.to_rfc3339() > later.to_rfc3339(),
+            "fixture premise: raw offset renderings would misorder lexically"
+        );
     }
 }
