@@ -7,7 +7,8 @@
 //! bounded and multi-arm (newest, most important, and lexical matches), so an
 //! old relevant Memory is not permanently excluded by a newest-rows window;
 //! scoring stays term overlap, then importance, then recency, and needs no
-//! embedding or index.
+//! embedding. The lexical arm matches query terms against a derived token
+//! index rather than scanning stored content.
 
 use ene_primitive::RawId;
 
@@ -15,13 +16,15 @@ use crate::repository::{LearningRepository, LearningTechnicalError};
 
 /// Rows one candidate arm contributes to one recall.
 ///
-/// Three arms run in one bounded query, so one recall decodes at most
-/// `3 * RECALL_CANDIDATE_LIMIT` rows regardless of how many memories exist.
+/// Three arms run in one bounded, index-backed query, so one recall decodes
+/// at most `3 * RECALL_CANDIDATE_LIMIT` rows regardless of how many memories
+/// exist, and finding those rows visits at most one index walk of `limit`
+/// entries per arm rather than scanning the companion's whole set.
 pub const RECALL_CANDIDATE_LIMIT: u64 = 200;
 
 /// Query terms the lexical arm uses, longest first.
 ///
-/// The cap keeps the generated `instr` predicate a constant size; the
+/// The cap keeps the generated token predicate a constant size; the
 /// longest terms are the most selective lexical evidence.
 const RECALL_MAX_TERMS: usize = 8;
 
@@ -56,11 +59,11 @@ impl core::fmt::Debug for RecalledMemory {
 ///
 /// Suppressed memories are excluded by candidate retrieval, before any cap
 /// applies. Candidates come from one bounded multi-arm query: the newest
-/// rows, the most important rows, and rows matching the longest query
-/// terms, so an old relevant Memory stays reachable after any number of
-/// newer memories. An empty query still returns the highest importance,
-/// newest memories so a caller can supply generic background. Equal scores
-/// keep the repository's newest-first order.
+/// rows, the most important rows, and rows whose derived index tokens carry
+/// the longest query terms, so an old relevant Memory stays reachable after
+/// any number of newer memories. An empty query still returns the highest
+/// importance, newest memories so a caller can supply generic background.
+/// Equal scores keep the repository's newest-first order.
 ///
 /// # Errors
 ///

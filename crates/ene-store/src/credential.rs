@@ -134,6 +134,7 @@ const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("learning_summary", "content"),
     ("learning_memory", "content"),
     ("learning_memory_revision", "content"),
+    ("learning_memory_term", "term"),
     ("management_intent", "rationale_quote"),
 ];
 
