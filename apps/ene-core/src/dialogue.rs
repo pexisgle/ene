@@ -69,19 +69,20 @@ use ene_companion::{
     UndeliveredRepository,
 };
 use ene_credential::{
-    CredentialRefRepository, CredentialSetRepository as _, CredentialStore, REDACTED_CREDENTIAL,
-    ScrubbedText,
+    CredentialRefRepository, CredentialSetRepository as _, CredentialSetRevision, CredentialStore,
+    REDACTED_CREDENTIAL, ScrubbedText,
 };
 use ene_inference::{
-    Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor,
-    InferenceTechnicalError, NotSentReason, PreparedAdmission, ProviderTransport,
+    Admission, AuthorizedInference, DeltaFlow, DeltaSink, InferenceDispatchOutcome,
+    InferenceExecutor, InferenceTechnicalError, NotSentReason, PreparedAdmission,
+    ProviderTransport,
 };
 use ene_learning::{ExperienceCandidate, SecretScrubError, SecretScrubber as _};
-use ene_permission::EvaluationTracker;
+use ene_permission::{CapabilityKind, ConsentRepository as _, EvaluationTracker};
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
-    PresenceCheckRef, PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
+    PresenceCheckRef, PresenceGeneration, PresenceRepository as _, PresenceState, ThinMoveReason,
 };
 use ene_presentation::{
     ClientInputRef, CompanionAvailability, IntakePremise, OpenRound, RevalidationReason, RoundId,
@@ -354,6 +355,7 @@ impl HostHandle {
         live: &LiveInput,
         transport: &impl ProviderTransport,
         sink: &mut dyn FrameSink,
+        stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
         let Some(device_wire) = live.paired_device.clone() else {
             sink.emit(unpaired_close(frame, live));
@@ -664,19 +666,31 @@ impl HostHandle {
                     &round_wire,
                     generation_number,
                 ));
-                let mut seq = 0_u64;
-                let mut on_delta = |delta: &str| {
-                    sink.emit(outgoing_frame(
-                        frame,
-                        live,
-                        WirePayload::TextStreamFrame(TextStreamFrameWire {
-                            stream,
-                            seq,
-                            delta: delta.to_owned(),
-                            is_final: false,
-                        }),
-                    ));
-                    seq += 1;
+                // Baselines the gate on the current record: the owner append
+                // committed under the admission consent, and any move since
+                // fails the attempt claim before the first delta. An
+                // unreadable record fails closed to an interrupted stream,
+                // like any post-acceptance failure.
+                let Ok(Some(consent)) = self.store.load_current(CapabilityKind::Dialogue).await
+                else {
+                    sink.emit(close_frame(frame, live, &stream, StreamClose::Interrupted));
+                    return;
+                };
+                let consent = (consent.id, consent.rev.as_u64());
+                let mut gate = StreamGate {
+                    handle: self,
+                    frame,
+                    live,
+                    client_ref: live.client_ref.clone(),
+                    companion_key: companion_key.clone(),
+                    companion,
+                    stream,
+                    round: accepted,
+                    generation: attribution.generation,
+                    consent,
+                    credential_set,
+                    tx: stream_tx.clone(),
+                    seq: 0,
                 };
                 let outcome = finish_turn(
                     turn,
@@ -684,7 +698,7 @@ impl HostHandle {
                     &executor,
                     &self.store,
                     &scrubber,
-                    &mut on_delta,
+                    &mut gate,
                 )
                 .await;
                 match outcome {
@@ -698,22 +712,10 @@ impl HostHandle {
                         if let Some(experience) = experience {
                             self.queue_learning_formation(*experience);
                         }
-                        // The final empty frame closes the displayed delta
-                        // sequence; the close states completion separately.
-                        sink.emit(outgoing_frame(
-                            frame,
-                            live,
-                            WirePayload::TextStreamFrame(TextStreamFrameWire {
-                                stream,
-                                seq,
-                                delta: String::new(),
-                                is_final: true,
-                            }),
-                        ));
-                        sink.emit(close_frame(frame, live, &stream, StreamClose::Completed));
+                        gate.finish().await;
                     }
                     DialogueOutcome::Interrupted => {
-                        sink.emit(close_frame(frame, live, &stream, StreamClose::Interrupted));
+                        gate.interrupt().await;
                     }
                 }
             }
@@ -1099,18 +1101,173 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         &self,
         authorized: AuthorizedInference,
         prompt: ScrubbedText,
-        on_delta: &mut (dyn FnMut(&str) + Send),
+        sink: &mut (dyn DeltaSink + Send),
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
         ene_inference::dispatch_authorized(
             authorized,
             prompt,
-            on_delta,
+            sink,
             self.store,
             self.store,
             self.store,
             self.transport,
         )
         .await
+    }
+}
+
+/// Presentation gate for one open text stream: each delta is shown only
+/// while its premise is still current.
+///
+/// Baselines are captured at stream open, after the owner append committed,
+/// so they equal the admitted premises: the presented round, the presence
+/// generation, the dialogue consent `(id, rev)`, and the credential-set
+/// revision. Every delta re-reads those premises before it is shown. A newer
+/// submit replacing the open round, a presence move, a consent move, a
+/// lifecycle stop, or a credential registration aborts the stream first, so
+/// no delta produced after invalidation is presented as current. Deltas shown
+/// before the change stay as historical partial presentation; the aborted
+/// provider read never completes, so the stale reply is never adopted.
+/// Delivery itself backpressures through the bounded channel: a slow client
+/// paces the provider instead of queueing unboundedly.
+struct StreamGate<'a> {
+    handle: &'a HostHandle,
+    frame: &'a WireFrame,
+    live: &'a LiveInput,
+    client_ref: String,
+    companion_key: String,
+    companion: CompanionId,
+    stream: StreamWireId,
+    round: RoundId,
+    generation: PresenceGeneration,
+    consent: (String, u64),
+    credential_set: CredentialSetRevision,
+    tx: tokio::sync::mpsc::Sender<WireFrame>,
+    seq: u64,
+}
+
+impl StreamGate<'_> {
+    /// Re-reads every presentation premise; any move — or any unreadable
+    /// premise — stops the stream. Failing closed keeps an unprovable
+    /// premise from presenting as current.
+    async fn current(&self) -> bool {
+        // A newer submit replaced this stream's round: the owner's
+        // attention moved on, so further deltas are not current.
+        let open = self
+            .handle
+            .open_round_for(&self.client_ref, &self.companion_key);
+        if open.is_none_or(|retained| retained.round != self.round) {
+            return false;
+        }
+        let Ok(Some(attribution)) = self
+            .handle
+            .store
+            .load_attribution(self.companion.as_raw())
+            .await
+        else {
+            return false;
+        };
+        if attribution.generation != self.generation {
+            return false;
+        }
+        let consent = match self
+            .handle
+            .store
+            .load_current(CapabilityKind::Dialogue)
+            .await
+        {
+            Ok(Some(record)) => (record.id, record.rev.as_u64()),
+            _ => return false,
+        };
+        if consent != self.consent {
+            return false;
+        }
+        let Ok(lifecycle) = self.handle.store.load_lifecycle(self.companion).await else {
+            return false;
+        };
+        if !matches!(lifecycle, Some(CompanionLifecycle::Running)) {
+            return false;
+        }
+        let Ok(set) = self.handle.store.current_set_revision().await else {
+            return false;
+        };
+        set == self.credential_set
+    }
+
+    fn delta_frame(&self, delta: &str, is_final: bool) -> WireFrame {
+        outgoing_frame(
+            self.frame,
+            self.live,
+            WirePayload::TextStreamFrame(TextStreamFrameWire {
+                stream: self.stream,
+                seq: self.seq,
+                delta: delta.to_owned(),
+                is_final,
+            }),
+        )
+    }
+
+    /// Closes the displayed delta sequence as completed: the final empty
+    /// frame carries the next sequence number, and the close states
+    /// completion separately. A gone client ends the send; the reply is
+    /// already durable, so the close is best-effort either way.
+    async fn finish(&mut self) {
+        if self.tx.send(self.delta_frame("", true)).await.is_err() {
+            return;
+        }
+        if self
+            .tx
+            .send(close_frame(
+                self.frame,
+                self.live,
+                &self.stream,
+                StreamClose::Completed,
+            ))
+            .await
+            .is_err()
+        {
+            // The connection is closing; the durable reply stands without
+            // its close frame, and the loop drops the host future with it.
+        }
+    }
+
+    /// Closes the stream interrupted after a stale or failed run: displayed
+    /// deltas stay, and no reply is adopted.
+    async fn interrupt(&mut self) {
+        if self
+            .tx
+            .send(close_frame(
+                self.frame,
+                self.live,
+                &self.stream,
+                StreamClose::Interrupted,
+            ))
+            .await
+            .is_err()
+        {
+            // Same gone-client close as above; nothing durable is at stake.
+        }
+    }
+}
+
+impl DeltaSink for StreamGate<'_> {
+    fn push_delta<'a>(
+        &'a mut self,
+        delta: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
+        Box::pin(async move {
+            if !self.current().await {
+                return DeltaFlow::Abort("the presentation premise went stale");
+            }
+            let frame = self.delta_frame(delta, false);
+            match self.tx.send(frame).await {
+                Ok(()) => {
+                    self.seq += 1;
+                    DeltaFlow::Continue
+                }
+                Err(_) => DeltaFlow::Abort("the client connection is gone"),
+            }
+        })
     }
 }
 

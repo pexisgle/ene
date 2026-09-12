@@ -16,7 +16,8 @@
 
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
-    Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor, NotSentReason,
+    Admission, AuthorizedInference, DiscardSink, InferenceDispatchOutcome, InferenceExecutor,
+    NotSentReason,
 };
 use ene_learning::{
     ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn, FormationDecision,
@@ -282,7 +283,7 @@ pub async fn begin_turn(
 /// accounting is already decided inside the inference boundary. An adopted
 /// reply appends with its undelivered registration in the same atomic
 /// section; any other reply outcome is interrupted. Provider deltas are
-/// forwarded through `on_delta` as they arrive; display is never a durable
+/// pushed to `sink` as they arrive; display is never a durable
 /// adoption, so an interrupted stream leaves partial display and no reply.
 /// After the durable append, the Experience premise is pinned for the
 /// post-response Learning pass.
@@ -292,7 +293,7 @@ pub async fn finish_turn(
     inference: &impl InferenceExecutor,
     learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
-    on_delta: &mut (dyn FnMut(&str) + Send),
+    sink: &mut (dyn ene_inference::DeltaSink + Send),
 ) -> DialogueOutcome {
     let DialogueTurn {
         input,
@@ -315,7 +316,7 @@ pub async fn finish_turn(
     else {
         return DialogueOutcome::Interrupted;
     };
-    match inference.dispatch(authorized, prompt, on_delta).await {
+    match inference.dispatch(authorized, prompt, sink).await {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
@@ -511,7 +512,7 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
             Ok(Admission::Admitted(authorized)) => {
                 match self
                     .inference
-                    .dispatch(*authorized, prompt, &mut |_delta: &str| {})
+                    .dispatch(*authorized, prompt, &mut DiscardSink)
                     .await
                 {
                     Ok(InferenceDispatchOutcome::Completed {

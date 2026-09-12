@@ -451,21 +451,8 @@ where
     }
 }
 
-/// Forwards host responses to the connection loop as they are emitted.
 #[cfg(unix)]
-struct ChannelSink {
-    tx: tokio::sync::mpsc::UnboundedSender<WireFrame>,
-}
-
-#[cfg(unix)]
-impl crate::serve::FrameSink for ChannelSink {
-    fn emit(&mut self, frame: WireFrame) {
-        if self.tx.send(frame).is_err() {
-            // The receiver is gone because the connection is closing; the
-            // host future is aborted with it and there is nowhere to write.
-        }
-    }
-}
+use crate::serve::STREAM_BUFFER_FRAMES;
 
 /// Applies one response's table bookkeeping and writes it to the socket.
 ///
@@ -547,11 +534,19 @@ async fn serve_connection<T>(
         };
         // The handle emits each response as it is decided; this loop writes
         // them while the host future is still running, so an early accept and
-        // provider deltas reach the socket before provider completion.
-        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<WireFrame>();
-        let mut sink = ChannelSink { tx: frame_tx };
-        let mut host =
-            std::pin::pin!(handle.handle_frame_to(frame, live, transport.as_ref(), &mut sink,));
+        // provider deltas reach the socket before provider completion. The
+        // channel is bounded: stream deltas backpressure the provider when
+        // the client falls behind instead of queueing without limit.
+        let (frame_tx, mut frame_rx) =
+            tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
+        let mut sink = frame_tx.clone();
+        let mut host = std::pin::pin!(handle.handle_frame_to(
+            frame,
+            live,
+            transport.as_ref(),
+            &mut sink,
+            &frame_tx,
+        ));
         let mut failed = false;
         let mut terminal = false;
         let mut host_done = false;

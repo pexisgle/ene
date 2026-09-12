@@ -3624,22 +3624,10 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
     );
 }
 
-/// Test sink that forwards host frames through a channel, standing in for
-/// the connection loop.
-struct ChannelFrameSink {
-    tx: tokio::sync::mpsc::UnboundedSender<ene_plugin_ipc::WireFrame>,
-}
-
-impl crate::serve::FrameSink for ChannelFrameSink {
-    fn emit(&mut self, frame: ene_plugin_ipc::WireFrame) {
-        if self.tx.send(frame).is_err() {
-            // The test dropped the receiver; nothing to forward to.
-        }
-    }
-}
-
 /// Streaming provider that emits deltas and pauses after the first one until
-/// released, so a test can observe delivery before completion.
+/// released, so a test can observe delivery before completion. It honors a
+/// sink abort the way production transports do: the read stops and the call
+/// reports the abort instead of completing with a gap.
 struct GatedStreamingTransport {
     deltas: Vec<String>,
     release: tokio::sync::Notify,
@@ -3686,7 +3674,7 @@ impl ProviderTransport for GatedStreamingTransport {
     fn complete_streaming<'a>(
         &'a self,
         _req: ene_inference::ProviderRequest,
-        on_delta: &'a mut (dyn FnMut(&str) + Send),
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -3700,7 +3688,11 @@ impl ProviderTransport for GatedStreamingTransport {
     > {
         Box::pin(async move {
             for (index, delta) in self.deltas.iter().enumerate() {
-                on_delta(delta);
+                if let ene_inference::DeltaFlow::Abort(reason) = sink.push_delta(delta).await {
+                    return Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    });
+                }
                 if index == 0 && self.deltas.len() > 1 {
                     self.release.notified().await;
                 }
@@ -3742,7 +3734,7 @@ impl ProviderTransport for FailingStreamingTransport {
     fn complete_streaming<'a>(
         &'a self,
         _req: ene_inference::ProviderRequest,
-        on_delta: &'a mut (dyn FnMut(&str) + Send),
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -3755,7 +3747,7 @@ impl ProviderTransport for FailingStreamingTransport {
         >,
     > {
         Box::pin(async move {
-            on_delta("Hel");
+            let _ = sink.push_delta("Hel").await;
             Err(ene_inference::InferenceTechnicalError::ProviderTransportFailed("down".to_owned()))
         })
     }
@@ -3779,9 +3771,10 @@ async fn streaming_emits_accept_and_first_delta_before_provider_completion() {
         "hi",
         live.connection_id,
     );
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut sink = ChannelFrameSink { tx: tx.clone() };
-    let mut host = Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink));
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut host =
+        Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink, &stream_tx));
 
     let mut early = Vec::new();
     while early.len() < 3 {
@@ -3815,7 +3808,7 @@ async fn streaming_emits_accept_and_first_delta_before_provider_completion() {
     transport.release().await;
     host.await;
     drop(sink);
-    drop(tx);
+    drop(stream_tx);
     let mut frames = early;
     while let Some(frame) = rx.recv().await {
         frames.push(frame);
@@ -3945,4 +3938,257 @@ async fn non_streaming_provider_delivers_the_full_text_as_one_delta() {
         ),
         "the fallback still completes"
     );
+}
+
+/// A newer submit replacing the open round mid-stream stops presentation:
+/// the first delta may stay as historical partial display, but no later
+/// delta is shown, the stream closes interrupted, and the stale reply is
+/// never adopted — while the overtaking round completes normally.
+#[tokio::test]
+async fn streaming_stops_presenting_once_a_newer_submit_replaces_the_round() -> Result<(), String> {
+    use ene_inference::fake::FakeProviderTransport;
+
+    let gated = GatedStreamingTransport::new(&["Hel", "lo"]);
+    let live = live_input("client-stale-stream");
+    let (handle, _dir) = round_test_handle("dlg-stale-stream", &live, &gated).await?;
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stale-1",
+        "first input",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live.clone(), &gated, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
+        return Err(String::from("the third frame is the first delta"));
+    };
+    if shown.delta != "Hel" {
+        return Err(format!(
+            "only the pre-stale delta shows, got {:?}",
+            shown.delta
+        ));
+    }
+    // The overtaking submit mints a new round while the first provider is
+    // still parked, so the first stream's premise goes stale mid-flight.
+    let overtaking = FakeProviderTransport::new(String::from("second reply"), None);
+    let generation = current_generation(&handle).await?;
+    let mut second = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-stale-2",
+        "second input",
+        live.connection_id,
+    );
+    if let WirePayload::SubmitTextInput(ref mut input) = second.payload {
+        input.fresh = true;
+    }
+    let second_frames = handle.handle_frame(second, live.clone(), &overtaking).await;
+    if !matches!(
+        second_frames.last().map(|frame| &frame.payload),
+        Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+    ) {
+        return Err(format!(
+            "the overtaking round completes, got {second_frames:?}"
+        ));
+    }
+    gated.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    let shown: Vec<&str> = first_frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        vec!["Hel"],
+        "no delta produced after invalidation is presented, got {shown:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the stale stream closes interrupted, got {first_frames:?}"
+    );
+    let sequences: Vec<u64> = first_frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sequences,
+        vec![0],
+        "the aborted stream keeps a gap-free prefix, got {sequences:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        3,
+        "both owner inputs plus the overtaking reply are durable, never the stale one"
+    );
+    Ok(())
+}
+
+/// A stalled client paces the provider instead of queueing without limit:
+/// pushes beyond the buffer pend, the queued frames never exceed the bound,
+/// and once drained every delta still arrives gap-free with a normal
+/// completion — no silent loss, no gap presented as completed.
+#[tokio::test]
+async fn slow_client_backpressures_the_provider_instead_of_queueing() -> Result<(), String> {
+    use ene_companion::CompanionRepository as _;
+    use ene_credential::CredentialSetRepository as _;
+    use ene_inference::{DeltaFlow, DeltaSink as _};
+    use ene_permission::{CapabilityKind, ConsentRepository as _};
+    use ene_presentation::OpenRound;
+
+    let transport = ok_transport();
+    let live = live_input("client-slow");
+    let (handle, _dir) = round_test_handle("dlg-slow", &live, &transport).await?;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("the companion must resolve: {error:?}"))?;
+    let round = RoundId::from_raw(RawId::new());
+    let generation = current_generation(&handle).await?;
+    handle.record_open_round(
+        &live.client_ref,
+        &companion.as_raw().as_uuid().to_string(),
+        OpenRound {
+            companion: companion.as_raw(),
+            client: device_client("client-slow"),
+            round,
+            generation: ene_presence::PresenceGeneration::from_u64(generation),
+        },
+    );
+    let consent = handle
+        .store
+        .load_current(CapabilityKind::Dialogue)
+        .await
+        .map_err(|error| format!("consent must load: {error:?}"))?
+        .ok_or(String::from("setup must assign dialogue consent"))?;
+    let credential_set = handle
+        .store
+        .current_set_revision()
+        .await
+        .map_err(|error| format!("the credential set must load: {error:?}"))?;
+    let probe = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-slow",
+        "probe",
+        live.connection_id,
+    );
+    // A tiny buffer stands in for the production bound; the policy under
+    // test is boundedness itself, not the constant.
+    let (gate_tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let mut gate = super::StreamGate {
+        handle: &handle,
+        frame: &probe,
+        live: &live,
+        client_ref: live.client_ref.clone(),
+        companion_key: companion.as_raw().as_uuid().to_string(),
+        companion,
+        stream: ene_api::v1::refs::StreamWireId(RawId::new().as_uuid()),
+        round,
+        generation: ene_presence::PresenceGeneration::from_u64(generation),
+        consent: (consent.id, consent.rev.as_u64()),
+        credential_set,
+        tx: gate_tx,
+        seq: 0,
+    };
+    for index in 0..2 {
+        if gate.push_delta(&format!("d{index}")).await != DeltaFlow::Continue {
+            return Err(String::from("a drained buffer must accept pushes"));
+        }
+    }
+    // The receiver stays parked, modelling a stalled client: the next push
+    // must pend rather than queue a third frame.
+    tokio::select! {
+        biased;
+        _ = gate.push_delta("d2") => {
+            return Err(String::from("a stalled client must pace the provider, not queue"));
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+    }
+    // Drain: the two queued frames, then the rest paced by the drain, then
+    // the completion. Every delta arrives exactly once, in order.
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        received.push(
+            rx.recv()
+                .await
+                .ok_or(String::from("queued frames must arrive"))?,
+        );
+    }
+    for index in 2..10 {
+        if gate.push_delta(&format!("d{index}")).await != DeltaFlow::Continue {
+            return Err(String::from("a drained buffer must accept pushes"));
+        }
+        received.push(
+            rx.recv()
+                .await
+                .ok_or(String::from("paced frames must arrive"))?,
+        );
+    }
+    gate.finish().await;
+    drop(gate);
+    while let Some(frame) = rx.recv().await {
+        received.push(frame);
+    }
+    let mut deltas = Vec::new();
+    let mut sequences = Vec::new();
+    let mut final_seen = false;
+    for frame in &received {
+        if let WirePayload::TextStreamFrame(delta) = &frame.payload {
+            deltas.push(delta.delta.clone());
+            sequences.push(delta.seq);
+            if delta.is_final {
+                final_seen = true;
+            }
+        }
+    }
+    let expected: Vec<String> = (0..10).map(|index| format!("d{index}")).collect();
+    assert_eq!(
+        deltas[..10],
+        expected,
+        "no delta is silently lost, got {deltas:?}"
+    );
+    assert_eq!(
+        sequences,
+        (0..=10).collect::<Vec<_>>(),
+        "the sequence stays gap-free through backpressure, got {sequences:?}"
+    );
+    assert!(final_seen, "completion carries the final frame");
+    assert!(
+        matches!(
+            received.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Completed
+        ),
+        "a paced stream still completes, got {received:?}"
+    );
+    Ok(())
 }

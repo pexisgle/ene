@@ -22,7 +22,8 @@ use ene_credential::{CredentialStore, CredentialTechnicalError};
 use serde::Deserialize;
 
 use super::{
-    InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport, RawUsage,
+    DeltaFlow, DeltaSink, InferenceTechnicalError, ProviderRequest, ProviderResponse,
+    ProviderTransport, RawUsage,
 };
 
 /// Base URL for the `OpenAI` API; tests inject a local URL instead.
@@ -103,14 +104,16 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
     /// each `response.output_text.delta` as it arrives.
     ///
     /// The returned response still carries the full assembled text and usage,
-    /// so adoption, durable History, and display remain separate facts.
+    /// so adoption, durable History, and display remain separate facts. When
+    /// the sink aborts, the SSE read stops with it: no later delta is
+    /// presented, and the call never completes normally with a gap.
     fn complete_streaming<'a>(
         &'a self,
         req: ProviderRequest,
-        on_delta: &'a mut (dyn FnMut(&str) + Send),
+        sink: &'a mut (dyn DeltaSink + Send),
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + 'a>>
     {
-        Box::pin(self.complete_streaming_inner(req, on_delta))
+        Box::pin(self.complete_streaming_inner(req, sink))
     }
 }
 
@@ -171,7 +174,7 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
     async fn complete_streaming_inner(
         &self,
         req: ProviderRequest,
-        on_delta: &mut (dyn FnMut(&str) + Send),
+        sink: &mut (dyn DeltaSink + Send),
     ) -> Result<ProviderResponse, InferenceTechnicalError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{base}/v1/responses");
@@ -222,7 +225,13 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
             while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
                 let raw: Vec<u8> = pending.drain(..=newline).collect();
                 let line = String::from_utf8_lossy(&raw);
-                assembler.feed_line(line.trim_end_matches(['\r', '\n']), on_delta)?;
+                if let Some(delta) = assembler.feed_line(line.trim_end_matches(['\r', '\n']))?
+                    && let DeltaFlow::Abort(reason) = sink.push_delta(&delta).await
+                {
+                    return Err(InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    });
+                }
             }
         }
         assembler.finish()
@@ -244,17 +253,16 @@ struct StreamAssembler {
 }
 
 impl StreamAssembler {
-    fn feed_line(
-        &mut self,
-        line: &str,
-        on_delta: &mut (dyn FnMut(&str) + Send),
-    ) -> Result<(), InferenceTechnicalError> {
+    /// Feeds one event-stream line, returning the text delta it carries, if
+    /// any. The caller pushes the delta to its sink: parsing stays a pure
+    /// sync mapping with no delivery policy of its own.
+    fn feed_line(&mut self, line: &str) -> Result<Option<String>, InferenceTechnicalError> {
         let Some(data) = line.strip_prefix("data:") else {
-            return Ok(());
+            return Ok(None);
         };
         let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
-            return Ok(());
+            return Ok(None);
         }
         let event: serde_json::Value = serde_json::from_str(data).map_err(|_| {
             InferenceTechnicalError::ProviderTransportFailed("decode provider stream".to_owned())
@@ -262,9 +270,10 @@ impl StreamAssembler {
         match event.get("type").and_then(|kind| kind.as_str()) {
             Some("response.output_text.delta") => {
                 if let Some(delta) = event.get("delta").and_then(|delta| delta.as_str()) {
-                    on_delta(delta);
                     self.text.push_str(delta);
+                    return Ok(Some(delta.to_owned()));
                 }
+                Ok(None)
             }
             Some("response.completed") => {
                 self.usage = event
@@ -273,6 +282,7 @@ impl StreamAssembler {
                     .and_then(|usage| serde_json::from_value::<UsageObj>(usage.clone()).ok())
                     .and_then(UsageObj::into_raw);
                 self.completed = true;
+                Ok(None)
             }
             Some("response.incomplete") => {
                 let reason = event
@@ -281,23 +291,18 @@ impl StreamAssembler {
                     .and_then(|details| details.get("reason"))
                     .and_then(|reason| reason.as_str())
                     .unwrap_or("unknown");
-                return Err(InferenceTechnicalError::ProviderTransportFailed(format!(
+                Err(InferenceTechnicalError::ProviderTransportFailed(format!(
                     "provider response incomplete: {reason}"
-                )));
+                )))
             }
-            Some("response.failed") => {
-                return Err(InferenceTechnicalError::ProviderTransportFailed(
-                    "provider response failed".to_owned(),
-                ));
-            }
-            Some("error") => {
-                return Err(InferenceTechnicalError::ProviderTransportFailed(
-                    "provider stream error".to_owned(),
-                ));
-            }
-            _ => {}
+            Some("response.failed") => Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider response failed".to_owned(),
+            )),
+            Some("error") => Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider stream error".to_owned(),
+            )),
+            _ => Ok(None),
         }
-        Ok(())
     }
 
     fn finish(self) -> Result<ProviderResponse, InferenceTechnicalError> {
@@ -757,16 +762,14 @@ mod tests {
     fn stream_assembler_emits_deltas_in_order_and_reports_usage() {
         let mut assembler = super::StreamAssembler::default();
         let mut deltas = Vec::new();
-        let mut on_delta = |delta: &str| deltas.push(delta.to_owned());
         for line in [
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}",
             "event: response.output_text.delta",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}",
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
         ] {
-            assembler
-                .feed_line(line, &mut on_delta)
-                .expect("a known event must parse");
+            let fed = assembler.feed_line(line).expect("a known event must parse");
+            deltas.extend(fed);
         }
         assert_eq!(deltas, vec!["Hel", "lo"]);
         let response = assembler.finish().expect("the stream completed");
@@ -783,13 +786,10 @@ mod tests {
     #[test]
     fn stream_assembler_treats_missing_completion_as_failure() {
         let mut assembler = super::StreamAssembler::default();
-        let mut on_delta = |_delta: &str| {};
-        assembler
-            .feed_line(
-                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
-                &mut on_delta,
-            )
+        let fed = assembler
+            .feed_line("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}")
             .expect("the delta parses");
+        assert_eq!(fed.as_deref(), Some("partial"));
         let result = assembler.finish();
         assert!(matches!(
             result,
@@ -815,8 +815,7 @@ mod tests {
             ),
         ] {
             let mut assembler = super::StreamAssembler::default();
-            let mut on_delta = |_delta: &str| {};
-            let result = assembler.feed_line(line, &mut on_delta);
+            let result = assembler.feed_line(line);
             let InferenceTechnicalError::ProviderTransportFailed(reason) =
                 result.expect_err("failure events must fail")
             else {
@@ -834,16 +833,16 @@ mod tests {
     fn stream_assembler_ignores_unknown_events_and_malformed_lines() {
         let mut assembler = super::StreamAssembler::default();
         let mut deltas = Vec::new();
-        let mut on_delta = |delta: &str| deltas.push(delta.to_owned());
-        assembler
-            .feed_line("event: response.output_text.delta", &mut on_delta)
-            .expect("a non-data line is ignored");
-        assembler
-            .feed_line(
-                "data: {\"type\":\"response.future_event\",\"x\":1}",
-                &mut on_delta,
-            )
-            .expect("an unknown event is ignored");
+        deltas.extend(
+            assembler
+                .feed_line("event: response.output_text.delta")
+                .expect("a non-data line is ignored"),
+        );
+        deltas.extend(
+            assembler
+                .feed_line("data: {\"type\":\"response.future_event\",\"x\":1}")
+                .expect("an unknown event is ignored"),
+        );
         assert!(deltas.is_empty());
     }
 

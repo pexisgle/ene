@@ -113,17 +113,43 @@ pub enum CoreError {
 
 /// Where Host responses go at the point they are decided.
 ///
-/// Direct callers collect frames into a `Vec`; the connection loop forwards
-/// each frame to the socket as it is emitted, which is what makes an early
-/// accept and incremental provider deltas observable before the host future
-/// completes.
+/// The connection loop forwards each frame to the socket as it is emitted,
+/// which is what makes an early accept and incremental provider deltas
+/// observable before the host future completes. Control frames `try_send`
+/// on the bounded stream channel; the open stream's deltas pace the
+/// provider through real backpressure on the same channel.
 pub trait FrameSink: Send {
     fn emit(&mut self, frame: WireFrame);
 }
 
-impl FrameSink for Vec<WireFrame> {
+/// Queued frames per connection between the Host and the socket writer.
+///
+/// Bounds slow-client memory: provider-paced deltas backpressure through
+/// this capacity (the stream gate awaits room) instead of accumulating
+/// without limit, while control frames stay far below it — each call emits
+/// only a handful on a fresh channel, so `try_send` there fails only when
+/// the receiver is gone.
+pub(crate) const STREAM_BUFFER_FRAMES: usize = 32;
+
+impl FrameSink for tokio::sync::mpsc::Sender<WireFrame> {
     fn emit(&mut self, frame: WireFrame) {
-        self.push(frame);
+        use tokio::sync::mpsc::error::TrySendError;
+
+        match self.try_send(frame) {
+            Ok(()) => {}
+            // The receiver is gone because the connection is closing; the
+            // host future is dropped with it and there is nowhere to write.
+            Err(TrySendError::Closed(_)) => {}
+            // Control frames are O(1) per call on a fresh channel while the
+            // stream gate paces deltas with real backpressure, so a full
+            // buffer here means the control allowance was exceeded.
+            Err(TrySendError::Full(_)) => {
+                debug_assert!(
+                    false,
+                    "control frames must stay far below the stream buffer"
+                );
+            }
+        }
     }
 }
 
@@ -399,10 +425,26 @@ impl HostHandle {
         live: LiveInput,
         transport: &impl ProviderTransport,
     ) -> Vec<WireFrame> {
-        let mut collected = Vec::new();
-        self.handle_frame_to(frame, live, transport, &mut collected)
+        let (stream_tx, stream_rx) = tokio::sync::mpsc::channel(STREAM_BUFFER_FRAMES);
+        let drain = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            let mut stream_rx = stream_rx;
+            while let Some(frame) = stream_rx.recv().await {
+                frames.push(frame);
+            }
+            frames
+        });
+        let mut sink = stream_tx.clone();
+        self.handle_frame_to(frame, live, transport, &mut sink, &stream_tx)
             .await;
-        collected
+        drop(stream_tx);
+        drop(sink);
+        match drain.await {
+            Ok(frames) => frames,
+            // The drain task only collects frames, so a panic there is the
+            // task's own panic: resume it rather than reporting success.
+            Err(join) => std::panic::resume_unwind(join.into_panic()),
+        }
     }
 
     /// [`HostHandle::handle_frame`] with incremental emission.
@@ -412,13 +454,17 @@ impl HostHandle {
     /// real: the connection loop forwards them to the socket while this
     /// future still awaits the provider, instead of splitting a completed
     /// response afterwards. Other frames emit their single response as
-    /// before.
+    /// before. `stream_tx` feeds the same channel and carries the open
+    /// stream's ordered frames; the submit path emits each response on
+    /// exactly one of the two senders in emission order, so the drained
+    /// channel preserves the response order.
     pub async fn handle_frame_to(
         &self,
         frame: WireFrame,
         live: LiveInput,
         transport: &impl ProviderTransport,
         sink: &mut dyn FrameSink,
+        stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
         if frame.envelope.message_type.0 != frame.payload.message_type() {
             sink.emit(reject_frame(
@@ -481,7 +527,7 @@ impl HostHandle {
                     sink.emit(unpaired_close(&frame, &live));
                     return;
                 }
-                self.submit_text(&frame, submit, &live, transport, sink)
+                self.submit_text(&frame, submit, &live, transport, sink, stream_tx)
                     .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
