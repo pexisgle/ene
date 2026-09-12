@@ -77,10 +77,13 @@ pub enum Command {
         limit: u64,
     },
     /// Read-only Memory view: current recognition, scope, temporal meaning,
-    /// importance, grounds, and past revisions. `after` continues from the
-    /// `next:` id of the previous page.
+    /// and importance. `after` continues the current list from the `next:` id
+    /// of the previous page; `revisions` selects one Memory's paged revision
+    /// history (with `after_revision` continuing it).
     Memory {
         after: Option<String>,
+        revisions: Option<String>,
+        after_revision: Option<u64>,
     },
 }
 
@@ -214,6 +217,8 @@ fn parse_status(args: &[String]) -> Result<Command, CliError> {
 
 fn parse_memory(args: &[String]) -> Result<Command, CliError> {
     let mut after: Option<String> = None;
+    let mut revisions: Option<String> = None;
+    let mut after_revision: Option<u64> = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -227,6 +232,31 @@ fn parse_memory(args: &[String]) -> Result<Command, CliError> {
                 after = Some(value.clone());
                 index += 1;
             }
+            "--revisions" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(CliError::Usage(format!(
+                        "missing value for --revisions\n{USAGE}"
+                    )));
+                };
+                revisions = Some(value.clone());
+                index += 1;
+            }
+            "--after-revision" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(CliError::Usage(format!(
+                        "missing value for --after-revision\n{USAGE}"
+                    )));
+                };
+                let Some(parsed) = value.parse::<u64>().ok() else {
+                    return Err(CliError::Usage(format!(
+                        "invalid --after-revision: {value}\n{USAGE}"
+                    )));
+                };
+                after_revision = Some(parsed);
+                index += 1;
+            }
             other => {
                 return Err(CliError::Usage(format!(
                     "unknown argument: {other}\n{USAGE}"
@@ -234,7 +264,21 @@ fn parse_memory(args: &[String]) -> Result<Command, CliError> {
             }
         }
     }
-    Ok(Command::Memory { after })
+    if after.is_some() && revisions.is_some() {
+        return Err(CliError::Usage(format!(
+            "--after and --revisions select different pages\n{USAGE}"
+        )));
+    }
+    if after_revision.is_some() && revisions.is_none() {
+        return Err(CliError::Usage(format!(
+            "--after-revision requires --revisions MEMORY\n{USAGE}"
+        )));
+    }
+    Ok(Command::Memory {
+        after,
+        revisions,
+        after_revision,
+    })
 }
 
 /// A word starting with `--` is never treated as text; such input is a usage
@@ -355,15 +399,24 @@ pub fn setup_view_request() -> ManagementViewRequest {
             .map(|section| (*section).to_string())
             .collect(),
         memory_after: None,
+        memory_revisions_of: None,
+        memory_revisions_after: None,
     }
 }
 
-/// Requests only the read-only Memory section, optionally continuing after
-/// the `next:` id of a previous page.
-pub fn memory_view_request(after: Option<&str>) -> ManagementViewRequest {
+/// Requests only the read-only Memory section. `after` continues the current
+/// list from a previous page; `revisions_of` selects one Memory's paged
+/// revision history, continued by `after_revision`.
+pub fn memory_view_request(
+    after: Option<&str>,
+    revisions_of: Option<&str>,
+    after_revision: Option<u64>,
+) -> ManagementViewRequest {
     ManagementViewRequest {
         sections: vec![HOST_MEMORY_SECTION.to_string()],
         memory_after: after.map(str::to_owned),
+        memory_revisions_of: revisions_of.map(str::to_owned),
+        memory_revisions_after: after_revision,
     }
 }
 
@@ -762,7 +815,12 @@ mod tests {
     fn memory_parses_without_operands() {
         let command = (parse_command(&args(&["memory"]))).expect("memory");
         assert!(
-            command == Command::Memory { after: None },
+            command
+                == Command::Memory {
+                    after: None,
+                    revisions: None,
+                    after_revision: None,
+                },
             "memory must parse, got {command:?}"
         );
     }
@@ -774,8 +832,62 @@ mod tests {
         assert_eq!(
             command,
             Command::Memory {
-                after: Some(String::from("memory-1"))
+                after: Some(String::from("memory-1")),
+                revisions: None,
+                after_revision: None,
             }
+        );
+    }
+
+    #[test]
+    fn memory_revisions_parse_with_an_optional_cursor() {
+        let command = (parse_command(&args(&["memory", "--revisions", "memory-1"])))
+            .expect("memory --revisions");
+        assert_eq!(
+            command,
+            Command::Memory {
+                after: None,
+                revisions: Some(String::from("memory-1")),
+                after_revision: None,
+            }
+        );
+        let paged = (parse_command(&args(&[
+            "memory",
+            "--revisions",
+            "memory-1",
+            "--after-revision",
+            "20",
+        ])))
+        .expect("memory --revisions --after-revision");
+        assert_eq!(
+            paged,
+            Command::Memory {
+                after: None,
+                revisions: Some(String::from("memory-1")),
+                after_revision: Some(20),
+            }
+        );
+    }
+
+    #[test]
+    fn memory_rejects_mixed_or_orphaned_cursors() {
+        assert_usage(
+            parse_command(&args(&["memory", "--after", "a", "--revisions", "b"])),
+            "mixed list and revision cursors",
+        );
+        assert_usage(
+            parse_command(&args(&["memory", "--after-revision", "1"])),
+            "revision cursor without a memory",
+        );
+        assert_usage(
+            parse_command(&args(&[
+                "memory",
+                "--revisions",
+                "b",
+                "--after-revision",
+                "soon",
+            ])),
+            "non-numeric revision cursor",
         );
     }
 
@@ -1154,17 +1266,32 @@ mod tests {
                     .collect::<Vec<String>>(),
             "setup --show requests the Host sections: {setup:?}"
         );
-        let memory = memory_view_request(None);
+        let memory = memory_view_request(None, None, None);
         assert!(
             memory.sections == vec![HOST_MEMORY_SECTION.to_string()]
                 && memory.memory_after.is_none(),
             "memory requests exactly the read-only Memory section: {memory:?}"
         );
-        let paged = memory_view_request(Some("memory-1"));
+        let paged = memory_view_request(Some("memory-1"), None, None);
         assert_eq!(
             paged.memory_after,
             Some(String::from("memory-1")),
             "the page cursor rides the typed request field"
+        );
+        let revisions = memory_view_request(None, Some("memory-2"), Some(20));
+        assert_eq!(
+            revisions.memory_revisions_of,
+            Some(String::from("memory-2")),
+            "the revision selector rides its own typed field"
+        );
+        assert_eq!(
+            revisions.memory_revisions_after,
+            Some(20),
+            "the revision cursor rides its own typed field"
+        );
+        assert!(
+            revisions.memory_after.is_none(),
+            "a revision request is not a list page: {revisions:?}"
         );
         let history = history_request("companion-1", 7);
         assert!(

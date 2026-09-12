@@ -157,28 +157,41 @@ impl LearningRepository for FakeLearningRepository {
     async fn list_memory_revisions(
         &self,
         memory: MemoryId,
+        after: Option<MemoryRevision>,
+        limit: u64,
     ) -> Result<Vec<MemoryRevisionRecord>, LearningTechnicalError> {
+        let cap = usize::try_from(limit).unwrap_or(usize::MAX);
         Ok(self
             .revisions
             .lock()
             .expect("fake revision lock")
             .iter()
-            .filter(|revision| revision.memory == memory)
+            .filter(|revision| {
+                revision.memory == memory
+                    && after.is_none_or(|after| revision.revision.as_u64() > after.as_u64())
+            })
+            .take(cap)
             .cloned()
             .collect())
     }
 
-    async fn load_summary(
+    async fn load_summaries(
         &self,
-        summary: SummaryId,
-    ) -> Result<Option<SummaryRecord>, LearningTechnicalError> {
-        Ok(self
-            .summaries
-            .lock()
-            .expect("fake summary lock")
-            .iter()
-            .find(|stored| stored.id == summary)
-            .cloned())
+        ids: &[SummaryId],
+    ) -> Result<Vec<SummaryRecord>, LearningTechnicalError> {
+        let summaries = self.summaries.lock().expect("fake summary lock");
+        let mut seen: Vec<SummaryId> = Vec::new();
+        let mut loaded = Vec::new();
+        for id in ids {
+            if seen.contains(id) {
+                continue;
+            }
+            seen.push(*id);
+            if let Some(stored) = summaries.iter().find(|stored| stored.id == *id) {
+                loaded.push(stored.clone());
+            }
+        }
+        Ok(loaded)
     }
 }
 

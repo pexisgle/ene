@@ -2429,19 +2429,115 @@ async fn learning_new_memory_keeps_summary_grounds_and_current_row() {
     assert_eq!(current.importance, Importance::clamped(4));
     assert_eq!(current.temporal, TemporalMeaning::Enduring);
 
-    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    let revisions = store
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
     assert_eq!(revisions.len(), 1);
     assert_eq!(revisions[0].change, ChangeKind::Initial);
     assert_eq!(revisions[0].summary, Some(evidence.id));
     assert_eq!(revisions[0].content, "owner likes jasmine tea");
 
-    let stored_evidence = store.load_summary(evidence.id).await.unwrap();
+    let stored_evidence = store
+        .load_summaries(&[evidence.id])
+        .await
+        .unwrap()
+        .into_iter()
+        .next();
     let Some(stored_evidence) = stored_evidence else {
         panic!("the evidence summary must be stored");
     };
     assert_eq!(stored_evidence.content, "owner likes jasmine tea");
     assert_eq!(stored_evidence.source.kind, ExperienceSourceKind::Dialogue);
     assert_eq!(stored_evidence.scope, LearningScope::companion(companion));
+}
+
+/// Revision pages bound the rows read and still cover every revision exactly
+/// once; a shared Summary is one row in the batch read, and a missing id
+/// stays absent instead of being fabricated.
+#[tokio::test]
+async fn memory_revision_pages_and_summary_batches_are_bounded() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "shared grounds");
+    let first = store
+        .commit_memory_change(commit(
+            Some(evidence.clone()),
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "revision one",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(first, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let mut expected = vec![MemoryRevision::initial()];
+    let mut revision = MemoryRevision::initial();
+    for index in 1..=205_u64 {
+        let outcome = store
+            .commit_memory_change(commit(
+                Some(evidence.clone()),
+                learning_change(
+                    companion,
+                    MemoryTarget::Existing {
+                        id: memory,
+                        expected_revision: revision,
+                    },
+                    &format!("revision {index}"),
+                    ChangeKind::Refined,
+                    false,
+                ),
+            ))
+            .await
+            .unwrap();
+        let MemoryChangeOutcome::Committed { revision: next, .. } = outcome else {
+            panic!("revision {index} must commit: {outcome:?}");
+        };
+        expected.push(next);
+        revision = next;
+    }
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list_memory_revisions(memory, cursor, 7)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        for revision in &page {
+            seen.push(revision.revision);
+        }
+        cursor = page.last().map(|revision| revision.revision);
+    }
+    assert_eq!(seen, expected, "pages cover every revision without skips");
+    assert!(
+        store
+            .list_memory_revisions(memory, None, 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a zero limit reads no revisions"
+    );
+
+    let ids: Vec<SummaryId> = expected
+        .iter()
+        .map(|_| evidence.id)
+        .chain(std::iter::once(SummaryId::generate()))
+        .collect();
+    let loaded = store.load_summaries(&ids).await.unwrap();
+    assert_eq!(
+        loaded.len(),
+        1,
+        "the shared grounds and the missing id read as one and nothing"
+    );
+    assert!(store.load_summaries(&[]).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2492,13 +2588,19 @@ async fn learning_reused_summary_identity_with_a_different_payload_is_refused() 
     );
     assert!(
         store
-            .list_memory_revisions(second)
+            .list_memory_revisions(second, None, 100)
             .await
             .unwrap()
             .is_empty(),
         "the refused change must leave no current row"
     );
-    let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
+    let stored = store
+        .load_summaries(&[evidence.id])
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(stored.content, "owner likes jasmine tea");
 }
 
@@ -2563,11 +2665,18 @@ async fn learning_stale_change_leaves_no_orphan_summary() {
         })
     );
     assert_eq!(
-        store.load_summary(evidence.id).await,
-        Ok(None),
+        store.load_summaries(&[evidence.id]).await,
+        Ok(Vec::new()),
         "a rejected change must not strand its Summary"
     );
-    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 2);
+    assert_eq!(
+        store
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -2619,7 +2728,10 @@ async fn learning_update_appends_a_revision_and_keeps_the_previous_one() {
     assert_eq!(memories[0].content, "owner lives in Osaka");
     assert_eq!(memories[0].revision, MemoryRevision::from_u64(2));
 
-    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    let revisions = store
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
     assert_eq!(revisions.len(), 2, "the old revision is kept");
     assert_eq!(revisions[0].content, "owner lives in Tokyo");
     assert_eq!(revisions[1].content, "owner lives in Osaka");
@@ -2683,7 +2795,10 @@ async fn learning_stale_update_is_rejected_without_overwriting() {
             current: MemoryRevision::from_u64(2),
         })
     );
-    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    let revisions = store
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
     assert_eq!(
         revisions[1].content, "owner switched to the day shift",
         "the stale result must not overwrite the newer recognition"
@@ -2787,7 +2902,10 @@ async fn learning_forgetting_suppresses_recall_and_keeps_content_and_revisions()
         forgotten,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
-    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    let revisions = store
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
     assert_eq!(revisions.len(), 2, "revision history is kept");
     assert_eq!(revisions[0].content, "owner was worried about the launch");
     assert!(revisions[1].recall_suppressed, "recall is suppressed");
@@ -2813,7 +2931,10 @@ async fn learning_forgetting_suppresses_recall_and_keeps_content_and_revisions()
         remembered,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
-    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    let revisions = store
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
     assert!(!revisions[2].recall_suppressed);
     assert_eq!(revisions.len(), 3);
 }
@@ -2903,10 +3024,18 @@ async fn learning_memory_survives_reopen() {
         .unwrap();
     assert_eq!(memories.len(), 1, "memory must survive reopen");
     assert_eq!(memories[0].content, "owner prefers morning conversations");
-    let revisions = reopened.list_memory_revisions(memory).await.unwrap();
+    let revisions = reopened
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
     assert_eq!(revisions.len(), 1);
     assert_eq!(revisions[0].summary, Some(evidence.id));
-    let stored_evidence = reopened.load_summary(evidence.id).await.unwrap();
+    let stored_evidence = reopened
+        .load_summaries(&[evidence.id])
+        .await
+        .unwrap()
+        .into_iter()
+        .next();
     assert!(
         stored_evidence.is_some(),
         "summary evidence survives reopen"
@@ -3052,9 +3181,18 @@ async fn approval_sweep_redacts_history_and_learning_content() {
     let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].text, "the key is [credential]");
-    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    let revisions = store
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
     assert_eq!(revisions[0].content, "owner key [credential]");
-    let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
+    let stored = store
+        .load_summaries(&[evidence.id])
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(stored.content, "evidence mentions [credential]");
 }
 
@@ -3195,10 +3333,10 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
+    assert_eq!(writer.load_summaries(&[evidence.id]).await, Ok(Vec::new()));
     assert!(
         writer
-            .list_memory_revisions(memory)
+            .list_memory_revisions(memory, None, 100)
             .await
             .unwrap()
             .is_empty()
@@ -3331,10 +3469,10 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
+    assert_eq!(writer.load_summaries(&[evidence.id]).await, Ok(Vec::new()));
     assert!(
         writer
-            .list_memory_revisions(memory)
+            .list_memory_revisions(memory, None, 100)
             .await
             .unwrap()
             .is_empty()

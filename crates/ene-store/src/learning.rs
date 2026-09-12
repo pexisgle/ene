@@ -36,7 +36,7 @@ const SQL_INSERT_SUMMARY_IGNORE: &str = "INSERT OR IGNORE INTO learning_summary 
 
 const SQL_LIST_CURRENT: &str = "SELECT memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at FROM learning_memory WHERE companion_id = ?1 AND (?2 IS NULL OR rowid < (SELECT rowid FROM learning_memory WHERE memory_id = ?2)) ORDER BY rowid DESC LIMIT ?3";
 
-const SQL_LIST_REVISIONS: &str = "SELECT memory_id, revision, companion_id, content, importance, temporal, recall_suppressed, change_kind, summary_id, at FROM learning_memory_revision WHERE memory_id = ?1 ORDER BY revision ASC";
+const SQL_LIST_REVISIONS: &str = "SELECT memory_id, revision, companion_id, content, importance, temporal, recall_suppressed, change_kind, summary_id, at FROM learning_memory_revision WHERE memory_id = ?1 AND (?2 IS NULL OR revision > ?2) ORDER BY revision ASC LIMIT ?3";
 
 const SQL_SELECT_SUMMARY: &str = "SELECT summary_id, companion_id, content, source_kind, source_start, source_end, formed_at FROM learning_summary WHERE summary_id = ?1";
 
@@ -373,26 +373,32 @@ fn list_current_sync(
 fn list_revisions_sync(
     conn: &Mutex<Connection>,
     memory: MemoryId,
+    after: Option<MemoryRevision>,
+    limit: u64,
 ) -> Result<Vec<MemoryRevisionRecord>, LearningTechnicalError> {
     let guard = lock_shared(conn);
     let mut statement = guard
         .prepare(SQL_LIST_REVISIONS)
         .map_err(learning_unavailable)?;
+    let after = after.map(encode_revision).transpose()?;
     let rows = statement
-        .query_map(params![encode_id(memory.as_raw())], |row| {
-            Ok(RawRevision {
-                memory: row.get(0)?,
-                revision: row.get(1)?,
-                companion: row.get(2)?,
-                content: row.get(3)?,
-                importance: row.get(4)?,
-                temporal: row.get(5)?,
-                recall_suppressed: row.get(6)?,
-                change: row.get(7)?,
-                summary: row.get(8)?,
-                at: row.get(9)?,
-            })
-        })
+        .query_map(
+            params![encode_id(memory.as_raw()), after, encode_limit(limit)?],
+            |row| {
+                Ok(RawRevision {
+                    memory: row.get(0)?,
+                    revision: row.get(1)?,
+                    companion: row.get(2)?,
+                    content: row.get(3)?,
+                    importance: row.get(4)?,
+                    temporal: row.get(5)?,
+                    recall_suppressed: row.get(6)?,
+                    change: row.get(7)?,
+                    summary: row.get(8)?,
+                    at: row.get(9)?,
+                })
+            },
+        )
         .map_err(learning_unavailable)?;
     let mut revisions = Vec::new();
     for row in rows {
@@ -401,15 +407,33 @@ fn list_revisions_sync(
     Ok(revisions)
 }
 
-fn load_summary_sync(
+/// Loads the Summaries for `ids` in one query. Ids are deduplicated and
+/// bound as parameters; the placeholder count is bounded by the caller's
+/// page size, never by stored history.
+fn load_summaries_sync(
     conn: &Mutex<Connection>,
-    summary: SummaryId,
-) -> Result<Option<SummaryRecord>, LearningTechnicalError> {
+    ids: &[SummaryId],
+) -> Result<Vec<SummaryRecord>, LearningTechnicalError> {
+    let mut unique: Vec<SummaryId> = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !unique.contains(id) {
+            unique.push(*id);
+        }
+    }
+    if unique.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", unique.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT summary_id, companion_id, content, source_kind, source_start, source_end, formed_at FROM learning_summary WHERE summary_id IN ({placeholders})"
+    );
     let guard = lock_shared(conn);
-    let row = guard
-        .query_row(
-            SQL_SELECT_SUMMARY,
-            params![encode_id(summary.as_raw())],
+    let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;
+    let rows = statement
+        .query_map(
+            rusqlite::params_from_iter(unique.iter().map(|id| encode_id(id.as_raw()))),
             |row| {
                 Ok(RawSummary {
                     summary: row.get(0)?,
@@ -422,9 +446,12 @@ fn load_summary_sync(
                 })
             },
         )
-        .optional()
         .map_err(learning_unavailable)?;
-    row.map(decode_summary).transpose()
+    let mut summaries = Vec::new();
+    for row in rows {
+        summaries.push(decode_summary(row.map_err(learning_unavailable)?)?);
+    }
+    Ok(summaries)
 }
 
 fn raw_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawMemory> {
@@ -534,16 +561,19 @@ impl LearningRepository for Store {
     async fn list_memory_revisions(
         &self,
         memory: MemoryId,
+        after: Option<MemoryRevision>,
+        limit: u64,
     ) -> Result<Vec<MemoryRevisionRecord>, LearningTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || list_revisions_sync(&conn, memory)).await
+        run_blocking(move || list_revisions_sync(&conn, memory, after, limit)).await
     }
 
-    async fn load_summary(
+    async fn load_summaries(
         &self,
-        summary: SummaryId,
-    ) -> Result<Option<SummaryRecord>, LearningTechnicalError> {
+        ids: &[SummaryId],
+    ) -> Result<Vec<SummaryRecord>, LearningTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || load_summary_sync(&conn, summary)).await
+        let ids = ids.to_vec();
+        run_blocking(move || load_summaries_sync(&conn, &ids)).await
     }
 }

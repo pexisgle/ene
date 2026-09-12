@@ -1447,7 +1447,7 @@ async fn memory_view(client: &mut Client) -> String {
 async fn memory_view_after(client: &mut Client, after: Option<&str>) -> String {
     let answer = ask(
         client,
-        WirePayload::ManagementViewRequest(cmds::memory_view_request(after)),
+        WirePayload::ManagementViewRequest(cmds::memory_view_request(after, None, None)),
         "memory view",
     )
     .await;
@@ -1512,6 +1512,42 @@ async fn stage3_view_after(dir: &std::path::Path, after: Option<&str>) -> String
     memory_view_after(&mut client, after).await
 }
 
+/// The first addressable Memory id named by a rendered memory list body.
+fn first_memory_id(view: &str) -> String {
+    view.lines()
+        .find(|line| line.starts_with("memory "))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .expect("the list names a Memory id")
+        .to_owned()
+}
+
+/// One bounded page of one Memory's revisions and grounds.
+async fn stage3_memory_revisions(
+    dir: &std::path::Path,
+    memory: &str,
+    after_revision: Option<u64>,
+) -> String {
+    let mut client = stage3_client(dir).await;
+    let answer = ask(
+        &mut client,
+        WirePayload::ManagementViewRequest(cmds::memory_view_request(
+            None,
+            Some(memory),
+            after_revision,
+        )),
+        "memory revisions",
+    )
+    .await;
+    let Ok(WirePayload::ManagementView(view)) = answer else {
+        panic!("memory revisions must answer a view: {answer:?}");
+    };
+    view.sections
+        .iter()
+        .find(|section| section.kind == "memory")
+        .map(|section| section.body.clone())
+        .unwrap_or_default()
+}
+
 /// Assigns the learning capability explicitly on the production path.
 async fn stage3_assign_learning(dir: &std::path::Path) -> Result<(), String> {
     let mut client = stage3_client(dir).await;
@@ -1566,6 +1602,25 @@ async fn stage3_wait_for_memory(dir: &std::path::Path, expected: &str) -> String
     panic!("the memory view never showed {expected:?}: {view}");
 }
 
+/// Polls one Memory's revision page until `expected` appears.
+async fn stage3_wait_for_revisions(dir: &std::path::Path, expected: &str) -> String {
+    for _ in 0..100 {
+        let view = stage3_view(dir).await;
+        for memory_id in view
+            .lines()
+            .filter_map(|line| line.strip_prefix("memory "))
+            .filter_map(|rest| rest.split_whitespace().next())
+        {
+            let revisions = stage3_memory_revisions(dir, memory_id, None).await;
+            if revisions.contains(expected) {
+                return revisions;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the revision page never showed {expected:?}");
+}
+
 #[tokio::test]
 async fn stage3_conversation_formation_restart_and_recall() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1612,8 +1667,20 @@ async fn stage3_conversation_formation_restart_and_recall() {
     assert!(view.contains("importance=4"));
     assert!(view.contains("temporal=enduring"));
     assert!(view.contains("recall=active"));
-    assert!(view.contains("grounds summary"), "summary grounds: {view}");
-    assert!(view.contains("rev1 initial"), "first revision: {view}");
+    assert!(
+        !view.contains("grounds summary") && !view.contains("rev1"),
+        "the list page stays current recognition plus metadata: {view}"
+    );
+    let memory_id = first_memory_id(&view);
+    let revisions = stage3_memory_revisions(&dir, &memory_id, None).await;
+    assert!(
+        revisions.contains("grounds summary"),
+        "summary grounds: {revisions}"
+    );
+    assert!(
+        revisions.contains("rev1 initial"),
+        "first revision: {revisions}"
+    );
 
     // (2) An experience with no lasting value is not stored.
     transport.push_learning(r#"{"summary": "Small talk about the weather.", "memories": []}"#);
@@ -1634,8 +1701,13 @@ async fn stage3_conversation_formation_restart_and_recall() {
     let sent = stage3_send(&dir, "I still love jasmine tea").await;
     assert!(sent.is_ok());
     transport.wait_learning().await;
-    let view = stage3_wait_for_memory(&dir, "rev2 reinforced").await;
-    assert_eq!(memory_count(&view), 1, "no duplicate memory");
+    let view = stage3_wait_for_revisions(&dir, "rev2 reinforced").await;
+    assert_eq!(
+        memory_count(&stage3_view(&dir).await),
+        1,
+        "no duplicate memory"
+    );
+    let _ = view;
 
     // (4) A correction and a temporal change stay distinguishable.
     transport.push_learning(
@@ -1650,7 +1722,7 @@ async fn stage3_conversation_formation_restart_and_recall() {
     let sent = stage3_send(&dir, "I moved on to coffee last month").await;
     assert!(sent.is_ok());
     transport.wait_learning().await;
-    let view = stage3_wait_for_memory(&dir, "rev4 changed-since").await;
+    let view = stage3_wait_for_revisions(&dir, "rev4 changed-since").await;
     assert!(view.contains("rev3 corrected-initially-wrong"), "{view}");
     assert!(
         view.contains("rev1 initial"),
@@ -1703,10 +1775,29 @@ async fn stage3_conversation_formation_restart_and_recall() {
     assert!(wait_for_socket(&dir).await, "listener must rebind");
     let view = stage3_view(&dir).await;
     assert_eq!(memory_count(&view), 2, "restart keeps formed memories");
-    assert!(view.contains("rev1 initial"));
-    assert!(view.contains("rev3 corrected-initially-wrong"));
-    assert!(view.contains("rev4 changed-since"));
-    assert!(view.contains("grounds summary"));
+    assert!(
+        !view.contains("rev1") && !view.contains("grounds summary"),
+        "the restarted list still stays current recognition only: {view}"
+    );
+    let lines: Vec<&str> = view.lines().collect();
+    let content_line = lines
+        .iter()
+        .position(|line| line.starts_with("content: The owner prefers coffee now."))
+        .expect("the current recognition is listed");
+    let memory_id = lines[..content_line]
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("memory "))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .expect("the listed content belongs to a Memory");
+    let revisions = stage3_memory_revisions(&dir, memory_id, None).await;
+    assert!(revisions.contains("rev1 initial"), "{revisions}");
+    assert!(
+        revisions.contains("rev3 corrected-initially-wrong"),
+        "{revisions}"
+    );
+    assert!(revisions.contains("rev4 changed-since"), "{revisions}");
+    assert!(revisions.contains("grounds summary"), "{revisions}");
 
     // (7) A related conversation after restart recalls the current Memory.
     transport.push_learning(r#"{"summary": "Nothing new.", "memories": []}"#);
@@ -1729,15 +1820,15 @@ async fn stage3_conversation_formation_restart_and_recall() {
     let sent = stage3_send(&dir, "forget about my drink preference").await;
     assert!(sent.is_ok());
     transport.wait_learning().await;
-    let view = stage3_wait_for_memory(&dir, "rev5 forgotten").await;
-    assert!(view.contains("recall=suppressed"), "{view}");
+    let view = stage3_wait_for_memory(&dir, "recall=suppressed").await;
     assert!(
         view.contains("content: The owner prefers coffee now."),
         "content is kept: {view}"
     );
+    let revisions = stage3_wait_for_revisions(&dir, "rev5 forgotten").await;
     assert!(
-        view.contains("rev1 initial"),
-        "all revisions are kept: {view}"
+        revisions.contains("rev1 initial"),
+        "all revisions are kept: {revisions}"
     );
 
     transport.push_learning(r#"{"summary": "Nothing new.", "memories": []}"#);
@@ -1831,15 +1922,20 @@ async fn stage3_management_view_reaches_memories_beyond_the_first_page() {
         second.contains("batch 0 memory 0"),
         "the oldest memory is reachable: {second}"
     );
-    assert_eq!(
-        second.matches("rev1 initial").count(),
-        5,
-        "every older memory shows its first revision: {second}"
+    assert!(
+        !second.contains("rev1") && !second.contains("grounds summary"),
+        "list pages never expand revisions: {second}"
     );
+    let memory_id = first_memory_id(&second);
+    let revisions = stage3_memory_revisions(&dir, &memory_id, None).await;
     assert_eq!(
-        second.matches("grounds summary").count(),
-        5,
-        "every older memory shows its grounds: {second}"
+        revisions.matches("rev1 initial").count(),
+        1,
+        "the requested memory shows its first revision: {revisions}"
+    );
+    assert!(
+        revisions.contains("grounds summary"),
+        "the requested memory shows its grounds: {revisions}"
     );
     for batch in 0..5 {
         for index in 0..5 {

@@ -164,15 +164,26 @@ pub trait LearningRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<Memory>, LearningTechnicalError>;
 
-    /// Lists one Memory's revisions oldest first, including the initial one.
+    /// Lists a bounded page of one Memory's revisions, oldest first,
+    /// including the initial one.
+    ///
+    /// `after` starts strictly after that revision, so every revision stays
+    /// reachable by feeding the last returned one back. `limit` bounds the
+    /// rows read; zero requests none.
     async fn list_memory_revisions(
         &self,
         memory: MemoryId,
+        after: Option<MemoryRevision>,
+        limit: u64,
     ) -> Result<Vec<MemoryRevisionRecord>, LearningTechnicalError>;
 
-    /// Loads one Summary by identity.
-    async fn load_summary(
+    /// Loads the Summaries named by `ids` in one bounded batch.
+    ///
+    /// Duplicate ids are read once, and ids with no stored Summary are
+    /// absent from the result: a missing identity is never fabricated, and
+    /// the caller can render it as its own state.
+    async fn load_summaries(
         &self,
-        summary: SummaryId,
-    ) -> Result<Option<SummaryRecord>, LearningTechnicalError>;
+        ids: &[SummaryId],
+    ) -> Result<Vec<SummaryRecord>, LearningTechnicalError>;
 }
