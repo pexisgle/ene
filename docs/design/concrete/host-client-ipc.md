@@ -533,7 +533,7 @@ Host 側での実行直前検証（Live authorization）、対象端末の特定
 
 - Host から Client へのデバイス操作のキャンセルと、Client から Host への推論・ストリーム中断（発話割り込みや回答生成の停止等）の双方向において、全く同一の区別を適用します。
 - 将来の破棄（Future drop）やネットワーク接続の切断をもって、処理の停止が完了したとみなしてはなりません。停止指示の後に遅延して届いた実行結果は、元の試行（Attempt）や操作（Operation）に正しく記録し、現在の処理に勝手に採用したり、後続の処理を自動開始させたりしてはなりません。
-- **タスクの中断（Task Cancel）との境界**: タスク単位の中断は、ここで扱う operation / stream / attempt 単位の wire-level cancel とは別の境界です。タスク中断は Host 内で個体調整または第一者管理経路から作業担当（`cancel_task`、AU16）へ直接届き、`reason` 本文を Task へ複製せず、要求元（会話履歴・管理経路の記録）が理由を保持します。`CancelRequestWire.reason` は wire-level の停止要求専用であり、Task の durable state には渡しません。
+- **タスクの中断（Task Cancel）との境界**: タスク単位の中断は、ここで扱う operation / stream / attempt 単位の wire-level cancel とは別の境界です。タスク中断は Host 内で個体調整（会話）または第一者管理経路から作業担当（`cancel_task`、AU16）へ直接届き、`reason` 本文を Task へ複製せず、要求元（会話履歴・管理経路の記録）が理由を保持します。`CancelRequestWire.reason` は wire-level の停止要求専用であり、Task の durable state には渡しません。cancel 後に禁止されるのは新規 work の admission と現在 Task への採用・lifecycle 前進であり、already-started activity の事実記録（AU15a の到着 record/seal、AU15b の検証済み相関、Action certainty、利用量など）は引き続き許可されます。
 
 ## 17. Targeted Deletion 参加
 
@@ -944,7 +944,7 @@ struct ManagementViewWire {
 
 ### V-10 Host restart → reconnect → presence restoration
 
-1. ホストの再起動後、在席状態は `RecoveryWait`（復旧待機中）として安全に再構成されます。中断されたタスクはオーナーによる明示的な再開指示を待ち、成否不明のアクション試行は `Unknown` のまま保持され、未完了のデータ削除や安全保留はそのまま維持されます。
+1. ホストの再起動後、在席状態は `RecoveryWait`（復旧待機中）として安全に再構成されます。再起動で中断されたタスクはオーナーによる明示的な再開指示を待ち（cancel された Task は再開せず、再実行は新しい Task の下に新しい delegation を作成して行います）、成否不明のアクション試行は `Unknown` のまま保持され、未完了のデータ削除や安全保留はそのまま維持されます。
 2. ホストは、再起動前に接続していたクライアントからの再認証や応答を、現在の `RecoveryWait` の状態、復旧先の正当性、現行の接続、権限、および排他性と厳格に照合します。すべての正当性が確認できた場合にのみ `Present`（在席中）として確定し、確認できなければアクティブな在席なしとします。クライアント側からの単なる `MoveIntent` を復旧の根拠として受け入れてはなりません。
 3. 再起動前の古い一時状態、古い承認フラグ、すでに解決済みの経路情報だけを根拠にして、在席・実行許可・処理再開を勝手に成立させてはなりません。中断されたタスクやアクションを、事前の確認なしに自動実行する権限を与えてはなりません。
 

@@ -242,6 +242,9 @@ struct TaskRevision(u64); // 同一タスクに対する指示や目標の変更
 // terminal は再評価しても開始できないため、AU3/AU4/AU14/AU5/AU15b は同じ不分区間で非 terminal を必須とし、
 // 専用の domain outcome（TaskTerminal。Action 側は Task lifecycle の値型を import せず unit）で拒否する。
 // Cancelled は「中断要求を受理した」ことだけを表し、外部作用の停止完了・Unknown の解消を表さない。
+// 受理後に失われ得るのはローカルの Future / cancellation token / 停止 handle だけで、開始済み試行の
+// durable 相関と Unknown は維持する。Cancelled の Task は再開せず（progress を戻さず、同じ Task の
+// delegation を再利用せず）、再実行は新しい Task の下に新しい delegation を作成して行う。
 // execution seal はこれとは別の gate である: final result の到着（AU15a）が 1 delegation を seal し、
 // Task が InProgress のままでも AU14/AU5 は ExecutionSealed として拒否する。
 // Completed への CAS（AU15b）は、同じ不分区間で Task-wide completion barrier（同じ TaskId に属する
@@ -678,7 +681,7 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 - **遅延結果の隔離**: キャンセル、追加指示、権限失効の後に遅れて届いた結果は、元のアクション試行やタスク履歴にのみ記録し、過去の承認を勝手に復活させたり、新しい目標の達成として採用したり、後続処理を自動開始したりしないこと。
 - **リトライ**: 新しいアクション試行IDを発行して実行し、重複実行のリスクをユーザーに提示すること。別ルートを使ってこっそり再実行するような迂回を行わないこと。
 - **キャンセル**: 要求の受付と実際の停止完了を明確に区別し、停止できなかった外部作用や成否不明な状態を正直に記録・報告すること。AIモデルの正常終了を待たずに即座に応答すること。
-- **ホスト再起動**: 中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待つこと。成否不明な外部作用を勝手に自動再実行しないこと。
+- **ホスト再起動**: 再起動で中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待つこと（cancel された Task は再開せず、再実行は新しい Task の下に新しい delegation を作成して行う）。成否不明な外部作用を勝手に自動再実行しないこと。
 - **タスクエージェントへの委任**: 委任元の親が持たない権限を勝手に付与せず、独立したAPIキー、独立したコスト上限、独自の長期人格などを持たせないこと。
 
 ### 9.3 個人データ完全削除（Targeted Deletion）
