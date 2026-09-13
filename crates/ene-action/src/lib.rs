@@ -28,8 +28,8 @@ pub use attempt::{
     EffectGrounds, OperationKind, RealTargetRef, certainty_grounds_pair_is_valid,
 };
 pub use filesystem::{
-    ActionOutput, ListEntry, ListEntryKind, MAX_ACTION_FILE_BYTES, ObservedEffect, TargetRejection,
-    WorkspaceRoot, WorkspaceRootError,
+    ActionOutput, ListEntry, ListEntryKind, ObservedEffect, TargetRejection, WorkspaceRoot,
+    WorkspaceRootError,
 };
 pub use run::{
     ActionNotStarted, ActionRunOutcome, WorkspaceActionCommand, orchestrate_workspace_action,

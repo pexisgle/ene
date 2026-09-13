@@ -283,13 +283,27 @@ mod tests {
         .expect("a create answers a domain outcome");
         let WorkspaceActionHostOutcome::Completed {
             attempt: create_attempt,
+            effect: create_effect,
             fact_recorded: create_recorded,
-            ..
         } = created
         else {
             panic!("the create must complete, got {created:?}");
         };
         assert!(create_recorded);
+        let Some(ene_action::ActionOutput::Created { target }) = &create_effect.output else {
+            panic!("a create success reports the created marker");
+        };
+        let create_record = host
+            .store
+            .load_attempt(create_attempt)
+            .await
+            .unwrap()
+            .expect("the create attempt is durable");
+        assert_eq!(
+            target.as_path(),
+            create_record.real_target.as_path(),
+            "the created marker carries exactly the AU5-recorded target"
+        );
         assert_eq!(
             std::fs::read(host.workspace.path().join("report.md")).expect("report exists"),
             b"# report"
@@ -306,13 +320,18 @@ mod tests {
         .expect("an edit answers a domain outcome");
         let WorkspaceActionHostOutcome::Completed {
             attempt: edit_attempt,
+            effect: edit_effect,
             fact_recorded: edit_recorded,
-            ..
         } = edited
         else {
             panic!("the edit must complete, got {edited:?}");
         };
         assert!(edit_recorded);
+        assert_eq!(
+            edit_effect.output,
+            Some(ene_action::ActionOutput::Updated),
+            "an edit success reports the updated marker"
+        );
         assert_eq!(
             std::fs::read(host.workspace.path().join("report.md")).expect("report exists"),
             b"# edited report"

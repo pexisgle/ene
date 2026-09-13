@@ -1,6 +1,6 @@
 //! Orchestration of one Workspace-contained filesystem Action.
 //!
-//! The order is fixed by K-B.1 and AU5: input bounds and path resolution
+//! The order is fixed by K-B.1 and AU5: input shape and path resolution
 //! happen before any durable claim (a refused or malformed request never
 //! leaves an attempt row), the permission-owned live decision is taken for
 //! exactly the resolved target, the attempt insert is the start linearization
@@ -25,7 +25,7 @@ use crate::attempt::{
     ActionAttemptId, ActionAttemptRepository, ActionCertainty, ActionStartOutcome,
     ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome, OperationKind,
 };
-use crate::filesystem::{MAX_ACTION_FILE_BYTES, ObservedEffect, TargetRejection, WorkspaceRoot};
+use crate::filesystem::{ObservedEffect, TargetRejection, WorkspaceRoot};
 
 /// One start-and-execute request under an existing delegation/workspace
 /// premise.
@@ -82,8 +82,6 @@ pub enum ActionNotStarted {
     MissingContent,
     /// List/read arrived with content.
     ContentNotAllowed,
-    /// The payload exceeds [`MAX_ACTION_FILE_BYTES`].
-    ContentTooLarge,
     /// The permission-owned decision refused this use.
     Denied(ActionDenyCode),
     /// The permission-owned candidate disagrees with the current premise; the
@@ -101,7 +99,7 @@ pub enum ActionRunOutcome {
     Completed {
         attempt: ActionAttemptId,
         /// What the executor observed; the [`core::fmt::Debug`] rendering of
-        /// [`ObservedEffect`] redacts any read output.
+        /// [`ObservedEffect`] redacts content and target paths.
         effect: ObservedEffect,
         /// Whether the observation became durable. `false` means the attempt
         /// row still reads `Unknown` (the effect happened and is reported,
@@ -114,7 +112,7 @@ pub enum ActionRunOutcome {
 
 /// Starts and executes one Workspace-contained filesystem action.
 ///
-/// Input bounds and path resolution are checked first, so a refused request
+/// Input shape and path resolution are checked first, so a refused request
 /// leaves no attempt row. The resolved target then goes through the
 /// permission-owned [`authorize_action_use`], whose single-use evaluation is
 /// consumed before the durable claim; the repository's claim decides start
@@ -229,13 +227,10 @@ fn input_check(command: &WorkspaceActionCommand) -> Option<ActionNotStarted> {
             .content
             .is_some()
             .then_some(ActionNotStarted::ContentNotAllowed),
-        OperationKind::Create | OperationKind::Edit => match &command.content {
-            None => Some(ActionNotStarted::MissingContent),
-            Some(content) if content.len() > MAX_ACTION_FILE_BYTES => {
-                Some(ActionNotStarted::ContentTooLarge)
-            }
-            Some(_) => None,
-        },
+        OperationKind::Create | OperationKind::Edit => command
+            .content
+            .is_none()
+            .then_some(ActionNotStarted::MissingContent),
     }
 }
 
@@ -399,6 +394,13 @@ mod tests {
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].operation, OperationKind::Create);
         assert!(starts[0].real_target.as_path().ends_with("report.md"));
+        assert_eq!(
+            effect.output,
+            Some(crate::filesystem::ActionOutput::Created {
+                target: starts[0].real_target.clone(),
+            }),
+            "Create reports exactly the resolved target recorded in the claim"
+        );
         assert_ne!(
             starts[0].relied_evaluation.as_raw(),
             ene_primitive::RawId::new(),
@@ -472,7 +474,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_bounds_are_refused_before_any_claim() {
+    async fn input_shape_is_refused_before_any_claim() {
         let (_directory, root) = workspace();
         let attempts = FakeAttempts::default();
 
@@ -487,7 +489,7 @@ mod tests {
             ActionRunOutcome::NotStarted(ActionNotStarted::ContentNotAllowed)
         );
 
-        let mut write_without_content = command(root.clone(), OperationKind::Edit, "input.txt");
+        let mut write_without_content = command(root, OperationKind::Edit, "input.txt");
         write_without_content.content = None;
         assert_eq!(
             run(&attempts, write_without_content)
@@ -496,12 +498,6 @@ mod tests {
             ActionRunOutcome::NotStarted(ActionNotStarted::MissingContent)
         );
 
-        let mut oversized = command(root, OperationKind::Create, "report.md");
-        oversized.content = Some(vec![b'x'; crate::filesystem::MAX_ACTION_FILE_BYTES + 1]);
-        assert_eq!(
-            run(&attempts, oversized).await.expect("domain outcome"),
-            ActionRunOutcome::NotStarted(ActionNotStarted::ContentTooLarge)
-        );
         assert!(attempts.starts().is_empty());
     }
 

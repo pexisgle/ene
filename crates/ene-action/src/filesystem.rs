@@ -31,12 +31,6 @@ use thiserror::Error;
 
 use crate::attempt::{ActionCertainty, EffectGrounds, OperationKind, RealTargetRef};
 
-/// Maximum bytes for one read result or one create/edit payload.
-///
-/// The bound is checked before any durable claim, so an over-limit request is
-/// a never-started refusal and leaves no attempt row.
-pub const MAX_ACTION_FILE_BYTES: usize = 1_048_576;
-
 /// Failure to open the workspace folder itself.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WorkspaceRootError {
@@ -73,6 +67,12 @@ pub enum ActionOutput {
     Bytes(Vec<u8>),
     /// The entries observed by a `List`, sorted by name.
     Listing(Vec<ListEntry>),
+    /// The created marker of a successful `Create`, carrying the exact
+    /// [`RealTargetRef`] the attempt was recorded and executed under; the
+    /// request path is never reconstructed into the result.
+    Created { target: RealTargetRef },
+    /// The updated marker of a successful `Edit`.
+    Updated,
 }
 
 /// Why one requested path was refused before any attempt was claimed.
@@ -104,9 +104,6 @@ pub enum TargetRejection {
     /// Create named a target that already exists.
     #[error("requested target already exists")]
     AlreadyExists,
-    /// The read target exceeds [`MAX_ACTION_FILE_BYTES`].
-    #[error("requested target is too large")]
-    TooLarge,
     /// The filesystem refused to answer (permission or I/O failure).
     #[error("requested target is unavailable")]
     TargetUnavailable,
@@ -180,11 +177,6 @@ impl WorkspaceRoot {
                         if !metadata.is_file() {
                             return Err(TargetRejection::NotAFile);
                         }
-                        if operation == OperationKind::Read
-                            && metadata.len() > MAX_ACTION_FILE_BYTES as u64
-                        {
-                            return Err(TargetRejection::TooLarge);
-                        }
                     }
                 }
                 Ok(canonical_target(canonical))
@@ -255,10 +247,10 @@ impl WorkspaceRoot {
             OperationKind::List => self.list_directory(target),
             OperationKind::Read => {
                 let destination = Path::new(target.as_path());
-                let Some(metadata) = self.verified_existing_metadata(destination, false) else {
-                    return refused();
-                };
-                if metadata.len() > MAX_ACTION_FILE_BYTES as u64 {
+                if self
+                    .verified_existing_metadata(destination, false)
+                    .is_none()
+                {
                     return refused();
                 }
                 match fs::read(destination) {
@@ -397,7 +389,13 @@ impl WorkspaceRoot {
             Ok(read_back) if read_back == bytes => ObservedEffect {
                 certainty: ActionCertainty::ConfirmedSuccess,
                 grounds: EffectGrounds::ObservedAtTarget,
-                output: None,
+                output: Some(if replace {
+                    ActionOutput::Updated
+                } else {
+                    ActionOutput::Created {
+                        target: target.clone(),
+                    }
+                }),
             },
             // Something is at the destination but not what we intended; an
             // effect occurred, but it cannot be confirmed as the intended one.
@@ -610,9 +608,9 @@ fn crosses_linux_mount(root: &Path, target: &Path, mounts: &[PathBuf]) -> bool {
 
 /// One observed execution result.
 ///
-/// `output` carries read bytes or a listing and is redacted from
-/// [`core::fmt::Debug`] so diagnostic output never leaks file content or
-/// private names.
+/// `output` carries read bytes, a listing, or a write success marker and is
+/// redacted from [`core::fmt::Debug`] so diagnostic output never leaks file
+/// content, entry names, or private target paths.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ObservedEffect {
     pub certainty: ActionCertainty,
@@ -634,6 +632,8 @@ impl core::fmt::Debug for ObservedEffect {
                     ActionOutput::Listing(entries) => {
                         format!("<{} entries redacted>", entries.len())
                     }
+                    ActionOutput::Created { .. } => String::from("<created target redacted>"),
+                    ActionOutput::Updated => String::from("<updated marker>"),
                 }),
             )
             .finish()
@@ -694,10 +694,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{
-        ActionOutput, ListEntry, ListEntryKind, MAX_ACTION_FILE_BYTES, TargetRejection,
-        WorkspaceRoot,
-    };
+    use super::{ActionOutput, ListEntry, ListEntryKind, TargetRejection, WorkspaceRoot};
     use crate::attempt::OperationKind;
 
     fn workspace() -> (tempfile::TempDir, WorkspaceRoot) {
@@ -762,17 +759,6 @@ mod tests {
         assert_eq!(
             root.resolve("sub", OperationKind::Edit),
             Err(TargetRejection::NotAFile)
-        );
-    }
-
-    #[test]
-    fn read_refuses_targets_over_the_bound() {
-        let (directory, root) = workspace();
-        let bytes = vec![b'x'; MAX_ACTION_FILE_BYTES + 1];
-        fs::write(directory.path().join("large.bin"), &bytes).expect("fixture write");
-        assert_eq!(
-            root.resolve("large.bin", OperationKind::Read),
-            Err(TargetRejection::TooLarge)
         );
     }
 
@@ -858,6 +844,13 @@ mod tests {
             crate::attempt::ActionCertainty::ConfirmedSuccess
         );
         assert_eq!(
+            created.output,
+            Some(ActionOutput::Created {
+                target: create_target.clone(),
+            }),
+            "Create reports the exact resolved target it was recorded and executed under"
+        );
+        assert_eq!(
             fs::read(directory.path().join("report.md")).expect("created file"),
             b"# report"
         );
@@ -879,6 +872,10 @@ mod tests {
             crate::attempt::ActionCertainty::ConfirmedFailure
         );
         assert_eq!(
+            raced.output, None,
+            "a refused create never reports a success marker"
+        );
+        assert_eq!(
             fs::read(directory.path().join("race.md")).expect("race file kept"),
             b"winner"
         );
@@ -891,6 +888,7 @@ mod tests {
             edited.certainty,
             crate::attempt::ActionCertainty::ConfirmedSuccess
         );
+        assert_eq!(edited.output, Some(ActionOutput::Updated));
         assert_eq!(
             fs::read(directory.path().join("report.md")).expect("edited file"),
             b"# edited"
@@ -914,25 +912,6 @@ mod tests {
         assert_eq!(
             effect.grounds,
             crate::attempt::EffectGrounds::RefusedBeforeEffect
-        );
-        assert_eq!(effect.output, None);
-    }
-
-    #[test]
-    fn execute_refuses_a_read_that_grew_over_the_bound_at_effect_time() {
-        let (directory, root) = workspace();
-        let path = directory.path().join("large.bin");
-        fs::write(&path, vec![b'x'; MAX_ACTION_FILE_BYTES + 1]).expect("fixture write");
-        let target = crate::attempt::RealTargetRef::from_canonical_path(
-            fs::canonicalize(&path)
-                .expect("canonical fixture")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        let effect = root.execute(&target, OperationKind::Read, None);
-        assert_eq!(
-            effect.certainty,
-            crate::attempt::ActionCertainty::ConfirmedFailure
         );
         assert_eq!(effect.output, None);
     }
@@ -999,6 +978,22 @@ mod tests {
         let rendered = format!("{effect:?}");
         assert!(!rendered.contains("private-notes.md"));
         assert!(rendered.contains("entries redacted"));
+    }
+
+    #[test]
+    fn debug_redacts_a_created_target() {
+        let effect = super::ObservedEffect {
+            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
+            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
+            output: Some(ActionOutput::Created {
+                target: crate::attempt::RealTargetRef::from_canonical_path(String::from(
+                    "/home/private-notes/report.md",
+                )),
+            }),
+        };
+        let rendered = format!("{effect:?}");
+        assert!(!rendered.contains("private-notes"));
+        assert!(rendered.contains("created target redacted"));
     }
 
     #[test]
