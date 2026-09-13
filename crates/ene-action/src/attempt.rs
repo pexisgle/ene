@@ -7,11 +7,12 @@
 //! row's existence is a correlation, not proof that the action ran, succeeded,
 //! or that an agent is alive.
 //!
-//! The premise carries cross-domain identities as opaque values
-//! ([`RawId`] / [`RevisionInner`]) so this crate never imports another
-//! domain's newtype; the owner maps them at the composition root.
+//! The durable types in this module carry cross-domain identities as opaque
+//! values ([`RawId`] / [`RevisionInner`]); they never name another domain's
+//! newtype. The meaning of a Permission evaluation stays with the Permission
+//! owner: the orchestration boundary reduces an issued evaluation to its
+//! [`RawId`] before the premise is built.
 
-use ene_permission::ActionPermissionEvaluationId;
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use thiserror::Error;
 
@@ -213,8 +214,10 @@ impl RealTargetRef {
 ///
 /// The orchestration mints `attempt`; the repository never re-allocates it.
 /// The correlation values are owner-defined opaque values (CM §4.3).
-/// `relied_evaluation` is the K-B.1 single-use judgment this start relies on;
-/// the repository refuses a second attempt using the same identity.
+/// `relied_evaluation` is the opaque identity of the K-B.1 single-use judgment
+/// this start relies on; the repository refuses a second attempt using the
+/// same identity. The judgment itself is Permission-owned: this type holds
+/// only its raw correlation identity, never the Permission newtype.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptCommitPremise {
     pub attempt: ActionAttemptId,
@@ -226,8 +229,10 @@ pub struct AttemptCommitPremise {
     /// The target resolved immediately before the start request.
     pub real_target: RealTargetRef,
     pub operation: OperationKind,
-    /// The permission-owned evaluation that authorized exactly this use.
-    pub relied_evaluation: ActionPermissionEvaluationId,
+    /// The opaque identity of the evaluation that authorized exactly this
+    /// use. Action stores only this durable correlation; the evaluation's
+    /// meaning and single-use tracking stay with the Permission owner.
+    pub relied_evaluation: RawId,
 }
 
 /// The domain result of one attempt insertion.
@@ -280,8 +285,10 @@ pub struct ActionAttemptRecord {
     pub workspace: RawId,
     pub real_target: RealTargetRef,
     pub operation: OperationKind,
-    /// The K-B.1 evaluation this attempt started under.
-    pub relied_evaluation: ActionPermissionEvaluationId,
+    /// The opaque identity of the K-B.1 evaluation this attempt started
+    /// under, as durable correlation only; Action never reconstructs the
+    /// Permission-owned evaluation from it.
+    pub relied_evaluation: RawId,
     pub certainty: ActionCertainty,
     /// `None` only for an attempt that has not reported an observation yet.
     pub grounds: Option<EffectGrounds>,

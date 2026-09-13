@@ -10,13 +10,16 @@
 //! executor cannot verify stays unknown, and an agent's self-report is never a
 //! ground.
 //!
-//! The crate owns no Task or Permission types: the delegation, relied TaskRef,
-//! and workspace association arrive as owner-defined opaque values
-//! ([`RawId`](ene_primitive::RawId) / [`RevisionInner`](ene_primitive::RevisionInner)),
-//! mapped at the Host composition root. Result adoption, Task completion,
-//! retries (`prior_unknown`), delete/execute operations, and the general
-//! Action permission evaluation are deliberately absent: each arrives with
-//! the producer that owns it.
+//! The durable attempt boundary owns no Task or Permission types: the
+//! delegation, relied TaskRef, workspace association, and relied evaluation
+//! arrive as owner-defined opaque values
+//! ([`RawId`](ene_primitive::RawId) / [`RevisionInner`](ene_primitive::RevisionInner)).
+//! The Permission-owned live decision is taken only at the orchestration
+//! boundary and reduced to its opaque raw identity before the claim; the
+//! meaning and single-use tracking of the evaluation stay with the Permission
+//! owner. Result adoption, Task completion, retries (`prior_unknown`),
+//! delete/execute operations, and the general Action permission evaluation are
+//! deliberately absent: each arrives with the producer that owns it.
 
 mod attempt;
 mod filesystem;

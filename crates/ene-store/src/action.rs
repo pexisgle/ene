@@ -23,7 +23,6 @@ use ene_action::{
     ActionStartOutcome, ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome,
     EffectGrounds, OperationKind, RealTargetRef,
 };
-use ene_permission::ActionPermissionEvaluationId;
 use ene_primitive::{RevisionInner, WallClockWithTz};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -77,7 +76,7 @@ fn insert_attempt_sync(
     let task_text = encode_id(premise.task);
     let delegation_text = encode_id(premise.delegation);
     let workspace_text = encode_id(premise.workspace);
-    let evaluation_text = encode_id(premise.relied_evaluation.as_raw());
+    let evaluation_text = encode_id(premise.relied_evaluation);
     let revision_raw = encode_u64(premise.task_revision.as_u64()).map_err(action_unavailable)?;
     let mut guard = lock_shared(conn);
     let tx = guard
@@ -349,9 +348,7 @@ fn decode_attempt_record(
         workspace: decode_id(&raw.workspace).map_err(action_unavailable)?,
         real_target: RealTargetRef::from_canonical_path(raw.real_target),
         operation,
-        relied_evaluation: ActionPermissionEvaluationId::from_raw(
-            decode_id(&raw.relied_evaluation).map_err(action_unavailable)?,
-        ),
+        relied_evaluation: decode_id(&raw.relied_evaluation).map_err(action_unavailable)?,
         certainty,
         grounds,
         started_at: WallClockWithTz::parse_rfc3339(&raw.started_at).map_err(action_unavailable)?,

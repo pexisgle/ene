@@ -8,7 +8,6 @@ use ene_action::{
     ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds,
     OperationKind, RealTargetRef,
 };
-use ene_permission::ActionPermissionEvaluationId;
 
 fn attempt_premise(
     attempt: ActionAttemptId,
@@ -26,7 +25,7 @@ fn attempt_premise(
         workspace: workspace.as_raw(),
         real_target: RealTargetRef::from_canonical_path(target.to_owned()),
         operation,
-        relied_evaluation: ActionPermissionEvaluationId::from_raw(RawId::new()),
+        relied_evaluation: RawId::new(),
     }
 }
 
@@ -102,7 +101,7 @@ async fn action_attempt_records_the_durable_correlation() {
     assert_eq!(record.operation, OperationKind::Create);
     assert_eq!(
         record.relied_evaluation, evaluation,
-        "the single-use evaluation is part of the durable correlation"
+        "the raw evaluation identity is part of the durable correlation"
     );
     assert_eq!(
         record.certainty,
@@ -118,20 +117,21 @@ async fn action_attempt_correlation_survives_reopen_without_replay() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("action-restart.db");
     let attempt = ActionAttemptId::generate();
+    let evaluation = RawId::new();
     {
         let store = Store::open(&path).await.unwrap();
         let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
+        let mut premise = attempt_premise(
+            attempt,
+            delegation,
+            created,
+            assoc,
+            &target_path("report.md"),
+            OperationKind::Create,
+        );
+        premise.relied_evaluation = evaluation;
         assert_eq!(
-            store
-                .insert_attempt_if_current(attempt_premise(
-                    attempt,
-                    delegation,
-                    created,
-                    assoc,
-                    &target_path("report.md"),
-                    OperationKind::Create,
-                ))
-                .await,
+            store.insert_attempt_if_current(premise).await,
             Ok(ActionStartOutcome::Started)
         );
     }
@@ -142,6 +142,10 @@ async fn action_attempt_correlation_survives_reopen_without_replay() {
         .expect("the correlation must read after restart")
         .expect("the started attempt survives restart");
     assert_eq!(record.certainty, ActionCertainty::Unknown);
+    assert_eq!(
+        record.relied_evaluation, evaluation,
+        "the evaluation correlation survives restart as the same opaque raw identity"
+    );
     assert_eq!(
         task_table_count(&reopened, "action_attempt"),
         1,
@@ -375,7 +379,7 @@ async fn duplicate_attempt_identity_is_a_technical_error() {
 async fn a_reused_evaluation_is_a_technical_error() {
     let store = open_memory().await.unwrap();
     let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
-    let evaluation = ActionPermissionEvaluationId::from_raw(RawId::new());
+    let evaluation = RawId::new();
     let mut first = attempt_premise(
         ActionAttemptId::generate(),
         delegation,

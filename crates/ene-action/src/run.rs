@@ -17,13 +17,14 @@
 
 use ene_permission::{
     ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
-    ActionUseCandidate, CurrentActionPremise, authorize_action_use,
+    ActionPermissionEvaluationId, ActionUseCandidate, CurrentActionPremise, authorize_action_use,
 };
 use ene_primitive::{RawId, RevisionInner};
 
 use crate::attempt::{
     ActionAttemptId, ActionAttemptRepository, ActionCertainty, ActionStartOutcome,
     ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome, OperationKind,
+    RealTargetRef,
 };
 use crate::filesystem::{ObservedEffect, TargetRejection, WorkspaceRoot};
 
@@ -115,11 +116,12 @@ pub enum ActionRunOutcome {
 /// Input shape and path resolution are checked first, so a refused request
 /// leaves no attempt row. The resolved target then goes through the
 /// permission-owned [`authorize_action_use`], whose single-use evaluation is
-/// consumed before the durable claim; the repository's claim decides start
-/// versus [`ActionNotStarted::StalePremise`], and only `Started` executes. The
-/// effect is observed from the executor's own operation (read-back for
-/// writes), never from an agent self-report, and its certainty is recorded
-/// with a compare-and-set from `Unknown`.
+/// consumed before the durable claim; the claim itself carries the evaluation
+/// only as its opaque [`RawId`], mapped at this orchestration boundary. The
+/// repository's claim decides start versus [`ActionNotStarted::StalePremise`],
+/// and only `Started` executes. The effect is observed from the executor's own
+/// operation (read-back for writes), never from an agent self-report, and its
+/// certainty is recorded with a compare-and-set from `Unknown`.
 pub async fn orchestrate_workspace_action(
     repository: &impl ActionAttemptRepository,
     tracker: &mut ActionEvaluationTracker,
@@ -172,19 +174,9 @@ pub async fn orchestrate_workspace_action(
             ActionNotStarted::EvaluationConsumed,
         ));
     }
-    let attempt = ActionAttemptId::generate();
-    let outcome = repository
-        .insert_attempt_if_current(AttemptCommitPremise {
-            attempt,
-            delegation: command.delegation,
-            task: command.task,
-            task_revision: command.task_revision,
-            workspace: command.workspace,
-            real_target: target.clone(),
-            operation: command.operation,
-            relied_evaluation: evaluation,
-        })
-        .await?;
+    let premise = attempt_premise(&command, &target, evaluation);
+    let attempt = premise.attempt;
+    let outcome = repository.insert_attempt_if_current(premise).await?;
     if outcome == ActionStartOutcome::StalePremise {
         return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::StalePremise));
     }
@@ -208,6 +200,30 @@ pub async fn orchestrate_workspace_action(
         effect,
         fact_recorded,
     })
+}
+
+/// The mapping boundary from the Permission-owned live decision to the
+/// Action-owned durable premise.
+///
+/// The evaluation is reduced to its opaque [`RawId`] here: the durable types
+/// ([`AttemptCommitPremise`] / [`ActionAttemptRecord`](crate::ActionAttemptRecord))
+/// never name the Permission newtype, and the Action repository neither
+/// decodes nor reconstructs the Permission-owned evaluation.
+fn attempt_premise(
+    command: &WorkspaceActionCommand,
+    target: &RealTargetRef,
+    evaluation: ActionPermissionEvaluationId,
+) -> AttemptCommitPremise {
+    AttemptCommitPremise {
+        attempt: ActionAttemptId::generate(),
+        delegation: command.delegation,
+        task: command.task,
+        task_revision: command.task_revision,
+        workspace: command.workspace,
+        real_target: target.clone(),
+        operation: command.operation,
+        relied_evaluation: evaluation.as_raw(),
+    }
 }
 
 /// Total mapping from the Action-owned operation kind to the permission-owned
@@ -241,7 +257,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ActionNotStarted, ActionRunOutcome, WorkspaceActionCommand, orchestrate_workspace_action,
+        ActionNotStarted, ActionRunOutcome, WorkspaceActionCommand, attempt_premise,
+        orchestrate_workspace_action,
     };
     use crate::attempt::{
         ActionAttemptId, ActionAttemptRecord, ActionCertainty, ActionStartOutcome,
@@ -249,6 +266,10 @@ mod tests {
         OperationKind, RealTargetRef,
     };
     use crate::filesystem::{TargetRejection, WorkspaceRoot};
+    use ene_permission::{
+        ActionAuthorizationDecision, ActionEvaluationTracker, ActionKind, ActionUseCandidate,
+        CurrentActionPremise, authorize_action_use,
+    };
 
     /// Captures every claim and answers configured domain outcomes.
     #[derive(Default)]
@@ -362,7 +383,7 @@ mod tests {
         attempts: &FakeAttempts,
         command: WorkspaceActionCommand,
     ) -> Result<ActionRunOutcome, ActionTechnicalError> {
-        let mut tracker = ene_permission::ActionEvaluationTracker::new();
+        let mut tracker = ActionEvaluationTracker::new();
         orchestrate_workspace_action(attempts, &mut tracker, command).await
     }
 
@@ -401,15 +422,52 @@ mod tests {
             }),
             "Create reports exactly the resolved target recorded in the claim"
         );
-        assert_ne!(
-            starts[0].relied_evaluation.as_raw(),
-            ene_primitive::RawId::new(),
-            "the claim carries the permission-owned evaluation id"
-        );
         let updates = attempts.updates();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].1, ActionCertainty::ConfirmedSuccess);
         assert_eq!(updates[0].2, EffectGrounds::ObservedAtTarget);
+    }
+
+    #[test]
+    fn the_issued_evaluation_raw_identity_is_the_premise_correlation() {
+        let (_directory, root) = workspace();
+        let command = command(root, OperationKind::Create, "report.md");
+        let target = RealTargetRef::from_canonical_path(String::from("/srv/workspace/report.md"));
+        let candidate = ActionUseCandidate {
+            delegation: command.delegation,
+            task: command.task,
+            task_revision: command.task_revision,
+            workspace: command.workspace,
+            operation: ActionKind::Create,
+            resolved_target: target.as_path().to_owned(),
+        };
+        let current = CurrentActionPremise {
+            delegation: command.delegation,
+            task: command.task,
+            task_revision: command.task_revision,
+            workspace: command.workspace,
+        };
+        let mut tracker = ActionEvaluationTracker::new();
+        let ActionAuthorizationDecision::AllowForThisUse(evaluation) =
+            authorize_action_use(&candidate, &current, &mut tracker)
+        else {
+            panic!("the matching candidate is allowed");
+        };
+        let premise = attempt_premise(&command, &target, evaluation);
+        assert_eq!(
+            premise.relied_evaluation,
+            evaluation.as_raw(),
+            "the durable premise carries exactly the issued raw evaluation identity"
+        );
+        assert_eq!(premise.real_target, target);
+        assert!(
+            tracker.consume(&evaluation, &candidate),
+            "the boundary still consumes exactly the issued evaluation"
+        );
+        assert!(
+            !tracker.consume(&evaluation, &candidate),
+            "the evaluation stays single-use"
+        );
     }
 
     #[tokio::test]
