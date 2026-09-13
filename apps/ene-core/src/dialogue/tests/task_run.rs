@@ -1,0 +1,442 @@
+//! Stage 4 final end-to-end: the autonomous file-work task through the Host
+//! composition path.
+//!
+//! Real store, real credential/consent setup path (the production management
+//! intents used by the dialogue tests), real workspace filesystem, real Task
+//! Agent loop, and only the provider HTTP transport faked. Covers the
+//! acceptance scenario "read a file and create a Markdown report", the
+//! durable result and attempt correlation, restart read-back without
+//! replay, and the cancel / late-result contract.
+
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "integration-test fixtures and helpers live outside #[test] functions, where clippy.toml's test allowances do not apply"
+)]
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use ene_action::ActionAttemptRepository as _;
+use ene_companion::CompanionRepository as _;
+use ene_credential::{CredentialRef, MemoryCredentialStore};
+use ene_inference::{
+    InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
+};
+use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{
+    AssigneeRef, CancelTaskCommand, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
+    DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskCancelOutcome,
+    TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise,
+    TaskProgress, TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance,
+    WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
+    orchestrate_result_arrival,
+};
+
+use crate::serve::{CredStore, HostHandle};
+use crate::task_run::{TaskAgentRunOutcome, TaskAgentRunRefusal};
+
+use super::{live_input, round_test_handle};
+
+/// One scripted provider response per call, in call order.
+struct ScriptedTransport {
+    replies: Mutex<VecDeque<String>>,
+    inputs: Mutex<Vec<String>>,
+}
+
+impl ScriptedTransport {
+    fn new(replies: Vec<String>) -> Self {
+        Self {
+            replies: Mutex::new(replies.into_iter().collect()),
+            inputs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.lock().expect("input capture lock").clone()
+    }
+}
+
+impl ProviderTransport for ScriptedTransport {
+    fn complete(
+        &self,
+        req: ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.inputs
+            .lock()
+            .expect("input capture lock")
+            .push(req.input.clone());
+        let text = self
+            .replies
+            .lock()
+            .expect("script lock")
+            .pop_front()
+            .expect("every exercised provider call has a scripted reply");
+        Box::pin(async move { Ok(ProviderResponse { text, usage: None }) })
+    }
+}
+
+/// Transport whose first call reports that it started and then waits forever,
+/// so the test can cancel while the provider call is in flight.
+#[derive(Default)]
+struct BlockingTransport {
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl ProviderTransport for BlockingTransport {
+    fn complete(
+        &self,
+        _req: ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+            Ok(ProviderResponse {
+                text: String::new(),
+                usage: None,
+            })
+        })
+    }
+}
+
+fn memory_store() -> MemoryCredentialStore {
+    let store = MemoryCredentialStore::new();
+    store.insert(
+        CredentialRef::new("openai", "main").expect("valid test fixture"),
+        "sk-stage4-test",
+    );
+    store
+}
+
+/// Seeds one Task with a confirmed workspace association and one delegation,
+/// mirroring the Host wiring the conversation path will perform.
+async fn seed_task(
+    handle: &HostHandle,
+    workspace: &std::path::Path,
+) -> (TaskRef, DelegationId, WorkspaceAssocId) {
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the running companion resolves");
+    let assoc = WorkspaceAssocId::generate();
+    let folder = WorkspaceFolderRef {
+        path: workspace.to_string_lossy().into_owned(),
+    };
+    let task = handle
+        .store
+        .create_task(TaskCreationPremise {
+            task: ene_task::TaskId::generate(),
+            purpose: TaskPurpose {
+                text: String::from("read the notes and write the report"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: WallClockWithTz::now(),
+            assignee: AssigneeRef {
+                companion: companion.as_raw(),
+            },
+            workspace: Some(WorkspaceAssociationPremise {
+                assoc,
+                need: WorkspaceNeedRef {
+                    folder: folder.clone(),
+                    save_target: None,
+                },
+            }),
+        })
+        .await
+        .expect("task creation commits");
+    let delegation = DelegationId::generate();
+    let delegated = handle
+        .store
+        .create_delegation(DelegationCreationPremise {
+            delegation,
+            task,
+            agent: TaskAgentEphemeralId::generate(),
+            scope_copy: DelegationScope {
+                workspace: Some(DelegatedWorkspace {
+                    assoc,
+                    folder,
+                    save_target: None,
+                }),
+            },
+        })
+        .await
+        .expect("delegation creation commits");
+    assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
+    (task, delegation, assoc)
+}
+
+#[tokio::test]
+async fn stage4_reads_the_workspace_writes_the_report_and_survives_restart() {
+    let live = live_input("stage4-e2e");
+    // The escape attempt points at a real file outside the workspace carrying
+    // a sentinel that must never reach the provider. A sibling scratch
+    // directory under the system temp dir keeps the path relative and cleans
+    // itself up.
+    let outside = tempfile::tempdir_in(std::env::temp_dir()).expect("outside directory");
+    let outside_sibling = outside
+        .path()
+        .file_name()
+        .expect("the scratch directory has a name")
+        .to_string_lossy()
+        .into_owned();
+    std::fs::write(outside.path().join("sentinel.txt"), b"SENTINEL-OUTSIDE")
+        .expect("outside fixture");
+    let transport = ScriptedTransport::new(vec![
+        format!("{{\"tool\":\"read\",\"path\":\"../{outside_sibling}/sentinel.txt\"}}"),
+        String::from(r#"{"tool":"read","path":"input.txt"}"#),
+        String::from(
+            "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
+        ),
+        String::from(r#"{"final":"report.md was created from input.txt"}"#),
+    ]);
+    let (handle, data_dir) = round_test_handle("stage4-e2e", &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    let (task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
+
+    let outcome = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("the execution answers a domain outcome");
+    let TaskAgentRunOutcome::Finalized { result, acceptance } = outcome else {
+        panic!("expected Finalized, got {outcome:?}");
+    };
+    assert_eq!(acceptance, TaskResultAcceptance::AdoptedAsCompletion(task));
+    assert_eq!(result.body.text(), "report.md was created from input.txt");
+    assert_eq!(
+        std::fs::read(workspace.path().join("report.md")).expect("the report exists"),
+        b"# Report\nnotes"
+    );
+    // The logical input replayed the observed file content, never the outside
+    // sentinel and never a file list the model did not ask for.
+    let inputs = transport.inputs();
+    assert_eq!(inputs.len(), 4, "one provider call per turn");
+    assert!(
+        inputs[0].contains("[RESPONSE FORMAT]") && !inputs[0].contains("input.txt"),
+        "the first turn sends no file list"
+    );
+    assert!(
+        inputs[1].contains("refused:"),
+        "the traversal refusal is replayed as an observation, got {}",
+        inputs[1]
+    );
+    assert!(
+        inputs[2].contains("read ok:\nnotes") && inputs[2].contains("[TOOL CALL]"),
+        "the third turn replays the read observation"
+    );
+    for input in &inputs {
+        assert!(
+            !input.contains("SENTINEL-OUTSIDE"),
+            "the outside file content never reaches the provider"
+        );
+    }
+
+    // Durable correlation: exactly the two executed actions, both confirmed;
+    // the refused traversal never claimed an attempt.
+    let loaded = handle.store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(loaded.task.progress, TaskProgress::Completed);
+    assert_eq!(loaded.task.adopted_result, Some(result.result));
+    let stamped = handle
+        .store
+        .load_task_result(result.result)
+        .await
+        .unwrap()
+        .expect("the adopted result is readable");
+    assert!(stamped.adopted_revision.is_some());
+    assert_eq!(stamped.attempt_refs.len(), 2);
+    for attempt in &stamped.attempt_refs {
+        let record = handle
+            .store
+            .load_attempt(ene_action::ActionAttemptId::from_raw(*attempt))
+            .await
+            .unwrap()
+            .expect("the attempt is durable");
+        assert_eq!(record.delegation, delegation.as_raw());
+    }
+    drop(handle);
+
+    // Restart: the outcome is durable, and a new run never replays work.
+    let reopened =
+        HostHandle::open_with_cred_store(data_dir.path(), CredStore::Memory(memory_store()))
+            .await
+            .expect("the host reopens");
+    let reloaded = reopened.store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(reloaded.task.progress, TaskProgress::Completed);
+    assert_eq!(reloaded.task.adopted_result, Some(result.result));
+    let replayed = reopened
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("a terminal task answers a domain outcome");
+    assert_eq!(
+        replayed,
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::TaskTerminal {
+            task: task.task,
+            progress: TaskProgress::Completed,
+        }),
+        "a completed execution is never resumed or replayed"
+    );
+    assert_eq!(
+        transport.inputs().len(),
+        4,
+        "the restart attempt sends no provider call"
+    );
+    assert_eq!(
+        reopened
+            .cancel_task(CancelTaskCommand { task: task.task })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::TaskTerminal {
+            task: task.task,
+            progress: TaskProgress::Completed,
+        },
+        "completion is never retracted by a late cancel"
+    );
+}
+
+#[tokio::test]
+async fn stage4_cancel_stops_the_loop_and_a_late_result_stays_original_only() {
+    let live = live_input("stage4-cancel");
+    let transport = BlockingTransport::default();
+    let (handle, data_dir) = round_test_handle("stage4-cancel", &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    let (task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
+    let handle = Arc::new(handle);
+    let started = Arc::clone(&transport.started);
+
+    let execution = {
+        let handle = Arc::clone(&handle);
+        tokio::spawn(async move { handle.run_task_agent(&transport, delegation).await })
+    };
+    // Wait until the provider call is actually in flight, then cancel.
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("the provider call starts");
+    assert_eq!(
+        handle
+            .cancel_task(CancelTaskCommand { task: task.task })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::CancelAccepted
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), execution)
+        .await
+        .expect("the execution stops promptly after the admission")
+        .expect("the join succeeds")
+        .expect("the stop is a domain outcome");
+    assert_eq!(outcome, TaskAgentRunOutcome::Cancelled);
+    assert!(
+        handle
+            .store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_none(),
+        "a stopped execution is not sealed"
+    );
+
+    // A delayed final result from the same execution is still recorded and
+    // sealed, but never adopted into the cancelled Task.
+    let recorded = orchestrate_result_arrival(
+        &handle.store,
+        delegation,
+        ene_task::TaskAgentOutput::new(String::from("late final body")),
+    )
+    .await
+    .expect("the arrival record survives cancel");
+    let acceptance = handle
+        .store
+        .adopt_result(ene_task::TaskResultAdoptionClaim {
+            result: recorded.result,
+            attempt_refs: Vec::new(),
+        })
+        .await
+        .expect("the adoption answers");
+    assert_eq!(acceptance, TaskResultAcceptance::RecordedToOriginalOnly);
+    let loaded = handle
+        .store
+        .load_task_result(recorded.result)
+        .await
+        .unwrap()
+        .expect("the late result is readable");
+    assert_eq!(loaded.body.text(), "late final body");
+    assert!(loaded.adopted_revision.is_none());
+    assert_eq!(
+        handle
+            .store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::Cancelled
+    );
+    drop(handle);
+
+    // Restart keeps the cancelled marker, never resumes the Task, and a new
+    // execution attempt is refused before any provider I/O.
+    let reopened =
+        HostHandle::open_with_cred_store(data_dir.path(), CredStore::Memory(memory_store()))
+            .await
+            .expect("the host reopens");
+    let reloaded = reopened.store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(reloaded.task.progress, TaskProgress::Cancelled);
+    assert_eq!(
+        reopened
+            .cancel_task(CancelTaskCommand { task: task.task })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::AlreadyCancelled,
+        "the admission happened exactly once"
+    );
+    assert!(
+        reopened
+            .store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_some(),
+        "the late result stays durable against its original execution"
+    );
+    let refusing_transport = ScriptedTransport::new(Vec::new());
+    let refused = reopened
+        .run_task_agent(&refusing_transport, delegation)
+        .await
+        .expect("a cancelled task answers a domain outcome");
+    assert_eq!(
+        refused,
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::TaskTerminal {
+            task: task.task,
+            progress: TaskProgress::Cancelled,
+        }),
+        "a restart never resumes or re-executes a cancelled Task"
+    );
+    assert!(
+        refusing_transport.inputs().is_empty(),
+        "the cancelled Task sends no provider call"
+    );
+}
