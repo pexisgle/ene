@@ -1,6 +1,7 @@
 //! Autonomous Task Agent ↔ Action execution loop (Stage 4 slice D).
 //!
-//! One [`DelegationId`] is one delegated Task Agent execution lifetime
+//! One [`DelegationId`](ene_task::DelegationId) is one delegated Task Agent
+//! execution lifetime
 //! (0..N inference turns, 0..N Action attempts, 0..1 final result). This
 //! module runs that lifetime end to end through the existing owner
 //! boundaries and adds no new admission, state, or storage:
@@ -13,7 +14,7 @@
 //!    [`run_workspace_action`] (AU5 + the workspace filesystem boundary); a
 //!    final answer goes through the explicit finalization boundary
 //!    (`orchestrate_result_arrival`, AU15a) and then adoption
-//!    ([`TaskRepository::adopt_result`], AU15b).
+//!    ([`TaskRepository::adopt_result`](ene_task::TaskRepository::adopt_result), AU15b).
 //! 3. Action observations are replayed into the next turn as execution-local
 //!    transcript. They are never persisted: the only durable result body is
 //!    the `task_result` row.
