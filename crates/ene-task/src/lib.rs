@@ -26,9 +26,10 @@ mod task;
 mod workspace;
 
 pub use agent::{
-    TaskAgentInference, TaskAgentInferenceError, TaskAgentInferenceOutcome,
-    TaskAgentInferencePremise, TaskAgentInferenceProduced, TaskAgentNotSent, TaskAgentOutput,
-    TaskAgentTurnError, TaskAgentTurnOutcome, TaskAgentTurnPremise, orchestrate_task_agent_turn,
+    TaskAgentActionExchange, TaskAgentInference, TaskAgentInferenceError,
+    TaskAgentInferenceOutcome, TaskAgentInferencePremise, TaskAgentInferenceProduced,
+    TaskAgentNotSent, TaskAgentObservation, TaskAgentOutput, TaskAgentTurnError,
+    TaskAgentTurnOutcome, TaskAgentTurnPremise, orchestrate_task_agent_turn,
 };
 pub use cancel::{CancelTaskCommand, TaskCancelOutcome};
 pub use context::{
