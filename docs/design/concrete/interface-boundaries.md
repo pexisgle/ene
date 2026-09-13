@@ -410,7 +410,7 @@ enum TaskProgress {
 - **永続化とコミット**: タスクの新規作成は、`task + task_revision + 初期 task_context_entry` と、関連付けを確定した場合の `workspace_assoc` を不可分に永続化してから外部へ可視化します（durable-before-visible）。方針変更は、新リビジョンと新コンテキストを不可分に進めます。結果の到着 record は、`task_result` の 1 回だけの insert（`body` 1 行、`adopted_revision = NULL`、`task_id`/`task_revision` は delegation 行から写す）として final result の可視化前に確定し、同じ不分区間でその delegation を seal します（durable invariant: 1 delegation につき final `task_result` は最大 1 行。同じ `TaskResultId` の retry は冪等、同じ delegation の異なる `TaskResultId` は 2 つ目の final result として受理せず fail closed）。採用と完了確定は別の短い `Immediate` トランザクションで、result 行の存在確認、delegation（execution lifetime）からの authoritative set 列挙と claim の完全一致、確定度の読み取り、Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと）の検証、`task_result.adopted_revision` の刻印、`task_result_attempt` の相関刻印、`task.progress` の terminal への CAS を行います。現在リビジョン不一致・terminal・cancel marker ありの場合は、到着 record に留めて現在 Task を変更しません。また、`create_delegation`・`forward_steering`・推論試行 claim（AU14）・Action 開始（AU5）はそれぞれの同一トランザクションで `task.progress` の非 terminal を必須とし、AU14/AU5 はさらに delegation が seal 済みでないこと（その delegation の `task_result` 行が存在しないこと）を同じ不分区間で必須とします。terminal は書き込み・開始ともに行いません。同一 `TaskId` に対する方針指示、委任受付、完了確定、結果採用は、同期区分 SD-Task によって厳格に逐次化します（CCT §4）。
 - **Task progress / lifecycle（本スライス）**: Task revision（目的・指示の steering）と `TaskProgress` は別の軸です。`create_task` は `Started` で初期化し、`create_delegation` は `Started → InProgress` を同じ AU3 トランザクションで進め（end-to-end の初回実装はこのスライス）、`adopt_result` は採用成立時に、同じ不分区間で Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと）を検証した上で `progress` を非 terminal から `Completed` へ CAS します。terminal 状態は吸収的で、terminal からの遷移は `RecordedToOriginalOnly`（結果）に留まります。`Failed` は作業担当が確定した terminal failure のみを表し、provider の一時障害・`NotSent`・Action `Unknown`・`WithheldByEffectFacts` を写しません（それらを terminal failure と確定できる producer は後続スライスが追加します）。start 要求から結果が返るまでの推論ターン自体は lifecycle を変更しません。**terminal 後の新規委任・steering・推論試行 claim・Action 開始の拒否（admission gate）は本スライスの契約であり**、AU3/AU4/AU14/AU5 の比較と同じ不分区間で `task.progress` が非 terminal であることを必須とし、terminal は専用の domain outcome（`TaskTerminal`）で書き込み・開始ともに行いません（cancel marker と cancel-specific gate は後続スライスが同じ比較点へ producer と対で追加します）。execution seal はこれとは別の gate であり、Task が non-terminal（InProgress）のままでも seal 済み delegation の AU14/AU5 は拒否されます（`ExecutionSealed`）。逆に Task が terminal なら seal の有無に関わらず `TaskTerminal` です。seal は Task の terminal への遷移を意味せず、Task terminal は execution seal の前提でもありません。本スライスが固定するのは progress の吸収性、terminal の admission gate、execution seal、terminal 後に結果を現在へ採用しないことです。
 - **Task Agent の推論開始（K-E との接続）**: 委任された一時エージェントの推論は、依拠タスクリビジョンの前提を推論試行の確定（attempt claim）と同一の短いトランザクションで照合してから開始します（照合条件は K-E。現在の `task.progress` が非 terminal であることに加え、その delegation が seal 済みでないこと（その delegation の `task_result` 行が存在しないこと）を含みます）。照合に失敗した場合は `TaskPremiseStale`（タスク前提の不一致。terminal と execution seal を含む）または `Stale`（同意・認証情報の不一致）として送信前に不受理とし、provider への I/O を行いません。作業側は再読込で delegation の final result を検出した場合、`StaleTaskRevision` ではなく `ExecutionSealed { delegation }` として返し、progress の terminal を検出した場合は `TaskTerminal { task, progress }` として返します。確定済みの試行は、その後の方針指示（steering）によって開始を取り消されません（遅延結果は元リビジョンへの記録に留め、現在のタスクへ自動採用しません）。委任レコードの存在を実行中・生存の証拠にしてはなりません（CI §5.3）。
-- **Task Agent の入力と scrub（本スライスの範囲）**: このスライスの論理入力は依拠リビジョンの採用目的本文（`task_revision` snapshot）であり、`SecretScrubber` の出力（`ScrubbedText`）だけを推論境界へ渡します。ハーネス自ら `ScrubbedText` を構成してはなりません（構成の封止は Issue #1530 で追跡）。採用指示の本文は History が原本のまま保持し、参照先レコードの bounded read を持つ producer が同じ設計変更で解決を追加します（本スライスは本文を複製せず、指示本文も送信しません）。ワークスペース範囲・ファイル内容はこの推論経路では送信しません（Action スライス）。scrub の失敗は fail closed の技術的失敗であり、原文を送信・保存・ログ出力しません。Task Agent は `admit_task_agent` のみを呼び、`admit_dialogue` / `admit_learning` を代用してはなりません。
+- **Task Agent の入力・採用指示本文の解決・scrub（採用指示本文の契約）**: 推論ターンの論理入力は、依拠リビジョンの採用目的本文（`task_revision` snapshot）に、現在リビジョンまでの `AdoptedInstruction` 項目の本文を `TaskContextEntry` の順序のまま並べたものです。採用指示本文の正本は History の `history_message` 行（`origin.source` が指す発言レコード）であり、Task 側（`task_context_entry`・delegation・inference attempt・task_result）へ本文を複製してはなりません。本文は作業側が定義する `TaskInstructionSource` port で解決し、Host 結合ルート（`apps/ene-core`）が History owner の単一メッセージ bounded read（`message_id` PK を直接引き、timeline 全読込・recent timeline・command lookup を代用しない）へ写します。ハーネスは採用指示項目ごとに (1) `origin.kind = OwnerConversation`、(2) 読み戻したレコードの `source` が `origin.source` と一致すること、(3) `role = Owner` であること、(4) `companion` が `task.assignee.companion` と一致することを検証し、不一致・未対応 kind・読み出し失敗は fail closed の技術的失敗として provider I/O を開始しません（別 Companion の Owner 発言を混入させません）。参照先が存在しない場合は `TaskAgentTurnOutcome::InstructionSourceMissing { entry, source }` として、本文を捏造せず・黙ってスキップせず・`TaskContextEntry` を削除／書き換えずに turn を終えます。目的本文と解決済み指示本文は 1 つの論理入力へ組み立て、`SecretScrubber` を 1 回だけ通し、返却された `ScrubbedText` のみを推論境界へ渡します。ハーネス自ら `ScrubbedText` を構成せず、複数回 scrub した断片を合成しません（構成の封止は Issue #1530 で追跡）。ワークスペース範囲・ファイル内容はこの推論経路では送信しません（Action スライス）。scrub の失敗は fail closed の技術的失敗であり、原文を送信・保存・ログ出力しません。Task Agent は `admit_task_agent` のみを呼び、`admit_dialogue` / `admit_learning` を代用してはなりません。
 - **依存性の反転（Inversion）**: 保全・消去等の他ドメインのデータ（`HoldConditionRef` や `RestoreGeneration` 等）は、クレート境界では受け入れ側のドメイン（作業、推論、実行等）が定義する前提型として受け取ります。他ドメインの固有型を直接インポートしてはなりません（CM §4.3）。
 - **IPC 通信**: ホスト内部で完結します。クライアントへは進捗や結果の必要な表示情報のみを伝達し、タスクのマスターデータそのものは送信しません。
 
@@ -455,14 +455,68 @@ enum TaskAgentTurnOutcome {
     StaleTaskRevision { current: TaskRef }, // 依拠リビジョンが前進済み。provider へ送信していない
     MissingTask { task: TaskId },
     MissingDelegation { delegation: DelegationId },
+    InstructionSourceMissing {       // 採用指示本文の canonical source が存在せず、本文を解決できない。
+        entry: TaskContextEntryId,   // 採用 identity。context 順で最初に解決できなかった項目
+        source: RawId,               // 解決できなかった由来レコードの参照
+    },                               // 本文の捏造・指示の黙殺・TaskContextEntry の削除/書換え・provider I/O のいずれも行わない
     NotSent(TaskAgentNotSent),       // setup 不足・許可リスト外・同意失効・入力上限・利用済み評価
 }
+
+// 採用指示本文の解決 port（作業側が定義する。Host 結合ルート apps/ene-core が
+// History owner の単一メッセージ bounded read へアダプターとして実装する）。
+// 作業側は個体調整・会話履歴の具象型（HistoryMessage / HistoryRole / CompanionId）を import せず、
+// 不透明 ID と作業側の写像語彙だけを受け取る。直接依存（ene-task → ene-companion）は CM §9.1 が禁止し、
+// caller が本文列を組み立てて渡す形は canonical source の検証を迂回できるため採用しない。
+struct TaskInstructionSourceRecord { // History 発言レコードの写像。本文の正本は History のまま
+    source: RawId,                   // 会話履歴レコードの識別子。origin.source と一致することを作業側が検証する
+    companion: RawId,                // 発言主体（AssigneeRef.companion と同じ RawId 空間。ドメイン newtype へ変換しない）
+    role: TaskInstructionRole,       // 会話履歴 role の作業側写像。作業側が Owner であることを検証する
+    text: String,                    // 発言本文。Debug では伏字化し、正本を複製しない
+}
+enum TaskInstructionRole { Owner, Companion }
+enum TaskInstructionSourceError {    // 技術的失敗（本文・秘密・provider 応答を含めない）
+    SourceUnavailable { reason: String },
+}
+trait TaskInstructionSource: Send + Sync {
+    // message_id（PK）を直接引く単一メッセージ bounded read のみを契約とする。
+    // timeline 全読込・load_recent_timeline・lookup_command から探す実装を禁止する。
+    // 欠如は Ok(None)。malformed durable row は Err（フェイルクローズ）とし、合成値を返さない。
+    async fn load_owner_instruction(&self, source: RawId)
+        -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError>;
+}
+
+// 論理入力の組み立てと検証（順序固定。1 inference turn につき 1 回）:
+// 1. load_task の context から AdoptedInstruction 項目を順序のまま取り出す。順序は load_task が返す
+//    目的項目の後に続く (reference.revision, entry_id) 昇順であり、source ID での再ソート・dedupeをしない。
+// 2. 各項目に origin.kind = OwnerConversation を要求する。本文解決 producer の存在しない
+//    Spontaneous / ScheduleOccurrence の項目は、producer を持つスライスが同じ設計変更で解決を追加するまで
+//    fail closed の技術的失敗として拒否し、黙ってスキップしない。
+// 3. TaskInstructionSource で本文を解決し、source 一致・role = Owner・companion = assignee を検証する。
+//    参照先 record の不在（Ok(None)）は InstructionSourceMissing、対応関係の破損（source 不一致・role 不一致・
+//    別 Companion の行）と読み出し失敗（TaskInstructionSourceError）は技術的失敗（fail closed。stale へ丸めない）。
+//    読み出し失敗・対応関係の破損は既存の TaskAgentTurnError::InputUnavailable に写し（reason は固定クラス。
+//    本文・History 行・秘密を含めない）、enum を増やさない。scrub 失敗も同じ InputUnavailable である。
+// 4. 目的本文 → 採用指示本文を context 順に並べた 1 つの論理入力を組み立て、SecretScrubber を 1 回だけ通す。
+//    目的本文と指示本文の境界は固定の framing で区切り、本文の順序・件数を変えず、空の指示集合では
+//    目的本文のみを論理入力とする。prompt の具体的文言は実装の自由度だが、境界の表現は全 turn で同一にする。
+// 5. ScrubbedText のみを TaskAgentInference へ渡す。AU14 claim が依拠 TaskRef を atomic に比較するため、
+//    本文 read の後に steering が勝った場合は古い prompt が provider へ届かない（CCT §7.2）。
+// 6. TaskContextEntry の作成・削除・書き換え、task_context_entry への本文複製、指示本文の cache は行わない。
+//    本文を解決できない turn は provider I/O を開始せず、生成した論理入力や未解決の本文をログ・Debug・
+//    技術的エラーへ出さない（HistoryMessage / TaskInstructionSourceRecord / TaskAgentInferencePremise の
+//    Debug は本文を伏字化する）。
 // `TaskAgentNotSent` / `TaskAgentInferenceError` は推論側 `NotSentReason` / `InferenceTechnicalError`
 // と同じ意味の語彙を作業側に写したもの。`StaleTaskPremise` は作業側が委任・現在のタスク・
 // delegation の final result（seal）を再読込し、委任が不在なら MissingDelegation、タスクが不在なら
 // MissingTask、final result が durable なら ExecutionSealed、progress が terminal なら
 // TaskTerminal { task, progress }、タスクリビジョンが前進していれば StaleTaskRevision { current } へ写す
 // （判定の所有は作業担当に残る。terminal と seal を revision stale へ丸めない）。
+// 採用指示本文の参照先 record 欠如（InstructionSourceMissing）は Ok 側のドメイン判定であり、本文を捏造・
+// 黙殺せず、TaskContextEntry も書き換えず、provider I/O も開始しない。source 不一致・role 不一致・
+// 別 Companion の行・本文解決 producer の無い origin kind・読み出し失敗は技術的失敗（fail closed）であり、
+// stale や InstructionSourceMissing へ丸めず、既存の TaskAgentTurnError::InputUnavailable（reason は固定クラス）に写す。
+// 参照先 record の不在そのものは TaskContextEntry の破損ではないため、TaskTerminal / StaleTaskRevision と同じ
+// Ok 側のドメイン判定として返し、TaskContextEntry の削除・retire や本文 cache で「修復」しない。
 // final result を提出する finalization 境界（TaskAgentResultArrival）は `Produced` とは別であり、
 // orchestrate がそこで TaskResultId を発行して AU15a で本文を durable 化してから採用判定へ進む。
 // どの provider 出力が final かを決める tool loop の低レベル protocol は本スライスでは固定しない
@@ -1700,6 +1754,9 @@ trait TaskRepository {
     // 未知の項目種別（unknown item kind）、種別とペイロードの不一致、現在リビジョンを超える項目は技術的エラーとし、
     // 読み飛ばしや勝手な再解釈を行ってはなりません。origin.source は参照であり、参照先レコードの存在や可読性は要求しません
     // （解決できない来歴情報もそのまま返し、本文を複製・再解釈しません）。存在しない識別子の場合は None を返します。
+    // 採用指示項目の本文はこの読み出しで History から引いてはなりません（Task の読み出しに History owner の
+    // テーブル走査を混ぜない）。本文の解決は推論ターンの入力組み立てが、作業側の TaskInstructionSource port
+    // （message_id PK の単一メッセージ bounded read）で行い、TaskRecord へ本文を複製しません。
     async fn load_task(
         &self,
         task: TaskId,
@@ -2110,7 +2167,7 @@ trait UndeliveredRepository {
 
 1. 個体調整担当が `ProposeTaskCommand(requester, purpose, origin, workspace_need)` を作業担当へ渡します。会話上での受付は、タスク本体への反映ではありません。作業担当は `TaskProposalOutcome::AcceptedAsTask(TaskRef)` を確定します。タスクの作成は、`TaskCreationPremise`（初期目的・初期コンテキスト項目・確定したワークスペース関連付け）が不可分に永続化された後に外部へ可視化されます。
 2. 作業担当は `CreateDelegationCommand(task=TaskRef(expected), scope_copy)` を発行して一時エージェントへの委任を作成します。作成は、期待リビジョンと現在のタスクリビジョンの不可分な比較照合（AU3）と `task.progress` が非 terminal であることを満たした場合にのみ `DelegationRef` として永続化され、progress を `Started → InProgress` へ進めます。リビジョン不一致は `StaleTaskRevision { current }`、terminal は `TaskTerminal { task, progress }` として書き込みなしに再評価へ戻ります。エージェントは一時的な従属主体に留まり、独立した特権、認証情報、プロバイダ設定の上書き権限、個別の予算枠限度を持ちません。`consumer_assignment` は保存された identity としては導入せず、Task Agent の推論受付時に委任元が依拠する現在の Capability 同意から live に解決します（durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` が担います）。
-3. オーナーからの追加指示は、`ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source)`（`unadopted` フィールドは W-3 の反映判断を生成元に持つスライスで導入）によって、新リビジョンと新コンテキストの不可分な前進（forward）となります。新リビジョンは採用目的項目と採用指示項目を同一の `forward_steering` トランザクションに記録します。採用識別子は作業担当が確定し、採用指示項目自身の `TaskContextEntryId` が表します（`instruction_source` は由来レコードの参照であり、採用識別子そのものではありません）。過去のリビジョンも確実に保持されます。2つの方針指示が競合した場合は同期区分 SD-Task の順序で直列化され、先に確定した方を優先して現在の状態とし、後から到着した要求は新しい現在の状態に対する再指示として評価します。
+3. オーナーからの追加指示は、`ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source)`（`unadopted` フィールドは W-3 の反映判断を生成元に持つスライスで導入）によって、新リビジョンと新コンテキストの不可分な前進（forward）となります。新リビジョンは採用目的項目と採用指示項目を同一の `forward_steering` トランザクションに記録します。採用識別子は作業担当が確定し、採用指示項目自身の `TaskContextEntryId` が表します（`instruction_source` は由来レコードの参照であり、採用識別子そのものではありません）。過去のリビジョンも確実に保持されます。採用指示本文は History を正本として Task Agent turn の入力組み立て時に bounded read で解決し、複製しません（V-11）。2つの方針指示が競合した場合は同期区分 SD-Task の順序で直列化され、先に確定した方を優先して現在の状態とし、後から到着した要求は新しい現在の状態に対する再指示として評価します。
 4. 方針指示（steering）が行われた後に、古いリビジョンを前提とした委任作成やアクション実行要求が届いた場合は、`StalePremise { current }` または `StaleTaskRevision { current }` として不受理にし、再評価へ差し戻します。Task が terminal の場合は revision stale と区別し、委任は `TaskTerminal { task, progress }`、steering は `TaskProposalOutcome::TaskTerminal`、Action は `ActionStartOutcome::TaskTerminal` として書き込み・開始ともに行いません。実行中だった古い委任はベストエフォートで停止・縮小させ、古い結果を勝手に新しい目的に採用してはなりません。Task Agent の推論開始も同じ照合に従い、依拠リビジョン・現在のタスクリビジョン・`task.progress` が非 terminal であること・delegation が seal 済みでないことの比較を推論試行の確定と同一の不分区間で行います（照合に失敗した新規推論は `TaskPremiseStale` として送信前に拒絶し、作業側の再読込が terminal を検出した場合は `TaskTerminal`、delegation の final result（seal）を検出した場合は `ExecutionSealed` へ写します）。
 5. エージェントの処理結果は、Task Agent execution が final result を提出した明示的な finalization 境界で `TaskAgentResultArrival(delegation, result, body)` として、orchestrate が `TaskResultId` を発行し final result の可視化より前に `record_task_result_arrival` で durable に記録します（本文を失わない。同じ不分区間で delegation を seal し、1 delegation につき final result は最大 1 つ）。`TaskAgentTurnOutcome::Produced` は 1 回の inference turn の provider 出力であり、Action 要求や途中経過を含むため final result でも seal でもなく、到着 record に入れません。その後の採用判定は `TaskResultAdoptionClaim(result, attempt_refs)` を `adopt_result` が 1 つの短い `Immediate` トランザクションで判定します。依拠リビジョンは delegation 行から解決し、その revision snapshot の目的 identity と現在の目的 identity を比較します（本文の文字列一致は使いません）。同時に result 行の delegation（execution lifetime）から Action attempt の authoritative set を列挙し、claim の `attempt_refs` との完全一致を要求します（欠如・追加・重複は技術的エラー。seal 後に membership は変化しません）。現在リビジョンが前進済みまたは Task が terminal の場合は `RecordedToOriginalOnly` として元の依拠リビジョンにのみ記録し、現在のタスクには不採用とします。現在リビジョンと一致しても、result-local authoritative set に `ConfirmedSuccess` 以外があれば、または同じ TaskId の全 revision / 全 delegation の Action 試行に `Unknown` が残れば（Task-wide completion barrier。blockers は両者の和集合とし、重複は 1 回）、`WithheldByEffectFacts` として完了しません（barrier で見つけた試行は result-local 相関として `task_result_attempt` に刻印せず、terminal CAS の可否だけを判定します）。古い承認情報を使ってタスクの中断を勝手に解除してはなりません。採用・競合・不明の詳細は V-10 で確認します。
 6. **失われてはならない情報**: 単なる発言記録とタスク反映内容および未反映・保留指示の対応関係、方針指示の前後の目的の区別、委任範囲、ワークスペース境界、クライアント依存条件、タスクリビジョンの前提情報。
@@ -2201,6 +2258,19 @@ trait UndeliveredRepository {
 22. **settled cross-delegation success**: D2 の A2 が `ConfirmedSuccess` で settlement 済み、X の result-local 依存もすべて `ConfirmedSuccess`、同じ `TaskId` に `Unknown` が無い場合、A2 が X の dependency でなくても Task-wide completion barrier を理由に完了を block しません（`AdoptedAsCompletion` が成立し得ます）。完了 commit 後に新しい AU5 は terminal gate で拒否されるため、A2 の fact は durable に残ったままです。
 23. **settled cross-delegation failure**: D2 の A2 が `ConfirmedFailure` で settlement 済み、X の result-local 依存がすべて `ConfirmedSuccess`、`Unknown` が無い場合、A2 が X の result-local dependency でなければ、unsettled-effect barrier だけを理由に完了を block しません（外部作用 certainty として settlement 済みだからです）。A2 が X の result-local set に含まれる場合だけ、既存 contract どおり `ConfirmedFailure` が X の採用を block します。
 24. **old revision Unknown（steering を跨ぐ started Action）**: current Task が R1 のとき D1 の A1 が `Unknown` で durable start し、owner の steering が R2 を確定し、その後 R2 の D-new が result X を提出したとします。steering は既に開始した外部作用を取り消さないため、A1 は R2 の completion 後に外部作用を確定し得ます。AU15b の Task-wide completion barrier は `task_id` 単位（全 revision / 全 delegation）で `Unknown` を検出するため、A1 が `Unknown` の間は R2 の X を `Completed` にしません。A1 が ene-action owner の客観的証拠で settlement した後に X の採用を再試行してよく、その時点で barrier が clear なら完了が成立し得ます。barrier を current `TaskRef` の delegation に限定しないのは、この old-revision started Action を漏らさないためです。
+
+### V-11 Task Agent 採用指示本文の解決と prompt 配線（H-A・K-E・CI §5.2・CCT §7.2・PR グループB/D）
+
+1. **one instruction（採用指示 1 件の正常系）**: Task は R1 で purpose P を採用済み。owner の steering が R2 を確定し、`AdoptedInstruction` E1（`origin.kind = OwnerConversation`、`origin.source = H1`）が R2 と同じ `forward_steering` トランザクションで記録されています。H1.text = I1。次の Task Agent turn は delegated execution D1（依拠 R2）に対して実行されます。ハーネスは `load_task` の context から E1 を取り出し、`TaskInstructionSource.load_owner_instruction(H1)` で H1（role Owner、companion = assignee）を解決し、source 一致・role・companion を検証します。論理入力「purpose P → instruction I1」を組み立てて `SecretScrubber` を 1 回通し、返却された `ScrubbedText` だけを `TaskAgentInference` へ渡します。AU14 claim は依拠 R2 を比較し、成功した場合のみ provider I/O が始まります。`task_context_entry` へ I1 は複製されず、History が正本のままです。
+2. **multiple steering instructions（複数指示の順序維持）**: E1→H1（R2 採用）、E2→H2（R3 採用）、E3→H3（R4 採用、current）。`load_task` は purpose 項目の後に E1、E2、E3 を (reference.revision, entry_id) 昇順で返します。ハーネスはこの順序のまま I1、I2、I3 を論理入力へ含め、revision 番号だけで再ソートせず、History timeline 順へ置換せず、source ID で dedupe しません。3 件すべてが 1 回の scrub を通ります。
+3. **duplicate source identity（同じ source の複数採用）**: 同じ History source H1 が別の採用機会に E1 と E2 として 2 回採用されている場合（canonical contract 上、同一 source の再提案は別の entry identity として採用され得ます）、ハーネスは E1→H1 と E2→H1 をそれぞれ解決し、context 順に I1 を 2 回とも論理入力へ含めます。source ID だけで dedupe して 1 件に畳んだり、entry identity を統合したりしません。
+4. **missing History source（参照先欠如）**: AdoptedInstruction E1（origin.source = H1）が存在するが H1 行が durable に存在しない場合、`TaskInstructionSource` は `Ok(None)` を返します。ハーネスは `TaskAgentTurnOutcome::InstructionSourceMissing { entry: E1, source: H1 }` を返し、指示を黙って落として purpose だけで続行することも、本文を捏造することも、`TaskContextEntry` を削除・書き換え・retire することもなく、provider I/O を開始しません（scrub も inference claim も行いません）。この状態は破損とは限りません。origin.source は参照であり、参照先 record の存在は TaskContextEntry の validity 条件ではなく、将来の Targeted Deletion が History 行を消去した場合も同じ outcome で安全に停止します。
+5. **foreign Companion source（別 Companion の発言）**: Task の assignee が C1 なのに、H1 行の companion が C2 である場合、ハーネスは companion 一致検証で fail closed の技術的失敗とし、provider I/O を開始しません。C2 の Owner 発言を C1 の Task Agent prompt へ混入させることも、`InstructionSourceMissing` として扱うこともありません（対応関係の破損は技術的エラーであり、参照先欠如のドメイン判定へ丸めません）。TaskContextEntry は書き換えません。
+6. **wrong History role（Owner 以外の発言）**: H1 行が `HistoryRole::Companion`（role = Companion）である場合、ハーネスは role = Owner 検証で fail closed の技術的失敗とし、provider I/O を開始しません。Companion の発言を Owner instruction として Task Agent へ渡すことはありません。
+7. **steering race（body read 後の steering 勝ち）**: ハーネスが R2 current の context と採用指示本文（E1→H1）を解決し、論理入力を scrub した後、AU14 claim の前に concurrent steering が R3 を確定したとします。claim は依拠 TaskRef R2 と現在リビジョン R3 の不一致を同一トランザクションで検出して `TaskPremiseStale` を返し、作業側の再読込が `StaleTaskRevision { current: R3 }` へ写します。R2 の旧 prompt は provider へ送信されません。本文 read は claim transaction の外で行われ、その間 Task-wide mutex や長い SQLite transaction を保持しません（CCT §15.2 の await 中ロック保持禁止）。steering が R3→R4 とさらに進んだ場合も同じです。
+8. **scrub failure（指示本文を含む論理入力の scrub 失敗）**: 目的本文と解決済み指示本文を組み立てた論理入力（採用指示本文を含む）の scrub が `SecretScrubError` で失敗した場合、ハーネスは `TaskAgentTurnError::InputUnavailable` を返し、provider I/O を開始しません。error / Debug / log に論理入力や指示本文を含めず、原文を保存しません。
+9. **secret in instruction（指示本文内の credential-like value）**: H1.text に登録済み credential 値と同値の文字列が含まれていても、1 回の scrub がその出現を除去した `ScrubbedText` だけが inference port へ届きます。raw の I1 は provider へ渡らず、`TaskAgentInferencePremise` / `TaskAgentOutput` の Debug も本文を伏字化します。複数回 scrub した断片を組み合わせないため、credential-set revision の drift による adoption / commit の穴も作りません。
+10. **reopen（再起動後の再解決と自動 replay 禁止）**: Task / History を close して reopen した後も、現在 TaskRecord の E1 と History H1 の対応は保持されており、同じ `origin.source` から同じ指示本文を再解決できます。すでに確定した inference attempt は durable fact のまま残り、provider 呼び出しの自動 replay も、前回 turn の prompt の自動再送も行いません。新しい turn は明示的な呼び出し（`TaskAgentTurnPremise`）に対してのみ、現在の TaskRef 前提を AU14 で再照合してから開始します。
 
 ## 18. 意図的に残した Design Freedom
 

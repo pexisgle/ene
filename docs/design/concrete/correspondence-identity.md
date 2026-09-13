@@ -226,6 +226,8 @@ enum ReportStatus {
 
 - メッセージを生成したこととユーザーに提示されたこと、送信したことと伝達が完了したこと、報告済みであることとユーザーから承認されたことは、それぞれ全く別の事象です。
 - 会話ラウンドの終了は、会話タイムラインの終了や過去ログの消去を意味しません。
+- **発言 identity と single-message bounded read**: 会話履歴の各発言は `message_id`（PK）で一意に引きます。採用指示の本文解決は、参照（`origin.source`）の `message_id` を直接引く単一メッセージ bounded read だけを使い、timeline 全読込・recent timeline・command lookup から目的の発言を探す実装を禁止します（欠如は識別子不在として明示し、malformed durable row は技術的エラーとして fail closed とします）。同じ行を指す別の本文複製 record を作ってはなりません。
+- **参照と採用 identity の区別**: `TaskContextOrigin.source` は由来レコードへの参照であり、Task 側の採用 identity（`TaskContextEntryId`）や目的 identity（`TaskPurposeRef`）とは別概念です（§5.3）。参照先の record が存在しないことは参照側の record の validity を否定せず、参照を勝手に別 record へ付け替えたり、解決できないまま本文を捏造・黙って省略したりしてはなりません。本文を解決できない Task Agent turn は provider I/O を開始せず、採用済み項目を削除・書き換えません。同じ source が複数回採用された場合も、source ID で entry identity を dedupe しません。
 
 ### 5.3 タスク・委任・タスクコンテキスト・ワークスペース・スケジュール
 
