@@ -157,8 +157,9 @@ const ORIGIN_KIND_SCHEDULE_OCCURRENCE: &str = "schedule_occurrence";
 /// The stored `item_kind` discriminators. The kind decides which payload is
 /// required: an adopted purpose carries the adopted revision, an adopted
 /// instruction carries no payload because the entry identity is the adoption
-/// identity.
-const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
+/// identity. Shared with the migration that resolves an attempt's relied
+/// purpose provenance, so the storage name has one definition.
+pub(crate) const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
 const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
 
 fn task_unavailable(reason: impl core::fmt::Display) -> TaskTechnicalError {

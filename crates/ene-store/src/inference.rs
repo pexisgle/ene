@@ -5,8 +5,9 @@ use ene_inference::{
     InferenceTechnicalError, TaskAgentAttemptPremise, UsageFact, UsageRepository,
 };
 use ene_permission::{CapabilityKind, ConsumerKind};
-use ene_primitive::{RevisionInner, WallClockWithTz};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use ene_preservation::{DeletionOperationId, DeletionSweepGeneration, ErasureConditionRef};
+use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
@@ -17,11 +18,31 @@ use crate::codec::{
 use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
 
-const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consumer, purpose, consent_id, consent_rev, credential_set_rev, provider, model, started_at, delegation_id, task_id, task_revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consumer, purpose, consent_id, consent_rev, credential_set_rev, provider, model, started_at, delegation_id, task_id, task_revision, data_use_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 
-const SQL_SELECT_ATTEMPT: &str = "SELECT capability, consumer, purpose, provider, model, delegation_id, task_id, task_revision FROM inference_attempt WHERE ticket = ?1";
+const SQL_INSERT_DATA_USE: &str =
+    "INSERT INTO inference_attempt_data_use (ticket, ordinal, source) VALUES (?1, ?2, ?3)";
+
+const SQL_SELECT_DATA_USE: &str =
+    "SELECT ordinal, source FROM inference_attempt_data_use WHERE ticket = ?1 ORDER BY ordinal";
+
+const SQL_SELECT_ATTEMPT: &str = "SELECT capability, consumer, purpose, provider, model, delegation_id, task_id, task_revision, data_use_count FROM inference_attempt WHERE ticket = ?1";
 
 const SQL_SELECT_ATTEMPT_TICKET: &str = "SELECT ticket FROM inference_attempt WHERE ticket = ?1";
+
+/// The bounded coverage probe of the canonical erasure-condition store: the
+/// canonical source correlation of the current conditions. One covering row
+/// is enough to hold the send, and the row's identity is decoded through the
+/// preservation owner's types so a malformed canonical row fails closed
+/// instead of reading as "not covering". A missing table is a technical
+/// failure, never "no deletion": the authoritative empty set is an empty
+/// query result on this table, not the absence of the store.
+///
+/// Stage 4 has no deletion-operation producer and therefore no closure state:
+/// every durable condition row is currently active. Stage 6 adds the
+/// operation lifecycle and narrows the same canonical table's read instead of
+/// adding another currentness registry.
+const SQL_SELECT_COVERING_CONDITION: &str = "SELECT operation_id, sweep FROM erasure_condition_source WHERE source = ?1 ORDER BY operation_id, sweep LIMIT 1";
 
 const SQL_SELECT_DELEGATION_PREMISE: &str =
     "SELECT task_id, task_revision FROM delegation WHERE delegation_id = ?1";
@@ -58,7 +79,7 @@ impl InferenceAttemptRepository for Store {
             let credential_set_raw = encode_u64(attempt.expected_credential_set.as_u64())
                 .map_err(inference_unavailable)?;
             let ticket_text = encode_id(attempt.ticket.0);
-            let correlation = encode_task_agent(attempt.task_agent)?;
+            let correlation = encode_task_agent(attempt.task_agent.as_ref())?;
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -107,12 +128,26 @@ impl InferenceAttemptRepository for Store {
             // refuses the start before any provider I/O, and the three
             // conditions keep the shared consent slot from starting a turn
             // for an already-advanced Task.
-            match check_task_agent_premise(&tx, attempt.task_agent)? {
+            match check_task_agent_premise(&tx, attempt.task_agent.as_ref())? {
                 TaskPremiseCheck::Current => {}
                 TaskPremiseCheck::Stale => {
                     return Ok(AttemptBeginOutcome::TaskPremiseStale);
                 }
             }
+            // The data-use currentness compare rides the same atomic interval:
+            // a condition that committed first is seen here and holds the
+            // send (no attempt row, no provider byte), and a condition that
+            // commits after only affects already-started uses. The query reads
+            // the canonical store itself, so an empty active set is a genuine
+            // "not covered" answer rather than a default.
+            match check_data_use_currentness(&tx, &correlation.data_use)? {
+                DataUseCheck::Clear => {}
+                DataUseCheck::Covered(_condition) => {
+                    return Ok(AttemptBeginOutcome::DataUseHeld);
+                }
+            }
+            let data_use_count =
+                encode_u64(correlation.data_use.len() as u64).map_err(inference_unavailable)?;
             let started_text = WallClockWithTz::now().to_rfc3339();
             match tx.execute(
                 SQL_INSERT_ATTEMPT,
@@ -130,6 +165,7 @@ impl InferenceAttemptRepository for Store {
                     correlation.delegation,
                     correlation.task,
                     correlation.task_revision,
+                    data_use_count,
                 ],
             ) {
                 Ok(_) => {}
@@ -144,6 +180,17 @@ impl InferenceAttemptRepository for Store {
                     return Ok(AttemptBeginOutcome::Stale);
                 }
                 Err(error) => return Err(inference_unavailable(error.to_string())),
+            }
+            // The ordered source correlation lands in the same transaction as
+            // the attempt row and its count: a crash can never leave a claimed
+            // send whose logical-input provenance is unknown.
+            for (ordinal, source) in correlation.data_use.iter().enumerate() {
+                let ordinal_raw = encode_u64(ordinal as u64).map_err(inference_unavailable)?;
+                tx.execute(
+                    SQL_INSERT_DATA_USE,
+                    params![ticket_text, ordinal_raw, source],
+                )
+                .map_err(|error| inference_unavailable(error.to_string()))?;
             }
             tx.commit()
                 .map_err(|error| inference_unavailable(error.to_string()))?;
@@ -165,7 +212,7 @@ impl InferenceAttemptRepository for Store {
                 .optional()
                 .map_err(|error| inference_unavailable(error.to_string()))?;
             found
-                .map(|raw| decode_attempt_record(ticket, raw))
+                .map(|raw| decode_attempt_record(&guard, ticket, raw))
                 .transpose()
         })
         .await
@@ -173,30 +220,91 @@ impl InferenceAttemptRepository for Store {
 }
 
 /// The encoded Task Agent correlation group. The whole group is present or
-/// absent together; a partial group can never be written.
+/// absent together; a partial group can never be written. `data_use` is empty
+/// exactly for a non-Task-Agent attempt; a Task Agent attempt whose logical
+/// input names no canonical source is refused instead of being recorded as
+/// "no use" (its purpose entry always provides at least one source).
 struct EncodedCorrelation {
     delegation: Option<String>,
     task: Option<String>,
     task_revision: Option<i64>,
+    data_use: Vec<String>,
 }
 
 fn encode_task_agent(
-    premise: Option<TaskAgentAttemptPremise>,
+    premise: Option<&TaskAgentAttemptPremise>,
 ) -> Result<EncodedCorrelation, InferenceTechnicalError> {
     match premise {
         None => Ok(EncodedCorrelation {
             delegation: None,
             task: None,
             task_revision: None,
+            data_use: Vec::new(),
         }),
-        Some(premise) => Ok(EncodedCorrelation {
-            delegation: Some(encode_id(premise.delegation)),
-            task: Some(encode_id(premise.task)),
-            task_revision: Some(
-                encode_u64(premise.task_revision.as_u64()).map_err(inference_unavailable)?,
-            ),
-        }),
+        Some(premise) => {
+            if premise.data_use.is_empty() {
+                return Err(inference_unavailable(String::from(
+                    "task agent attempt carries no data-use correlation",
+                )));
+            }
+            Ok(EncodedCorrelation {
+                delegation: Some(encode_id(premise.delegation)),
+                task: Some(encode_id(premise.task)),
+                task_revision: Some(
+                    encode_u64(premise.task_revision.as_u64()).map_err(inference_unavailable)?,
+                ),
+                data_use: premise
+                    .data_use
+                    .iter()
+                    .map(|source| encode_id(*source))
+                    .collect(),
+            })
+        }
     }
+}
+
+enum DataUseCheck {
+    Clear,
+    Covered(ErasureConditionRef),
+}
+
+/// Compares the attempt's canonical source correlation against the canonical
+/// current erasure-condition store, inside the claim transaction.
+///
+/// Every source is probed against the condition source correlation with a
+/// bounded `LIMIT 1` lookup; any covering condition is [`DataUseCheck::Covered`]
+/// and the claim refuses. An empty probe result across all sources is the
+/// authoritative "not covered" — there is no sentinel and no default. A
+/// malformed stored identity is a technical error (fail closed), never a
+/// silent "not covering". The source correlation alone decides coverage: an
+/// orphan source row (without its condition parent) still holds, so a torn
+/// canonical store can never open a send.
+fn check_data_use_currentness(
+    tx: &rusqlite::Transaction<'_>,
+    data_use: &[String],
+) -> Result<DataUseCheck, InferenceTechnicalError> {
+    for source in data_use {
+        let covering: Option<(String, i64)> = tx
+            .query_row(SQL_SELECT_COVERING_CONDITION, params![source], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(|error| inference_unavailable(error.to_string()))?;
+        let Some((operation_text, sweep_raw)) = covering else {
+            continue;
+        };
+        let operation = DeletionOperationId::from_raw(
+            decode_id(&operation_text).map_err(inference_unavailable)?,
+        );
+        let sweep = DeletionSweepGeneration::from_u64(
+            decode_u64(sweep_raw).map_err(inference_unavailable)?,
+        );
+        return Ok(DataUseCheck::Covered(ErasureConditionRef {
+            operation,
+            sweep,
+        }));
+    }
+    Ok(DataUseCheck::Clear)
 }
 
 enum TaskPremiseCheck {
@@ -218,7 +326,7 @@ enum TaskPremiseCheck {
 /// premise mismatch, and the Task side re-reads to explain which one.
 fn check_task_agent_premise(
     tx: &rusqlite::Transaction<'_>,
-    premise: Option<TaskAgentAttemptPremise>,
+    premise: Option<&TaskAgentAttemptPremise>,
 ) -> Result<TaskPremiseCheck, InferenceTechnicalError> {
     let Some(premise) = premise else {
         return Ok(TaskPremiseCheck::Current);
@@ -286,6 +394,7 @@ struct RawAttempt {
     delegation_id: Option<String>,
     task_id: Option<String>,
     task_revision: Option<i64>,
+    data_use_count: Option<i64>,
 }
 
 fn raw_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAttempt> {
@@ -298,14 +407,58 @@ fn raw_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAttempt> {
         delegation_id: row.get(5)?,
         task_id: row.get(6)?,
         task_revision: row.get(7)?,
+        data_use_count: row.get(8)?,
     })
 }
 
+/// Reads and validates one attempt's ordered source correlation.
+///
+/// The attempt row's count is the expected child count: a missing count, a
+/// child-count disagreement, or a non-contiguous ordinal sequence is a
+/// corrupted correlation and fails closed, never a silently smaller or empty
+/// set. The `source` identities are decoded so a malformed row is unreadable.
+fn decode_data_use(
+    conn: &Connection,
+    ticket_text: &str,
+    count_raw: Option<i64>,
+) -> Result<Vec<RawId>, InferenceTechnicalError> {
+    let count = count_raw.ok_or_else(|| {
+        inference_unavailable(String::from("inference attempt row missing data_use_count"))
+    })?;
+    let count = decode_u64(count).map_err(inference_unavailable)?;
+    let mut statement = conn
+        .prepare(SQL_SELECT_DATA_USE)
+        .map_err(|error| inference_unavailable(error.to_string()))?;
+    let rows: Vec<(i64, String)> = statement
+        .query_map(params![ticket_text], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| inference_unavailable(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| inference_unavailable(error.to_string()))?;
+    if rows.len() as u64 != count {
+        return Err(inference_unavailable(String::from(
+            "inference attempt data_use count disagrees with its rows",
+        )));
+    }
+    let mut data_use = Vec::with_capacity(rows.len());
+    for (expected, (ordinal, source)) in rows.iter().enumerate() {
+        if *ordinal != expected as i64 {
+            return Err(inference_unavailable(String::from(
+                "inference attempt data_use ordinals are not contiguous",
+            )));
+        }
+        data_use.push(decode_id(source).map_err(inference_unavailable)?);
+    }
+    Ok(data_use)
+}
+
 /// A claimed attempt is composed only when it is internally consistent:
-/// known capability/consumer/purpose names, and a Task Agent consumer whose
-/// correlation group is complete (or a non-Task-Agent consumer with no
-/// group). Anything else is an unreadable row, never guessed.
+/// known capability/consumer/purpose names, a Task Agent consumer whose
+/// correlation group is complete and whose `data_use` is non-empty (or a
+/// non-Task-Agent consumer with no correlation and no data use), and a
+/// `data_use` child relation whose count, order, and identities agree with
+/// the attempt row. Anything else is an unreadable row, never guessed.
 fn decode_attempt_record(
+    conn: &Connection,
     ticket: ene_inference::InferenceTicketId,
     raw: RawAttempt,
 ) -> Result<InferenceAttemptRecord, InferenceTechnicalError> {
@@ -320,15 +473,31 @@ fn decode_attempt_record(
         inference_unavailable(String::from("inference attempt row missing purpose"))
     })?)
     .map_err(inference_unavailable)?;
+    let data_use = decode_data_use(conn, &encode_id(ticket.0), raw.data_use_count)?;
     let task_agent = match (raw.delegation_id, raw.task_id, raw.task_revision) {
-        (None, None, None) => None,
-        (Some(delegation), Some(task), Some(revision_raw)) => Some(TaskAgentAttemptPremise {
-            delegation: decode_id(&delegation).map_err(inference_unavailable)?,
-            task: decode_id(&task).map_err(inference_unavailable)?,
-            task_revision: RevisionInner::from_u64(
-                decode_u64(revision_raw).map_err(inference_unavailable)?,
-            ),
-        }),
+        (None, None, None) => {
+            if !data_use.is_empty() {
+                return Err(inference_unavailable(String::from(
+                    "non-task-agent attempt carries a data-use correlation",
+                )));
+            }
+            None
+        }
+        (Some(delegation), Some(task), Some(revision_raw)) => {
+            if data_use.is_empty() {
+                return Err(inference_unavailable(String::from(
+                    "task agent attempt has no data-use correlation",
+                )));
+            }
+            Some(TaskAgentAttemptPremise {
+                delegation: decode_id(&delegation).map_err(inference_unavailable)?,
+                task: decode_id(&task).map_err(inference_unavailable)?,
+                task_revision: RevisionInner::from_u64(
+                    decode_u64(revision_raw).map_err(inference_unavailable)?,
+                ),
+                data_use,
+            })
+        }
         _ => {
             return Err(inference_unavailable(String::from(
                 "partial task agent attempt correlation",

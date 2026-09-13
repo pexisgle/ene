@@ -3,9 +3,9 @@ use rusqlite::{Connection, TransactionBehavior};
 use ene_permission::{CapabilityKind, ConsumerKind, PurposeKind};
 use ene_primitive::WallClockWithTz;
 
-use crate::codec::{decode_id, encode_consumer, encode_purpose};
+use crate::codec::{decode_consumer, decode_id, encode_consumer, encode_purpose};
 
-const CURRENT_VERSION: u64 = 20;
+const CURRENT_VERSION: u64 = 21;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -622,6 +622,185 @@ fn migrate_v20(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Introduces the Stage 4 erasure-currentness foundation (V21): the minimal
+/// canonical Group J erasure-condition state and the Task Agent attempt's
+/// `data_use` source correlation.
+///
+/// `erasure_condition` is the logical table's minimal physical form: one row
+/// per `(operation, sweep)`, with the covered canonical source identities in
+/// the normalized `erasure_condition_source` child, so one condition can
+/// cover many sources and the source index answers the claim's bounded
+/// "is this source covered" probe. Stage 4 has no deletion-operation producer
+/// (the authoritative active set is empty, obtained by reading these tables);
+/// Stage 6 extends the same canonical tables with the operation lifecycle
+/// instead of adding a second currentness registry.
+///
+/// `inference_attempt_data_use` stores the logical input's canonical source
+/// correlation in order, duplicates included: `(ticket, ordinal)` is the key
+/// and `data_use_count` on the attempt row is the expected child count, so a
+/// bounded read rejects a truncated or reordered correlation instead of
+/// silently composing a smaller set. Bodies and hashes are never stored.
+const MIGRATION_V21_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS erasure_condition (
+operation_id TEXT NOT NULL,
+sweep INTEGER NOT NULL,
+PRIMARY KEY (operation_id, sweep)
+);
+CREATE TABLE IF NOT EXISTS erasure_condition_source (
+operation_id TEXT NOT NULL,
+sweep INTEGER NOT NULL,
+source TEXT NOT NULL,
+PRIMARY KEY (operation_id, sweep, source)
+);
+CREATE INDEX IF NOT EXISTS idx_erasure_condition_source_source ON erasure_condition_source (source);
+CREATE TABLE IF NOT EXISTS inference_attempt_data_use (
+ticket TEXT NOT NULL,
+ordinal INTEGER NOT NULL,
+source TEXT NOT NULL,
+PRIMARY KEY (ticket, ordinal)
+);
+";
+
+/// Applies the V21 column add and backfill idempotently: a version-only
+/// rewind re-enters with the column already present, and the backfill touches
+/// only rows whose `data_use_count` is still NULL, so a re-run never rewrites
+/// a recorded correlation.
+fn migrate_v21(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    if !column_exists(tx, "inference_attempt", "data_use_count")? {
+        tx.execute_batch("ALTER TABLE inference_attempt ADD COLUMN data_use_count INTEGER NULL;")
+            .map_err(|error| error.to_string())?;
+    }
+    tx.execute_batch(MIGRATION_V21_TABLES)
+        .map_err(|error| error.to_string())?;
+    backfill_inference_attempt_data_use(tx)
+}
+
+/// One pre-V21 attempt row's correlation columns, as read for the backfill.
+struct BackfillAttemptRow {
+    ticket: String,
+    consumer: String,
+    delegation: Option<String>,
+    task: Option<String>,
+    revision: Option<i64>,
+}
+
+/// Backfills the `data_use` correlation for attempts claimed before V21.
+///
+/// In the V20 shape, Task Agent sends are purpose-only: the logical input was
+/// exactly the relied revision's adopted-purpose snapshot. The migration
+/// resolves the in-force adopted-purpose context entry at each attempt's
+/// relied `(task_id, task_revision)` and records its `origin.source` as the
+/// single used source. Adopted-instruction sources are never invented:
+/// pre-V21 sends never carried an instruction body to a provider.
+///
+/// Non-Task-Agent attempts have no data use and are recorded as the empty
+/// set. A missing, ambiguous, malformed, or inconsistent correspondence
+/// (partial correlation group, unknown consumer, absent or duplicated
+/// purpose entry, undecodable identity) aborts the migration inside its
+/// transaction: an upgrade never degrades an unknown use into an empty set.
+fn backfill_inference_attempt_data_use(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    let rows: Vec<BackfillAttemptRow> = {
+        let mut select = tx
+            .prepare(
+                "SELECT ticket, consumer, delegation_id, task_id, task_revision FROM inference_attempt WHERE data_use_count IS NULL",
+            )
+            .map_err(|error| error.to_string())?;
+        select
+            .query_map([], |row| {
+                Ok(BackfillAttemptRow {
+                    ticket: row.get(0)?,
+                    consumer: row.get(1)?,
+                    delegation: row.get(2)?,
+                    task: row.get(3)?,
+                    revision: row.get(4)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let mut set_count = tx
+        .prepare("UPDATE inference_attempt SET data_use_count = ?2 WHERE ticket = ?1")
+        .map_err(|error| error.to_string())?;
+    let mut insert_source = tx
+        .prepare(
+            "INSERT INTO inference_attempt_data_use (ticket, ordinal, source) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in &rows {
+        let consumer = decode_consumer(&row.consumer).map_err(|error| error.to_string())?;
+        let count: i64 = match (consumer, &row.delegation, &row.task, row.revision) {
+            (ConsumerKind::TaskAgent, Some(_), Some(task), Some(revision_raw)) => {
+                let source = resolve_purpose_source(tx, task, revision_raw)?;
+                insert_source
+                    .execute(rusqlite::params![row.ticket, 0_i64, source])
+                    .map_err(|error| error.to_string())?;
+                1
+            }
+            (ConsumerKind::TaskAgent, _, _, _) => {
+                return Err(String::from(
+                    "partial task agent attempt correlation during data_use backfill",
+                ));
+            }
+            (_, None, None, None) => 0,
+            (_, _, _, _) => {
+                return Err(String::from(
+                    "non-task-agent attempt carries a task correlation during data_use backfill",
+                ));
+            }
+        };
+        set_count
+            .execute(rusqlite::params![row.ticket, count])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Resolves the `origin.source` of the adopted-purpose entry in force at one
+/// relied Task revision, for the V21 backfill.
+///
+/// The `task_context_entry` invariant gives every revision exactly one
+/// `adopted_purpose` row with its adopted-revision payload (a purpose change
+/// and a carry-forward both write one). Anything else — a missing row, a
+/// duplicated row, a row without its adopted-revision payload, or an
+/// undecodable source identity — is corruption: the migration fails instead
+/// of guessing which provenance the send used.
+fn resolve_purpose_source(
+    tx: &rusqlite::Transaction<'_>,
+    task_text: &str,
+    revision_raw: i64,
+) -> Result<String, String> {
+    let mut select = tx
+        .prepare(
+            "SELECT origin_source FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND item_kind = ?3 AND purpose_adopted_revision IS NOT NULL ORDER BY rowid LIMIT 2",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows: Vec<String> = select
+        .query_map(
+            rusqlite::params![
+                task_text,
+                revision_raw,
+                crate::task::ITEM_KIND_ADOPTED_PURPOSE
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    match rows.as_slice() {
+        [source] => {
+            decode_id(source).map_err(|error| error.to_string())?;
+            Ok(source.clone())
+        }
+        [] => Err(String::from(
+            "task agent attempt has no usable adopted purpose entry during data_use backfill",
+        )),
+        _ => Err(String::from(
+            "task agent attempt has multiple adopted purpose entries during data_use backfill",
+        )),
+    }
+}
+
 /// Derives the recall token rows for pre-index memories inside the
 /// migration transaction, so an upgraded database answers lexical recall
 /// from the index immediately. Fresh databases backfill zero rows.
@@ -748,6 +927,9 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 20 {
         migrate_v20(&tx)?;
+    }
+    if stored_version < 21 {
+        migrate_v21(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

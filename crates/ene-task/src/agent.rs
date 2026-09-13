@@ -15,7 +15,9 @@
 //! completion, adoption, or external-effect success.
 
 use ene_credential::{ScrubbedText, SecretScrubber};
+use ene_primitive::RawId;
 
+use crate::context::TaskContextItem;
 use crate::delegation::{DelegationId, DelegationRef};
 use crate::repository::{TaskRepository, TaskTechnicalError};
 use crate::task::{TaskId, TaskProgress, TaskRecord, TaskRef};
@@ -34,8 +36,12 @@ pub struct TaskAgentTurnPremise {
 /// What the port receives.
 ///
 /// `prompt` is only ever the injected scrubber's output; the harness never
-/// assembles a `ScrubbedText` itself. [`core::fmt::Debug`] redacts the
-/// prompt so diagnostic output cannot leak its text.
+/// assembles a `ScrubbedText` itself. `data_use` is the canonical source
+/// correlation of the logical input in input order (opaque [`RawId`]s, never
+/// bodies or hashes): the in-force adopted-purpose entry's `origin.source`
+/// today, extended to every adopted-instruction entry with the slice that
+/// sends instruction bodies. [`core::fmt::Debug`] redacts the prompt so
+/// diagnostic output cannot leak its text.
 #[derive(Clone)]
 pub struct TaskAgentInferencePremise {
     /// The delegation correspondence this turn runs under.
@@ -44,6 +50,9 @@ pub struct TaskAgentInferencePremise {
     pub task: TaskRef,
     /// Scrubbed logical input for this turn.
     pub prompt: ScrubbedText,
+    /// Canonical source correlation of `prompt`, in logical-input order.
+    /// Duplicates are preserved: each adopted entry keeps its own correlation.
+    pub data_use: Vec<RawId>,
 }
 
 impl core::fmt::Debug for TaskAgentInferencePremise {
@@ -53,6 +62,7 @@ impl core::fmt::Debug for TaskAgentInferencePremise {
             .field("delegation", &self.delegation)
             .field("task", &self.task)
             .field("prompt", &"[redacted]")
+            .field("data_use", &self.data_use)
             .finish()
     }
 }
@@ -107,6 +117,11 @@ pub enum TaskAgentNotSent {
     /// The evaluation id was unknown, already consumed, or bound to a
     /// different fingerprint.
     EvaluationConsumed,
+    /// At least one canonical source of the logical input is covered by a
+    /// current erasure condition. The send is refused before any provider
+    /// I/O; this is a data-use hold, not revision/consent staleness, a
+    /// missing source, or a technical error.
+    DataUseHeld,
 }
 
 /// Port result; provider output never leaks through [`core::fmt::Debug`]
@@ -238,7 +253,12 @@ pub enum TaskAgentTurnOutcome {
 /// the claim is still reported as stale by the port. The logical input is
 /// only the relied revision's adopted-purpose text, canonical in the
 /// `task_revision` snapshot; no instruction body and no workspace or file
-/// content is copied into the prompt. A scrub failure fails closed as
+/// content is copied into the prompt. The logical input's canonical source
+/// correlation (`data_use`) travels to the claim, which compares it against
+/// the canonical current erasure-condition store in the same transaction as
+/// the task premise; a covered source yields
+/// [`TaskAgentTurnOutcome::NotSent`] with [`TaskAgentNotSent::DataUseHeld`]
+/// and no provider I/O. A scrub failure fails closed as
 /// [`TaskAgentTurnError::InputUnavailable`] and nothing is sent.
 ///
 /// Outcome mapping: `Produced` carries the output and consent flag without
@@ -287,8 +307,27 @@ pub async fn orchestrate_task_agent_turn(
         });
     }
     // The precheck matched, so `record.revision` is the relied revision's
-    // snapshot. The scrub stays ahead of the port call and its failure fails
-    // closed: raw purpose text must never reach the port.
+    // snapshot. The logical input's canonical source is the in-force
+    // adopted-purpose entry, which `load_task` returns first and validates as
+    // part of the unit; this read carries that provenance and never resolves
+    // a second one.
+    let data_use = match record.context.first() {
+        Some(entry) if matches!(entry.item, TaskContextItem::AdoptedPurpose(_)) => {
+            vec![entry.origin.source]
+        }
+        Some(_) => {
+            return Err(TaskAgentTurnError::StorageUnavailable {
+                reason: String::from("task context does not start with its adopted purpose entry"),
+            });
+        }
+        None => {
+            return Err(TaskAgentTurnError::StorageUnavailable {
+                reason: String::from("task context has no adopted purpose entry"),
+            });
+        }
+    };
+    // The scrub stays ahead of the port call and its failure fails closed:
+    // raw purpose text must never reach the port.
     let Ok(prompt) = scrubber.scrub(&record.revision.purpose_text.text).await else {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("credential scrub failed"),
@@ -299,6 +338,7 @@ pub async fn orchestrate_task_agent_turn(
             delegation: delegation.delegation,
             task: delegation.task,
             prompt,
+            data_use,
         })
         .await
         .map_err(inference_error)?;

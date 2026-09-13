@@ -382,7 +382,9 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     let purpose_text = "probe adopted purpose text";
     let repository = FakeTaskRepository::new();
     repository.script_delegation(Ok(Some(delegation_ref)));
-    repository.script_task(Ok(Some(record(task, revision(1), purpose_text))));
+    let loaded = record(task, revision(1), purpose_text);
+    let purpose_source = loaded.context[0].origin.source;
+    repository.script_task(Ok(Some(loaded)));
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::Produced {
         output: TaskAgentOutput::new(String::from("probe provider output")),
         adoption_consent_current: true,
@@ -408,6 +410,11 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
         received.prompt.credential_set,
         CredentialSetRevision::from_u64(7),
         "the scrub premise crosses unchanged"
+    );
+    assert_eq!(
+        received.data_use,
+        vec![purpose_source],
+        "the logical input's canonical source is the in-force purpose entry's origin"
     );
     assert_eq!(
         scrubber.inputs(),
@@ -848,6 +855,7 @@ fn debug_redacts_prompt_and_output_text() {
             text: probe.to_owned(),
             credential_set: CredentialSetRevision::initial(),
         },
+        data_use: vec![RawId::new()],
     };
     assert!(
         !format!("{inference_premise:?}").contains(probe),

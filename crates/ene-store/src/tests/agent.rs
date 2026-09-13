@@ -8,6 +8,7 @@ fn task_agent_attempt_premise(delegation: DelegationId, task: TaskRef) -> TaskAg
         delegation: delegation.as_raw(),
         task: task.task.as_raw(),
         task_revision: RevisionInner::from_u64(task.revision.as_u64()),
+        data_use: vec![RawId::new()],
     }
 }
 
@@ -78,7 +79,7 @@ async fn task_agent_claim_records_the_durable_correlation() {
     let ticket = InferenceTicketId(RawId::new());
     assert_eq!(
         store
-            .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+            .begin_inference_attempt(task_agent_claim(ticket, 1, premise.clone()))
             .await,
         Ok(AttemptBeginOutcome::Started)
     );
@@ -192,7 +193,7 @@ async fn duplicate_ticket_is_stale_even_after_the_task_premise_moves() {
     let ticket = InferenceTicketId(RawId::new());
     assert_eq!(
         store
-            .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+            .begin_inference_attempt(task_agent_claim(ticket, 1, premise.clone()))
             .await,
         Ok(AttemptBeginOutcome::Started)
     );
@@ -212,7 +213,7 @@ async fn duplicate_ticket_is_stale_even_after_the_task_premise_moves() {
     // depends on which premise check happens to fail first.
     assert_eq!(
         store
-            .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+            .begin_inference_attempt(task_agent_claim(ticket, 1, premise.clone()))
             .await,
         Ok(AttemptBeginOutcome::Stale),
         "a duplicate ticket must answer Stale deterministically"
@@ -243,6 +244,7 @@ async fn task_agent_claim_is_stale_when_the_delegation_row_is_gone() {
         delegation: RawId::new(),
         task: created.task.as_raw(),
         task_revision: RevisionInner::from_u64(created.revision.as_u64()),
+        data_use: vec![RawId::new()],
     };
     let ticket = InferenceTicketId(RawId::new());
     assert_eq!(
@@ -267,6 +269,7 @@ async fn task_agent_claim_rejects_a_premise_that_disagrees_with_the_delegation()
         delegation: delegation.as_raw(),
         task: created.task.as_raw(),
         task_revision: RevisionInner::from_u64(2),
+        data_use: vec![RawId::new()],
     };
     let ticket = InferenceTicketId(RawId::new());
     let outcome = store
@@ -349,7 +352,7 @@ async fn inference_attempt_reads_fail_closed_on_corrupt_correlation() {
         let ticket = InferenceTicketId(RawId::new());
         assert_eq!(
             store
-                .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+                .begin_inference_attempt(task_agent_claim(ticket, 1, premise.clone()))
                 .await,
             Ok(AttemptBeginOutcome::Started),
             "corruption case {index} must seed a fresh claim"
@@ -504,7 +507,7 @@ async fn task_agent_correlation_survives_reopen_without_replay() {
         premise = task_agent_attempt_premise(delegation, created);
         assert_eq!(
             store
-                .begin_inference_attempt(task_agent_claim(ticket, 1, premise))
+                .begin_inference_attempt(task_agent_claim(ticket, 1, premise.clone()))
                 .await,
             Ok(AttemptBeginOutcome::Started)
         );
@@ -532,7 +535,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let learning_ticket = InferenceTicketId(RawId::new());
     {
         let store = Store::open(&path).await.expect("a fresh store must open");
-        assert_eq!(read_schema_version(&path), Some(20));
+        assert_eq!(read_schema_version(&path), Some(21));
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
             Err(poisoned) => poisoned.into_inner(),
@@ -569,7 +572,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let reopened = Store::open(&path)
         .await
         .expect("the V18 migration must succeed");
-    assert_eq!(read_schema_version(&path), Some(20));
+    assert_eq!(read_schema_version(&path), Some(21));
     let columns = table_columns(&path, "inference_attempt");
     for column in [
         "consumer",
