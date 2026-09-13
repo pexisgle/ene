@@ -228,6 +228,7 @@ enum ReportStatus {
 - 会話ラウンドの終了は、会話タイムラインの終了や過去ログの消去を意味しません。
 - **発言 identity と single-message bounded read**: 会話履歴の各発言は `message_id`（PK）で一意に引きます。採用指示の本文解決は、参照（`origin.source`）の `message_id` を直接引く単一メッセージ bounded read だけを使い、timeline 全読込・recent timeline・command lookup から目的の発言を探す実装を禁止します（欠如は識別子不在として明示し、malformed durable row は技術的エラーとして fail closed とします）。同じ行を指す別の本文複製 record を作ってはなりません。
 - **参照と採用 identity の区別**: `TaskContextOrigin.source` は由来レコードへの参照であり、Task 側の採用 identity（`TaskContextEntryId`）や目的 identity（`TaskPurposeRef`）とは別概念です（§5.3）。参照先の record が存在しないことは参照側の record の validity を否定せず、参照を勝手に別 record へ付け替えたり、解決できないまま本文を捏造・黙って省略したりしてはなりません。本文を解決できない Task Agent turn は provider I/O を開始せず、採用済み項目を削除・書き換えません。同じ source が複数回採用された場合も、source ID で entry identity を dedupe しません。
+- **送信 admission まで保持する source 相関**: 採用指示本文を bounded read で解決した後も、canonical source identity（`origin.source`。本文でも hash でもない）を Task Agent の送信 admission まで失ってはなりません。採用目的 entry を含む論理入力全体の source 相関として推論試行 claim へ渡し、claim は `(operation, sweep, valid_interval)` 相当の現在の消去条件と同一の不分区間で coverage を照合し、覆われた source を含む送信を開始しません（claim 前の deletion status 再読込では再読込と送信の間に同じ race が残るため採用しません）。claim が先に確定した attempt の source 相関は durable に残り、削除参加と遅延結果の再保存防止に使います。本文の複製と hash による identity 置換は禁止です。
 
 ### 5.3 タスク・委任・タスクコンテキスト・ワークスペース・スケジュール
 
@@ -554,6 +555,7 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 | **クライアント依存活動の開始・継続** | 端末が申告する世代番号 × ホストPCが管理する最新滞在世代番号 × 実際の接続疎通と機能の可用性 × 最新の権限や保留状態 | 接続や状態が確認できない場合は処理を継続しません。古い一時キャッシュや過去の承認情報だけで成立させてはいけません。 |
 | **端末切り替え期間中の処理** | `旧端末に滞在 / 移行中 / 新端末に滞在 / アクティブなし / 停止中 / 復旧待ち` の区別 × 処理がどちらの端末に紐付いているか | 移行期間中は新旧どちらの端末でも端末依存の新規処理を開始しません。移動元の処理は安全な区切りまで完了させ、未終了の外部作用を別端末へ勝手に引き継ぎません。 |
 | **削除区間中のデータ受入・生成・再保存** | 届いた・生成された情報の `(情報源との関係, 取得日時, 削除区間との関係)` × 進行中の消去条件 `(operation, sweep, valid_interval)` × 各機能の局所検証 | 削除区間に該当するデータはすべて消去対象とし、実行中の処理が誤って再保存しないようにブロックします。削除が完了していないのに完了と表示してはいけません。 |
+| **プロバイダ送信の開始（data-use admission）** | 送信する論理入力の canonical source 相関 `(採用目的・全採用指示の origin.source)` × 現在の消去条件 `(operation, sweep, valid_interval)` × 既存のタスク・同意・認証情報 premise × already-started use としての attempt 相関 | coverage がある送信は開始せず、provider へ 0 バイトも送りません（`DataUseHeld` 相当の data-use hold として区別し、source absence / stale revision / storage エラーへ丸めません）。claim が先に確定した送信は already-started use として削除参加に列挙され、遅延結果は受入境界で照合され再保存されません（確定度は改ざんしません）。 |
 | **バックアップ復元後の処理利用** | 処理が前提とする `(復元世代番号, 同意リビジョン, 認証情報, 依拠ルール)` × 現在の `(最新復元世代, 最新認証ストア, 最新制約, 復元後の保留状態)` | 復元前の古いセッションや古い同意情報だけで、外部通信やタスクを自動実行してはいけません。一括有効化が行われた後も現在の最新条件を守ります。 |
 | **利用コスト・リソース枠の継続判定** | 消費の `(用途・送信先, 報告済み/成否不明/処理中の区分)` × 現在の上限枠やリソース状況 | 処理中や成否不明な枠を勝手にゼロとみなさず、並行リクエストによる上限超過を防止します。安全な継続が判断できない場合は、データを保持したまま安全に停止し、ユーザーの判断を待ちます。 |
 
