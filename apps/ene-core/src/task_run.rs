@@ -33,6 +33,12 @@
 //! Tasks and moved revisions are refused by the existing gates on the next
 //! turn or Action start and end the loop as [`TaskAgentRunRefusal`].
 //!
+//! A local cooperative stop signal ([`ExecutionCancellation`]) stops the loop
+//! before the next provider call or Action and drops an in-flight provider
+//! call best-effort. It is never authority: the durable AU16 admission is the
+//! Task owner's commit, and dropping a local future is not evidence that a
+//! provider request or external effect stopped.
+//!
 //! What this module deliberately does not do: it does not create Tasks or
 //! delegations, does not retry provider calls or Actions, does not resume
 //! anything after restart, and does not decide Task completion itself (the
@@ -62,6 +68,138 @@ use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_wo
 /// The bound exists so a model that never emits a final answer cannot loop
 /// forever; reaching it stops the execution without sealing a result.
 pub const DEFAULT_MAX_TURNS: u32 = 16;
+
+/// Cooperative stop signal for one running Task Agent execution.
+///
+/// This is a local, best-effort handle: it survives only in this process, and
+/// signalling it proves nothing about a provider call or an external effect.
+/// The durable cancel admission (AU16) is the Task owner's commit; this token
+/// only stops the loop from starting new work and drops the in-flight turn
+/// future so the transport call is aborted best-effort.
+#[derive(Clone, Default)]
+pub struct ExecutionCancellation {
+    inner: std::sync::Arc<CancellationInner>,
+}
+
+#[derive(Default)]
+struct CancellationInner {
+    cancelled: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ExecutionCancellation {
+    /// Raises the signal and wakes the execution, if it is waiting.
+    ///
+    /// `notify_one` (not `notify_waiters`) closes the check-then-wait race:
+    /// the permit is stored when the loop is between its flag check and its
+    /// first `notified` poll, so the wakeup is never lost.
+    pub fn cancel(&self) {
+        self.inner
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.notify.notify_one();
+    }
+
+    /// Whether the signal is already raised.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .cancelled
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Waits until the signal is raised; returns immediately when it already is.
+    pub async fn cancelled(&self) {
+        while !self.is_cancelled() {
+            self.inner.notify.notified().await;
+        }
+    }
+}
+
+/// Tracks the running Task Agent executions of this process, keyed by
+/// delegation (one delegated execution lifetime).
+///
+/// The registry is not durable state: a restart drops it, and losing a local
+/// token never means an execution or effect stopped. Several executions of
+/// one Task are allowed (AU3 allows several delegations of one revision); a
+/// cancel signals every token registered for that Task, and a registration
+/// removes only its own entry.
+#[derive(Default)]
+pub struct TaskExecutionRegistry {
+    running: std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, RunningExecution>>,
+}
+
+struct RunningExecution {
+    task: ene_task::TaskId,
+    cancellation: ExecutionCancellation,
+}
+
+impl TaskExecutionRegistry {
+    /// Registers one running execution and returns its cancellable handle.
+    ///
+    /// The returned registration removes the entry on drop, so an abandoned
+    /// future cannot leave a stale token behind.
+    pub fn register(
+        &self,
+        delegation: ene_task::DelegationId,
+        task: ene_task::TaskId,
+    ) -> TaskExecutionRegistration<'_> {
+        let cancellation = ExecutionCancellation::default();
+        crate::lock_unpoison(&self.running).insert(
+            delegation,
+            RunningExecution {
+                task,
+                cancellation: cancellation.clone(),
+            },
+        );
+        TaskExecutionRegistration {
+            registry: self,
+            delegation,
+            cancellation,
+        }
+    }
+
+    /// Signals every running execution of `task`, if any is registered.
+    ///
+    /// Returns whether at least one token was signalled; `false` means no
+    /// execution of this Task is running in this process, which says nothing
+    /// about durable work.
+    pub fn cancel(&self, task: ene_task::TaskId) -> bool {
+        let running = crate::lock_unpoison(&self.running);
+        let mut signalled = false;
+        for execution in running.values() {
+            if execution.task == task {
+                execution.cancellation.cancel();
+                signalled = true;
+            }
+        }
+        signalled
+    }
+
+    fn remove(&self, delegation: ene_task::DelegationId, token: &ExecutionCancellation) {
+        let mut running = crate::lock_unpoison(&self.running);
+        if running
+            .get(&delegation)
+            .is_some_and(|stored| std::sync::Arc::ptr_eq(&stored.cancellation.inner, &token.inner))
+        {
+            running.remove(&delegation);
+        }
+    }
+}
+
+/// RAII registration of one running execution; see [`TaskExecutionRegistry`].
+pub struct TaskExecutionRegistration<'a> {
+    registry: &'a TaskExecutionRegistry,
+    delegation: ene_task::DelegationId,
+    /// The cooperative stop token for the execution.
+    pub cancellation: ExecutionCancellation,
+}
+
+impl Drop for TaskExecutionRegistration<'_> {
+    fn drop(&mut self) {
+        self.registry.remove(self.delegation, &self.cancellation);
+    }
+}
 
 /// One parsed provider response under the fixed Task Agent protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +312,11 @@ pub enum TaskAgentRunOutcome {
     EffectUnresolved {
         attempt: ene_action::ActionAttemptId,
     },
+    /// The cooperative stop signal fired before a new provider call or Action
+    /// start (an in-flight provider call was dropped best-effort). The durable
+    /// cancel admission is the Task owner's separate fact; this variant claims
+    /// nothing about provider or external-effect completion.
+    Cancelled,
 }
 
 /// Technical failure of one delegated execution; never a domain outcome.
@@ -206,14 +349,23 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
 /// The loop starts from the execution's relied revision and continues until a
 /// final answer is recorded, an owner boundary refuses, the response is
 /// malformed, the effect is unresolved, the consent premise for the produced
-/// output lapsed, or the turn bound is reached. See the module docs for the
-/// exact boundary order.
+/// output lapsed, the cooperative stop signals, or the turn bound is reached.
+/// See the module docs for the exact boundary order.
 ///
 /// A provider output whose `adoption_consent_current` is `false` is discarded
 /// as [`TaskAgentRunOutcome::ConsentStaleAfterSend`] before any Action or
 /// result record: the consent premise that admitted the send no longer holds,
 /// while the already-started attempt and its usage fact stay durable. An
 /// output refused before the send at all stays [`TaskAgentRunOutcome::NotSent`].
+///
+/// `cancellation` is the local cooperative stop signal for this execution. It
+/// is checked before every provider call and Action start, and an in-flight
+/// provider call is dropped best-effort when the signal fires. The signal is
+/// never authority: the durable cancel admission (AU16) is the Task owner's
+/// commit, and stopping locally proves nothing about provider or external
+/// effects. A final answer that was already produced is still recorded and
+/// adoption still runs, so a cancel race resolves through the ordinary
+/// `RecordedToOriginalOnly` path.
 ///
 /// One delegated execution is run once. A stopped execution (no final result)
 /// is never continued by calling this function again over the same
@@ -227,6 +379,7 @@ pub async fn run_task_agent_execution(
     scrubber: &impl SecretScrubber,
     delegation: ene_task::DelegationId,
     max_turns: u32,
+    cancellation: &ExecutionCancellation,
 ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
     if execution_already_started(store, delegation).await? {
         return Ok(TaskAgentRunOutcome::Refused(
@@ -237,21 +390,30 @@ pub async fn run_task_agent_execution(
     let mut attempt_refs: Vec<RawId> = Vec::new();
     let mut turn = 0_u32;
     loop {
+        if cancellation.is_cancelled() {
+            return Ok(TaskAgentRunOutcome::Cancelled);
+        }
         if turn >= max_turns {
             return Ok(TaskAgentRunOutcome::TurnLimitReached { turns: turn });
         }
         turn += 1;
-        let outcome = orchestrate_task_agent_turn(
-            store,
-            instructions,
-            inference,
-            scrubber,
-            TaskAgentTurnPremise {
-                delegation,
-                exchanges: exchanges.clone(),
-            },
-        )
-        .await?;
+        // `biased` makes the stop signal win when both are ready: a new
+        // provider call is never started after the signal fired, and an
+        // in-flight one is dropped instead of being awaited to completion.
+        let outcome = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Ok(TaskAgentRunOutcome::Cancelled),
+            outcome = orchestrate_task_agent_turn(
+                store,
+                instructions,
+                inference,
+                scrubber,
+                TaskAgentTurnPremise {
+                    delegation,
+                    exchanges: exchanges.clone(),
+                },
+            ) => outcome?,
+        };
         let produced = match outcome {
             TaskAgentTurnOutcome::Produced(produced) => produced,
             TaskAgentTurnOutcome::StaleTaskRevision { current } => {
@@ -312,6 +474,9 @@ pub async fn run_task_agent_execution(
                 return Ok(TaskAgentRunOutcome::Finalized { result, acceptance });
             }
             Ok(TaskAgentDirective::Act(request)) => {
+                if cancellation.is_cancelled() {
+                    return Ok(TaskAgentRunOutcome::Cancelled);
+                }
                 let action = run_workspace_action(
                     store,
                     delegation,
