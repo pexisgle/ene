@@ -263,6 +263,8 @@ enum TaskProposalOutcome {
     AcceptedAsSteering(TaskRef),     // 新しいリビジョンとして方針変更を受理（過去リビジョンも保持）
     CancelAccepted,                  // 中断要求を現在のタスクに記録（外部処理の停止完了とは別）
     StalePremise { current: TaskRef }, // 期待リビジョン・依拠目的の不一致（再評価へ差し戻し）
+    TaskTerminal { task: TaskId, progress: TaskProgress }, // 方針指示: 対象 Task が terminal（Completed / Failed）のため
+                                   // 前進できない（書き込みなし。リポジトリ結果の写し）。終端は吸収的であり、revision stale と区別する
     MissingTask { task: TaskId },       // 方針指示: 前提のタスクに永続状態が存在しない（書き込みなし。リポジトリ結果の写し）
     RevisionExhausted { task: TaskId }, // 方針指示: 次の相異なるリビジョンを永続的に確定できない（書き込みなし。リポジトリ結果の写し）
     HeldByGlobalHold(HoldConditionRef), // データ消去中・復元保留・安全停止などによる新規禁止（hold スライスで導入。ペイロードは受入側オーナーが定義する前提型に写す）
@@ -288,6 +290,9 @@ struct CreateDelegationCommand {
 enum DelegationOutcome {
     Delegated(DelegationRef),
     StaleTaskRevision { current: TaskRef },
+    TaskTerminal { task: TaskId, progress: TaskProgress }, // 対象 Task が terminal（Completed / Failed）のため新規委任を
+                                   // 作成できない（書き込みなし。§11.3 に従い Ok 側のドメイン判定結果）。再評価しても前進しないため
+                                   // revision stale と区別する
     MissingTask { task: TaskId },    // 前提のタスクに永続状態が存在しない（書き込みなし。§11.3 に従い Ok 側のドメイン判定結果）
     // HeldByGlobalHold は hold スライスが、NeedsRevalidation・InsufficientContext は権限・
     // 在席・利用枠・情報不足の再照合 producer を持つスライスが、対応する前提型と対で追加します。
@@ -303,25 +308,40 @@ enum DelegationOutcome {
 // 採用判定は同じ結果行に対して再評価されます（二重採用・二重完了の防止）。
 struct TaskResultId(/* 不透明な識別子 */);
 
-// 結果の到着。依拠タスクリビジョンは delegation 行（委任の対応関係）が正本であり、arrival は再掲しません。
-// attempt_refs は結果が依拠した Action 試行の opaque な相関（Action owner の newtype を直接インポートしない）。
-// 各要素は adoption 時に durable に検証され、Task owner は Action owner の確定度を書き換えません。
+// 結果の到着（durable な record premises）。依拠タスクリビジョンは delegation 行（委任の対応関係）が正本であり、
+// arrival は再掲しません。producer は結果を生成した Task Agent turn の opaque な durable 相関
+// （その turn が claim した推論試行の identity。Task owner は意味を解釈せず、Action 側の相関と照合します）。
+// provider 出力を受け取った orchestrate が adoption より先にこの記録を 1 回だけ確定し、本文を失いません
+// （durable-before-visible）。この step は現在性・確定度・完了・terminal のいずれも判定しません。
 struct TaskAgentResultArrival {
     delegation: DelegationId,        // 委任の対応関係（依拠タスクリビジョンは行から解決）
     result: TaskResultId,            // 結果本文の identity。orchestrate が発行
     body: TaskAgentOutput,           // provider 出力。Task 側で 1 度だけ durable 保存（本文の複製を作らない）
-    attempt_refs: Vec<RawId>,        // 依拠した Action 試行の相関（存在する場合）
+    producer: RawId,                 // 結果を生成した Task Agent turn の durable 相関（Action owner の newtype を直接インポートしない）
 }
 
-// 採用判定の結果。すべて Ok 側のドメイン判定であり、技術的エラー（相関の破損）と混同しません。
+// 採用判定へ渡す主張。attempt_refs は caller（orchestrator / Task Agent 経路）の自己申告であり、
+// それ自体は完了の証拠になりません。store は result 行の producer から Action attempt の
+// authoritative set（その turn が開始した Action 試行の完全な durable 集合）を列挙し、
+// この集合との完全一致（欠如・追加・重複のいずれも不可）を要求します。
+struct TaskResultAdoptionClaim {
+    result: TaskResultId,
+    attempt_refs: Vec<RawId>,        // 主張。durable producer 相関から列挙した authoritative set との完全一致でのみ採用材料になる
+}
+
+// 採用判定の結果。すべて Ok 側のドメイン判定であり、技術的エラー（主張と durable 相関の不一致などの破損）と混同しません。
 enum TaskResultAcceptance {
-    AdoptedAsCompletion(TaskRef),    // 結果を 1 回だけ記録し、現在リビジョン・目的 identity と一致し、
-                                     // 依拠試行がすべて ConfirmedSuccess のため、同じ不分区間で Task を完了
+    AdoptedAsCompletion(TaskRef),    // 結果は採用と同じ不分区間で 1 回だけ確定済み（到着 record 済み）で、現在リビジョン・目的 identity と
+                                     // 一致し、producer から列挙した authoritative set が claim と完全一致し、すべて ConfirmedSuccess の
+                                     // ため、同じ不分区間で Task を完了
     RecordedToOriginalOnly,          // 現在リビジョンが前進済み / Task が終端済み / 後続 cancel marker あり（producer は後続スライス）。
                                      // 元の依拠リビジョンへの durable record に留め、現在 Task を変更しない
-    WithheldByEffectFacts {          // 現在リビジョンと一致するが、依拠試行に ConfirmedSuccess 以外
+    WithheldByEffectFacts {          // claim が authoritative set と完全一致した上で、依拠試行に ConfirmedSuccess 以外
         attempts: Vec<RawId>,        // （Unknown / ConfirmedFailure）があり現在 Task を完了しない。
     },                               // Unknown は確定するまで保持し、Agent の自己申告で昇格させない
+    MissingResult {                  // 採用対象の result 行が durable に存在しない（record 前の adoption 等。識別子不在は正常系で書き込みなし）
+        result: TaskResultId,
+    },
     MissingDelegation {              // 委任に対応する durable 状態が無い（書き込みなし）
         delegation: DelegationId,
     },
@@ -333,13 +353,20 @@ enum TaskResultAcceptance {
 // `TaskAgentResultArrival` の `TaskResultBodyRef` / `AgentResultCertainty` と `TaskResultAcceptance` の
 // `HeldForPermissionReview` / `DiscardedAsStaleWithRecord` は、producer（結果単位の権限再照合 workflow /
 // stale の別語彙）が存在しない、または `RecordedToOriginalOnly` と同義のため削除しました。
-// provider 出力そのものを完了・採用とみなさず、結果の durable 化と現在 Task への採用を分離します。
+// provider 出力そのものを完了・採用とみなさず、結果の到着 record（本文の durable 化）と
+// 現在 Task への採用・完了を分離します。
+// Task 完了に利用する Action attempt 集合は、arrival caller が任意に省略・追加できる値ではありません。
+// durable producer 相関から完全な集合を解決し、claim と比較します（存在しない attempt を主張に足しても
+// 存在する attempt を主張から落としても技術的エラーとして fail closed し、Withheld / stale へ丸めません）。
 
 // Task のライフサイクル / 進捗（closed world）。Task revision（目的・指示の steering）とは別軸であり、
 // revision の前進や世代番号で lifecycle を代替してはなりません。terminal 状態は吸収的で、
-// 結果採用・委任作成・後続の cancel marker のいずれも terminal から非 terminal へ戻しません。
+// 結果採用・委任作成・試行開始・後続の cancel marker のいずれも terminal から非 terminal へ戻しません。
+// terminal は単なる revision stale ではなく「再評価しても開始できない」ため、本スライスの admission gate は
+// 専用の domain outcome（TaskTerminal）で拒否し、Stale* へ丸めません。gate は次の比較と同じ不分区間に置きます:
+// AU3 create_delegation、AU4 forward_steering、AU14 Task Agent 推論試行 claim、AU5 Action 開始。
 enum TaskProgress {
-    Started,      // 開始: Task が正式に受理され、委任可能
+    Started,      // 開始: Task が正式に受理され、terminal でない限り委任可能
     InProgress,   // 進行中: 少なくとも 1 つの委任が durable に作成され、terminal 判定待ち
     Completed,    // 完了: 作業担当が採用 result と依拠 Action facts を確認して確定
     Failed,       // 失敗: 作業担当が確定した terminal failure。本スライスに producer はなく、
@@ -348,17 +375,17 @@ enum TaskProgress {
 ```
 
 - **開始責務と判断権限**: 個体調整担当がタスク化・方針指示（steering）・中断（Cancel）の意図を開始し、作業担当がその受理・反映・達成を確定します。`TaskProposalOutcome` や `TaskRepository` trait などの結果型は作業担当が所有し、呼び出し側（dialogue）は自身の要求型（`ProposeTaskCommand` や `ProposeSteeringCommand` 等）を作業側の値の前提（`TaskProposalPremise` や `SteeringProposalPremise`）に変換して渡します。`TaskId`・`TaskContextEntryId`・`WorkspaceAssocId` などの識別子は作業担当（`orchestrate`）が発行して `TaskCreationPremise` を構成します。方針指示の新リビジョンが記録するコンテキスト項目（採用目的・採用指示等）の `TaskContextEntryId` も作業担当が発行し、呼び出し側は依拠した現在リビジョン（`expected`）のみを渡します。タスク作成時は要求元を担当者 `AssigneeRef` として写します。権限の判断は権限・制約担当が行い、外部アクションの成功判定は実行・拡張担当が行います。
-- **方針指示（steering）の結果マッピング**: 作業担当（orchestrate）は、まず `load_task` が返した現在リビジョンに対して `expected` と依拠目的を照合します（`expected != current` の場合は `StalePremise { current }`。`expected == current` であっても `premise.purpose` が現在の採用目的識別子と一致しなければ同様に `StalePremise { current }` とし、単なる目的本文の一致では照合しません）。`forward_steering` の呼び出し後は、`CommittedAs` を `AcceptedAsSteering` へ、`StaleExpected { current }` を `StalePremise { current }` へ変換し、`MissingTask` および `RevisionExhausted` は同じ意味・ペイロードのまま `Ok` 側のドメイン結果として返します。リポジトリのリビジョン比較照合（atomic compare）が、事前照合後の競合レースを含む現在性を包含します。`HeldByGlobalHold` は hold スライスが保留照合前提と対で追加し、このマッピングに加わります。
+- **方針指示（steering）の結果マッピング**: 作業担当（orchestrate）は、まず `load_task` が返した現在リビジョンに対して `expected` と依拠目的を照合します（`expected != current` の場合は `StalePremise { current }`。`expected == current` であっても `premise.purpose` が現在の採用目的識別子と一致しなければ同様に `StalePremise { current }` とし、単なる目的本文の一致では照合しません）。`forward_steering` の呼び出し後は、`CommittedAs` を `AcceptedAsSteering` へ、`StaleExpected { current }` を `StalePremise { current }` へ変換し、`MissingTask`・`RevisionExhausted`・`TaskTerminal` は同じ意味・ペイロードのまま `Ok` 側のドメイン結果として返します。リポジトリのリビジョン比較照合（atomic compare）が、事前照合後の競合レースを含む現在性を包含します。`HeldByGlobalHold` は hold スライスが保留照合前提と対で追加し、このマッピングに加わります。
 - **入力として必要な情報**: 採用を提案する目的本文と発生由来（作成時）、`SteeringPremiseRef`（依拠リビジョン・目的。方針指示時）、委任スコープの写し、ワークスペース利用条件、クライアント依存条件。なお、軽微な処理をタスク化せずに直接行うかどうかの判断は本体が行えますが、その閾値や分類アルゴリズムを固定化してはなりません（H-9）。
 - **由来・目的・スコープの保持**: 目的本文、採用位置の識別子、発生由来、委任範囲、ワークスペースの境界情報を決して欠落させてはなりません。単なる会話上の発言記録と、タスクに実際に反映された指示内容、および未反映・保留となった内容を明確に区別します。
 - **クライアント依存条件**: `client_binding` は受付時の現在条件として照合し、タスクの永続状態にはしません。実行時のクライアント条件は、後続の境界（アクション開始時など）で最新の在席世代番号や接続状態から再確認します（IB §10）。
 - **期待される現在の前提条件**: 現在のタスクリビジョン、委任の有効性、ワークスペースの有効性、方針指示の前提条件。クライアント依存のタスクであれば、在席世代番号、現行接続状態、およびデバイスの可用性を照合します。
 - **キャンセルと安全保留**: 中断要求の受理と、実際の処理遂行の停止、および外部アクションの停止完了は別個の事実です。中断後に遅延して届いた結果は、`RecordedToOriginalOnly` として元の過去記録への保存に留めます。後続のキャンセルスライスが durable な cancel marker を導入した場合、`adopt_result` は同じ不可分な比較照合の中でその marker を確認し、遅延結果を現在 Task に採用しません（本スライスは marker の producer を作らず、placeholder 列も置きません）。
-- **結果の identity・本文・相関（本スライス）**: 結果本文の master は Task owner（作業担当）が `task_result` の 1 行として保持し、identity は作業担当の orchestrate が 1 回の produced 出力に対して発行する `TaskResultId` です。provider 出力・Agent の自己申告・結果本文の到着は、外部作用の成功・Task の採用・Task の完了のいずれの証拠でもありません。arrival の `attempt_refs` は Action owner の不透明な相関として受け取り、採用時に同一の短い `Immediate` トランザクションで各 attempt 行の durable な存在と `(delegation, task, task_revision)` の対応を検証します。対応の欠如・不一致は部分的・不整合な単位として技術的エラー（fail closed）であり、推測で stale に丸めません。
-- **結果の確信度と採用判定**: エージェントの自己申告を外部作用の成功証拠として過信してはなりません。外部作用の確信度は実行・拡張担当が記録した確定事実（fact）を参照・集約し、作業担当側で勝手に更新してはなりません。依拠試行が 1 つでも `ConfirmedSuccess` でない場合（`Unknown` / `ConfirmedFailure`）は `WithheldByEffectFacts` として現在 Task を完了せず、結果本文の durable record だけを残します。`Unknown` は新しい客観的証拠が実行・拡張担当側で確定するまで保持します。
-- **永続化とコミット**: タスクの新規作成は、`task + task_revision + 初期 task_context_entry` と、関連付けを確定した場合の `workspace_assoc` を不可分に永続化してから外部へ可視化します（durable-before-visible）。方針変更は、新リビジョンと新コンテキストを不可分に進めます。結果の採用と完了確定は、結果行の 1 回だけの insert、Action 試行事実の読み取り検証、`task_result.adopted_revision` の刻印、`task.progress` の terminal への CAS を同じ短い `Immediate` トランザクションで行います。現在リビジョン不一致・terminal・cancel marker ありの場合は、結果行の記録だけを確定して現在 Task を変更しません。同一 `TaskId` に対する方針指示、委任受付、完了確定、結果採用は、同期区分 SD-Task によって厳格に逐次化します（CCT §4）。
-- **Task progress / lifecycle（本スライス）**: Task revision（目的・指示の steering）と `TaskProgress` は別の軸です。`create_task` は `Started` で初期化し、`create_delegation` は `Started → InProgress` を同じ AU3 トランザクションで進め（end-to-end の初回実装はこのスライス）、`adopt_result` は採用成立時に `progress` を非 terminal から `Completed` へ CAS します。terminal 状態は吸収的で、terminal からの遷移は `RecordedToOriginalOnly`（結果）に留まります。`Failed` は作業担当が確定した terminal failure のみを表し、provider の一時障害・`NotSent`・Action `Unknown`・`WithheldByEffectFacts` を写しません（それらを terminal failure と確定できる producer は後続スライスが追加します）。start 要求から結果が返るまでの推論ターン自体は lifecycle を変更しません。terminal 後の新規委任・steering・attempt 開始の拒否（admission gate）は、cancel marker と同じ後続スライスが各比較点へ producer と対で追加します。本スライスが固定するのは progress の吸収性と、terminal 後に結果を現在へ採用しないことです（拒否 variant の placeholder は置きません）。
-- **Task Agent の推論開始（K-E との接続）**: 委任された一時エージェントの推論は、依拠タスクリビジョンの前提を推論試行の確定（attempt claim）と同一の短いトランザクションで照合してから開始します（照合条件は K-E）。照合に失敗した場合は `TaskPremiseStale`（タスク前提の不一致）または `Stale`（同意・認証情報の不一致）として送信前に不受理とし、provider への I/O を行いません。確定済みの試行は、その後の方針指示（steering）によって開始を取り消されません（遅延結果は元リビジョンへの記録に留め、現在のタスクへ自動採用しません）。委任レコードの存在を実行中・生存の証拠にしてはなりません（CI §5.3）。
+- **結果の到着 record と identity・本文・相関（本スライス）**: 結果本文の master は Task owner（作業担当）が `task_result` の 1 行として保持し、identity は作業担当の orchestrate が 1 回の produced 出力に対して発行する `TaskResultId` です。provider 出力を受け取った orchestrate は、`Produced` を呼び出し元へ返す前に `record_task_result_arrival` で `{ delegation, result, body, producer }` を 1 回だけ durable に記録します（durable-before-visible。同じ identity の再 arrival は本文行を増やさず、本文・委任・依拠リビジョン・producer の不一致は技術的エラー）。provider 出力・Agent の自己申告・結果本文の到着は、外部作用の成功・Task の採用・Task の完了のいずれの証拠でもありません。`producer` は結果を生成した Task Agent turn の durable 相関（その turn が claim した推論試行の identity）です。`adopt_result` は同じ短い `Immediate` トランザクションで、result 行の `producer` から Action owner の `action_attempt` を列挙して authoritative set（その turn が開始した Action 試行の完全な durable 集合）を解決し、claim の `attempt_refs` との完全一致（欠如・追加・重複のいずれも不可）を要求します。一致しない claim は完了材料にできず、不整合な単位として技術的エラー（fail closed）です（推測で stale や `WithheldByEffectFacts` に丸めません）。
+- **結果の確信度と採用判定**: エージェントの自己申告を外部作用の成功証拠として過信してはなりません。外部作用の確信度は実行・拡張担当が記録した確定事実（fact）を参照・集約し、作業担当側で勝手に更新してはなりません。claim が authoritative set と完全一致した上で、依拠試行が 1 つでも `ConfirmedSuccess` でない場合（`Unknown` / `ConfirmedFailure`）は `WithheldByEffectFacts { attempts: authoritative set の非確認分 }` として現在 Task を完了せず、到着 record だけを残します。authoritative set が durable に空である場合（その turn が Action 試行を 1 つも開始していない場合）に限り、Action 無しの結果として採用判定へ進めます（claim が空だから Action が無かった、と推定してはなりません）。`Unknown` は新しい客観的証拠が実行・拡張担当側で確定するまで保持します。
+- **永続化とコミット**: タスクの新規作成は、`task + task_revision + 初期 task_context_entry` と、関連付けを確定した場合の `workspace_assoc` を不可分に永続化してから外部へ可視化します（durable-before-visible）。方針変更は、新リビジョンと新コンテキストを不可分に進めます。結果の到着 record は、`task_result` の 1 回だけの insert（`body` 1 行、`adopted_revision = NULL`、`producer` 相関）として `Produced` の可視化前に確定します。採用と完了確定は別の短い `Immediate` トランザクションで、result 行の存在確認、依拠 Action 試行の authoritative set 列挙と claim の完全一致、確定度の読み取り、`task_result.adopted_revision` の刻印、`task_result_attempt` の相関刻印、`task.progress` の terminal への CAS を行います。現在リビジョン不一致・terminal・cancel marker ありの場合は、到着 record に留めて現在 Task を変更しません。また、`create_delegation`・`forward_steering`・推論試行 claim・Action 開始はそれぞれの同一トランザクションで `task.progress` の非 terminal を必須とし、terminal は書き込み・開始ともに行いません。同一 `TaskId` に対する方針指示、委任受付、完了確定、結果採用は、同期区分 SD-Task によって厳格に逐次化します（CCT §4）。
+- **Task progress / lifecycle（本スライス）**: Task revision（目的・指示の steering）と `TaskProgress` は別の軸です。`create_task` は `Started` で初期化し、`create_delegation` は `Started → InProgress` を同じ AU3 トランザクションで進め（end-to-end の初回実装はこのスライス）、`adopt_result` は採用成立時に `progress` を非 terminal から `Completed` へ CAS します。terminal 状態は吸収的で、terminal からの遷移は `RecordedToOriginalOnly`（結果）に留まります。`Failed` は作業担当が確定した terminal failure のみを表し、provider の一時障害・`NotSent`・Action `Unknown`・`WithheldByEffectFacts` を写しません（それらを terminal failure と確定できる producer は後続スライスが追加します）。start 要求から結果が返るまでの推論ターン自体は lifecycle を変更しません。**terminal 後の新規委任・steering・推論試行 claim・Action 開始の拒否（admission gate）は本スライスの契約であり**、AU3/AU4/AU14/AU5 の比較と同じ不分区間で `task.progress` が非 terminal であることを必須とし、terminal は専用の domain outcome（`TaskTerminal`）で書き込み・開始ともに行いません（cancel marker と cancel-specific gate は後続スライスが同じ比較点へ producer と対で追加します）。本スライスが固定するのは progress の吸収性、terminal の admission gate、terminal 後に結果を現在へ採用しないことです。
+- **Task Agent の推論開始（K-E との接続）**: 委任された一時エージェントの推論は、依拠タスクリビジョンの前提を推論試行の確定（attempt claim）と同一の短いトランザクションで照合してから開始します（照合条件は K-E。現在の `task.progress` が非 terminal であることを含みます）。照合に失敗した場合は `TaskPremiseStale`（タスク前提の不一致。terminal を含む）または `Stale`（同意・認証情報の不一致）として送信前に不受理とし、provider への I/O を行いません。作業側は再読込で progress の terminal を検出した場合、`StaleTaskRevision` ではなく `TaskTerminal { task, progress }` として返します。確定済みの試行は、その後の方針指示（steering）によって開始を取り消されません（遅延結果は元リビジョンへの記録に留め、現在のタスクへ自動採用しません）。委任レコードの存在を実行中・生存の証拠にしてはなりません（CI §5.3）。
 - **Task Agent の入力と scrub（本スライスの範囲）**: このスライスの論理入力は依拠リビジョンの採用目的本文（`task_revision` snapshot）であり、`SecretScrubber` の出力（`ScrubbedText`）だけを推論境界へ渡します。ハーネス自ら `ScrubbedText` を構成してはなりません（構成の封止は Issue #1530 で追跡）。採用指示の本文は History が原本のまま保持し、参照先レコードの bounded read を持つ producer が同じ設計変更で解決を追加します（本スライスは本文を複製せず、指示本文も送信しません）。ワークスペース範囲・ファイル内容はこの推論経路では送信しません（Action スライス）。scrub の失敗は fail closed の技術的失敗であり、原文を送信・保存・ログ出力しません。Task Agent は `admit_task_agent` のみを呼び、`admit_dialogue` / `admit_learning` を代用してはなりません。
 - **依存性の反転（Inversion）**: 保全・消去等の他ドメインのデータ（`HoldConditionRef` や `RestoreGeneration` 等）は、クレート境界では受け入れ側のドメイン（作業、推論、実行等）が定義する前提型として受け取ります。他ドメインの固有型を直接インポートしてはなりません（CM §4.3）。
 - **IPC 通信**: ホスト内部で完結します。クライアントへは進捗や結果の必要な表示情報のみを伝達し、タスクのマスターデータそのものは送信しません。
@@ -375,8 +402,13 @@ struct TaskAgentInferencePremise {   // port 入力。prompt は SecretScrubber 
     prompt: ScrubbedText,
 }
 enum TaskAgentInferenceOutcome {
-    Produced { output: TaskAgentOutput, adoption_consent_current: bool },
-    StaleTaskPremise,                // タスク前提の不一致。provider へ送信していない
+    Produced {
+        output: TaskAgentOutput,
+        adoption_consent_current: bool,
+        producer: RawId,             // この turn が claim した推論試行の durable 相関（結果の producer）。
+                                     // Task owner は解釈せず、Action attempt の相関列挙キーとして使う
+    },
+    StaleTaskPremise,                // タスク前提の不一致（リビジョン前進・terminal・行欠如を含む）。provider へ送信していない
     NotSent(TaskAgentNotSent),
 }
 struct TaskAgentOutput;              // provider 出力本文。Debug では伏字化し、アクセサ経由でのみ読む
@@ -387,14 +419,16 @@ trait TaskAgentInference: Send + Sync {
         -> Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>;
 }
 enum TaskAgentTurnOutcome {
-    Produced {                       // provider 出力が返った事実。タスク完了・採用・外部作用成功ではない
+    Produced {                       // provider 出力が返り、結果本文が durable になった事実。タスク完了・採用・外部作用成功ではない
         delegation: DelegationId,
         task: TaskRef,               // 依拠タスクリビジョン
-        result: TaskResultId,        // 出力本文の identity。orchestrate がこのマッピングで発行し、
-                                     // 同じ出力の再 arrival でも二重に本文保存しない（採否の意思ではない）
-        output: TaskAgentOutput,     // 本文は Debug で伏字化する。durable 保存は採用判定側が 1 回だけ行う
+        result: TaskResultId,        // 出力本文の identity。orchestrate が発行し、呼び出し元へ返す前に
+                                     // record_task_result_arrival で本文・producer 相関を durable 化する（採否の意思ではない）
+        producer: RawId,             // 結果を生成した turn の durable 相関。Action attempt と result を結ぶ
+        output: TaskAgentOutput,     // 本文は Debug で伏字化する。durable 正本は task_result の 1 行だけ
         adoption_consent_current: bool, // ネットワーク待機後も同意が成立していたか
     },
+    TaskTerminal { task: TaskId, progress: TaskProgress }, // Task が terminal のため claim を拒否。provider へ送信していない
     StaleTaskRevision { current: TaskRef }, // 依拠リビジョンが前進済み。provider へ送信していない
     MissingTask { task: TaskId },
     MissingDelegation { delegation: DelegationId },
@@ -402,8 +436,9 @@ enum TaskAgentTurnOutcome {
 }
 // `TaskAgentNotSent` / `TaskAgentInferenceError` は推論側 `NotSentReason` / `InferenceTechnicalError`
 // と同じ意味の語彙を作業側に写したもの。`StaleTaskPremise` は作業側が委任と現在のタスクを再読込し、
-// 委任が不在なら MissingDelegation、タスクが不在なら MissingTask、タスクリビジョンが前進していれば
-// StaleTaskRevision { current } へ写す（判定の所有は作業担当に残る）。
+// 委任が不在なら MissingDelegation、タスクが不在なら MissingTask、progress が terminal なら
+// TaskTerminal { task, progress }、タスクリビジョンが前進していれば StaleTaskRevision { current } へ写す
+// （判定の所有は作業担当に残る。terminal を revision stale へ丸めない）。
 ```
 
 ### H-B Experience 提出 → 形成判断（個体調整・作業 → 認識・学習）
@@ -767,11 +802,11 @@ struct InferenceResultArrival {
 }
 ```
 
-- `NotSentReason` と試行確定の結果は、Task Agent のタスク前提不一致（`TaskPremiseStale`）を同意・認証情報の失効（`ConsentStale` / `Stale`）とは別の列挙子として持ち、技術的エラーへ吸収しません。作業側は `TaskPremiseStale` を受けて委任と現在のタスクを再読込し、`MissingDelegation` / `MissingTask` / `StaleTaskRevision { current }` へ写します（判定の所有は作業担当に残ります）。
+- `NotSentReason` と試行確定の結果は、Task Agent のタスク前提不一致（`TaskPremiseStale`）を同意・認証情報の失効（`ConsentStale` / `Stale`）とは別の列挙子として持ち、技術的エラーへ吸収しません。作業側は `TaskPremiseStale` を受けて委任と現在のタスクを再読込し、`MissingDelegation` / `MissingTask` / `TaskTerminal { task, progress }` / `StaleTaskRevision { current }` へ写します（判定の所有は作業担当に残ります。terminal を revision stale へ丸めず、`TaskPremiseStale` に Task lifecycle の値型を import させません）。
 
 - **送信の手順**:
   1. 受付ゲート（admission）が最新の同意・認証前提と、K-B の単一利用認可を確認して `Admission` を返します。Task Agent の admission は `(TaskAgent, Dialogue, TaskAgentTurn)` を固定した専用経路（`admit_task_agent`）のみで作り、`admit_dialogue` / `admit_learning` の代用を許しません。
-  2. 試行の確定（attempt claim）が、保存された同意情報および認証情報セットとの一致を単一のトランザクションで確定した上で、トランスポート層を介して送信します。Task Agent の利用では、同じトランザクションで次の 3 条件を照合します: (1) 前提の `delegation` が `delegation` 行に存在する、(2) その行の `(task_id, task_revision)` が依拠 `TaskRef` 前提と一致する、(3) 現在の `task` 行のリビジョンが依拠リビジョンと一致する。(1)(3) の不一致と行の欠如は `TaskPremiseStale` として送信前に拒絶し(2) の不一致や部分的・不整合な行は技術的エラー（fail closed）とします。同意・認証情報の不一致は従来どおり `Stale` で、`TaskPremiseStale` と区別します。
+  2. 試行の確定（attempt claim）が、保存された同意情報および認証情報セットとの一致を単一のトランザクションで確定した上で、トランスポート層を介して送信します。Task Agent の利用では、同じトランザクションで次の 4 条件を照合します: (1) 前提の `delegation` が `delegation` 行に存在する、(2) その行の `(task_id, task_revision)` が依拠 `TaskRef` 前提と一致する、(3) 現在の `task` 行のリビジョンが依拠リビジョンと一致する、(4) 現在の `task` 行の progress が非 terminal である。(1)(3)(4) の不一致と行の欠如は `TaskPremiseStale` として送信前に拒絶し(2) の不一致や部分的・不整合な行は技術的エラー（fail closed）とします。terminal を含む refusal を受けた作業側は、再読込で terminal を検出すると `TaskTerminal { task, progress }` へ写します。同意・認証情報の不一致は従来どおり `Stale` で、`TaskPremiseStale` と区別します。
   3. 入力トークン上限は確定前に、プロンプト内の認証情報セット前提は試行確定と同一のトランザクションで照合します。
   4. 試行確定後のプロバイダへの非同期I/Oはロックを持たずに並行実行し、送信の瞬間に権限やルーティングを二重に検証することはありません（受付ゲートとの二重チェックによる競合を防ぐため）。
   5. ネットワーク待機（await）後に同意状態が変化して結果を採用できなくなった場合は、生成結果の採用のみを安全に破棄し、利用実績の記録は確定した試行情報に従って正しく残します。
@@ -871,6 +906,9 @@ enum ActionStartOutcome {
     Denied(DenyReasonRef),
     AskOwner(OwnerQuestionRef),      // オーナーの指示が必要なため実行せず待機
     StalePremise(StalePremiseRef),   // タスクリビジョン、委任、ワークスペース、実対象、許可、帰属、消去、復元の条件不一致
+    TaskTerminal,                    // 対象 Task が terminal（Completed / Failed）のため開始しない。書き込み・実行ともになし。
+                                     // Action 側は Task lifecycle の値型を import せず、Task owner が自分の
+                                     // TaskTerminal { task, progress } として意味を説明する
     HeldByGlobalHold(HoldConditionRef), // 安全保留スライスで導入
 }
 
@@ -1364,8 +1402,8 @@ struct ManagementOperationCommand {
 
 | インターフェース境界 | 期待される識別子＋リビジョン | 期待される世代番号（型付き） | 発生元／消費主体 | 目的・利用用途・スコープ | 操作種別／試行ID | 結果の確信度 | 安全保留／削除／復元との関係 |
 |---|---|---|---|---|---|---|---|
-| H-A タスク化／方針指示／委任 | ● `TaskRef` | ○ 復元前提（`RestoreGeneration`。復元跨ぎ参照防止。保全・消去スライスで導入） | ● 委任元パートナー・タスク・ワークスペース | ● 作成時の目的・方針指示前提（`SteeringPremiseRef`）・委任スコープ | ○ `DelegationRef` | —（達成は作業担当、確信度は実行担当） | ● 安全停止・保留・削除・復元保留の照合（hold スライスで導入） |
-| H-A エージェント結果受入 | ● 委任対応（delegation 行）から解決する依拠 `TaskRef` と、現在 `task.revision` の一致 | ○ 復元／消去の各世代タグ（producer スライスで追加） | ● 結果 identity・委任・依拠 revision | ● 現在の目的 identity との整合性（本文文字列の一致は使わない） | ● 依拠 Action 試行相関（存在検証と `(delegation, task, task_revision)` 対応。確定度は owner 事実のまま） | ● 結果本文は Task owner が 1 行だけ保存（自己申告を確信度にしない） | ● 中断（cancel marker は後続 producer）・方針変更・terminal・削除・復元との照合 |
+| H-A タスク化／方針指示／委任 | ● `TaskRef` ＋ ● `task.progress` 非 terminal（委任 AU3・方針指示 AU4。terminal は `TaskTerminal` で書き込みなし） | ○ 復元前提（`RestoreGeneration`。復元跨ぎ参照防止。保全・消去スライスで導入） | ● 委任元パートナー・タスク・ワークスペース | ● 作成時の目的・方針指示前提（`SteeringPremiseRef`）・委任スコープ | ○ `DelegationRef` | —（達成は作業担当、確信度は実行担当） | ● 安全停止・保留・削除・復元保留の照合（hold スライスで導入） |
+| H-A エージェント結果受入 | ● 委任対応（delegation 行）から解決する依拠 `TaskRef` と、現在 `task.revision` の一致 | ○ 復元／消去の各世代タグ（producer スライスで追加） | ● 結果 identity・委任・依拠 revision・producer 相関 | ● 現在の目的 identity との整合性（本文文字列の一致は使わない） | ● 依拠 Action 試行相関（result の producer 相関から列挙した authoritative set と claim の完全一致。欠如・追加・重複は技術的エラー）。確定度は owner 事実のまま | ● 結果本文は Task owner が到着時に 1 行だけ保存（自己申告を確信度にしない） | ● 中断（cancel marker は後続 producer）・方針変更・terminal・削除・復元との照合 |
 | H-B 経験提出 | ○ タスク由来なら `TaskRef` | ○ 在席／復元／消去の各世代タグ | ● 経験したパートナー・タスク・委任 | ● 想定用途・期待スコープ | — | — | ● 保存禁止・非共有・消去条件の照合 |
 | H-C 会話による訂正 | ● `(LearningId, expected_revision)` | ○ 消去スイープタグ | ● 訂正対象・根拠となる新経験 | ● 時間的な意味論（最初から誤り／変化） | — | — | ● 消去・制約条件の照合 |
 | H-D 自律学習参照 | ○ `(LearningId, revision)`（取得データ側） | ○ 消去スイープタグ | ● 利用元・目的・要求スコープ | ● 用途・スコープ・制約の写し | — | — | ● スコープ制限・保存禁止・消去保留 |
@@ -1376,7 +1414,7 @@ struct ManagementOperationCommand {
 | K-C 秘密情報利用 | ○ `CredentialRef`（非秘密）＋ 用途 | — | ● 接続先・用途 | ● 認証用途の厳格な制限 | ○ 操作種別 | ○ 認証成否・再認証要否 | ● 認証失効・安全保留の照合 |
 | K-D/E/F 推論実行・フォールバック | ○ 同意情報の期待リビジョン | ○ 復元／消去の世代タグ | ● 消費主体・要求能力 | ● 用途・データ・送信先・取扱制限・費用 | ○ チケットID | ○ 能力不足・送信失敗・実測利用量 | ● 保存禁止・費用上限・保留・消去 |
 | K-G 利用枠予約・確定 | ○ `CapId` ＋ 帰属先 | — | ● 消費主体・用途・送信先 | ● 利用枠上限・引当予約量 | ○ 予約ID | ○ 確定実測値／成否不明／処理中 | ● 上限超過・費用不明の照合 |
-| K-H アクション実行開始 | ● タスクリビジョン・ルール／同意の前提 | ● 在席 ＋ 復元 ＋ 消去（該当するもの） | ● 実行主体・委任・タスク・ワークスペース | ● 目的・実対象・操作・データ・送信先・費用 | ● 認可判定ID ＋ 費用予約ID | —（開始時点） | ● 認証失効・安全停止・費用上限・保留・消去・復元 |
+| K-H アクション実行開始 | ● タスクリビジョン・ルール／同意の前提 ＋ ● `task.progress` 非 terminal（terminal は `TaskTerminal` で開始なし） | ● 在席 ＋ 復元 ＋ 消去（該当するもの） | ● 実行主体・委任・タスク・ワークスペース・producer 相関（Task Agent turn） | ● 目的・実対象・操作・データ・送信先・費用 | ● 認可判定ID ＋ 費用予約ID | —（開始時点） | ● 認証失効・安全停止・費用上限・保留・消去・復元 |
 | K-H 外部結果確定 | ● 試行ID ＋ 期待される確信度 | ○ 世代タグ | ● タスク・委任 | ● 対象・外部作用との対応関係 | ● 元となった成否不明試行ID | ● 確認済み成功／確認済み失敗／成否不明 | ● 中断・再実行条件の照合 |
 | X-A 在席移動 | ● `(CompanionId, expected_generation+state)` | ● `PresenceGeneration` | ● 対象パートナー・移動元端末・移動先端末 | ● 移動の発生理由 | ○ ラウンド終了対応 | ○ 到達性・排他性の確認 | ● ペアリング・デバイス・安全停止・保留 |
 | X-B 対話ラウンド受付 | ○ `(Companion, Client, round)` ＋ 申告世代 | ● `PresenceGeneration` | ● 対象パートナー・端末・ラウンド・観測候補 | ● 対話の目的 | ○ ラウンドID・試行ID | ○ 受付完了／提示完了／成否不明 | ● 端末切り替え・安全停止・保留・消去 |
@@ -1415,15 +1453,15 @@ fn request_action(cmd: ExecuteActionCommand)
 
 | ドメイン領域 | 結果判定 enum（例） | 主なバリアントの意味論 |
 |---|---|---|
-| タスク提案・方針指示・委任（コマンドレベル） | `TaskProposalOutcome`、`DelegationOutcome` | 受理（Accepted）／前提不一致（StalePremise：現在値付き）／タスク未存在（MissingTask：方針指示・委任時）／リビジョン上限超過（RevisionExhausted：方針指示時のみ）／全体保留中（HeldByGlobalHold：hold スライスで追加）／再照合が必要（NeedsRevalidation）／情報不足（InsufficientContext）。TaskProposalOutcome は候補側の意味論をすべて持ち、DelegationOutcome は HeldByGlobalHold・NeedsRevalidation・InsufficientContext を、それぞれの producer を持つスライスで追加します |
-| タスクコミット（方針指示 AU4、リポジトリレベル） | `TaskCommitOutcome` | コミット成功（CommittedAs）／期待値不一致（StaleExpected：現在値付き）／タスク未存在（MissingTask）／リビジョン上限超過（RevisionExhausted）／全体保留中（HeldByGlobalHold：hold スライスで追加） |
-| エージェント結果受入 | `TaskResultAcceptance` | 採用と同時に完了（AdoptedAsCompletion：結果を 1 回だけ記録・現在リビジョンと一致・依拠試行がすべて ConfirmedSuccess）／元の依拠リビジョンへ記録のみ（RecordedToOriginalOnly：revision 前進・terminal・cancel marker）／依拠 Action 試行が未確定のため完了を保留（WithheldByEffectFacts：Unknown / ConfirmedFailure。結果行は記録し現在 Task は不変）／委任・タスクの durable 状態が無く書き込みなし（MissingDelegation / MissingTask。識別子不在は技術的エラーにしない） |
+| タスク提案・方針指示・委任（コマンドレベル） | `TaskProposalOutcome`、`DelegationOutcome` | 受理（Accepted）／前提不一致（StalePremise：現在値付き）／タスク終端（TaskTerminal：Completed / Failed のため書き込みなし。方針指示・委任時）／タスク未存在（MissingTask：方針指示・委任時）／リビジョン上限超過（RevisionExhausted：方針指示時のみ）／全体保留中（HeldByGlobalHold：hold スライスで追加）／再照合が必要（NeedsRevalidation）／情報不足（InsufficientContext）。TaskProposalOutcome は候補側の意味論をすべて持ち、DelegationOutcome は HeldByGlobalHold・NeedsRevalidation・InsufficientContext を、それぞれの producer を持つスライスで追加します |
+| タスクコミット（方針指示 AU4、リポジトリレベル） | `TaskCommitOutcome` | コミット成功（CommittedAs）／期待値不一致（StaleExpected：現在値付き）／タスク終端（TaskTerminal：Completed / Failed のため書き込みなし）／タスク未存在（MissingTask）／リビジョン上限超過（RevisionExhausted）／全体保留中（HeldByGlobalHold：hold スライスで追加） |
+| エージェント結果受入 | `TaskResultAcceptance` | 採用と同時に完了（AdoptedAsCompletion：到着 record 済み・現在リビジョンと一致・durable producer 相関から列挙した authoritative set が claim と完全一致・依拠試行がすべて ConfirmedSuccess）／元の依拠リビジョンへ記録のみ（RecordedToOriginalOnly：revision 前進・terminal・cancel marker）／依拠 Action 試行が未確定のため完了を保留（WithheldByEffectFacts：authoritative set に Unknown / ConfirmedFailure。到着 record は残り現在 Task は不変）／採用対象の result 行が無い（MissingResult）／委任・タスクの durable 状態が無く書き込みなし（MissingDelegation / MissingTask。識別子不在は技術的エラーにしない） |
 | 経験提出・訂正・スコープ | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | 知識形成（Formed）／保留（Deferred）／保存価値なし（Declined）／訂正完了（Corrected）／パートナー専用を維持（KeptAsCompanion）／明示制約により拒絶（DeniedByExplicitConstraint）／対象期限切れ（StaleTarget）／消去中保留（HeldByErasure） |
 | 権限リアルタイム照合 | `LiveAuthorizationDecision` | 今回の利用を認可（AllowForThisUse）／拒絶（Deny）／オーナー確認待ち（AskOwner）／条件充足待ち（WaitForCondition）／再照合が必要（NeedsRevalidation） |
 | 認証秘密利用 | `AuthenticatedUseOutcome` | 規定範囲で安全に利用（UsedWithinScope）／再認証が必要（NeedsReauthentication）／制約により拒絶（DeniedByConstraint）／参照期限切れ（StaleReference） |
 | 推論実行・フォールバック | `InferenceDispatchOutcome`、`FallbackDecision` | 完了（Completed）／送信前拒絶（NotSent）／承認済みフォールバックとして許可（AllowedAsApprovedFallback）／未承認経路のため拒絶（DeniedAsUnapprovedRoute） |
 | 利用枠予約・確定・解放 | `ReservationOutcome` | 予約成功（Reserved）／上限超過で拒絶（DeniedByCap）／費用不明のため保留（HeldForUnknownCost）／再照合が必要（NeedsRevalidation） |
-| アクション開始・確定 | `ActionStartOutcome`、`LateArrivalHandling` | 試行開始（StartedAsAttempt）／拒絶（Denied）／オーナー指示待ち（AskOwner）／前提不一致（StalePremise）／全体保留中（HeldByGlobalHold）／元記録へ保存（RecordedToOriginal）／成否不明のまま重複リスク提示（KeptUnknownWithDupRisk）／消去条件により再保存抑止（SuppressedByErasure） |
+| アクション開始・確定 | `ActionStartOutcome`、`LateArrivalHandling` | 試行開始（StartedAsAttempt）／拒絶（Denied）／オーナー指示待ち（AskOwner）／前提不一致（StalePremise）／タスク終端（TaskTerminal：Completed / Failed のため開始なし。Action 側は Task lifecycle 語彙を import しない）／全体保留中（HeldByGlobalHold）／元記録へ保存（RecordedToOriginal）／成否不明のまま重複リスク提示（KeptUnknownWithDupRisk）／消去条件により再保存抑止（SuppressedByErasure） |
 | 在席移動・対話ラウンド | `MoveDecision`、`RoundIntakeOutcome` | 新端末へ移行開始（TransitioningToNew）／古い在席情報のため拒絶（RejectedAsStalePresence）／制約により拒絶（DeniedByConstraint）／ラウンド受理（AcceptedForRound）／過去ラウンドのため拒絶（StaleRound）／移行中保留（HeldForTransition） |
 | 観測結果ルーティング | `RoutingDecision` | 指定パートナーへ配信（RoutedTo）／制御設定により抑止（SuppressedByControl）／古い観測候補のため破棄（StaleCandidate） |
 | キャラクター適用・インポート | `CharacterApplicationOutcome`、`SkillImportOutcome` | 適用完了（AppliedAs）／リビジョン不一致（StaleRevision）／禁止部品のため拒絶（DeniedProhibitedPart）／オーナー選択待ち（NeedsOwnerSelection）／スコープ別インポート完了／スコープ規則違反で拒絶（RejectedByScopeRule）／検証失敗で拒絶（RejectedByValidation） |
@@ -1452,8 +1490,8 @@ LLMによる推論、タスクエージェントの自律処理、外部ツー�
 | 長時間処理の種類 | 開始要求（request） | 結果到着・完了報告（completion / result） | 永続化により復元可能な対応関係（durable correlation） |
 |---|---|---|---|
 | 推論実行（単発・継続・フォールバック・再送） | `AdmissionRequest` / `AuthorizedInference` → 試行の確定（チケット発行、費用予約、前提条件の確定） | `InferenceResultArrival`（チケットIDから結果テキストおよび利用量への対応付け） | `(チケットID, 消費主体, タスク／委任との対応, 利用目的, リビジョン／世代前提, 由来情報)`。PR グループF/I、CI §6.4 の世代タグ。実装では推論試行行（`inference_attempt`）が ticket から消費主体・利用目的・委任・依拠 `TaskRef` を辿れるように保持し、利用実績（`usage_fact`）からの帰属は ticket 対応で解決します。結果到着・採用・確定度は試行行に持たせず、それぞれの producer が追加します。再起動時の読み出しは ticket を境界にした bounded read（`load_inference_attempt(ticket)`）で行い、provider の自動 replay やエージェントの自動再起動の根拠にしてはなりません。 |
-| タスク委任・自律エージェント | `CreateDelegationCommand`（期待リビジョンの不可分な比較照合。AU3 の作成スライスは委任 ID・依拠 TaskRef・委任元・ephemeral ID・スコープの写しを永続化） | `TaskAgentResultArrival`（委任情報から現在タスクへの結果受入判定。結果本文の identity と 1 回だけの保存、依拠 Action 試行相関、採用と完了確定） | `(結果ID, 委任ID, 依拠 TaskRef, 結果本文 1 行, 依拠 Action 試行相関, 採用リビジョン, Task progress)`。依拠リビジョンは delegation 行、目的はそのリビジョンの `task_revision` snapshot から解決。Action 試行の確定度は実行・拡張 owner の事実のまま参照のみ。再起動後は `(result_id → task_result → delegation → task_revision → task_result_attempt)` の bounded read（`load_task_result`）で辿る。PR グループD（Task）/E（Action）、CI §5.3 |
-| アクション試行・外部ツール・Computer Use | `ExecuteActionCommand`（実行前の不可分な比較照合）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（試行ごとの CAS 更新）＋ `LateArrivalAttribution`（遅延到着の帰属） | `(試行ID, タスクリビジョン前提, 実際の操作対象と操作種別, 依拠した認可ID, 在席／復元世代, 元の成否不明試行ID)`。PR グループE |
+| タスク委任・自律エージェント | `CreateDelegationCommand`（期待リビジョン ＋ `task.progress` 非 terminal の不可分な比較照合。AU3 の作成スライスは委任 ID・依拠 TaskRef・委任元・ephemeral ID・スコープの写しを永続化し、progress を `Started → InProgress` へ進める） | `TaskAgentResultArrival`（到着 record を先に durable 化し、その後に採用判定。結果本文の identity と 1 回だけの保存、claim の authoritative set 検証、採用と完了確定） | `(結果ID, 委任ID, 依拠 TaskRef, 結果本文 1 行, producer 相関, 依拠 Action 試行相関（authoritative set）, 採用リビジョン, Task progress)`。依拠リビジョンは delegation 行、目的はそのリビジョンの `task_revision` snapshot から解決。producer 相関は Task Agent turn が claim した推論試行で、Action attempt の列挙キー。Action 試行の確定度は実行・拡張 owner の事実のまま参照のみ。再起動後は `(result_id → task_result → delegation → task_revision → task_result_attempt)` の bounded read（`load_task_result`）で辿り、到着済み・採用未確定の結果は本文を保持したまま提示できる。PR グループD（Task）/E（Action）、CI §5.3 |
+| アクション試行・外部ツール・Computer Use | `ExecuteActionCommand`（実行前の不可分な比較照合。`task.progress` 非 terminal を含む）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（試行ごとの CAS 更新）＋ `LateArrivalAttribution`（遅延到着の帰属） | `(試行ID, producer 相関（Task Agent turn）, タスクリビジョン前提, 実際の操作対象と操作種別, 依拠した認可ID, 在席／復元世代, 元の成否不明試行ID)`。PR グループE |
 | バックアップ作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点、参照関係、未完了状況の整合性が揃って確定） | `(バックアップID, 対象時点・参照整合性・除外データ・未完了状況)`。PR グループJ |
 | バックアップ復元 | `RequestRestoreCommand` → `StagedRestoreCandidate`（隔離ステージング検証） | `SwitchRestoreDecision`（復元世代の更新 ＋ マスター切り替え）→ `BulkEnableAfterRestoreCommand` | `(復元ID, バックアップID, RestoreGeneration, 安全保留, 認証情報照合)`。PR グループJ |
 | 個人データ完全削除 | `RequestTargetedDeletionCommand` → `DeletionScopeDecision` | `DemandLocalErasureCommand` → `ParticipantCompletionFact` → `VerifyRemainderQuery` → `GlobalDeletionCompletion` | `(操作ID, 消去スイープ世代, 有効期間, 参加者対応, 安全保留)`。PR グループJ、CI §5.9 |
@@ -1503,6 +1541,8 @@ struct TaskCommitPremise {            // 方針指示（steering AU4）。1コ�
 enum TaskCommitOutcome {
     CommittedAs(TaskRef),            // コミット成功（新リビジョン。方針指示時は cur+1）
     StaleExpected { current: TaskRef }, // 期待リビジョン不一致（最新リビジョンを添えて返却）
+    TaskTerminal { task: TaskId, progress: TaskProgress }, // 対象 Task が terminal（Completed / Failed）。
+                                     // 再評価しても前進しないため StaleExpected と区別し、何も書き込まない
     MissingTask { task: TaskId },    // 前提のタスクに対応する永続化状態が存在しない。何も書き込まない
     RevisionExhausted { task: TaskId }, // 次の相異なるリビジョンを永続化データとして確定できない。何も書き込まない
     // HeldByGlobalHold(hold-check premise) は hold スライスで追加（下記参照）
@@ -1515,7 +1555,10 @@ enum TaskCommitOutcome {
 // - new_purpose: Some の origin は方針指示の発言レコードとし（kind = OwnerConversation、source = ProposeSteeringCommand.instruction_source と同一レコード）、acquired_at は作業担当が採用時に取得します。目的と指示で由来を分ける生成元が生じた段階で、コマンドに由来フィールドを追加します。
 // - adopted_instruction: 方針指示の前進（forward）は採用指示項目を 1 つ記録します（ProposeSteeringCommand.instruction_source は必須）。None は指示を採用しない将来の前進用であり、本スライスの steering 経路では常に Some を渡します。
 // - 採用指示の識別子は新リビジョンの TaskContextEntryId であり、リポジトリは渡された識別子を採番し直さず、CAS 成立後に reference = (task, new revision) のみを刻みます。項目は採用リビジョンで 1 度だけ書き込み、以降の前進では再記録しません（目的項目の引き継ぎ再記録とは異なります）。現在有効な採用指示は、現在リビジョンまでの AdoptedInstruction 項目全体となります。
-// - MissingTask / RevisionExhausted は正常系（Ok 側）のドメイン判定結果（domain outcome）とし、永続化状態を変更しません。RevisionExhausted は後続リビジョンの不在だけでなく、後続リビジョンを永続化表現に写せない場合も含みます。
+// - 同じ不分区間で現在の task.progress が非 terminal であることを必須とします。terminal（Completed / Failed）は
+//   TaskTerminal { task, progress } として何も書き込まずに返し、StaleExpected と区別します（吸収的な終端であり、
+//   再評価で前進できる stale ではありません）。この gate は本スライスの契約です。
+// - MissingTask / RevisionExhausted / TaskTerminal は正常系（Ok 側）のドメイン判定結果（domain outcome）とし、永続化状態を変更しません。RevisionExhausted は後続リビジョンの不在だけでなく、後続リビジョンを永続化表現に写せない場合も含みます。
 // - AU4 のリポジトリスライスが記録するコンテキスト種別は採用目的のみです。最初の追加種別である採用指示は、H-A steering 配線スライスが書き込み側の前提（adopted_instruction）・項目種別識別子（discriminator）・マイグレーション・読み取り規則の拡張を同一の設計変更として追加します。材料や途中理解はそれぞれの利用先が分岐するスライスが同一の形式で追加します。どの種別も同一の forward_steering トランザクションに載せ、別メソッド・別リビジョン・別トランザクションの採用経路を作ってはなりません。
 // - HeldByGlobalHold は、hold スライス（HoldConditionRef の生成元が存在する最初のステージ。個別データ削除 / 復元 / 停止のいずれか早い方）において、タスク所有の安全保留照合前提（HoldCheckContextRef 相当）と対で追加します。forward_steering と adopt_result は同一の不可分比較照合内で現在の保留・消去・復元保留を照合し、成立しなければ何も書き込まず HeldByGlobalHold を返します（adopt_result は結果行の記録も保留しません）。それまでは具象 enum に保留の代役バリアントや仮の前提条件を置いてはなりません。この名称は H-A コマンドレベルとリポジトリレベルで共通のドメイン名であり、hold の producer を持つ具象 enum（TaskProposalOutcome / TaskCommitOutcome 等）に hold スライスが追加します。運用管理意図の HeldByOperation（未確定・保留）とは明確に区別される別概念です。
 
@@ -1540,8 +1583,10 @@ struct WorkspaceAssociationPremise {
 // 同一トランザクションで現在の Task 行の担当者から写します（委任の有効性は常にタスク側の
 // 現在単位から再確認し、この写しだけを根拠にしません）。scope_copy は作業担当（orchestrate）
 // が依拠した Task 単位の確定済みワークスペース関連付けから写して構成します。
-// 委任作成は Task revision を前進させませんが、progress を Started → InProgress へ進めます
-// （terminal 状態は変更しません）。行の存在は実行中・生存の証明ではありません。
+// 委任作成は Task revision を前進させませんが、progress を Started → InProgress へ進めます。
+// 同じ不分区間で現在の task.progress が非 terminal であることを必須とし、terminal（Completed / Failed）は
+// TaskTerminal { task, progress } として何も書き込まずに返します（terminal 状態は変更しません）。
+// 行の存在は実行中・生存の証明ではありません。
 struct DelegationCreationPremise {
     delegation: DelegationId,
     task: TaskRef,                   // 期待するタスクリビジョン（boundary token）
@@ -1578,15 +1623,26 @@ struct TaskRecord {
 }
 
 // 1 つの結果の durable record（D2）。本文は `body` の 1 行だけが正本であり、他の record へ複製しません。
-// `attempt_refs` は結果が依拠した Action 試行の opaque な相関で、adoption 時に durable に検証されます。
+// 到着 record が先に本文・identity・producer 相関を確定し、採用判定はその同じ行に対して行われます。
+// `attempt_refs` は採用判定で authoritative set と完全一致が確認され、`task_result_attempt` に刻印された
+// opaque な相関だけを返します（未採用・未判定なら空であり得る。Action owner の newtype ではなく opaque 相関）。
 struct TaskResultRecord {
     result: TaskResultId,
     task: TaskRef,                   // 依拠リビジョン（delegation 行の task_revision と一致）
     delegation: DelegationId,
+    producer: RawId,                 // 結果を生成した Task Agent turn の durable 相関（Action attempt の列挙キー）
     body: TaskAgentOutput,           // provider 出力本文（Debug では伏字化）
-    attempt_refs: Vec<RawId>,        // Action owner の newtype ではなく opaque 相関
-    adopted_revision: Option<TaskRevision>, // Some は現在 Task へ採用された（adopted result）。None は記録のみ
+    attempt_refs: Vec<RawId>,        // 採用判定で検証済みの authoritative set（task_result_attempt の相関）
+    adopted_revision: Option<TaskRevision>, // Some は現在 Task へ採用された（adopted result）。None は到着 record のみ
     recorded_at: WallClockWithTz,
+}
+
+// 採用判定の主張。caller（orchestrator / Task Agent 経路）が「この result が依拠した」と主張する
+// Action 試行の列挙であり、それ自体は完了の根拠になりません。store は result 行の producer 相関から
+// authoritative set を列挙し、この集合との完全一致（欠如・追加・重複のいずれも不可）を要求します。
+struct TaskResultAdoptionClaim {
+    result: TaskResultId,
+    attempt_refs: Vec<RawId>,
 }
 
 trait TaskRepository {
@@ -1600,6 +1656,8 @@ trait TaskRepository {
 
     // 方針指示（steering）：新リビジョンと新コンテキストを不可分に前進（過去リビジョンも確実に保持）。
     // 採用するコンテキスト項目の識別子は前提条件（premise）が保持し、リポジトリはCAS成立後のリビジョン参照のみを刻みます。
+    // 同じ atomic compare で現在の task.progress が非 terminal であることを必須とし、terminal（Completed / Failed）は
+    // 何も書き込まず TaskTerminal { task, progress } を返します。
     // hold スライスでは、タスクが所有する安全保留照合前提（hold-check premise）を同一の不可分比較照合（atomic compare）に加えます。
     async fn forward_steering(
         &self,
@@ -1618,12 +1676,14 @@ trait TaskRepository {
         task: TaskId,
     ) -> Result<Option<TaskRecord>, TaskTechnicalError>;
 
-    // 委任の作成：expected_task_revision の比較照合を満たした上で安全に作成。delegation と
+    // 委任の作成：expected_task_revision の比較照合と、現在の task.progress が非 terminal であることを
+    // 満たした上で安全に作成し、progress を Started → InProgress へ進めます。delegation と
     // agent の識別子は作業担当（orchestrate）が発行して premise で渡し、リポジトリは採番し
     // 直しません。delegator は同一トランザクション内で現在の Task 行の担当者から写し、
     // 同じリビジョンの task_revision snapshot との担当者一致を確認します（欠如・不一致は
-    // 技術的エラー。合成値を作りません）。リビジョン不一致（StaleTaskRevision）とタスク
-    // 未存在（MissingTask）は commit せずに返し、部分的な行を残しません。
+    // 技術的エラー。合成値を作りません）。リビジョン不一致（StaleTaskRevision）、タスク
+    // 未存在（MissingTask）、terminal（TaskTerminal { task, progress }）は commit せずに返し、
+    // 部分的な行を残しません。
     async fn create_delegation(
         &self,
         premise: DelegationCreationPremise,
@@ -1639,33 +1699,52 @@ trait TaskRepository {
         delegation: DelegationId,
     ) -> Result<Option<DelegationRef>, TaskTechnicalError>;
 
-    // 結果の記録と採用判定：1 つの短い Immediate トランザクションで、delegation 行の存在と
-    // 依拠 TaskRef（(task, revision) の対）を解決し、現在 task.revision と purpose identity を
-    // 比較します。現在 revision が前進済み・task.progress が terminal・後続 cancel marker あり
-    // （marker の producer は後続スライス）の場合は、結果行と attempt 相関行だけを 1 回だけ記録し、
-    // 現在 Task を変更せず RecordedToOriginalOnly を返します（purpose text の文字列一致は使いません）。
-    // 現在 revision と一致する場合は、arrival.attempt_refs の各試行を action_attempt から読み、
-    // 存在と (delegation, task, task_revision) の対応を検証します（欠如・不一致は部分的な単位として
-    // 技術的エラー、推測で stale に丸めません）。1 つでも ConfirmedSuccess でない場合は結果行を
-    // 記録した上で WithheldByEffectFacts を返し、Task を完了しません（確定度は実行・拡張 owner の
-    // 事実のまま読み取るだけで、Task owner は書き換えません）。すべて ConfirmedSuccess の場合は、
-    // 同じトランザクションで task_result.adopted_revision を現在 revision に刻み、task.progress を
-    // 非 terminal から Completed へ CAS して AdoptedAsCompletion を返します。
+    // 結果の到着 record（durable 化）：provider 出力を受け取った orchestrate が `Produced` を返す前に
+    // 呼び、task_result の 1 回だけの insert を短い Immediate トランザクションで確定します。保存するのは
+    // 結果 identity・本文 1 行・delegation 行から解決した依拠 TaskRef・producer 相関・recorded_at であり、
+    // adopted_revision は NULL、attempt 相関は書きません（採用判定で検証後 1 回だけ刻印）。現在 revision・
+    // progress・確定度・terminal は判定しません（採用・完了は adopt_result の役割）。同じ result identity の
+    // 再 arrival は本文行を増やさず、本文・委任・依拠リビジョン・producer の不一致を伴う identity 再利用は
+    // 技術的エラーとして既存行を上書きしません。
+    async fn record_task_result_arrival(
+        &self,
+        arrival: TaskAgentResultArrival,
+    ) -> Result<(), TaskTechnicalError>;
+
+    // 結果の採用判定：到着 record 済みの task_result 行に対して、1 つの短い Immediate トランザクションで
+    // 判定します。result 行が無い場合は MissingResult（書き込みなし）。まず result 行の producer 相関から
+    // action_attempt を列挙し、authoritative set（その turn が開始した Action 試行の完全な durable 集合）を
+    // 解決します。各 attempt の (delegation, task, task_revision) 対応と claim.attempt_refs との完全一致
+    // （欠如・追加・重複のいずれも不可）を検証し、不一致は不整合な単位として技術的エラー（fail closed）と
+    // します（推測で stale や Withheld に丸めません）。claim は完了の根拠ではなく、単独で attempt 集合を
+    // 狭めたり広げたりできません。
+    // 続いて delegation 行を読み、result 行に記録された依拠 TaskRef との対応を確認してから（delegation 行の
+    // 欠如は MissingDelegation、対応の不一致は技術的エラー）、現在 task.revision と purpose identity を比較します
+    // （purpose text の文字列一致は使いません）。現在 revision が前進済み・task.progress が terminal・
+    // 後続 cancel marker あり（marker の producer は後続スライス）の場合は、attempt 相関だけを 1 回だけ
+    // 刻印し、現在 Task を変更せず RecordedToOriginalOnly を返します。現在 revision と一致する場合は、
+    // authoritative set に 1 つでも ConfirmedSuccess でないもの（Unknown / ConfirmedFailure）があれば、
+    // attempt 相関を刻印した上で WithheldByEffectFacts { attempts: authoritative set の非確認分 } を返し、
+    // Task を完了しません（確定度は実行・拡張 owner の事実のまま読み取るだけで、Task owner は書き換えません）。
+    // authoritative set が durable に空の場合のみ Action 無しとして採用判定へ進みます（claim が空だから
+    // Action が無かった、と推定しません）。すべて ConfirmedSuccess の場合は、同じトランザクションで
+    // task_result.adopted_revision を現在 revision に刻み、task.progress を非 terminal から Completed へ CAS
+    // して AdoptedAsCompletion を返します。
     // 同じ result identity の再 arrival は本文を増やさず、記録済みの adopted_revision と現在状態から
-    // 同じ判定を再評価して二重採用・二重完了を防ぎます。本文・委任・依拠リビジョンの不一致を伴う
-    // identity 再利用は技術的エラーとし、既存の結果行を上書きしません。delegation 行または task 行が
+    // 同じ判定を再評価して二重採用・二重完了を防ぎます。delegation 行または task 行が
     // 存在しない場合は MissingDelegation / MissingTask として書き込みなしで返します（識別子不在は
     // 正常系のドメイン判定、部分的・不整合な行は技術的エラー）。
     async fn adopt_result(
         &self,
-        arrival: TaskAgentResultArrival,
+        claim: TaskResultAdoptionClaim,
     ) -> Result<TaskResultAcceptance, TaskTechnicalError>;
 
-    // 結果の bounded read：result identity から、依拠 TaskRef・delegation・本文・attempt 相関・
-    // 採用リビジョンを読み戻します。存在しない場合は None。部分的な行（本文欠如、採用リビジョンと
-    // task の不整合等）は技術的エラーとし、合成した record を返しません。再起動後に
-    // 結果 ⇔ 委任 / 依拠リビジョン / Action 試行の対応を辿るための入口であり、自動 replay や
-    // 再採用の根拠にはなりません。
+    // 結果の bounded read：result identity から、依拠 TaskRef・delegation・producer 相関・本文・
+    // 検証済み attempt 相関・採用リビジョンを読み戻します。存在しない場合は None。部分的な行
+    // （本文欠如、採用リビジョンと task の不整合等）は技術的エラーとし、合成した record を返しません。
+    // 再起動後に結果 ⇔ 委任 / 依拠リビジョン / Action 試行の対応を辿るための入口です。到着 record 済み・
+    // 採用未確定（adopted_revision = None）の結果は、本文を保持したまま「到着済み・採用未確定」として
+    // 読み戻せます。自動 replay や再採用の根拠にはなりません（ユーザーの明示指示なしに採用・完了しません）。
     async fn load_task_result(
         &self,
         result: TaskResultId,
@@ -1679,7 +1758,7 @@ trait TaskRepository {
 }
 
 - タスク作成の復元世代前提（復元跨ぎタグ）は、値の担当責任者（保全・消去）が存在する開発ステージで `task` に追加します。タスク側は `GenerationInner` を包むタスク所有の前提型とし、他担当の `RestoreGeneration` を直接インポートしません（CI §6.4 の復元跨ぎ参照を欠落させないため）。
-- 委任作成のオーケストレーション（作業担当）: `load_task` による事前照合（欠如は `MissingTask`、リビジョン不一致は `StaleTaskRevision { current }`）→ `DelegationId`・`TaskAgentEphemeralId` の発行 → `DelegationCreationPremise` の構成 → `create_delegation` 呼び出し、の順に進みます。事前照合は現在性の保証ではなく、`create_delegation` のリビジョン比較照合が事前照合後の競合レースを包含します。リポジトリの結果は変更不能のまま写像します。
+- 委任作成のオーケストレーション（作業担当）: `load_task` による事前照合（欠如は `MissingTask`、リビジョン不一致は `StaleTaskRevision { current }`、terminal は `TaskTerminal { task, progress }`）→ `DelegationId`・`TaskAgentEphemeralId` の発行 → `DelegationCreationPremise` の構成 → `create_delegation` 呼び出し、の順に進みます。事前照合は現在性の保証ではなく、`create_delegation` のリビジョン比較照合と terminal gate が事前照合後の競合レースを包含します。リポジトリの結果は変更不能のまま写像します。
 
 // --- アクション試行（PR グループE。SD-Attempt。追記専用 ＋ 行ごとの CAS） ---
 // このスライスの read / create / edit は、既存の依拠タスクリビジョンと現在の
@@ -1692,6 +1771,10 @@ struct AttemptCommitPremise {
     delegation: RawId,               // 依拠する委任対応
     task: RawId,                     // 依拠タスク
     task_revision: RevisionInner,    // 依拠タスクリビジョン（(task, revision) の対で運ぶ）
+    producer: RawId,                 // この試行を開始した Task Agent turn の opaque な durable 相関
+                                     // （その turn が claim した推論試行。結果採用時の authoritative set 列挙キー）。
+                                     // 本スライスの Action は Task Agent turn からのみ開始され、この相関を必須とする。
+                                     // Task に紐づかない単発操作は、producer を持つ producer スライスが optional 化と対で追加する
     workspace: RawId,                // 現在の workspace_assoc の識別子
     real_target: RealTargetRef,      // 実行直前に解決された実際の対象
     operation: OperationKind,        // List | Read | Create | Edit（このスライスの closed world）
@@ -1701,6 +1784,9 @@ struct AttemptCommitPremise {
 enum ActionStartOutcome {
     Started,                         // 試行行は durable。実行はトランザクション外
     StalePremise,                    // 委任・タスク・ワークスペース前提の欠如/前進。書き込みゼロ
+    TaskTerminal,                    // 対象 Task が terminal（Completed / Failed）のため開始しない。書き込みゼロ。
+                                     // Action 側は Task lifecycle の値型を import せず、Task owner が自分の
+                                     // TaskTerminal { task, progress } として意味を説明する
 }
 
 // 確定度の CAS 結果。Updated 以外は書き込みなしのドメイン結果。
@@ -1712,11 +1798,14 @@ enum CertaintyUpdateOutcome {
 
 trait ActionAttemptRepository {
     // 試行の開始：同一の即時トランザクション内で、委任対応、依拠タスクリビジョン、
-    // 現在のタスクリビジョン、現在の workspace_assoc、委任の scope_assoc を照合し、
-    // 不可分に挿入する（AU5）。relied_evaluation は single-use とし、同じ評価 ID での
+    // 現在のタスクリビジョン、現在の workspace_assoc、委任の scope_assoc、producer 相関を
+    // 照合し、現在の task.progress が非 terminal であることを必須として不可分に挿入する（AU5）。
+    // terminal（Completed / Failed）は TaskTerminal として書き込みゼロで返す。
+    // relied_evaluation は single-use とし、同じ評価 ID での
     // 二度目の挿入は技術的エラーとして拒否する（二重開始を許さない）。
     // 委任行と premise の不一致、複数行の関連付け、未知の操作種別は技術的エラーとし、
-    // 推測で stale に丸めない。
+    // 推測で stale に丸めない。producer 相関は試行行へそのまま保存し、結果採用の
+    // authoritative set 列挙（producer → action_attempt）の正本になる。
     async fn insert_attempt_if_current(
         &self,
         premise: AttemptCommitPremise,
@@ -1954,17 +2043,17 @@ trait UndeliveredRepository {
 ### V-2 Task creation → Task Agent → steering → result（H-A・K-H・K-K）
 
 1. 個体調整担当が `ProposeTaskCommand(requester, purpose, origin, workspace_need)` を作業担当へ渡します。会話上での受付は、タスク本体への反映ではありません。作業担当は `TaskProposalOutcome::AcceptedAsTask(TaskRef)` を確定します。タスクの作成は、`TaskCreationPremise`（初期目的・初期コンテキスト項目・確定したワークスペース関連付け）が不可分に永続化された後に外部へ可視化されます。
-2. 作業担当は `CreateDelegationCommand(task=TaskRef(expected), scope_copy)` を発行して一時エージェントへの委任を作成します。作成は、期待リビジョンと現在のタスクリビジョンの不可分な比較照合（AU3）を満たした場合にのみ `DelegationRef` として永続化され、不一致の場合は `StaleTaskRevision { current }` として書き込みなしに再評価へ戻ります。エージェントは一時的な従属主体に留まり、独立した特権、認証情報、プロバイダ設定の上書き権限、個別の予算枠限度を持ちません。`consumer_assignment` は保存された identity としては導入せず、Task Agent の推論受付時に委任元が依拠する現在の Capability 同意から live に解決します（durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` が担います）。
+2. 作業担当は `CreateDelegationCommand(task=TaskRef(expected), scope_copy)` を発行して一時エージェントへの委任を作成します。作成は、期待リビジョンと現在のタスクリビジョンの不可分な比較照合（AU3）と `task.progress` が非 terminal であることを満たした場合にのみ `DelegationRef` として永続化され、progress を `Started → InProgress` へ進めます。リビジョン不一致は `StaleTaskRevision { current }`、terminal は `TaskTerminal { task, progress }` として書き込みなしに再評価へ戻ります。エージェントは一時的な従属主体に留まり、独立した特権、認証情報、プロバイダ設定の上書き権限、個別の予算枠限度を持ちません。`consumer_assignment` は保存された identity としては導入せず、Task Agent の推論受付時に委任元が依拠する現在の Capability 同意から live に解決します（durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` が担います）。
 3. オーナーからの追加指示は、`ProposeSteeringCommand(premise=SteeringPremiseRef, new_purpose, instruction_source)`（`unadopted` フィールドは W-3 の反映判断を生成元に持つスライスで導入）によって、新リビジョンと新コンテキストの不可分な前進（forward）となります。新リビジョンは採用目的項目と採用指示項目を同一の `forward_steering` トランザクションに記録します。採用識別子は作業担当が確定し、採用指示項目自身の `TaskContextEntryId` が表します（`instruction_source` は由来レコードの参照であり、採用識別子そのものではありません）。過去のリビジョンも確実に保持されます。2つの方針指示が競合した場合は同期区分 SD-Task の順序で直列化され、先に確定した方を優先して現在の状態とし、後から到着した要求は新しい現在の状態に対する再指示として評価します。
-4. 方針指示（steering）が行われた後に、古いリビジョンを前提とした委任作成やアクション実行要求が届いた場合は、`StalePremise { current }` または `StaleTaskRevision { current }` として不受理にし、再評価へ差し戻します。実行中だった古い委任はベストエフォートで停止・縮小させ、古い結果を勝手に新しい目的に採用してはなりません。Task Agent の推論開始も同じ照合に従い、依拠リビジョンと現在のタスクリビジョンの比較を推論試行の確定と同一の不分区間で行います（照合に失敗した新規推論は `TaskPremiseStale` として送信前に拒絶します）。
-5. 遅延して届いたエージェントの処理結果は、`TaskAgentResultArrival(delegation, result, body, attempt_refs)` として受け取り、`adopt_result` が 1 つの短い `Immediate` トランザクションで判定します。依拠リビジョンは delegation 行から解決し、その revision snapshot の目的 identity と現在の目的 identity を比較します（本文の文字列一致は使いません）。現在リビジョンが前進済みの場合は `RecordedToOriginalOnly` として元の依拠リビジョンにのみ記録し、現在のタスクには不採用とします。現在リビジョンと一致しても、依拠試行に `ConfirmedSuccess` 以外があれば `WithheldByEffectFacts` として完了しません。古い承認情報を使ってタスクの中断を勝手に解除してはなりません。採用・競合・不明の詳細は V-10 で確認します。
+4. 方針指示（steering）が行われた後に、古いリビジョンを前提とした委任作成やアクション実行要求が届いた場合は、`StalePremise { current }` または `StaleTaskRevision { current }` として不受理にし、再評価へ差し戻します。Task が terminal の場合は revision stale と区別し、委任は `TaskTerminal { task, progress }`、steering は `TaskProposalOutcome::TaskTerminal`、Action は `ActionStartOutcome::TaskTerminal` として書き込み・開始ともに行いません。実行中だった古い委任はベストエフォートで停止・縮小させ、古い結果を勝手に新しい目的に採用してはなりません。Task Agent の推論開始も同じ照合に従い、依拠リビジョン・現在のタスクリビジョン・`task.progress` が非 terminal であることの比較を推論試行の確定と同一の不分区間で行います（照合に失敗した新規推論は `TaskPremiseStale` として送信前に拒絶し、作業側の再読込が terminal を検出した場合は `TaskTerminal` へ写します）。
+5. エージェントの処理結果は `TaskAgentResultArrival(delegation, result, body, producer)` として、provider 出力を受け取った orchestrate が `Produced` を返す前に `record_task_result_arrival` で durable に記録します（本文を失わない）。その後の採用判定は `TaskResultAdoptionClaim(result, attempt_refs)` を `adopt_result` が 1 つの短い `Immediate` トランザクションで判定します。依拠リビジョンは delegation 行から解決し、その revision snapshot の目的 identity と現在の目的 identity を比較します（本文の文字列一致は使いません）。同時に result 行の `producer` から Action attempt の authoritative set を列挙し、claim の `attempt_refs` との完全一致を要求します（欠如・追加・重複は技術的エラー）。現在リビジョンが前進済みまたは Task が terminal の場合は `RecordedToOriginalOnly` として元の依拠リビジョンにのみ記録し、現在のタスクには不採用とします。現在リビジョンと一致しても、authoritative set に `ConfirmedSuccess` 以外があれば `WithheldByEffectFacts` として完了しません。古い承認情報を使ってタスクの中断を勝手に解除してはなりません。採用・競合・不明の詳細は V-10 で確認します。
 6. **失われてはならない情報**: 単なる発言記録とタスク反映内容および未反映・保留指示の対応関係、方針指示の前後の目的の区別、委任範囲、ワークスペース境界、クライアント依存条件、タスクリビジョンの前提情報。
 
 ### V-3 Action candidate → authorization → external effect → timeout → late result（K-H・K-B・K-K・H-A）
 
 1. 機能利用元が `ActionCandidate(principal_chain, task, delegation, workspace, purpose, described_target, operation, data_use, cost_risk, relied_intent_rule)` を組み立てます。候補構造体を組み立てられたこと自体は、実行許可を意味しません。
 2. 実行・拡張担当は現在の関連付けのフォルダから対象を実行直前に解決し（canonical 化・フォルダ配下の照合・mount/reparse 境界の照合。`List` は directory、`Read`/`Edit` は regular file）、`RealTargetRef` を得ます。続いて `ActionUseCandidate(operation, resolved_target, delegation, task, task_revision, workspace)` を K-B.1 の `authorize_action_use` に渡します。`AllowForThisUse` の評価 ID だけが開始を許し、`Deny` / `NeedsRevalidation` は書き込みも実行も行いません。推論用の `PermissionEvaluationId` / `EvaluationTracker` は流用しません。
-3. `AllowForThisUse` の評価 ID を consume してその opaque な `RawId` に落とし、`AttemptCommitPremise(attempt, delegation, task, task_revision, workspace, real_target, operation, relied_evaluation)` を `insert_attempt_if_current` に渡します。同一の短い `Immediate` トランザクションで委任対応・依拠タスクリビジョン・現在のタスクリビジョン・現在の `workspace_assoc`・委任の `scope_assoc` を照合し（AU5）、同じ評価 ID の二度目の挿入は技術的エラーとして拒否します。`Started` の場合のみトランザクション外で解決済みの対象に作用し、欠如・前進は `StalePremise` として書き込みも実行も行いません。
+3. `AllowForThisUse` の評価 ID を consume してその opaque な `RawId` に落とし、`AttemptCommitPremise(attempt, delegation, task, task_revision, producer, workspace, real_target, operation, relied_evaluation)` を `insert_attempt_if_current` に渡します。同一の短い `Immediate` トランザクションで委任対応・依拠タスクリビジョン・現在のタスクリビジョン・現在の `workspace_assoc`・委任の `scope_assoc`・producer 相関を照合し、現在の `task.progress` が非 terminal であることを必須とし（AU5）、同じ評価 ID の二度目の挿入は技術的エラーとして拒否します。`Started` の場合のみトランザクション外で解決済みの対象に作用し、欠如・前進は `StalePremise`、terminal は `TaskTerminal` として書き込みも実行も行いません。
 4. 作用の確定度は実行・拡張担当が実行そのものの観測から記録します。`ConfirmedSuccess` は対象の事後確認（例: 書き込み後の読み戻し一致）を根拠とし、エージェント自身の「成功しました」という自己申告を証拠にしません。作用が起き得なかったことが確認できた場合は `ConfirmedFailure`、確認できない場合は `Unknown` のまま保持し、中断要求の受理、通信の成功、画面への表示、DB保存の成功、再接続、復元、端末移動などを理由にして勝手に成功や失敗へ書き換えません。試行行は開始時に `Unknown` で挿入され、確定度は行ごとの CAS でのみ更新します。
 5. 遅れて届いた成功の証拠は、元の試行記録に対して `compare_and_set_certainty(attempt, expected=Unknown, new=Confirmed, grounds)` のアトミック更新（CAS）で記録します。新たな客観的証拠の確認を必須とし、エージェント自身の自己申告を証拠にしてはなりません。現在のタスクへ結果を採用するかどうかは、H-A の受付インターフェースにおいて改めて判定します（このスライスは採用を行いません）。成否不明となったアクションを再実行するには、新しい試行IDの発行と、重複リスクを明示したオーナー自身の再判断が必要です。
 6. **失われてはならない情報**: 判定時の想定対象と解決済み実対象の対応関係、委任の不変性、確定度（確認済み成功／確認済み失敗／成否不明）、試行と外部作用の区別、遅延到着の帰属、重複実行防止に必要な永続記録。
@@ -2022,11 +2111,16 @@ trait UndeliveredRepository {
 
 ### V-10 Task Agent result adoption と Task progress（H-A・K-H・K-K・SD-Task）
 
-1. **正常系（current R1 → 採用 → 完了）**: current Task が revision R1。委任 D1 は R1 を依拠して作成され（AU3 の同一トランザクションで progress は `Started → InProgress`）、Action 試行 A1（Read）と A2（Create）が durable に記録されています。Task Agent の turn が出力を返すと、orchestrate が `TaskResultId` X を発行し、`TaskAgentResultArrival { delegation: D1, result: X, body, attempt_refs: [A1, A2] }` を `adopt_result` へ渡します。1 つの `Immediate` トランザクションで、D1 行から依拠 `TaskRef` R1 を解決し、現在 `task.revision` が R1、目的 identity が R1 の `task_revision` snapshot と一致、A1/A2 が durable に存在し `(task, revision, delegation)` が D1/R1 と一致し、いずれも `ConfirmedSuccess` であることを確認します。同じトランザクションで `task_result` X と `task_result_attempt` の相関行を 1 回だけ挿入し、`adopted_revision = R1` を刻み、`task.progress` を非 terminal から `Completed` へ CAS して `AdoptedAsCompletion(R1)` を返します。再起動後は `load_task` が `progress = Completed` と `adopted_result = X` を返し、`load_task_result(X)` が X → D1 → R1 → A1/A2 の対応を bounded read で辿れます。
-2. **steering race（R1 結果の遅延到着）**: D1 が R1 を依拠して実行中に、owner の steering が R2 を確定します。その後に R1 の結果が到着した場合、`adopt_result` は delegation 行が依拠した revision と現在 revision の不一致を同一トランザクションで検出し、結果行と attempt 相関だけを記録して `RecordedToOriginalOnly` を返します。R2 は完了・上書きされず、progress も変化しません（目的 identity が偶然一致していても、revision correspondence が崩れていれば現在へ採用しません）。
-3. **Action Unknown（未確定の外部作用）**: 結果本文が成功を主張していても、A2（Create/Edit）の確定度が `Unknown` のままである場合、`adopt_result` は結果行を 1 回だけ記録した上で `WithheldByEffectFacts { attempts: [A2] }` を返し、`task.progress` は `InProgress` のままです。Task が「成功して完了した」と確定されることはなく、Agent の自己申告によって `Unknown` が `ConfirmedSuccess` へ昇格することもありません。`ConfirmedFailure` の場合も同様に現在 Task を完了せず、結果行だけを残します。
-4. **同一 result の二重 arrival**: 同じ `TaskResultId` X が再び届いても、`task_result` の PK により本文行は増えず、`task_result_attempt` も重複挿入されません。既存行の `adopted_revision` と現在状態から同じ判定を再評価するため、採用済みなら `AdoptedAsCompletion`（同じ TaskRef）を返して二度目の terminal transition を行わず、記録のみ／保留だった場合は同じ `RecordedToOriginalOnly` / `WithheldByEffectFacts` を返します。同一 identity で本文・委任・依拠リビジョンが異なる再 arrival は技術的エラーとし、既存行を上書きしません。別の result Y が完了後に到着した場合は `RecordedToOriginalOnly` で履歴に帰属します。
-5. **失われてはならない情報**: 結果 identity と本文の 1 回だけの保存、依拠リビジョンと委任対応、Action 試行相関の検証結果、採用リビジョン、現在の progress、terminal 後に遅延した結果の帰属。
+1. **正常系（current R1 → 到着 record → 採用 → 完了）**: current Task が revision R1。委任 D1 は R1 を依拠して作成され（AU3 の同一トランザクションで progress は `Started → InProgress`）、Task Agent turn T の producer 相関 P で Action 試行 A1（Read）と A2（Create）が durable に記録されています。Task Agent の turn が出力を返すと、orchestrate が `TaskResultId` X を発行し、`Produced` を返す前に `record_task_result_arrival(TaskAgentResultArrival { delegation: D1, result: X, body, producer: P })` で本文を durable 化します。その後 `TaskResultAdoptionClaim { result: X, attempt_refs: [A1, A2] }` を `adopt_result` へ渡します。1 つの `Immediate` トランザクションで、result 行の存在、依拠リビジョン R1 と現在 `task.revision`、目的 identity、`task.progress` が非 terminal であることを確認し、producer P から `action_attempt` を列挙して authoritative set {A1, A2} を解決し、claim との完全一致、各行の `(task, revision, delegation)` 対応、いずれも `ConfirmedSuccess` であることを確認します。同じトランザクションで `task_result_attempt` の相関行を 1 回だけ挿入し、`adopted_revision = R1` を刻み、`task.progress` を非 terminal から `Completed` へ CAS して `AdoptedAsCompletion(R1)` を返します。再起動後は `load_task` が `progress = Completed` と `adopted_result = X` を返し、`load_task_result(X)` が X → D1 → R1 → P → A1/A2 の対応を bounded read で辿れます。
+2. **steering race（R1 結果の遅延到着）**: D1 が R1 を依拠して実行中に、owner の steering が R2 を確定します。その後に R1 の結果が到着した場合、`adopt_result` は delegation 行が依拠した revision と現在 revision の不一致を同一トランザクションで検出し、claim と authoritative set の一致を確認した上で attempt 相関だけを記録して `RecordedToOriginalOnly` を返します。R2 は完了・上書きされず、progress も変化しません（目的 identity が偶然一致していても、revision correspondence が崩れていれば現在へ採用しません）。
+3. **Action Unknown（未確定の外部作用）**: 結果本文が成功を主張していても、A2（Create/Edit）の確定度が `Unknown` のままである場合、`adopt_result` は authoritative set に A2 を含めて検証し、`WithheldByEffectFacts { attempts: [A2] }` を返し、`task.progress` は `InProgress` のままです。Task が「成功して完了した」と確定されることはなく、Agent の自己申告によって `Unknown` が `ConfirmedSuccess` へ昇格することもありません。`ConfirmedFailure` の場合も同様に現在 Task を完了せず、到着 record だけを残します。
+4. **同一 result の二重 arrival**: 同じ `TaskResultId` X が再び届いても、`task_result` の PK により本文行は増えず、`task_result_attempt` も重複挿入されません。既存行の `adopted_revision` と現在状態から同じ判定を再評価するため、採用済みなら `AdoptedAsCompletion`（同じ TaskRef）を返して二度目の terminal transition を行わず、記録のみ／保留だった場合は同じ `RecordedToOriginalOnly` / `WithheldByEffectFacts` を返します。同一 identity で本文・委任・依拠リビジョン・producer が異なる再 arrival は技術的エラーとし、既存行を上書きしません。別の result Y が完了後に到着した場合は `RecordedToOriginalOnly` で履歴に帰属します。
+5. **terminal gate（Completed / Failed 後の新規処理拒否）**: Task R1 が `Completed`（`Failed` も同様）になった後、同じ current R1 のまま (a) `create_delegation` 要求 → AU3 が progress terminal を検出して `TaskTerminal { task, progress }` を返し、delegation は作成されない、(b) steering 要求 → AU4 が `TaskTerminal` を返し revision は前進しない、(c) Task Agent 推論開始 → AU14 の claim が terminal を検出し `TaskPremiseStale`（作業側で `TaskTerminal` へ写像）として provider I/O なし、(d) 残っている古い delegation D1 からの filesystem Action 開始 → AU5 が `TaskTerminal` を返し、`action_attempt` も外部作用も発生しない。terminal は吸収的であり、cancel marker の producer を待たずにこのスライスの比較点で拒否されます。
+6. **omitted Unknown attempt（claim の部分集合）**: producer P の turn T が A1（`ConfirmedSuccess`）と A2（`Unknown`）を開始していたのに、caller が `attempt_refs: [A1]` だけを主張した場合、`adopt_result` は producer P から authoritative set {A1, A2} を列挙し、claim との不一致（A2 の欠如）を技術的エラーとして fail closed します。Task は `InProgress` のままで、A2 を省略した完了は成立しません。
+7. **empty attempt spoof（空集合の主張）**: turn T が実際に A1 を開始していたのに、caller が `attempt_refs: []` を主張した場合、authoritative set {A1} と一致しないため技術的エラーとして fail closed し、完了しません。逆に authoritative set が durable に空である場合（turn が Action を 1 つも開始していない場合）だけ、claim: `[]` が一致して採用判定へ進めます。
+8. **true no-Action result（Action 無しの採用）**: turn T が Action を 1 つも開始せず pure inference の出力を返した場合、producer P からの列挙は durable に空集合になります。現在 Task/purpose が有効で terminal でなく、claim: `[]` が一致する場合、Action 無しの結果として `AdoptedAsCompletion` へ進めます（claim が空だから Action が無かった、と推定するのではなく、producer P からの列挙が空であることを durable に確認します）。
+9. **crash after provider output（到着 record 後・採用前のクラッシュ）**: provider 出力を受け取り、`record_task_result_arrival` が X の本文・delegation・producer P を durable 化した後、`adopt_result` の前に Host が crash した場合、再起動後に `load_task_result(X)` は本文を返し、`adopted_revision = None`（到着済み・採用未確定）を示します。provider 呼び出しは自動 replay されず、結果が自動再採用・完了されることもなく、Task は `InProgress` のままです。採用を進めるには、現在の前提を確認した上で明示的に `adopt_result` を再実行します。
+10. **失われてはならない情報**: 結果 identity と本文の 1 回だけの到着 record、依拠リビジョンと委任対応、producer 相関、Action 試行相関の authoritative set 検証結果、採用リビジョン、現在の progress、terminal 後の新規開始拒否、terminal 後に遅延した結果の帰属、到着済み・採用未確定の状態。
 
 ## 18. 意図的に残した Design Freedom
 
