@@ -1944,6 +1944,77 @@ async fn bounded_reads_fail_closed_on_duplicate_adopted_results() {
     assert_adopted_unit_corruption_fails_closed(&store, delegation, x.result).await;
 }
 
+// --- adopted current-unit snapshot / purpose identity corruption (review #5190349125) ---
+
+/// Asserts all four adopted-result paths — both bounded reads, the AU15a
+/// same-result retry, and the AU15b same-result adoption retry — fail closed
+/// for one corrupted adopted current unit.
+async fn assert_adopted_unit_corruption_fails_closed_everywhere(
+    store: &Store,
+    delegation: DelegationId,
+    result: TaskResultId,
+    attempts: &[ActionAttemptId],
+) {
+    assert_adopted_unit_corruption_fails_closed(store, delegation, result).await;
+    let retry = store.adopt_result(claim(result, attempts)).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the adoption retry must fail closed, got {retry:?}"
+    );
+}
+
+/// Deleting the relied revision's `task_revision` snapshot after completion is
+/// durable corruption: no adopted path may answer from the stamp alone.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_deleted_relied_task_revision() {
+    let store = open_store().await;
+    let (task, delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "DELETE FROM task_revision WHERE task_id = '{}' AND revision = 1",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed_everywhere(&store, delegation, result, &[a1, a2])
+        .await;
+}
+
+/// The current Task's purpose identity must still equal the relied revision
+/// snapshot's; corrupting it is durable corruption on all adopted paths.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_current_purpose_identity_corruption() {
+    let store = open_store().await;
+    let (task, delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task SET purpose_adopted_revision = 2 WHERE task_id = '{}'",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed_everywhere(&store, delegation, result, &[a1, a2])
+        .await;
+}
+
+/// The relied snapshot's purpose identity must still equal the current Task's;
+/// corrupting it is durable corruption on all adopted paths.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_snapshot_purpose_identity_corruption() {
+    let store = open_store().await;
+    let (task, delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_revision SET purpose_adopted_revision = 2 \
+             WHERE task_id = '{}' AND revision = 1",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed_everywhere(&store, delegation, result, &[a1, a2])
+        .await;
+}
+
 /// A true no-Action execution adopts with an empty authoritative set, and the
 /// adopted result stays healthy: `{} == {}` is valid on the bounded reads and
 /// on both idempotent retries.

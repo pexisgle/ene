@@ -1040,11 +1040,13 @@ fn load_adopted_result(
 ///
 /// An adopted stamp is proof that a completion adoption committed against the
 /// relied revision, so the stamp must equal that revision, the current Task
-/// must still exist at it and be `Completed`, and the unique adopted result
-/// resolved by [`load_adopted_result`] must be exactly this result. A missing
-/// current Task is never rounded to a `None` record, and a different or
-/// duplicate adopted result fails closed: an adopted result without its
-/// intact completed unit is durable corruption, not a readable record.
+/// must still exist at it and be `Completed`, the relied `task_revision`
+/// snapshot must exist with the same purpose identity as the current Task,
+/// and the unique adopted result resolved by [`load_adopted_result`] must be
+/// exactly this result. A missing current Task or snapshot is never rounded
+/// to a `None` record, and a different or duplicate adopted result fails
+/// closed: an adopted result without its intact completed unit is durable
+/// corruption, not a readable record.
 fn require_adopted_result_current_unit(
     conn: &Connection,
     result: TaskResultId,
@@ -1069,6 +1071,27 @@ fn require_adopted_result_current_unit(
     if current_revision != relied_revision || current_progress != TaskProgress::Completed {
         return Err(task_unavailable(
             "adopted task result does not match the completed current task",
+        ));
+    }
+    // The relied revision's snapshot must still exist and carry the same
+    // purpose identity as the current Task: adoption pinned that pair, so a
+    // missing row or an identity disagreement is durable corruption of the
+    // completed unit. The identity is compared, never the purpose text.
+    let current_purpose = decode_revision(current.purpose_adopted_revision)?;
+    let snapshot: RawTaskRevision = conn
+        .query_row(
+            SQL_SELECT_TASK_REVISION,
+            params![task_text, current.revision],
+            raw_revision_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?
+        .ok_or_else(|| {
+            task_unavailable("task revision snapshot missing for the adopted relied revision")
+        })?;
+    if decode_revision(snapshot.purpose_adopted_revision)? != current_purpose {
+        return Err(task_unavailable(
+            "task revision purpose does not match the current purpose",
         ));
     }
     if load_adopted_result(conn, task_text, current_revision, current_progress)? != Some(result) {
@@ -1711,14 +1734,33 @@ fn adopt_result_sync(
     let current_revision = decode_revision(current.revision)?;
     let current_purpose = decode_revision(current.purpose_adopted_revision)?;
     let current_progress = decode_progress(current.progress.as_deref())?;
+    // The purpose identity is the relied revision's snapshot correspondence,
+    // never a text comparison. The snapshot is read before the adopted branch
+    // so an already-adopted retry validates the same completed unit the
+    // bounded reads require; a missing row is an inconsistent unit.
+    let snapshot: Option<RawTaskRevision> = tx
+        .query_row(
+            SQL_SELECT_TASK_REVISION,
+            params![raw.task, raw.task_revision],
+            raw_revision_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(snapshot) = snapshot else {
+        return Err(task_unavailable(
+            "task revision snapshot missing for the relied revision",
+        ));
+    };
+    let relied_purpose = decode_revision(snapshot.purpose_adopted_revision)?;
     if let Some(adopted_raw) = raw.adopted_revision {
         // This result already committed its adoption. The retry is idempotent
         // only while the durable current unit still agrees with the completed
         // state: the adopted stamp equals the relied revision, the current
-        // Task is still at that revision and completed, and exactly this
-        // result is the Task's adopted result. The same checks `load_task`
-        // applies, so a corrupted current unit fails closed here too instead
-        // of answering success from a stale stamp.
+        // Task is still at that revision and completed with the relied
+        // purpose identity, and exactly this result is the Task's adopted
+        // result. The same checks `load_task` applies, so a corrupted current
+        // unit fails closed here too instead of answering success from a
+        // stale stamp.
         if decode_revision(adopted_raw)? != relied_revision {
             return Err(task_unavailable(
                 "adopted task result does not match its relied revision",
@@ -1727,6 +1769,11 @@ fn adopt_result_sync(
         if current_revision != relied_revision || current_progress != TaskProgress::Completed {
             return Err(task_unavailable(
                 "adopted task result does not match the completed current task",
+            ));
+        }
+        if relied_purpose != current_purpose {
+            return Err(task_unavailable(
+                "task revision purpose does not match the current purpose",
             ));
         }
         if load_adopted_result(&tx, &raw.task, current_revision, current_progress)?
@@ -1747,22 +1794,6 @@ fn adopt_result_sync(
             revision: relied_revision,
         }));
     }
-    // The purpose identity is the relied revision's snapshot correspondence,
-    // never a text comparison. A missing snapshot is an inconsistent unit.
-    let snapshot: Option<RawTaskRevision> = tx
-        .query_row(
-            SQL_SELECT_TASK_REVISION,
-            params![raw.task, raw.task_revision],
-            raw_revision_row,
-        )
-        .optional()
-        .map_err(task_unavailable)?;
-    let Some(snapshot) = snapshot else {
-        return Err(task_unavailable(
-            "task revision snapshot missing for the relied revision",
-        ));
-    };
-    let relied_purpose = decode_revision(snapshot.purpose_adopted_revision)?;
     if current_revision != relied_revision
         || relied_purpose != current_purpose
         || current_progress.is_terminal()
