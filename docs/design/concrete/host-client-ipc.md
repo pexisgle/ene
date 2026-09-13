@@ -533,6 +533,7 @@ Host 側での実行直前検証（Live authorization）、対象端末の特定
 
 - Host から Client へのデバイス操作のキャンセルと、Client から Host への推論・ストリーム中断（発話割り込みや回答生成の停止等）の双方向において、全く同一の区別を適用します。
 - 将来の破棄（Future drop）やネットワーク接続の切断をもって、処理の停止が完了したとみなしてはなりません。停止指示の後に遅延して届いた実行結果は、元の試行（Attempt）や操作（Operation）に正しく記録し、現在の処理に勝手に採用したり、後続の処理を自動開始させたりしてはなりません。
+- **タスクの中断（Task Cancel）との境界**: タスク単位の中断は、ここで扱う operation / stream / attempt 単位の wire-level cancel とは別の境界です。タスク中断は Host 内で個体調整または第一者管理経路から作業担当（`cancel_task`、AU16）へ直接届き、`reason` 本文を Task へ複製せず、要求元（会話履歴・管理経路の記録）が理由を保持します。`CancelRequestWire.reason` は wire-level の停止要求専用であり、Task の durable state には渡しません。
 
 ## 17. Targeted Deletion 参加
 
