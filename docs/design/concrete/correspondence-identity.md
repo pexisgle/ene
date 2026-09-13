@@ -236,15 +236,18 @@ enum ReportStatus {
 struct TaskId(/* 不透明なID */);
 struct TaskRevision(u64); // 同一タスクに対する指示や目標の変更順序。
 // Task のライフサイクル / 進捗（closed world）。Task revision とは別軸であり、リビジョンの前進や
-// 世代番号で lifecycle を代替しない。terminal（Completed / Failed）は吸収的で、結果採用・委任作成・
-// 試行開始・後続の cancel marker のいずれも terminal から非 terminal へ戻さない。
-// terminal は再評価しても開始できないため、AU3/AU4/AU14/AU5 は同じ不分区間で非 terminal を必須とし、
+// 世代番号で lifecycle を代替しない。terminal（Completed / Failed / Cancelled）は吸収的で、結果採用・委任作成・
+// 試行開始・cancel 受付のいずれも terminal から非 terminal へ戻さない。cancel の durable marker は
+// progress の Cancelled そのものであり、cancel 専用の停止フラグ・停止行・gate 条件を作らない。
+// terminal は再評価しても開始できないため、AU3/AU4/AU14/AU5/AU15b は同じ不分区間で非 terminal を必須とし、
 // 専用の domain outcome（TaskTerminal。Action 側は Task lifecycle の値型を import せず unit）で拒否する。
+// Cancelled は「中断要求を受理した」ことだけを表し、外部作用の停止完了・Unknown の解消を表さない。
 // execution seal はこれとは別の gate である: final result の到着（AU15a）が 1 delegation を seal し、
 // Task が InProgress のままでも AU14/AU5 は ExecutionSealed として拒否する。
 // Completed への CAS（AU15b）は、同じ不分区間で Task-wide completion barrier（同じ TaskId に属する
 // 全 revision / 全 delegation の Action 試行に Unknown が無いこと）を確認した場合にのみ行う。
-enum TaskProgress { Started, InProgress, Completed, Failed }
+// Cancelled への CAS（AU16）は、非 terminal からのみ行い、停止完了を待たない。
+enum TaskProgress { Started, InProgress, Completed, Failed, Cancelled }
 // final Task result の本文 identity。Task Agent execution が final result を提出した finalization 境界で
 // 作業担当（orchestrate）が発行し、採番し直し・再利用をしない。1 delegation につき final result は最大 1 つで、
 // 同じ identity の retry は冪等。採用判定は同じ結果行に対して、delegation（execution lifetime）から
@@ -549,7 +552,7 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 | **プロバイダへの実送信（初回・フォールバック・再送・継続）** | 論理的な選択範囲 × 解決された割り当て経路と実送信先・データ・用途・取り扱い・費用の同意 × 最新の認証用途・制限・保留・利用量 × 元の要求範囲 | 送信を阻止します。同意が得られていない不足を、テキストを勝手に削ることでこっそり解消してはいけません。 |
 | **アクションの新規開始** | アクション試行が前提とする `(タスクリビジョン, 委任スコープ, ワークスペース範囲, 具体的操作対象と種別, 依拠した権限)` × 現在の `(最新タスクリビジョン, 委任の有効性, ワークスペースの有効性, 解決された実対象, 最新の許可・端末・コスト・停止・保留・消去・復元条件)` × 端末依存なら滞在世代と接続状況 | 処理を開始しません。古い判定や解決済み経路だけで開始してはいけません。ユーザー確認待ちの場合は実行せず待機します。 |
 | **重要変化の再評価** | 操作対象の変更、操作種別の変更、外部作用の拡大、タスクの目的や追加指示の変更、委任やワークスペースの変更、滞在端末の変更、ルールや同意・認証情報の変更、コストやリスクの増大、停止や保留の発生 | 該当する場合は権限を再評価します。無関係な画面テーマの変更や音声の準備完了などを理由に余計な再評価を強制してはいけません。 |
-| **タスク達成の受入** | 到着した final result の `(結果ID, 委任から解決する依拠 TaskRef, delegation = execution lifetime)` × 現在の `(task.revision, purpose identity, task.progress, cancel marker)` × delegation から列挙した Action 試行の authoritative set と claim の完全一致（membership は final result 到着（seal）時点で固定） × 各試行の確定度（すべて `ConfirmedSuccess` のみ完了可。空集合は durable に空の場合のみ。seal 後の証拠更新で再評価可能） × Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと。result-local set の外も対象） | final result の到着時に本文・identity を採用判定より先に durable record し、同じ不分区間で delegation を seal します（1 delegation につき final result は最大 1 つ。2 つ目の final result は fail closed）。1 回の inference turn の provider 出力は final result でも seal でもありません。依拠リビジョンが前進済み・terminal・cancel marker ありなら現在へ採用せず `RecordedToOriginalOnly` として元の依拠リビジョンへ記録します。blockers（authoritative set の `ConfirmedSuccess` 以外 ∪ 同じ `TaskId` の全 revision / 全 delegation の `Unknown`。集合として重複を 1 回に畳む）が空でなければ `WithheldByEffectFacts` として完了せず、`Unknown` を自己申告で昇格させません（barrier で見つけた試行は `task_result_attempt` に刻印せず、cross-delegation / 旧 revision の `ConfirmedSuccess` / `ConfirmedFailure` は barrier だけを理由に block しません）。claim の欠如・追加・重複は技術的エラーとして fail closed します（単独の `attempt_refs` を完了根拠にしません）。同じ結果IDの retry は本文を増やさず二度完了しません。目的の照合は identity / revision correspondence で行い、本文の文字列一致は使いません。 |
+| **タスク達成の受入** | 到着した final result の `(結果ID, 委任から解決する依拠 TaskRef, delegation = execution lifetime)` × 現在の `(task.revision, purpose identity, task.progress)` × delegation から列挙した Action 試行の authoritative set と claim の完全一致（membership は final result 到着（seal）時点で固定） × 各試行の確定度（すべて `ConfirmedSuccess` のみ完了可。空集合は durable に空の場合のみ。seal 後の証拠更新で再評価可能） × Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと。result-local set の外も対象） | final result の到着時に本文・identity を採用判定より先に durable record し、同じ不分区間で delegation を seal します（1 delegation につき final result は最大 1 つ。2 つ目の final result は fail closed）。1 回の inference turn の provider 出力は final result でも seal でもありません。依拠リビジョンが前進済み、または `task.progress` が terminal（`Completed` / `Failed` / `Cancelled`）なら現在へ採用せず `RecordedToOriginalOnly` として元の依拠リビジョンへ記録します（中断 AU16 が durable な `cancelled` を確定していれば、この terminal 判定で採用を拒否します。cancel 専用の追加条件は置きません）。blockers（authoritative set の `ConfirmedSuccess` 以外 ∪ 同じ `TaskId` の全 revision / 全 delegation の `Unknown`。集合として重複を 1 回に畳む）が空でなければ `WithheldByEffectFacts` として完了せず、`Unknown` を自己申告で昇格させません（barrier で見つけた試行は `task_result_attempt` に刻印せず、cross-delegation / 旧 revision の `ConfirmedSuccess` / `ConfirmedFailure` は barrier だけを理由に block しません）。claim の欠如・追加・重複は技術的エラーとして fail closed します（単独の `attempt_refs` を完了根拠にしません）。同じ結果IDの retry は本文を増やさず二度完了しません。目的の照合は identity / revision correspondence で行い、本文の文字列一致は使いません。 |
 | **結果の長期記憶・要約化** | 到着した結果の `(情報源範囲, 取得日時, 依拠リビジョン)` × 現在の `(最新記憶リビジョン, スコープ, 制約)` | 遅れて届いた記憶形成処理が、現在の最新記憶を無条件に上書きしてはいけません。到着順だけを理由に新旧を決めてはいけません。 |
 | **権限・ルール解釈の採用** | モデルによる「許可」の出力、外部引用、過去の許可ログ、復元ルール、プロンプト内の文脈、キャッシュ判定 × 現在の `(最新ルールリビジョン, 同意, 端末条件, コスト上限, 失効・停止・消去・復元保留)` | セキュリティ制御を勝手に変更してはいけません。恒久的なルール変更は、解釈結果と適用範囲を提示し、保存と取り消し（Undo）の枠組みを経ます。 |
 | **クライアント依存活動の開始・継続** | 端末が申告する世代番号 × ホストPCが管理する最新滞在世代番号 × 実際の接続疎通と機能の可用性 × 最新の権限や保留状態 | 接続や状態が確認できない場合は処理を継続しません。古い一時キャッシュや過去の承認情報だけで成立させてはいけません。 |
