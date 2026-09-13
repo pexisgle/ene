@@ -65,7 +65,10 @@ const SQL_SELECT_TASK_CONTEXT: &str = "SELECT entry_id, revision, item_kind, pur
 /// stays detectable instead of being normalized.
 const SQL_SELECT_ADOPTED_PURPOSE_ENTRY: &str = "SELECT purpose_adopted_revision, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND item_kind = ?3 ORDER BY rowid LIMIT 2";
 
-const SQL_SELECT_WORKSPACE_ASSOC: &str = "SELECT assoc_id, folder, save_target FROM workspace_assoc WHERE task_id = ?1 ORDER BY rowid LIMIT 1";
+/// Probes two rows so a duplicate association (a violated 0..1 invariant) is
+/// detected at the storage boundary instead of silently reduced to the first
+/// row.
+const SQL_SELECT_WORKSPACE_ASSOCS: &str = "SELECT assoc_id, folder, save_target FROM workspace_assoc WHERE task_id = ?1 ORDER BY rowid LIMIT 2";
 
 const SQL_INSERT_DELEGATION: &str = "INSERT INTO delegation (delegation_id, task_id, task_revision, delegator, agent, scope_assoc, scope_folder, scope_save_target) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)";
 
@@ -805,16 +808,32 @@ fn load_task_sync(
         assignee: revision_assignee,
     };
     let context = load_context_sync(&guard, &task_text, reference, purpose)?;
-    let workspace = guard
-        .query_row(SQL_SELECT_WORKSPACE_ASSOC, params![task_text], |row| {
-            Ok(RawWorkspaceAssoc {
-                assoc: row.get(0)?,
-                folder: row.get(1)?,
-                save_target: row.get(2)?,
+    // The association is 0..1 for this stage: two rows are a violated
+    // invariant and a technical error, never a silent first-row pick.
+    let workspace_rows = {
+        let mut statement = guard
+            .prepare(SQL_SELECT_WORKSPACE_ASSOCS)
+            .map_err(task_unavailable)?;
+        statement
+            .query_map(params![task_text], |row| {
+                Ok(RawWorkspaceAssoc {
+                    assoc: row.get(0)?,
+                    folder: row.get(1)?,
+                    save_target: row.get(2)?,
+                })
             })
-        })
-        .optional()
-        .map_err(task_unavailable)?
+            .map_err(task_unavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(task_unavailable)?
+    };
+    if workspace_rows.len() > 1 {
+        return Err(task_unavailable(
+            "multiple workspace associations for the task",
+        ));
+    }
+    let workspace = workspace_rows
+        .into_iter()
+        .next()
         .map(|raw| decode_workspace(raw, task))
         .transpose()?;
     Ok(Some(TaskRecord {

@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 ene-primitive = { path = "../ene-primitive" }
+ene-action = { path = "../ene-action" }
 ene-presence = { path = "../ene-presence" }
 ene-companion = { path = "../ene-companion" }
 ene-learning = { path = "../ene-learning" }

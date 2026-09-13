@@ -277,7 +277,7 @@ struct ActionAttemptRow {
     prior_unknown: Option<ActionAttemptId>, // リトライ時に「どの不明試行のやり直しか」を示す紐付け
     real_target: RealTargetRef,
     operation: OperationKind,
-    relied_evaluation: PermissionEvaluationId, // 依拠した権限評価（過去ログであり、現在有効な許可証ではない）
+    relied_evaluation: RawId, // Permission 所有の評価識別子の opaque な対応（K-B.1 の ActionPermissionEvaluationId に由来。過去ログであり、現在有効な許可証ではない）
     certainty: ActionCertainty,          // 結果不明（Unknown）の確実な維持。担当責任者の新証拠でのみ更新
     presence_generation: PresenceGeneration,
     restore_generation: RestoreGeneration,

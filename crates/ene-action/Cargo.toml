@@ -1,0 +1,21 @@
+[package]
+name = "ene-action"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ene-permission = { path = "../ene-permission" }
+ene-primitive = { path = "../ene-primitive" }
+tempfile.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

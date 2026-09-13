@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+ene-action = { path = "../../crates/ene-action" }
 ene-config = { path = "../../crates/ene-config" }
 ene-api = { path = "../../crates/ene-api" }
 ene-companion = { path = "../../crates/ene-companion" }

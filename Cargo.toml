@@ -29,6 +29,8 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+# Windows-only volume identity for the Action filesystem boundary.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"

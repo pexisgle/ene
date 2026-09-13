@@ -1,8 +1,8 @@
 //! SQLite-backed implementations of the repository contracts owned by
 //! [`ene_presence`], [`ene_companion`], [`ene_permission`],
-//! [`ene_credential`], [`ene_inference`], [`ene_learning`], and [`ene_task`];
-//! those owners never depend on this crate and program against their own
-//! traits.
+//! [`ene_credential`], [`ene_inference`], [`ene_learning`], [`ene_task`], and
+//! [`ene_action`]; those owners never depend on this crate and program against
+//! their own traits.
 //!
 //! Concurrency shape: the connection is `Send` but not `Sync`, so an
 //! `Arc<std::sync::Mutex<Connection>>` shares it across callers. Each
@@ -20,6 +20,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
+mod action;
 mod codec;
 mod companion;
 mod credential;
