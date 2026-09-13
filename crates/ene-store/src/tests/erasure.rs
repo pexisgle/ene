@@ -634,7 +634,7 @@ async fn v21_backfills_task_agent_attempts_from_their_replied_purpose_source() {
 
 #[tokio::test]
 async fn v21_backfill_fails_closed_on_broken_purpose_correspondence() {
-    let cases: [(&str, &str, bool); 3] = [
+    let cases: [(&str, &str, bool); 8] = [
         (
             "missing purpose entry",
             "DELETE FROM task_context_entry WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
@@ -649,6 +649,31 @@ async fn v21_backfill_fails_closed_on_broken_purpose_correspondence() {
             "malformed purpose source",
             "UPDATE task_context_entry SET origin_source = 'not-an-identity' WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
             false,
+        ),
+        (
+            "snapshot/context pointer mismatch",
+            "UPDATE task_context_entry SET purpose_adopted_revision = 99 WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+            false,
+        ),
+        (
+            "missing task revision snapshot",
+            "DELETE FROM task_revision WHERE task_id = ?1",
+            false,
+        ),
+        (
+            "malformed origin kind",
+            "UPDATE task_context_entry SET origin_kind = 'not-a-known-origin' WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+            false,
+        ),
+        (
+            "malformed acquired_at",
+            "UPDATE task_context_entry SET acquired_at = 'not-a-timestamp' WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+            false,
+        ),
+        (
+            "NULL-payload duplicate purpose entry",
+            "INSERT INTO task_context_entry (entry_id, task_id, revision, item_kind, purpose_adopted_revision, origin_kind, origin_source, acquired_at) SELECT ?2, task_id, revision, item_kind, NULL, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+            true,
         ),
     ];
     for (name, mutation, needs_entry) in cases {
@@ -684,6 +709,15 @@ async fn v21_backfill_fails_closed_on_broken_purpose_correspondence() {
                 .count(),
             0,
             "the failed backfill rolls back the added column: {name}"
+        );
+        let tables = schema_table_names(&path);
+        assert!(
+            !tables.iter().any(|table| {
+                table == "inference_attempt_data_use"
+                    || table == "erasure_condition"
+                    || table == "erasure_condition_source"
+            }),
+            "the failed migration rolls back the V21 tables: {name}"
         );
     }
 }

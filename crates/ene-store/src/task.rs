@@ -378,6 +378,54 @@ fn validated_adopted_purpose_entry(
     Ok(entry)
 }
 
+/// Decodes the provenance identity of one validated adopted-purpose entry with
+/// the same checks the Task read applies to every context row: an unknown
+/// origin kind, an undecodable source, or a malformed acquisition time is an
+/// unreadable row. The steering carry-forward and the V21 backfill share this,
+/// so the backfill never stamps provenance the Task reads would reject.
+fn validate_adopted_purpose_provenance(
+    entry: &RawAdoptedPurpose,
+) -> Result<(), TaskTechnicalError> {
+    decode_origin_kind(&entry.origin_kind)?;
+    decode_id(&entry.origin_source).map_err(task_unavailable)?;
+    decode_clock(&entry.acquired_at)?;
+    Ok(())
+}
+
+/// Validates the adopted-purpose correspondence of one relied revision and
+/// returns the canonical source the send depended on.
+///
+/// This is the storage-local invariant the normal Task read applies at the
+/// current revision, resolved here for an arbitrary relied revision: the D2
+/// `task_revision` snapshot must exist and its adopted-purpose pointer is the
+/// authoritative premise; the revision's adopted-purpose rows are probed
+/// without narrowing the payload, exactly one must exist, carry a payload
+/// equal to the snapshot pointer, and have decodable provenance. A missing
+/// snapshot, a duplicated row (a NULL payload never hides one), a pointer
+/// disagreement, or malformed provenance is a technical error, never a
+/// guessed source.
+pub(crate) fn validated_adopted_purpose_source(
+    conn: &Connection,
+    task_text: &str,
+    revision: i64,
+) -> Result<String, TaskTechnicalError> {
+    let snapshot: RawTaskRevision = conn
+        .query_row(
+            SQL_SELECT_TASK_REVISION,
+            params![task_text, revision],
+            raw_revision_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?
+        .ok_or_else(|| {
+            task_unavailable("task revision snapshot missing for the relied revision")
+        })?;
+    let expected_adopted = decode_revision(snapshot.purpose_adopted_revision)?;
+    let entry = validated_adopted_purpose_entry(conn, task_text, revision, expected_adopted)?;
+    validate_adopted_purpose_provenance(&entry)?;
+    Ok(entry.origin_source)
+}
+
 /// Commits one steering forward (AU4).
 ///
 /// The current row is read inside the `Immediate` transaction, so the compare
@@ -484,9 +532,7 @@ fn forward_steering_sync(
                 // Fail closed on unreadable stored provenance instead of copying
                 // corruption into the new revision. The reads only validate; the
                 // bytes stay as stored.
-                decode_origin_kind(&current_purpose_entry.origin_kind)?;
-                decode_id(&current_purpose_entry.origin_source).map_err(task_unavailable)?;
-                decode_clock(&current_purpose_entry.acquired_at)?;
+                validate_adopted_purpose_provenance(&current_purpose_entry)?;
                 (
                     current_adopted,
                     snapshot.purpose_text,

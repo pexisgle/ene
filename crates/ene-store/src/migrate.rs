@@ -694,10 +694,13 @@ struct BackfillAttemptRow {
 /// pre-V21 sends never carried an instruction body to a provider.
 ///
 /// Non-Task-Agent attempts have no data use and are recorded as the empty
-/// set. A missing, ambiguous, malformed, or inconsistent correspondence
-/// (partial correlation group, unknown consumer, absent or duplicated
-/// purpose entry, undecodable identity) aborts the migration inside its
+/// set. A missing, ambiguous, malformed, or inconsistent correspondence —
+/// partial correlation group, unknown consumer, absent or duplicated purpose
+/// entry, pointer disagreement between the relied `task_revision` snapshot
+/// and the entry, undecodable provenance — aborts the migration inside its
 /// transaction: an upgrade never degrades an unknown use into an empty set.
+/// The correspondence is validated by the same storage-local check the Task
+/// reads use, not by a migration-specific weaker contract.
 fn backfill_inference_attempt_data_use(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
     let rows: Vec<BackfillAttemptRow> = {
         let mut select = tx
@@ -731,7 +734,8 @@ fn backfill_inference_attempt_data_use(tx: &rusqlite::Transaction<'_>) -> Result
         let consumer = decode_consumer(&row.consumer).map_err(|error| error.to_string())?;
         let count: i64 = match (consumer, &row.delegation, &row.task, row.revision) {
             (ConsumerKind::TaskAgent, Some(_), Some(task), Some(revision_raw)) => {
-                let source = resolve_purpose_source(tx, task, revision_raw)?;
+                let source = crate::task::validated_adopted_purpose_source(tx, task, revision_raw)
+                    .map_err(|error| error.to_string())?;
                 insert_source
                     .execute(rusqlite::params![row.ticket, 0_i64, source])
                     .map_err(|error| error.to_string())?;
@@ -754,51 +758,6 @@ fn backfill_inference_attempt_data_use(tx: &rusqlite::Transaction<'_>) -> Result
             .map_err(|error| error.to_string())?;
     }
     Ok(())
-}
-
-/// Resolves the `origin.source` of the adopted-purpose entry in force at one
-/// relied Task revision, for the V21 backfill.
-///
-/// The `task_context_entry` invariant gives every revision exactly one
-/// `adopted_purpose` row with its adopted-revision payload (a purpose change
-/// and a carry-forward both write one). Anything else — a missing row, a
-/// duplicated row, a row without its adopted-revision payload, or an
-/// undecodable source identity — is corruption: the migration fails instead
-/// of guessing which provenance the send used.
-fn resolve_purpose_source(
-    tx: &rusqlite::Transaction<'_>,
-    task_text: &str,
-    revision_raw: i64,
-) -> Result<String, String> {
-    let mut select = tx
-        .prepare(
-            "SELECT origin_source FROM task_context_entry WHERE task_id = ?1 AND revision = ?2 AND item_kind = ?3 AND purpose_adopted_revision IS NOT NULL ORDER BY rowid LIMIT 2",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows: Vec<String> = select
-        .query_map(
-            rusqlite::params![
-                task_text,
-                revision_raw,
-                crate::task::ITEM_KIND_ADOPTED_PURPOSE
-            ],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    match rows.as_slice() {
-        [source] => {
-            decode_id(source).map_err(|error| error.to_string())?;
-            Ok(source.clone())
-        }
-        [] => Err(String::from(
-            "task agent attempt has no usable adopted purpose entry during data_use backfill",
-        )),
-        _ => Err(String::from(
-            "task agent attempt has multiple adopted purpose entries during data_use backfill",
-        )),
-    }
 }
 
 /// Derives the recall token rows for pre-index memories inside the
