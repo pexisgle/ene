@@ -5,7 +5,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::{decode_id, encode_consumer, encode_purpose};
 
-const CURRENT_VERSION: u64 = 19;
+const CURRENT_VERSION: u64 = 20;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -556,6 +556,72 @@ started_at TEXT NOT NULL
 );
 ";
 
+/// Adds the Task lifecycle progress and the Task result group (V20).
+///
+/// `task.progress` is nullable only so the same transaction can backfill it;
+/// every new write names a value, and the read path fails closed on a stored
+/// NULL or unknown name. The backfill follows persistence-recovery §4.5: a
+/// Task with no durable delegation reads `started`, one with at least one
+/// delegation reads `in_progress`, and the migration never fabricates
+/// `completed` / `failed` (a `ConfirmedSuccess` Action is not Task completion,
+/// and inference or provider failure is not Task failure). Only the Task row
+/// and delegation existence are inputs: Action attempts, inference attempts,
+/// timestamps, and liveness heuristics never decide progress. Existing
+/// delegation / revision / workspace / attempt rows stay untouched.
+///
+/// `task_result` is the single result body master and the execution seal: one
+/// delegation has at most one row (`UNIQUE(delegation_id)`), there is no seal
+/// flag or producer column, and `adopted_revision = NULL` means recorded but
+/// not adopted. `task_result_attempt` is the result-local verified Action
+/// attempt correlation only; Task-wide barrier attempts are never stamped
+/// there. The two `action_attempt` indexes are query support for the
+/// result-local enumeration and the Task-wide barrier; they hold no semantic
+/// state.
+const MIGRATION_V20_COLUMN: &str = "
+ALTER TABLE task ADD COLUMN progress TEXT NULL;
+";
+
+const MIGRATION_V20_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS task_result (
+result_id TEXT PRIMARY KEY,
+task_id TEXT NOT NULL,
+task_revision INTEGER NOT NULL,
+delegation_id TEXT NOT NULL UNIQUE,
+body TEXT NOT NULL,
+adopted_revision INTEGER NULL,
+recorded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_result_attempt (
+result_id TEXT NOT NULL,
+attempt_id TEXT NOT NULL,
+PRIMARY KEY (result_id, attempt_id)
+);
+CREATE INDEX IF NOT EXISTS idx_action_attempt_task ON action_attempt (task_id);
+CREATE INDEX IF NOT EXISTS idx_action_attempt_delegation ON action_attempt (delegation_id);
+";
+
+/// Applies the V20 column add and backfill idempotently: a version-only
+/// rewind re-enters with the column already present and must not overwrite an
+/// existing progress value (a re-run after adoption must not demote a
+/// completed Task), so only NULL rows are backfilled. The delegation
+/// existence probe is the sole input; the statement order writes the
+/// zero-delegation default first, then the one-or-more case.
+fn migrate_v20(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    if !column_exists(tx, "task", "progress")? {
+        tx.execute_batch(MIGRATION_V20_COLUMN)
+            .map_err(|error| error.to_string())?;
+    }
+    tx.execute_batch(
+        "UPDATE task SET progress = 'started' WHERE progress IS NULL
+           AND NOT EXISTS (SELECT 1 FROM delegation WHERE delegation.task_id = task.task_id);
+         UPDATE task SET progress = 'in_progress' WHERE progress IS NULL
+           AND EXISTS (SELECT 1 FROM delegation WHERE delegation.task_id = task.task_id);",
+    )
+    .map_err(|error| error.to_string())?;
+    tx.execute_batch(MIGRATION_V20_TABLES)
+        .map_err(|error| error.to_string())
+}
+
 /// Derives the recall token rows for pre-index memories inside the
 /// migration transaction, so an upgraded database answers lexical recall
 /// from the index immediately. Fresh databases backfill zero rows.
@@ -679,6 +745,9 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     if stored_version < 19 {
         tx.execute_batch(MIGRATION_V19)
             .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 20 {
+        migrate_v20(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

@@ -26,7 +26,12 @@ const SQL_SELECT_ATTEMPT_TICKET: &str = "SELECT ticket FROM inference_attempt WH
 const SQL_SELECT_DELEGATION_PREMISE: &str =
     "SELECT task_id, task_revision FROM delegation WHERE delegation_id = ?1";
 
-const SQL_SELECT_TASK_REVISION_POINTER: &str = "SELECT revision FROM task WHERE task_id = ?1";
+const SQL_SELECT_TASK_STATE: &str = "SELECT revision, progress FROM task WHERE task_id = ?1";
+
+/// The delegation's final result row, i.e. its execution seal. The row's
+/// existence — never a liveness or completion flag — refuses new claims.
+const SQL_SELECT_DELEGATION_RESULT: &str =
+    "SELECT result_id FROM task_result WHERE delegation_id = ?1";
 
 const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model, input_tokens, output_tokens, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 
@@ -201,11 +206,16 @@ enum TaskPremiseCheck {
 
 /// Task Agent premise compare inside the claim transaction.
 ///
-/// (1) the delegation row exists, (2) its stated `(task, revision)` equals
-/// the premise, (3) the current Task row is still at the relied revision.
-/// Missing rows and a moved revision are [`TaskPremiseCheck::Stale`] (domain
-/// stale, no write, no send); a disagreement (2) or malformed stored values
-/// are technical errors, never a fabricated stale.
+/// The five canonical AU14 conditions: (1) the delegation row exists, (2) its
+/// stated `(task, revision)` equals the premise, (3) the current Task row is
+/// still at the relied revision, (4) the current `task.progress` is
+/// non-terminal, and (5) the delegation is not sealed (no `task_result` row).
+/// Missing rows and (3)(4)(5) mismatches are [`TaskPremiseCheck::Stale`]
+/// (domain stale, no write, no provider I/O); a disagreement (2), an unknown
+/// stored progress name, and malformed stored values are technical errors,
+/// never a fabricated stale. The inference side imports no Task lifecycle
+/// type: terminal progress and the execution seal are both refused as a task
+/// premise mismatch, and the Task side re-reads to explain which one.
 fn check_task_agent_premise(
     tx: &rusqlite::Transaction<'_>,
     premise: Option<TaskAgentAttemptPremise>,
@@ -231,19 +241,37 @@ fn check_task_agent_premise(
             "delegation correlation disagrees with the attempt premise",
         )));
     }
-    let current: Option<i64> = tx
+    let current: Option<(i64, Option<String>)> = tx
         .query_row(
-            SQL_SELECT_TASK_REVISION_POINTER,
+            SQL_SELECT_TASK_STATE,
             params![encode_id(premise.task)],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|error| inference_unavailable(error.to_string()))?;
-    let Some(current_raw) = current else {
+    let Some((current_raw, progress_raw)) = current else {
         return Ok(TaskPremiseCheck::Stale);
     };
     let current_revision = decode_u64(current_raw).map_err(inference_unavailable)?;
     if current_revision != premise.task_revision.as_u64() {
+        return Ok(TaskPremiseCheck::Stale);
+    }
+    let progress_text = progress_raw
+        .ok_or_else(|| inference_unavailable(String::from("task progress is missing")))?;
+    let progress = ene_task::TaskProgress::from_name(&progress_text)
+        .ok_or_else(|| inference_unavailable(String::from("unknown task progress")))?;
+    if progress.is_terminal() {
+        return Ok(TaskPremiseCheck::Stale);
+    }
+    let sealed: Option<String> = tx
+        .query_row(
+            SQL_SELECT_DELEGATION_RESULT,
+            params![encode_id(premise.delegation)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| inference_unavailable(error.to_string()))?;
+    if sealed.is_some() {
         return Ok(TaskPremiseCheck::Stale);
     }
     Ok(TaskPremiseCheck::Current)

@@ -20,7 +20,7 @@ use ene_action::{
 use ene_permission::ActionEvaluationTracker;
 use ene_primitive::RevisionInner;
 use ene_store::Store;
-use ene_task::{DelegationId, TaskId, TaskRef, TaskRepository, TaskTechnicalError};
+use ene_task::{DelegationId, TaskId, TaskProgress, TaskRef, TaskRepository, TaskTechnicalError};
 
 /// The caller-facing outcome of one Host filesystem action request.
 ///
@@ -44,6 +44,15 @@ pub enum WorkspaceActionHostOutcome {
     MissingTask { task: TaskId },
     /// The relied Task revision moved; nothing was claimed or executed.
     StaleTaskRevision { current: TaskRef },
+    /// The Task is terminal (`Completed` / `Failed`); nothing was claimed or
+    /// executed.
+    TaskTerminal {
+        task: TaskId,
+        progress: TaskProgress,
+    },
+    /// The delegation already submitted its final result; nothing was claimed
+    /// or executed, even while the Task is not terminal.
+    ExecutionSealed { delegation: DelegationId },
     /// The Task has no current workspace association.
     MissingWorkspace { task: TaskId },
     /// The association exists but its folder is currently unusable.
@@ -94,6 +103,23 @@ pub async fn run_workspace_action(
             current: record.task.reference,
         });
     }
+    // The precheck reports the terminal lifecycle and the execution seal with
+    // their own Task-side context; the authoritative refusal still happens
+    // inside the AU5 claim, so a race after this read is refused there.
+    if record.task.progress.is_terminal() {
+        return Ok(WorkspaceActionHostOutcome::TaskTerminal {
+            task,
+            progress: record.task.progress,
+        });
+    }
+    if store
+        .load_delegation_result(delegation)
+        .await
+        .map_err(task_unavailable)?
+        .is_some()
+    {
+        return Ok(WorkspaceActionHostOutcome::ExecutionSealed { delegation });
+    }
     let Some(workspace) = record.workspace else {
         return Ok(WorkspaceActionHostOutcome::MissingWorkspace { task });
     };
@@ -127,6 +153,22 @@ pub async fn run_workspace_action(
             effect,
             fact_recorded,
         }),
+        // The Action owner's refusal vocabulary is unit-style: it holds no
+        // Task lifecycle type. The Host explains the two Task-side refusals by
+        // re-reading the durable Task (no delete path exists, so a missing row
+        // here would mean the premise was never durable).
+        ActionRunOutcome::NotStarted(ActionNotStarted::TaskTerminal) => {
+            match store.load_task(task).await.map_err(task_unavailable)? {
+                Some(record) => Ok(WorkspaceActionHostOutcome::TaskTerminal {
+                    task,
+                    progress: record.task.progress,
+                }),
+                None => Ok(WorkspaceActionHostOutcome::MissingTask { task }),
+            }
+        }
+        ActionRunOutcome::NotStarted(ActionNotStarted::ExecutionSealed) => {
+            Ok(WorkspaceActionHostOutcome::ExecutionSealed { delegation })
+        }
         ActionRunOutcome::NotStarted(reason) => Ok(WorkspaceActionHostOutcome::NotStarted(reason)),
     }
 }
@@ -159,10 +201,12 @@ mod tests {
     use ene_store::Store;
     use ene_task::{
         AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
-        DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome,
-        TaskCommitPremise, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
-        TaskCreationPremise, TaskId, TaskPurpose, TaskRef, TaskRepository, WorkspaceAssocId,
+        DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskAgentOutput,
+        TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskContextOrigin,
+        TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskRef,
+        TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId,
         WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
+        orchestrate_result_arrival,
     };
 
     struct Host {
@@ -438,6 +482,76 @@ mod tests {
                 "path {path} must be refused before any claim"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_sealed_execution_refuses_before_an_attempt_or_effect() {
+        let host = host().await;
+        let result = orchestrate_result_arrival(
+            &host.store,
+            host.delegation,
+            TaskAgentOutput::new(String::from("final report")),
+        )
+        .await
+        .expect("the finalization records the result");
+        assert!(result.adopted_revision.is_none());
+        let outcome = run_workspace_action(
+            &host.store,
+            host.delegation,
+            OperationKind::Create,
+            String::from("sealed.md"),
+            Some(b"never".to_vec()),
+        )
+        .await
+        .expect("a sealed execution is a domain outcome");
+        assert_eq!(
+            outcome,
+            WorkspaceActionHostOutcome::ExecutionSealed {
+                delegation: host.delegation,
+            }
+        );
+        assert!(!host.workspace.path().join("sealed.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_terminal_task_refuses_before_an_attempt_or_effect() {
+        let host = host().await;
+        let result = orchestrate_result_arrival(
+            &host.store,
+            host.delegation,
+            TaskAgentOutput::new(String::from("final report")),
+        )
+        .await
+        .expect("the finalization records the result");
+        let adopted = host
+            .store
+            .adopt_result(TaskResultAdoptionClaim {
+                result: result.result,
+                attempt_refs: Vec::new(),
+            })
+            .await
+            .expect("the adoption answers");
+        assert_eq!(
+            adopted,
+            TaskResultAcceptance::AdoptedAsCompletion(host.task)
+        );
+        let outcome = run_workspace_action(
+            &host.store,
+            host.delegation,
+            OperationKind::Create,
+            String::from("terminal.md"),
+            Some(b"never".to_vec()),
+        )
+        .await
+        .expect("a terminal Task is a domain outcome");
+        assert_eq!(
+            outcome,
+            WorkspaceActionHostOutcome::TaskTerminal {
+                task: host.task.task,
+                progress: TaskProgress::Completed,
+            }
+        );
+        assert!(!host.workspace.path().join("terminal.md").exists());
     }
 
     #[tokio::test]

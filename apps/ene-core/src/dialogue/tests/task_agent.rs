@@ -7,10 +7,11 @@ use crate::task_agent::TaskAgentInferenceAdapter;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,
-    TaskAgentEphemeralId, TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCommitOutcome,
-    TaskCommitPremise, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
-    TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
-    TaskRepository as _, orchestrate_task_agent_turn,
+    TaskAgentEphemeralId, TaskAgentOutput, TaskAgentTurnOutcome, TaskAgentTurnPremise,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose,
+    TaskPurposeAdoptionPremise, TaskRef, TaskRepository as _, TaskResultAcceptance,
+    TaskResultAdoptionClaim, orchestrate_result_arrival, orchestrate_task_agent_turn,
 };
 
 async fn seed_task_and_delegation(handle: &crate::serve::HostHandle) -> (TaskRef, DelegationId) {
@@ -171,5 +172,117 @@ async fn task_agent_turn_is_stale_after_steering_and_never_sends() {
             .expect("input capture lock")
             .is_empty(),
         "a stale start never reaches the provider"
+    );
+}
+
+#[tokio::test]
+async fn task_agent_turn_is_execution_sealed_after_finalization() {
+    let live = live_input("dlg-task-agent-sealed");
+    let transport = LearningAwareTransport::new("agent report", None);
+    let (handle, _dir) = round_test_handle("dlg-task-agent-sealed", &live, &transport)
+        .await
+        .expect("setup must complete");
+    let (_created, delegation) = seed_task_and_delegation(&handle).await;
+    let result = orchestrate_result_arrival(
+        &handle.store,
+        delegation,
+        TaskAgentOutput::new(String::from("final report")),
+    )
+    .await
+    .expect("the finalization records the result");
+    assert!(result.adopted_revision.is_none());
+
+    let executor = HostInference {
+        store: &handle.store,
+        cred_store: &handle.cred_store,
+        tracker: &handle.tracker,
+        transport: &transport,
+    };
+    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let scrubber = CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let outcome = orchestrate_task_agent_turn(
+        &handle.store,
+        &adapter,
+        &scrubber,
+        TaskAgentTurnPremise { delegation },
+    )
+    .await
+    .expect("the turn must answer");
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::ExecutionSealed { delegation },
+        "the sealed execution refuses new inference while the Task is InProgress"
+    );
+    assert!(
+        transport
+            .inputs
+            .lock()
+            .expect("input capture lock")
+            .is_empty(),
+        "a sealed execution never reaches the provider"
+    );
+}
+
+#[tokio::test]
+async fn task_agent_turn_is_terminal_after_completion() {
+    let live = live_input("dlg-task-agent-terminal");
+    let transport = LearningAwareTransport::new("agent report", None);
+    let (handle, _dir) = round_test_handle("dlg-task-agent-terminal", &live, &transport)
+        .await
+        .expect("setup must complete");
+    let (created, delegation) = seed_task_and_delegation(&handle).await;
+    let result = orchestrate_result_arrival(
+        &handle.store,
+        delegation,
+        TaskAgentOutput::new(String::from("final report")),
+    )
+    .await
+    .expect("the finalization records the result");
+    let adopted = handle
+        .store
+        .adopt_result(TaskResultAdoptionClaim {
+            result: result.result,
+            attempt_refs: Vec::new(),
+        })
+        .await
+        .expect("the adoption answers");
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(created));
+
+    let executor = HostInference {
+        store: &handle.store,
+        cred_store: &handle.cred_store,
+        tracker: &handle.tracker,
+        transport: &transport,
+    };
+    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let scrubber = CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let outcome = orchestrate_task_agent_turn(
+        &handle.store,
+        &adapter,
+        &scrubber,
+        TaskAgentTurnPremise { delegation },
+    )
+    .await
+    .expect("the turn must answer");
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::TaskTerminal {
+            task: created.task,
+            progress: TaskProgress::Completed,
+        }
+    );
+    assert!(
+        transport
+            .inputs
+            .lock()
+            .expect("input capture lock")
+            .is_empty(),
+        "a terminal Task never reaches the provider"
     );
 }

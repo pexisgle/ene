@@ -610,7 +610,7 @@ async fn action_attempt_migration_creates_the_table() {
     let path = dir.path().join("action-migration.db");
     {
         let store = Store::open(&path).await.expect("a fresh store must open");
-        assert_eq!(read_schema_version(&path), Some(19));
+        assert_eq!(read_schema_version(&path), Some(20));
         drop(store);
     }
     {
@@ -629,7 +629,7 @@ async fn action_attempt_migration_creates_the_table() {
     let reopened = Store::open(&path)
         .await
         .expect("the V19 migration must succeed");
-    assert_eq!(read_schema_version(&path), Some(19));
+    assert_eq!(read_schema_version(&path), Some(20));
     let columns = table_columns(&path, "action_attempt");
     for column in [
         "attempt_id",

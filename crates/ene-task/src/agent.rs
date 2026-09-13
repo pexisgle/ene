@@ -18,7 +18,7 @@ use ene_credential::{ScrubbedText, SecretScrubber};
 
 use crate::delegation::{DelegationId, DelegationRef};
 use crate::repository::{TaskRepository, TaskTechnicalError};
-use crate::task::{TaskId, TaskRecord, TaskRef};
+use crate::task::{TaskId, TaskProgress, TaskRecord, TaskRef};
 
 /// One turn request from the caller; carries no liveness claim.
 ///
@@ -208,6 +208,22 @@ pub enum TaskAgentTurnOutcome {
         /// The missing delegation identity.
         delegation: DelegationId,
     },
+    /// The Task is terminal (`Completed` / `Failed`); no inference is
+    /// claimed and no provider I/O happens.
+    TaskTerminal {
+        /// The terminal Task identity.
+        task: TaskId,
+        /// The terminal progress value.
+        progress: TaskProgress,
+    },
+    /// The delegation's execution already submitted a final result (its
+    /// `task_result` row exists, sealing it); no inference is claimed and no
+    /// provider I/O happens. Distinct from revision staleness: the Task may
+    /// still be `InProgress`.
+    ExecutionSealed {
+        /// The sealed delegation.
+        delegation: DelegationId,
+    },
     /// The use was refused before any provider I/O.
     NotSent(TaskAgentNotSent),
 }
@@ -226,12 +242,18 @@ pub enum TaskAgentTurnOutcome {
 /// [`TaskAgentTurnError::InputUnavailable`] and nothing is sent.
 ///
 /// Outcome mapping: `Produced` carries the output and consent flag without
-/// adopting either, `StaleTaskPremise` is re-read as `MissingDelegation`,
-/// `MissingTask`, or `StaleTaskRevision { current }`, and `NotSent` reasons
-/// pass through unchanged. Repository technical errors map to
-/// [`TaskAgentTurnError::StorageUnavailable`] and port technical errors to
-/// [`TaskAgentTurnError::InferenceUnavailable`]; domain outcomes are never
-/// folded into either.
+/// adopting either, and `NotSent` reasons pass through unchanged. A
+/// `StaleTaskPremise` refusal is re-read against durable state and mapped to
+/// [`TaskAgentTurnOutcome::MissingDelegation`],
+/// [`TaskAgentTurnOutcome::MissingTask`],
+/// [`TaskAgentTurnOutcome::TaskTerminal`] (progress terminal),
+/// [`TaskAgentTurnOutcome::ExecutionSealed`] (the delegation already has its
+/// final result), or [`TaskAgentTurnOutcome::StaleTaskRevision`]. The precheck
+/// terminal refusal and the claim's terminal/seal refusal both come from
+/// durable comparisons, and neither sends a provider byte. Repository
+/// technical errors map to [`TaskAgentTurnError::StorageUnavailable`] and port
+/// technical errors to [`TaskAgentTurnError::InferenceUnavailable`]; domain
+/// outcomes are never folded into either.
 pub async fn orchestrate_task_agent_turn(
     repository: &impl TaskRepository,
     inference: &impl TaskAgentInference,
@@ -252,6 +274,16 @@ pub async fn orchestrate_task_agent_turn(
     if record.task.reference != delegation.task {
         return Ok(TaskAgentTurnOutcome::StaleTaskRevision {
             current: record.task.reference,
+        });
+    }
+    // The precheck reads the same durable Task unit the claim will compare
+    // again; a terminal progress refuses before the scrub or the port call.
+    // The claim remains the authoritative gate, so a race that commits after
+    // this read is still refused there.
+    if record.task.progress.is_terminal() {
+        return Ok(TaskAgentTurnOutcome::TaskTerminal {
+            task: delegation.task.task,
+            progress: record.task.progress,
         });
     }
     // The precheck matched, so `record.revision` is the relied revision's
@@ -281,22 +313,48 @@ pub async fn orchestrate_task_agent_turn(
             adoption_consent_current,
         }),
         TaskAgentInferenceOutcome::StaleTaskPremise => {
-            match load_premise(repository, premise.delegation).await? {
-                PremiseLoad::Loaded(loaded) => TaskAgentTurnOutcome::StaleTaskRevision {
-                    current: loaded.record.task.reference,
-                },
-                PremiseLoad::MissingDelegation => {
-                    return Ok(TaskAgentTurnOutcome::MissingDelegation {
-                        delegation: premise.delegation,
-                    });
-                }
-                PremiseLoad::MissingTask { task } => {
-                    return Ok(TaskAgentTurnOutcome::MissingTask { task });
-                }
-            }
+            re_read_stale_premise(repository, premise.delegation).await?
         }
         TaskAgentInferenceOutcome::NotSent(reason) => TaskAgentTurnOutcome::NotSent(reason),
     })
+}
+
+/// Maps one stale claim refusal to the durable reason, re-reading only
+/// bounded state.
+///
+/// Terminal progress is reported before the execution seal: a terminal Task
+/// explains the refusal regardless of whether the delegation is also sealed.
+/// A sealed delegation is reported before revision staleness because the
+/// execution can never contribute new work even while the Task is
+/// `InProgress`.
+async fn re_read_stale_premise(
+    repository: &impl TaskRepository,
+    delegation: DelegationId,
+) -> Result<TaskAgentTurnOutcome, TaskAgentTurnError> {
+    match load_premise(repository, delegation).await? {
+        PremiseLoad::MissingDelegation => {
+            Ok(TaskAgentTurnOutcome::MissingDelegation { delegation })
+        }
+        PremiseLoad::MissingTask { task } => Ok(TaskAgentTurnOutcome::MissingTask { task }),
+        PremiseLoad::Loaded(loaded) => {
+            if loaded.record.task.progress.is_terminal() {
+                return Ok(TaskAgentTurnOutcome::TaskTerminal {
+                    task: loaded.delegation.task.task,
+                    progress: loaded.record.task.progress,
+                });
+            }
+            let sealed = repository
+                .load_delegation_result(delegation)
+                .await
+                .map_err(storage_error)?;
+            if sealed.is_some() {
+                return Ok(TaskAgentTurnOutcome::ExecutionSealed { delegation });
+            }
+            Ok(TaskAgentTurnOutcome::StaleTaskRevision {
+                current: loaded.record.task.reference,
+            })
+        }
+    }
 }
 
 fn storage_error(error: TaskTechnicalError) -> TaskAgentTurnError {

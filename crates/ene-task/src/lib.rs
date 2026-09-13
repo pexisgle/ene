@@ -19,6 +19,7 @@ mod context;
 mod delegation;
 mod orchestrate;
 mod repository;
+mod result;
 mod task;
 mod workspace;
 
@@ -35,13 +36,18 @@ pub use delegation::{
     DelegationOutcome, DelegationRef, DelegationScope, TaskAgentEphemeralId,
 };
 pub use orchestrate::{
-    SteeringProposalPremise, TaskProposalOutcome, orchestrate_delegation, orchestrate_steering,
+    SteeringProposalPremise, TaskProposalOutcome, orchestrate_delegation,
+    orchestrate_result_arrival, orchestrate_steering,
 };
 pub use repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
+pub use result::{
+    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
+    TaskResultRecord,
+};
 pub use task::{
     AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId,
-    TaskInstructionAdoptionPremise, TaskPurpose, TaskPurposeAdoptionPremise, TaskPurposeRef,
-    TaskRecord, TaskRef, TaskRevision, TaskRevisionRecord,
+    TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise,
+    TaskPurposeRef, TaskRecord, TaskRef, TaskRevision, TaskRevisionRecord,
 };
 pub use workspace::{
     WorkspaceAssocId, WorkspaceAssociation, WorkspaceAssociationPremise, WorkspaceFolderRef,
