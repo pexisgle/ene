@@ -1097,3 +1097,151 @@ fn control_emit_reports_closed() {
         "a gone connection must report Closed, not Full"
     );
 }
+
+/// Cancel admission on the handle commits first, then signals the running
+/// execution's cooperative token; refused admissions signal nothing.
+#[tokio::test]
+async fn cancel_task_admission_wires_the_cooperative_stop() {
+    use ene_task::{
+        AssigneeRef, CancelTaskCommand, DelegationCreationPremise, DelegationId, DelegationOutcome,
+        DelegationScope, TaskAgentEphemeralId, TaskAgentOutput, TaskCancelOutcome,
+        TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
+        TaskProgress, TaskPurpose, TaskRepository as _, TaskResultAcceptance,
+        TaskResultAdoptionClaim, orchestrate_result_arrival,
+    };
+
+    let Some((handle, _dir)) = memory_handle("cancel-task").await else {
+        panic!("the handle must open");
+    };
+    let task = handle
+        .store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: String::from("cancellable"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: ene_primitive::RawId::new(),
+            },
+            acquired_at: ene_primitive::WallClockWithTz::now(),
+            assignee: AssigneeRef {
+                companion: ene_primitive::RawId::new(),
+            },
+            workspace: None,
+        })
+        .await
+        .expect("task creation commits");
+
+    // A running execution is registered under the Task; the admission signals
+    // its cooperative token after the durable commit. The registration key is
+    // the execution's delegation identity; this Task has no durable
+    // delegation, so the key is just a fresh identity.
+    let registration = handle
+        .task_executions
+        .register(DelegationId::generate(), task.task);
+    assert_eq!(
+        handle
+            .cancel_task(CancelTaskCommand { task: task.task })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::CancelAccepted
+    );
+    assert!(
+        registration.cancellation.is_cancelled(),
+        "the admission signals the running execution"
+    );
+    let loaded = handle.store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(loaded.task.progress, TaskProgress::Cancelled);
+
+    // Re-requests and missing identities are refused without a signal.
+    assert_eq!(
+        handle
+            .cancel_task(CancelTaskCommand { task: task.task })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::AlreadyCancelled
+    );
+    let missing = TaskId::generate();
+    assert_eq!(
+        handle
+            .cancel_task(CancelTaskCommand { task: missing })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::MissingTask { task: missing }
+    );
+
+    // A completed Task answers TaskTerminal and never signals a registered
+    // token (a terminal Task admits no running work).
+    let completed = handle
+        .store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: String::from("already done"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: ene_primitive::RawId::new(),
+            },
+            acquired_at: ene_primitive::WallClockWithTz::now(),
+            assignee: AssigneeRef {
+                companion: ene_primitive::RawId::new(),
+            },
+            workspace: None,
+        })
+        .await
+        .unwrap();
+    let completed_delegation = DelegationId::generate();
+    let delegated = handle
+        .store
+        .create_delegation(DelegationCreationPremise {
+            delegation: completed_delegation,
+            task: completed,
+            agent: TaskAgentEphemeralId::generate(),
+            scope_copy: DelegationScope { workspace: None },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
+    let arrival = orchestrate_result_arrival(
+        &handle.store,
+        completed_delegation,
+        TaskAgentOutput::new(String::from("done")),
+    )
+    .await
+    .unwrap();
+    let adopted = handle
+        .store
+        .adopt_result(TaskResultAdoptionClaim {
+            result: arrival.result,
+            attempt_refs: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    let completed_registration = handle
+        .task_executions
+        .register(completed_delegation, completed.task);
+    assert_eq!(
+        handle
+            .cancel_task(CancelTaskCommand {
+                task: completed.task
+            })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::TaskTerminal {
+            task: completed.task,
+            progress: TaskProgress::Completed,
+        }
+    );
+    assert!(
+        !completed_registration.cancellation.is_cancelled(),
+        "a refused admission never signals"
+    );
+}

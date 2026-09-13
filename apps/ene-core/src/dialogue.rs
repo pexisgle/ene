@@ -1045,9 +1045,9 @@ impl HostHandle {
 /// longest-first so a shorter registered value cannot split an occurrence of
 /// a longer one. An unreadable registry or bearer fails closed: absence
 /// cannot be proven, so the caller must not use the original text.
-struct CredentialScrubber<'a> {
-    refs: &'a Store,
-    store: &'a CredStore,
+pub(crate) struct CredentialScrubber<'a> {
+    pub(crate) refs: &'a Store,
+    pub(crate) store: &'a CredStore,
 }
 
 impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
@@ -1141,11 +1141,31 @@ async fn attach_from(
 /// decision lives in `ene-inference`; this adapter only hands it the concrete
 /// repositories and takes the short tracker lock for the single-use
 /// authorization.
-struct HostInference<'a, T> {
+pub(crate) struct HostInference<'a, T> {
     store: &'a Store,
     cred_store: &'a CredStore,
     tracker: &'a AsyncMutex<EvaluationTracker>,
     transport: &'a T,
+}
+
+impl<'a, T: ProviderTransport + Send + Sync> HostInference<'a, T> {
+    /// Builds the Host inference boundary from its concrete repositories.
+    ///
+    /// Composition only: every admission, attempt, provider, adoption, and
+    /// usage decision lives in `ene-inference`.
+    pub(crate) fn new(
+        store: &'a Store,
+        cred_store: &'a CredStore,
+        tracker: &'a AsyncMutex<EvaluationTracker>,
+        transport: &'a T,
+    ) -> Self {
+        HostInference {
+            store,
+            cred_store,
+            tracker,
+            transport,
+        }
+    }
 }
 
 impl<T: ProviderTransport + Send + Sync> HostInference<'_, T> {
