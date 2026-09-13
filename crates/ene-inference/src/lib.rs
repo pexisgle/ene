@@ -17,10 +17,12 @@
 //!
 //! A Task Agent attempt carries an opaque [`TaskAgentAttemptPremise`]; the
 //! claim verifies it against the delegation row and the current Task in the
-//! same transaction as the consent and credential-set compare, and persists
-//! the correlation ([`InferenceAttemptRecord`]) so a delayed result can be
-//! attributed after a restart. The inference crate never imports Task-owned
-//! types; the mapping happens in the Host composition root.
+//! same transaction as the consent and credential-set compare, and compares
+//! the premise's `data_use` source correlation against the canonical current
+//! erasure-condition store in that same transaction. A covered source is a
+//! [`NotSentReason::DataUseHeld`] refusal with zero provider bytes. The
+//! inference crate never imports Task-owned or preservation-owned types; the
+//! mapping happens in the Host composition root.
 //!
 //! Body text is redacted from [`core::fmt::Debug`]: [`ProviderRequest`]
 //! hides `input`, and [`InferenceResultArrival`] hides `output_text`.
@@ -54,7 +56,15 @@ pub struct InferenceTicketId(pub RawId);
 /// The inference domain never imports Task-owned types: the task side (or
 /// the Host composition root) maps `DelegationId` / `TaskRef` into this
 /// premise, and the claim carries it through to the durable attempt row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `data_use` is the canonical source correlation of the logical input the
+/// attempt sends: the adopted purpose entry's source and every adopted
+/// instruction entry's source, in logical-input order. The values are opaque
+/// [`RawId`]s — never bodies or hashes — and the order and duplicates are
+/// preserved because each entry keeps its own correlation. The claim compares
+/// every source against the current erasure conditions inside its
+/// transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskAgentAttemptPremise {
     /// Delegation correspondence this turn runs under.
     pub delegation: RawId,
@@ -62,6 +72,10 @@ pub struct TaskAgentAttemptPremise {
     pub task: RawId,
     /// Relied-on Task revision; always travels with the identity pair.
     pub task_revision: RevisionInner,
+    /// Canonical source correlation of the logical input, in input order.
+    /// A Task Agent attempt always names at least its purpose source; the
+    /// claim refuses an empty correlation instead of treating it as no use.
+    pub data_use: Vec<RawId>,
 }
 
 /// Why an inference use was not sent.
@@ -90,6 +104,11 @@ pub enum NotSentReason {
     /// before the claim: the relied revision moved, or the delegation row is
     /// gone. Produced by dispatch only, distinct from [`Self::ConsentStale`].
     TaskPremiseStale,
+    /// The canonical current erasure-condition store covers at least one
+    /// source in the attempt's `data_use`. A data-use hold is a domain
+    /// refusal, not task/consent staleness and not a storage error: the
+    /// provider receives zero bytes and the attempt is not claimed.
+    DataUseHeld,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -352,6 +371,11 @@ pub enum AttemptBeginOutcome {
     /// must NOT issue provider I/O for this ticket. Distinct from
     /// [`Self::Stale`], which is about consent or credential currency.
     TaskPremiseStale,
+    /// At least one canonical source of the attempt's `data_use` is covered
+    /// by a current erasure condition: the caller must NOT issue provider I/O
+    /// for this ticket, and the attempt is not recorded. Distinct from both
+    /// staleness outcomes and never a storage error.
+    DataUseHeld,
 }
 
 /// Linearization point for starting provider I/O.
@@ -613,8 +637,8 @@ impl AuthorizedInference {
 
     /// Task Agent correlation carried through the claim, when present.
     #[must_use]
-    pub fn task_agent_premise(&self) -> Option<TaskAgentAttemptPremise> {
-        self.task_agent
+    pub fn task_agent_premise(&self) -> Option<&TaskAgentAttemptPremise> {
+        self.task_agent.as_ref()
     }
 }
 
@@ -747,6 +771,11 @@ pub async fn dispatch_authorized(
         Ok(AttemptBeginOutcome::TaskPremiseStale) => {
             return Ok(InferenceDispatchOutcome::NotSent(
                 NotSentReason::TaskPremiseStale,
+            ));
+        }
+        Ok(AttemptBeginOutcome::DataUseHeld) => {
+            return Ok(InferenceDispatchOutcome::NotSent(
+                NotSentReason::DataUseHeld,
             ));
         }
         Err(error) => return Err(error),
@@ -1080,6 +1109,35 @@ mod dispatch_tests {
         }
     }
 
+    /// An attempt repository whose claim finds a covering erasure condition,
+    /// modelling a Targeted Deletion condition landing after the History read
+    /// but before the send admission.
+    struct DataUseHeldAttempts;
+
+    impl InferenceAttemptRepository for DataUseHeldAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::DataUseHeld)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
     /// An attempt repository that keeps the claimed attempts for correlation
     /// assertions.
     struct CapturedAttempts(Mutex<Vec<InferenceAttempt>>);
@@ -1178,6 +1236,7 @@ mod dispatch_tests {
             delegation: RawId::new(),
             task: RawId::new(),
             task_revision: RevisionInner::from_u64(1),
+            data_use: vec![RawId::new(), RawId::new()],
         }
     }
 
@@ -1399,6 +1458,36 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
+    async fn data_use_hold_never_calls_the_provider_and_records_no_fact() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let outcome = dispatch_authorized(
+            authorized_task_agent(task_agent_premise()),
+            prompt("delegated work"),
+            &mut DiscardSink,
+            &consent,
+            &DataUseHeldAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::DataUseHeld),
+            "a covered source is a data-use hold, not consent or task staleness"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a data-use hold sends zero bytes"
+        );
+        assert!(usage.0.lock().expect("usage capture lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn task_agent_claim_carries_the_durable_correlation() {
         let attempts = CapturedAttempts(Mutex::new(Vec::new()));
         let usage = CapturedUsage(Mutex::new(Vec::new()));
@@ -1406,7 +1495,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::new(String::from("ok"), None);
         let premise = task_agent_premise();
         let outcome = dispatch_authorized(
-            authorized_task_agent(premise),
+            authorized_task_agent(premise.clone()),
             prompt("delegated work"),
             &mut DiscardSink,
             &consent,
@@ -1425,7 +1514,11 @@ mod dispatch_tests {
         assert_eq!(claimed[0].consumer, ConsumerKind::TaskAgent);
         assert_eq!(claimed[0].purpose, PurposeKind::TaskAgentTurn);
         assert_eq!(claimed[0].capability, CapabilityKind::Dialogue);
-        assert_eq!(claimed[0].task_agent, Some(premise));
+        assert_eq!(
+            claimed[0].task_agent,
+            Some(premise),
+            "the claim carries the delegation/task/relied-revision and the ordered data_use"
+        );
         let facts = usage.0.lock().expect("usage capture lock");
         assert_eq!(facts.len(), 1, "the task agent turn records its usage");
         assert_eq!(facts[0].ticket, claimed[0].ticket);
@@ -1583,9 +1676,10 @@ mod admission_tests {
             delegation: RawId::new(),
             task: RawId::new(),
             task_revision: RevisionInner::from_u64(1),
+            data_use: vec![RawId::new()],
         };
         let prepared =
-            prepare_task_agent_admission(&consent, &refs, &credential_store, premise).await;
+            prepare_task_agent_admission(&consent, &refs, &credential_store, premise.clone()).await;
         let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
             panic!("a complete setup must prepare a task agent admission");
         };
@@ -1593,7 +1687,7 @@ mod admission_tests {
         let Admission::Admitted(authorized) = request.authorize(&mut tracker) else {
             panic!("the task agent candidate is inside the closed world");
         };
-        assert_eq!(authorized.task_agent_premise(), Some(premise));
+        assert_eq!(authorized.task_agent_premise(), Some(&premise));
         assert_eq!(authorized.consent_premise().0, "consent-1");
     }
 
@@ -1606,6 +1700,7 @@ mod admission_tests {
             delegation: RawId::new(),
             task: RawId::new(),
             task_revision: RevisionInner::from_u64(1),
+            data_use: vec![RawId::new()],
         };
         let prepared =
             prepare_task_agent_admission(&consent, &refs, &credential_store, premise).await;

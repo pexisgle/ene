@@ -353,6 +353,7 @@ dependencies = [
  "ene-primitive",
  "ene-store",
  "ene-task",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -454,6 +455,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-preservation"
+version = "0.1.0"
+dependencies = [
+ "ene-primitive",
+]
+
+[[package]]
 name = "ene-primitive"
 version = "0.1.0"
 dependencies = [
@@ -473,6 +481,7 @@ dependencies = [
  "ene-learning",
  "ene-permission",
  "ene-presence",
+ "ene-preservation",
  "ene-primitive",
  "ene-task",
  "rusqlite",

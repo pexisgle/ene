@@ -38,6 +38,7 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
             delegation: premise.delegation.as_raw(),
             task: premise.task.task.as_raw(),
             task_revision: RevisionInner::from_u64(premise.task.revision.as_u64()),
+            data_use: premise.data_use,
         };
         let admission = self
             .executor
@@ -80,6 +81,7 @@ fn mirror_not_sent(reason: NotSentReason) -> TaskAgentInferenceOutcome {
         NotSentReason::ConsentStale => Outcome::NotSent(NotSent::ConsentStale),
         NotSentReason::OverLimit => Outcome::NotSent(NotSent::OverLimit),
         NotSentReason::EvaluationConsumed => Outcome::NotSent(NotSent::EvaluationConsumed),
+        NotSentReason::DataUseHeld => Outcome::NotSent(NotSent::DataUseHeld),
     }
 }
 
@@ -104,6 +106,7 @@ mod tests {
     use super::*;
     use ene_credential::{CredentialSetRevision, ScrubbedText};
     use ene_inference::{AuthorizedInference, DeltaSink};
+    use ene_primitive::RawId;
     use ene_task::{DelegationId, TaskId, TaskRef, TaskRevision};
 
     #[derive(Default)]
@@ -175,6 +178,7 @@ mod tests {
                 text: String::from("delegated input"),
                 credential_set: CredentialSetRevision::initial(),
             },
+            data_use: vec![RawId::new(), RawId::new()],
         }
     }
 
@@ -203,8 +207,11 @@ mod tests {
         assert_eq!(mapped[0].task, premise.task.task.as_raw());
         assert_eq!(
             mapped[0].task_revision.as_u64(),
-            premise.task.revision.as_u64(),
-            "the relied revision travels as the (task, revision) pair"
+            premise.task.revision.as_u64()
+        );
+        assert_eq!(
+            mapped[0].data_use, premise.data_use,
+            "the ordered source correlation travels to the claim unchanged"
         );
     }
 
@@ -233,6 +240,10 @@ mod tests {
             (
                 NotSentReason::EvaluationConsumed,
                 Outcome::NotSent(NotSent::EvaluationConsumed),
+            ),
+            (
+                NotSentReason::DataUseHeld,
+                Outcome::NotSent(NotSent::DataUseHeld),
             ),
             (NotSentReason::TaskPremiseStale, Outcome::StaleTaskPremise),
         ] {
