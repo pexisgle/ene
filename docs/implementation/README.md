@@ -82,6 +82,14 @@ ene の開発では、`.old/` に限らず、いかなる後方互換性も考�
 4. 権限チェック（フォルダ内のファイル一覧・読込・作成・編集のみを許可）
 5. フォルダ外への不正アクセス（パストラバーサル）の確実な遮断
 6. パートナーを通じた進捗報告・追加指示・作業キャンセル
+- **cross-cutting prerequisite（Stage 4 内で先行）**: Task Agent の provider send を完成させる前に、Targeted Deletion 全体（Stage 6）ではなく、**送信 currentness に必要な最小 erasure-condition foundation** を導入します。これは保全・消去 owner の canonical current erasure-condition state とその durable store（restart 後も読める persistence）、送信 source 相関（`data_use`）に対する coverage 判定、AU14 推論試行 claim と同一トランザクションでの currentness compare、`DataUseHeld`、inference attempt の `data_use` durable 相関だけを持ちます。active condition set が空の場合も、canonical store を実際に照会した authoritative な空集合として送信を許可します（`NoDeletion` / `ErasureConditionRef::none()` / generation 0 のような placeholder や、producer の無い「削除なし」既定値を使いません）。
+- **implementation slice 順（前提 PR 反映後）**:
+  - A. minimal erasure-currentness foundation（preservation-owned current condition state、その persistence、AU14 coverage gate、`DataUseHeld`、`inference_attempt` の `data_use` 相関）
+  - B. adopted-instruction History bounded read + prompt wiring（`load_message`、`TaskInstructionSource`、body resolution、correspondence validation、assembly、scrub）と、A を通した actual provider send
+  - C. Cancel
+  - D. autonomous Task Agent ↔ Action loop
+  - E. Stage 4 final E2E
+  - A と B を同じ implementation PR にまとめる必要はなく、レビューしやすい最小 stacked PR を優先します。ただし B を A より先に provider-send-enabled として merge しないでください。
 - **完了基準**: 指定フォルダ内のファイルを読んで新しいレポートを生成するタスクが正常に完了し、不正なファイルアクセスが確実に拒否されること。
 
 ### Stage 5: クライアントのライフサイクルとホストでの作業継続
@@ -99,6 +107,7 @@ ene の開発では、`.old/` に限らず、いかなる後方互換性も考�
 3. 完全に消去されたことの検証と監査ログ
 4. OpenAI のトークン消費量（入力・出力・キャッシュ）と発生費用の記録・表示
 5. API キーなどの認証情報がログやプロンプトに絶対に漏洩しないことのテスト
+- **Stage 4 erasure-currentness foundation との関係**: Stage 6 は Stage 4 で導入した canonical current-condition store と AU14 claim 内の data-use 照合を置き換えず、同じ foundation を利用・拡張して、ユーザー向け Targeted Deletion の operation producer / deletion sweep / participant の列挙・調整 / actual erasure / delayed-arrival collection / remainder verification / finalizing / 全域完了 / 監査を完成させます。別の deletion gate / currentness registry / source correlation を新設しません。Stage 4 が Stage 6 に依存してはなりません。
 - **完了基準**: 指定データの完全消去が派生データを含めて完全に完了すること、および機密漏洩テスト・費用表示が正しく動作すること。
 
 ### Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証
