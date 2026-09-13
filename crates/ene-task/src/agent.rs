@@ -2,23 +2,28 @@
 //!
 //! One turn runs exactly one delegated inference through the Task-owned
 //! [`TaskAgentInference`] port. The harness assembles the logical input
-//! itself: the relied revision's adopted-purpose text is read from the
-//! `task_revision` snapshot, where the purpose text is canonical, and only
-//! the injected [`SecretScrubber`]'s output reaches the port. This module
-//! never constructs a [`ScrubbedText`] literal, never sends an instruction
-//! body, and never sends workspace or file content.
+//! itself: the relied revision's adopted-purpose text comes from the
+//! `task_revision` snapshot, and each adopted instruction body is resolved
+//! through the Task-owned [`TaskInstructionSource`] port from its canonical
+//! History source. Purpose and instruction bodies are one string with one
+//! fixed framing, scrubbed exactly once, and only the injected
+//! [`SecretScrubber`]'s output reaches the port. This module never
+//! constructs a [`ScrubbedText`] literal, never copies an instruction body
+//! into Task state, and never sends workspace or file content.
 //!
-//! The port keeps `ene-task` free of permission and credential concrete
-//! types: the Host composition root (`apps/ene-core`) implements it against
-//! `ene-inference`. The delegation row is a durable correspondence, not a
-//! liveness claim, and provider output is a fact about the call, not task
+//! The ports keep `ene-task` free of permission, credential, and
+//! conversation-history concrete types: the Host composition root
+//! (`apps/ene-core`) implements them against `ene-inference` and
+//! `HistoryRepository`. The delegation row is a durable correspondence, not
+//! a liveness claim, and provider output is a fact about the call, not task
 //! completion, adoption, or external-effect success.
 
 use ene_credential::{ScrubbedText, SecretScrubber};
 use ene_primitive::RawId;
 
-use crate::context::TaskContextItem;
+use crate::context::{TaskContextEntryId, TaskContextItem, TaskContextOriginKind};
 use crate::delegation::{DelegationId, DelegationRef};
+use crate::instruction::{TaskInstructionRole, TaskInstructionSource};
 use crate::repository::{TaskRepository, TaskTechnicalError};
 use crate::task::{TaskId, TaskProgress, TaskRecord, TaskRef};
 
@@ -239,6 +244,20 @@ pub enum TaskAgentTurnOutcome {
         /// The sealed delegation.
         delegation: DelegationId,
     },
+    /// An adopted instruction's canonical History source does not exist, so
+    /// the logical input cannot be resolved. The turn ends with this
+    /// `Ok`-side domain outcome: no body is fabricated, no entry is removed,
+    /// rewritten, or retired, no scrub or inference claim happens, and the
+    /// provider receives nothing. This is not a corruption and not a
+    /// data-use hold: a source that was readable and then came under an
+    /// erasure condition is reported as [`TaskAgentNotSent::DataUseHeld`].
+    InstructionSourceMissing {
+        /// The adoption identity, in context order, whose body could not be
+        /// resolved.
+        entry: TaskContextEntryId,
+        /// The unresolved canonical source identity.
+        source: RawId,
+    },
     /// The use was refused before any provider I/O.
     NotSent(TaskAgentNotSent),
 }
@@ -250,16 +269,32 @@ pub enum TaskAgentTurnOutcome {
 /// and task premise inside that claim, which is the actual currentness
 /// guarantee. The precheck here (delegation and held revision) is
 /// informational, so a competing steering winner between the precheck and
-/// the claim is still reported as stale by the port. The logical input is
-/// only the relied revision's adopted-purpose text, canonical in the
-/// `task_revision` snapshot; no instruction body and no workspace or file
-/// content is copied into the prompt. The logical input's canonical source
-/// correlation (`data_use`) travels to the claim, which compares it against
-/// the canonical current erasure-condition store in the same transaction as
-/// the task premise; a covered source yields
-/// [`TaskAgentTurnOutcome::NotSent`] with [`TaskAgentNotSent::DataUseHeld`]
-/// and no provider I/O. A scrub failure fails closed as
-/// [`TaskAgentTurnError::InputUnavailable`] and nothing is sent.
+/// the claim is still reported as stale by the port.
+///
+/// The logical input is the relied revision's adopted-purpose text followed
+/// by the adopted-instruction bodies in `TaskRecord.context` order. Purpose
+/// and instruction bodies are one string with one fixed framing; the whole
+/// string is scrubbed exactly once and only the scrubber's output crosses
+/// the port. Instruction bodies stay canonical in History: the
+/// [`TaskInstructionSource`] port reads each adopted entry's source, the
+/// source/role/companion correspondence is verified before the body is
+/// used, and an absent source ends the turn as
+/// [`TaskAgentTurnOutcome::InstructionSourceMissing`] without fabricating,
+/// skipping, or rewriting anything. No workspace or file content enters the
+/// prompt.
+///
+/// The logical input's canonical source correlation (`data_use`) is the
+/// purpose entry's `origin.source` followed by every adopted instruction's
+/// `origin.source`, in the same order, duplicates retained. It travels to
+/// the claim, which compares it against the canonical current
+/// erasure-condition store in the same transaction as the task premise; a
+/// covered source yields [`TaskAgentTurnOutcome::NotSent`] with
+/// [`TaskAgentNotSent::DataUseHeld`] and no provider I/O. A scrub failure,
+/// a source read failure, and a correspondence mismatch all fail closed as
+/// [`TaskAgentTurnError::InputUnavailable`] with nothing sent.
+///
+/// The History reads and the scrub happen outside any transaction or lock
+/// the claim uses: the claim alone is the linearization point.
 ///
 /// Outcome mapping: `Produced` carries the output and consent flag without
 /// adopting either, and `NotSent` reasons pass through unchanged. A
@@ -276,6 +311,7 @@ pub enum TaskAgentTurnOutcome {
 /// outcomes are never folded into either.
 pub async fn orchestrate_task_agent_turn(
     repository: &impl TaskRepository,
+    instructions: &impl TaskInstructionSource,
     inference: &impl TaskAgentInference,
     scrubber: &impl SecretScrubber,
     premise: TaskAgentTurnPremise,
@@ -307,28 +343,70 @@ pub async fn orchestrate_task_agent_turn(
         });
     }
     // The precheck matched, so `record.revision` is the relied revision's
-    // snapshot. The logical input's canonical source is the in-force
-    // adopted-purpose entry, which `load_task` returns first and validates as
-    // part of the unit; this read carries that provenance and never resolves
-    // a second one.
-    let data_use = match record.context.first() {
-        Some(entry) if matches!(entry.item, TaskContextItem::AdoptedPurpose(_)) => {
-            vec![entry.origin.source]
+    // snapshot. The context walk carries the load-time ordering and
+    // provenance invariants instead of re-deriving them: `load_task` returns
+    // the in-force adopted-purpose entry first, followed by the adopted
+    // instruction entries in `(revision, entry_id)` order.
+    let mut purpose_text = None;
+    let mut instruction_texts = Vec::new();
+    let mut data_use = Vec::with_capacity(record.context.len());
+    for (index, entry) in record.context.iter().enumerate() {
+        match entry.item {
+            TaskContextItem::AdoptedPurpose(_) if index == 0 => {
+                purpose_text = Some(record.revision.purpose_text.text.as_str());
+                data_use.push(entry.origin.source);
+            }
+            TaskContextItem::AdoptedPurpose(_) => {
+                return Err(TaskAgentTurnError::InputUnavailable {
+                    reason: String::from("task context purpose entry is out of order"),
+                });
+            }
+            TaskContextItem::AdoptedInstruction => {
+                // The body producer exists only for Owner conversation
+                // sources; a Spontaneous / ScheduleOccurrence item stays
+                // fail closed until its producer designs a body resolution,
+                // and is never silently skipped.
+                if entry.origin.kind != TaskContextOriginKind::OwnerConversation {
+                    return Err(TaskAgentTurnError::InputUnavailable {
+                        reason: String::from("unsupported instruction origin kind"),
+                    });
+                }
+                let loaded = instructions
+                    .load_owner_instruction(entry.origin.source)
+                    .await
+                    .map_err(|_| TaskAgentTurnError::InputUnavailable {
+                        reason: String::from("instruction source read failed"),
+                    })?;
+                let Some(loaded) = loaded else {
+                    return Ok(TaskAgentTurnOutcome::InstructionSourceMissing {
+                        entry: entry.entry,
+                        source: entry.origin.source,
+                    });
+                };
+                if loaded.source != entry.origin.source
+                    || loaded.role != TaskInstructionRole::Owner
+                    || loaded.companion != record.task.assignee.companion
+                {
+                    return Err(TaskAgentTurnError::InputUnavailable {
+                        reason: String::from("instruction source correspondence mismatch"),
+                    });
+                }
+                data_use.push(entry.origin.source);
+                instruction_texts.push(loaded.text);
+            }
         }
-        Some(_) => {
-            return Err(TaskAgentTurnError::StorageUnavailable {
-                reason: String::from("task context does not start with its adopted purpose entry"),
-            });
-        }
-        None => {
-            return Err(TaskAgentTurnError::StorageUnavailable {
-                reason: String::from("task context has no adopted purpose entry"),
-            });
-        }
+    }
+    let Some(purpose_text) = purpose_text else {
+        return Err(TaskAgentTurnError::StorageUnavailable {
+            reason: String::from("task context has no adopted purpose entry"),
+        });
     };
-    // The scrub stays ahead of the port call and its failure fails closed:
-    // raw purpose text must never reach the port.
-    let Ok(prompt) = scrubber.scrub(&record.revision.purpose_text.text).await else {
+    // The logical input is assembled in full before the single scrub: the
+    // scrubber sees purpose and every resolved instruction body once, and
+    // only its output may cross the port. A scrub failure fails closed with
+    // no provider I/O and never logs the raw input.
+    let raw_input = assemble_logical_input(purpose_text, &instruction_texts);
+    let Ok(prompt) = scrubber.scrub(&raw_input).await else {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("credential scrub failed"),
         });
@@ -357,6 +435,24 @@ pub async fn orchestrate_task_agent_turn(
         }
         TaskAgentInferenceOutcome::NotSent(reason) => TaskAgentTurnOutcome::NotSent(reason),
     })
+}
+
+/// Assembles the fixed logical-input framing for one turn.
+///
+/// The purpose comes first, then each resolved instruction body in
+/// `TaskRecord.context` order. The boundary markers are identical for every
+/// turn (including a turn with no instructions), so the provider-visible
+/// purpose/instruction boundary is never body text and never varies by
+/// caller. Instructions are not sorted, deduplicated, or filtered: repeated
+/// adoption of the same source remains repeated input.
+fn assemble_logical_input(purpose: &str, instructions: &[String]) -> String {
+    let mut input = String::from("[PURPOSE]\n");
+    input.push_str(purpose);
+    for instruction in instructions {
+        input.push_str("\n[INSTRUCTION]\n");
+        input.push_str(instruction);
+    }
+    input
 }
 
 /// Maps one stale claim refusal to the durable reason, re-reading only

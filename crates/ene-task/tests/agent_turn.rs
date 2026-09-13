@@ -29,11 +29,76 @@ use ene_task::{
     TaskAgentNotSent, TaskAgentOutput, TaskAgentResultArrival, TaskAgentTurnError,
     TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCommitOutcome, TaskCommitPremise,
     TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
-    TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
-    TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
-    orchestrate_task_agent_turn,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskInstructionRole, TaskInstructionSource,
+    TaskInstructionSourceError, TaskInstructionSourceRecord, TaskProgress, TaskPurpose,
+    TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord,
+    TaskTechnicalError, orchestrate_task_agent_turn,
 };
+
+/// Instruction source for turns whose context carries no adopted instruction:
+/// the harness must never read a source for a purpose-only input.
+struct NoInstructionSource;
+
+impl TaskInstructionSource for NoInstructionSource {
+    async fn load_owner_instruction(
+        &self,
+        _source: RawId,
+    ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
+        panic!("a purpose-only context must not read an instruction source")
+    }
+}
+
+/// Scripted instruction source: one reply per read plus the ordered capture
+/// of every source identity asked for.
+struct FakeInstructionSource {
+    replies:
+        Mutex<VecDeque<Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError>>>,
+    loaded: Mutex<Vec<RawId>>,
+}
+
+impl FakeInstructionSource {
+    fn new() -> Self {
+        Self {
+            replies: Mutex::new(VecDeque::new()),
+            loaded: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn script(
+        &self,
+        reply: Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError>,
+    ) {
+        self.replies
+            .lock()
+            .expect("fixture script is never poisoned")
+            .push_back(reply);
+    }
+
+    fn loaded(&self) -> Vec<RawId> {
+        self.loaded
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .clone()
+    }
+}
+
+impl TaskInstructionSource for FakeInstructionSource {
+    async fn load_owner_instruction(
+        &self,
+        source: RawId,
+    ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
+        self.loaded
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .push(source);
+        self.replies
+            .lock()
+            .expect("fixture script is never poisoned")
+            .pop_front()
+            .expect("every exercised source read has a scripted reply")
+    }
+}
 
 /// Scripted `TaskRepository`: queued `load_delegation` / `load_task` /
 /// seal replies plus a capture of every identity each read was asked for.
@@ -373,6 +438,68 @@ fn premise(delegation: DelegationId) -> TaskAgentTurnPremise {
     TaskAgentTurnPremise { delegation }
 }
 
+fn instruction_entry(
+    reference: TaskRef,
+    source: RawId,
+    kind: TaskContextOriginKind,
+) -> TaskContextEntry {
+    TaskContextEntry {
+        entry: TaskContextEntryId::generate(),
+        reference,
+        item: TaskContextItem::AdoptedInstruction,
+        origin: TaskContextOrigin { kind, source },
+        acquired_at: WallClockWithTz::now(),
+    }
+}
+
+fn source_record(
+    source: RawId,
+    companion: RawId,
+    role: TaskInstructionRole,
+    text: &str,
+) -> TaskInstructionSourceRecord {
+    TaskInstructionSourceRecord {
+        source,
+        companion,
+        role,
+        text: text.to_owned(),
+    }
+}
+
+/// Loads one delegation and one record, returning the capture handles the
+/// instruction tests inspect.
+struct TurnFixture {
+    repository: FakeTaskRepository,
+    instructions: FakeInstructionSource,
+    inference: ScriptedInference,
+    scrubber: FakeScrubber,
+    delegation: DelegationId,
+    task: TaskId,
+}
+
+fn turn_fixture(loaded: TaskRecord, delegation_ref: DelegationRef) -> TurnFixture {
+    let task = delegation_ref.task.task;
+    let delegation = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(loaded)));
+    TurnFixture {
+        repository,
+        instructions: FakeInstructionSource::new(),
+        inference: ScriptedInference::new(produced_reply()),
+        scrubber: FakeScrubber::new(FakeScrubReply::Scrubbed),
+        delegation,
+        task,
+    }
+}
+
+fn produced_reply() -> Result<TaskAgentInferenceOutcome, TaskAgentInferenceError> {
+    Ok(TaskAgentInferenceOutcome::Produced {
+        output: TaskAgentOutput::new(String::from("probe provider output")),
+        adoption_consent_current: true,
+    })
+}
+
 #[tokio::test]
 async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     let task = TaskId::generate();
@@ -391,10 +518,15 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     }));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a produced turn is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a produced turn is a domain outcome, not a technical error");
 
     let captured = inference.premises();
     assert_eq!(captured.len(), 1, "one turn runs exactly one inference");
@@ -403,7 +535,7 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     assert_eq!(received.task, relied, "the port gets the relied revision");
     assert_eq!(
         received.prompt.text,
-        format!("[scrubbed] {purpose_text}"),
+        format!("[scrubbed] [PURPOSE]\n{purpose_text}"),
         "the port gets the scrubber's output, not the raw purpose text"
     );
     assert_eq!(
@@ -418,8 +550,8 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     );
     assert_eq!(
         scrubber.inputs(),
-        vec![purpose_text.to_owned()],
-        "the scrubber is asked to scrub exactly the relied snapshot's purpose text"
+        vec![format!("[PURPOSE]\n{purpose_text}")],
+        "the scrubber is asked to scrub exactly the relied snapshot's purpose text in the fixed framing"
     );
     assert_eq!(repository.loaded_delegations(), vec![delegation_id]);
     assert_eq!(repository.loaded_tasks(), vec![task]);
@@ -454,10 +586,15 @@ async fn advanced_revision_is_stale_before_any_inference() {
     }));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a stale revision is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a stale revision is a domain outcome, not a technical error");
 
     assert_eq!(outcome, TaskAgentTurnOutcome::StaleTaskRevision { current });
     assert!(
@@ -486,10 +623,15 @@ async fn port_stale_premise_with_a_forwarded_revision_maps_to_stale_with_current
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a lost claim is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a lost claim is a domain outcome, not a technical error");
 
     assert_eq!(outcome, TaskAgentTurnOutcome::StaleTaskRevision { current });
     assert_eq!(
@@ -518,10 +660,15 @@ async fn port_stale_premise_with_a_gone_delegation_maps_to_missing_delegation() 
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a gone delegation is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a gone delegation is a domain outcome, not a technical error");
 
     assert_eq!(
         outcome,
@@ -563,10 +710,15 @@ async fn terminal_task_is_reported_before_any_scrub_or_port_call() {
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("terminal progress is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("terminal progress is a domain outcome, not a technical error");
 
     assert_eq!(
         outcome,
@@ -603,10 +755,15 @@ async fn port_stale_premise_with_terminal_progress_maps_to_task_terminal() {
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a lost claim is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a lost claim is a domain outcome, not a technical error");
 
     assert_eq!(
         outcome,
@@ -636,10 +793,15 @@ async fn port_stale_premise_with_a_sealed_delegation_maps_to_execution_sealed() 
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a sealed execution is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a sealed execution is a domain outcome, not a technical error");
 
     assert_eq!(
         outcome,
@@ -663,10 +825,15 @@ async fn missing_delegation_is_reported_without_reading_the_task_or_inferring() 
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a missing delegation is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a missing delegation is a domain outcome, not a technical error");
 
     assert_eq!(
         outcome,
@@ -694,10 +861,15 @@ async fn missing_task_is_reported_without_inferring() {
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect("a missing Task is a domain outcome, not a technical error");
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a missing Task is a domain outcome, not a technical error");
 
     assert_eq!(outcome, TaskAgentTurnOutcome::MissingTask { task });
     assert!(inference.premises().is_empty());
@@ -719,10 +891,15 @@ async fn scrub_failure_fails_closed_without_sending_or_leaking_the_purpose() {
         SecretScrubError::RegistryUnavailable,
     ));
 
-    let error =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await
-            .expect_err("a scrub failure is a technical error");
+    let error = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect_err("a scrub failure is a technical error");
 
     match &error {
         TaskAgentTurnError::InputUnavailable { reason } => {
@@ -732,8 +909,8 @@ async fn scrub_failure_fails_closed_without_sending_or_leaking_the_purpose() {
     }
     assert_eq!(
         scrubber.inputs(),
-        vec![purpose_text.to_owned()],
-        "the scrub was attempted on the relied purpose text"
+        vec![format!("[PURPOSE]\n{purpose_text}")],
+        "the scrub was attempted on the relied purpose text in the fixed framing"
     );
     assert!(
         inference.premises().is_empty(),
@@ -771,10 +948,15 @@ async fn every_not_sent_reason_maps_through_unchanged() {
         let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::NotSent(reason)));
         let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
 
-        let outcome =
-            orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-                .await
-                .expect("a refused use is a domain outcome, not a technical error");
+        let outcome = orchestrate_task_agent_turn(
+            &repository,
+            &NoInstructionSource,
+            &inference,
+            &scrubber,
+            premise(delegation_id),
+        )
+        .await
+        .expect("a refused use is a domain outcome, not a technical error");
 
         assert_eq!(outcome, TaskAgentTurnOutcome::NotSent(reason));
         assert_eq!(inference.premises().len(), 1);
@@ -794,9 +976,14 @@ async fn technical_failures_stay_errors() {
     }));
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await;
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await;
     assert_eq!(
         outcome,
         Err(TaskAgentTurnError::StorageUnavailable {
@@ -814,9 +1001,14 @@ async fn technical_failures_stay_errors() {
     repository.script_task(Err(task_error));
     let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await;
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await;
     assert_eq!(
         outcome,
         Err(TaskAgentTurnError::StorageUnavailable {
@@ -833,9 +1025,14 @@ async fn technical_failures_stay_errors() {
         reason: String::from("provider transport failed"),
     }));
     let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
-    let outcome =
-        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
-            .await;
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await;
     match outcome {
         Err(TaskAgentTurnError::InferenceUnavailable { reason }) => {
             assert_eq!(reason, "provider transport failed");
@@ -886,5 +1083,364 @@ fn debug_redacts_prompt_and_output_text() {
     assert!(
         !format!("{produced:?}").contains(probe),
         "the turn outcome Debug must not leak the output"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bodies_are_resolved_in_context_order_and_scrubbed_once() {
+    let purpose_text = "probe adopted purpose";
+    let loaded = record(TaskId::generate(), revision(2), purpose_text);
+    let relied = loaded.task.reference;
+    let companion = loaded.task.assignee.companion;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    let purpose_source = loaded.context[0].origin.source;
+    // Context order is the logical-input order: E1 then E2.
+    let first = RawId::new();
+    let second = RawId::new();
+    loaded.context.push(instruction_entry(
+        relied,
+        first,
+        TaskContextOriginKind::OwnerConversation,
+    ));
+    loaded.context.push(instruction_entry(
+        relied,
+        second,
+        TaskContextOriginKind::OwnerConversation,
+    ));
+    let fixture = turn_fixture(loaded, delegation_ref);
+    fixture.instructions.script(Ok(Some(source_record(
+        first,
+        companion,
+        TaskInstructionRole::Owner,
+        "first instruction",
+    ))));
+    fixture.instructions.script(Ok(Some(source_record(
+        second,
+        companion,
+        TaskInstructionRole::Owner,
+        "second instruction",
+    ))));
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await
+    .expect("a produced turn is a domain outcome");
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+
+    let raw_input = format!(
+        "[PURPOSE]\n{purpose_text}\n[INSTRUCTION]\nfirst instruction\n[INSTRUCTION]\nsecond instruction"
+    );
+    let captured = fixture.inference.premises();
+    let received = captured.first().expect("the premise was captured");
+    assert_eq!(
+        received.prompt.text,
+        format!("[scrubbed] {raw_input}"),
+        "the port receives the single scrub of the whole framed input"
+    );
+    assert_eq!(
+        received.data_use,
+        vec![purpose_source, first, second],
+        "the correlation follows purpose then instruction order"
+    );
+    assert_eq!(
+        fixture.scrubber.inputs(),
+        vec![raw_input.clone()],
+        "purpose and every resolved body are scrubbed exactly once, together"
+    );
+    assert_eq!(
+        fixture.instructions.loaded(),
+        vec![first, second],
+        "sources are resolved in context order without dedupe"
+    );
+    assert_eq!(
+        fixture.repository.loaded_tasks(),
+        vec![fixture.task],
+        "no Task re-read is inserted between assembly and the claim"
+    );
+    assert_eq!(
+        fixture.repository.loaded_delegations(),
+        vec![fixture.delegation]
+    );
+}
+
+#[tokio::test]
+async fn duplicate_source_adoption_keeps_both_bodies_and_correlations() {
+    let loaded = record(TaskId::generate(), revision(2), "probe purpose");
+    let relied = loaded.task.reference;
+    let companion = loaded.task.assignee.companion;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    let repeated = RawId::new();
+    loaded.context.push(instruction_entry(
+        relied,
+        repeated,
+        TaskContextOriginKind::OwnerConversation,
+    ));
+    loaded.context.push(instruction_entry(
+        relied,
+        repeated,
+        TaskContextOriginKind::OwnerConversation,
+    ));
+    let fixture = turn_fixture(loaded, delegation_ref);
+    for _ in 0..2 {
+        fixture.instructions.script(Ok(Some(source_record(
+            repeated,
+            companion,
+            TaskInstructionRole::Owner,
+            "repeat me",
+        ))));
+    }
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await
+    .expect("a produced turn is a domain outcome");
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+
+    let captured = fixture.inference.premises();
+    let received = captured.first().expect("the premise was captured");
+    assert_eq!(
+        received.prompt.text.matches("repeat me").count(),
+        2,
+        "a repeated adoption repeats the body instead of deduplicating"
+    );
+    let purpose_source = received.data_use[0];
+    assert_eq!(
+        received.data_use,
+        vec![purpose_source, repeated, repeated],
+        "entry-level correlation duplicates are preserved"
+    );
+    assert_eq!(fixture.instructions.loaded(), vec![repeated, repeated]);
+}
+
+#[tokio::test]
+async fn missing_instruction_source_ends_the_turn_without_scrub_or_send() {
+    let loaded = record(TaskId::generate(), revision(2), "probe purpose");
+    let relied = loaded.task.reference;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    let missing = RawId::new();
+    let entry = instruction_entry(relied, missing, TaskContextOriginKind::OwnerConversation);
+    let entry_id = entry.entry;
+    loaded.context.push(entry);
+    let fixture = turn_fixture(loaded, delegation_ref);
+    fixture.instructions.script(Ok(None));
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await
+    .expect("a missing source is a domain outcome, not a technical error");
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::InstructionSourceMissing {
+            entry: entry_id,
+            source: missing,
+        },
+        "the exact adopted entry and unresolved source are reported"
+    );
+    assert!(
+        fixture.scrubber.inputs().is_empty(),
+        "a missing instruction body is never scrubbed as if it existed"
+    );
+    assert!(
+        fixture.inference.premises().is_empty(),
+        "a missing instruction body never reaches the inference port"
+    );
+}
+
+#[tokio::test]
+async fn instruction_correspondence_mismatches_fail_closed() {
+    type RecordBuilder = fn(RawId, RawId) -> TaskInstructionSourceRecord;
+    // Each case violates exactly one correspondence condition: the loaded
+    // source identity differs, the companion differs, or the role differs.
+    let cases: [(&str, RecordBuilder); 3] = [
+        ("wrong source identity", |_source, companion| {
+            source_record(RawId::new(), companion, TaskInstructionRole::Owner, "body")
+        }),
+        ("foreign companion", |source, _companion| {
+            source_record(source, RawId::new(), TaskInstructionRole::Owner, "body")
+        }),
+        ("wrong role", |source, companion| {
+            source_record(source, companion, TaskInstructionRole::Companion, "body")
+        }),
+    ];
+    for (name, build) in cases {
+        let loaded = record(TaskId::generate(), revision(2), "probe purpose");
+        let relied = loaded.task.reference;
+        let companion = loaded.task.assignee.companion;
+        let delegation_ref = delegation(relied);
+        let mut loaded = loaded;
+        let source = RawId::new();
+        loaded.context.push(instruction_entry(
+            relied,
+            source,
+            TaskContextOriginKind::OwnerConversation,
+        ));
+        let fixture = turn_fixture(loaded, delegation_ref);
+        fixture
+            .instructions
+            .script(Ok(Some(build(source, companion))));
+
+        let outcome = orchestrate_task_agent_turn(
+            &fixture.repository,
+            &fixture.instructions,
+            &fixture.inference,
+            &fixture.scrubber,
+            premise(fixture.delegation),
+        )
+        .await;
+        match outcome {
+            Err(TaskAgentTurnError::InputUnavailable { reason }) => {
+                assert_eq!(
+                    reason, "instruction source correspondence mismatch",
+                    "{name} must fail as a fixed body-free class"
+                );
+            }
+            other => panic!("{name} must fail closed, got {other:?}"),
+        }
+        assert!(
+            fixture.inference.premises().is_empty(),
+            "{name} never reaches the port"
+        );
+        assert!(
+            fixture.scrubber.inputs().is_empty(),
+            "{name} is rejected before the scrub"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsupported_instruction_origin_fails_closed_without_reading_a_body() {
+    let loaded = record(TaskId::generate(), revision(2), "probe purpose");
+    let relied = loaded.task.reference;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    loaded.context.push(instruction_entry(
+        relied,
+        RawId::new(),
+        TaskContextOriginKind::Spontaneous,
+    ));
+    let fixture = turn_fixture(loaded, delegation_ref);
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await;
+    match outcome {
+        Err(TaskAgentTurnError::InputUnavailable { reason }) => {
+            assert_eq!(reason, "unsupported instruction origin kind");
+        }
+        other => panic!("an unsupported origin kind must fail closed, got {other:?}"),
+    }
+    assert!(
+        fixture.instructions.loaded().is_empty(),
+        "no body producer exists for this origin kind, so none is read"
+    );
+    assert!(fixture.inference.premises().is_empty());
+}
+
+#[tokio::test]
+async fn instruction_source_read_failure_fails_closed_without_leaking_the_reason() {
+    let loaded = record(TaskId::generate(), revision(2), "probe purpose");
+    let relied = loaded.task.reference;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    loaded.context.push(instruction_entry(
+        relied,
+        RawId::new(),
+        TaskContextOriginKind::OwnerConversation,
+    ));
+    let fixture = turn_fixture(loaded, delegation_ref);
+    fixture
+        .instructions
+        .script(Err(TaskInstructionSourceError::SourceUnavailable {
+            reason: String::from("backend detail probe"),
+        }));
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await;
+    match outcome {
+        Err(TaskAgentTurnError::InputUnavailable { reason }) => {
+            assert_eq!(reason, "instruction source read failed");
+            assert!(!reason.contains("backend detail probe"));
+        }
+        other => panic!("a source read failure must fail closed, got {other:?}"),
+    }
+    assert!(fixture.inference.premises().is_empty());
+    assert!(fixture.scrubber.inputs().is_empty());
+}
+
+#[tokio::test]
+async fn instruction_scrub_failure_fails_closed_without_leaking_the_input() {
+    let probe = "probe instruction secret body";
+    let loaded = record(TaskId::generate(), revision(2), "probe purpose");
+    let relied = loaded.task.reference;
+    let companion = loaded.task.assignee.companion;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    let source = RawId::new();
+    loaded.context.push(instruction_entry(
+        relied,
+        source,
+        TaskContextOriginKind::OwnerConversation,
+    ));
+    let fixture = turn_fixture(loaded, delegation_ref);
+    fixture.instructions.script(Ok(Some(source_record(
+        source,
+        companion,
+        TaskInstructionRole::Owner,
+        probe,
+    ))));
+    let scrubber = FakeScrubber::new(FakeScrubReply::Failed(
+        SecretScrubError::RegistryUnavailable,
+    ));
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &scrubber,
+        premise(fixture.delegation),
+    )
+    .await;
+    match outcome {
+        Err(TaskAgentTurnError::InputUnavailable { reason }) => {
+            assert_eq!(reason, "credential scrub failed");
+        }
+        other => panic!("a scrub failure must fail closed, got {other:?}"),
+    }
+    assert!(
+        scrubber.inputs().iter().any(|input| input.contains(probe)),
+        "the whole framed input, instruction body included, was the scrub target"
+    );
+    assert!(
+        fixture.inference.premises().is_empty(),
+        "a failed scrub never reaches the port"
     );
 }

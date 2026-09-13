@@ -42,6 +42,12 @@ const SQL_SELECT_RECENT_TIMELINE: &str = "SELECT message_id, round_id, role, bod
 
 const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 
+/// The single-message bounded read: `message_id` is the primary key, so the
+/// lookup touches exactly the addressed row and never scans the table. The
+/// companion column is appended after the shared [`HistoryRow`] column list
+/// so one decoder serves every History read.
+pub(crate) const SQL_SELECT_HISTORY_BY_MESSAGE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random, companion_id FROM history_message WHERE message_id = ?1";
+
 /// Durable identity lookup for one Owner-message premise: the expected row
 /// resolves by primary key, never by text or position.
 pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
@@ -444,6 +450,38 @@ impl HistoryRepository for Store {
                 }
                 None => Ok(None),
             }
+        })
+        .await
+    }
+
+    async fn load_message(
+        &self,
+        message: RawId,
+    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let message_text = encode_id(message);
+            let guard = lock_shared(&conn);
+            // Point lookup on the `message_id` primary key. The companion
+            // column rides the same row so the shared `HistoryRow` decoder
+            // is reused; a companion that cannot be decoded is an unreadable
+            // row, not a default.
+            let found: Option<(HistoryRow, String)> = guard
+                .query_row(
+                    SQL_SELECT_HISTORY_BY_MESSAGE,
+                    params![message_text],
+                    |row| Ok((HistoryRow::from_row(row)?, row.get(14)?)),
+                )
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            found
+                .map(|(row, companion_text)| {
+                    let companion = CompanionId::from_raw(
+                        decode_id(&companion_text).map_err(companion_unavailable)?,
+                    );
+                    decode_history_message(companion, row).map_err(companion_unavailable)
+                })
+                .transpose()
         })
         .await
     }

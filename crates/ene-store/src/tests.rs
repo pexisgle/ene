@@ -1380,6 +1380,84 @@ async fn lookup_command_roundtrip_returns_both_ids() {
 }
 
 #[tokio::test]
+async fn load_message_reads_one_row_by_primary_key_and_fails_closed() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let appended = store
+        .append_message(history_command(companion, generation, "single body"))
+        .await;
+    let HistoryAppendOutcome::CommittedAs { message } = appended.unwrap() else {
+        panic!("the append must commit");
+    };
+
+    let found = store
+        .load_message(message)
+        .await
+        .expect("the bounded read must answer")
+        .expect("the addressed row must load");
+    assert_eq!(found.id, message);
+    assert_eq!(found.companion, companion);
+    assert_eq!(found.text, "single body");
+    assert_eq!(found.role, HistoryRole::Owner);
+    assert_eq!(found.presence_generation, generation);
+
+    assert_eq!(
+        store.load_message(RawId::new()).await,
+        Ok(None),
+        "an absent identity is reported, never fabricated"
+    );
+
+    // The implemented query is a primary-key point lookup, not a scan: the
+    // plan proves the read stays bounded to the addressed row.
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let plan_sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            crate::companion::SQL_SELECT_HISTORY_BY_MESSAGE
+        );
+        let mut statement = guard.prepare(&plan_sql).expect("the plan must prepare");
+        let details: Vec<String> = statement
+            .query_map(params![crate::codec::encode_id(message)], |row| row.get(3))
+            .expect("the plan must run")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the plan rows must decode");
+        assert!(
+            details.iter().all(|detail| !detail.contains("SCAN")),
+            "the bounded read never scans: {details:?}"
+        );
+        assert!(
+            details.iter().any(|detail| detail.contains("SEARCH")),
+            "the bounded read uses the message identity: {details:?}"
+        );
+    }
+
+    // A malformed durable row is a technical error, never a composed
+    // substitute.
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE history_message SET at = 'not-a-timestamp' WHERE message_id = ?1",
+                params![crate::codec::encode_id(message)],
+            )
+            .expect("the corruption must apply");
+    }
+    assert!(
+        matches!(
+            store.load_message(message).await,
+            Err(ene_companion::CompanionTechnicalError::StorageUnavailable { .. })
+        ),
+        "a malformed row fails closed"
+    );
+}
+
+#[tokio::test]
 async fn migration_v3_keeps_pre_command_rows_readable() {
     let dir = tempfile::tempdir();
     let dir = dir.unwrap();
