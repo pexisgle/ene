@@ -182,8 +182,13 @@ pub fn certainty_grounds_pair_is_valid(certainty: ActionCertainty, grounds: Effe
 ///
 /// Constructed by the execution-time resolution
 /// ([`WorkspaceRoot::resolve`](crate::WorkspaceRoot::resolve)); the public
-/// constructor exists for the store's read-back and for tests, and a caller
-/// must never build it from an input string to establish identity.
+/// constructor exists only for the store's durable read-back and for tests,
+/// and a caller must never build it from an input string to establish
+/// identity. Forgery is contained: the effect entry
+/// (`WorkspaceRoot::execute`) is `pub(crate)`, so only
+/// [`orchestrate_workspace_action`](crate::orchestrate_workspace_action) can
+/// execute, and effect time re-verifies containment and the
+/// mount/reparse/volume boundary fail-closed for every operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealTargetRef(String);
 

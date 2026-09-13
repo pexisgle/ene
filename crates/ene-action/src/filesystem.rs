@@ -236,8 +236,16 @@ impl WorkspaceRoot {
     ///
     /// `content` is required for create/edit and ignored for list/read; the
     /// orchestration checks this before any durable claim.
+    ///
+    /// This is `pub(crate)`: the only public effect path is
+    /// [`orchestrate_workspace_action`](crate::orchestrate_workspace_action),
+    /// which binds the target to the K-B.1 live decision and the AU5 start
+    /// claim before executing. An externally forged [`RealTargetRef`] (built
+    /// from an arbitrary string via the store read-back constructor) cannot
+    /// reach an effect from another crate. Effect-time containment is
+    /// re-verified for every operation and fails closed.
     #[must_use]
-    pub fn execute(
+    pub(crate) fn execute(
         &self,
         target: &RealTargetRef,
         operation: OperationKind,
@@ -246,15 +254,14 @@ impl WorkspaceRoot {
         match operation {
             OperationKind::List => self.list_directory(target),
             OperationKind::Read => {
-                let Ok(metadata) = fs::metadata(target.as_path()) else {
+                let destination = Path::new(target.as_path());
+                let Some(metadata) = self.verified_existing_metadata(destination, false) else {
                     return refused();
                 };
-                if !self.boundary_holds(Path::new(target.as_path()), &metadata)
-                    || metadata.len() > MAX_ACTION_FILE_BYTES as u64
-                {
+                if metadata.len() > MAX_ACTION_FILE_BYTES as u64 {
                     return refused();
                 }
-                match fs::read(target.as_path()) {
+                match fs::read(destination) {
                     Ok(bytes) => ObservedEffect {
                         certainty: ActionCertainty::ConfirmedSuccess,
                         grounds: EffectGrounds::ObservedAtTarget,
@@ -279,13 +286,11 @@ impl WorkspaceRoot {
     /// listing. A partial read of the directory is a confirmed refusal (a
     /// listing changes nothing).
     fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
-        let Ok(metadata) = fs::metadata(target.as_path()) else {
-            return refused();
-        };
-        if !metadata.is_dir() || !self.boundary_holds(Path::new(target.as_path()), &metadata) {
+        let destination = Path::new(target.as_path());
+        if self.verified_existing_metadata(destination, true).is_none() {
             return refused();
         }
-        let Ok(entries) = fs::read_dir(target.as_path()) else {
+        let Ok(entries) = fs::read_dir(destination) else {
             return refused();
         };
         let mut listing = Vec::new();
@@ -410,6 +415,30 @@ impl WorkspaceRoot {
     /// root and remain on the root's filesystem entity; create requires the
     /// canonical parent to still be inside the root and on the same entity,
     /// and the destination to still be absent.
+    ///
+    /// Read and list use [`Self::verified_existing_metadata`]: the stored
+    /// target must still canonicalize to itself, stay inside the root, and
+    /// remain on the root's filesystem entity. A forged [`RealTargetRef`]
+    /// pointing outside the workspace (even on the same device) is refused.
+    fn verified_existing_metadata(
+        &self,
+        destination: &Path,
+        want_directory: bool,
+    ) -> Option<fs::Metadata> {
+        let canonical = fs::canonicalize(destination).ok()?;
+        if canonical != destination || !canonical.starts_with(&self.root) {
+            return None;
+        }
+        let metadata = fs::metadata(&canonical).ok()?;
+        if metadata.is_dir() != want_directory {
+            return None;
+        }
+        if !self.boundary_holds(&canonical, &metadata) {
+            return None;
+        }
+        Some(metadata)
+    }
+
     fn reverifies_at_effect(&self, destination: &Path, replace: bool) -> bool {
         if replace {
             match (fs::canonicalize(destination), fs::metadata(destination)) {
@@ -442,7 +471,7 @@ impl WorkspaceRoot {
     /// Linux: root and target must share a device, and no mount point from
     /// `/proc/self/mountinfo` may sit strictly below the root on the target's
     /// path (an unreadable mount table fails closed). Other Unix: device
-    /// equality. Windows: canonical volume-prefix equality. Undeterminable
+    /// equality. Windows: volume serial number equality. Undeterminable
     /// boundaries are refused, never assumed inside.
     fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
         self.boundary_holds_impl(target, metadata)
@@ -475,25 +504,17 @@ impl WorkspaceRoot {
     }
 
     #[cfg(windows)]
-    fn boundary_holds_impl(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
-        use std::path::Component;
+    fn boundary_holds_impl(&self, _target: &Path, metadata: &fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt;
 
-        fn volume_prefix(path: &Path) -> Option<std::path::Prefix<'_>> {
-            match path.components().next() {
-                Some(Component::Prefix(prefix)) => Some(prefix.kind()),
-                _ => None,
-            }
-        }
-        // The root is already canonical; the target is canonicalized so a
-        // nested volume mount resolves to its own volume prefix. Any failure
-        // refuses the boundary rather than assuming it holds.
-        let Ok(canonical_target) = fs::canonicalize(target) else {
-            return false;
-        };
-        match (volume_prefix(&self.root), volume_prefix(&canonical_target)) {
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        }
+        // A nested mounted volume or reparse target resolves to a different
+        // volume serial; an undeterminable serial fails closed. Create passes
+        // its canonical parent's metadata, so the same equality covers it.
+        let root_volume = fs::metadata(&self.root)
+            .ok()
+            .and_then(|root| root.volume_serial_number());
+        let target_volume = metadata.volume_serial_number();
+        matches!((root_volume, target_volume), (Some(left), Some(right)) if left == right)
     }
 }
 
@@ -872,6 +893,43 @@ mod tests {
     }
 
     #[test]
+    fn forged_outside_targets_cannot_read_or_list_at_effect_time() {
+        let (_directory, root) = workspace();
+        let outside = tempdir().expect("outside directory");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, b"secret").expect("outside fixture");
+        let canonical_file = fs::canonicalize(&outside_file).expect("canonical outside file");
+        // A forged reference to an outside absolute path, even on the same
+        // device, must fail closed at effect time.
+        let forged_file = crate::attempt::RealTargetRef::from_canonical_path(
+            canonical_file.to_string_lossy().into_owned(),
+        );
+        let read = root.execute(&forged_file, OperationKind::Read, None);
+        assert_eq!(
+            read.certainty,
+            crate::attempt::ActionCertainty::ConfirmedFailure,
+            "a forged outside target must not be readable"
+        );
+        assert_eq!(
+            read.grounds,
+            crate::attempt::EffectGrounds::RefusedBeforeEffect
+        );
+        assert_eq!(read.output, None);
+
+        let canonical_dir = fs::canonicalize(outside.path()).expect("canonical outside directory");
+        let forged_dir = crate::attempt::RealTargetRef::from_canonical_path(
+            canonical_dir.to_string_lossy().into_owned(),
+        );
+        let listed = root.execute(&forged_dir, OperationKind::List, None);
+        assert_eq!(
+            listed.certainty,
+            crate::attempt::ActionCertainty::ConfirmedFailure,
+            "a forged outside directory must not be listable"
+        );
+        assert_eq!(listed.output, None);
+    }
+
+    #[test]
     fn debug_redacts_read_output() {
         let effect = super::ObservedEffect {
             certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
@@ -1032,5 +1090,81 @@ mod tests {
         );
         assert_eq!(decode_mountinfo_escape("/a\\134b"), "/a\\b");
         assert_eq!(parse_mount_point("too short"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_inside_targets_share_the_root_volume_serial() {
+        use std::os::windows::fs::MetadataExt;
+
+        let (directory, root) = workspace();
+        fs::write(directory.path().join("input.txt"), b"hello").expect("fixture write");
+        let canonical =
+            fs::canonicalize(directory.path().join("input.txt")).expect("canonical fixture");
+        let target_metadata = fs::metadata(&canonical).expect("target metadata");
+        let root_metadata = fs::metadata(root.as_path()).expect("root metadata");
+        // A nested mounted volume presents a different volume serial, so the
+        // same equality refuses it; an undeterminable serial (None) fails
+        // closed by the matches! guard in boundary_holds_impl.
+        assert_eq!(
+            root_metadata.volume_serial_number(),
+            target_metadata.volume_serial_number(),
+            "an inside target must share the root volume serial"
+        );
+        assert!(
+            root.boundary_holds(&canonical, &target_metadata),
+            "a same-volume inside target holds the boundary"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reparse_points_are_excluded_and_escapes_refused() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+
+        let (directory, root) = workspace();
+        let outside = tempdir().expect("outside directory");
+        fs::write(outside.path().join("secret.txt"), b"secret").expect("outside fixture");
+        fs::write(directory.path().join("regular.txt"), b"x").expect("fixture file");
+        // File and directory symlinks are reparse points, like junctions and
+        // mounted volumes; creation may require privileges, so skip when the
+        // platform refuses to create them.
+        if symlink_file(
+            outside.path().join("secret.txt"),
+            directory.path().join("escape.txt"),
+        )
+        .is_err()
+        {
+            return;
+        }
+        // A junction-like directory reparse; a failure leaves only the file
+        // reparse for the exclusion assertion below.
+        let _ = symlink_dir(outside.path(), directory.path().join("escape-dir"));
+        assert!(
+            matches!(
+                root.resolve("escape.txt", OperationKind::Read),
+                Err(TargetRejection::OutsideWorkspace | TargetRejection::CrossFilesystem)
+            ),
+            "a reparse escape must not resolve inside the workspace"
+        );
+        let target = root.resolve("", OperationKind::List).expect("root listing");
+        let effect = root.execute(&target, OperationKind::List, None);
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedSuccess
+        );
+        let Some(ActionOutput::Listing(entries)) = effect.output else {
+            panic!("a listing observes entries");
+        };
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.name != "escape.txt" && entry.name != "escape-dir"),
+            "reparse/junction entries are excluded, never followed: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.name == "regular.txt"),
+            "regular files remain listable: {entries:?}"
+        );
     }
 }
