@@ -77,6 +77,13 @@ impl core::fmt::Debug for WorkspaceActionCommand {
 pub enum ActionNotStarted {
     /// The delegation/task/workspace premise is no longer current.
     StalePremise,
+    /// The Task is terminal (`Completed` / `Failed`); nothing was claimed or
+    /// executed. Unit-style because the Task lifecycle vocabulary stays with
+    /// its owner; the Work-side adapter re-reads to carry the detail.
+    TaskTerminal,
+    /// The delegation's execution already submitted its final result;
+    /// nothing was claimed or executed, even while the Task is not terminal.
+    ExecutionSealed,
     /// The requested path was refused before any claim.
     Rejected(TargetRejection),
     /// Create/edit arrived without content.
@@ -180,8 +187,19 @@ pub async fn orchestrate_workspace_action(
     let premise = attempt_premise(&command, &target, evaluation_id);
     let attempt = premise.attempt;
     let outcome = repository.insert_attempt_if_current(premise).await?;
-    if outcome == ActionStartOutcome::StalePremise {
-        return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::StalePremise));
+    match outcome {
+        ActionStartOutcome::Started => {}
+        ActionStartOutcome::StalePremise => {
+            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::StalePremise));
+        }
+        ActionStartOutcome::TaskTerminal => {
+            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::TaskTerminal));
+        }
+        ActionStartOutcome::ExecutionSealed => {
+            return Ok(ActionRunOutcome::NotStarted(
+                ActionNotStarted::ExecutionSealed,
+            ));
+        }
     }
     // The attempt is durable: execute outside every transaction, exactly the
     // premise that was compared, then observe the effect.

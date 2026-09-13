@@ -3,15 +3,17 @@
 
 use ene_primitive::{RawId, WallClockWithTz};
 
+use crate::agent::TaskAgentOutput;
 use crate::context::{TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind};
 use crate::delegation::{
     CreateDelegationCommand, DelegationCreationPremise, DelegationId, DelegationOutcome,
     TaskAgentEphemeralId,
 };
 use crate::repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
+use crate::result::{TaskAgentResultArrival, TaskResultId, TaskResultRecord};
 use crate::task::{
-    SteeringPremiseRef, TaskCommitPremise, TaskId, TaskInstructionAdoptionPremise, TaskPurpose,
-    TaskPurposeAdoptionPremise, TaskRef,
+    SteeringPremiseRef, TaskCommitPremise, TaskId, TaskInstructionAdoptionPremise, TaskProgress,
+    TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
 };
 
 /// The Task-side premise for one steering proposal (H-A).
@@ -39,6 +41,13 @@ pub enum TaskProposalOutcome {
     /// The relied-on revision or purpose does not match the durable current
     /// state; nothing was changed and the caller re-evaluates.
     StalePremise { current: TaskRef },
+    /// The Task is terminal (`Completed` / `Failed`); the revision and
+    /// context are unchanged. Absorbing, so it is distinct from revision
+    /// staleness.
+    TaskTerminal {
+        task: TaskId,
+        progress: TaskProgress,
+    },
     /// The premise names a Task with no durable state; nothing was changed.
     MissingTask { task: TaskId },
     /// No representable next revision can be durably committed; nothing was
@@ -78,6 +87,12 @@ pub async fn orchestrate_steering(
             current: record.task.reference,
         });
     }
+    if record.task.progress.is_terminal() {
+        return Ok(TaskProposalOutcome::TaskTerminal {
+            task: expected.task,
+            progress: record.task.progress,
+        });
+    }
     let adopted_purpose_entry = TaskContextEntryId::generate();
     let entry = TaskContextEntryId::generate();
     let acquired_at = WallClockWithTz::now();
@@ -111,6 +126,9 @@ pub async fn orchestrate_steering(
         }
         TaskCommitOutcome::StaleExpected { current } => {
             TaskProposalOutcome::StalePremise { current }
+        }
+        TaskCommitOutcome::TaskTerminal { task, progress } => {
+            TaskProposalOutcome::TaskTerminal { task, progress }
         }
         TaskCommitOutcome::MissingTask { task } => TaskProposalOutcome::MissingTask { task },
         TaskCommitOutcome::RevisionExhausted { task } => {
@@ -147,12 +165,49 @@ pub async fn orchestrate_delegation(
             current: record.task.reference,
         });
     }
+    if record.task.progress.is_terminal() {
+        return Ok(DelegationOutcome::TaskTerminal {
+            task: command.task.task,
+            progress: record.task.progress,
+        });
+    }
     repository
         .create_delegation(DelegationCreationPremise {
             delegation: DelegationId::generate(),
             task: command.task,
             agent: TaskAgentEphemeralId::generate(),
             scope_copy: command.scope_copy,
+        })
+        .await
+}
+
+/// Orchestrates one explicit final result submission (AU15a).
+///
+/// This is the Task-owned finalization boundary the caller (in this stage the
+/// Host or a test; later the Task Agent tool loop) invokes when it decides
+/// that one delegated turn produced the **final** result. One
+/// [`TaskAgentTurnOutcome::Produced`] is only a provider output and may still
+/// be an Action request or intermediate text: this function is never called
+/// from that outcome automatically, and no provider output parsing or
+/// automatic final-output detection exists here.
+///
+/// The orchestration mints the [`TaskResultId`], so the caller names no
+/// identity, and records `{ delegation, result, body }` through
+/// [`TaskRepository::record_task_result_arrival`] before returning. The
+/// committed row is the execution seal; the arrival judges no currentness,
+/// certainty, or completion. Repository technical errors (including a broken
+/// delegation correspondence, a reused identity with different content, and a
+/// second final result for the same delegation) stay `Err` and fail closed.
+pub async fn orchestrate_result_arrival(
+    repository: &impl TaskRepository,
+    delegation: DelegationId,
+    body: TaskAgentOutput,
+) -> Result<TaskResultRecord, TaskTechnicalError> {
+    repository
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation,
+            result: TaskResultId::generate(),
+            body,
         })
         .await
 }

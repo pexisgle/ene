@@ -3,6 +3,7 @@
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 
 use crate::context::{TaskContextEntry, TaskContextEntryId, TaskContextOrigin};
+use crate::result::TaskResultId;
 use crate::workspace::{WorkspaceAssociation, WorkspaceAssociationPremise};
 
 /// Identity of one Task. Wraps [`RawId`]; never converted to any other domain
@@ -130,15 +131,72 @@ pub struct AssigneeRef {
     pub companion: RawId,
 }
 
+/// The lifecycle progress of one Task.
+///
+/// Progress is a closed world orthogonal to the revision: a purpose change is
+/// a revision forward, never a progress transition, and terminal states are
+/// absorbing. The admission gates (delegation, steering, Task Agent inference
+/// claim, Action start) require a non-terminal progress in their own atomic
+/// compare; `Completed` is only produced by the adoption commit, and `Failed`
+/// has no producer in this stage (provider failures, `NotSent`, Action
+/// `Unknown`, and withheld results are not Task failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskProgress {
+    /// The Task was accepted; delegation is possible while non-terminal.
+    Started,
+    /// At least one delegation is durable; the Task awaits its outcome.
+    InProgress,
+    /// The Task owner adopted a final result after verifying the relied Action
+    /// facts and the Task-wide completion barrier.
+    Completed,
+    /// Task failure confirmed by the Task owner; no producer exists yet.
+    Failed,
+}
+
+impl TaskProgress {
+    /// Stable storage name, closed world.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Parses the [`Self::as_str`] vocabulary, closed world.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "started" => Some(Self::Started),
+            "in_progress" => Some(Self::InProgress),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// Whether this progress admits no further work.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
 /// The current durable state of one Task (D1).
 ///
 /// The purpose text is not duplicated here; it is read from the current
-/// revision snapshot.
+/// revision snapshot. `adopted_result` is not a second master: it is resolved
+/// from the single `task_result` row whose `adopted_revision` is set, and is
+/// `None` for every Task that is not completed by a result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub reference: TaskRef,
     pub purpose: TaskPurposeRef,
     pub assignee: AssigneeRef,
+    pub progress: TaskProgress,
+    pub adopted_result: Option<TaskResultId>,
 }
 
 /// One revision of a Task, kept as the change history (D2).
@@ -253,7 +311,9 @@ pub struct TaskCommitPremise {
 mod tests {
     use ene_primitive::RawId;
 
-    use super::{AssigneeRef, TaskId, TaskPurpose, TaskPurposeRef, TaskRef, TaskRevision};
+    use super::{
+        AssigneeRef, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef, TaskRef, TaskRevision,
+    };
 
     #[test]
     fn initial_task_revision_is_one() {
@@ -323,5 +383,22 @@ mod tests {
         let companion = RawId::new();
         let assignee = AssigneeRef { companion };
         assert_eq!(assignee.companion, companion);
+    }
+
+    #[test]
+    fn progress_names_round_trip_as_a_closed_world_and_mark_terminals() {
+        for progress in [
+            TaskProgress::Started,
+            TaskProgress::InProgress,
+            TaskProgress::Completed,
+            TaskProgress::Failed,
+        ] {
+            assert_eq!(TaskProgress::from_name(progress.as_str()), Some(progress));
+        }
+        assert_eq!(TaskProgress::from_name("cancelled"), None);
+        assert!(!TaskProgress::Started.is_terminal());
+        assert!(!TaskProgress::InProgress.is_terminal());
+        assert!(TaskProgress::Completed.is_terminal());
+        assert!(TaskProgress::Failed.is_terminal());
     }
 }

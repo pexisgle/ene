@@ -532,7 +532,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let learning_ticket = InferenceTicketId(RawId::new());
     {
         let store = Store::open(&path).await.expect("a fresh store must open");
-        assert_eq!(read_schema_version(&path), Some(19));
+        assert_eq!(read_schema_version(&path), Some(20));
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
             Err(poisoned) => poisoned.into_inner(),
@@ -569,7 +569,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let reopened = Store::open(&path)
         .await
         .expect("the V18 migration must succeed");
-    assert_eq!(read_schema_version(&path), Some(19));
+    assert_eq!(read_schema_version(&path), Some(20));
     let columns = table_columns(&path, "inference_attempt");
     for column in [
         "consumer",

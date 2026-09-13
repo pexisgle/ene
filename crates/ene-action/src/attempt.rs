@@ -237,10 +237,13 @@ pub struct AttemptCommitPremise {
 
 /// The domain result of one attempt insertion.
 ///
-/// Stale is an `Ok`-side domain outcome with zero writes and zero execution;
-/// a missing delegation, task, or workspace association, and a moved revision
-/// or association all answer `StalePremise` (the Work owner re-reads to
-/// distinguish them).
+/// Every non-`Started` variant is an `Ok`-side domain outcome with zero
+/// writes and zero execution; a missing delegation, task, or workspace
+/// association, and a moved revision or association all answer
+/// `StalePremise` (the Work owner re-reads to distinguish them). Terminal
+/// Task progress and an execution-sealed delegation are their own Action-owned
+/// outcomes: Action never imports the Task lifecycle type, and the Work-side
+/// adapter re-reads the durable state to explain them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionStartOutcome {
     /// The attempt row is durable; execution may proceed outside any
@@ -249,6 +252,13 @@ pub enum ActionStartOutcome {
     /// The delegation/task/workspace premise is no longer current; nothing
     /// was written and nothing may be executed.
     StalePremise,
+    /// The Task is terminal (`Completed` / `Failed`); nothing was written and
+    /// no external effect may happen.
+    TaskTerminal,
+    /// The delegation already submitted its final result (execution seal);
+    /// nothing was written and no external effect may happen, even while the
+    /// Task is non-terminal.
+    ExecutionSealed,
 }
 
 /// The domain result of one certainty compare-and-set.
@@ -310,11 +320,14 @@ pub trait ActionAttemptRepository: Send + Sync {
     /// Inserts one attempt iff every durable premise still holds.
     ///
     /// Missing rows and moved revisions/associations answer
-    /// [`ActionStartOutcome::StalePremise`] without writes. A premise that
-    /// disagrees with the stored delegation correspondence, duplicate
-    /// workspace association rows, unknown operation names, and a duplicate
-    /// attempt identity are technical errors (fail closed, never reduced to
-    /// stale).
+    /// [`ActionStartOutcome::StalePremise`] without writes; terminal Task
+    /// progress answers [`ActionStartOutcome::TaskTerminal`] and an
+    /// execution-sealed delegation answers
+    /// [`ActionStartOutcome::ExecutionSealed`], both without writes and
+    /// before any external effect. A premise that disagrees with the stored
+    /// delegation correspondence, duplicate workspace association rows,
+    /// unknown operation names, and a duplicate attempt identity are
+    /// technical errors (fail closed, never reduced to stale).
     async fn insert_attempt_if_current(
         &self,
         premise: AttemptCommitPremise,

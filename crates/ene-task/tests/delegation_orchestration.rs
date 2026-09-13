@@ -21,11 +21,12 @@ use std::sync::Mutex;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, CreateDelegationCommand, DelegatedWorkspace, DelegationCreationPremise,
-    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, Task, TaskCommitOutcome,
-    TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRecord,
-    TaskRef, TaskRepository, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
-    WorkspaceAssocId, WorkspaceFolderRef, orchestrate_delegation,
+    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, Task, TaskAgentResultArrival,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress,
+    TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord,
+    TaskTechnicalError, WorkspaceAssocId, WorkspaceFolderRef, orchestrate_delegation,
 };
 
 /// The repository-side script for one `create_delegation` call.
@@ -134,6 +135,40 @@ impl TaskRepository for FakeTaskRepository {
     ) -> Result<Option<DelegationRef>, TaskTechnicalError> {
         Ok(None)
     }
+
+    async fn record_task_result_arrival(
+        &self,
+        _arrival: TaskAgentResultArrival,
+    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_result_arrival is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_task_result(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_task_result is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_delegation_result(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        Ok(None)
+    }
+
+    async fn adopt_result(
+        &self,
+        _claim: TaskResultAdoptionClaim,
+    ) -> Result<TaskResultAcceptance, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("adopt_result is outside this fixture's scope"),
+        })
+    }
 }
 
 fn clock() -> WallClockWithTz {
@@ -168,6 +203,8 @@ fn record(
             reference,
             purpose,
             assignee,
+            progress: TaskProgress::InProgress,
+            adopted_result: None,
         },
         revision: TaskRevisionRecord {
             reference,
@@ -218,6 +255,41 @@ async fn missing_task_is_reported_without_creating_a_delegation() {
     assert!(
         repository.delegated().is_empty(),
         "a missing Task must not create a delegation"
+    );
+}
+
+#[tokio::test]
+async fn terminal_task_is_reported_without_creating_a_delegation() {
+    let task = TaskId::generate();
+    let reference = TaskRef {
+        task,
+        revision: revision(1),
+    };
+    let purpose = TaskPurposeRef {
+        task,
+        adopted_revision: revision(1),
+    };
+    let mut loaded = record(task, revision(1), purpose, TaskContextEntryId::generate());
+    loaded.task.progress = TaskProgress::Completed;
+    let repository = FakeTaskRepository::new(Ok(Some(loaded)), assignee());
+
+    let outcome = orchestrate_delegation(
+        &repository,
+        command(reference, DelegationScope { workspace: None }),
+    )
+    .await
+    .expect("terminal progress is a domain outcome, not a technical error");
+
+    assert_eq!(
+        outcome,
+        DelegationOutcome::TaskTerminal {
+            task,
+            progress: TaskProgress::Completed,
+        }
+    );
+    assert!(
+        repository.delegated().is_empty(),
+        "a terminal Task must not create a delegation"
     );
 }
 
