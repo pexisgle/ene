@@ -98,7 +98,7 @@ ene はホストPC上で動作する非同期システムです。並行処理�
 
 | ドメインID | 直列化の単位 | このドメインに含める状態変更 | 並行して実行してよい処理 | 備考 |
 |---|---|---|---|---|
-| **SD-Task** | タスクごと（`TaskId`） | 追加指示の適用（新リビジョンと新コンテキストの前進）、委任エージェント作成の受付、タスクの完了・失敗・キャンセルの確定、結果の採用判定 | 異なる `TaskId` のすべての処理。同一タスクであっても読み取り専用の参照、進捗表示、思考ログの取得 | タスクの達成判定、外部作用の確定、権限の確認はそれぞれ別個の責任であり、ひとつの更新に混同しません。 |
+| **SD-Task** | タスクごと（`TaskId`） | 追加指示の適用（新リビジョンと新コンテキストの前進）、委任エージェント作成の受付（progress の `Started → InProgress` を含む）、結果の到着 record と delegation の execution seal、採用判定、Task progress の terminal への CAS（完了・失敗。キャンセルは後続 producer が同じ不分区間に追加）。AU3/AU4/AU14/AU5 の同一不分区間で非 terminal を必須とする terminal admission gate と、AU14/AU5 の同一不分区間で must-not-be-sealed を必須とする execution seal gate も含む | 異なる `TaskId` のすべての処理。同一タスクであっても読み取り専用の参照、進捗表示、思考ログの取得 | タスクの達成判定、外部作用の確定、権限の確認はそれぞれ別個の責任であり、ひとつの更新に混同しません。progress は revision とは別軸で、terminal 状態は吸収的です。terminal は専用の `TaskTerminal` outcome で拒否し、revision stale へ丸めません。execution seal（final result 到着で閉じる 1 delegation の lifetime）は Task の terminal とは別の gate であり、Task が InProgress でも成立します（`ExecutionSealed`）。採用判定（AU15b）は、同じ不分区間で Task-wide completion barrier（同じ `TaskId` の全 revision / 全 delegation の `action_attempt` に `Unknown` が無いこと）を検証してから `Completed` へ CAS し、1 件でも `Unknown` が残れば完了しません。 |
 | **SD-Attempt** | アクション試行ごと（`ActionAttemptId`） | 試行の開始（委任対応・依拠タスクリビジョン・現在のタスクリビジョン・現在の `workspace_assoc`・委任 `scope_assoc`・未使用の `relied_evaluation` の照合付き挿入）、確定度の更新（`Unknown → Confirmed`、証拠不能時の `Unknown` 据え置き）、停止要求・停止結果・保留（hold）の記録 | 異なる試行の実行や結果報告。同一試行の読み取り | 試行履歴は追加専用とし、行ごとの比較更新（CAS）で管理します。Action 評価 ID と試行 ID は single-use です。タスクの達成更新は別トランザクションで行います。 |
 | **SD-Presence** | コンパニオンごとの滞在帰属（`CompanionId`） | 滞在先帰属の遷移（`旧端末 → 移行中 → 新端末`）、世代番号のインクリメント、アクティブ端末の切り替え、復旧ヒントの更新 | 異なるコンパニオンの滞在処理。同一コンパニオンであっても表示、音声再生、画面観測などの非帰属処理 | 端末との通信疎通確認はDBの外で行います。移行期間中は新旧どちらの端末でも端末依存の新規処理を開始しません。 |
 | **SD-Cap** | コスト上限ごと（`CapId`） | 利用枠の仮押さえ（reservation）の登録と上限チェック、確定時の仮押さえから実績への振り替え、不要枠の解放 | 異なるコスト上限の消費。同一上限の読み取りや集計表示。仮押さえ完了後の推論処理そのもの | 同一トランザクション内でチェックし、処理中や成否不明の枠を勝手にゼロとみなしてはいけません。 |
@@ -147,8 +147,9 @@ ene はホストPC上で動作する非同期システムです。並行処理�
 
 | 実行しようとする処理 | 確定直前に不可分（アトミック）に比較するもの | 不一致だった場合の安全な扱い |
 |---|---|---|
-| **タスクへの委任・追加指示・アクション開始** | `(task_id, 期待されるtask_revision)` × 現在のタスクリビジョン × 委任スコープ × ワークスペースの有効性 × 追加指示の前提（委任スコープ・ワークスペース・追加指示の前提を変更できる producer が存在するスライスが、同じ不分区間の比較に加えます。AU3 の作成スライスでは期待リビジョンと現在のリビジョンの比較照合が現在性を確定し、スコープは依拠したタスク単位から写した写しを保存します。Task Agent の推論開始も、委任の対応関係と依拠タスクリビジョンの比較を推論試行の確定（attempt claim）と同一の不分区間で行います） | 処理を開始せず、最新状態での再評価に戻します。 |
-| **外部アクションの新規開始** | 試行が前提とする `(タスクリビジョン, 委任スコープ, 操作対象と種別, 依拠した権限評価)` × 現在の最新条件 × クライアント依存なら滞在世代と接続状況 × 消去・復元の保留状態（Workspace 内ファイルシステムのスライスでは、委任対応 × 依拠タスクリビジョン × 現在のタスクリビジョン × 現在の `workspace_assoc` × 委任 `scope_assoc` × 未使用の `relied_evaluation` を `action_attempt` 挿入と同一の不分区間で比較します。依拠権限評価は K-B.1 の single-use な Action 評価 ID で、同じ ID での二度目の開始は拒否します。在席・消去・復元の比較は、それぞれの producer を持つスライスが同じ不分区間に加えます） | 処理を開始しません。ユーザーの確認待ちが必要な場合は待機状態にします。 |
+| **タスクへの委任・追加指示・アクション開始** | `(task_id, 期待されるtask_revision)` × 現在のタスクリビジョン × 現在の `task.progress`（非 terminal） × delegated execution の seal 状態（AU14/AU5 は not sealed） × 委任スコープ × ワークスペースの有効性 × 追加指示の前提（委任スコープ・ワークスペース・追加指示の前提を変更できる producer が存在するスライスが、同じ不分区間の比較に加えます。AU3 の作成スライスでは期待リビジョンと現在のリビジョンの比較照合が現在性を確定し、スコープは依拠したタスク単位から写した写しを保存します。Task Agent の推論開始も、委任の対応関係と依拠タスクリビジョンの比較、非 terminal な progress、およびその delegation が seal 済みでないことを推論試行の確定（attempt claim）と同一の不分区間で行います。Action 開始は委任（execution lifetime）を AU5 で照合します） | 処理を開始せず、最新状態での再評価に戻します。terminal（`Completed` / `Failed`）は再評価しても開始できないため `TaskTerminal` として区別し、`Stale*` へ丸めません。seal 済み delegation は Task が InProgress でも再開できないため `ExecutionSealed` として区別します（terminal と混同しません）。 |
+| **タスク結果の記録・採用・完了確定** | 結果 identity・本文の 1 回だけの到着 record と同一不分区間での delegation の execution seal（1 delegation につき final result は最大 1 つ）× delegation 行から解決する依拠 `(task_id, task_revision)` × 現在の `task.revision` と purpose identity（本文一致は使わない）× 現在 `task.progress` の非 terminal × cancel marker（後続 producer が追加）× delegation（execution lifetime）から列挙した `action_attempt` の authoritative set と claim の完全一致（欠如・追加・重複は技術的エラー。membership は seal 時点で固定）× 各試行の確定度（すべて `ConfirmedSuccess` のみ完了可。空集合は durable に空の場合のみ有効）× Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと） | 現在 revision が前進済み・terminal・cancel marker ありなら現在へ採用せず `RecordedToOriginalOnly` として元の依拠リビジョンへ attempt 相関を記録します。blockers（authoritative set の `ConfirmedSuccess` 以外 ∪ 同じ `TaskId` の全 revision / 全 delegation の `Unknown`。集合として重複を 1 回に畳む）が空でなければ `WithheldByEffectFacts` として現在 Task を完了せず、result-local の attempt 相関のみ記録します（barrier で見つけた試行は `task_result_attempt` に刻印しません）。cross-delegation / 旧 revision の `ConfirmedSuccess` / `ConfirmedFailure` は barrier だけを理由に block せず、inference attempt と unsealed delegation の存在も barrier に含めません。seal 後に確定度が客観的証拠で進展した場合は同じ result の再評価で完了が成立し得ます（membership は変えません）。claim の欠如・追加・重複は部分的な単位として技術的エラーにし、stale / Withheld へ丸めません。同じ result ID の再 arrival は本文を増やさず同じ判定を再評価し、二度目の terminal transition を行いません。 |
+| **外部アクションの新規開始** | 試行が前提とする `(タスクリビジョン, 委任（execution lifetime）とその seal 状態, 操作対象と種別, 依拠した権限評価)` × 現在の最新条件 × 現在の `task.progress`（非 terminal）× delegated execution が not sealed × クライアント依存なら滞在世代と接続状況 × 消去・復元の保留状態（Workspace 内ファイルシステムのスライスでは、委任対応 × 依拠タスクリビジョン × 現在のタスクリビジョン × 現在の `task.progress` × 現在の `workspace_assoc` × 委任 `scope_assoc` × 未使用の `relied_evaluation` × その delegation の final result 行が存在しないことを `action_attempt` 挿入と同一の不分区間で比較・保存します。依拠権限評価は K-B.1 の single-use な Action 評価 ID で、同じ ID での二度目の開始は拒否します。在席・消去・復元の比較は、それぞれの producer を持つスライスが同じ不分区間に加えます） | 処理を開始しません。terminal は `TaskTerminal`、seal 済みは `ExecutionSealed`、その他の前提不一致は `StalePremise` として区別します。ユーザーの確認待ちが必要な場合は待機状態にします。 |
 | **アクション確定度の更新** | `(attempt_id, 期待される確定度=Unknown)` × 事実確認が取れた新たな証拠（実行・拡張自身による対象の事後確認。エージェントの自己申告は証拠にしない） | 確実な証拠がない限り書き換えません。確定済みの値からの更新は行いません。現在のタスクへの採用可否は別個に判定します。 |
 | **クライアント依存活動の開始・継続** | 端末が主張する世代番号 × ホストが管理する現在の滞在世代番号 × 現在の接続・可用性 × 最新の権限や保留状態 | 接続や状態が確認できない場合は処理を継続しません。 |
 | **削除区間中のデータ受入・生成・再保存** | 届いた・生成された情報の `(情報源との関係, 取得日時)` × 進行中の消去条件 `(operation, sweep, valid_interval)` | 削除区間に該当するデータはすべて消去対象とし、実行中の処理が誤って再保存しないようにブロックします。削除完了後に届いた古い関連データも再保存しません。 |
@@ -174,7 +175,7 @@ ene はホストPC上で動作する非同期システムです。並行処理�
 
 | ドメイン | 選択するメカニズム | 選定の理由と、あえて採用しない選択肢 |
 |---|---|---|
-| **タスク / 追加指示 / 委任受付** | タスクごとの局所的な直列化 ＋楽観的リビジョン比較（CAS）＋短い Immediate トランザクション。局所直列化は、同一プロセス内で同じ Task のタスクリビジョンまたは現在値を更新する producer が存在するスライスでは per-Task mailbox / per-Task Mutex として導入し、それまでの単一 producer 段階では単一の書き込み接続による短い Immediate トランザクション内の比較照合が同じ現在性保証を担います | タスクの進行ポインタを正しく前進させるためです。システム全体を止めるグローバルロックは不要であり、異なるタスク同士は完全に並行動作できます。メカニズムの選択は Design Freedom であり、完了確定・結果採用など他の SD-Task メンバーの比較条件はそれぞれの producer スライスが定めます。 |
+| **タスク / 追加指示 / 委任受付** | タスクごとの局所的な直列化 ＋楽観的リビジョン比較（CAS）＋短い Immediate トランザクション。局所直列化は、同一プロセス内で同じ Task のタスクリビジョンまたは現在値を更新する producer が存在するスライスでは per-Task mailbox / per-Task Mutex として導入し、それまでの単一 producer 段階では単一の書き込み接続による短い Immediate トランザクション内の比較照合が同じ現在性保証を担います。AU3/AU4/AU14/AU5 は同じ比較内で非 terminal な `task.progress` を必須とし、AU14/AU5 はさらにその delegation の execution seal（final result 行の不存在）を必須とします | タスクの進行ポインタを正しく前進させるためです。システム全体を止めるグローバルロックは不要であり、異なるタスク同士は完全に並行動作できます。メカニズムの選択は Design Freedom であり、完了確定・結果採用など他の SD-Task メンバーの比較条件はそれぞれの producer スライスが定めます。terminal と execution seal の拒否は全 producer が同じ不分区間で行い（`TaskTerminal` / `ExecutionSealed`）、cancel marker の producer と混同しません。 |
 | **アクション受付・確定度管理** | 追加専用の履歴記録（append-only insert）＋試行ごとの確定度比較更新（CAS）＋短いトランザクション。実行自体は非同期並行 | 試行は一度起きた歴史的事実であり現在の可変状態ではないため、全体的な順序制御は不要です。エージェントの自己申告を鵜呑みにしない安全策はコード上で担保します。 |
 | **権限・ルールの評価** | 評価処理自体はスナップショット読み取りによる完全並行。確定時（予約や開始）のみ短いトランザクションで現在条件と再照合 | 評価処理の並行性をロックで潰さないためです。過去の許可キャッシュを生きた許可として誤認しないようロジックで制御します。 |
 | **利用コスト・リソース枠** | 仮押さえ（Reserved）→ 確定（Committed）/ 解放（Released）の3状態管理＋短いトランザクション内でのアトミックチェック。仮押さえ完了後の推論はロックなし並行 | 単純な読み取りだけでは並行リクエストによる上限突破を防げないため、事前の引き当てが必須です。ただし推論中までロックを抱え込むことは避けます。 |
@@ -195,18 +196,18 @@ ene はホストPC上で動作する非同期システムです。並行処理�
 ### 7.1 前提と直列化
 
 - **タスクの作成**: タスク本体、初期リビジョン、初期コンテキスト、および確定した場合のワークスペース紐付けをひとつのトランザクションで不可分に永続化（AU2）し、コミットが完了するまでは委任先やエージェントから見えないようにします（durable-before-visible）。
-- **追加指示（steering）**: ユーザーからの新しい指示は、タスクの最新リビジョンとコンテキストを安全に前進させるアトミックな更新（AU4）として記録し、過去のリビジョンも履歴として残します。過去の指示で作られた結果を新しい目標に自動適用してはいけません。
-- **委任エージェントの作成**: 親タスクの期待リビジョンと一致していることをアトミックに確認（AU3）した上で作成します。同じタスクの同じリビジョンに対する複数の委任は許可し、単一委任の制約を課しません。再委任やリトライは、既存の委任 identity を再利用せず、新しい委任 identity で開始します（委任 identity の replay・重複排除は、それを必要とする producer を持つスライスで追加します）。
-- **直列化の範囲**: 同一の `TaskId` に対する追加指示、委任の受付、完了の確定、結果の採用判定は、`SD-Task` ドメインにより順番に直列化します。異なる `TaskId` 同士は完全に並行して実行できます。直列化の実現メカニズム（per-Task mailbox / per-Task Mutex / 短い即時トランザクション内の比較照合）は Design Freedom です。委任作成の現在性は、単一の書き込み接続が担う短い `Immediate` トランザクション内で、期待リビジョンと現在のタスクリビジョンを比較照合（CAS）することで保証します。完了確定や結果採用など、他の `SD-Task` メンバーの比較条件は、それぞれの producer を持つスライスが定めます（リビジョン CAS がすべてのメンバーの直列化を代替するわけではありません）。per-Task mailbox / Mutex は、同一プロセス内で同じ Task のタスクリビジョンまたは現在値を更新する producer が増えるスライスで、必要になった時点で追加します。
+- **追加指示（steering）**: ユーザーからの新しい指示は、タスクの最新リビジョンとコンテキストを安全に前進させるアトミックな更新（AU4）として記録し、過去のリビジョンも履歴として残します。同じ不分区間で現在の `task.progress` が非 terminal であることを必須とし、terminal は `TaskTerminal` として何も書き込みません。過去の指示で作られた結果を新しい目標に自動適用してはいけません。
+- **委任エージェントの作成**: 親タスクの期待リビジョンと一致し、かつ現在の `task.progress` が非 terminal であることをアトミックに確認（AU3）した上で作成し、`Started → InProgress` を同じトランザクションで進めます（terminal は `TaskTerminal` で書き込みなし）。同じタスクの同じリビジョンに対する複数の委任は許可し、単一委任の制約を課しません。再委任やリトライは、既存の委任 identity を再利用せず、新しい委任 identity で開始します（委任 identity の replay・重複排除は、それを必要とする producer を持つスライスで追加します）。既に final result で seal された delegation D1 を再利用せず、Task が non-terminal のままなら新しい delegation D2 を AU3 で作成して work を継続できます（D2 は新しい execution lifetime であり、D1 の Action 試行集合を引き継ぎません）。
+- **直列化の範囲**: 同一の `TaskId` に対する追加指示、委任の受付、完了の確定、結果の到着 record・採用判定は、`SD-Task` ドメインにより順番に直列化します。異なる `TaskId` 同士は完全に並行して実行できます。直列化の実現メカニズム（per-Task mailbox / per-Task Mutex / 短い即時トランザクション内の比較照合）は Design Freedom です。委任作成の現在性は、単一の書き込み接続が担う短い `Immediate` トランザクション内で、期待リビジョン・現在のタスクリビジョン・非 terminal な progress を比較照合（CAS）することで保証します。結果の到着 record は result identity の PK（再 arrival の 1 回だけの記録）と 1 delegation につき final result 最大 1 つ（UNIQUE(delegation_id) 相当）で本文と execution seal を保護し、採用・完了確定の現在性は、delegation 行から解決する依拠リビジョンと現在 `task.revision` / purpose identity の一致、非 terminal な `task.progress` からの terminal への CAS、delegation（execution lifetime）から列挙した `action_attempt` の authoritative set と claim の完全一致、すべて `ConfirmedSuccess` の読み取り、および Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと）の比較を同じ不分区間で行うことで保証します（リビジョン CAS がすべてのメンバーの直列化を代替するわけではありません）。per-Task mailbox / Mutex は、同一プロセス内で同じ Task のタスクリビジョンまたは現在値を更新する producer が増えるスライスで、必要になった時点で追加します。
 
 ### 7.2 競合制御のルール
 
 - **指示の競合（steering vs steering）**: 2つの追加指示が同時に届いた場合、`SD-Task` の順序で直列化され、先に確定した指示が最新リビジョンとなります。後から届いた指示は、その新しいリビジョンに対するさらなる変更として評価します。指示を勝手に混ぜ合わせたり上書きしたりしてはいけません。会話のログ記録と、タスクに反映された内容、および保留中の指示は明確に区別し、反映できなかった場合は理由と選択肢を提示します。
 - **委任の競合（delegation vs steering）**: 委任関係は作成時点のタスクリビジョンとスコープのコピーを保持します（`DelegationRef`）。追加指示によってタスクのリビジョンが進んだ後に、古いリビジョンを前提とした委任作成要求が届いた場合は受理せず、最新指示のもとで再評価させます。実行中の委任と追加指示が交差した場合、親側は古い委任の停止を試み、古い委任の結果を新しい目的に勝手に流用しません。
-- **Task Agent の推論開始 vs steering（inference start vs steering）**: Task Agent の推論は、推論試行の確定（attempt claim）と同一の短い `Immediate` トランザクションで、(1) 前提の委任が `delegation` 行に存在すること、(2) その行の `(task_id, task_revision)` が依拠 `TaskRef` 前提と一致すること、(3) 現在の `task` 行のリビジョンが依拠リビジョンと一致すること、を照合してから開始します。委任行・タスク行の欠如や (3) の不一致は `TaskPremiseStale`、同意・認証情報の不一致は `Stale`、(2) の不一致や部分的・不整合な行は技術的エラー（fail closed）として区別し、新規推論を provider へ一切送信しません。確定済みの試行は、その後の追加指示によって開始を取り消されません（結果の採用判定は別の不分区間で行い、遅延結果は元リビジョンへの記録に留めます）。provider I/O は試行確定後にロックなしで実行し、推論試行自体の自動再実行は行いません。
+- **Task Agent の推論開始 vs steering（inference start vs steering）**: Task Agent の推論は、推論試行の確定（attempt claim）と同一の短い `Immediate` トランザクションで、(1) 前提の委任が `delegation` 行に存在すること、(2) その行の `(task_id, task_revision)` が依拠 `TaskRef` 前提と一致すること、(3) 現在の `task` 行のリビジョンが依拠リビジョンと一致すること、(4) 現在の `task.progress` が非 terminal であること、(5) その delegation が seal 済みでないこと（その delegation の `task_result` 行が存在しないこと）、の 5 条件を照合してから開始します。委任行・タスク行の欠如や (3)(4)(5) の不一致は `TaskPremiseStale`、同意・認証情報の不一致は `Stale`、(2) の不一致や部分的・不整合な行は技術的エラー（fail closed）として区別し、新規推論を provider へ一切送信しません。推論側は Task lifecycle の値型を import せず (4)(5) を `TaskPremiseStale` として拒否し、作業側の再読込が progress の terminal を検出した場合は `StaleTaskRevision` ではなく `TaskTerminal { task, progress }`、`load_delegation_result(delegation)` で delegation の final result（seal）を検出した場合は `TaskAgentTurnOutcome::ExecutionSealed { delegation }` として説明します（terminal と execution seal は別概念であり、Task が `InProgress` のままでも delegation は seal 済みになり得ます）。AU14 と AU15a（結果到着 record と seal）は同一 SQLite master 上の短い `Immediate` トランザクションで直列化されるため、`AU14 commits → AU15a seals` ならその推論試行は開始済みの durable fact として残り、`AU15a seals → AU14 arrives` なら AU14 は送信前に拒否し provider I/O を開始しません。確定済みの試行は、その後の追加指示によって開始を取り消されません（結果の採用判定は別の不分区間で行い、遅延結果は元リビジョンへの記録に留めます）。provider I/O は試行確定後にロックなしで実行し、推論試行自体の自動再実行は行いません。
 - **キャンセルの競合**: キャンセル要求は `SD-Task` を通じて即座にタスクに記録され、委任先やアクション試行へ速やかに停止が伝えられます。キャンセルの受付と実際の停止完了は区別し、停止できなかった処理や成否不明な外部作用は事実として記録して報告します。キャンセル後に遅れて届いたエージェントの結果は、元リビジョンの履歴に留め、タスクの完了成果として受け入れてはいけません。
-- **遅れて届いたエージェントの結果（delayed Agent result）**: 結果の帰属は「試行 → タスクリビジョン → 現在のタスク」の順に辿って検証します（CI §6.3）。結果が到着した時点で、結果が前提としていたタスクリビジョンから解決した目的（`task_revision` スナップショットから解決し、本文の一致では照合しません）が、現在のタスクの最新状態と一致するかを照合します。一致しない場合は現在の会話やタスクに反映せず、元のアクション履歴にのみ記録します。
-- **タスク完了の競合**: タスクの完了確定は、`SD-Task` の短いトランザクション内で「現在のリビジョンが期待通りか」「未完了・判断待ち・成否不明な処理が適切に整理されているか」を確認して行います。複数の完了報告が交差した場合は先着優先とし、後から届いた報告は重複完了にせず履歴記録とします。
+- **遅れて届いたエージェントの結果（delayed Agent result）**: final result の到着はまず result identity・本文の 1 回だけの durable record と、同じ不分区間での delegation の execution seal とし（採用・完了判定より先）、その後の採用判定で帰属を delegation 行 → 依拠タスクリビジョン → 現在のタスクの順に辿って検証します（CI §6.3）。採用判定は 1 つの短い `Immediate` トランザクションで、delegation（execution lifetime）から列挙した `action_attempt` の authoritative set と claim の完全一致（欠如・追加・重複は技術的エラー。membership は seal 時点で固定）、現在 `task.revision` が依拠リビジョンと一致するか、purpose identity が依拠リビジョンの `task_revision` snapshot と一致するか（本文の文字列一致は使いません）、`task.progress` が非 terminal か、cancel marker（後続 producer が導入）が無いかを照合します。現在 revision と一致して完了へ進む場合は、同じ不分区間で Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと）も検証し、1 件でも `Unknown` が残れば result-local の attempt 相関のみを記録して `WithheldByEffectFacts` を返します。一致しない場合は attempt 相関のみを記録し、現在のタスクや会話へ反映せず `RecordedToOriginalOnly` を返します。
+- **タスク完了の競合**: タスクの完了確定は、`SD-Task` の短いトランザクション内で「result 行が到着 record 済みか」「delegation（execution lifetime）から列挙した authoritative set が claim と完全一致するか（membership は seal 時点で固定）」「現在のリビジョンが依拠リビジョンと一致するか」「authoritative set の Action 試行がすべて `ConfirmedSuccess` か（`Unknown` / `ConfirmedFailure` が無いか。空集合は durable に空の場合のみ。seal 後の証拠更新で再評価可能）」「同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いか（Task-wide completion barrier。result-local set の外も対象）」「`task.progress` が非 terminal か」を確認して行います。AU5 Action 開始と AU15b 完了確定は同一 SQLite master 上の短い `Immediate` トランザクションで直列化されるため、`AU5 commits A2 → AU15b` なら barrier が A2 を検出して完了を保留し、`AU15b Completed → AU5` なら AU5 が terminal gate で `TaskTerminal` として拒否され、A2 の行も外部作用も発生しません（この 2 順序以外の隙間はありません）。確定度更新と AU15b も同じ master で直列化され、`Unknown → Confirmed*` が先なら barrier は clear、AU15b が先で `Unknown` を見れば `WithheldByEffectFacts` となり、その後 A2 が settlement すると同じ result の再評価で完了が成立し得ます（Task owner は確定度を書き換えません）。複数の完了報告（異なる delegation の異なる result）が交差した場合は、`Immediate` トランザクションと progress の CAS により先に確定した方のみが完了し、後から届いた報告は attempt 相関のみを記録して `RecordedToOriginalOnly` とします（二重完了にしません）。完了後に遅れて届いた古い result は履歴へ帰属させ、現在 Task を変更しません。同じ delegation への 2 つ目の final result は AU15a が受理せず fail closed です。
 - **再試行と再起動（retry / restart）**: リトライや再委任は、その時点で依拠できる現在のタスクリビジョンを前提として、新しい委任 identity・新しい試行（Attempt）として開始します（同じリビジョンへの再委任・リトライも既存の委任 identity を再利用しません）。ホスト再起動後は、保存済みの進捗、確認済みの外部作用、成否不明な状態をユーザーに提示して再開指示を待ち、エージェントを無条件で勝手に自動再開してはいけません。
 
 ### 7.3 処理フローの例（追加指示 vs 結果到着）
@@ -217,6 +218,10 @@ BEGIN IMMEDIATE;
   IF task が存在しない THEN 
     ROLLBACK;
     RETURN MissingTask { task }; -- タスクが存在しないため書き込みなしで終了
+  END IF;
+  IF cur.progress が terminal THEN
+    ROLLBACK;
+    RETURN TaskTerminal { task, progress: cur.progress }; -- 吸収的な終端。revision stale と区別し、書き込みなしで終了
   END IF;
   IF cur != expected_revision THEN 
     ROLLBACK;
@@ -232,22 +237,85 @@ BEGIN IMMEDIATE;
   -- 後の前進では再記録しない）。安全保留スライスにおける保留照合も同一トランザクションに加わる
 COMMIT;
 
--- 遅れて届いたエージェント結果の受付 (ロックなしで帰属を解決後、SD-Task の短い受入トランザクション)
-premise = result.task_ref; -- (task_id, 処理開始時のリビジョン前提)
-                           -- premise の目的は premise.revision の task_revision snapshot から解決する
+-- 結果の到着記録と execution seal (SD-Task の短い Immediate トランザクション。
+-- Task Agent が final result を提出した finalization 境界で、orchestrate が最終結果を可視化する前に実行)
+-- 現在性・確定度・terminal・完了は判定しない（採用は AU15b）。1 回の inference turn の provider 出力は入れない
 BEGIN IMMEDIATE;
-  cur = SELECT revision, purpose FROM task WHERE task_id = ?;
-  IF premise.revision != cur.revision OR premise.purpose != cur.purpose THEN
-    -- 現在のタスクとは前提が食い違っているため、現在の達成には採用しない
-    -- 元の試行履歴にのみ記録して終了する
-    RETURN AdoptedToOriginalOnly;
+  delegation = SELECT task_id, task_revision FROM delegation WHERE delegation_id = ?;
+  IF delegation が存在しない THEN
+    ROLLBACK; RETURN 技術的エラー;  -- record 前提の対応が無い。採用時のドメイン結果は AU15b が返す
+  END IF
+  IF 同じ result_id の task_result 行が既に存在 THEN
+    -- 本文は再保存しない。本文・delegation・依拠リビジョンが一致すれば COMMIT（retry は冪等）、
+    -- 不一致なら ROLLBACK; RETURN 技術的エラー（identity 再利用）
+  ELSE IF 同じ delegation の task_result 行が既に存在 THEN
+    -- 1 delegation につき final result は最大 1 つ。2 つ目の final result は受理せず
+    ROLLBACK; RETURN 技術的エラー;  -- fail closed（domain outcome にしない）
   ELSE
-    -- 前提が一致しているため、さらに最新の権限・消去・復元・コスト上限と照合し、問題なければ確定
-    UPDATE task SET ...;
-    RETURN Accepted;
-  END IF;
-COMMIT;
+    -- task_id / task_revision は delegation 行から写す（arrival は再掲しない）
+    INSERT INTO task_result(result_id, task_id, task_revision, delegation_id, body, recorded_at)
+      VALUES (result_id, delegation.task_id, delegation.task_revision, delegation_id, body, now);
+    -- この行の commit がそのまま delegation の execution seal になる（seal 専用の列・行を置かない）
+  END IF
+COMMIT;  -- 本文・identity・execution seal が durable。adopted_revision は NULL のまま
+
+-- 結果の採用・完了確定 (SD-Task の短い Immediate トランザクション。到着 record/seal の後)
+-- 依拠リビジョンは delegation 行から、目的は依拠リビジョンの task_revision snapshot から解決し、
+-- purpose text の文字列一致では照合しない
+BEGIN IMMEDIATE;
+  result_row = SELECT task_id, task_revision, delegation_id, adopted_revision
+    FROM task_result WHERE result_id = ?;
+  IF result_row が存在しない THEN
+    ROLLBACK; RETURN MissingResult { result };  -- 識別子不在は書き込みなしの正常系
+  END IF
+  delegation = SELECT task_id, task_revision FROM delegation WHERE delegation_id = result_row.delegation_id;
+  IF delegation が存在しない THEN
+    ROLLBACK; RETURN MissingDelegation { delegation: result_row.delegation_id };
+  END IF
+  IF (delegation.task_id, delegation.task_revision) != (result_row.task_id, result_row.task_revision) THEN
+    ROLLBACK; RETURN 技術的エラー;  -- 到着 record 後の対応破損。stale へ丸めない
+  END IF
+  -- delegation（execution lifetime）から authoritative set（この delegated execution が durable start した
+  -- Action 試行の完全な集合。membership は AU15a の seal 時点で固定）を列挙する
+  attempts = SELECT attempt_id, delegation_id, task_id, task_revision, certainty
+    FROM action_attempt WHERE delegation_id = result_row.delegation_id;
+  IF attempts の (delegation, task, task_revision) が result_row と不一致
+     OR claim.attempt_refs と集合として不一致（欠如・追加・重複） THEN
+    ROLLBACK; RETURN 技術的エラー;  -- 不整合な単位。stale / Withheld へ丸めない
+  END IF
+  cur = SELECT revision, purpose_adopted_revision, progress FROM task WHERE task_id = result_row.task_id;
+  IF cur が存在しない THEN
+    ROLLBACK; RETURN MissingTask { task: result_row.task_id };
+  END IF
+  IF result_row.adopted_revision IS NOT NULL THEN
+    -- この result 自身が過去に採用を確定済み。二度目の terminal transition は行わず同じ判定を返す
+    IF result_row.adopted_revision != result_row.task_revision THEN
+      ROLLBACK; RETURN 技術的エラー;  -- 採用リビジョンと依拠リビジョンの不整合
+    END IF
+    COMMIT; RETURN AdoptedAsCompletion((task, result_row.adopted_revision));
+  END IF
+  IF cur.revision != result_row.task_revision OR cur.progress が terminal OR cancel marker あり THEN
+    INSERT task_result_attempt 相関（attempts）;  -- 1 回だけ
+    COMMIT; RETURN RecordedToOriginalOnly;
+  END IF
+  -- Task-wide completion barrier（同じ TaskId の全 revision / 全 delegation。steering 前の古い revision の
+  -- started Action を含む）。入力は action_attempt の durable facts だけを使い、timestamps・delegation liveness・
+  -- ephemeral alive flag・result body・caller の attempt_refs は使わない。不整合な行は技術的エラーとして fail closed
+  unknown_attempts = SELECT attempt_id FROM action_attempt
+    WHERE task_id = result_row.task_id AND certainty = 'unknown';
+  blockers = 集合（attempts の certainty != 'confirmed_success' の attempt_id）∪ 集合（unknown_attempts）; -- 重複は 1 回
+  IF blockers が空でない THEN
+    INSERT task_result_attempt 相関（attempts）;  -- result-local の検証済み集合のみ。barrier の試行は刻印しない
+    COMMIT; RETURN WithheldByEffectFacts { attempts = blockers };
+  END IF
+  INSERT task_result_attempt 相関（attempts）;  -- authoritative set のみ。1 回だけ
+  UPDATE task_result SET adopted_revision = cur.revision WHERE result_id = ? AND adopted_revision IS NULL;
+  UPDATE task SET progress = 'completed'
+    WHERE task_id = ? AND progress NOT IN ('completed','failed');  -- terminal への CAS（barrier 判定と同一トランザクション）
+  COMMIT; RETURN AdoptedAsCompletion((task, cur.revision));
 ```
+
+採用判定では、`purpose` を identity / adopted_revision の対応で照合し、目的本文の文字列一致を使いません。Action の確定度は ene-action owner の事実のまま読み取るだけで、Task owner は書き換えません。`Unknown` は新しい客観的証拠が確定するまで保持し、seal 後に証拠が付いて `ConfirmedSuccess` へ進んだ場合は同じ result の再評価で完了が成立し得ます（membership は seal 時点のまま）。attempt 集合は delegation（execution lifetime）から durable に列挙した authoritative set だけであり、caller の `attempt_refs` はこの集合との完全一致にのみ使います（単独で集合を狭めたり広げたりできません）。Task-wide completion barrier は result-local authoritative set とは別の gate であり、同じ `TaskId` に属する全 revision / 全 delegation の試行を `action_attempt` から `task_id` と `certainty` で読み、`Unknown` が 1 件も無いことを Completed CAS と同じ不分区間で要求します（timestamps・delegation liveness・ephemeral alive flag は使いません）。cross-delegation / 旧 revision の `ConfirmedSuccess` / `ConfirmedFailure` は barrier だけを理由に完了を block せず、in-flight の inference attempt と unsealed delegation の存在も barrier に含めません。barrier で見つけた試行は `task_result_attempt` に刻印しません。到着 record と seal は採用判定より先に確定するため、採用判定の成否や途中クラッシュで本文を失いません。同じ result identity の retry は本文行と attempt 相関行を増やさず、二重の terminal transition を行いません。同じ delegation の異なる result identity は 2 つ目の final result として受理されません。
 
 ## 8. 外部アクション（認可と実行結果追跡の分離）
 
@@ -257,7 +325,8 @@ COMMIT;
 
 新しいアクション試行（`action_attempt`）を登録する際、ごく短い `Immediate` トランザクションの中で以下を不可分に照合します：
 
-- `(task_id, 期待されるtask_revision)` が現在のタスクリビジョン、委任の有効性、ワークスペースの有効性と一致しているか。
+- `(task_id, 期待されるtask_revision)` が現在のタスクリビジョン、委任の有効性、ワークスペースの有効性と一致し、現在の `task.progress` が非 terminal であるか（terminal は `TaskTerminal` として開始しない）。
+- 委任（execution lifetime）が seal 済みでないか（その delegation の `task_result` 行が存在しない。seal 済みは `ExecutionSealed` として開始せず、Task が InProgress でも拒否する）。
 - 解決された具体的な操作対象と操作種別（読み取り、作成、編集、削除、実行など）が正当か。
 - 根拠となる権限評価が、最新のルールリビジョン、ユーザー同意、端末条件、コスト上限、保留状態と合致しているか（過去の許可記録や解決済み経路だけを根拠に開始してはいけません）。
 - クライアント端末に依存する処理であれば、端末の滞在世代番号と実際の接続状況が有効か。
@@ -450,8 +519,8 @@ DBへの登録を先行させて「DBにレコードはあるがファイルが�
 | **1. キャンセル要求の受付（Request）** | ユーザーの指示、管理操作、権限失効、保留によって「処理を止めてほしい」という要求を受け付けた段階。 | タスクのアクターやメールボックスへのキャンセル要求の送信と、即座の受付応答。AIモデルの返答やエージェントの正常終了を待たずに即座に応答します。 |
 | **2. 内部計算の協調停止（Computation）** | ホストPC内部で実行されている推論、集計、テキスト生成などの処理を中断させる段階。 | `Notify` や cancellation token を用いた協調的キャンセルと、`select!` やタイムアウトによる待機の打ち切り。非同期待機中にロックを保持しません。 |
 | **3. 外部作用の停止試行（External Effect）** | ツール、MCP、プロバイダ通信、OS操作などの外部への働きかけを可能な限り停止させる段階。 | 実行機能からの停止シグナルの送信や通信切断。すでに実行されてしまった操作や成否不明な状態は正直に記録・報告し、別端末等で勝手に再実行しません。 |
-| **4. 遅延結果の隔離（Result Arrival）** | 停止要求の後に遅れて返ってきた処理結果を安全に取り扱う段階。 | 遅れて届いた結果は元のアクション試行やタスク履歴にのみ記録し、現在の会話への自動採用や後続処理の自動開始を決して行いません。`Unknown` は維持します。 |
-| **5. 状態確定の禁止（Commit Prohibition）** | キャンセルされた処理が、データベースに新しい確定データを書き込むことを防ぐ段階。 | 確定（commit）直前の前提再照合により、タスクリビジョンや保留状態の食い違いを検知し、キャンセル後の書き込み要求を安全に拒絶（`StalePremise` / `HoldActive`）します。 |
+| **4. 遅延結果の隔離（Result Arrival）** | 停止要求の後に遅れて返ってきた処理結果を安全に取り扱う段階。 | 遅れて届いた final result も、まず本文・identity の 1 回だけの到着 record と、同じ不分区間での delegation の execution seal として durable 化し、採用判定では元の依拠リビジョンと Action 試行の履歴にのみ記録し（`task_result` 1 行と検証済み attempt 相関）、現在 Task への自動採用や後続処理の自動開始を決して行いません（`RecordedToOriginalOnly`）。`Unknown` は維持します。seal により、その execution からの新規 inference claim / Action 開始は以後拒否されます。後続の cancel producer が durable な cancel marker を導入した場合、`adopt_result` は同一の不可分な比較照合で marker を確認し、marker があれば attempt 相関の記録に留めて現在 Task を変更しません。本スライスは marker の producer を作りません。 |
+| **5. 状態確定の禁止（Commit Prohibition）** | キャンセルされた処理が、データベースに新しい確定データを書き込むことを防ぐ段階。 | 確定（commit）直前の前提再照合により、タスクリビジョンや保留状態の食い違いを検知し、キャンセル後の書き込み要求を安全に拒絶（`StalePremise` / `HoldActive` / `TaskTerminal` / `ExecutionSealed`）します。委任・steering・推論試行 claim・Action 開始では、current な `task.revision` と purpose identity（該当する境界）に加えて `task.progress` の非 terminal を同一の不可分区间で照合し、terminal は `TaskTerminal` として書き込み・provider I/O・外部作用を行いません。推論試行 claim（AU14）と Action 開始（AU5）はさらにその delegation が seal 済みでないことを同じ不分区間で照合し、seal 済みは provider I/O・書き込み・外部作用を行いません。結果採用・完了確定では、到着 record 済み result、delegation（execution lifetime）から列挙した authoritative set と claim の完全一致（seal 時点で membership 固定）、現在 `task.revision` と purpose identity、`task.progress` の非 terminal、依拠 Action 試行の `ConfirmedSuccess`、同じ `TaskId` の全 revision / 全 delegation に `Unknown` が無いこと（Task-wide completion barrier）を同一の不可分区间で照合し、revision 不一致・terminal は `RecordedToOriginalOnly`、result-local の非成功または barrier の `Unknown` が残る場合は `WithheldByEffectFacts`、相関不一致は技術的エラーとして現在 Task を完了しません。seal 後に確定度が客観的証拠で進展した場合は同じ result の再評価で完了が成立し得ます。 |
 
 - キャンセル要求の伝達、新規処理の開始禁止、状態の確認は、外部プロセスの終了や全タスクの完了を待たずに即座に行われます。
 - ホストPCのシャットダウンや再起動の際も、実行中だった処理や成否不明な状態を正しく保全し、「ホストが終了したから外部の処理も消滅しただろう」と勝手に推定してはいけません。
@@ -480,7 +549,7 @@ DBへの登録を先行させて「DBにレコードはあるがファイルが�
 
 | 境界 | 確実に引き渡すべき並行特性・プロパティ |
 |---|---|
-| **タスク化・委任・追加指示・結果統合** | `(task_id, 期待されるtask_revision)`、目的や追加指示の前提、委任スコープのコピー、ワークスペースの有効性、キャンセル対象の識別。会話のログ記録とタスク反映内容の区別。 |
+| **タスク化・委任・追加指示・結果統合** | `(task_id, 期待されるtask_revision)`、目的や追加指示の前提、委任スコープのコピー、ワークスペースの有効性、結果 identity と本文（finalization 時に 1 回だけ保存し delegation を seal）、委任（execution lifetime）、検証済み Action 試行相関（authoritative set。seal 時点で固定。result-local）、Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと。result-local 相関とは別概念）、Task progress（非 terminal の admission gate を含む）、execution seal（AU14/AU5 の not-sealed gate を含む）、キャンセル対象の識別。会話のログ記録とタスク反映内容の区別。 |
 | **アクション要求・試行・停止・結果** | アクション試行参照（試行ID、タスクリビジョン前提、委任スコープ、操作対象と種別、依拠した権限評価）、対象解決の前提、コスト・停止・保留・消去・復元の各条件、確認された作用と確定度（成否不明を含む）、リトライ時の元試行参照（`prior_attempt`）。 |
 | **権限判断の依頼と回答** | 判断対象（主体、委任、タスク、目的、操作対象、送信先、コストリスク）、依拠したルールと同意のリビジョン、端末条件、重要な状況変化の有無。過去の判断ログと現在の生きた許可の区別。 |
 | **プロバイダ送信（初回・フォールバック・再送・継続）** | 解決された割り当て経路、送信先、利用目的、コスト枠の同意対応、認証情報の用途制限、予約済みの利用枠ID（`usage_id`）、報告済み/不明/処理中の区分。 |
@@ -491,7 +560,7 @@ DBへの登録を先行させて「DBにレコードはあるがファイルが�
 | **利用量・コスト** | 用途と送信先の対応、報告済み/成否不明/処理中の区分、上限枠の現在条件、仮押さえした予約ID（`usage_id`）。 |
 | **キャラクター定義の適用** | `(character_id, 期待されるcharacter_revision)`、ユーザーの選択参照、適用されるパーツ群。 |
 
-- **判定結果の表現**: 確定処理（commit）の結果は、少なくとも `Accepted`（受理）、`StalePremise`（前提食い違い）、`HoldActive`（保留中）、`Denied`（拒絶）、`NeedsReevaluation`（再評価が必要）、`AdoptedToOriginalOnly`（遅延結果として元履歴にのみ記録）を明確に区別して返します。これは並行比較（concurrency compare）の結果判定であり、各ドメインのライフサイクル状態（Task 状態、滞在状態、確定度、システム全域の操作状態など）を 1 つに潰した共通 `Status` enum ではありません。共通のライフサイクル状態マシンを新設してはなりません（[CI §2.1](correspondence-identity.md#21-ownership-を奪わない責任境界の維持)）。これらは一般的な分類語であり、ドメインごとの具体的な型バリアントは各機能オーナーのインターフェースが定めます（例えばタスクの方向転換は [IB §13.2](interface-boundaries.md#132-domain-別の-repository-interfacepseudo-trait必要なものだけ-abstract-する) の `TaskCommitOutcome`）。
+- **判定結果の表現**: 確定処理（commit）の結果は、少なくとも `Accepted`（受理）、`StalePremise`（前提食い違い）、`HoldActive`（保留中）、`Denied`（拒絶）、`NeedsReevaluation`（再評価が必要）、`RecordedToOriginalOnly`（遅延結果として元履歴にのみ記録）を明確に区別して返します。これは並行比較（concurrency compare）の結果判定であり、各ドメインのライフサイクル状態（Task 状態、滞在状態、確定度、システム全域の操作状態など）を 1 つに潰した共通 `Status` enum ではありません。共通のライフサイクル状態マシンを新設してはなりません（[CI §2.1](correspondence-identity.md#21-ownership-を奪わない責任境界の維持)）。これらは一般的な分類語であり、ドメインごとの具体的な型バリアントは各機能オーナーのインターフェースが定めます（例えばタスクの方向転換は [IB §13.2](interface-boundaries.md#132-domain-別の-repository-interfacepseudo-trait必要なものだけ-abstract-する) の `TaskCommitOutcome`）。
 - **シリアライズ境界での厳格なフィールド化**: 直列化の境界では ID、リビジョン、世代番号、関連付け情報を明示的なフィールドとして扱い、自由記述の本文テキストに含まれる文字列を同一性の照合に使ってはなりません（[CI §4.6](correspondence-identity.md#46-シリアライズ境界での基本ルール)）。
 
 ## 17. Rust での実装指針（Concrete Rust Implications）
@@ -536,6 +605,13 @@ fn cas_task_steer(conn: &Connection, premise: TaskCommitPremise) -> Result<TaskC
         let Some(current) = select_task_current(tx, premise.expected.task)? else {
             return Ok(TaskCommitOutcome::MissingTask { task: premise.expected.task });
         };
+        // terminal は吸収的であり、revision stale とは区別して書き込みなしで拒否する（AU4 の terminal gate）
+        if current.progress.is_terminal() {
+            return Ok(TaskCommitOutcome::TaskTerminal {
+                task: premise.expected.task,
+                progress: current.progress,
+            });
+        }
         if current.revision != premise.expected.revision {
             return Ok(TaskCommitOutcome::StaleExpected { current: current.reference });
         }
@@ -589,7 +665,7 @@ fn reserve_usage(
 | 競合シナリオ | 動作の流れと安全性の担保 | 本書での成立箇所 |
 |---|---|---|
 | **会話の推論結果 vs ユーザーからの新しい追加指示** | 推論開始時の前提（タスクリビジョン、目的、会話ラウンド等）を保持し、推論結果が届いた際に最新状態と突き合わせます。ユーザーからの新しい指示が先に確定していた場合、古い回答は現在の会話には採用せず、過去の思考ログとしてのみ記録します。現在の状況に合致した結果のみを画面に表示します。 | 第5節, 第7節 |
-| **エージェントの作業結果 vs 追加指示・キャンセル** | 到着した結果の前提リビジョンと現在のタスクリビジョンを比較します。食い違っている場合は現在の成果としては採用せず、元リビジョンの履歴に留めます。キャンセルされていた場合は後続処理を自動開始せず、未完了・成否不明な状態を正直に報告します。 | 第5節, 第7節, 第14節 |
+| **エージェントの作業結果 vs 追加指示・キャンセル** | final result の到着はまず本文・identity を 1 回だけ durable record し、同じ不分区間で delegation を seal し（1 delegation につき final result は最大 1 つ）、採用判定で依拠リビジョン（delegation 行から解決）と現在のタスクリビジョン・purpose identity を 1 つの短いトランザクションで比較します。食い違っている場合は現在の成果としては採用せず、検証済み attempt 相関のみを記録して `RecordedToOriginalOnly` とします。delegation（execution lifetime）から列挙した authoritative set と claim が一致しない場合は技術的エラー（fail closed）、result-local の `ConfirmedSuccess` 以外があるか、または同じ `TaskId` の全 revision / 全 delegation の Action 試行に `Unknown` が残れば（Task-wide completion barrier。blockers は両者の和集合として重複を 1 回に畳む）、`WithheldByEffectFacts` として完了しません（seal 後の証拠更新で再評価可能）。AU5 と AU15b は同一 SQLite master 上の短い `Immediate` トランザクションで直列化されるため、開始済み Action が barrier に見えず、かつ terminal gate も通る順序は存在しません（`AU5 → barrier sees Unknown → Withheld` か `Completed → AU5 TaskTerminal` のいずれかです）。seal 後は同じ execution からの新規 inference claim / Action 開始を拒否し、キャンセル（後続 producer）や terminal 後は後続処理を自動開始せず、未完了・成否不明な状態を正直に報告します。 | 第5節, 第7節, 第14節 |
 | **並行して実行される2つのアクション試行** | 開始時の前提確認とコスト枠の仮押さえを短いトランザクションで直列化し、アクションの実行そのものは並行して行います。重複の危険がある再試行は、ユーザーへの確認と元試行への関連付けを必須とします。成否の確定は試行ごとのアトミックな更新で独立して行います。 | 第8節 |
 | **アクションのタイムアウト vs 遅れて届いた成功応答** | タイムアウトしても結果の確定度は `Unknown`（成否不明）として維持します。遅れて成功通知が届いた場合、元の試行レコードを `Unknown → ConfirmedSuccess` とアトミックに更新します。現在のタスクへ採用するかは、現在の状況と照らし合わせて別途判断します。 | 第8節, 第14節 |
 | **コスト上限付近での複数の並行推論リクエスト** | すべてのリクエストは `reserve_usage` による同一トランザクションでの事前仮押さえを行います。先に受け付けられたリクエストで上限に達した場合、後続のリクエストは安全に保留・拒絶され、上限突破を防ぎます。処理中や成否不明な枠を勝手にゼロとみなすことはありません。 | 第9節 |
