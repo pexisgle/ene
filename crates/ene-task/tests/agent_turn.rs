@@ -26,20 +26,26 @@ use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
     DelegationScope, Task, TaskAgentEphemeralId, TaskAgentInference, TaskAgentInferenceError,
     TaskAgentInferenceOutcome, TaskAgentInferencePremise, TaskAgentInferenceProduced,
-    TaskAgentNotSent, TaskAgentOutput, TaskAgentTurnError, TaskAgentTurnOutcome,
-    TaskAgentTurnPremise, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry,
-    TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
-    TaskCreationPremise, TaskId, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository,
-    TaskRevision, TaskRevisionRecord, TaskTechnicalError, orchestrate_task_agent_turn,
+    TaskAgentNotSent, TaskAgentOutput, TaskAgentResultArrival, TaskAgentTurnError,
+    TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCommitOutcome, TaskCommitPremise,
+    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
+    TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
+    orchestrate_task_agent_turn,
 };
 
-/// Scripted `TaskRepository`: queued `load_delegation` / `load_task` replies
-/// plus a capture of every identity each read was asked for.
+/// Scripted `TaskRepository`: queued `load_delegation` / `load_task` /
+/// seal replies plus a capture of every identity each read was asked for.
 struct FakeTaskRepository {
     delegations: Mutex<VecDeque<Result<Option<DelegationRef>, TaskTechnicalError>>>,
     tasks: Mutex<VecDeque<Result<Option<TaskRecord>, TaskTechnicalError>>>,
+    /// Scripted seal reads; an unscripted read answers `None` (not sealed),
+    /// which is the state of every delegation that has not finalized.
+    delegation_results: Mutex<VecDeque<Result<Option<TaskResultRecord>, TaskTechnicalError>>>,
     loaded_delegations: Mutex<Vec<DelegationId>>,
     loaded_tasks: Mutex<Vec<TaskId>>,
+    loaded_delegation_results: Mutex<Vec<DelegationId>>,
 }
 
 impl FakeTaskRepository {
@@ -47,9 +53,28 @@ impl FakeTaskRepository {
         Self {
             delegations: Mutex::new(VecDeque::new()),
             tasks: Mutex::new(VecDeque::new()),
+            delegation_results: Mutex::new(VecDeque::new()),
             loaded_delegations: Mutex::new(Vec::new()),
             loaded_tasks: Mutex::new(Vec::new()),
+            loaded_delegation_results: Mutex::new(Vec::new()),
         }
+    }
+
+    fn loaded_delegation_results(&self) -> Vec<DelegationId> {
+        self.loaded_delegation_results
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .clone()
+    }
+
+    fn script_delegation_result(
+        &self,
+        reply: Result<Option<TaskResultRecord>, TaskTechnicalError>,
+    ) {
+        self.delegation_results
+            .lock()
+            .expect("fixture script is never poisoned")
+            .push_back(reply);
     }
 
     fn script_delegation(&self, reply: Result<Option<DelegationRef>, TaskTechnicalError>) {
@@ -134,6 +159,52 @@ impl TaskRepository for FakeTaskRepository {
             .expect("fixture script is never poisoned")
             .pop_front()
             .expect("every exercised load_delegation call has a scripted reply")
+    }
+
+    async fn record_task_result_arrival(
+        &self,
+        _arrival: TaskAgentResultArrival,
+    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_result_arrival is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_task_result(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_task_result is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_delegation_result(
+        &self,
+        delegation: DelegationId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        self.loaded_delegation_results
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .push(delegation);
+        match self
+            .delegation_results
+            .lock()
+            .expect("fixture script is never poisoned")
+            .pop_front()
+        {
+            Some(reply) => reply,
+            None => Ok(None),
+        }
+    }
+
+    async fn adopt_result(
+        &self,
+        _claim: TaskResultAdoptionClaim,
+    ) -> Result<TaskResultAcceptance, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("adopt_result is outside this fixture's scope"),
+        })
     }
 }
 
@@ -273,6 +344,8 @@ fn record(task: TaskId, current_revision: TaskRevision, purpose_text: &str) -> T
             reference,
             purpose,
             assignee,
+            progress: TaskProgress::InProgress,
+            adopted_result: None,
         },
         revision: TaskRevisionRecord {
             reference,
@@ -454,6 +527,124 @@ async fn port_stale_premise_with_a_gone_delegation_maps_to_missing_delegation() 
         repository.loaded_tasks(),
         vec![task],
         "a gone delegation on reload is reported without any task re-read"
+    );
+}
+
+fn result_record(task: TaskRef, delegation: DelegationId) -> TaskResultRecord {
+    TaskResultRecord {
+        result: TaskResultId::generate(),
+        task,
+        delegation,
+        body: TaskAgentOutput::new(String::from("final body")),
+        attempt_refs: Vec::new(),
+        adopted_revision: None,
+        recorded_at: WallClockWithTz::now(),
+    }
+}
+
+#[tokio::test]
+async fn terminal_task_is_reported_before_any_scrub_or_port_call() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    let mut loaded = record(task, revision(1), "probe purpose");
+    loaded.task.progress = TaskProgress::Completed;
+    repository.script_task(Ok(Some(loaded)));
+    let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let outcome =
+        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
+            .await
+            .expect("terminal progress is a domain outcome, not a technical error");
+
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::TaskTerminal {
+            task,
+            progress: TaskProgress::Completed,
+        }
+    );
+    assert!(
+        scrubber.inputs().is_empty(),
+        "a terminal Task must not even be scrubbed"
+    );
+    assert!(
+        inference.premises().is_empty(),
+        "a terminal Task must not reach the port"
+    );
+}
+
+#[tokio::test]
+async fn port_stale_premise_with_terminal_progress_maps_to_task_terminal() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref.clone())));
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    let mut terminal = record(task, revision(1), "probe purpose");
+    terminal.task.progress = TaskProgress::Failed;
+    repository.script_task(Ok(Some(terminal)));
+    // A seal that exists at the same time must not win over terminal.
+    repository.script_delegation_result(Ok(Some(result_record(relied, delegation_id))));
+    let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let outcome =
+        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
+            .await
+            .expect("a lost claim is a domain outcome, not a technical error");
+
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::TaskTerminal {
+            task,
+            progress: TaskProgress::Failed,
+        }
+    );
+    assert!(
+        repository.loaded_delegation_results().is_empty(),
+        "terminal progress is checked before the execution seal"
+    );
+}
+
+#[tokio::test]
+async fn port_stale_premise_with_a_sealed_delegation_maps_to_execution_sealed() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref.clone())));
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    repository.script_delegation_result(Ok(Some(result_record(relied, delegation_id))));
+    let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::StaleTaskPremise));
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let outcome =
+        orchestrate_task_agent_turn(&repository, &inference, &scrubber, premise(delegation_id))
+            .await
+            .expect("a sealed execution is a domain outcome, not a technical error");
+
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::ExecutionSealed {
+            delegation: delegation_id,
+        },
+        "the seal is reported instead of revision staleness while the Task is InProgress"
+    );
+    assert_eq!(
+        repository.loaded_delegation_results(),
+        vec![delegation_id],
+        "the stale re-read uses the bounded seal read"
     );
 }
 

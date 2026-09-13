@@ -15,7 +15,7 @@
 
 use ene_primitive::RawId;
 
-use crate::task::{AssigneeRef, TaskId, TaskRef};
+use crate::task::{AssigneeRef, TaskId, TaskProgress, TaskRef};
 use crate::workspace::{WorkspaceAssocId, WorkspaceFolderRef};
 
 /// Identity of one delegation correspondence. Wraps [`RawId`]; never reused.
@@ -29,6 +29,11 @@ impl DelegationId {
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
+    }
+
+    #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self(raw)
     }
 
     #[must_use]
@@ -141,10 +146,18 @@ pub struct DelegationCreationPremise {
 /// and leave no writes behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DelegationOutcome {
-    /// The correspondence was committed.
+    /// The correspondence was committed; a `Started` Task moved to
+    /// `InProgress` in the same transaction.
     Delegated(DelegationRef),
     /// The expected Task revision no longer matches; nothing was changed.
     StaleTaskRevision { current: TaskRef },
+    /// The Task is terminal (`Completed` / `Failed`); no delegation is
+    /// created and the revision is not advanced. Absorbing, so it is
+    /// distinct from revision staleness.
+    TaskTerminal {
+        task: TaskId,
+        progress: TaskProgress,
+    },
     /// The premise names a Task with no durable state; nothing was changed.
     MissingTask { task: TaskId },
 }

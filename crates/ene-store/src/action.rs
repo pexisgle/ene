@@ -2,13 +2,16 @@
 //!
 //! The insert is AU5: one short `Immediate` transaction compares the
 //! delegation correspondence, the relied task revision, the current task
-//! revision, the current workspace association (exactly one, fail closed on
-//! duplicates), and the delegation's copied scope association before writing
-//! the attempt row. Missing rows and moved revisions/associations answer
-//! `StalePremise` with zero writes; a premise that disagrees with the stored
-//! delegation row, a duplicate association, an unknown stored operation, and
-//! a duplicate attempt identity are technical errors and are never reduced to
-//! stale.
+//! revision, the current non-terminal `task.progress`, the absence of the
+//! delegation's final result row (execution seal), the current workspace
+//! association (exactly one, fail closed on duplicates), and the delegation's
+//! copied scope association before writing the attempt row. Missing rows and
+//! moved revisions/associations answer `StalePremise` with zero writes;
+//! terminal progress answers `TaskTerminal` and a sealed delegation answers
+//! `ExecutionSealed`, both before any external effect. A premise that
+//! disagrees with the stored delegation row, a duplicate association, an
+//! unknown stored operation, and a duplicate attempt identity are technical
+//! errors and are never reduced to stale.
 //!
 //! The certainty update is a per-row compare-and-set that accepts only
 //! `expected = Unknown` and the closed-world `(certainty, grounds)` pairs. The
@@ -49,7 +52,12 @@ const SQL_UPDATE_CERTAINTY: &str = "UPDATE action_attempt SET certainty = ?2, gr
 const SQL_SELECT_DELEGATION_PREMISE: &str =
     "SELECT task_id, task_revision, scope_assoc FROM delegation WHERE delegation_id = ?1";
 
-const SQL_SELECT_TASK_REVISION_POINTER: &str = "SELECT revision FROM task WHERE task_id = ?1";
+const SQL_SELECT_TASK_STATE: &str = "SELECT revision, progress FROM task WHERE task_id = ?1";
+
+/// The delegation's final result row, i.e. its execution seal. The row's
+/// existence — never a liveness or completion flag — refuses a new start.
+const SQL_SELECT_DELEGATION_RESULT: &str =
+    "SELECT result_id FROM task_result WHERE delegation_id = ?1";
 
 /// Probes two rows so a duplicate association is detected instead of being
 /// silently reduced to the first one.
@@ -127,21 +135,42 @@ fn insert_attempt_sync(
         ));
     }
     // (2) The current Task row is still at the relied revision.
-    let current: Option<i64> = tx
-        .query_row(
-            SQL_SELECT_TASK_REVISION_POINTER,
-            params![task_text],
-            |row| row.get(0),
-        )
+    let current: Option<(i64, Option<String>)> = tx
+        .query_row(SQL_SELECT_TASK_STATE, params![task_text], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .optional()
         .map_err(action_unavailable)?;
-    let Some(current_raw) = current else {
+    let Some((current_raw, progress_raw)) = current else {
         return Ok(ActionStartOutcome::StalePremise);
     };
     if decode_u64(current_raw).map_err(action_unavailable)? != premise.task_revision.as_u64() {
         return Ok(ActionStartOutcome::StalePremise);
     }
-    // (3) Exactly one current workspace association exists, it is the premise
+    // (3) The Task is not terminal. Terminal progress is absorbing, so a
+    // start can never succeed later and the Work owner reports it as its own
+    // outcome instead of stale.
+    let progress_text =
+        progress_raw.ok_or_else(|| action_unavailable("task progress is missing"))?;
+    let progress = ene_task::TaskProgress::from_name(&progress_text)
+        .ok_or_else(|| action_unavailable("unknown task progress"))?;
+    if progress.is_terminal() {
+        return Ok(ActionStartOutcome::TaskTerminal);
+    }
+    // (4) The delegated execution is not sealed: a final result row refuses
+    // every new start even while the Task stays non-terminal.
+    let sealed: Option<String> = tx
+        .query_row(
+            SQL_SELECT_DELEGATION_RESULT,
+            params![delegation_text],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(action_unavailable)?;
+    if sealed.is_some() {
+        return Ok(ActionStartOutcome::ExecutionSealed);
+    }
+    // (5) Exactly one current workspace association exists, it is the premise
     // association, and the delegation's copied scope relied on the same
     // boundary. The copy is provenance: a mismatch means the delegation did
     // not witness the current boundary, so no widening is allowed.

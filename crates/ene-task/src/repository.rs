@@ -5,7 +5,13 @@ use thiserror::Error;
 use crate::delegation::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
 };
-use crate::task::{TaskCommitPremise, TaskCreationPremise, TaskId, TaskRecord, TaskRef};
+use crate::result::{
+    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
+    TaskResultRecord,
+};
+use crate::task::{
+    TaskCommitPremise, TaskCreationPremise, TaskId, TaskProgress, TaskRecord, TaskRef,
+};
 
 /// Technical failure for Task persistence.
 ///
@@ -29,6 +35,13 @@ pub enum TaskCommitOutcome {
     CommittedAs(TaskRef),
     /// The expected revision no longer matches; nothing was changed.
     StaleExpected { current: TaskRef },
+    /// The Task is terminal (`Completed` / `Failed`); the revision and the
+    /// context are unchanged. Absorbing, so it is distinct from revision
+    /// staleness.
+    TaskTerminal {
+        task: TaskId,
+        progress: TaskProgress,
+    },
     /// The premise names a Task with no durable state; nothing was changed.
     MissingTask { task: TaskId },
     /// No representable next revision exists; nothing was changed.
@@ -118,4 +131,65 @@ pub trait TaskRepository: Send + Sync {
         &self,
         delegation: DelegationId,
     ) -> Result<Option<DelegationRef>, TaskTechnicalError>;
+
+    /// Records one final result arrival and seals its delegation (AU15a).
+    ///
+    /// Called by orchestration at the explicit finalization boundary before
+    /// the result becomes visible. The relied `(task, revision)` is copied
+    /// from the delegation row inside one short `Immediate` transaction; the
+    /// committed row's existence is the execution seal, so no separate seal
+    /// state exists. A retry of the same [`TaskResultId`] is idempotent when
+    /// the body, delegation, and relied revision match exactly; a different
+    /// body or relied revision under the same identity, and a second final
+    /// result for an already-sealed delegation, are technical errors (fail
+    /// closed, never a domain outcome). This step judges no currentness,
+    /// certainty, terminal state, or completion.
+    async fn record_task_result_arrival(
+        &self,
+        arrival: TaskAgentResultArrival,
+    ) -> Result<TaskResultRecord, TaskTechnicalError>;
+
+    /// Loads one final result by identity, with its verified attempt
+    /// correlation and adoption state.
+    ///
+    /// `None` means the identity has no stored result. Malformed rows and
+    /// inconsistent correlation are technical errors and are never composed
+    /// into a [`TaskResultRecord`].
+    async fn load_task_result(
+        &self,
+        result: TaskResultId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError>;
+
+    /// Loads the final result of one delegation, if its execution is sealed.
+    ///
+    /// This is the bounded seal read: `Some` means the delegation already
+    /// submitted a final result and admits no new inference claim (AU14) or
+    /// Action start (AU5). `None` means no final result was recorded; it is
+    /// not evidence about liveness.
+    async fn load_delegation_result(
+        &self,
+        delegation: DelegationId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError>;
+
+    /// Attempts to adopt one recorded final result into its Task (AU15b).
+    ///
+    /// Inside one short `Immediate` transaction: the result row is read, the
+    /// authoritative Action attempt set is enumerated from its delegation
+    /// (execution lifetime) with each row's `(delegation, task, revision)`
+    /// correspondence verified, the claim must match that set exactly
+    /// (missing, extra, and duplicate refs are technical errors), the current
+    /// revision and purpose identity are compared against the relied
+    /// revision's snapshot, terminal progress yields
+    /// [`TaskResultAcceptance::RecordedToOriginalOnly`], and the Task-wide
+    /// completion barrier (no `Unknown` attempt under the same `TaskId`,
+    /// across every revision and delegation) is evaluated. Blockers record
+    /// the result-local correlation and return
+    /// [`TaskResultAcceptance::WithheldByEffectFacts`]; an empty blocker set
+    /// stamps the correlation, marks `adopted_revision`, and CASes the
+    /// progress to `Completed` in the same transaction. The Task owner never
+    /// changes Action certainty.
+    async fn adopt_result(
+        &self,
+        claim: TaskResultAdoptionClaim,
+    ) -> Result<TaskResultAcceptance, TaskTechnicalError>;
 }

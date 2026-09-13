@@ -20,10 +20,12 @@ use ene_companion::dialogue::{ProposeSteeringCommand, propose_steering};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
-    SteeringPremiseRef, Task, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry,
-    TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
-    TaskCreationPremise, TaskId, TaskProposalOutcome, TaskPurpose, TaskPurposeRef, TaskRecord,
-    TaskRef, TaskRepository, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
+    SteeringPremiseRef, Task, TaskAgentResultArrival, TaskCommitOutcome, TaskCommitPremise,
+    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskProposalOutcome,
+    TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord,
+    TaskTechnicalError,
 };
 
 /// Scripted `TaskRepository`: one load fixture, one forward result, and a
@@ -100,6 +102,40 @@ impl TaskRepository for FakeTaskRepository {
     ) -> Result<Option<DelegationRef>, TaskTechnicalError> {
         Ok(None)
     }
+
+    async fn record_task_result_arrival(
+        &self,
+        _arrival: TaskAgentResultArrival,
+    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_result_arrival is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_task_result(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_task_result is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_delegation_result(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        Ok(None)
+    }
+
+    async fn adopt_result(
+        &self,
+        _claim: TaskResultAdoptionClaim,
+    ) -> Result<TaskResultAcceptance, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("adopt_result is outside this fixture's scope"),
+        })
+    }
 }
 
 fn clock() -> WallClockWithTz {
@@ -128,6 +164,8 @@ fn record(
             reference,
             purpose,
             assignee,
+            progress: TaskProgress::InProgress,
+            adopted_result: None,
         },
         revision: TaskRevisionRecord {
             reference,

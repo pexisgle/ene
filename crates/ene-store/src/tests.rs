@@ -31,7 +31,7 @@ use ene_presence::{
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
-    DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome, TaskCommitPremise,
+    DelegationRef, DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome, TaskCommitPremise,
     TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
     TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise, TaskPurpose,
     TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskRevision,
@@ -1472,8 +1472,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(19)),
-        "migration must record version 19"
+        matches!(version, Ok(20)),
+        "migration must record version 20"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1796,7 +1796,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
+        Some(20),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1845,8 +1845,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(19)),
-        "reopened database must record schema version 19"
+        matches!(version, Ok(20)),
+        "reopened database must record schema version 20"
     );
 }
 
@@ -2614,8 +2614,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(19)),
-        "reopened database must record schema version 19"
+        matches!(version, Ok(20)),
+        "reopened database must record schema version 20"
     );
 }
 
@@ -3155,8 +3155,8 @@ async fn migration_v11_applies_v12_through_v18() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
-        "a v11 database must converge on v19"
+        Some(20),
+        "a v11 database must converge on v20"
     );
     let projection = {
         let guard = match store.conn.lock() {
@@ -3254,8 +3254,8 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
-        "a v13 database must converge on v19"
+        Some(20),
+        "a v13 database must converge on v20"
     );
     let (projection, columns) = {
         let guard = match store.conn.lock() {
@@ -4178,7 +4178,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
+        Some(20),
         "migration advances the schema version"
     );
     assert!(
@@ -4220,8 +4220,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
-        "a v11 database must converge on v19"
+        Some(20),
+        "a v11 database must converge on v20"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -4292,7 +4292,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(19));
+    assert_eq!(read_schema_version(&path), Some(20));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
@@ -5203,8 +5203,8 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     let reopened = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
-        "a v14 database must converge on v19"
+        Some(20),
+        "a v14 database must converge on v20"
     );
     assert!(!table_columns(&path, "task").is_empty(), "task is created");
     assert!(
@@ -5366,8 +5366,8 @@ async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
         .expect("the V16 migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
-        "a v15 database must converge on v19"
+        Some(20),
+        "a v15 database must converge on v20"
     );
 
     // A fresh store in its own directory builds the schema and every
@@ -5521,7 +5521,7 @@ async fn migration_v16_fault_rolls_back_and_reopen_converges() {
         .expect("open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
+        Some(20),
         "the retried migration must converge"
     );
     assert!(
@@ -7902,8 +7902,8 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         let store = Store::open(&path).await.expect("a fresh store must open");
         assert_eq!(
             read_schema_version(&path),
-            Some(19),
-            "a fresh database converges on v19"
+            Some(20),
+            "a fresh database converges on v20"
         );
         assert!(
             !table_columns(&path, "delegation").is_empty(),
@@ -7957,8 +7957,8 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         .expect("the V17 migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(19),
-        "a v16 database converges on v19"
+        Some(20),
+        "a v16 database converges on v20"
     );
     let columns = table_columns(&path, "delegation");
     for column in [
@@ -8030,3 +8030,4 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
 
 mod action;
 mod agent;
+mod task_result;
