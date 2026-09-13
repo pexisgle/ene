@@ -20,12 +20,12 @@ use std::sync::Mutex;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
-    SteeringPremiseRef, SteeringProposalPremise, Task, TaskAgentResultArrival, TaskCommitOutcome,
-    TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskProposalOutcome,
-    TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
-    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord,
-    TaskTechnicalError, orchestrate_steering,
+    SteeringPremiseRef, SteeringProposalPremise, Task, TaskAgentResultArrival, TaskCancelOutcome,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress,
+    TaskProposalOutcome, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository,
+    TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision,
+    TaskRevisionRecord, TaskTechnicalError, orchestrate_steering,
 };
 
 /// Scripted `TaskRepository`: one load fixture, one forward result, and a
@@ -78,6 +78,12 @@ impl TaskRepository for FakeTaskRepository {
             .lock()
             .expect("fixture script is never poisoned")
             .clone()
+    }
+
+    async fn cancel_task(&self, _task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("cancel_task is outside this fixture's scope"),
+        })
     }
 
     async fn load_task(&self, _task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError> {

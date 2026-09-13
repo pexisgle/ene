@@ -15,6 +15,7 @@
 //! premises.
 
 mod agent;
+mod cancel;
 mod context;
 mod delegation;
 mod instruction;
@@ -29,6 +30,7 @@ pub use agent::{
     TaskAgentInferencePremise, TaskAgentInferenceProduced, TaskAgentNotSent, TaskAgentOutput,
     TaskAgentTurnError, TaskAgentTurnOutcome, TaskAgentTurnPremise, orchestrate_task_agent_turn,
 };
+pub use cancel::{CancelTaskCommand, TaskCancelOutcome};
 pub use context::{
     TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
 };

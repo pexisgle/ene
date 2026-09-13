@@ -137,9 +137,11 @@ pub struct AssigneeRef {
 /// a revision forward, never a progress transition, and terminal states are
 /// absorbing. The admission gates (delegation, steering, Task Agent inference
 /// claim, Action start) require a non-terminal progress in their own atomic
-/// compare; `Completed` is only produced by the adoption commit, and `Failed`
-/// has no producer in this stage (provider failures, `NotSent`, Action
-/// `Unknown`, and withheld results are not Task failure).
+/// compare; `Completed` is only produced by the adoption commit, `Cancelled`
+/// by the cancel admission CAS (AU16), and `Failed` has no producer in this
+/// stage (provider failures, `NotSent`, Action `Unknown`, withheld results,
+/// and cancel are not Task failure). `Cancelled` means the cancel request was
+/// accepted, never that running work or an external effect stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskProgress {
     /// The Task was accepted; delegation is possible while non-terminal.
@@ -151,6 +153,9 @@ pub enum TaskProgress {
     Completed,
     /// Task failure confirmed by the Task owner; no producer exists yet.
     Failed,
+    /// The cancel request was accepted (AU16). Absorbing; the Task is never
+    /// resumed in place, and already-started activity keeps its own facts.
+    Cancelled,
 }
 
 impl TaskProgress {
@@ -162,6 +167,7 @@ impl TaskProgress {
             Self::InProgress => "in_progress",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -173,6 +179,7 @@ impl TaskProgress {
             "in_progress" => Some(Self::InProgress),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
     }
@@ -180,7 +187,7 @@ impl TaskProgress {
     /// Whether this progress admits no further work.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
 
@@ -392,13 +399,15 @@ mod tests {
             TaskProgress::InProgress,
             TaskProgress::Completed,
             TaskProgress::Failed,
+            TaskProgress::Cancelled,
         ] {
             assert_eq!(TaskProgress::from_name(progress.as_str()), Some(progress));
         }
-        assert_eq!(TaskProgress::from_name("cancelled"), None);
+        assert_eq!(TaskProgress::from_name("canceled"), None);
         assert!(!TaskProgress::Started.is_terminal());
         assert!(!TaskProgress::InProgress.is_terminal());
         assert!(TaskProgress::Completed.is_terminal());
         assert!(TaskProgress::Failed.is_terminal());
+        assert!(TaskProgress::Cancelled.is_terminal());
     }
 }
