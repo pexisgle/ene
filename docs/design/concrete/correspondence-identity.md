@@ -314,16 +314,32 @@ enum ActionCertainty {
     Unknown,          // 外部通信が途切れるなどして成否が不明
 }
 
+/// 実行直前に解決された実際の操作対象。構築は実行・拡張の解決処理を通し、
+/// 呼び出し側が入力文字列から直接組み立てません（公開コンストラクタは store の
+/// 読み戻しとテスト用。入力文字列の一致を同一性の根拠にしない）。
+struct RealTargetRef { /* canonical な絶対パス。秘密ではない */ }
+
+/// 確定度の判断根拠（closed world。エージェントの自己申告を語彙として受け付けない）。
+enum EffectGrounds {
+    ObservedAtTarget,     // 実行・拡張自身が対象での結果を確認した（例: 書き込み後の読み戻し一致）
+    RefusedBeforeEffect,  // 作用が起きる前に拒否/失敗し、対象が変わっていないことを確認した
+    OutcomeUnverified,    // 作用が起きた可能性があるが確認できない（Unknown のまま保持）
+}
+
 /// 実行・拡張機能が管理する、把握された外部作用の記録。
+/// この段階では task / delegation / workspace は必須（Task に紐づく Workspace 内操作のみ）。
 struct ActionAttemptRef {
     attempt: ActionAttemptId,
-    task: Option<TaskRef>,          // 軽微な日常アクションでは None（活動レコードと紐付く）
-    delegation: Option<DelegationId>,
-    workspace: Option<WorkspaceAssocId>,
+    task: TaskRef,                  // 依拠したタスクリビジョン（軽微な単発操作の producer は後続スライス）
+    delegation: DelegationId,
+    workspace: WorkspaceAssocId,    // 開始時に照合した現在の関連付け（委任 scope_copy ではない）
     real_target: RealTargetRef,     // パス解決等を経た具体的な操作対象（単なる文字列一致ではない）
-    operation: OperationKind,       // Read | Create | Edit | Delete | Execute を混同しない
-    relied_permission: PermissionEvaluationRef, // 判断時の根拠（生きた許可そのものではない）
+    operation: OperationKind,       // List | Read | Create | Edit を混同しない（Delete/Execute は後続スライス）
+    relied_evaluation: ActionPermissionEvaluationId, // K-B.1 の今回限りの判断（single-use。評価ログ行そのものではない）
+    certainty: ActionCertainty,     // 開始時は Unknown。CAS でのみ更新
+    grounds: Option<EffectGrounds>, // Unknown の開始時は None
 }
+struct ActionPermissionEvaluationId(/* 不透明なID。推論用 PermissionEvaluationId とは別 */);
 
 /// 認可判断の記録を生きた許可と区別するための、判断当時の対応の写し。
 struct PermissionEvaluationRef {
