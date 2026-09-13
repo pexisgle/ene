@@ -1109,20 +1109,19 @@ fn raw_result_by_delegation_row(
     })
 }
 
-/// Reads the result-local verified correlation of one result, in attempt-id
-/// order. The set is stamped once at adoption evaluation and never grows or
-/// shrinks: an empty read means no evaluation has stamped it yet.
+/// Reads the result-local verified correlation of one result (encoded result
+/// text), in attempt-id order. The set is stamped once at adoption evaluation
+/// and never grows or shrinks: for a result that has not been adopted yet, an
+/// empty read means no evaluation has stamped it.
 fn load_result_attempts(
     conn: &Connection,
-    result: TaskResultId,
+    result_text: &str,
 ) -> Result<Vec<RawId>, TaskTechnicalError> {
     let mut statement = conn
         .prepare(SQL_SELECT_RESULT_ATTEMPTS)
         .map_err(task_unavailable)?;
     let rows = statement
-        .query_map(params![encode_id(result.as_raw())], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_map(params![result_text], |row| row.get::<_, String>(0))
         .map_err(task_unavailable)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(task_unavailable)?;
@@ -1137,8 +1136,11 @@ fn load_result_attempts(
 /// Before the record is built: the sealed delegation must exist and its stored
 /// `(task_id, task_revision)` must equal the result's copied correlation, and
 /// every stamped result-local attempt must be an `action_attempt` row whose
-/// copied delegation/task/revision equal the result's. A missing delegation,
-/// a missing attempt, or any disagreement is an inconsistent unit and a
+/// copied delegation/task/revision equal the result's. An adopted result's
+/// stamped set is additionally required to equal the authoritative set
+/// re-derived from the delegation, so a fully wiped set fails closed instead
+/// of being read as an empty first evaluation. A missing delegation, a
+/// missing attempt, or any disagreement is an inconsistent unit and a
 /// technical error, never a silently recomposed record. The remembered
 /// certainty values stay with their Action owner and are not duplicated here.
 #[expect(
@@ -1173,7 +1175,7 @@ fn compose_result(
             "result delegation correspondence disagrees with the recorded result",
         ));
     }
-    let attempt_refs = load_result_attempts(conn, result)?;
+    let attempt_refs = load_result_attempts(conn, &encode_id(result.as_raw()))?;
     for attempt in &attempt_refs {
         let stamped: Option<(String, String, i64)> = conn
             .query_row(
@@ -1196,6 +1198,24 @@ fn compose_result(
                 "stamped task result attempt disagrees with the recorded result correlation",
             ));
         }
+    }
+    if adopted_revision.is_some() {
+        // An adopted result's stamp committed in the same transaction as its
+        // adoption, so `adopted_revision = Some` proves the set is not an
+        // unstamped first evaluation. Re-derive the authoritative set from
+        // the delegation and require exact equality: a fully wiped set (here
+        // and in the retry path) is durable corruption, never an initial
+        // empty evaluation, and an extra row is equally unreadable.
+        let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
+        let delegation_id =
+            DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
+        let relied_revision = decode_revision(task_revision)?;
+        let authoritative: Vec<RawId> =
+            enumerate_delegation_attempts(conn, delegation_id, task_id, relied_revision)?
+                .into_iter()
+                .map(|(attempt, _)| attempt)
+                .collect();
+        require_stamped_attempts_exact(&attempt_refs, &authoritative)?;
     }
     Ok(TaskResultRecord {
         result,
@@ -1388,12 +1408,12 @@ fn load_delegation_result_sync(
 /// `action_attempt` stores only the closed-world certainty vocabulary, so an
 /// unknown name is unreadable.
 fn enumerate_delegation_attempts(
-    tx: &rusqlite::Transaction<'_>,
+    conn: &Connection,
     delegation: DelegationId,
     task: TaskId,
     relied_revision: TaskRevision,
 ) -> Result<Vec<(RawId, ActionCertainty)>, TaskTechnicalError> {
-    let mut statement = tx
+    let mut statement = conn
         .prepare(SQL_SELECT_DELEGATION_ATTEMPTS)
         .map_err(task_unavailable)?;
     let rows = statement
@@ -1524,28 +1544,40 @@ fn claim_matches_authoritative(
     Ok(())
 }
 
+/// Requires a stored result-local set to equal the authoritative set exactly:
+/// missing, extra, and duplicate refs are all inconsistent units and fail
+/// closed. This is the read-only half used where an insert is forbidden — an
+/// adopted result's retry and the bounded reads — so a fully wiped set is
+/// corruption, not an unstamped first evaluation.
+fn require_stamped_attempts_exact(
+    stored: &[RawId],
+    authoritative: &[RawId],
+) -> Result<(), TaskTechnicalError> {
+    let stored: HashSet<RawId> = stored.iter().copied().collect();
+    let authoritative: HashSet<RawId> = authoritative.iter().copied().collect();
+    if stored != authoritative {
+        return Err(task_unavailable(
+            "stored task result correlation is not exactly the authoritative attempt set",
+        ));
+    }
+    Ok(())
+}
+
 /// Verifies and stamps the result-local fixed set.
 ///
-/// An empty stored set is the unstamped first evaluation: the authoritative
-/// set is inserted whole. Once any row is stamped the set is durable and
-/// fixed, so the stored set must equal the authoritative set exactly — a
-/// missing, extra, or undecodable row is an inconsistent unit and fails
-/// closed. There is no silent refill: a stored non-empty set is never
-/// extended or repaired.
+/// This is the first-evaluation path only: an empty stored set means no
+/// evaluation has stamped it yet, so the authoritative set is inserted whole.
+/// Once any row is stamped the set is durable and fixed, so the stored set
+/// must equal the authoritative set exactly. There is no silent refill: a
+/// stored non-empty set is never extended or repaired. An adopted result
+/// never reaches the empty branch — its retry and the bounded reads use
+/// [`require_stamped_attempts_exact`] instead.
 fn stamp_result_attempts(
     tx: &rusqlite::Transaction<'_>,
     result_text: &str,
     attempts: &[RawId],
 ) -> Result<(), TaskTechnicalError> {
-    let mut statement = tx
-        .prepare(SQL_SELECT_RESULT_ATTEMPTS)
-        .map_err(task_unavailable)?;
-    let stored = statement
-        .query_map(params![result_text], |row| row.get::<_, String>(0))
-        .map_err(task_unavailable)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(task_unavailable)?;
-    drop(statement);
+    let stored = load_result_attempts(tx, result_text)?;
     if stored.is_empty() {
         for attempt in attempts {
             tx.execute(
@@ -1556,17 +1588,7 @@ fn stamp_result_attempts(
         }
         return Ok(());
     }
-    let stored: HashSet<RawId> = stored
-        .into_iter()
-        .map(|text| decode_id(&text).map_err(task_unavailable))
-        .collect::<Result<_, _>>()?;
-    let authoritative: HashSet<RawId> = attempts.iter().copied().collect();
-    if stored != authoritative {
-        return Err(task_unavailable(
-            "stored task result correlation is not exactly the authoritative attempt set",
-        ));
-    }
-    Ok(())
+    require_stamped_attempts_exact(&stored, attempts)
 }
 
 /// Attempts one adoption commit (AU15b) in a single short transaction.
@@ -1654,8 +1676,10 @@ fn adopt_result_sync(
             ));
         }
         // The result-local set was stamped in the same transaction as the
-        // adopted stamp, so a retry must find it already exactly equal.
-        stamp_result_attempts(&tx, &result_text, &local)?;
+        // adopted stamp, so a retry must find it already exactly equal. This
+        // check never inserts: a fully wiped set fails closed instead of
+        // being silently refilled as a first evaluation.
+        require_stamped_attempts_exact(&load_result_attempts(&tx, &result_text)?, &local)?;
         tx.commit().map_err(task_unavailable)?;
         return Ok(TaskResultAcceptance::AdoptedAsCompletion(TaskRef {
             task: task_id,

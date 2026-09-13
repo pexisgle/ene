@@ -1714,6 +1714,201 @@ async fn stamped_attempt_correlation_corruption_fails_closed() {
     ));
 }
 
+/// Seeds one Task completed by adopting a result whose result-local set was
+/// stamped as exactly `{a1, a2}`, ready for full-wipe corruption probes.
+async fn seed_adopted_two_attempt_result(
+    store: &Store,
+) -> (
+    TaskRef,
+    DelegationId,
+    TaskResultId,
+    ActionAttemptId,
+    ActionAttemptId,
+) {
+    let (task, delegation, assoc) = seed_workspace_execution(store).await;
+    let a1 = start_attempt(store, delegation, task, assoc, "a1.txt").await;
+    let a2 = start_attempt(store, delegation, task, assoc, "a2.txt").await;
+    for attempt in [a1, a2] {
+        settle(
+            store,
+            attempt,
+            ActionCertainty::ConfirmedSuccess,
+            EffectGrounds::ObservedAtTarget,
+        )
+        .await;
+    }
+    let x = finalize(store, delegation, "x body").await;
+    let adopted = store
+        .adopt_result(claim(x.result, &[a1, a2]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    assert_eq!(task_table_count(store, "task_result_attempt"), 2);
+    (task, delegation, x.result, a1, a2)
+}
+
+/// Wipes every stamped result-local row of one result and asserts the wipe.
+fn wipe_result_attempts(store: &Store, result: TaskResultId) {
+    raw_exec(
+        store,
+        &format!(
+            "DELETE FROM task_result_attempt WHERE result_id = '{}'",
+            crate::codec::encode_id(result.as_raw()),
+        ),
+    );
+    assert_eq!(task_table_count(store, "task_result_attempt"), 0);
+}
+
+/// An adopted result whose stamped set is wiped whole is durable corruption:
+/// the same-result adoption retry fails closed and never refills the rows.
+#[tokio::test]
+async fn adopted_result_full_wipe_is_never_refilled() {
+    let store = open_store().await;
+    let (_task, _delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    wipe_result_attempts(&store, result);
+    let retry = store.adopt_result(claim(result, &[a1, a2])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a fully wiped adopted set must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "task_result_attempt"),
+        0,
+        "the wiped rows must not be silently refilled"
+    );
+}
+
+/// The bounded reads re-derive the adopted result's authoritative set and
+/// fail closed when the stamped set was wiped whole.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_adopted_result_full_wipe() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    wipe_result_attempts(&store, result);
+    assert!(matches!(
+        store.load_task_result(result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.load_delegation_result(delegation).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+/// The AU15a same-result retry composes the bounded record and therefore also
+/// fails closed on a fully wiped adopted set instead of returning it.
+#[tokio::test]
+async fn arrival_retry_fails_closed_on_adopted_result_full_wipe() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    wipe_result_attempts(&store, result);
+    let retry = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation,
+            result,
+            body: TaskAgentOutput::new(String::from("x body")),
+        })
+        .await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the arrival retry must not hide the wiped adopted set, got {retry:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "task_result_attempt"),
+        0,
+        "the arrival retry must not refill the wiped rows"
+    );
+}
+
+/// A true no-Action execution adopts with an empty authoritative set, and the
+/// adopted result stays healthy: `{} == {}` is valid on the bounded reads and
+/// on both idempotent retries.
+#[tokio::test]
+async fn true_no_action_adopted_result_stays_healthy() {
+    let store = open_store().await;
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DelegationOutcome::Delegated(_)));
+    let result = finalize(&store, delegation, "no action body").await;
+    let adopted = store.adopt_result(claim(result.result, &[])).await.unwrap();
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(created));
+
+    let loaded = store
+        .load_task_result(result.result)
+        .await
+        .unwrap()
+        .expect("the adopted no-Action result reads");
+    assert_eq!(loaded.attempt_refs, Vec::new());
+    assert_eq!(loaded.adopted_revision, Some(created.revision));
+    assert_eq!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .expect("the adopted no-Action result reads by delegation"),
+        loaded
+    );
+
+    let retry = store.adopt_result(claim(result.result, &[])).await.unwrap();
+    assert_eq!(retry, TaskResultAcceptance::AdoptedAsCompletion(created));
+    let arrival = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation,
+            result: result.result,
+            body: TaskAgentOutput::new(String::from("no action body")),
+        })
+        .await
+        .unwrap();
+    assert_eq!(arrival, loaded);
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 0);
+}
+
+/// A healthy non-empty adopted result keeps its exact stamped set across the
+/// idempotent retries: completion is answered without a new row, a duplicate,
+/// or a second terminal transition.
+#[tokio::test]
+async fn healthy_non_empty_adopted_retry_is_idempotent() {
+    let store = open_store().await;
+    let (task, _delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    let before = store.load_task(task.task).await.unwrap().unwrap();
+    let loaded = store.load_task_result(result).await.unwrap().unwrap();
+    let mut refs = loaded.attempt_refs.clone();
+    refs.sort_by_key(|attempt| attempt.as_uuid());
+    let mut expected = vec![a1.as_raw(), a2.as_raw()];
+    expected.sort_by_key(|attempt| attempt.as_uuid());
+    assert_eq!(refs, expected);
+
+    let retry = store.adopt_result(claim(result, &[a1, a2])).await.unwrap();
+    assert_eq!(retry, TaskResultAcceptance::AdoptedAsCompletion(task));
+    let arrival = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation: loaded.delegation,
+            result,
+            body: TaskAgentOutput::new(String::from("x body")),
+        })
+        .await
+        .unwrap();
+    assert_eq!(arrival, loaded);
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 2);
+    assert_eq!(
+        store.load_task(task.task).await.unwrap().unwrap(),
+        before,
+        "the idempotent retries must not transition the Task again"
+    );
+}
+
 #[tokio::test]
 async fn adopted_retry_rejects_non_completed_current_task() {
     let store = open_store().await;
