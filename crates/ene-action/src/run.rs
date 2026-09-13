@@ -17,7 +17,7 @@
 
 use ene_permission::{
     ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
-    ActionPermissionEvaluationId, ActionUseCandidate, CurrentActionPremise, authorize_action_use,
+    ActionUseCandidate, CurrentActionPremise, authorize_action_use,
 };
 use ene_primitive::{RawId, RevisionInner};
 
@@ -174,7 +174,10 @@ pub async fn orchestrate_workspace_action(
             ActionNotStarted::EvaluationConsumed,
         ));
     }
-    let premise = attempt_premise(&command, &target, evaluation);
+    // The Permission-owned decision ends here: the durable claim carries only
+    // its opaque raw correlation identity.
+    let evaluation_id = evaluation.as_raw();
+    let premise = attempt_premise(&command, &target, evaluation_id);
     let attempt = premise.attempt;
     let outcome = repository.insert_attempt_if_current(premise).await?;
     if outcome == ActionStartOutcome::StalePremise {
@@ -205,14 +208,17 @@ pub async fn orchestrate_workspace_action(
 /// The mapping boundary from the Permission-owned live decision to the
 /// Action-owned durable premise.
 ///
-/// The evaluation is reduced to its opaque [`RawId`] here: the durable types
+/// The caller consumes the Permission-owned evaluation and reduces it to its
+/// opaque [`RawId`] at this orchestration boundary; this helper only fills the
+/// Action-owned premise.
+/// The durable types
 /// ([`AttemptCommitPremise`] / [`ActionAttemptRecord`](crate::ActionAttemptRecord))
 /// never name the Permission newtype, and the Action repository neither
 /// decodes nor reconstructs the Permission-owned evaluation.
 fn attempt_premise(
     command: &WorkspaceActionCommand,
     target: &RealTargetRef,
-    evaluation: ActionPermissionEvaluationId,
+    evaluation: RawId,
 ) -> AttemptCommitPremise {
     AttemptCommitPremise {
         attempt: ActionAttemptId::generate(),
@@ -222,7 +228,7 @@ fn attempt_premise(
         workspace: command.workspace,
         real_target: target.clone(),
         operation: command.operation,
-        relied_evaluation: evaluation.as_raw(),
+        relied_evaluation: evaluation,
     }
 }
 
@@ -453,7 +459,7 @@ mod tests {
         else {
             panic!("the matching candidate is allowed");
         };
-        let premise = attempt_premise(&command, &target, evaluation);
+        let premise = attempt_premise(&command, &target, evaluation.as_raw());
         assert_eq!(
             premise.relied_evaluation,
             evaluation.as_raw(),

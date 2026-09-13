@@ -335,7 +335,7 @@ struct ActionAttemptRef {
     workspace: WorkspaceAssocId,    // 開始時に照合した現在の関連付け（委任 scope_copy ではない）
     real_target: RealTargetRef,     // パス解決等を経た具体的な操作対象（単なる文字列一致ではない）
     operation: OperationKind,       // List | Read | Create | Edit を混同しない（Delete/Execute は後続スライス）
-    relied_evaluation: ActionPermissionEvaluationId, // K-B.1 の今回限りの判断（single-use。評価ログ行そのものではない）
+    relied_evaluation: RawId,       // Permission-owned ActionPermissionEvaluationId の opaque な対応識別子（K-B.1 の今回限りの判断。single-use。評価ログ行そのものではない）
     certainty: ActionCertainty,     // 開始時は Unknown。CAS でのみ更新
     grounds: Option<EffectGrounds>, // Unknown の開始時は None
 }
