@@ -138,10 +138,11 @@ impl WorkspaceRoot {
     ///
     /// List accepts an empty request or `.` to enumerate the workspace root.
     /// Read/edit require an existing regular file inside the folder; list
-    /// requires an existing directory; create requires an existing directory
-    /// parent inside the folder and a destination that does not exist yet. The
-    /// returned target is the canonical absolute path, which is what
-    /// execution uses.
+    /// requires an existing directory; create requires every existing
+    /// ancestor of the requested path, including the destination's parent, to
+    /// canonicalize inside the folder on the root's filesystem entity, and a
+    /// destination that does not exist yet. The returned target is the
+    /// canonical absolute path, which is what execution uses.
     pub fn resolve(
         &self,
         requested: &str,
@@ -185,27 +186,36 @@ impl WorkspaceRoot {
                 let Some((file_name, parent_names)) = names.split_last() else {
                     return Err(TargetRejection::MalformedPath);
                 };
-                let mut parent = self.root.clone();
+                // Verify every existing ancestor in order. Canonicalizing the
+                // whole parent at once would accept a path that leaves the
+                // workspace through one symlink/reparse and re-enters through
+                // another (e.g. `out` -> outside, `outside/back` ->
+                // workspace/sub): the final parent canonicalizes back inside
+                // even though an intermediate ancestor resolved outside. Each
+                // prefix must canonicalize inside the root and stay on the
+                // root's filesystem entity before the next name is joined.
+                let mut canonical_parent = self.root.clone();
                 for name in parent_names {
-                    parent.push(name);
-                }
-                let canonical_parent = fs::canonicalize(&parent).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        TargetRejection::MissingParent
-                    } else {
-                        TargetRejection::TargetUnavailable
+                    canonical_parent.push(name);
+                    let canonical = fs::canonicalize(&canonical_parent).map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::NotFound {
+                            TargetRejection::MissingParent
+                        } else {
+                            TargetRejection::TargetUnavailable
+                        }
+                    })?;
+                    if !canonical.starts_with(&self.root) {
+                        return Err(TargetRejection::OutsideWorkspace);
                     }
-                })?;
-                if !canonical_parent.starts_with(&self.root) {
-                    return Err(TargetRejection::OutsideWorkspace);
-                }
-                if !canonical_parent.is_dir() {
-                    return Err(TargetRejection::MissingParent);
-                }
-                let parent_metadata =
-                    fs::metadata(&canonical_parent).map_err(|error| map_io_error(&error))?;
-                if !self.boundary_holds(&canonical_parent, &parent_metadata) {
-                    return Err(TargetRejection::CrossFilesystem);
+                    if !canonical.is_dir() {
+                        return Err(TargetRejection::MissingParent);
+                    }
+                    let metadata =
+                        fs::metadata(&canonical).map_err(|error| map_io_error(&error))?;
+                    if !self.boundary_holds(&canonical, &metadata) {
+                        return Err(TargetRejection::CrossFilesystem);
+                    }
+                    canonical_parent = canonical;
                 }
                 let destination = canonical_parent.join(file_name);
                 match fs::symlink_metadata(&destination) {
@@ -785,6 +795,76 @@ mod tests {
         assert!(
             root.resolve("sub/report.md", OperationKind::Create).is_ok(),
             "an existing subdirectory is a valid parent"
+        );
+        fs::create_dir_all(directory.path().join("sub/deep")).expect("fixture directory");
+        assert!(
+            root.resolve("sub/deep/report.md", OperationKind::Create)
+                .is_ok(),
+            "every existing ancestor in a nested path is walked"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_through_an_inside_symlink_parent_resolves_inside() {
+        let (directory, root) = workspace();
+        let sub = directory.path().join("sub");
+        fs::create_dir(&sub).expect("inside subdirectory");
+        std::os::unix::fs::symlink(&sub, directory.path().join("link")).expect("inside symlink");
+        let resolved = root
+            .resolve("link/new.txt", OperationKind::Create)
+            .expect("an inside symlink parent never leaves the workspace");
+        let expected = fs::canonicalize(&sub)
+            .expect("canonical subdirectory")
+            .join("new.txt");
+        assert_eq!(resolved.as_path(), expected.to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_reentry_symlink_path() {
+        let (directory, root) = workspace();
+        let outside = tempdir().expect("outside directory");
+        let sub = directory.path().join("sub");
+        fs::create_dir(&sub).expect("inside subdirectory");
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("out"))
+            .expect("out symlink");
+        std::os::unix::fs::symlink(&sub, outside.path().join("back")).expect("back symlink");
+        assert_eq!(
+            root.resolve("out/back/new.txt", OperationKind::Create),
+            Err(TargetRejection::OutsideWorkspace),
+            "an ancestor that leaves the workspace is refused even when the final parent re-enters"
+        );
+        assert!(
+            !sub.join("new.txt").exists(),
+            "a refused create never reaches the filesystem"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_refuses_a_reentry_symlink_path() {
+        use std::os::windows::fs::symlink_dir;
+
+        let (directory, root) = workspace();
+        let outside = tempdir().expect("outside directory");
+        let sub = directory.path().join("sub");
+        fs::create_dir(&sub).expect("inside subdirectory");
+        // Directory symlinks are reparse points; creation may require
+        // Developer Mode or privileges, so skip when the platform refuses.
+        if symlink_dir(outside.path(), directory.path().join("out")).is_err()
+            || symlink_dir(&sub, outside.path().join("back")).is_err()
+        {
+            return;
+        }
+        assert_eq!(
+            root.resolve("out/back/new.txt", OperationKind::Create),
+            Err(TargetRejection::OutsideWorkspace),
+            "an ancestor that leaves the workspace is refused even when the final parent re-enters"
+        );
+        assert!(
+            !sub.join("new.txt").exists(),
+            "a refused create never reaches the filesystem"
         );
     }
 

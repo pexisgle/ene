@@ -473,6 +473,39 @@ mod tests {
         assert!(attempts.updates().is_empty());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_through_a_reentry_symlink_never_claims_and_never_executes() {
+        let (directory, root) = workspace();
+        let outside = tempdir().expect("outside directory");
+        let sub = directory.path().join("sub");
+        std::fs::create_dir(&sub).expect("inside subdirectory");
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("out"))
+            .expect("out symlink");
+        std::os::unix::fs::symlink(&sub, outside.path().join("back")).expect("back symlink");
+        let attempts = FakeAttempts::default();
+        let mut command = command(root, OperationKind::Create, "out/back/new.txt");
+        command.content = Some(b"# new".to_vec());
+        let outcome = run(&attempts, command)
+            .await
+            .expect("a rejection is a domain outcome");
+        assert_eq!(
+            outcome,
+            ActionRunOutcome::NotStarted(ActionNotStarted::Rejected(
+                TargetRejection::OutsideWorkspace
+            ))
+        );
+        assert!(
+            attempts.starts().is_empty(),
+            "a path that leaves and re-enters the workspace never claims an attempt"
+        );
+        assert!(attempts.updates().is_empty());
+        assert!(
+            !sub.join("new.txt").exists(),
+            "no create effect may bypass the ancestor boundary"
+        );
+    }
+
     #[tokio::test]
     async fn input_shape_is_refused_before_any_claim() {
         let (_directory, root) = workspace();
