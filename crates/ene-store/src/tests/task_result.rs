@@ -1823,6 +1823,127 @@ async fn arrival_retry_fails_closed_on_adopted_result_full_wipe() {
     );
 }
 
+// --- adopted current-unit bounded-read corruption (review #5190282818) ---
+
+/// Asserts both bounded reads and the AU15a same-result retry, which share
+/// `compose_result`, fail closed for one corrupted adopted current unit.
+async fn assert_adopted_unit_corruption_fails_closed(
+    store: &Store,
+    delegation: DelegationId,
+    result: TaskResultId,
+) {
+    assert!(
+        matches!(
+            store.load_task_result(result).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "the bounded result read must fail closed"
+    );
+    assert!(
+        matches!(
+            store.load_delegation_result(delegation).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "the bounded delegation read must fail closed"
+    );
+    let retry = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation,
+            result,
+            body: TaskAgentOutput::new(String::from("x body")),
+        })
+        .await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the arrival retry must fail closed, got {retry:?}"
+    );
+}
+
+/// A corrupted `task_result.adopted_revision` must equal the relied revision;
+/// disagreeing is durable corruption, never a readable adopted record.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_adopted_revision_corruption() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET adopted_revision = 2 WHERE result_id = '{}'",
+            crate::codec::encode_id(result.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// The adopted result's current Task must still be `Completed`: a demoted
+/// progress is an inconsistent unit on every shared read path.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_demoted_adopted_task() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(&store, "UPDATE task SET progress = 'in_progress'");
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// The current Task must still be at the relied revision: a moved revision
+/// cannot be composed into an adopted bounded record.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_moved_adopted_current_revision() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(&store, "UPDATE task SET revision = 2");
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// An adopted result without its current Task row is corruption, never a
+/// missing record.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_missing_adopted_current_task() {
+    let store = open_store().await;
+    let (task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "DELETE FROM task WHERE task_id = '{}'",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// Two adopted results for one Task violate the 0..1 invariant: the bounded
+/// reads resolve the unique adopted result through the existing fail-closed
+/// helper instead of returning one of them.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_duplicate_adopted_results() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let late = create_workspace_delegation(&store, task, assoc).await;
+    let y = finalize(&store, late, "y body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET adopted_revision = 1 WHERE result_id = '{}'",
+            crate::codec::encode_id(y.result.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, x.result).await;
+}
+
 /// A true no-Action execution adopts with an empty authoritative set, and the
 /// adopted result stays healthy: `{} == {}` is valid on the bounded reads and
 /// on both idempotent retries.

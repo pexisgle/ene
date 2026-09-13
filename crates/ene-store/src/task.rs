@@ -114,9 +114,11 @@ const SQL_INSERT_RESULT: &str = "INSERT INTO task_result (result_id, task_id, ta
 const SQL_SELECT_RESULT_ATTEMPTS: &str =
     "SELECT attempt_id FROM task_result_attempt WHERE result_id = ?1 ORDER BY attempt_id";
 
-/// Strict by construction: the verified result-local set is fixed at the seal,
-/// so the first evaluation inserts it and every later evaluation must find the
-/// stored set already exactly equal — a missing row is never refilled.
+/// Strict by construction: the first evaluation inserts the verified
+/// result-local set whole, and a stored non-empty set is never extended or
+/// repaired. A fully wiped set is distinguishable from an unstamped first
+/// evaluation only for an adopted result (`adopted_revision = Some`), whose
+/// reads use the read-only exact-match and fail closed.
 const SQL_INSERT_RESULT_ATTEMPT: &str =
     "INSERT INTO task_result_attempt (result_id, attempt_id) VALUES (?1, ?2)";
 
@@ -1033,6 +1035,50 @@ fn load_adopted_result(
     )))
 }
 
+/// Requires the durable current unit to be the completed unit an adopted
+/// result belongs to before that result is composed into a bounded read.
+///
+/// An adopted stamp is proof that a completion adoption committed against the
+/// relied revision, so the stamp must equal that revision, the current Task
+/// must still exist at it and be `Completed`, and the unique adopted result
+/// resolved by [`load_adopted_result`] must be exactly this result. A missing
+/// current Task is never rounded to a `None` record, and a different or
+/// duplicate adopted result fails closed: an adopted result without its
+/// intact completed unit is durable corruption, not a readable record.
+fn require_adopted_result_current_unit(
+    conn: &Connection,
+    result: TaskResultId,
+    task_text: &str,
+    relied_revision: TaskRevision,
+    adopted_revision: TaskRevision,
+) -> Result<(), TaskTechnicalError> {
+    if adopted_revision != relied_revision {
+        return Err(task_unavailable(
+            "adopted task result does not match its relied revision",
+        ));
+    }
+    let current: Option<RawTask> = conn
+        .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(current) = current else {
+        return Err(task_unavailable("adopted task result has no current task"));
+    };
+    let current_revision = decode_revision(current.revision)?;
+    let current_progress = decode_progress(current.progress.as_deref())?;
+    if current_revision != relied_revision || current_progress != TaskProgress::Completed {
+        return Err(task_unavailable(
+            "adopted task result does not match the completed current task",
+        ));
+    }
+    if load_adopted_result(conn, task_text, current_revision, current_progress)? != Some(result) {
+        return Err(task_unavailable(
+            "adopted task result is not the task's single adopted result",
+        ));
+    }
+    Ok(())
+}
+
 /// Reads one delegation correlation row by decoding every stored column.
 ///
 /// `None` means the identity has no stored delegation. A malformed identity
@@ -1136,8 +1182,11 @@ fn load_result_attempts(
 /// Before the record is built: the sealed delegation must exist and its stored
 /// `(task_id, task_revision)` must equal the result's copied correlation, and
 /// every stamped result-local attempt must be an `action_attempt` row whose
-/// copied delegation/task/revision equal the result's. An adopted result's
-/// stamped set is additionally required to equal the authoritative set
+/// copied delegation/task/revision equal the result's. An adopted result is
+/// additionally required to be the current completed unit's unique adopted
+/// result (stamp equals the relied revision, current Task exists at that
+/// revision and is `Completed`, and [`load_adopted_result`] resolves exactly
+/// this result), and its stamped set must equal the authoritative set
 /// re-derived from the delegation, so a fully wiped set fails closed instead
 /// of being read as an empty first evaluation. A missing delegation, a
 /// missing attempt, or any disagreement is an inconsistent unit and a
@@ -1199,17 +1248,28 @@ fn compose_result(
             ));
         }
     }
-    if adopted_revision.is_some() {
+    if let Some(adopted_stamp) = adopted_revision {
+        // The adopted stamp only means the completed unit is readable while
+        // the current Task still agrees with it; the same checks the retry and
+        // `load_task` apply, so a bounded read never answers success from a
+        // stale stamp after an adopted-unit corruption.
+        let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
+        let delegation_id =
+            DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
+        let relied_revision = decode_revision(task_revision)?;
+        require_adopted_result_current_unit(
+            conn,
+            result,
+            &task,
+            relied_revision,
+            decode_revision(adopted_stamp)?,
+        )?;
         // An adopted result's stamp committed in the same transaction as its
         // adoption, so `adopted_revision = Some` proves the set is not an
         // unstamped first evaluation. Re-derive the authoritative set from
         // the delegation and require exact equality: a fully wiped set (here
         // and in the retry path) is durable corruption, never an initial
         // empty evaluation, and an extra row is equally unreadable.
-        let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
-        let delegation_id =
-            DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
-        let relied_revision = decode_revision(task_revision)?;
         let authoritative: Vec<RawId> =
             enumerate_delegation_attempts(conn, delegation_id, task_id, relied_revision)?
                 .into_iter()
@@ -1565,13 +1625,14 @@ fn require_stamped_attempts_exact(
 
 /// Verifies and stamps the result-local fixed set.
 ///
-/// This is the first-evaluation path only: an empty stored set means no
-/// evaluation has stamped it yet, so the authoritative set is inserted whole.
-/// Once any row is stamped the set is durable and fixed, so the stored set
-/// must equal the authoritative set exactly. There is no silent refill: a
-/// stored non-empty set is never extended or repaired. An adopted result
-/// never reaches the empty branch — its retry and the bounded reads use
-/// [`require_stamped_attempts_exact`] instead.
+/// A stored non-empty set is durable and fixed: it must equal the
+/// authoritative set exactly and is never extended or repaired. An empty
+/// stored set is inserted whole as a first evaluation — for a non-adopted
+/// result (`adopted_revision = None`) a fully wiped set is indistinguishable
+/// from an unstamped first evaluation in the V20 state, so this insert may
+/// refill it; that residual ambiguity is out of this slice's guarantee. An
+/// adopted result never reaches the empty branch: its retry and the bounded
+/// reads use [`require_stamped_attempts_exact`] and fail closed on a wipe.
 fn stamp_result_attempts(
     tx: &rusqlite::Transaction<'_>,
     result_text: &str,
