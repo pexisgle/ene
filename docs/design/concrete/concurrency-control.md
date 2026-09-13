@@ -281,6 +281,13 @@ BEGIN IMMEDIATE;
   IF cur が存在しない THEN
     ROLLBACK; RETURN MissingTask { task: result_row.task_id };
   END IF
+  IF result_row.adopted_revision IS NOT NULL THEN
+    -- この result 自身が過去に採用を確定済み。二度目の terminal transition は行わず同じ判定を返す
+    IF result_row.adopted_revision != result_row.task_revision THEN
+      ROLLBACK; RETURN 技術的エラー;  -- 採用リビジョンと依拠リビジョンの不整合
+    END IF
+    COMMIT; RETURN AdoptedAsCompletion((task, result_row.adopted_revision));
+  END IF
   IF cur.revision != result_row.task_revision OR cur.progress が terminal OR cancel marker あり THEN
     INSERT task_result_attempt 相関（attempts）;  -- 1 回だけ
     COMMIT; RETURN RecordedToOriginalOnly;

@@ -1720,7 +1720,10 @@ trait TaskRepository {
     // 狭めたり広げたりできません。
     // 続いて delegation 行を読み、result 行に記録された依拠 TaskRef との対応を確認してから（delegation 行の
     // 欠如は MissingDelegation、対応の不一致は技術的エラー）、現在 task.revision と purpose identity を比較します
-    // （purpose text の文字列一致は使いません）。現在 revision が前進済み・task.progress が terminal・
+    // （purpose text の文字列一致は使いません）。result 行の adopted_revision が Some で、その値が result 行の
+    // 依拠リビジョンと一致する場合は、この result 自身が過去に採用・完了を確定した再評価であり、二度目の
+    // terminal transition を行わず同じ AdoptedAsCompletion を返します（adopted_revision と依拠リビジョンの
+    // 不整合は技術的エラー）。現在 revision が前進済み・task.progress が terminal・
     // 後続 cancel marker あり（marker の producer は後続スライス）の場合は、attempt 相関だけを 1 回だけ
     // 刻印し、現在 Task を変更せず RecordedToOriginalOnly を返します。現在 revision と一致する場合は、
     // authoritative set に 1 つでも ConfirmedSuccess でないもの（Unknown / ConfirmedFailure）があれば、
