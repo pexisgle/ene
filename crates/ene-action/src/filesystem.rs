@@ -504,17 +504,62 @@ impl WorkspaceRoot {
     }
 
     #[cfg(windows)]
-    fn boundary_holds_impl(&self, _target: &Path, metadata: &fs::Metadata) -> bool {
-        use std::os::windows::fs::MetadataExt;
-
-        // A nested mounted volume or reparse target resolves to a different
+    fn boundary_holds_impl(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
+        // A nested mounted volume or reparse target lives on a different
         // volume serial; an undeterminable serial fails closed. Create passes
-        // its canonical parent's metadata, so the same equality covers it.
-        let root_volume = fs::metadata(&self.root)
-            .ok()
-            .and_then(|root| root.volume_serial_number());
-        let target_volume = metadata.volume_serial_number();
-        matches!((root_volume, target_volume), (Some(left), Some(right)) if left == right)
+        // its canonical parent, so the same equality covers it.
+        match (
+            Self::volume_serial_of(&self.root),
+            Self::volume_serial_of(target),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    /// The volume serial number of the volume hosting `path`, if determinable.
+    ///
+    /// Maps the path to its volume mount point with `GetVolumePathNameW` and
+    /// reads the serial with `GetVolumeInformationW`; any failure answers
+    /// `None` so the boundary fails closed. Both are stable Win32 APIs (the
+    /// std `MetadataExt::volume_serial_number` needs `windows_by_handle`).
+    #[cfg(windows)]
+    fn volume_serial_of(path: &Path) -> Option<u32> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::MAX_PATH;
+        use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+
+        let mut name: Vec<u16> = path.as_os_str().encode_wide().collect();
+        name.push(0);
+        let mut mount = vec![0u16; MAX_PATH as usize];
+        // SAFETY: `name` is NUL-terminated and `mount` has exactly the passed
+        // capacity; both outlive the call and the buffer is only read after
+        // the success flag is checked.
+        let mapped =
+            unsafe { GetVolumePathNameW(name.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) };
+        if mapped == 0 {
+            return None;
+        }
+        let mut serial = 0u32;
+        // SAFETY: `mount` is NUL-terminated by the successful call above;
+        // unneeded out buffers are NULL, which the API permits, and `serial`
+        // is a live local exclusively borrowed for the call.
+        let read = unsafe {
+            GetVolumeInformationW(
+                mount.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut serial,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read == 0 {
+            return None;
+        }
+        Some(serial)
     }
 }
 
@@ -1095,21 +1140,22 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_inside_targets_share_the_root_volume_serial() {
-        use std::os::windows::fs::MetadataExt;
-
         let (directory, root) = workspace();
         fs::write(directory.path().join("input.txt"), b"hello").expect("fixture write");
         let canonical =
             fs::canonicalize(directory.path().join("input.txt")).expect("canonical fixture");
         let target_metadata = fs::metadata(&canonical).expect("target metadata");
-        let root_metadata = fs::metadata(root.as_path()).expect("root metadata");
         // A nested mounted volume presents a different volume serial, so the
         // same equality refuses it; an undeterminable serial (None) fails
         // closed by the matches! guard in boundary_holds_impl.
         assert_eq!(
-            root_metadata.volume_serial_number(),
-            target_metadata.volume_serial_number(),
+            WorkspaceRoot::volume_serial_of(root.as_path()),
+            WorkspaceRoot::volume_serial_of(&canonical),
             "an inside target must share the root volume serial"
+        );
+        assert!(
+            WorkspaceRoot::volume_serial_of(root.as_path()).is_some(),
+            "the serial must be determinable on the test volume"
         );
         assert!(
             root.boundary_holds(&canonical, &target_metadata),
