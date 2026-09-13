@@ -526,6 +526,19 @@ pub trait HistoryRepository {
         companion: CompanionId,
         command: &CommandId,
     ) -> Result<Option<HistoryMessage>, CompanionTechnicalError>;
+
+    /// Loads one history item by its `message_id` primary key.
+    ///
+    /// This is the single-message bounded read: exactly the addressed row is
+    /// read, never a timeline load, a recent window, or a command lookup.
+    /// [`None`] reports absence (the row does not exist); a malformed durable
+    /// row is a technical error, never a composed substitute. The returned
+    /// row is decoded by the same decoder every other History read uses, so
+    /// there is no second decoding contract.
+    async fn load_message(
+        &self,
+        message: RawId,
+    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError>;
 }
 
 /// Undelivered registration and reporting contract.

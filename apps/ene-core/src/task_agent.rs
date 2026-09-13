@@ -7,14 +7,16 @@
 //! outcomes without adding behavior. The provider output is handed back as a
 //! Task Agent output, never as Task completion.
 
+use ene_companion::{HistoryMessage, HistoryRepository, HistoryRole};
 use ene_inference::{
     Admission, DiscardSink, InferenceDispatchOutcome, InferenceExecutor, InferenceTechnicalError,
     NotSentReason, TaskAgentAttemptPremise,
 };
-use ene_primitive::RevisionInner;
+use ene_primitive::{RawId, RevisionInner};
 use ene_task::{
     TaskAgentInference, TaskAgentInferenceError, TaskAgentInferenceOutcome,
-    TaskAgentInferencePremise, TaskAgentNotSent, TaskAgentOutput,
+    TaskAgentInferencePremise, TaskAgentNotSent, TaskAgentOutput, TaskInstructionRole,
+    TaskInstructionSource, TaskInstructionSourceError, TaskInstructionSourceRecord,
 };
 
 /// Adapts one [`InferenceExecutor`] to the Task Agent port.
@@ -64,6 +66,51 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
             Ok(InferenceDispatchOutcome::NotSent(reason)) => Ok(mirror_not_sent(reason)),
             Err(error) => Err(inference_unavailable(error)),
         }
+    }
+}
+
+/// Adapts one `HistoryRepository` to the Task-owned instruction-source port.
+///
+/// The adapter maps the canonical single-message read result into the
+/// Task-owned record and adds no behavior: no body is cached or copied into
+/// Task state, and a read failure becomes a fixed-class technical error
+/// without the row or the body.
+pub struct HistoryInstructionSource<'a, H> {
+    history: &'a H,
+}
+
+impl<'a, H> HistoryInstructionSource<'a, H> {
+    #[must_use]
+    pub fn new(history: &'a H) -> Self {
+        Self { history }
+    }
+}
+
+impl<H: HistoryRepository + Sync> TaskInstructionSource for HistoryInstructionSource<'_, H> {
+    async fn load_owner_instruction(
+        &self,
+        source: RawId,
+    ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
+        let message = self.history.load_message(source).await.map_err(|_| {
+            TaskInstructionSourceError::SourceUnavailable {
+                reason: String::from("history message read failed"),
+            }
+        })?;
+        Ok(message.map(map_history_message))
+    }
+}
+
+/// The whole mapping is one direction: no `HistoryMessage` crosses into
+/// `ene-task`, and only the fields the turn needs are carried.
+fn map_history_message(message: HistoryMessage) -> TaskInstructionSourceRecord {
+    TaskInstructionSourceRecord {
+        source: message.id,
+        companion: message.companion.as_raw(),
+        role: match message.role {
+            HistoryRole::Owner => TaskInstructionRole::Owner,
+            HistoryRole::Companion => TaskInstructionRole::Companion,
+        },
+        text: message.text,
     }
 }
 

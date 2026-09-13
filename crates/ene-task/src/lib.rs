@@ -17,6 +17,7 @@
 mod agent;
 mod context;
 mod delegation;
+mod instruction;
 mod orchestrate;
 mod repository;
 mod result;
@@ -34,6 +35,10 @@ pub use context::{
 pub use delegation::{
     CreateDelegationCommand, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
     DelegationOutcome, DelegationRef, DelegationScope, TaskAgentEphemeralId,
+};
+pub use instruction::{
+    TaskInstructionRole, TaskInstructionSource, TaskInstructionSourceError,
+    TaskInstructionSourceRecord,
 };
 pub use orchestrate::{
     SteeringProposalPremise, TaskProposalOutcome, orchestrate_delegation,
