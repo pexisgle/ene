@@ -19,6 +19,8 @@
 //!   Host inference boundary.
 //! - [`action`] adapts the Task-owned delegation/workspace correspondence to
 //!   the Action-owned filesystem boundary.
+//! - [`task_run`] runs the bounded autonomous Task Agent ↔ Action loop over
+//!   those boundaries.
 //! - [`conn`] holds the Unix socket listener. The wire close convention is shared:
 //!   a [`ene_api::v1::handshake::DisconnectNotice`] in the response vector is
 //!   terminal and the connection closes after it is written.
@@ -34,6 +36,7 @@ pub mod dialogue;
 pub mod serve;
 pub mod setup;
 pub mod task_agent;
+pub mod task_run;
 
 #[cfg(test)]
 pub(crate) mod test_support;

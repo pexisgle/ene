@@ -122,7 +122,10 @@ async fn task_agent_turn_dispatches_under_the_inherited_consent() {
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -195,7 +198,10 @@ async fn task_agent_turn_is_data_use_held_when_the_purpose_source_is_covered() {
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -277,7 +283,10 @@ async fn task_agent_turn_is_stale_after_steering_and_never_sends() {
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -330,7 +339,10 @@ async fn task_agent_turn_is_execution_sealed_after_finalization() {
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -391,7 +403,10 @@ async fn task_agent_turn_is_terminal_after_completion() {
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -552,7 +567,10 @@ async fn task_agent_turn_sends_purpose_and_instruction_through_the_real_composit
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -564,9 +582,17 @@ async fn task_agent_turn_sends_purpose_and_instruction_through_the_real_composit
     {
         let inputs = transport.inputs.lock().expect("input capture lock");
         assert_eq!(inputs.len(), 1, "exactly one provider call");
+        let expected = "[RESPONSE FORMAT]\n\
+Respond with exactly one JSON object and no other text. One of:\n\
+{\"tool\":\"list\",\"path\":\"<workspace-relative directory>\"}\n\
+{\"tool\":\"read\",\"path\":\"<workspace-relative file>\"}\n\
+{\"tool\":\"create\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+{\"tool\":\"edit\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+{\"final\":\"<final answer>\"}\n\
+[PURPOSE]\nwrite the report\n[INSTRUCTION]\nread the notes first";
         assert_eq!(
-            inputs[0], "[PURPOSE]\nwrite the report\n[INSTRUCTION]\nread the notes first",
-            "the logical input frames purpose then the adopted instruction body"
+            inputs[0], expected,
+            "the logical input frames the response format, purpose, then the adopted instruction body"
         );
     }
     assert_eq!(
@@ -638,7 +664,10 @@ async fn task_agent_turn_is_data_use_held_when_the_instruction_source_is_covered
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -728,7 +757,10 @@ async fn task_agent_turn_with_an_instruction_never_sends_after_steering_wins() {
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");
@@ -778,7 +810,10 @@ async fn reopened_handle_does_not_replay_a_turn_and_resolves_the_instruction_aga
             &instructions,
             &adapter,
             &scrubber,
-            TaskAgentTurnPremise { delegation },
+            TaskAgentTurnPremise {
+                delegation,
+                exchanges: Vec::new(),
+            },
         )
         .await
         .expect("the turn must answer")
@@ -824,7 +859,10 @@ async fn reopened_handle_does_not_replay_a_turn_and_resolves_the_instruction_aga
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the reopened turn must answer");
@@ -878,7 +916,10 @@ async fn task_agent_turn_scrubs_a_registered_secret_in_an_instruction_body() {
         &instructions,
         &adapter,
         &scrubber,
-        TaskAgentTurnPremise { delegation },
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
     )
     .await
     .expect("the turn must answer");

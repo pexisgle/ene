@@ -2,14 +2,18 @@
 //!
 //! One turn runs exactly one delegated inference through the Task-owned
 //! [`TaskAgentInference`] port. The harness assembles the logical input
-//! itself: the relied revision's adopted-purpose text comes from the
-//! `task_revision` snapshot, and each adopted instruction body is resolved
-//! through the Task-owned [`TaskInstructionSource`] port from its canonical
-//! History source. Purpose and instruction bodies are one string with one
-//! fixed framing, scrubbed exactly once, and only the injected
-//! [`SecretScrubber`]'s output reaches the port. This module never
-//! constructs a [`ScrubbedText`] literal, never copies an instruction body
-//! into Task state, and never sends workspace or file content.
+//! itself: a fixed response-format preamble, the relied revision's
+//! adopted-purpose text from the `task_revision` snapshot, each adopted
+//! instruction body resolved through the Task-owned [`TaskInstructionSource`]
+//! port from its canonical History source, and the execution-local Action
+//! transcript (the completed tool calls and their observations) the caller
+//! passes in the premise. Everything is one string with one fixed framing,
+//! scrubbed exactly once, and only the injected [`SecretScrubber`]'s output
+//! reaches the port. This module never constructs a [`ScrubbedText`] literal,
+//! never copies an instruction body into Task state, never persists the
+//! Action transcript, and never sends workspace or file content on its own
+//! (the exchange text is composed by the Host from what the Action owner
+//! observed).
 //!
 //! The ports keep `ene-task` free of permission, credential, and
 //! conversation-history concrete types: the Host composition root
@@ -32,10 +36,15 @@ use crate::task::{TaskId, TaskProgress, TaskRecord, TaskRef};
 /// The delegation identity names a correspondence row, and the row's
 /// existence never proves the ephemeral agent is alive or that delegated work
 /// is running; the turn re-checks the task premise instead of assuming it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `exchanges` is the execution-local transcript of Action requests this
+/// delegation already performed (in order); it is never persisted and is
+/// replayed into the provider-visible logical input for this turn only.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskAgentTurnPremise {
     /// The delegation correspondence to run.
     pub delegation: DelegationId,
+    /// Prior Action exchanges of this execution, oldest first.
+    pub exchanges: Vec<TaskAgentActionExchange>,
 }
 
 /// What the port receives.
@@ -101,6 +110,51 @@ impl core::fmt::Debug for TaskAgentOutput {
             .field(&"[redacted]")
             .finish()
     }
+}
+
+/// The execution-local result of one Action request, as the Task Agent
+/// execution observed it.
+///
+/// The text is composed by the Host from the Action owner's observed effect
+/// (or from the refusal class) and is never persisted: the only durable
+/// result body is the final `task_result` row. [`core::fmt::Debug`] redacts
+/// the text because it can carry file content.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TaskAgentObservation(String);
+
+impl TaskAgentObservation {
+    /// Builds the observation text the next turn replays.
+    #[must_use]
+    pub fn new(text: String) -> Self {
+        Self(text)
+    }
+
+    /// The observation text.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for TaskAgentObservation {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_tuple("TaskAgentObservation")
+            .field(&"[redacted]")
+            .finish()
+    }
+}
+
+/// One completed Action exchange of a delegated execution.
+///
+/// `request` is the provider output that asked for the Action and
+/// `observation` is what the execution observed (or the refusal class). The
+/// pair is execution-local transcript, never a canonical source and never
+/// persisted; it exists so the next turn sees what already happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAgentActionExchange {
+    pub request: TaskAgentOutput,
+    pub observation: TaskAgentObservation,
 }
 
 /// Mirror of the inference-side `NotSentReason`; same meanings, Task-owned.
@@ -271,21 +325,26 @@ pub enum TaskAgentTurnOutcome {
 /// informational, so a competing steering winner between the precheck and
 /// the claim is still reported as stale by the port.
 ///
-/// The logical input is the relied revision's adopted-purpose text followed
-/// by the adopted-instruction bodies in `TaskRecord.context` order. Purpose
-/// and instruction bodies are one string with one fixed framing; the whole
-/// string is scrubbed exactly once and only the scrubber's output crosses
-/// the port. Instruction bodies stay canonical in History: the
+/// The logical input is a fixed response-format preamble, the relied
+/// revision's adopted-purpose text, the adopted-instruction bodies in
+/// `TaskRecord.context` order, and the execution-local Action exchanges the
+/// caller replays (each request followed by its observation, oldest first).
+/// The whole string is scrubbed exactly once and only the scrubber's output
+/// crosses the port. Instruction bodies stay canonical in History: the
 /// [`TaskInstructionSource`] port reads each adopted entry's source, the
 /// source/role/companion correspondence is verified before the body is
 /// used, and an absent source ends the turn as
 /// [`TaskAgentTurnOutcome::InstructionSourceMissing`] without fabricating,
-/// skipping, or rewriting anything. No workspace or file content enters the
-/// prompt.
+/// skipping, or rewriting anything. The exchange transcript is execution-local
+/// evidence from the Action owner and is never persisted or treated as a
+/// canonical source; it is reproduced for the provider only through this
+/// turn.
 ///
 /// The logical input's canonical source correlation (`data_use`) is the
 /// purpose entry's `origin.source` followed by every adopted instruction's
-/// `origin.source`, in the same order, duplicates retained. It travels to
+/// `origin.source`, in the same order, duplicates retained. The Action
+/// exchange transcript is execution-local and carries no canonical source, so
+/// it adds no `data_use` entry. It travels to
 /// the claim, which compares it against the canonical current
 /// erasure-condition store in the same transaction as the task premise; a
 /// covered source yields [`TaskAgentTurnOutcome::NotSent`] with
@@ -402,10 +461,11 @@ pub async fn orchestrate_task_agent_turn(
         });
     };
     // The logical input is assembled in full before the single scrub: the
-    // scrubber sees purpose and every resolved instruction body once, and
-    // only its output may cross the port. A scrub failure fails closed with
-    // no provider I/O and never logs the raw input.
-    let raw_input = assemble_logical_input(purpose_text, &instruction_texts);
+    // scrubber sees purpose, every resolved instruction body, and the
+    // execution-local Action transcript once, and only its output may cross
+    // the port. A scrub failure fails closed with no provider I/O and never
+    // logs the raw input.
+    let raw_input = assemble_logical_input(purpose_text, &instruction_texts, &premise.exchanges);
     let Ok(prompt) = scrubber.scrub(&raw_input).await else {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("credential scrub failed"),
@@ -439,18 +499,39 @@ pub async fn orchestrate_task_agent_turn(
 
 /// Assembles the fixed logical-input framing for one turn.
 ///
-/// The purpose comes first, then each resolved instruction body in
-/// `TaskRecord.context` order. The boundary markers are identical for every
-/// turn (including a turn with no instructions), so the provider-visible
-/// purpose/instruction boundary is never body text and never varies by
-/// caller. Instructions are not sorted, deduplicated, or filtered: repeated
-/// adoption of the same source remains repeated input.
-fn assemble_logical_input(purpose: &str, instructions: &[String]) -> String {
-    let mut input = String::from("[PURPOSE]\n");
+/// The protocol preamble comes first (it tells the model how to answer and
+/// never varies), then the purpose, then each resolved instruction body in
+/// `TaskRecord.context` order, then every completed Action exchange of this
+/// execution in order. The boundary markers are identical for every turn
+/// (including a turn with no instructions or exchanges), so the
+/// provider-visible boundaries are never body text and never vary by caller.
+/// Instructions are not sorted, deduplicated, or filtered: repeated adoption
+/// of the same source remains repeated input.
+fn assemble_logical_input(
+    purpose: &str,
+    instructions: &[String],
+    exchanges: &[TaskAgentActionExchange],
+) -> String {
+    let mut input = String::from(
+        "[RESPONSE FORMAT]\n\
+         Respond with exactly one JSON object and no other text. One of:\n\
+         {\"tool\":\"list\",\"path\":\"<workspace-relative directory>\"}\n\
+         {\"tool\":\"read\",\"path\":\"<workspace-relative file>\"}\n\
+         {\"tool\":\"create\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+         {\"tool\":\"edit\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+         {\"final\":\"<final answer>\"}\n\
+         [PURPOSE]\n",
+    );
     input.push_str(purpose);
     for instruction in instructions {
         input.push_str("\n[INSTRUCTION]\n");
         input.push_str(instruction);
+    }
+    for exchange in exchanges {
+        input.push_str("\n[TOOL CALL]\n");
+        input.push_str(exchange.request.text());
+        input.push_str("\n[TOOL RESULT]\n");
+        input.push_str(exchange.observation.text());
     }
     input
 }
