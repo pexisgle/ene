@@ -1350,6 +1350,462 @@ async fn load_fails_closed_on_corrupt_progress_or_adoption_state() {
     ));
 }
 
+// --- corruption fail-closed (review #5190132687) ---
+
+/// Healthy cross-delegation Unknown first withholds; after a corrupted
+/// `action_attempt.task_id` moves that row out of a naive
+/// `WHERE task_id = target` read, the correspondence join must still see it,
+/// fail closed, and never complete the Task.
+#[tokio::test]
+async fn barrier_fails_closed_on_swapped_action_task_id() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+
+    let d2 = create_workspace_delegation(&store, task, assoc).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+    assert_eq!(
+        store.adopt_result(claim(x.result, &[a1])).await.unwrap(),
+        TaskResultAcceptance::WithheldByEffectFacts {
+            attempts: vec![a2.as_raw()],
+        },
+        "a healthy cross-delegation Unknown withholds"
+    );
+
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET task_id = '{}' WHERE attempt_id = '{}'",
+            crate::codec::encode_id(RawId::new()),
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a swapped task_id must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress,
+        "the barrier corruption must not complete the Task"
+    );
+}
+
+#[tokio::test]
+async fn barrier_fails_closed_on_action_revision_mismatch() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+    let d2 = create_workspace_delegation(&store, task, assoc).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET task_revision = 999 WHERE attempt_id = '{}'",
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a copied revision disagreeing with the delegation must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress
+    );
+}
+
+#[tokio::test]
+async fn barrier_fails_closed_on_foreign_delegation() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+    let d2 = create_workspace_delegation(&store, task, assoc).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+
+    let (foreign_premise, foreign_assoc) = workspace_task_premise();
+    let foreign_task = store.create_task(foreign_premise).await.unwrap();
+    let foreign_delegation = create_workspace_delegation(&store, foreign_task, foreign_assoc).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET delegation_id = '{}' WHERE attempt_id = '{}'",
+            crate::codec::encode_id(foreign_delegation.as_raw()),
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a copied task_id without its delegation must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress
+    );
+}
+
+/// A `task_result` copied `task_id`/`task_revision` that disagrees with its
+/// sealed delegation is unreadable on every bounded result read and on
+/// adoption.
+#[tokio::test]
+async fn bounded_result_reads_fail_closed_on_result_correspondence_mismatch() {
+    // Copied task_id swapped.
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET task_id = '{}' WHERE result_id = '{}'",
+            crate::codec::encode_id(RawId::new()),
+            crate::codec::encode_id(x.result.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.load_delegation_result(delegation).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.adopt_result(claim(x.result, &[a1])).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+
+    // Copied task_revision swapped.
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET task_revision = 999 WHERE result_id = '{}'",
+            crate::codec::encode_id(x.result.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.load_delegation_result(delegation).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.adopt_result(claim(x.result, &[a1])).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+/// Once stamped, the result-local set is fixed: a deleted row is never
+/// silently recreated by a retry.
+#[tokio::test]
+async fn stamped_correlation_is_never_silently_refilled() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    let a2 = start_attempt(&store, delegation, task, assoc, "a2.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    settle(
+        &store,
+        a2,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store
+        .adopt_result(claim(x.result, &[a1, a2]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 2);
+
+    raw_exec(
+        &store,
+        &format!(
+            "DELETE FROM task_result_attempt WHERE result_id = '{}' AND attempt_id = '{}'",
+            crate::codec::encode_id(x.result.as_raw()),
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1, a2])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a missing stamped row must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "task_result_attempt"),
+        1,
+        "the missing row must not be silently refilled"
+    );
+}
+
+/// A stamped row that points at a foreign delegation is unreadable on the
+/// bounded reads and fails the retry's exact-match check.
+#[tokio::test]
+async fn stamped_foreign_attempt_fails_closed_on_reads_and_retry() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+
+    let (foreign_premise, foreign_assoc) = workspace_task_premise();
+    let foreign_task = store.create_task(foreign_premise).await.unwrap();
+    let foreign_delegation = create_workspace_delegation(&store, foreign_task, foreign_assoc).await;
+    let foreign_attempt = start_attempt(
+        &store,
+        foreign_delegation,
+        foreign_task,
+        foreign_assoc,
+        "foreign.txt",
+    )
+    .await;
+    raw_exec(
+        &store,
+        &format!(
+            "INSERT INTO task_result_attempt (result_id, attempt_id) VALUES ('{}', '{}')",
+            crate::codec::encode_id(x.result.as_raw()),
+            crate::codec::encode_id(foreign_attempt.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a foreign stamped attempt must fail the retry, got {retry:?}"
+    );
+}
+
+/// A stamped attempt whose copied correlation is corrupted is unreadable on
+/// the bounded reads, on the arrival retry, and on the adoption retry.
+#[tokio::test]
+async fn stamped_attempt_correlation_corruption_fails_closed() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET task_id = '{}' WHERE attempt_id = '{}'",
+            crate::codec::encode_id(RawId::new()),
+            crate::codec::encode_id(a1.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    let arrival = orchestrate_result_arrival(
+        &store,
+        delegation,
+        TaskAgentOutput::new(String::from("x body")),
+    )
+    .await;
+    assert!(
+        matches!(arrival, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "an arrival retry must not return a corrupted record, got {arrival:?}"
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(matches!(
+        retry,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+#[tokio::test]
+async fn adopted_retry_rejects_non_completed_current_task() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(&store, "UPDATE task SET progress = 'in_progress'");
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a demoted current progress must fail the retry, got {retry:?}"
+    );
+}
+
+#[tokio::test]
+async fn adopted_retry_rejects_moved_current_revision() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(&store, "UPDATE task SET revision = 2");
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a moved current revision must fail the retry, got {retry:?}"
+    );
+}
+
+#[tokio::test]
+async fn adopted_retry_rejects_multiple_adopted_results() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    // The second execution seals before the completion CAS; its result is
+    // never adopted by the producer, then corruption stamps it too.
+    let late = create_workspace_delegation(&store, task, assoc).await;
+    let y = finalize(&store, late, "y body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET adopted_revision = 1 WHERE result_id = '{}'",
+            crate::codec::encode_id(y.result.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "two adopted results must fail the retry, got {retry:?}"
+    );
+    assert!(matches!(
+        store.load_task(task.task).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
 // --- V20 migration ---
 
 /// Rewinds a V20 database to the V19 shape: the added column, the two result

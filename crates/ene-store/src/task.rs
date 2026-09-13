@@ -114,11 +114,11 @@ const SQL_INSERT_RESULT: &str = "INSERT INTO task_result (result_id, task_id, ta
 const SQL_SELECT_RESULT_ATTEMPTS: &str =
     "SELECT attempt_id FROM task_result_attempt WHERE result_id = ?1 ORDER BY attempt_id";
 
-/// Idempotent by construction: the verified result-local set is fixed at the
-/// seal, so a re-evaluation of the same result must not duplicate rows but
-/// also must not silently drop a row that was already stamped.
+/// Strict by construction: the verified result-local set is fixed at the seal,
+/// so the first evaluation inserts it and every later evaluation must find the
+/// stored set already exactly equal — a missing row is never refilled.
 const SQL_INSERT_RESULT_ATTEMPT: &str =
-    "INSERT OR IGNORE INTO task_result_attempt (result_id, attempt_id) VALUES (?1, ?2)";
+    "INSERT INTO task_result_attempt (result_id, attempt_id) VALUES (?1, ?2)";
 
 /// The result-local authoritative set enumeration: all Action attempts of the
 /// sealed delegation (execution lifetime). The correspondence columns are
@@ -127,11 +127,17 @@ const SQL_INSERT_RESULT_ATTEMPT: &str =
 const SQL_SELECT_DELEGATION_ATTEMPTS: &str = "SELECT attempt_id, task_id, task_revision, certainty FROM action_attempt WHERE delegation_id = ?1 ORDER BY attempt_id";
 
 /// The Task-wide completion barrier enumeration: every revision and every
-/// delegation of the Task. Only durable facts are read (`task_id`,
-/// `task_revision`, `delegation_id`, `certainty`); timestamps, liveness, and
-/// the caller's claim are never inputs.
-const SQL_SELECT_TASK_ATTEMPTS: &str =
-    "SELECT attempt_id, certainty FROM action_attempt WHERE task_id = ?1 ORDER BY attempt_id";
+/// delegation of the Task. A row is read from either direction — under a
+/// delegation of the Task, or with a copied `task_id` naming the Task — so a
+/// corrupted copy cannot fall out of the barrier. The delegation columns are
+/// joined in and read back so each row's copied correlation is verified, not
+/// trusted; timestamps, liveness, and the caller's claim are never inputs.
+const SQL_SELECT_TASK_ATTEMPTS: &str = "SELECT a.attempt_id, a.task_id, a.task_revision, a.delegation_id, d.task_id, d.task_revision, a.certainty FROM action_attempt a LEFT JOIN delegation d ON d.delegation_id = a.delegation_id WHERE d.task_id = ?1 OR a.task_id = ?1 ORDER BY a.attempt_id";
+
+/// The copied correlation of one Action attempt, used to verify a stamped
+/// result-local row before it is trusted.
+const SQL_SELECT_ATTEMPT_CORRESPONDENCE: &str =
+    "SELECT delegation_id, task_id, task_revision FROM action_attempt WHERE attempt_id = ?1";
 
 const SQL_MARK_RESULT_ADOPTED: &str = "UPDATE task_result SET adopted_revision = ?2 WHERE result_id = ?1 AND adopted_revision IS NULL";
 
@@ -1125,6 +1131,16 @@ fn load_result_attempts(
         .collect()
 }
 
+/// Reads one result's bounded durable correlation unit and composes the
+/// record, or fails closed.
+///
+/// Before the record is built: the sealed delegation must exist and its stored
+/// `(task_id, task_revision)` must equal the result's copied correlation, and
+/// every stamped result-local attempt must be an `action_attempt` row whose
+/// copied delegation/task/revision equal the result's. A missing delegation,
+/// a missing attempt, or any disagreement is an inconsistent unit and a
+/// technical error, never a silently recomposed record. The remembered
+/// certainty values stay with their Action owner and are not duplicated here.
 #[expect(
     clippy::too_many_arguments,
     reason = "one decoded row's columns; a struct would restate the SQL row"
@@ -1139,6 +1155,48 @@ fn compose_result(
     adopted_revision: Option<i64>,
     recorded_at: String,
 ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    let correspondence: Option<(String, i64)> = conn
+        .query_row(
+            SQL_SELECT_DELEGATION_CORRESPONDENCE,
+            params![delegation],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some((delegation_task, delegation_revision)) = correspondence else {
+        return Err(task_unavailable(
+            "result delegation correspondence is missing",
+        ));
+    };
+    if delegation_task != task || delegation_revision != task_revision {
+        return Err(task_unavailable(
+            "result delegation correspondence disagrees with the recorded result",
+        ));
+    }
+    let attempt_refs = load_result_attempts(conn, result)?;
+    for attempt in &attempt_refs {
+        let stamped: Option<(String, String, i64)> = conn
+            .query_row(
+                SQL_SELECT_ATTEMPT_CORRESPONDENCE,
+                params![encode_id(*attempt)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(task_unavailable)?;
+        let Some((attempt_delegation, attempt_task, attempt_revision)) = stamped else {
+            return Err(task_unavailable(
+                "stamped task result attempt is missing from the action attempts",
+            ));
+        };
+        if attempt_delegation != delegation
+            || attempt_task != task
+            || attempt_revision != task_revision
+        {
+            return Err(task_unavailable(
+                "stamped task result attempt disagrees with the recorded result correlation",
+            ));
+        }
+    }
     Ok(TaskResultRecord {
         result,
         task: TaskRef {
@@ -1147,7 +1205,7 @@ fn compose_result(
         },
         delegation: DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?),
         body: TaskAgentOutput::new(body),
-        attempt_refs: load_result_attempts(conn, result)?,
+        attempt_refs,
         adopted_revision: adopted_revision.map(decode_revision).transpose()?,
         recorded_at: decode_clock(&recorded_at)?,
     })
@@ -1368,29 +1426,75 @@ fn enumerate_delegation_attempts(
 }
 
 /// Enumerates the Task-wide barrier input: every attempt under the Task, in
-/// attempt-id order. Only the durable fact columns are read.
+/// attempt-id order.
+///
+/// The enumeration is correspondence-aware. It reads attempts from both
+/// directions — those under a delegation of the Task and those whose copied
+/// `task_id` names the Task — and verifies each row's copied
+/// `(task_id, task_revision)` against its delegation's stored correspondence.
+/// A row whose delegation is missing, or whose copied correlation disagrees
+/// with the delegation (or with the target Task), is an inconsistent unit:
+/// it fails closed instead of being read as a certainty fact or dropped from
+/// the barrier. Scope stays Task-wide: all revisions and all delegations.
 fn enumerate_task_attempts(
     tx: &rusqlite::Transaction<'_>,
-    task_text: &str,
+    task_id: TaskId,
 ) -> Result<Vec<(RawId, ActionCertainty)>, TaskTechnicalError> {
+    let task_text = encode_id(task_id.as_raw());
     let mut statement = tx
         .prepare(SQL_SELECT_TASK_ATTEMPTS)
         .map_err(task_unavailable)?;
     let rows = statement
         .query_map(params![task_text], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
         })
         .map_err(task_unavailable)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(task_unavailable)?;
-    rows.into_iter()
-        .map(|(attempt, certainty)| {
-            Ok((
-                decode_id(&attempt).map_err(task_unavailable)?,
-                decode_certainty(&certainty)?,
-            ))
-        })
-        .collect()
+    let mut attempts = Vec::with_capacity(rows.len());
+    for (
+        attempt,
+        row_task,
+        row_revision,
+        row_delegation,
+        delegation_task,
+        delegation_revision,
+        certainty,
+    ) in rows
+    {
+        decode_id(&row_delegation).map_err(task_unavailable)?;
+        let Some(delegation_task) = delegation_task else {
+            return Err(task_unavailable(
+                "action attempt delegation is missing from the task-wide barrier",
+            ));
+        };
+        let Some(delegation_revision) = delegation_revision else {
+            return Err(task_unavailable(
+                "action attempt delegation correspondence is incomplete",
+            ));
+        };
+        if decode_id(&row_task).map_err(task_unavailable)? != task_id.as_raw()
+            || decode_id(&delegation_task).map_err(task_unavailable)? != task_id.as_raw()
+            || decode_revision(row_revision)? != decode_revision(delegation_revision)?
+        {
+            return Err(task_unavailable(
+                "action attempt correspondence disagrees with the task-wide barrier",
+            ));
+        }
+        attempts.push((
+            decode_id(&attempt).map_err(task_unavailable)?,
+            decode_certainty(&certainty)?,
+        ));
+    }
+    Ok(attempts)
 }
 
 /// Requires the caller's claim to equal the authoritative set exactly:
@@ -1420,18 +1524,19 @@ fn claim_matches_authoritative(
     Ok(())
 }
 
-/// Stamps the result-local verified correlation, exactly once per attempt.
+/// Verifies and stamps the result-local fixed set.
 ///
-/// Rows already stamped must stay inside the verified set: the membership is
-/// fixed at the seal, so a stored row outside it is an inconsistent unit. The
-/// insert is idempotent so re-evaluating the same result after settlement
-/// never duplicates or drops a row.
+/// An empty stored set is the unstamped first evaluation: the authoritative
+/// set is inserted whole. Once any row is stamped the set is durable and
+/// fixed, so the stored set must equal the authoritative set exactly — a
+/// missing, extra, or undecodable row is an inconsistent unit and fails
+/// closed. There is no silent refill: a stored non-empty set is never
+/// extended or repaired.
 fn stamp_result_attempts(
     tx: &rusqlite::Transaction<'_>,
     result_text: &str,
     attempts: &[RawId],
 ) -> Result<(), TaskTechnicalError> {
-    let verified: HashSet<RawId> = attempts.iter().copied().collect();
     let mut statement = tx
         .prepare(SQL_SELECT_RESULT_ATTEMPTS)
         .map_err(task_unavailable)?;
@@ -1440,20 +1545,26 @@ fn stamp_result_attempts(
         .map_err(task_unavailable)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(task_unavailable)?;
-    for stored in stored {
-        if !verified.contains(&decode_id(&stored).map_err(task_unavailable)?) {
-            return Err(task_unavailable(
-                "stored task result correlation is outside the authoritative attempt set",
-            ));
-        }
-    }
     drop(statement);
-    for attempt in attempts {
-        tx.execute(
-            SQL_INSERT_RESULT_ATTEMPT,
-            params![result_text, encode_id(*attempt)],
-        )
-        .map_err(task_unavailable)?;
+    if stored.is_empty() {
+        for attempt in attempts {
+            tx.execute(
+                SQL_INSERT_RESULT_ATTEMPT,
+                params![result_text, encode_id(*attempt)],
+            )
+            .map_err(task_unavailable)?;
+        }
+        return Ok(());
+    }
+    let stored: HashSet<RawId> = stored
+        .into_iter()
+        .map(|text| decode_id(&text).map_err(task_unavailable))
+        .collect::<Result<_, _>>()?;
+    let authoritative: HashSet<RawId> = attempts.iter().copied().collect();
+    if stored != authoritative {
+        return Err(task_unavailable(
+            "stored task result correlation is not exactly the authoritative attempt set",
+        ));
     }
     Ok(())
 }
@@ -1518,15 +1629,34 @@ fn adopt_result_sync(
     let current_purpose = decode_revision(current.purpose_adopted_revision)?;
     let current_progress = decode_progress(current.progress.as_deref())?;
     if let Some(adopted_raw) = raw.adopted_revision {
-        // This result already committed its adoption: return the same answer
-        // without a second terminal transition or duplicate correlation. The
-        // adopted stamp is checked against the relied revision, never against
-        // a mutable current pointer.
+        // This result already committed its adoption. The retry is idempotent
+        // only while the durable current unit still agrees with the completed
+        // state: the adopted stamp equals the relied revision, the current
+        // Task is still at that revision and completed, and exactly this
+        // result is the Task's adopted result. The same checks `load_task`
+        // applies, so a corrupted current unit fails closed here too instead
+        // of answering success from a stale stamp.
         if decode_revision(adopted_raw)? != relied_revision {
             return Err(task_unavailable(
                 "adopted task result does not match its relied revision",
             ));
         }
+        if current_revision != relied_revision || current_progress != TaskProgress::Completed {
+            return Err(task_unavailable(
+                "adopted task result does not match the completed current task",
+            ));
+        }
+        if load_adopted_result(&tx, &raw.task, current_revision, current_progress)?
+            != Some(claim.result)
+        {
+            return Err(task_unavailable(
+                "adopted task result is not the task's single adopted result",
+            ));
+        }
+        // The result-local set was stamped in the same transaction as the
+        // adopted stamp, so a retry must find it already exactly equal.
+        stamp_result_attempts(&tx, &result_text, &local)?;
+        tx.commit().map_err(task_unavailable)?;
         return Ok(TaskResultAcceptance::AdoptedAsCompletion(TaskRef {
             task: task_id,
             revision: relied_revision,
@@ -1567,7 +1697,7 @@ fn adopt_result_sync(
             blockers.push(*attempt);
         }
     }
-    for (attempt, certainty) in enumerate_task_attempts(&tx, &raw.task)? {
+    for (attempt, certainty) in enumerate_task_attempts(&tx, task_id)? {
         if certainty == ActionCertainty::Unknown && seen.insert(attempt) {
             blockers.push(attempt);
         }
