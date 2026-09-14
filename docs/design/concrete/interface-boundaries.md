@@ -478,10 +478,11 @@ enum TaskAgentInferenceOutcome {
     },
     StaleTaskPremise,                // タスク前提の不一致（リビジョン前進・terminal・execution seal・行欠如を含む）。provider へ送信していない
     NotSent(TaskAgentNotSent),
-    Aborted,                         // 呼び出し元のローカル協調停止で turn を終えた。claim 済みなら利用実績の
-                                     // 記録を完了してからこの回答を返し、claim 前なら何も claim していない。
-                                     // durable な cancel 受理とは別事実であり、provider I/O や外部作用が
-                                     // 停止したことを意味しない（NotSent へ丸めない）。
+    Aborted,                         // 呼び出し元のローカル協調停止で turn を終えた。claim 前の fast-path で
+                                     // abort を観測した場合は claim を行わず、claim が durable に Started と
+                                     // 確定した場合は利用実績の記録を完了してからこの回答を返す。durable な
+                                     // cancel 受理とは別事実であり、provider I/O や外部作用が停止したことを
+                                     // 意味しない（NotSent へ丸めない）。
 }
 struct TaskAgentOutput;              // provider 出力本文。Debug では伏字化し、アクセサ経由でのみ読む
 enum TaskAgentNotSent { SetupIncomplete, NotInAllowlist, ConsentStale, OverLimit, EvaluationConsumed }
@@ -519,9 +520,11 @@ enum TaskAgentTurnOutcome {
     NotSent(TaskAgentNotSent),       // setup 不足・許可リスト外・同意失効・入力上限・利用済み評価・
                                      // data-use hold（現在の消去条件。DataUseHeld。Stage 4
                                      // erasure-currentness foundation が追加し、StaleTaskRevision 等へ丸めない）
-    Aborted,                         // 呼び出し元のローカル協調停止で turn を終えた（出力なし）。provider I/O は
-                                     // 開始済みかもしれず、claim 済み attempt の利用実績はこの回答の前に記録済み。
-                                     // Task progress や外部作用の停止を主張せず、TaskTerminal / ExecutionSealed /
+    Aborted,                         // 呼び出し元のローカル協調停止で turn を終えた（出力なし）。claim 前の
+                                     // fast-path で abort を観測した場合は claim を行わない。claim が durable に
+                                     // Started と確定した場合は provider I/O は開始済みかもしれず、不確定利用
+                                     // 実績（計測不明の usage fact）はこの回答の前に記録済み。Task progress や
+                                     // 外部作用の停止を主張せず、TaskTerminal / ExecutionSealed /
                                      // StaleTaskRevision / NotSent へ丸めない（durable な cancel 受理とは別事実）。
 }
 
@@ -949,11 +952,12 @@ struct TaskAgentAttemptPremise {
 
 // 1 回の in-flight dispatch へのローカル・best-effort の協調停止トークン。canonical state ではなく、
 // 再起動や別プロセスへ持ち越されず、その有無や signal の送信を中断受理・停止完了の権威にしません。
-// dispatch は claim 前の signal を attempt を残さない Aborted として拒否し、claim 後の signal は
-// タイミングにかかわらず claim 済み attempt の不確定利用実績を記録してから Aborted を返します
-// （provider 待機中なら provider future をベストエフォートで drop。記録不能は storage の技術的エラーで、
-// clean な停止へ丸めません）。呼び出し元が dispatch future を drop することは、この記録を skip させる
-// 停止の代用になりません。
+// dispatch は claim を試みる前の fast-path で abort を観測した場合は claim を行わず attempt も利用実績も
+// 残さず Aborted を返し、fast-path 通過後に abort が発火しても claim が durable に Started と確定した
+// attempt は不確定利用実績を記録してから Aborted を返します（provider 待機中なら provider future を
+// ベストエフォートで drop。記録不能は storage の技術的エラーで、clean な停止へ丸めません）。claim 自体が
+// 拒否された場合（非 Started）は通常の pre-send refusal であり、Aborted へ写しません。呼び出し元が
+// dispatch future を drop することは、この記録を skip させる停止の代用になりません。
 struct DispatchAbort;
 
 enum InferenceDispatchOutcome {
@@ -962,10 +966,12 @@ enum InferenceDispatchOutcome {
         adopted: bool, // 待機（await）完了後の結果採用の同意が正常に成立したかどうか
     },
     NotSent(NotSentReason), // 送信前に安全に拒絶された状態（利用実績データは残さない）
-    Aborted, // ローカルの協調停止信号で in-flight の dispatch を終えた。claim 済みなら不確定利用実績
+    Aborted, // claim 前の fast-path で abort を観測した（attempt を claim しない）か、claim が durable に
+             // Started と確定した attempt をローカルの協調停止で終えた状態。後者は不確定利用実績
              // （計測不明の usage fact）を記録してから返り、記録できない場合は clean な停止へ丸めず
-             // storage の技術的エラーとして fail closed する。claim 前の拒否は attempt も利用実績も
-             // 残さない。provider 要求・外部作用が停止したことは意味せず、NotSent へは丸めない。
+             // storage の技術的エラーとして fail closed する。claim が拒否された場合（非 Started）は
+             // 通常の pre-send refusal であり、attempt も利用実績も残さない。provider 要求・外部作用が
+             // 停止したことは意味せず、NotSent へは丸めない。
 }
 
 struct InferenceResultArrival {
@@ -983,7 +989,7 @@ struct InferenceResultArrival {
   3. 入力トークン上限は確定前に、プロンプト内の認証情報セット前提は試行確定と同一のトランザクションで照合します。
   4. 試行確定後のプロバイダへの非同期I/Oはロックを持たずに並行実行し、送信の瞬間に権限やルーティングを二重に検証することはありません（受付ゲートとの二重チェックによる競合を防ぐため）。
   5. ネットワーク待機（await）後に同意状態が変化して結果を採用できなくなった場合は、生成結果の採用のみを安全に破棄し、利用実績の記録は確定した試行情報に従って正しく残します。
-  6. 呼び出し元にローカルの協調停止トークン（`DispatchAbort`）がある場合の停止は、claim と利用実績の記録を所有する推論境界が行います。claim 前の signal は attempt を残さず `Aborted`、claim 後の signal はタイミングにかかわらず claim 済み attempt の不確定利用実績（計測不明の usage fact）を記録してから `Aborted` を返します（provider 待機中なら provider future をベストエフォートで drop。記録不能は storage の技術的エラーで、clean な未送信へ丸めません）。トークンは canonical state ではなく、再起動・別プロセスへ持ち越されず、`Aborted` は provider 要求・外部作用が停止したことを意味しません。呼び出し元が dispatch future を drop してこの記録を skip してはならず、`Aborted` を `NotSent` へ写して「送信されなかった」と扱ってはいけません。Task Agent の turn では、この outcome が `TaskAgentInferenceOutcome::Aborted` → `TaskAgentTurnOutcome::Aborted` として写り、実行ループは provider I/O の停止を主張せずに turn を終えます（Task owner の durable な cancel 受理とは別の事実です）。
+  6. 呼び出し元にローカルの協調停止トークン（`DispatchAbort`）がある場合の停止は、claim と利用実績の記録を所有する推論境界が行います。dispatch は claim を試みる前の fast-path で abort を観測した場合は claim を行わず attempt も利用実績も残さず `Aborted` を返し、fast-path 通過後に abort が発火しても claim が durable に `Started` と確定した attempt は不確定利用実績（計測不明の usage fact）を記録してから `Aborted` を返します（provider 待機中なら provider future をベストエフォートで drop。記録不能は storage の技術的エラーで、clean な未送信へ丸めません）。claim 自体が拒否された場合（非 `Started`）は通常の pre-send refusal であり、`Aborted` へ写しません。トークンは canonical state ではなく、再起動・別プロセスへ持ち越されず、`Aborted` は provider 要求・外部作用が停止したことを意味しません。呼び出し元が dispatch future を drop してこの記録を skip してはならず、`Aborted` を `NotSent` へ写して「送信されなかった」と扱ってはいけません。Task Agent の turn では、この outcome が `TaskAgentInferenceOutcome::Aborted` → `TaskAgentTurnOutcome::Aborted` として写り、実行ループは provider I/O の停止を主張せずに turn を終えます（Task owner の durable な cancel 受理とは別の事実です）。
 - 環境設定の完備状態（同意の記録、認証情報の登録、トークンの有無）の判定責任は受付ゲートのみが持ち、不足があれば送信前に `NotSent` として処理します。権限側のリアルタイム照合は同意状態そのものだけを評価します。
 - 「データを参照できたこと」と「外部へ送信してよいこと」を厳格に区別します。一度解決された送信先を包括的な許可とみなしてはならず、同意が不足しているからといって送信内容を勝手に削って無言で送信してはなりません。プロンプトキャッシュやセッションの再利用はパフォーマンス最適化に限定し、権限判定そのものにも独立した割り当て同意・認証用途・費用上限を厳格に適用します。
 
@@ -1636,7 +1642,7 @@ fn request_action(cmd: ExecuteActionCommand)
 | 経験提出・訂正・スコープ | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | 知識形成（Formed）／保留（Deferred）／保存価値なし（Declined）／訂正完了（Corrected）／パートナー専用を維持（KeptAsCompanion）／明示制約により拒絶（DeniedByExplicitConstraint）／対象期限切れ（StaleTarget）／消去中保留（HeldByErasure） |
 | 権限リアルタイム照合 | `LiveAuthorizationDecision` | 今回の利用を認可（AllowForThisUse）／拒絶（Deny）／オーナー確認待ち（AskOwner）／条件充足待ち（WaitForCondition）／再照合が必要（NeedsRevalidation） |
 | 認証秘密利用 | `AuthenticatedUseOutcome` | 規定範囲で安全に利用（UsedWithinScope）／再認証が必要（NeedsReauthentication）／制約により拒絶（DeniedByConstraint）／参照期限切れ（StaleReference） |
-| 推論実行・フォールバック | `InferenceDispatchOutcome`、`FallbackDecision` | 完了（Completed）／送信前拒絶（NotSent）／ローカル協調停止（Aborted：claim 済みなら不確定利用実績（計測不明の usage fact）を記録してから返り、claim 前は attempt も利用実績も残さない。provider 要求・外部作用の停止は意味せず、NotSent へは丸めない）／承認済みフォールバックとして許可（AllowedAsApprovedFallback）／未承認経路のため拒絶（DeniedAsUnapprovedRoute） |
+| 推論実行・フォールバック | `InferenceDispatchOutcome`、`FallbackDecision` | 完了（Completed）／送信前拒絶（NotSent）／ローカル協調停止（Aborted：claim 前の fast-path で abort を観測した場合は attempt も利用実績も残さず、claim が durable に Started と確定した場合は不確定利用実績（計測不明の usage fact）を記録してから返る。claim 自体の拒否は通常の pre-send refusal であり Aborted へ丸めない。provider 要求・外部作用の停止は意味せず、NotSent へは丸めない）／承認済みフォールバックとして許可（AllowedAsApprovedFallback）／未承認経路のため拒絶（DeniedAsUnapprovedRoute） |
 | 利用枠予約・確定・解放 | `ReservationOutcome` | 予約成功（Reserved）／上限超過で拒絶（DeniedByCap）／費用不明のため保留（HeldForUnknownCost）／再照合が必要（NeedsRevalidation） |
 | アクション開始・確定 | `ActionStartOutcome`、`LateArrivalHandling` | 試行開始（StartedAsAttempt）／拒絶（Denied）／オーナー指示待ち（AskOwner）／前提不一致（StalePremise）／タスク終端（TaskTerminal：Completed / Failed / Cancelled のため開始なし。Action 側は Task lifecycle 語彙を import しない）／実行 seal 済み（ExecutionSealed：delegated execution が final result で seal 済みのため開始なし。Task lifecycle 語彙を import しない）／全体保留中（HeldByGlobalHold）／元記録へ保存（RecordedToOriginal）／成否不明のまま重複リスク提示（KeptUnknownWithDupRisk）／消去条件により再保存抑止（SuppressedByErasure） |
 | 在席移動・対話ラウンド | `MoveDecision`、`RoundIntakeOutcome` | 新端末へ移行開始（TransitioningToNew）／古い在席情報のため拒絶（RejectedAsStalePresence）／制約により拒絶（DeniedByConstraint）／ラウンド受理（AcceptedForRound）／過去ラウンドのため拒絶（StaleRound）／移行中保留（HeldForTransition） |
