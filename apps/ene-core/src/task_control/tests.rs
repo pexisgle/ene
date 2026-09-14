@@ -171,6 +171,16 @@ async fn progress(handle: &HostHandle, task: TaskId) -> TaskProgress {
         .progress
 }
 
+/// A platform-absolute attempt target: the Action read-back requires an
+/// absolute path on every supported platform, so tests must not hardcode a
+/// Unix-shaped one.
+fn canonical_target(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[tokio::test]
 async fn a_conversation_proposal_creates_the_task_association_and_delegation() {
     let (handle, _dir) = open_handle("proposal").await;
@@ -240,7 +250,7 @@ async fn late_certainty_settlement_re_evaluates_the_sealed_result() {
         delegation,
         task,
         assoc,
-        "/srv/workspace/ene/report.md",
+        &canonical_target("report.md"),
         OperationKind::Create,
     )
     .await;
@@ -310,7 +320,7 @@ async fn recovery_reconciliation_is_bounded_and_idempotent() {
         first_delegation,
         first_task,
         first_assoc,
-        "/srv/workspace/ene/first.md",
+        &canonical_target("first.md"),
         OperationKind::Create,
     )
     .await;
@@ -380,7 +390,7 @@ async fn the_task_report_composes_canonical_task_and_action_facts() {
         delegation,
         task,
         assoc,
-        "/srv/workspace/ene/report.md",
+        &canonical_target("report.md"),
         OperationKind::Create,
     )
     .await;
@@ -499,7 +509,7 @@ async fn a_cancel_report_distinguishes_confirmed_changes_from_unknown_effects() 
         delegation,
         task,
         assoc,
-        "/srv/workspace/ene/half.md",
+        &canonical_target("half.md"),
         OperationKind::Create,
     )
     .await;
