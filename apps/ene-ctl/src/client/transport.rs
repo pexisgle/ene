@@ -2,22 +2,29 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthChallenge;
 use ene_api::v1::payload::WirePayload;
+#[cfg(unix)]
 use ene_credential::pairing_proof_hex;
+#[cfg(unix)]
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 
+#[cfg(unix)]
 use crate::device;
 use crate::errors::CliError;
 
+#[cfg(unix)]
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, missing_secret_guidance, new_incarnation,
     pairing_frame, pending_guidance, proof_frame, unreadable_device_file_guidance,
 };
+#[cfg(unix)]
 use super::session::{
     AuthDecision, FrameDecision, SessionState, decide_auth, decide_frame, stale_generation_of,
 };
+#[cfg(unix)]
 use super::socket_path;
 
 /// Connected, handshaked Host session (Unix): the stream, the sender identity
@@ -435,10 +442,7 @@ impl Client {
         Err(CliError::UnsupportedPlatform("unix socket transport"))
     }
 
-    pub async fn authenticate(
-        &mut self,
-        _challenge: &ene_api::v1::handshake::AuthChallenge,
-    ) -> Result<(), CliError> {
+    pub async fn authenticate(&mut self, _challenge: &AuthChallenge) -> Result<(), CliError> {
         Err(CliError::UnsupportedPlatform("unix socket transport"))
     }
 

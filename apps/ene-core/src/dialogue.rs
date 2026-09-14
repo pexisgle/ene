@@ -8,7 +8,7 @@
 //! resulting domain outcome to frames and records the open round between the
 //! owner append and dispatch. A companion reply carrying a
 //! `[task-control]` directive is interpreted by the companion and executed
-//! through [`crate::task_control::HostTaskControl`] against the existing Task
+//! through `HostTaskControl` against the existing Task
 //! owner boundaries before the reply is stored; the stored reply is the
 //! owner-derived text, never the directive. `HostHandle::confirm_presentation`
 //! applies presentation observations, and `HostHandle::answer_history`

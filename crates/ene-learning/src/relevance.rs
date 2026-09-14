@@ -38,7 +38,7 @@ pub(crate) fn terms(text: &str) -> Vec<String> {
 
 /// The derived token set the store indexes for one Memory's content.
 ///
-/// This is [`terms`] under a stable name for the persistence boundary: the
+/// This is `terms` under a stable name for the persistence boundary: the
 /// store derives these tokens on every commit and matches query terms by
 /// token equality, so both sides must use this exact split. The tokens carry
 /// no score and never decide canonical importance.
