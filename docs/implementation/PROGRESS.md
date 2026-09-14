@@ -16,7 +16,8 @@
     - `propose_steering` / `orchestrate_steering` は実装・owner テスト済みだが、dialogue からの production caller が無い。会話の追加指示をこの経路へ配線する。
     - cancel 意図の受理: 会話経路と、現在 `NeedsClarification` を返している第一者管理経路（`ManagementIntentKind::CancelTask` → `HostHandle::cancel_task`）。
     - 進捗・結果の報告経路: 既存 facts（`task_result` 本文、`task_result_attempt` 相関、`action_attempt.certainty` の `Unknown`、`task.progress`）から報告を組み立てる owner（companion I-4 / W-1）を配線する。報告用の第二マスターは作らない。
-    - docs/requirements の受け入れシナリオ 4「ワークスペースでのファイル作業タスク」は、パートナーへの依頼・普段のチャットでの進捗確認・方針変更・キャンセル・結果報告を会話経由で要求するため、この経路が通るまで Stage 4 は完了扱いにしない。最終 E2E では 4.3（実行中の通常チャット）、4.4（キャンセル時点までの完了内容と残ファイルの報告）、4.5（完了報告の変更ファイル名・保存場所・やり残し）、4.7（完了・終了後も既存ファイルが消えない）を会話経路で確認する。4.6（シェル・外部ネットワークの遮断）とパス脱出は既存の closed-world ツール語彙とワークスペース境界で構造的に保証され、E で検証済み。
+    - 結果の再採用: seal 済みで未採用の result（`WithheldByEffectFacts` 後に確定度が進展した場合、AU15a と AU15b の間で停止した場合）を、task owner の既存 `adopt_result` 再評価で完了へ進める producer を配線する。新しい gate や state は作らない。
+    - docs/requirements の受け入れシナリオ 4「ワークスペースでのファイル作業タスク」は、パートナーへの依頼・普段のチャットでの進捗確認・方針変更・キャンセル・結果報告を会話経由で要求するため、この経路が通るまで Stage 4 は完了扱いにしない。最終 E2E では 4.3（実行中の通常チャット）、4.4（キャンセル時点までの完了内容と残ファイルの報告）、4.5（完了報告の変更ファイル名・保存場所・やり残し）、4.7（完了・終了後も既存ファイルが消えない）を会話経路で確認する。パス脱出は E の E2E で検証済み。4.6 のうちシェル・外部ネットワークは closed-world ツール語彙（`list` / `read` / `create` / `edit` / `final` のみ）で構造的に遮断され、そのツールが存在しないため E では試行しない。
     - 完了判定は `docs/implementation/README.md` の Stage 4 完了基準と `docs/requirements/acceptance.md` シナリオ 4 を、この経路を通した E2E で確認して行う。
   - **残りスライス G**: Stage 4 item 1 が挙げる `Failed`（作業担当が確定する terminal failure）。現在 producer が存在せず、design が後続スライスへ委ねている（`interface-boundaries.md` §Task progress / lifecycle、`persistence-recovery.md` §移行）。provider の一時障害・`NotSent`・Action `Unknown`・`WithheldByEffectFacts`・cancel を `Failed` に写さない producer を追加する。
 

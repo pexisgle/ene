@@ -7,9 +7,9 @@
 //! Agent loop, and only the provider HTTP transport faked. Covers the
 //! file/workspace half of the acceptance scenario ("read a file and create a
 //! Markdown report"), the durable result and attempt correlation, restart
-//! read-back without replay, the cancel / late-result contract, and the
-//! execution-abort accounting, concurrent-run, and one-shot restart
-//! boundaries.
+//! read-back without replay, the cancel / late-result contract, the
+//! execution-abort accounting, the input-bound transcript trimming, the
+//! concurrent-run, and the one-shot restart boundaries.
 
 #![allow(
     clippy::expect_used,
@@ -627,5 +627,101 @@ async fn stage4_a_stopped_unsealed_execution_is_not_restarted_after_reopen() {
         inference_attempt_count(data_dir.path()),
         1,
         "the one-shot refusal claims nothing new"
+    );
+}
+
+#[tokio::test]
+async fn stage4_a_multi_read_transcript_stays_within_the_input_bound() {
+    let live = live_input("stage4-input-bound");
+    let transport = ScriptedTransport::new(vec![
+        String::from(r#"{"tool":"read","path":"first.txt"}"#),
+        String::from(r#"{"tool":"read","path":"second.txt"}"#),
+        String::from(r#"{"final":"read both files"}"#),
+    ]);
+    let (handle, _data_dir) = round_test_handle("stage4-input-bound", &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("first.txt"), "a".repeat(4_000)).expect("first fixture");
+    std::fs::write(workspace.path().join("second.txt"), "b".repeat(4_000)).expect("second fixture");
+    let (_task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
+
+    let outcome = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("the execution answers a domain outcome");
+    assert!(
+        matches!(outcome, TaskAgentRunOutcome::Finalized { .. }),
+        "a transcript that outgrows the bound is trimmed, not wedged, got {outcome:?}"
+    );
+    let inputs = transport.inputs();
+    assert_eq!(inputs.len(), 3, "one provider call per turn");
+    for (index, input) in inputs.iter().enumerate() {
+        assert!(
+            input.chars().count() <= ene_inference::MAX_INPUT_CHARS,
+            "turn {} stays within the inference input cap, got {} chars",
+            index + 1,
+            input.chars().count()
+        );
+    }
+    assert!(
+        inputs[2].contains("[NOTE] earlier tool exchanges were omitted to fit the input bound"),
+        "the model is told the older exchange was omitted"
+    );
+    assert_eq!(
+        inputs[2].matches("[TOOL CALL]").count(),
+        1,
+        "only the newest exchange is replayed once the transcript outgrows the bound"
+    );
+}
+
+#[tokio::test]
+async fn stage4_an_oversized_single_read_stops_without_sealing_or_truncating() {
+    let live = live_input("stage4-oversized-read");
+    let transport = ScriptedTransport::new(vec![
+        String::from(r#"{"tool":"read","path":"huge.txt"}"#),
+        String::from(r#"{"final":"never reached"}"#),
+    ]);
+    let (handle, _data_dir) = round_test_handle("stage4-oversized-read", &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("huge.txt"), "x".repeat(9_000)).expect("huge fixture");
+    let (task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
+
+    let outcome = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("the over-limit stop is a domain outcome");
+    assert_eq!(
+        outcome,
+        TaskAgentRunOutcome::NotSent(ene_task::TaskAgentNotSent::OverLimit),
+        "an observation that cannot fit alone is refused, never silently truncated"
+    );
+    assert_eq!(
+        transport.inputs().len(),
+        1,
+        "the over-limit turn is refused before any provider call"
+    );
+    assert!(
+        handle
+            .store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_none(),
+        "the over-limit stop never seals the execution"
+    );
+    assert_eq!(
+        handle
+            .store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress,
+        "the Task stays non-terminal for the conversation path (slice F) to report and continue"
     );
 }
