@@ -4,8 +4,9 @@ use std::sync::Mutex;
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
     CompanionTechnicalError, HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole,
-    PresentationMark, ReportStatus, ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
-    UndeliveredTechnicalError,
+    PresentationMark, ReportStatus, ReportStatusTransition, TaskFact, UNDELIVERED_PAGE_MAX,
+    UndeliveredCursor, UndeliveredId, UndeliveredPage, UndeliveredRef, UndeliveredRepository,
+    UndeliveredSource, UndeliveredTechnicalError,
 };
 use ene_permission::CapabilityKind;
 use ene_presence::{PresenceGeneration, PresenceState};
@@ -15,9 +16,10 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::Store;
 use crate::codec::{
     HistoryRow, companion_unavailable, decode_history_message, decode_id, decode_lifecycle,
-    decode_report_status, decode_u64, encode_id, encode_lifecycle, encode_presence_state,
-    encode_report_status, encode_role, encode_round_intent, encode_u64, lock_shared,
-    select_attribution, select_consent, undelivered_unavailable,
+    decode_report_status, decode_u64, decode_undelivered_source, encode_id, encode_lifecycle,
+    encode_presence_state, encode_report_status, encode_role, encode_round_intent, encode_u64,
+    encode_undelivered_source, lock_shared, select_attribution, select_consent,
+    undelivered_unavailable,
 };
 use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
@@ -61,7 +63,7 @@ pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
 /// so the common current case is one index step, never a History scan.
 pub(crate) const SQL_EXISTS_NEWER_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM history_message WHERE companion_id = ?1 AND role = ?2 AND rowid > ?3 LIMIT 1)";
 
-const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (companion_id, source_kind, source_id, source_phase) DO NOTHING";
 
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
     "SELECT status FROM undelivered WHERE undelivered_id = ?1";
@@ -69,7 +71,75 @@ const SQL_SELECT_UNDELIVERED_STATUS: &str =
 const SQL_UPDATE_UNDELIVERED_STATUS: &str =
     "UPDATE undelivered SET status = ?1 WHERE undelivered_id = ?2";
 
-const SQL_SELECT_PENDING: &str = "SELECT undelivered_id, companion_id, source_message, status, round_id, presence_generation FROM undelivered WHERE companion_id = ?1 AND status = ?2 ORDER BY rowid ASC";
+/// The bounded unpresented page: `Pending` and `PresentationUnknown` only,
+/// keyset over the non-reused insertion sequence, with the pass upper bound
+/// keeping rows registered while the pass runs out of it.
+const SQL_SELECT_UNPRESENTED: &str = "SELECT row_seq, undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at FROM undelivered WHERE companion_id = ?1 AND status IN (?2, ?3) AND row_seq > ?4 AND row_seq <= ?5 ORDER BY row_seq ASC LIMIT ?6";
+
+/// The insertion sequence in force, for the next pass. A read: it writes no
+/// marker and advances no generation.
+const SQL_SELECT_PASS_BOUND: &str = "SELECT COALESCE(MAX(row_seq), 0) FROM undelivered";
+
+/// Bounded body projections. `substr(CAST(x AS BLOB), ...)` is byte-based,
+/// so the cap bounds the bytes read out of SQLite instead of decoding the
+/// whole body and truncating afterwards; the byte length of the full body is
+/// returned alongside for the caller's `truncated` display fact.
+const SQL_EXCERPT_HISTORY: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST(body AS BLOB), 1, ?2) FROM history_message WHERE message_id = ?1";
+
+const SQL_EXCERPT_TASK_REVISION: &str = "SELECT length(CAST(purpose_text AS BLOB)), substr(CAST(purpose_text AS BLOB), 1, ?3) FROM task_revision WHERE task_id = ?1 AND revision = ?2";
+
+const SQL_EXCERPT_RESULT: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST(body AS BLOB), 1, ?2) FROM task_result WHERE result_id = ?1";
+
+const SQL_EXCERPT_ATTEMPT: &str = "SELECT length(CAST(real_target AS BLOB)), substr(CAST(real_target AS BLOB), 1, ?2) FROM action_attempt WHERE attempt_id = ?1";
+
+/// Byte-bounded excerpt of one undelivered source's canonical body.
+///
+/// This is the source owner's bounded projection, never a copy stored on the
+/// `undelivered` row. `total_bytes` is the full body length so a caller can
+/// report truncation and page the rest; `text` is cut on a UTF-8 character
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndeliveredExcerpt {
+    pub text: String,
+    pub total_bytes: u64,
+}
+
+/// Registers one undelivered item inside the parent fact's transaction
+/// (AU1a / AU1b).
+///
+/// The source key is the canonical identity and closed fact kind; the
+/// `(companion_id, source_kind, source_id, source_phase)` uniqueness
+/// constraint makes a repeated registration a no-op that keeps the existing
+/// row. Any other failure (including a constraint violation that is not the
+/// source-key one) is returned to the caller, which must roll the parent
+/// fact back with it.
+pub(crate) fn register_undelivered_tx(
+    tx: &rusqlite::Transaction<'_>,
+    companion_text: &str,
+    undelivered_id: RawId,
+    source: &UndeliveredSource,
+    round_text: Option<&str>,
+    generation_raw: Option<i64>,
+    created_at: WallClockWithTz,
+) -> Result<(), String> {
+    let (kind, id, phase) = encode_undelivered_source(source);
+    tx.execute(
+        SQL_INSERT_UNDELIVERED,
+        params![
+            encode_id(undelivered_id),
+            companion_text,
+            kind,
+            id,
+            phase,
+            encode_report_status(ReportStatus::Pending),
+            round_text,
+            generation_raw,
+            created_at.to_rfc3339(),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
 
 /// Appends one history item, optionally registering an undelivered entry
 /// for it in the same atomic section.
@@ -102,9 +172,6 @@ fn append_history(
     let role_text = encode_role(cmd.role);
     let at_text = cmd.at.to_rfc3339();
     let at_utc = cmd.at.to_rfc3339_utc();
-    let undelivered = RawId::new();
-    let undelivered_text = encode_id(undelivered);
-    let now_text = WallClockWithTz::now().to_rfc3339();
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -270,26 +337,27 @@ fn append_history(
     .map_err(|error| companion_unavailable(error.to_string()))?;
     let mut registered = None;
     if register_unpresented {
-        tx.execute(
-            SQL_INSERT_UNDELIVERED,
-            params![
-                undelivered_text,
-                companion_text,
-                message_text,
-                encode_report_status(ReportStatus::Pending),
-                round_text,
-                generation_raw,
-                now_text
-            ],
+        let undelivered = RawId::new();
+        let source = UndeliveredSource::HistoryMessage(message);
+        let created_at = WallClockWithTz::now();
+        register_undelivered_tx(
+            &tx,
+            &companion_text,
+            undelivered,
+            &source,
+            Some(&round_text),
+            Some(generation_raw),
+            created_at,
         )
-        .map_err(|error| companion_unavailable(error.to_string()))?;
+        .map_err(companion_unavailable)?;
         registered = Some(UndeliveredRef {
-            id: undelivered,
+            id: UndeliveredId::from_raw(undelivered),
             companion: cmd.companion,
-            source_message: message,
+            source,
             status: ReportStatus::Pending,
-            round: cmd.round,
-            presence_generation: current.generation,
+            created_at,
+            round: Some(cmd.round),
+            presence_generation: Some(current.generation),
         });
     }
     tx.commit()
@@ -565,16 +633,104 @@ impl HistoryRepository for Store {
     }
 }
 
+/// One stored `undelivered` row in column order.
+struct RawUndelivered {
+    row_seq: i64,
+    undelivered_id: String,
+    companion_id: String,
+    source_kind: String,
+    source_id: String,
+    source_phase: String,
+    status: String,
+    round_id: Option<String>,
+    presence_generation: Option<i64>,
+    created_at: String,
+}
+
+impl RawUndelivered {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            row_seq: row.get(0)?,
+            undelivered_id: row.get(1)?,
+            companion_id: row.get(2)?,
+            source_kind: row.get(3)?,
+            source_id: row.get(4)?,
+            source_phase: row.get(5)?,
+            status: row.get(6)?,
+            round_id: row.get(7)?,
+            presence_generation: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    }
+
+    /// Decodes every part or fails closed: an unknown source kind / status, a
+    /// malformed identity, and a malformed timestamp are unreadable rows.
+    fn decode(self) -> Result<UndeliveredRef, UndeliveredTechnicalError> {
+        let companion =
+            CompanionId::from_raw(decode_id(&self.companion_id).map_err(undelivered_unavailable)?);
+        let source =
+            decode_undelivered_source(&self.source_kind, &self.source_id, &self.source_phase)
+                .map_err(undelivered_unavailable)?;
+        let round = self
+            .round_id
+            .as_deref()
+            .map(decode_id)
+            .transpose()
+            .map_err(undelivered_unavailable)?;
+        let presence_generation = self
+            .presence_generation
+            .map(decode_u64)
+            .transpose()
+            .map_err(undelivered_unavailable)?
+            .map(PresenceGeneration::from_u64);
+        Ok(UndeliveredRef {
+            id: UndeliveredId::from_raw(
+                decode_id(&self.undelivered_id).map_err(undelivered_unavailable)?,
+            ),
+            companion,
+            source,
+            status: decode_report_status(&self.status).map_err(undelivered_unavailable)?,
+            created_at: WallClockWithTz::parse_rfc3339(&self.created_at)
+                .map_err(|error| undelivered_unavailable(error.to_string()))?,
+            round,
+            presence_generation,
+        })
+    }
+}
+
+/// The insertion sequence in force; `0` on an empty table.
+fn select_pass_bound(conn: &Connection) -> Result<u64, String> {
+    let raw: i64 = conn
+        .query_row(SQL_SELECT_PASS_BOUND, (), |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    decode_u64(raw)
+}
+
+/// The valid UTF-8 prefix of one byte-bounded page.
+///
+/// A byte cap may cut a multi-byte character; the cut character belongs to
+/// the next page, and only an actually invalid sequence fails closed.
+fn utf8_prefix(bytes: &[u8]) -> Result<&str, String> {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if error.error_len().is_none() => {
+            core::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|_| String::from("malformed undelivered excerpt bytes"))
+        }
+        Err(_) => Err(String::from("malformed undelivered excerpt bytes")),
+    }
+}
+
 impl UndeliveredRepository for Store {
     async fn compare_and_mark_reported(
         &self,
-        id: RawId,
+        id: UndeliveredId,
         expected: ReportStatus,
         mark: PresentationMark,
     ) -> Result<ReportStatusTransition, UndeliveredTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            let key = encode_id(id);
+            let key = encode_id(id.as_raw());
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -589,21 +745,36 @@ impl UndeliveredRepository for Store {
                 return Ok(ReportStatusTransition::StaleSource);
             };
             let current = decode_report_status(&status_text).map_err(undelivered_unavailable)?;
-            // `PresentationUnknown` is sticky: no transition leaves it, so a
-            // compare that lands there is stale by definition.
-            if current != expected || current == ReportStatus::PresentationUnknown {
+            // `Presented` is absorbing: a duplicate ACK, a stale
+            // not-presented receipt, and a race with another receipt all
+            // write nothing instead of returning the row to `Pending`.
+            if current == ReportStatus::Presented {
+                return Ok(ReportStatusTransition::AlreadyPresented);
+            }
+            if current != expected {
                 return Ok(ReportStatusTransition::StaleSource);
             }
-            let (next, transition) = if mark.presented {
-                (
+            let (next, transition) = match (mark.presented, current) {
+                (true, ReportStatus::Pending | ReportStatus::PresentationUnknown) => (
                     ReportStatus::Presented,
                     ReportStatusTransition::PendingToPresented,
-                )
-            } else {
-                (
+                ),
+                // A not-presented mark against a pending row is the
+                // presentation start: the row stays re-presentable.
+                (false, ReportStatus::Pending) => (
                     ReportStatus::PresentationUnknown,
                     ReportStatusTransition::MarkedPresentationUnknown,
-                )
+                ),
+                // A not-presented mark against an unknown row is a current
+                // receipt that confirmed the item was not presented.
+                (false, ReportStatus::PresentationUnknown) => (
+                    ReportStatus::Pending,
+                    ReportStatusTransition::FailedToPending,
+                ),
+                (_, ReportStatus::Presented) => {
+                    // Handled above; keeping the arm total without a write.
+                    return Ok(ReportStatusTransition::AlreadyPresented);
+                }
             };
             tx.execute(
                 SQL_UPDATE_UNDELIVERED_STATUS,
@@ -617,50 +788,153 @@ impl UndeliveredRepository for Store {
         .await
     }
 
-    async fn list_pending(
+    async fn undelivered_pass_bound(&self) -> Result<u64, UndeliveredTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            select_pass_bound(&guard).map_err(undelivered_unavailable)
+        })
+        .await
+    }
+
+    async fn list_unpresented(
         &self,
         companion: CompanionId,
-    ) -> Result<Vec<UndeliveredRef>, UndeliveredTechnicalError> {
+        cursor: Option<UndeliveredCursor>,
+        limit: u32,
+    ) -> Result<UndeliveredPage, UndeliveredTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let key = encode_id(companion.as_raw());
+            // The page bound is applied by SQL, not after decoding; the design
+            // bound is 1..=50.
+            let cap = i64::from(limit.clamp(1, UNDELIVERED_PAGE_MAX));
             let guard = lock_shared(&conn);
-            let mut query = guard
-                .prepare(SQL_SELECT_PENDING)
+            // A fresh pass captures the insertion sequence in force; rows
+            // registered while the pass runs stay above it and are returned by
+            // the next pass.
+            let upper = match cursor {
+                Some(cursor) => cursor.pass_upper_bound(),
+                None => select_pass_bound(&guard).map_err(undelivered_unavailable)?,
+            };
+            let after = cursor.map_or(0, UndeliveredCursor::after_seq);
+            let after_raw = encode_u64(after).map_err(undelivered_unavailable)?;
+            let upper_raw = encode_u64(upper).map_err(undelivered_unavailable)?;
+            let mut statement = guard
+                .prepare(SQL_SELECT_UNPRESENTED)
                 .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            let rows = query
+            let rows = statement
                 .query_map(
-                    params![key, encode_report_status(ReportStatus::Pending)],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, i64>(5)?,
-                        ))
-                    },
+                    params![
+                        key,
+                        encode_report_status(ReportStatus::Pending),
+                        encode_report_status(ReportStatus::PresentationUnknown),
+                        after_raw,
+                        upper_raw,
+                        cap
+                    ],
+                    RawUndelivered::from_row,
                 )
                 .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            let mut pending = Vec::new();
+            let mut entries = Vec::new();
+            let mut last_seq = after;
             for row in rows {
-                let (id_text, companion_text, source_text, status_text, round_text, generation_raw) =
-                    row.map_err(|error| undelivered_unavailable(error.to_string()))?;
-                pending.push(UndeliveredRef {
-                    id: decode_id(&id_text).map_err(undelivered_unavailable)?,
-                    companion: CompanionId::from_raw(
-                        decode_id(&companion_text).map_err(undelivered_unavailable)?,
-                    ),
-                    source_message: decode_id(&source_text).map_err(undelivered_unavailable)?,
-                    status: decode_report_status(&status_text).map_err(undelivered_unavailable)?,
-                    round: decode_id(&round_text).map_err(undelivered_unavailable)?,
-                    presence_generation: PresenceGeneration::from_u64(
-                        decode_u64(generation_raw).map_err(undelivered_unavailable)?,
-                    ),
-                });
+                let row = row.map_err(|error| undelivered_unavailable(error.to_string()))?;
+                last_seq = decode_u64(row.row_seq).map_err(undelivered_unavailable)?;
+                entries.push(row.decode()?);
             }
-            Ok(pending)
+            let next = (entries.len() == usize::try_from(cap).unwrap_or(usize::MAX)
+                && last_seq < upper)
+                .then(|| UndeliveredCursor::begin(last_seq, upper));
+            Ok(UndeliveredPage {
+                entries,
+                next,
+                pass_upper_bound: upper,
+            })
+        })
+        .await
+    }
+}
+
+impl Store {
+    /// Loads a byte-bounded excerpt of one undelivered source's canonical
+    /// body.
+    ///
+    /// SELECT-only, and each source kind reads its owner row directly (the
+    /// history message primary key, the Task revision snapshot, the result
+    /// body, the Action attempt's recorded target). Nothing is copied into
+    /// `undelivered`. `None` means this source kind carries no bounded body
+    /// (delegation, terminal, activity) or the addressed row is gone; absence
+    /// is reported, never defaulted to an empty success.
+    pub async fn load_undelivered_excerpt(
+        &self,
+        source: UndeliveredSource,
+        max_bytes: u32,
+    ) -> Result<Option<UndeliveredExcerpt>, UndeliveredTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            // A zero cap would return the same page forever; the minimum
+            // page is one byte.
+            let cap = i64::from(max_bytes.max(1));
+            let guard = lock_shared(&conn);
+            let found: Option<(i64, Vec<u8>)> = match source {
+                UndeliveredSource::HistoryMessage(message) => guard
+                    .query_row(
+                        SQL_EXCERPT_HISTORY,
+                        params![encode_id(message), cap],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                UndeliveredSource::TaskRecord {
+                    fact: TaskFact::TaskRevision { task, revision },
+                    ..
+                } => guard
+                    .query_row(
+                        SQL_EXCERPT_TASK_REVISION,
+                        params![
+                            encode_id(task),
+                            encode_u64(revision).map_err(undelivered_unavailable)?,
+                            cap
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                UndeliveredSource::TaskRecord {
+                    fact: TaskFact::ResultRecorded(result) | TaskFact::ResultAdopted(result),
+                    ..
+                } => guard
+                    .query_row(SQL_EXCERPT_RESULT, params![encode_id(result), cap], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .optional()
+                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                UndeliveredSource::TaskRecord {
+                    fact: TaskFact::ActionAttempt { attempt, .. },
+                    ..
+                } => guard
+                    .query_row(
+                        SQL_EXCERPT_ATTEMPT,
+                        params![encode_id(attempt), cap],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                UndeliveredSource::TaskRecord {
+                    fact: TaskFact::Delegation(_) | TaskFact::Terminal { .. },
+                    ..
+                }
+                | UndeliveredSource::ActivityRecord(_) => None,
+            };
+            let Some((total_raw, bytes)) = found else {
+                return Ok(None);
+            };
+            let total_bytes = decode_u64(total_raw).map_err(undelivered_unavailable)?;
+            let text = utf8_prefix(&bytes)
+                .map_err(undelivered_unavailable)?
+                .to_owned();
+            Ok(Some(UndeliveredExcerpt { text, total_bytes }))
         })
         .await
     }

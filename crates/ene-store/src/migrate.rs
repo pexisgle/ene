@@ -229,13 +229,17 @@ assignee TEXT NOT NULL,
 PRIMARY KEY (task_id, revision)
 );
 CREATE TABLE undelivered (
-undelivered_id TEXT PRIMARY KEY,
+row_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+undelivered_id TEXT NOT NULL UNIQUE,
 companion_id TEXT NOT NULL,
-source_message TEXT NOT NULL,
+source_kind TEXT NOT NULL,
+source_id TEXT NOT NULL,
+source_phase TEXT NOT NULL,
 status TEXT NOT NULL,
-round_id TEXT NOT NULL,
-presence_generation INTEGER NOT NULL,
-created_at TEXT NOT NULL
+round_id TEXT NULL,
+presence_generation INTEGER NULL,
+created_at TEXT NOT NULL,
+UNIQUE (companion_id, source_kind, source_id, source_phase)
 );
 CREATE TABLE usage_fact (
 ticket TEXT PRIMARY KEY,
@@ -266,8 +270,9 @@ CREATE INDEX idx_learning_memory_recall_newest ON learning_memory (companion_id)
 CREATE INDEX idx_learning_memory_term_memory ON learning_memory_term (memory_id);
 CREATE UNIQUE INDEX idx_paired_device_wire ON paired_device (wire);
 CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
+CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
 CREATE INDEX idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
-CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
+CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status, row_seq);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
 INSERT INTO credential_set (id, rev) VALUES (1, 0);
 ";

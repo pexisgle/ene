@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use ene_action::ActionCertainty;
+use ene_companion::{TaskFact, TerminalKindWire, UndeliveredSource};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
@@ -61,6 +62,10 @@ const SQL_INSERT_WORKSPACE_ASSOC: &str =
 
 const SQL_SELECT_TASK: &str =
     "SELECT revision, purpose_adopted_revision, progress, assignee FROM task WHERE task_id = ?1";
+
+/// The destination of a Task-derived notification: the Task's assignee, read
+/// in the same transaction as the parent fact.
+const SQL_SELECT_TASK_ASSIGNEE: &str = "SELECT assignee FROM task WHERE task_id = ?1";
 
 /// Advances the progress of a non-terminal Task to `in_progress` inside the
 /// AU3 transaction. The terminal check is the transaction's own read; the
@@ -200,6 +205,32 @@ fn task_unavailable(reason: impl core::fmt::Display) -> TaskTechnicalError {
     TaskTechnicalError::StorageUnavailable {
         reason: reason.to_string(),
     }
+}
+
+/// Registers one Task-owned undelivered source against the assignee companion
+/// inside the caller's parent transaction (AU1b).
+///
+/// The destination is derived from the same row the commit read or wrote, and
+/// the source key comes from the fact itself; a failed registration returns an
+/// error so the caller's transaction rolls the parent fact back with it. The
+/// source-key uniqueness constraint keeps a repeated commit a no-op.
+fn register_task_undelivered(
+    tx: &rusqlite::Transaction<'_>,
+    companion_text: &str,
+    task: RawId,
+    fact: TaskFact,
+) -> Result<(), TaskTechnicalError> {
+    let source = UndeliveredSource::TaskRecord { task, fact };
+    crate::companion::register_undelivered_tx(
+        tx,
+        companion_text,
+        RawId::new(),
+        &source,
+        None,
+        None,
+        WallClockWithTz::now(),
+    )
+    .map_err(task_unavailable)
 }
 
 fn decode_revision(raw: i64) -> Result<TaskRevision, TaskTechnicalError> {
@@ -394,6 +425,18 @@ fn create_task_sync(
         )
         .map_err(task_unavailable)?;
     }
+    // AU2 commits the initial revision, so the initial `TaskRevision` fact is
+    // registered in the same transaction (AU1b); a failure rolls the whole
+    // creation back.
+    register_task_undelivered(
+        &tx,
+        &assignee_text,
+        premise.task.as_raw(),
+        TaskFact::TaskRevision {
+            task: premise.task.as_raw(),
+            revision: revision.as_u64(),
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskCreationOutcome::Created(reference))
 }
@@ -643,6 +686,17 @@ fn forward_steering_sync(
         params![task_text, next_raw, adopted_raw, purpose_text],
     )
     .map_err(task_unavailable)?;
+    // AU4 commits the new revision; register its `TaskRevision` fact in the
+    // same transaction so a failed registration leaves no partial forward.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::TaskRevision {
+            task: task.as_raw(),
+            revision: next_revision.as_u64(),
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskCommitOutcome::CommittedAs(TaskRef {
         task,
@@ -699,6 +753,18 @@ fn cancel_task_sync(
             "cancel CAS did not move exactly the current non-terminal task",
         ));
     }
+    // The cancel admission is the terminal transition: register it in the
+    // same commit. `AlreadyCancelled` / terminal returns above leave no row,
+    // so a repeated cancel never duplicates the notification.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::Terminal {
+            task: task.as_raw(),
+            progress: TerminalKindWire::Cancelled,
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskCancelOutcome::CancelAccepted)
 }
@@ -786,6 +852,17 @@ fn fail_task_sync(
             "failure CAS did not move exactly the relied non-terminal task",
         ));
     }
+    // The failure commit is the terminal transition; the notification shares
+    // the same transaction (AU1b).
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::Terminal {
+            task: task.as_raw(),
+            progress: TerminalKindWire::Failed,
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskFailureOutcome::FailedAs(TaskRef {
         task,
@@ -915,6 +992,14 @@ fn create_delegation_sync(
             "task progress did not advance with delegation creation",
         ));
     }
+    // AU3 registers the delegation fact for the delegator (the assignee the
+    // commit read) in the same transaction.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.task.as_raw(),
+        TaskFact::Delegation(delegation.as_raw()),
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(DelegationOutcome::Delegated(DelegationRef {
         delegation,
@@ -1651,6 +1736,28 @@ fn record_task_result_arrival_sync(
         ],
     )
     .map_err(task_unavailable)?;
+    // The Task row is the notification destination; a missing row is durable
+    // corruption, not a reason to skip the registration.
+    let assignee: Option<String> = tx
+        .query_row(SQL_SELECT_TASK_ASSIGNEE, params![task_text], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(assignee) = assignee else {
+        return Err(task_unavailable(
+            "task row missing for final result arrival",
+        ));
+    };
+    // AU15a registers the recorded-result fact in the same transaction. The
+    // idempotent same-identity retry above registers nothing: the source key
+    // already owns its row.
+    register_task_undelivered(
+        &tx,
+        &assignee,
+        delegation_task,
+        TaskFact::ResultRecorded(arrival.result.as_raw()),
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskResultRecord {
         result: arrival.result,
@@ -2226,6 +2333,16 @@ fn adopt_result_sync(
             "task completion did not apply exactly once",
         ));
     }
+    // AU15b registers the adoption fact in the same transaction as the
+    // `adopted_revision` stamp and the completion CAS. The idempotent adopted
+    // retry above and the non-adopting outcomes (`RecordedToOriginalOnly`,
+    // `WithheldByEffectFacts`) register nothing: they commit no adoption.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task_id.as_raw(),
+        TaskFact::ResultAdopted(claim.result.as_raw()),
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskResultAcceptance::AdoptedAsCompletion(TaskRef {
         task: task_id,

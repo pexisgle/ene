@@ -33,6 +33,8 @@ mod task;
 #[cfg(test)]
 mod tests;
 
+pub use companion::UndeliveredExcerpt;
+
 /// Messages carry the short backend cause only. Paths are non-secret but are
 /// kept out of messages for operational brevity.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
