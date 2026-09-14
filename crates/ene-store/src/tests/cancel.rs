@@ -570,10 +570,10 @@ async fn cancelled_task_keeps_late_result_and_never_adopts_it() {
 #[tokio::test]
 async fn cancel_v21_rewind_upgrades_without_rewriting_progress() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v23-rewind.db");
+    let path = dir.path().join("v21-rewind.db");
     let (started, in_progress) = {
         let store = Store::open(&path).await.unwrap();
-        assert_eq!(read_schema_version(&path), Some(23));
+        assert_eq!(read_schema_version(&path), Some(24));
         let started = store.create_task(task_premise(None)).await.unwrap();
         let (premise, assoc) = workspace_task_premise();
         let in_progress = store.create_task(premise).await.unwrap();
@@ -585,7 +585,7 @@ async fn cancel_v21_rewind_upgrades_without_rewriting_progress() {
         conn.execute_batch("PRAGMA user_version = 21;").unwrap();
     }
     let reopened = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(read_schema_version(&path), Some(24));
     assert_eq!(progress_of(&reopened, started).await, TaskProgress::Started);
     assert_eq!(
         progress_of(&reopened, in_progress).await,

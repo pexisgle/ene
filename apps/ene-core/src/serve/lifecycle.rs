@@ -60,6 +60,19 @@ pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     // together. A failed sweep keeps this Host from serving content prepared
     // under an unknown credential set.
     handle.sweep_registered_values().await?;
+    // Explicit recovery boundary, still before the listener binds:
+    // re-evaluate every sealed-but-unadopted result that AU15a recorded but
+    // AU15b did not adopt before the previous stop (or whose blockers settled
+    // while no producer listened), one bounded keyset page at a time so older
+    // permanently-unadopted candidates cannot starve later ones. This neither
+    // resumes an execution nor replays a provider call or filesystem Action,
+    // and a still-blocked result stays withheld. A page-read failure keeps the
+    // Host from serving because the durable result state itself is unreadable;
+    // per-candidate answers stay data and never wedge startup.
+    handle
+        .reconcile_sealed_results()
+        .await
+        .map_err(|error| CoreError::Store(error.to_string()))?;
     // Base URL override for self-hosted endpoints and tests: production
     // keeps [`DEFAULT_BASE_URL`]. The test harness points a real `serve`
     // binary at a local fake Responses server through this variable (child

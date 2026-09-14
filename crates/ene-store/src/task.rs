@@ -34,14 +34,15 @@ use std::sync::Mutex;
 use ene_action::ActionCertainty;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
-    DelegationRef, DelegationScope, Task, TaskAgentEphemeralId, TaskAgentOutput,
-    TaskAgentResultArrival, TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise,
-    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
+    AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
+    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness, Task,
+    TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskCreationPremise,
+    TaskFailureOutcome, TaskFailurePremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
     TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
     TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
-    WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
+    UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -119,6 +120,30 @@ const SQL_SELECT_RESULT_BY_DELEGATION: &str = "SELECT result_id, task_id, task_r
 const SQL_DELEGATION_HAS_STARTED_WORK: &str = "SELECT EXISTS(SELECT 1 FROM inference_attempt WHERE delegation_id = ?1 UNION ALL SELECT 1 FROM action_attempt WHERE delegation_id = ?1)";
 
 const SQL_INSERT_RESULT: &str = "INSERT INTO task_result (result_id, task_id, task_revision, delegation_id, body, adopted_revision, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+
+/// The failure producer's CAS: exactly the non-terminal values move to
+/// `failed`, guarded by the relied revision so a stale premise that slipped
+/// past the in-transaction compare can never terminate a moved Task.
+const SQL_FAIL_TASK: &str = "UPDATE task SET progress = 'failed' WHERE task_id = ?1 AND revision = ?2 AND progress IN ('started', 'in_progress')";
+
+/// The result's copied correspondence, used to re-derive an adoption claim
+/// and to verify it against the sealed delegation before it becomes
+/// comparison material.
+const SQL_SELECT_RESULT_CORRESPONDENCE: &str =
+    "SELECT task_id, task_revision, delegation_id FROM task_result WHERE result_id = ?1";
+
+/// The bounded sealed-but-unadopted candidate listing: `adopted_revision IS
+/// NULL` is the durable "may still need re-evaluation" marker, narrowed to
+/// candidates where re-adoption is still possible from canonical facts (the
+/// Task is non-terminal and the relied revision is the current revision). The
+/// cursor variant continues strictly after `(recorded_at, result_id)`, so a
+/// reconciliation sweep walks the whole candidate set page by page without
+/// re-reading the prefix. A result that can only answer
+/// `RecordedToOriginalOnly` (cancelled / moved-revision / terminal Task) is
+/// not a candidate, so permanent history never re-runs on every startup.
+const SQL_LIST_UNADOPTED_FIRST: &str = "SELECT r.result_id, r.recorded_at FROM task_result r JOIN task t ON t.task_id = r.task_id WHERE r.adopted_revision IS NULL AND t.progress IN ('started', 'in_progress') AND t.revision = r.task_revision ORDER BY r.recorded_at, r.result_id LIMIT ?1";
+
+const SQL_LIST_UNADOPTED_AFTER: &str = "SELECT r.result_id, r.recorded_at FROM task_result r JOIN task t ON t.task_id = r.task_id WHERE r.adopted_revision IS NULL AND t.progress IN ('started', 'in_progress') AND t.revision = r.task_revision AND (r.recorded_at > ?1 OR (r.recorded_at = ?1 AND r.result_id > ?2)) ORDER BY r.recorded_at, r.result_id LIMIT ?3";
 
 const SQL_SELECT_RESULT_ATTEMPTS: &str =
     "SELECT attempt_id FROM task_result_attempt WHERE result_id = ?1 ORDER BY attempt_id";
@@ -255,10 +280,50 @@ fn decode_clock(text: &str) -> Result<WallClockWithTz, TaskTechnicalError> {
     WallClockWithTz::parse_rfc3339(text).map_err(task_unavailable)
 }
 
+/// Requires the relied Owner utterance to still be the newest accepted Owner
+/// input for its companion, inside the caller's transaction.
+///
+/// The comparison is the same rowid discipline the reply append uses: a
+/// committed Owner row is an accepted input by construction, so any newer
+/// Owner row for the companion supersedes the turn. A premise whose message
+/// row does not exist fails closed (not current). Reading the expected row and
+/// the newer-row probe inside the same `Immediate` transaction as the Task
+/// write is what makes the Task side effect linearize against Owner input.
+fn owner_message_is_current(
+    tx: &rusqlite::Transaction<'_>,
+    currentness: &OwnerMessageCurrentness,
+) -> Result<bool, TaskTechnicalError> {
+    let expected_rowid: Option<i64> = tx
+        .query_row(
+            crate::companion::SQL_SELECT_OWNER_ROWID,
+            params![encode_id(currentness.message)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(expected_rowid) = expected_rowid else {
+        return Ok(false);
+    };
+    let newer = tx
+        .query_row(
+            crate::companion::SQL_EXISTS_NEWER_OWNER,
+            params![
+                encode_id(currentness.companion),
+                crate::codec::encode_role(ene_companion::HistoryRole::Owner),
+                expected_rowid
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    Ok(newer.is_none())
+}
+
 fn create_task_sync(
     conn: &Mutex<Connection>,
     premise: TaskCreationPremise,
-) -> Result<TaskRef, TaskTechnicalError> {
+    currentness: Option<OwnerMessageCurrentness>,
+) -> Result<TaskCreationOutcome, TaskTechnicalError> {
     let revision = TaskRevision::initial();
     let reference = TaskRef {
         task: premise.task,
@@ -271,6 +336,11 @@ fn create_task_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    if let Some(currentness) = currentness
+        && !owner_message_is_current(&tx, &currentness)?
+    {
+        return Ok(TaskCreationOutcome::Superseded);
+    }
     tx.execute(
         SQL_INSERT_TASK,
         params![
@@ -325,7 +395,7 @@ fn create_task_sync(
         .map_err(task_unavailable)?;
     }
     tx.commit().map_err(task_unavailable)?;
-    Ok(reference)
+    Ok(TaskCreationOutcome::Created(reference))
 }
 
 /// The adopted-purpose entry read for validation before a steering commit.
@@ -445,6 +515,7 @@ pub(crate) fn validated_adopted_purpose_source(
 fn forward_steering_sync(
     conn: &Mutex<Connection>,
     premise: TaskCommitPremise,
+    currentness: Option<OwnerMessageCurrentness>,
 ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
     let task = premise.expected.task;
     let task_text = encode_id(task.as_raw());
@@ -452,6 +523,11 @@ fn forward_steering_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    if let Some(currentness) = currentness
+        && !owner_message_is_current(&tx, &currentness)?
+    {
+        return Ok(TaskCommitOutcome::Superseded);
+    }
     let current: Option<RawTask> = tx
         .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
         .optional()
@@ -620,12 +696,18 @@ fn forward_steering_sync(
 fn cancel_task_sync(
     conn: &Mutex<Connection>,
     task: TaskId,
+    currentness: Option<OwnerMessageCurrentness>,
 ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
     let task_text = encode_id(task.as_raw());
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    if let Some(currentness) = currentness
+        && !owner_message_is_current(&tx, &currentness)?
+    {
+        return Ok(TaskCancelOutcome::Superseded);
+    }
     let current: Option<RawTask> = tx
         .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
         .optional()
@@ -653,6 +735,96 @@ fn cancel_task_sync(
     }
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskCancelOutcome::CancelAccepted)
+}
+
+/// Commits one confirmed terminal failure in a single short transaction.
+///
+/// The premise compare, the delegation correspondence check, and the progress
+/// CAS share one `Immediate` serialization boundary with every other Task
+/// transition, so `Completed`, `Cancelled`, and `Failed` have exactly one
+/// terminal winner: completion and cancel never rewrite `failed`, and this
+/// commit's revision guard never rewrites a terminal value. A delegation of
+/// another Task is a fail-closed technical error; a delegation whose relied
+/// revision disagrees with the premise is a stale domain outcome with zero
+/// writes. `kind` is caller-owned classification and is not persisted
+/// separately.
+fn fail_task_sync(
+    conn: &Mutex<Connection>,
+    premise: TaskFailurePremise,
+) -> Result<TaskFailureOutcome, TaskTechnicalError> {
+    let task = premise.task.task;
+    let task_text = encode_id(task.as_raw());
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(task_unavailable)?;
+    let current: Option<RawTask> = tx
+        .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(current) = current else {
+        return Ok(TaskFailureOutcome::MissingTask { task });
+    };
+    let current_revision = decode_revision(current.revision)?;
+    if let Some(delegation) = premise.delegation {
+        let correspondence: Option<(String, i64)> = tx
+            .query_row(
+                SQL_SELECT_DELEGATION_CORRESPONDENCE,
+                params![encode_id(delegation.as_raw())],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(task_unavailable)?;
+        let Some((delegation_task, delegation_revision)) = correspondence else {
+            return Ok(TaskFailureOutcome::MissingDelegation { delegation });
+        };
+        if decode_id(&delegation_task).map_err(task_unavailable)? != task.as_raw() {
+            // A delegation of another Task is a corrupted or foreign premise,
+            // never a reason to terminate this Task.
+            return Err(task_unavailable(
+                "failure delegation does not belong to the premise's task",
+            ));
+        }
+        if decode_revision(delegation_revision)? != premise.task.revision {
+            return Ok(TaskFailureOutcome::StalePremise {
+                current: TaskRef {
+                    task,
+                    revision: current_revision,
+                },
+            });
+        }
+    }
+    let current_progress = decode_progress(current.progress.as_deref())?;
+    if current_progress == TaskProgress::Failed {
+        return Ok(TaskFailureOutcome::AlreadyFailed { task });
+    }
+    if current_progress.is_terminal() {
+        return Ok(TaskFailureOutcome::TaskTerminal {
+            task,
+            progress: current_progress,
+        });
+    }
+    if current_revision != premise.task.revision {
+        return Ok(TaskFailureOutcome::StalePremise {
+            current: TaskRef {
+                task,
+                revision: current_revision,
+            },
+        });
+    }
+    let moved = tx
+        .execute(SQL_FAIL_TASK, params![task_text, current.revision])
+        .map_err(task_unavailable)?;
+    if moved != 1 {
+        return Err(task_unavailable(
+            "failure CAS did not move exactly the relied non-terminal task",
+        ));
+    }
+    tx.commit().map_err(task_unavailable)?;
+    Ok(TaskFailureOutcome::FailedAs(TaskRef {
+        task,
+        revision: current_revision,
+    }))
 }
 
 /// Commits one delegation correlation row (AU3).
@@ -1571,6 +1743,131 @@ fn delegation_has_started_work_sync(
         .map_err(task_unavailable)
 }
 
+/// Re-derives the adoption claim for one stored result.
+///
+/// `None` means the result row does not exist. The delegation correspondence
+/// is verified against the result's copied `(task, revision)` before the
+/// attempt enumeration becomes a claim; a disagreement is durable corruption
+/// and fails closed. A missing delegation row is left for the adoption commit
+/// to answer as `MissingDelegation`.
+fn load_result_adoption_claim_sync(
+    conn: &Mutex<Connection>,
+    result: TaskResultId,
+) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError> {
+    let result_text = encode_id(result.as_raw());
+    let guard = lock_shared(conn);
+    let found: Option<(String, i64, String)> = guard
+        .query_row(
+            SQL_SELECT_RESULT_CORRESPONDENCE,
+            params![result_text],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some((task, revision, delegation)) = found else {
+        return Ok(None);
+    };
+    let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
+    let relied_revision = decode_revision(revision)?;
+    let delegation_id = DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
+    let delegation_correspondence: Option<(String, i64)> = guard
+        .query_row(
+            SQL_SELECT_DELEGATION_CORRESPONDENCE,
+            params![delegation],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    if let Some((delegation_task, delegation_revision)) = delegation_correspondence {
+        let agrees = decode_id(&delegation_task).map_err(task_unavailable)? == task_id.as_raw()
+            && decode_revision(delegation_revision)? == relied_revision;
+        if !agrees {
+            return Err(task_unavailable(
+                "result delegation correspondence disagrees with the recorded result",
+            ));
+        }
+    }
+    let attempt_refs =
+        enumerate_delegation_attempts(&guard, delegation_id, task_id, relied_revision)?
+            .into_iter()
+            .map(|(attempt, _)| attempt)
+            .collect();
+    Ok(Some(TaskResultAdoptionClaim {
+        result,
+        attempt_refs,
+    }))
+}
+
+/// Lists one bounded page of sealed-but-unadopted candidates.
+///
+/// The cursor is compared against the stored `(recorded_at, result_id)` tuple
+/// in SQL, so each read is bounded by `limit` rows and consecutive pages
+/// partition the candidate set without overlap or gaps. The cursor text is
+/// the writer's own `to_rfc3339` rendering round-tripped through the domain
+/// clock, which is byte-identical for the values the arrival writes. A
+/// permanently unadopted row (cancelled / moved revision / still-withheld)
+/// stays behind the cursor for the rest of the pass instead of pinning the
+/// front of every page.
+fn list_unadopted_results_after_sync(
+    conn: &Mutex<Connection>,
+    after: Option<UnadoptedResultCursor>,
+    limit: u64,
+) -> Result<Vec<UnadoptedResultCursor>, TaskTechnicalError> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let guard = lock_shared(conn);
+    let rows: Vec<(String, String)> = match after {
+        None => {
+            let mut statement = guard
+                .prepare(SQL_LIST_UNADOPTED_FIRST)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![limit], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+        Some(cursor) => {
+            let mut statement = guard
+                .prepare(SQL_LIST_UNADOPTED_AFTER)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(
+                    params![
+                        cursor.recorded_at.to_rfc3339(),
+                        encode_id(cursor.result.as_raw()),
+                        limit
+                    ],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+    };
+    rows.into_iter()
+        .map(|(result, recorded_at)| {
+            Ok(UnadoptedResultCursor {
+                recorded_at: decode_clock(&recorded_at)?,
+                result: TaskResultId::from_raw(decode_id(&result).map_err(task_unavailable)?),
+            })
+        })
+        .collect()
+}
+
+/// Lists the Task-wide Action attempt identities for the report composition.
+fn load_task_action_attempts_sync(
+    conn: &Mutex<Connection>,
+    task: TaskId,
+) -> Result<Vec<RawId>, TaskTechnicalError> {
+    let guard = lock_shared(conn);
+    Ok(enumerate_task_attempts(&guard, task)?
+        .into_iter()
+        .map(|(attempt, _)| attempt)
+        .collect())
+}
+
 fn load_delegation_result_sync(
     conn: &Mutex<Connection>,
     delegation: DelegationId,
@@ -1657,11 +1954,11 @@ fn enumerate_delegation_attempts(
 /// it fails closed instead of being read as a certainty fact or dropped from
 /// the barrier. Scope stays Task-wide: all revisions and all delegations.
 fn enumerate_task_attempts(
-    tx: &rusqlite::Transaction<'_>,
+    conn: &Connection,
     task_id: TaskId,
 ) -> Result<Vec<(RawId, ActionCertainty)>, TaskTechnicalError> {
     let task_text = encode_id(task_id.as_raw());
-    let mut statement = tx
+    let mut statement = conn
         .prepare(SQL_SELECT_TASK_ATTEMPTS)
         .map_err(task_unavailable)?;
     let rows = statement
@@ -1976,7 +2273,14 @@ impl TaskRepository for Store {
         premise: TaskCreationPremise,
     ) -> Result<TaskRef, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || create_task_sync(&conn, premise)).await
+        match run_blocking(move || create_task_sync(&conn, premise, None)).await? {
+            TaskCreationOutcome::Created(reference) => Ok(reference),
+            // The unguarded creation has no currentness premise, so it can
+            // never answer supersession.
+            TaskCreationOutcome::Superseded => Err(task_unavailable(
+                "unguarded task creation cannot answer supersession",
+            )),
+        }
     }
 
     async fn forward_steering(
@@ -1984,7 +2288,7 @@ impl TaskRepository for Store {
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || forward_steering_sync(&conn, premise)).await
+        run_blocking(move || forward_steering_sync(&conn, premise, None)).await
     }
 
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError> {
@@ -1994,7 +2298,15 @@ impl TaskRepository for Store {
 
     async fn cancel_task(&self, task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || cancel_task_sync(&conn, task)).await
+        run_blocking(move || cancel_task_sync(&conn, task, None)).await
+    }
+
+    async fn fail_task(
+        &self,
+        premise: TaskFailurePremise,
+    ) -> Result<TaskFailureOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || fail_task_sync(&conn, premise)).await
     }
 
     async fn create_delegation(
@@ -2051,5 +2363,59 @@ impl TaskRepository for Store {
     ) -> Result<TaskResultAcceptance, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || adopt_result_sync(&conn, claim)).await
+    }
+
+    async fn load_result_adoption_claim(
+        &self,
+        result: TaskResultId,
+    ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || load_result_adoption_claim_sync(&conn, result)).await
+    }
+
+    async fn list_unadopted_results_after(
+        &self,
+        after: Option<UnadoptedResultCursor>,
+        limit: u64,
+    ) -> Result<Vec<UnadoptedResultCursor>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || list_unadopted_results_after_sync(&conn, after, limit)).await
+    }
+
+    async fn load_task_action_attempts(
+        &self,
+        task: TaskId,
+    ) -> Result<Vec<RawId>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || load_task_action_attempts_sync(&conn, task)).await
+    }
+}
+
+impl ConversationTaskRepository for Store {
+    async fn create_task_from_conversation(
+        &self,
+        premise: TaskCreationPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || create_task_sync(&conn, premise, Some(currentness))).await
+    }
+
+    async fn forward_steering_from_conversation(
+        &self,
+        premise: TaskCommitPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || forward_steering_sync(&conn, premise, Some(currentness))).await
+    }
+
+    async fn cancel_task_from_conversation(
+        &self,
+        task: TaskId,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || cancel_task_sync(&conn, task, Some(currentness))).await
     }
 }

@@ -48,6 +48,10 @@ pub enum TaskCancelOutcome {
     /// The Task is already `Cancelled`; the idempotent re-request wrote
     /// nothing (admission happens exactly once).
     AlreadyCancelled,
+    /// A newer accepted Owner input superseded the relied utterance; nothing
+    /// was changed. Only the conversation-sourced guarded admission answers
+    /// this.
+    Superseded,
     /// The Task is terminal for another reason (`Completed` / `Failed`) and
     /// cannot be cancelled; nothing was written.
     TaskTerminal {

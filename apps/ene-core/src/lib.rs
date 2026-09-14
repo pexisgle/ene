@@ -19,6 +19,9 @@
 //!   Host inference boundary.
 //! - [`action`] adapts the Task-owned delegation/workspace correspondence to
 //!   the Action-owned filesystem boundary.
+//! - [`task_control`] composes conversation / first-party Task control:
+//!   proposal, steering, effect settlement, recovery reconciliation, and
+//!   report composition.
 //! - [`task_run`] runs the bounded autonomous Task Agent ↔ Action loop over
 //!   those boundaries.
 //! - [`conn`] holds the Unix socket listener. The wire close convention is shared:
@@ -36,6 +39,7 @@ pub mod dialogue;
 pub mod serve;
 pub mod setup;
 pub mod task_agent;
+pub mod task_control;
 pub mod task_run;
 
 #[cfg(test)]

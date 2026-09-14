@@ -56,7 +56,7 @@
 
 use ene_action::{ActionCertainty, ActionNotStarted, ObservedEffect, OperationKind};
 use ene_credential::SecretScrubber;
-use ene_inference::DispatchAbort;
+use ene_inference::{DispatchAbort, ProviderTransport};
 use ene_primitive::RawId;
 use ene_store::Store;
 use ene_task::{
@@ -65,8 +65,10 @@ use ene_task::{
     TaskProgress, TaskRef, TaskRepository as _, TaskResultRecord, orchestrate_result_arrival,
     orchestrate_task_agent_turn,
 };
+use std::sync::Arc;
 
 use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_workspace_action};
+use crate::serve::HostHandle;
 
 /// The default bound on inference turns per execution.
 ///
@@ -714,6 +716,62 @@ pub fn parse_directive(text: &str) -> Result<TaskAgentDirective, TaskAgentProtoc
         path: path.to_owned(),
         content,
     }))
+}
+
+/// Starts the existing Task Agent runner in the background for one committed
+/// delegation.
+///
+/// The launcher only starts the existing runner; it owns no lifecycle, no
+/// durable running state, and no completion decision. The runner's own
+/// per-delegation registration and durable one-shot attempt facts make a
+/// second launch a domain refusal, and a technical runner failure stays a
+/// technical outcome (never `TaskProgress::Failed`).
+pub trait TaskAgentLauncher: Send + Sync {
+    /// Starts [`HostHandle::run_task_agent`] for `delegation` in the
+    /// background.
+    fn launch(&self, delegation: ene_task::DelegationId);
+}
+
+/// Launcher over the serving process's shared handle and provider transport.
+///
+/// This is the production composition seam: `conn::run` owns both Arcs and
+/// installs one launcher on the handle, so a conversation-accepted Task Agent
+/// execution starts without any test-side runner call. The handle is held
+/// weakly: the launcher is stored on the handle itself, and a strong
+/// reference would form a cycle.
+pub struct BackgroundTaskAgent<T> {
+    handle: std::sync::Weak<HostHandle>,
+    transport: Arc<T>,
+}
+
+impl<T> BackgroundTaskAgent<T> {
+    #[must_use]
+    pub fn new(handle: Arc<HostHandle>, transport: Arc<T>) -> Self {
+        Self {
+            handle: Arc::downgrade(&handle),
+            transport,
+        }
+    }
+}
+
+impl<T> TaskAgentLauncher for BackgroundTaskAgent<T>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    fn launch(&self, delegation: ene_task::DelegationId) {
+        let Some(handle) = self.handle.upgrade() else {
+            // The serving process is shutting down; no execution starts.
+            return;
+        };
+        let transport = Arc::clone(&self.transport);
+        tokio::spawn(async move {
+            // The runner owns every admission and outcome; a technical
+            // failure is dropped as technical and never becomes a Task
+            // failure. The launch is fire-and-forget on purpose: the dialogue
+            // turn never awaits the execution.
+            drop(handle.run_task_agent(transport.as_ref(), delegation).await);
+        });
+    }
 }
 
 #[cfg(test)]

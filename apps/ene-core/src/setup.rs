@@ -34,6 +34,19 @@
 //!   as a flag.
 //! - `(ManageRuleConsentCap, "setup:show")` answers a [`ManagementView`]
 //!   instead of an outcome.
+//! - `(CancelTask, "task:{task-id}")` reaches the Task owner's cancel
+//!   admission ([`HostHandle::cancel_task`], AU16) without waiting for the
+//!   main LLM or a Task Agent. An accepted or already-cancelled Task answers
+//!   [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime);
+//!   a Task terminal for another reason or an unknown Task clarifies; an
+//!   unreadable store holds. The intent only requests admission: acceptance
+//!   never means running provider I/O or an external effect stopped, and the
+//!   already-started facts stay untouched.
+//! - `(SelectWorkspace, "workspace:{path}")` records the Owner-confirmed
+//!   Workspace for Task work. The Owner-authored path must canonicalize to an
+//!   existing directory; a valid path becomes the trusted first-party premise
+//!   (never provider output) that a conversation Task proposal may use, and
+//!   an invalid path clarifies with zero premise change.
 //!
 //! Target parsing uses the shared `ene-api` setup grammar
 //! ([`parse_credential_target`],
@@ -61,10 +74,11 @@
 //! Assignment parameters come from the parsed consent target; the Host never
 //! sends intents, so no `quote` handling exists Host-side beyond carrying it.
 
+use ene_action::WorkspaceRoot;
 use ene_api::v1::management::{
     ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
     ManagementViewRequest, RationaleOrigin, SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, ViewSection,
-    parse_consent_target, parse_credential_target,
+    parse_consent_target, parse_credential_target, parse_task_target, parse_workspace_target,
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
@@ -84,6 +98,7 @@ use ene_permission::{
 };
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
+use ene_task::{CancelTaskCommand, TaskCancelOutcome, TaskId, WorkspaceFolderRef};
 
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
@@ -134,6 +149,10 @@ impl HostHandle {
             ManagementIntentKind::ManageRuleConsentCap => {
                 self.apply_consent_or_setup(frame, intent, live).await
             }
+            ManagementIntentKind::CancelTask => self.cancel_task_intent(frame, intent, live).await,
+            ManagementIntentKind::SelectWorkspace => {
+                self.select_workspace_intent(frame, intent, live).await
+            }
             // Deferred scope answers clarify, recorded like any other decided
             // outcome so a retried id observes one answer.
             _ => {
@@ -159,6 +178,7 @@ impl HostHandle {
             ManagementIntentKind::StopCompanion => "stop-companion",
             ManagementIntentKind::DeleteCompanion => "delete-companion",
             ManagementIntentKind::CancelTask => "cancel-task",
+            ManagementIntentKind::SelectWorkspace => "select-workspace",
             ManagementIntentKind::ManageSchedule => "manage-schedule",
             ManagementIntentKind::DenyOrRefuse => "deny-or-refuse",
             ManagementIntentKind::ManageRuleConsentCap => "manage-rule-consent-cap",
@@ -168,6 +188,148 @@ impl HostHandle {
                 "deletion-backup-restore-reset"
             }
         }
+    }
+
+    /// Reaches the Task owner's cancel admission from the first-party
+    /// management path.
+    ///
+    /// The Host composes the request only: [`HostHandle::cancel_task`] is the
+    /// one admission boundary and its durable `progress` CAS is the only
+    /// authority. The wire outcome loses no meaning that the management
+    /// vocabulary can carry: an accepted or already-`Cancelled` Task answers
+    /// `AppliedAsOneTime`, a Task terminal for another reason
+    /// (`Completed` / `Failed`) and an unknown Task clarify, and an
+    /// unreadable store holds. The intent never claims that running provider
+    /// I/O or an external effect stopped, and it never rewrites already
+    /// started activity facts.
+    async fn cancel_task_intent(
+        &self,
+        frame: &WireFrame,
+        intent: &ManagementIntent,
+        live: &LiveInput,
+    ) -> Vec<WireFrame> {
+        if let Some(answer) = self
+            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_CANCEL_TASK)
+            .await
+        {
+            return answer;
+        }
+        let Some(task) = parse_task_target(&intent.target)
+            .map(RawId::from_uuid)
+            .map(TaskId::from_raw)
+        else {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_CANCEL_TASK,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )];
+        };
+        match self.cancel_task(CancelTaskCommand { task }).await {
+            // The admission happened exactly once; an already-cancelled Task
+            // means the same accepted fact, so both answer the one-time
+            // application and an exact retry replays this snapshot.
+            Ok(TaskCancelOutcome::CancelAccepted | TaskCancelOutcome::AlreadyCancelled) => {
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    self.record_decided(
+                        intent,
+                        Self::INTENT_KIND_CANCEL_TASK,
+                        IntentOutcome::AppliedAsOneTime,
+                    )
+                    .await,
+                )]
+            }
+            // Another terminal state won or there is no Task to cancel: the
+            // admission cannot happen, and the management vocabulary has no
+            // more specific refusal, so clarify rather than reporting an
+            // admission that did not occur. The first-party admission has no
+            // Owner-message premise, so `Superseded` is unreachable and maps
+            // the same safe way.
+            Ok(
+                TaskCancelOutcome::TaskTerminal { .. }
+                | TaskCancelOutcome::MissingTask { .. }
+                | TaskCancelOutcome::Superseded,
+            ) => {
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    self.record_decided(
+                        intent,
+                        Self::INTENT_KIND_CANCEL_TASK,
+                        IntentOutcome::NeedsClarification,
+                    )
+                    .await,
+                )]
+            }
+            // Nothing was decided, so a retry is safe.
+            Err(_) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::HeldByOperation,
+            )],
+        }
+    }
+
+    /// Selects the Owner-confirmed Workspace folder for Task work.
+    ///
+    /// This is the trusted first-party premise a Task association may use:
+    /// the path is Owner-authored on this inlet, the Host validates it as an
+    /// existing canonical directory, and provider output never carries one.
+    /// The intent only records the selection; the Task owner confirms the
+    /// association when a Task is created. An invalid or missing path
+    /// clarifies with zero premise change.
+    async fn select_workspace_intent(
+        &self,
+        frame: &WireFrame,
+        intent: &ManagementIntent,
+        live: &LiveInput,
+    ) -> Vec<WireFrame> {
+        if let Some(answer) = self
+            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_SELECT_WORKSPACE)
+            .await
+        {
+            return answer;
+        }
+        let validated = parse_workspace_target(&intent.target)
+            .and_then(|path| WorkspaceRoot::open(path).ok())
+            .map(|root| WorkspaceFolderRef {
+                path: root.as_path().to_string_lossy().into_owned(),
+            });
+        let Some(folder) = validated else {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_SELECT_WORKSPACE,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )];
+        };
+        self.trusted_task_premises.set_workspace(folder);
+        vec![outcome_frame(
+            frame,
+            live,
+            intent,
+            self.record_decided(
+                intent,
+                Self::INTENT_KIND_SELECT_WORKSPACE,
+                IntentOutcome::AppliedAsOneTime,
+            )
+            .await,
+        )]
     }
 
     /// The wire intent only PROPOSES: a held snapshot stays held until a NEW
@@ -273,6 +435,8 @@ impl HostHandle {
     const INTENT_KIND_ASSIGN: &str = "assign";
     const INTENT_KIND_REGISTER: &str = "register";
     const INTENT_KIND_COMPLETE: &str = "complete";
+    const INTENT_KIND_CANCEL_TASK: &str = "cancel-task";
+    const INTENT_KIND_SELECT_WORKSPACE: &str = "select-workspace";
 
     fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {
         IntentFingerprint {

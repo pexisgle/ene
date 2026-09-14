@@ -5681,4 +5681,5 @@ async fn same_round_newer_owner_input_supersedes_the_running_reply() -> Result<(
 }
 
 mod task_agent;
+mod task_control;
 mod task_run;

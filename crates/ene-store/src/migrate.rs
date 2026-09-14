@@ -5,7 +5,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::{decode_consumer, decode_id, encode_consumer, encode_purpose};
 
-const CURRENT_VERSION: u64 = 23;
+const CURRENT_VERSION: u64 = 24;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -706,6 +706,23 @@ fn migrate_v23(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Adds the sealed-but-unadopted candidate index (V24).
+///
+/// The recovery reconciliation lists `adopted_revision IS NULL` results in
+/// `(recorded_at, result_id)` order; the partial index lets that bounded
+/// candidate query avoid scanning the whole result table as history grows.
+/// The index holds no semantic state and rewrites no row: a fresh V24
+/// database and a V23 → V24 upgraded database converge to the same meaning,
+/// and the version advance only records that the index exists.
+const MIGRATION_V24_INDEX: &str = "
+CREATE INDEX IF NOT EXISTS idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
+";
+
+fn migrate_v24(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(MIGRATION_V24_INDEX)
+        .map_err(|error| error.to_string())
+}
+
 /// One pre-V21 attempt row's correlation columns, as read for the backfill.
 struct BackfillAttemptRow {
     ticket: String,
@@ -926,6 +943,9 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 23 {
         migrate_v23(&tx)?;
+    }
+    if stored_version < 24 {
+        migrate_v24(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

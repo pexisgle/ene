@@ -14,15 +14,25 @@
 //! without opening a turn, while a conflicting reuse rejects just as
 //! early.
 //!
-//! Steering follows the same caller-proposes split: [`propose_steering`]
-//! maps an accepted conversation command onto the Task owner's value premise
-//! and returns the owner's outcome unchanged. Adoption decisions and
-//! identities stay with `ene-task`.
+//! Task control follows the same caller-proposes split: [`propose_task`] and
+//! [`propose_steering`] map accepted conversation commands onto the Task
+//! owner's value premises and return the owner's outcomes unchanged. Adoption
+//! decisions and identities stay with `ene-task`, and [`TaskReport`] renders
+//! user-facing facts the composition root read from the durable owners.
+//!
+//! [`finish_turn`] also interprets the companion's own provider output for
+//! one closed-world [`DialogueTaskCommand`] (`[task-control] {json}`, final
+//! line): the companion-owned interpretation reaches the Task owner only
+//! through the composition root's [`DialogueTaskControlPort`], the directive
+//! line is never stored, and the stored reply is the owner-derived text. A
+//! malformed directive clarifies without changing anything, and a technical
+//! failure closes the stream interrupted instead of storing a fabricated
+//! reply.
 
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
-    Admission, AuthorizedInference, DiscardSink, InferenceDispatchOutcome, InferenceExecutor,
-    NotSentReason,
+    Admission, AuthorizedInference, DeltaFlow, DeltaSink, DiscardSink, InferenceDispatchOutcome,
+    InferenceExecutor, NotSentReason,
 };
 use ene_learning::{
     ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn, FormationDecision,
@@ -32,8 +42,11 @@ use ene_learning::{
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    SteeringPremiseRef, SteeringProposalPremise, TaskProposalOutcome, TaskPurpose, TaskRepository,
-    TaskTechnicalError,
+    AssigneeRef, ConversationTaskRepository, OwnerMessageCurrentness, SteeringPremiseRef,
+    SteeringProposalPremise, TaskContextOrigin, TaskCreationOutcome, TaskProgress,
+    TaskProposalOutcome, TaskProposalPremise, TaskPurpose, TaskRepository, TaskTechnicalError,
+    WorkspaceNeedRef, orchestrate_steering_current, orchestrate_task_creation,
+    orchestrate_task_creation_current,
 };
 
 use crate::{
@@ -307,13 +320,201 @@ pub async fn begin_turn(
 /// turn's Owner message identity as its premise, and the store refuses the
 /// append when a newer accepted Owner input committed first, even inside
 /// the same round. After the durable append, the Experience premise is
-/// pinned for the post-response Learning pass.
+/// pinned for the post-response Learning pass. A reply carrying the reserved
+/// `[task-control]` protocol is interpreted before the append: a valid
+/// first-line-only command runs through the composition root's port and the
+/// stored reply is the scrubbed owner outcome, while a marker that is not a
+/// valid first-line command is a reserved-protocol violation — no command
+/// executes, no reply is stored, and the stream closes interrupted. A
+/// technical failure (`Unavailable`) closes interrupted instead of storing a
+/// reply no operation produced.
+/// The clarification shown for a malformed task-control directive.
+const TASK_CONTROL_CLARIFICATION: &str =
+    "I could not interpret the task instruction; nothing was changed.";
+
+/// How the presentation sink classified one provider reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlPresentation {
+    /// No marker anywhere: ordinary conversation.
+    Ordinary,
+    /// The first non-whitespace content is the marker: a directive candidate
+    /// for the parser to validate.
+    Directive,
+    /// The marker appeared after ordinary text: reserved-protocol violation,
+    /// fail closed.
+    LateMarker,
+}
+
+/// The sink's marker-detection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlMode {
+    /// No non-whitespace content yet.
+    Undecided,
+    /// Ordinary reply; rolling marker detection.
+    Ordinary,
+    /// The marker is at the reply start; suppress the rest.
+    Directive,
+    /// A marker appeared after ordinary text; suppress the rest and fail
+    /// closed.
+    LateMarker,
+}
+
+/// Presentation sink that never lets the reserved `[task-control]` protocol
+/// reach the user-visible stream.
+///
+/// Ordinary text streams as it arrives, with a rolling hold of only the
+/// trailing suffix that could still become the marker (at most
+/// `TASK_CONTROL_MARKER.len() - 1` bytes), so a marker split across provider
+/// deltas is still detected and suppressed. A marker at the first
+/// non-whitespace position switches to directive mode; a marker anywhere else
+/// switches to late-marker mode and the caller closes the turn interrupted.
+/// Directive turns present only the scrubbed typed owner outcome.
+struct ControlHoldingSink<'a> {
+    inner: Option<&'a mut (dyn DeltaSink + Send)>,
+    /// Undecided: all buffered text. Ordinary: the held marker-prefix tail.
+    buffer: String,
+    mode: ControlMode,
+}
+
+impl<'a> ControlHoldingSink<'a> {
+    fn new(inner: &'a mut (dyn DeltaSink + Send)) -> Self {
+        Self {
+            inner: Some(inner),
+            buffer: String::new(),
+            mode: ControlMode::Undecided,
+        }
+    }
+
+    async fn push_raw(&mut self, text: &str) -> DeltaFlow {
+        let Some(inner) = self.inner.as_mut() else {
+            return DeltaFlow::Continue;
+        };
+        inner.push_delta(text).await
+    }
+
+    /// Publishes ordinary text, holding only a trailing suffix that could
+    /// still become the marker.
+    async fn flush_ordinary(&mut self) -> DeltaFlow {
+        if let Some(position) = self.buffer.find(TASK_CONTROL_MARKER) {
+            // A marker appeared after ordinary text: present what preceded it
+            // and suppress from here on. The caller closes interrupted, so
+            // nothing of the malformed reply is stored.
+            let prefix = self.buffer[..position].to_owned();
+            self.buffer.clear();
+            self.mode = ControlMode::LateMarker;
+            if prefix.is_empty() {
+                return DeltaFlow::Continue;
+            }
+            return self.push_raw(&prefix).await;
+        }
+        // Hold the longest suffix that is a proper prefix of the marker.
+        let max_hold = (TASK_CONTROL_MARKER.len() - 1).min(self.buffer.len());
+        let mut hold = 0;
+        for length in (1..=max_hold).rev() {
+            let start = self.buffer.len() - length;
+            if self.buffer.is_char_boundary(start)
+                && TASK_CONTROL_MARKER.starts_with(&self.buffer[start..])
+            {
+                hold = length;
+                break;
+            }
+        }
+        let publish_len = self.buffer.len() - hold;
+        if publish_len == 0 {
+            return DeltaFlow::Continue;
+        }
+        let publish: String = self.buffer.drain(..publish_len).collect();
+        self.push_raw(&publish).await
+    }
+
+    /// Classifies the buffered undecided prefix, switching modes when enough
+    /// text is known.
+    async fn decide_undecided(&mut self) -> DeltaFlow {
+        let Some(start) = self
+            .buffer
+            .find(|character: char| !character.is_whitespace())
+        else {
+            return DeltaFlow::Continue;
+        };
+        if let Some(position) = self.buffer.find(TASK_CONTROL_MARKER) {
+            // The marker is reserved: at the first position it is a directive
+            // candidate, anywhere else it is a fail-closed violation.
+            if position == start {
+                self.mode = ControlMode::Directive;
+            } else {
+                self.mode = ControlMode::LateMarker;
+            }
+            self.buffer.clear();
+            return DeltaFlow::Continue;
+        }
+        let candidate = &self.buffer[start..];
+        if candidate.len() < TASK_CONTROL_MARKER.len() && TASK_CONTROL_MARKER.starts_with(candidate)
+        {
+            return DeltaFlow::Continue;
+        }
+        self.mode = ControlMode::Ordinary;
+        self.flush_ordinary().await
+    }
+
+    async fn push(&mut self, delta: &str) -> DeltaFlow {
+        match self.mode {
+            ControlMode::Directive | ControlMode::LateMarker => DeltaFlow::Continue,
+            ControlMode::Ordinary => {
+                self.buffer.push_str(delta);
+                self.flush_ordinary().await
+            }
+            ControlMode::Undecided => {
+                self.buffer.push_str(delta);
+                self.decide_undecided().await
+            }
+        }
+    }
+
+    /// Finalizes the reply and returns its classification.
+    ///
+    /// A held ordinary tail is flushed; a directive or late marker stays
+    /// suppressed.
+    async fn finalize(&mut self) -> ControlPresentation {
+        match self.mode {
+            ControlMode::Directive => ControlPresentation::Directive,
+            ControlMode::LateMarker => ControlPresentation::LateMarker,
+            ControlMode::Undecided | ControlMode::Ordinary => {
+                if !self.buffer.is_empty() {
+                    let text = core::mem::take(&mut self.buffer);
+                    let _ = self.push_raw(&text).await;
+                }
+                ControlPresentation::Ordinary
+            }
+        }
+    }
+
+    /// Presents the owner-derived text after a suppressed directive. The
+    /// caller must have scrubbed it already.
+    async fn present(&mut self, text: &str) -> DeltaFlow {
+        self.push_raw(text).await
+    }
+}
+
+impl DeltaSink for ControlHoldingSink<'_> {
+    fn push_delta<'a>(
+        &'a mut self,
+        delta: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
+        Box::pin(self.push(delta))
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter is one distinct owner boundary the turn composes; grouping them would restate the boundary set"
+)]
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
     learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
+    task_control: &impl DialogueTaskControlPort,
     sink: &mut (dyn ene_inference::DeltaSink + Send),
     is_current: &(dyn Fn() -> bool + Send + Sync),
 ) -> DialogueOutcome {
@@ -339,8 +540,14 @@ pub async fn finish_turn(
         return DialogueOutcome::Interrupted;
     };
     // Dialogue has no cooperative stop token: it is not a Task Agent
-    // execution, so no abort exists to forward.
-    match inference.dispatch(authorized, prompt, sink, None).await {
+    // execution, so no abort exists to forward. The presentation sink holds
+    // back any potential task-control directive line, so provider output can
+    // never leak the protocol to the client.
+    let mut holder = ControlHoldingSink::new(sink);
+    match inference
+        .dispatch(authorized, prompt, &mut holder, None)
+        .await
+    {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
@@ -358,16 +565,55 @@ pub async fn finish_turn(
             if !is_current() {
                 return DialogueOutcome::Interrupted;
             }
+            // Finalize the presentation classification before anything is
+            // stored: a late marker is a reserved-protocol violation and
+            // closes interrupted with no command and no reply row.
+            let presentation = holder.finalize().await;
+            let (reply_text, reply_credential_set) = match presentation {
+                ControlPresentation::LateMarker => return DialogueOutcome::Interrupted,
+                ControlPresentation::Ordinary => (text.text.clone(), text.credential_set),
+                ControlPresentation::Directive => {
+                    let tail = match interpret_task_control(&text.text) {
+                        DialogueTaskInterpretation::Command { command } => {
+                            match task_control.apply(command, message).await {
+                                DialogueTaskControlReply::Answered(tail) => tail,
+                                DialogueTaskControlReply::Unavailable => {
+                                    return DialogueOutcome::Interrupted;
+                                }
+                            }
+                        }
+                        DialogueTaskInterpretation::Invalid => {
+                            TASK_CONTROL_CLARIFICATION.to_owned()
+                        }
+                        // The sink saw a directive the scrubbed text does not
+                        // carry; fail closed instead of presenting unproven
+                        // text.
+                        DialogueTaskInterpretation::Conversation { .. } => {
+                            return DialogueOutcome::Interrupted;
+                        }
+                    };
+                    // Scrub before any user-visible publication: the
+                    // presented text and the durable reply are the same
+                    // scrubbed string.
+                    let Ok(scrubbed) = scrubber.scrub(&tail).await else {
+                        return DialogueOutcome::Interrupted;
+                    };
+                    if let DeltaFlow::Abort(_) = holder.present(&scrubbed.text).await {
+                        return DialogueOutcome::Interrupted;
+                    }
+                    (scrubbed.text, scrubbed.credential_set)
+                }
+            };
             let reply = AppendHistoryCommand {
                 companion: input.companion,
                 round: input.round,
                 role: HistoryRole::Companion,
-                text: text.text.clone(),
+                text: reply_text.clone(),
                 lang: input.lang.clone(),
                 at: WallClockWithTz::now(),
                 expected_generation: input.generation,
                 expected_consent: Some((consent_id, consent_rev)),
-                expected_credential_set: Some(text.credential_set),
+                expected_credential_set: Some(reply_credential_set),
                 // The durable Owner row this turn committed: the append
                 // refuses the reply when a newer accepted Owner input
                 // superseded it, even inside the same round.
@@ -386,7 +632,7 @@ pub async fn finish_turn(
                     // durable; the queued pass judges exactly this window.
                     let experience = pin_experience(&input, history).await.map(Box::new);
                     DialogueOutcome::Completed {
-                        text: text.text,
+                        text: reply_text,
                         experience,
                     }
                 }
@@ -408,7 +654,7 @@ pub const DIALOGUE_CONTEXT_MESSAGES: u64 = 8;
 /// Memories offered to one dialogue prompt.
 pub const DIALOGUE_RECALL_LIMIT: usize = 6;
 
-const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions.";
+const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions. If the owner asks for file work as a task, asks about task progress or results, changes a task's instructions, or cancels a task, reply with exactly one task-control line as the very first non-empty line and nothing else (no other prose): the line starts with [task-control] followed by one JSON object with exactly these fields: {\"kind\":\"propose_task\",\"purpose\":\"<summary of the work>\"} to start a task; {\"kind\":\"report\"} to ask about the current task; {\"kind\":\"steer\",\"instruction\":\"<instruction>\",\"purpose\":null} to change it; or {\"kind\":\"cancel\"} to cancel it. Never emit any other field, and never add a task-control line to ordinary conversation.";
 
 /// Prompt layout pieces shared by the budget check and the assembly, so the
 /// pre-acceptance check and the built prompt cannot drift apart.
@@ -713,4 +959,685 @@ pub async fn propose_steering(
         },
     )
     .await
+}
+
+/// Proposes one conversation-sourced steering change, conditional on the
+/// relied Owner input still being current.
+///
+/// Identical to [`propose_steering`] except that the Task owner compares the
+/// Owner-message currentness premise inside the revision commit: a newer
+/// accepted Owner input supersedes the turn and answers
+/// [`TaskProposalOutcome::Superseded`] with zero writes.
+pub async fn propose_steering_current(
+    command: ProposeSteeringCommand,
+    repository: &impl ConversationTaskRepository,
+    currentness: OwnerMessageCurrentness,
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
+    orchestrate_steering_current(
+        repository,
+        SteeringProposalPremise {
+            premise: command.premise,
+            new_purpose: command.new_purpose,
+            instruction_source: command.instruction_source,
+        },
+        currentness,
+    )
+    .await
+}
+
+/// One Task proposal from the Owner conversation (H-A caller side).
+///
+/// The dialogue layer builds this from accepted conversation evidence — the
+/// Owner's request is a canonical History record and `origin` references it;
+/// the purpose text is the proposal, never a committed Task state. The command
+/// carries no identity: `orchestrate_task_creation` mints the Task, context
+/// entry, and confirmed workspace association identities. A workspace need is
+/// present only when the conversation resolved one; the Task owner confirms
+/// the association.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposeTaskCommand {
+    /// The Companion proposing the Task; adopted as the Task assignee.
+    pub requester: CompanionId,
+    /// The purpose text proposed for adoption.
+    pub purpose: TaskPurpose,
+    /// The conversation record the request came from.
+    pub origin: TaskContextOrigin,
+    /// The workspace conditions the request relies on, when any.
+    pub workspace_need: Option<WorkspaceNeedRef>,
+}
+
+/// Proposes one Task to the Task owner and returns its decision.
+///
+/// The caller only proposes. This maps the command onto the Task owner's
+/// value premise and delegates to [`ene_task::orchestrate_task_creation`],
+/// which mints every identity and commits the creation unit. The returned
+/// [`TaskProposalOutcome`] is the owner's outcome unchanged
+/// ([`TaskProposalOutcome::AcceptedAsTask`] on success). Creating a delegation
+/// is a separate owner request issued by the composition root that received
+/// the accepted reference; this function never mints a
+/// [`DelegationId`](ene_task::DelegationId) and never starts an execution.
+pub async fn propose_task(
+    command: ProposeTaskCommand,
+    repository: &impl TaskRepository,
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
+    orchestrate_task_creation(
+        repository,
+        TaskProposalPremise {
+            requester: AssigneeRef {
+                companion: command.requester.as_raw(),
+            },
+            purpose: command.purpose,
+            origin: command.origin,
+            workspace_need: command.workspace_need,
+        },
+    )
+    .await
+}
+
+/// Proposes one conversation-sourced Task, conditional on the relied Owner
+/// input still being current.
+///
+/// Identical to [`propose_task`] except that the Task owner compares the
+/// Owner-message currentness premise inside the creation transaction: a newer
+/// accepted Owner input supersedes the turn and answers
+/// [`TaskCreationOutcome::Superseded`] with zero writes.
+pub async fn propose_task_current(
+    command: ProposeTaskCommand,
+    repository: &impl ConversationTaskRepository,
+    currentness: OwnerMessageCurrentness,
+) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+    orchestrate_task_creation_current(
+        repository,
+        TaskProposalPremise {
+            requester: AssigneeRef {
+                companion: command.requester.as_raw(),
+            },
+            purpose: command.purpose,
+            origin: command.origin,
+            workspace_need: command.workspace_need,
+        },
+        currentness,
+    )
+    .await
+}
+
+/// Marker introducing one companion-emitted Task control directive.
+///
+/// The companion's reply may carry at most one final line beginning with this
+/// marker; the line is stripped before the reply is stored or shown.
+pub const TASK_CONTROL_MARKER: &str = "[task-control]";
+
+/// One Task control command the companion emitted in a dialogue reply.
+///
+/// The companion owns the interpretation of its own provider output into this
+/// closed-world command; the composition root maps it onto the existing Task
+/// owner operations. The command deliberately carries no Task identity: the
+/// target is the conversation's current Task, resolved by the composition
+/// root, so a model output can never name an arbitrary Task. The
+/// `instruction` / `purpose` bodies are redacted from [`core::fmt::Debug`].
+#[derive(Clone, PartialEq, Eq)]
+pub enum DialogueTaskCommand {
+    /// Propose a new Task. The Workspace is deliberately absent: it is the
+    /// trusted first-party premise, never provider output.
+    ProposeTask { purpose: String },
+    /// Ask for the current Task's progress / completion report.
+    Report,
+    /// Propose an additional instruction for the current Task.
+    Steer {
+        instruction: String,
+        purpose: Option<String>,
+    },
+    /// Request cancel of the current Task.
+    Cancel,
+}
+
+impl core::fmt::Debug for DialogueTaskCommand {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ProposeTask { purpose } => formatter
+                .debug_struct("ProposeTask")
+                .field("purpose", &"[redacted]")
+                .field("purpose_len", &purpose.chars().count())
+                .finish(),
+            Self::Report => formatter.write_str("Report"),
+            Self::Steer {
+                instruction,
+                purpose,
+            } => formatter
+                .debug_struct("Steer")
+                .field("instruction", &"[redacted]")
+                .field("instruction_len", &instruction.chars().count())
+                .field("purpose", &purpose.as_ref().map(|_| "[redacted]"))
+                .finish(),
+            Self::Cancel => formatter.write_str("Cancel"),
+        }
+    }
+}
+
+/// Interpretation of one companion reply for Task control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogueTaskInterpretation {
+    /// No control marker: ordinary conversation text, unchanged.
+    Conversation { text: String },
+    /// The reply is exactly one valid control command line. Provider prose is
+    /// deliberately not part of a control reply.
+    Command { command: DialogueTaskCommand },
+    /// The reply begins with the marker but is not exactly one well-formed
+    /// command line; nothing may be executed and the caller answers a
+    /// clarification.
+    Invalid,
+}
+
+/// Interprets one companion reply for an embedded Task control command.
+///
+/// `[task-control]` is a reserved internal protocol: it may appear only as the
+/// reply's first non-empty line, it must be the only non-empty line, and its
+/// JSON must be one closed-world command. A reply with no marker at all is
+/// ordinary conversation; a marker anywhere else — after prose, mid-line, with
+/// trailing prose, malformed, or repeated — is invalid and fails closed: the
+/// caller executes no Task operation and stores no reply text containing the
+/// protocol. A control reply therefore has no provider prose, so only the
+/// scrubbed typed owner outcome is ever presented or stored.
+#[must_use]
+pub fn interpret_task_control(text: &str) -> DialogueTaskInterpretation {
+    if !text.contains(TASK_CONTROL_MARKER) {
+        return DialogueTaskInterpretation::Conversation {
+            text: text.to_owned(),
+        };
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(first_non_empty) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return DialogueTaskInterpretation::Invalid;
+    };
+    let trimmed = lines[first_non_empty].trim_start();
+    if !trimmed.starts_with(TASK_CONTROL_MARKER) {
+        return DialogueTaskInterpretation::Invalid;
+    }
+    let trailing_prose = lines
+        .iter()
+        .skip(first_non_empty + 1)
+        .any(|line| !line.trim().is_empty());
+    let body = trimmed
+        .strip_prefix(TASK_CONTROL_MARKER)
+        .unwrap_or("")
+        .trim();
+    match (trailing_prose, parse_task_command(body)) {
+        (false, Some(command)) => DialogueTaskInterpretation::Command { command },
+        _ => DialogueTaskInterpretation::Invalid,
+    }
+}
+
+/// Parses the JSON body of one control directive, closed world.
+///
+/// Each command shape has an exact field set: unknown fields, missing
+/// required fields, and wrong types are all invalid, so a provider cannot
+/// smuggle an extension (for example a Workspace path) into the command.
+fn parse_task_command(body: &str) -> Option<DialogueTaskCommand> {
+    use serde_json::Value;
+
+    fn has_exact_fields(object: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+        object.keys().all(|key| allowed.contains(&key.as_str()))
+    }
+
+    fn optional_string(
+        object: &serde_json::Map<String, Value>,
+        key: &str,
+    ) -> Option<Option<String>> {
+        match object.get(key) {
+            None | Some(Value::Null) => Some(None),
+            Some(Value::String(text)) => Some(Some(text.clone())),
+            Some(_) => None,
+        }
+    }
+
+    let value: Value = serde_json::from_str(body).ok()?;
+    let object = value.as_object()?;
+    match object.get("kind")?.as_str()? {
+        "propose_task" => {
+            if !has_exact_fields(object, &["kind", "purpose"]) {
+                return None;
+            }
+            let purpose = object.get("purpose")?.as_str()?.to_owned();
+            if purpose.trim().is_empty() {
+                return None;
+            }
+            Some(DialogueTaskCommand::ProposeTask { purpose })
+        }
+        "report" => {
+            if !has_exact_fields(object, &["kind"]) {
+                return None;
+            }
+            Some(DialogueTaskCommand::Report)
+        }
+        "steer" => {
+            if !has_exact_fields(object, &["kind", "instruction", "purpose"]) {
+                return None;
+            }
+            let instruction = object.get("instruction")?.as_str()?.to_owned();
+            if instruction.trim().is_empty() {
+                return None;
+            }
+            Some(DialogueTaskCommand::Steer {
+                instruction,
+                purpose: optional_string(object, "purpose")?,
+            })
+        }
+        "cancel" => {
+            if !has_exact_fields(object, &["kind"]) {
+                return None;
+            }
+            Some(DialogueTaskCommand::Cancel)
+        }
+        _ => None,
+    }
+}
+
+/// The composition root's answer to one companion Task control command.
+///
+/// `Unavailable` is the technical-failure class: the turn closes interrupted
+/// instead of storing a reply no owner operation produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogueTaskControlReply {
+    /// The owner answered; `text` is the user-facing reply composed from the
+    /// typed outcome.
+    Answered(String),
+    /// The operation could not answer; the turn closes interrupted.
+    Unavailable,
+}
+
+/// Executes one companion-emitted Task control command.
+///
+/// The companion owns the interpretation and the turn order; the composition
+/// root owns the owner operations. Implementations must use the existing Task
+/// owner boundaries (proposal, steering, cancel, report reads) and never
+/// write Task state directly. `origin` is the committed Owner message
+/// identity of the turn, used as the proposal / instruction provenance.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 4 contract style uses native async fn; the composition root implements it"
+)]
+pub trait DialogueTaskControlPort: Send + Sync {
+    async fn apply(&self, command: DialogueTaskCommand, origin: RawId) -> DialogueTaskControlReply;
+}
+
+/// Display certainty of one Action attempt in a Task report.
+///
+/// A companion-owned projection of the Action owner's closed world, so the
+/// report layer never re-decides certainty: the composition root maps the
+/// owner's read verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskReportCertainty {
+    ConfirmedSuccess,
+    ConfirmedFailure,
+    Unknown,
+}
+
+/// One Action attempt as shown in a Task report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReportAttempt {
+    /// Closed-world operation label (list/read/create/edit).
+    pub operation: String,
+    /// The target recorded when the attempt started.
+    pub target: String,
+    /// The Action owner's certainty, projected verbatim.
+    pub certainty: TaskReportCertainty,
+}
+
+/// User-facing Task report facts composed from canonical owner reads.
+///
+/// The composition root fills this from durable facts only — `task.progress`,
+/// the adopted/unadopted `task_result` body and its verified correlation, and
+/// the `action_attempt` records — and this layer owns the report layout. It
+/// carries no durable state and rewrites no owner fact: a report never
+/// rewrites certainty, progress, or adoption, and an `Unknown` effect is
+/// reported as unknown, never as success or failure.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TaskReport {
+    pub progress: TaskProgress,
+    /// The current workspace association folder, when one exists.
+    pub workspace_folder: Option<String>,
+    /// The association's save target, when declared.
+    pub save_target: Option<String>,
+    /// The sealed final result body, adopted or not.
+    pub result_body: Option<String>,
+    /// Whether the result body was adopted as the Task completion.
+    pub result_adopted: bool,
+    /// The verified result-local correlation, when a result exists.
+    pub correlated_attempts: Vec<TaskReportAttempt>,
+    /// Every other Action attempt under the Task.
+    pub other_attempts: Vec<TaskReportAttempt>,
+}
+
+impl core::fmt::Debug for TaskReport {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("TaskReport")
+            .field("progress", &self.progress)
+            .field("workspace_folder", &self.workspace_folder)
+            .field("save_target", &self.save_target)
+            .field(
+                "result_body",
+                &self.result_body.as_ref().map(|_| "[redacted]"),
+            )
+            .field("result_adopted", &self.result_adopted)
+            .field("correlated_attempts", &self.correlated_attempts)
+            .field("other_attempts", &self.other_attempts)
+            .finish()
+    }
+}
+
+impl TaskReport {
+    /// Renders the user-facing report from the canonical facts.
+    ///
+    /// Confirmed create/edit targets are the completed changes, the workspace
+    /// folder is the save location, and attempts that are not
+    /// [`TaskReportCertainty::ConfirmedSuccess`] are listed as remaining or
+    /// unconfirmed effects instead of being folded into success.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut text = format!("task status: {}", progress_label(self.progress));
+        if let Some(folder) = &self.workspace_folder {
+            text.push_str(&format!("\nworkspace: {folder}"));
+        }
+        if let Some(save_target) = &self.save_target {
+            text.push_str(&format!("\nsave target: {save_target}"));
+        }
+        match (&self.result_body, self.result_adopted) {
+            (Some(body), true) => {
+                text.push_str(&format!("\nresult (adopted): {}", body.trim()));
+            }
+            (Some(body), false) => {
+                text.push_str(&format!(
+                    "\nresult (recorded, not adopted): {}",
+                    body.trim()
+                ));
+            }
+            (None, _) => text.push_str("\nresult: none"),
+        }
+        if !self.correlated_attempts.is_empty() {
+            text.push_str("\nresult-correlated attempts:");
+            for attempt in &self.correlated_attempts {
+                text.push_str(&format!("\n- {}", attempt_label(attempt)));
+            }
+        }
+        let changes: Vec<&TaskReportAttempt> = self
+            .correlated_attempts
+            .iter()
+            .chain(self.other_attempts.iter())
+            .filter(|attempt| is_completed_change(attempt))
+            .collect();
+        text.push_str("\ncompleted changes:");
+        if changes.is_empty() {
+            text.push_str("\n- none");
+        } else {
+            for attempt in changes {
+                text.push_str(&format!("\n- {} {}", attempt.operation, attempt.target));
+            }
+        }
+        let remaining: Vec<&TaskReportAttempt> = self
+            .correlated_attempts
+            .iter()
+            .chain(self.other_attempts.iter())
+            .filter(|attempt| attempt.certainty != TaskReportCertainty::ConfirmedSuccess)
+            .collect();
+        text.push_str("\nremaining/unconfirmed effects:");
+        if remaining.is_empty() {
+            text.push_str("\n- none");
+        } else {
+            for attempt in remaining {
+                text.push_str(&format!("\n- {}", attempt_label(attempt)));
+            }
+        }
+        text
+    }
+}
+
+fn progress_label(progress: TaskProgress) -> &'static str {
+    match progress {
+        TaskProgress::Started => "started",
+        TaskProgress::InProgress => "in-progress",
+        TaskProgress::Completed => "completed",
+        TaskProgress::Failed => "failed",
+        TaskProgress::Cancelled => "cancelled",
+    }
+}
+
+fn is_completed_change(attempt: &TaskReportAttempt) -> bool {
+    attempt.certainty == TaskReportCertainty::ConfirmedSuccess
+        && matches!(attempt.operation.as_str(), "create" | "edit")
+}
+
+fn attempt_label(attempt: &TaskReportAttempt) -> String {
+    let certainty = match attempt.certainty {
+        TaskReportCertainty::ConfirmedSuccess => "confirmed success",
+        TaskReportCertainty::ConfirmedFailure => "confirmed failure",
+        TaskReportCertainty::Unknown => "unknown",
+    };
+    format!("{} {} ({certainty})", attempt.operation, attempt.target)
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::{TaskProgress, TaskReport, TaskReportAttempt, TaskReportCertainty};
+
+    fn attempt(operation: &str, target: &str, certainty: TaskReportCertainty) -> TaskReportAttempt {
+        TaskReportAttempt {
+            operation: operation.to_owned(),
+            target: target.to_owned(),
+            certainty,
+        }
+    }
+
+    #[test]
+    fn a_completed_report_names_the_changes_the_location_and_no_remainder() {
+        let report = TaskReport {
+            progress: TaskProgress::Completed,
+            workspace_folder: Some(String::from("/srv/workspace/ene")),
+            save_target: None,
+            result_body: Some(String::from("report.md was created")),
+            result_adopted: true,
+            correlated_attempts: vec![attempt(
+                "create",
+                "/srv/workspace/ene/report.md",
+                TaskReportCertainty::ConfirmedSuccess,
+            )],
+            other_attempts: Vec::new(),
+        };
+        let rendered = report.render();
+        assert!(rendered.contains("task status: completed"), "{rendered}");
+        assert!(
+            rendered.contains("workspace: /srv/workspace/ene"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("report.md was created"), "{rendered}");
+        assert!(
+            rendered.contains("create /srv/workspace/ene/report.md"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("remaining/unconfirmed effects:\n- none"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_effect_is_reported_as_unknown_not_as_success_or_failure() {
+        let report = TaskReport {
+            progress: TaskProgress::Cancelled,
+            workspace_folder: None,
+            save_target: None,
+            result_body: None,
+            result_adopted: false,
+            correlated_attempts: Vec::new(),
+            other_attempts: vec![
+                attempt(
+                    "create",
+                    "/srv/workspace/ene/half.md",
+                    TaskReportCertainty::Unknown,
+                ),
+                attempt(
+                    "edit",
+                    "/srv/workspace/ene/notes.md",
+                    TaskReportCertainty::ConfirmedFailure,
+                ),
+            ],
+        };
+        let rendered = report.render();
+        assert!(rendered.contains("task status: cancelled"), "{rendered}");
+        assert!(rendered.contains("result: none"), "{rendered}");
+        assert!(
+            rendered.contains("create /srv/workspace/ene/half.md (unknown)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("edit /srv/workspace/ene/notes.md (confirmed failure)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("completed changes:\n- none"),
+            "an unconfirmed effect is never listed as a completed change: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_debug_rendering_redacts_the_result_body() {
+        let report = TaskReport {
+            progress: TaskProgress::Completed,
+            workspace_folder: None,
+            save_target: None,
+            result_body: Some(String::from("private final words")),
+            result_adopted: true,
+            correlated_attempts: Vec::new(),
+            other_attempts: Vec::new(),
+        };
+        let rendered = format!("{report:?}");
+        assert!(!rendered.contains("private final words"), "{rendered}");
+    }
+}
+
+#[cfg(test)]
+mod task_control_tests {
+    use super::{DialogueTaskCommand, DialogueTaskInterpretation, interpret_task_control};
+
+    fn command(text: &str) -> DialogueTaskCommand {
+        match interpret_task_control(text) {
+            DialogueTaskInterpretation::Command { command } => command,
+            other => panic!("expected a command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_reply_is_conversation_unchanged() {
+        match interpret_task_control("hello there\nsecond line") {
+            DialogueTaskInterpretation::Conversation { text } => {
+                assert_eq!(text, "hello there\nsecond line");
+            }
+            other => panic!("expected conversation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_marker_after_prose_is_invalid() {
+        // The marker is reserved: after prose (or mid-line) it fails closed
+        // instead of leaking through as ordinary conversation.
+        for text in [
+            "Sure, I will do that.\n[task-control] {\"kind\":\"report\"}",
+            "hello [task-control] {\"kind\":\"report\"}",
+            "hello\n[task-control] {\"kind\":\"cancel\"}\nmore",
+        ] {
+            assert!(
+                matches!(
+                    interpret_task_control(text),
+                    DialogueTaskInterpretation::Invalid
+                ),
+                "{text:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_closed_world_command_parses_from_the_first_line() {
+        assert_eq!(
+            command("[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\"}"),
+            DialogueTaskCommand::ProposeTask {
+                purpose: String::from("read input.txt"),
+            }
+        );
+        assert_eq!(
+            command("[task-control] {\"kind\":\"report\"}"),
+            DialogueTaskCommand::Report
+        );
+        assert_eq!(
+            command(
+                "[task-control] {\"kind\":\"steer\",\"instruction\":\"add a summary\",\"purpose\":null}"
+            ),
+            DialogueTaskCommand::Steer {
+                instruction: String::from("add a summary"),
+                purpose: None,
+            }
+        );
+        assert_eq!(
+            command("[task-control] {\"kind\":\"cancel\"}"),
+            DialogueTaskCommand::Cancel
+        );
+        // Leading blank lines are allowed; the first non-empty line is the
+        // directive.
+        assert_eq!(
+            command("\n\n[task-control] {\"kind\":\"report\"}\n"),
+            DialogueTaskCommand::Report
+        );
+    }
+
+    #[test]
+    fn extra_fields_are_invalid_for_every_command_shape() {
+        for text in [
+            "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\",\"workspace\":\"/etc\"}",
+            "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\",\"save_target\":\"/etc\"}",
+            "[task-control] {\"kind\":\"report\",\"extra\":1}",
+            "[task-control] {\"kind\":\"steer\",\"instruction\":\"add\",\"purpose\":null,\"workspace\":\"/etc\"}",
+            "[task-control] {\"kind\":\"cancel\",\"reason\":\"because\"}",
+        ] {
+            assert!(
+                matches!(
+                    interpret_task_control(text),
+                    DialogueTaskInterpretation::Invalid
+                ),
+                "{text:?} must be invalid: a provider cannot smuggle extra fields"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_non_first_markers_are_invalid() {
+        for text in [
+            "[task-control] not json",
+            "[task-control] {\"kind\":\"unknown\"}",
+            "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"\"}",
+            "[task-control] {\"kind\":\"steer\",\"instruction\":\"  \"}",
+            "[task-control] {\"kind\":\"report\"}\nmore text after",
+            "[task-control] {\"kind\":\"report\"}\n[task-control] {\"kind\":\"cancel\"}",
+        ] {
+            assert!(
+                matches!(
+                    interpret_task_control(text),
+                    DialogueTaskInterpretation::Invalid
+                ),
+                "{text:?} must be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn the_command_debug_redacts_instruction_bodies() {
+        let rendered = format!(
+            "{:?}",
+            command("[task-control] {\"kind\":\"propose_task\",\"purpose\":\"private purpose\"}")
+        );
+        assert!(!rendered.contains("private purpose"), "{rendered}");
+        let rendered = format!(
+            "{:?}",
+            command("[task-control] {\"kind\":\"steer\",\"instruction\":\"private instruction\"}")
+        );
+        assert!(!rendered.contains("private instruction"), "{rendered}");
+    }
 }

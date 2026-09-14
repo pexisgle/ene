@@ -56,6 +56,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::NegotiatedConnection;
@@ -339,6 +340,30 @@ pub struct HostHandle {
     /// token never means the durable work or an external effect stopped. The
     /// durable attempt facts carry the one-shot start marker across restarts.
     pub(crate) task_executions: crate::task_run::TaskExecutionRegistry,
+    /// Transient conversation projection of the Task each dialogue is working
+    /// on, keyed by Companion.
+    ///
+    /// In-memory only and never authority: task control directives from the
+    /// conversation resolve their target through this projection, while every
+    /// operation still goes through the Task owner's durable compare. A
+    /// restart drops it (restart continuation is Stage 5).
+    pub(crate) conversation_tasks: crate::task_control::ConversationTaskProjection,
+    /// Trusted first-party Task premises (the Owner-selected Workspace).
+    ///
+    /// In-memory only and never provider output: the model can propose a Task
+    /// but can never supply the filesystem authority it runs under. Restart
+    /// re-selection is Stage 5.
+    pub(crate) trusted_task_premises: crate::task_control::TrustedTaskPremises,
+    /// The serving process's Task Agent launcher, installed once by
+    /// [`crate::conn::run`] with the shared handle and provider transport.
+    ///
+    /// A handle without an installed launcher (unit tests) accepts Task
+    /// creation but starts no execution; production always installs one.
+    pub(crate) task_launcher: OnceLock<std::sync::Arc<dyn crate::task_run::TaskAgentLauncher>>,
+    /// Test-only deterministic gate for conversation task-control commands.
+    #[cfg(test)]
+    pub(crate) task_control_gate:
+        StdMutex<Option<std::sync::Arc<crate::task_control::TestTaskControlGate>>>,
 }
 
 impl HostHandle {
@@ -403,6 +428,11 @@ impl HostHandle {
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: crate::task_run::TaskExecutionRegistry::default(),
+            conversation_tasks: crate::task_control::ConversationTaskProjection::default(),
+            trusted_task_premises: crate::task_control::TrustedTaskPremises::default(),
+            task_launcher: OnceLock::new(),
+            #[cfg(test)]
+            task_control_gate: StdMutex::new(None),
         })
     }
 
@@ -477,6 +507,43 @@ impl HostHandle {
             self.task_executions.cancel(command.task);
         }
         Ok(outcome)
+    }
+
+    /// Installs the serving process's Task Agent launcher.
+    ///
+    /// [`crate::conn::run`] owns the shared handle and provider transport and
+    /// installs exactly one launcher, so a conversation-accepted delegation
+    /// starts the existing runner in the background. Returns `false` when a
+    /// launcher was already installed; a handle opened outside a serving
+    /// composition simply has none.
+    pub fn install_task_launcher(
+        &self,
+        launcher: std::sync::Arc<dyn crate::task_run::TaskAgentLauncher>,
+    ) -> bool {
+        self.task_launcher.set(launcher).is_ok()
+    }
+
+    pub(crate) fn task_launcher(
+        &self,
+    ) -> Option<&std::sync::Arc<dyn crate::task_run::TaskAgentLauncher>> {
+        self.task_launcher.get()
+    }
+
+    /// Arms the test-only task-control race gate and returns it.
+    #[cfg(test)]
+    pub(crate) fn arm_task_control_gate(
+        &self,
+    ) -> std::sync::Arc<crate::task_control::TestTaskControlGate> {
+        let gate = std::sync::Arc::new(crate::task_control::TestTaskControlGate::default());
+        *crate::lock_unpoison(&self.task_control_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_task_control_gate(
+        &self,
+    ) -> Option<std::sync::Arc<crate::task_control::TestTaskControlGate>> {
+        crate::lock_unpoison(&self.task_control_gate).clone()
     }
 
     /// Runs one delegated Task Agent execution through the Host composition.

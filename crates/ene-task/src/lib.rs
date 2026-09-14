@@ -18,6 +18,7 @@ mod agent;
 mod cancel;
 mod context;
 mod delegation;
+mod failure;
 mod instruction;
 mod orchestrate;
 mod repository;
@@ -39,23 +40,29 @@ pub use delegation::{
     CreateDelegationCommand, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
     DelegationOutcome, DelegationRef, DelegationScope, TaskAgentEphemeralId,
 };
+pub use failure::{TaskFailureKind, TaskFailureOutcome, TaskFailurePremise};
 pub use instruction::{
     TaskInstructionRole, TaskInstructionSource, TaskInstructionSourceError,
     TaskInstructionSourceRecord,
 };
 pub use orchestrate::{
-    SteeringProposalPremise, TaskProposalOutcome, orchestrate_delegation,
-    orchestrate_result_arrival, orchestrate_steering,
+    SteeringProposalPremise, TaskProposalOutcome, TaskProposalPremise, orchestrate_delegation,
+    orchestrate_result_arrival, orchestrate_steering, orchestrate_steering_current,
+    orchestrate_task_creation, orchestrate_task_creation_current, reevaluate_result_adoption,
 };
-pub use repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
+pub use repository::{
+    ConversationTaskRepository, OwnerMessageCurrentness, TaskCommitOutcome, TaskRepository,
+    TaskTechnicalError,
+};
 pub use result::{
     TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord,
+    TaskResultRecord, UnadoptedResultCursor,
 };
 pub use task::{
-    AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId,
-    TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise,
-    TaskPurposeRef, TaskRecord, TaskRef, TaskRevision, TaskRevisionRecord,
+    AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationOutcome,
+    TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose,
+    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRecord, TaskRef, TaskRevision,
+    TaskRevisionRecord,
 };
 pub use workspace::{
     WorkspaceAssocId, WorkspaceAssociation, WorkspaceAssociationPremise, WorkspaceFolderRef,

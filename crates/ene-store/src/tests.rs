@@ -1550,8 +1550,8 @@ PRAGMA user_version = 2;",
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(23)),
-        "migration must record version 23"
+        matches!(version, Ok(24)),
+        "migration must record version 24"
     );
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
@@ -1874,7 +1874,7 @@ PRAGMA user_version = 4;",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
+        Some(24),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1923,8 +1923,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(23)),
-        "reopened database must record schema version 23"
+        matches!(version, Ok(24)),
+        "reopened database must record schema version 24"
     );
 }
 
@@ -2692,8 +2692,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     };
     let version = guard.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0));
     assert!(
-        matches!(version, Ok(23)),
-        "reopened database must record schema version 23"
+        matches!(version, Ok(24)),
+        "reopened database must record schema version 24"
     );
 }
 
@@ -3233,8 +3233,8 @@ async fn migration_v11_applies_v12_through_v18() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
-        "a v11 database must converge on v23"
+        Some(24),
+        "a v11 database must converge on v24"
     );
     let projection = {
         let guard = match store.conn.lock() {
@@ -3332,8 +3332,8 @@ async fn migration_v13_preserves_at_utc_and_adds_the_token_index() {
     let store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
-        "a v13 database must converge on v23"
+        Some(24),
+        "a v13 database must converge on v24"
     );
     let (projection, columns) = {
         let guard = match store.conn.lock() {
@@ -4256,7 +4256,7 @@ async fn learning_migration_adds_tables_to_a_v8_database() {
     assert_eq!(opened, Ok(Vec::new()), "migrated schema answers reads");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
+        Some(24),
         "migration advances the schema version"
     );
     assert!(
@@ -4298,8 +4298,8 @@ async fn migration_v11_adds_the_owner_recency_index() {
     let _store = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
-        "a v11 database must converge on v23"
+        Some(24),
+        "a v11 database must converge on v24"
     );
     let conn = rusqlite::Connection::open(&path).expect("the migrated store must open");
     let index: Option<String> = conn
@@ -4370,7 +4370,7 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         .unwrap();
     }
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(read_schema_version(&path), Some(24));
     let dialogue = store
         .load_current(CapabilityKind::Dialogue)
         .await
@@ -5281,8 +5281,8 @@ async fn task_migration_adds_tables_to_a_v14_database() {
     let reopened = Store::open(&path).await.expect("migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
-        "a v14 database must converge on v23"
+        Some(24),
+        "a v14 database must converge on v24"
     );
     assert!(!table_columns(&path, "task").is_empty(), "task is created");
     assert!(
@@ -5444,8 +5444,8 @@ async fn task_migration_v15_context_rows_backfill_as_adopted_purpose() {
         .expect("the V16 migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
-        "a v15 database must converge on v23"
+        Some(24),
+        "a v15 database must converge on v24"
     );
 
     // A fresh store in its own directory builds the schema and every
@@ -5599,7 +5599,7 @@ async fn migration_v16_fault_rolls_back_and_reopen_converges() {
         .expect("open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
+        Some(24),
         "the retried migration must converge"
     );
     assert!(
@@ -7980,8 +7980,8 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         let store = Store::open(&path).await.expect("a fresh store must open");
         assert_eq!(
             read_schema_version(&path),
-            Some(23),
-            "a fresh database converges on v23"
+            Some(24),
+            "a fresh database converges on v24"
         );
         assert!(
             !table_columns(&path, "delegation").is_empty(),
@@ -8035,8 +8035,8 @@ async fn delegation_migration_adds_the_table_to_a_v16_database() {
         .expect("the V17 migration must succeed");
     assert_eq!(
         read_schema_version(&path),
-        Some(23),
-        "a v16 database converges on v23"
+        Some(24),
+        "a v16 database converges on v24"
     );
     let columns = table_columns(&path, "delegation");
     for column in [
@@ -8110,4 +8110,6 @@ mod action;
 mod agent;
 mod cancel;
 mod erasure;
+mod result_reevaluation;
+mod task_failure;
 mod task_result;

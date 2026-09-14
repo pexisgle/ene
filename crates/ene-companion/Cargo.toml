@@ -12,6 +12,7 @@ ene-credential = { path = "../ene-credential" }
 ene-inference = { path = "../ene-inference" }
 ene-learning = { path = "../ene-learning" }
 ene-task = { path = "../ene-task" }
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

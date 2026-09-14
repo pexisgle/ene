@@ -16,7 +16,9 @@
 
 use std::sync::Mutex;
 
-use ene_companion::dialogue::{ProposeSteeringCommand, propose_steering};
+use ene_companion::dialogue::{
+    ProposeSteeringCommand, ProposeTaskCommand, propose_steering, propose_task,
+};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
@@ -34,6 +36,7 @@ struct FakeTaskRepository {
     load: Mutex<Result<Option<TaskRecord>, TaskTechnicalError>>,
     forward: Mutex<Result<TaskCommitOutcome, TaskTechnicalError>>,
     forwarded: Mutex<Vec<TaskCommitPremise>>,
+    created: Mutex<Vec<TaskCreationPremise>>,
 }
 
 impl FakeTaskRepository {
@@ -45,6 +48,7 @@ impl FakeTaskRepository {
             load: Mutex::new(load),
             forward: Mutex::new(forward),
             forwarded: Mutex::new(Vec::new()),
+            created: Mutex::new(Vec::new()),
         }
     }
 
@@ -54,16 +58,29 @@ impl FakeTaskRepository {
             .expect("fixture capture is never poisoned")
             .clone()
     }
+
+    fn created(&self) -> Vec<TaskCreationPremise> {
+        self.created
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .clone()
+    }
 }
 
 impl TaskRepository for FakeTaskRepository {
     async fn create_task(
         &self,
-        _premise: TaskCreationPremise,
+        premise: TaskCreationPremise,
     ) -> Result<TaskRef, TaskTechnicalError> {
-        Err(TaskTechnicalError::StorageUnavailable {
-            reason: String::from("create_task is outside this fixture's scope"),
-        })
+        let reference = TaskRef {
+            task: premise.task,
+            revision: TaskRevision::initial(),
+        };
+        self.created
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .push(premise);
+        Ok(reference)
     }
 
     async fn forward_steering(
@@ -148,6 +165,39 @@ impl TaskRepository for FakeTaskRepository {
         Err(TaskTechnicalError::StorageUnavailable {
             reason: String::from("adopt_result is outside this fixture's scope"),
         })
+    }
+
+    async fn fail_task(
+        &self,
+        _premise: ene_task::TaskFailurePremise,
+    ) -> Result<ene_task::TaskFailureOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("fail_task is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_result_adoption_claim(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_result_adoption_claim is outside this fixture's scope"),
+        })
+    }
+
+    async fn list_unadopted_results_after(
+        &self,
+        _after: Option<ene_task::UnadoptedResultCursor>,
+        _limit: u64,
+    ) -> Result<Vec<ene_task::UnadoptedResultCursor>, TaskTechnicalError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_task_action_attempts(
+        &self,
+        _task: TaskId,
+    ) -> Result<Vec<ene_primitive::RawId>, TaskTechnicalError> {
+        Ok(Vec::new())
     }
 }
 
@@ -324,5 +374,85 @@ async fn propose_steering_maps_the_command_onto_the_task_premise() {
     assert_ne!(
         premise.adopted_purpose_entry, instruction.entry,
         "purpose and instruction entries are distinct identities"
+    );
+}
+
+#[tokio::test]
+async fn propose_task_maps_the_requester_and_delegates_the_creation() {
+    let repository = FakeTaskRepository::new(
+        Ok(None),
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("steering is outside this test"),
+        }),
+    );
+    let companion = ene_companion::CompanionId::generate();
+    let purpose = TaskPurpose {
+        text: String::from("read the notes and write the report"),
+    };
+    let origin = TaskContextOrigin {
+        kind: TaskContextOriginKind::OwnerConversation,
+        source: RawId::new(),
+    };
+    let workspace_need = ene_task::WorkspaceNeedRef {
+        folder: ene_task::WorkspaceFolderRef {
+            path: String::from("/srv/workspace/ene"),
+        },
+        save_target: None,
+    };
+
+    // Compile-level shape check: the command carries the requester, the
+    // proposed purpose and origin, and the workspace need — no caller-minted
+    // Task, entry, or association identity.
+    let ProposeTaskCommand {
+        requester,
+        purpose: proposed_purpose,
+        origin: proposed_origin,
+        workspace_need: proposed_workspace,
+    } = ProposeTaskCommand {
+        requester: companion,
+        purpose: purpose.clone(),
+        origin,
+        workspace_need: Some(workspace_need.clone()),
+    };
+    assert_eq!(requester, companion);
+    assert_eq!(proposed_purpose, purpose);
+    assert_eq!(proposed_origin, origin);
+    assert_eq!(proposed_workspace, Some(workspace_need.clone()));
+
+    let outcome = propose_task(
+        ProposeTaskCommand {
+            requester: companion,
+            purpose: purpose.clone(),
+            origin,
+            workspace_need: Some(workspace_need.clone()),
+        },
+        &repository,
+    )
+    .await
+    .expect("a task decision is a domain outcome, not a technical error");
+    let TaskProposalOutcome::AcceptedAsTask(created) = outcome else {
+        panic!("expected AcceptedAsTask, got {outcome:?}");
+    };
+    assert_eq!(created.revision, TaskRevision::initial());
+
+    let captured = repository.created();
+    assert_eq!(captured.len(), 1);
+    let premise = &captured[0];
+    assert_eq!(
+        premise.assignee,
+        AssigneeRef {
+            companion: companion.as_raw()
+        },
+        "the requester is adopted as the Task assignee"
+    );
+    assert_eq!(premise.purpose, purpose);
+    assert_eq!(premise.origin, origin);
+    assert_eq!(
+        premise
+            .workspace
+            .as_ref()
+            .map(|association| &association.need),
+        Some(&workspace_need),
+        "the workspace conditions cross as a need, not as a confirmed association"
     );
 }

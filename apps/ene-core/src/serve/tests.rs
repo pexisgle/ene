@@ -4,9 +4,15 @@ use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, PairingRequest, PairingResult,
 };
+use ene_api::v1::management::{
+    IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, RationaleOrigin,
+};
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, DeviceWireId, WireMessageType};
-use ene_api::v1::refs::{ClientLocalId, CompanionWireRef, TextLangWire};
+use ene_api::v1::refs::{
+    BaseViewMark, ClientIncarnationId, ConnectionWireId, DeviceWireId, ManagementTargetWire,
+    WireMessageType,
+};
+use ene_api::v1::refs::{ClientLocalId, CommandWireId, CompanionWireRef, TextLangWire};
 use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
 use ene_credential::pairing_proof_hex;
 use ene_inference::fake::FakeProviderTransport;
@@ -112,6 +118,36 @@ fn history_frame() -> super::WireFrame {
             round: None,
         }),
     }
+}
+
+/// One first-party management intent frame with a caller-chosen idempotency
+/// key, so replay tests can resend the same logical intent byte-for-byte.
+fn management_intent_frame(
+    live: &LiveInput,
+    kind: ManagementIntentKind,
+    target: &str,
+    intent_id: CommandWireId,
+) -> super::WireFrame {
+    stamped(
+        super::WireFrame {
+            envelope: new_outgoing_envelope(
+                ProtocolVersion::V1,
+                sender(),
+                WireMessageType(String::from("ManagementIntent")),
+            ),
+            payload: WirePayload::ManagementIntent(ManagementIntent {
+                intent_id,
+                kind,
+                target: ManagementTargetWire(target.to_string()),
+                base_view: BaseViewMark(String::from("mark")),
+                rationale: IntentRationaleWire {
+                    origin: RationaleOrigin::ManagementSurface,
+                    quote: None,
+                },
+            }),
+        },
+        live,
+    )
 }
 
 /// Premises for a connection that never paired (and so cannot be authed).
@@ -1246,4 +1282,164 @@ async fn cancel_task_admission_wires_the_cooperative_stop() {
         !completed_registration.cancellation.is_aborted(),
         "a refused admission never signals"
     );
+}
+
+/// The first-party management cancel reaches the same
+/// [`HostHandle::cancel_task`] admission as the conversation path, preserves
+/// the typed outcome meanings the management vocabulary can carry, and
+/// replays a retried intent from its durable snapshot.
+#[tokio::test]
+async fn management_cancel_reaches_the_cancel_admission_and_replays() {
+    use ene_primitive::RawId;
+    use ene_task::{
+        AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,
+        TaskAgentEphemeralId, TaskAgentOutput, TaskContextEntryId, TaskContextOrigin,
+        TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose,
+        TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim,
+        orchestrate_result_arrival,
+    };
+
+    let Some((handle, _dir)) = memory_handle("management-cancel").await else {
+        panic!("the handle must open");
+    };
+    let live = paired_input("management-cancel");
+    let transport = fake_transport();
+
+    let task = handle
+        .store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: String::from("cancel me"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: ene_primitive::WallClockWithTz::now(),
+            assignee: AssigneeRef {
+                companion: RawId::new(),
+            },
+            workspace: None,
+        })
+        .await
+        .expect("task creation commits");
+    let target = format!("task:{}", task.task.as_raw().as_uuid().as_hyphenated());
+    let intent_id = CommandWireId(RawId::new().as_uuid());
+    let frame =
+        management_intent_frame(&live, ManagementIntentKind::CancelTask, &target, intent_id);
+    let responses = handle
+        .handle_frame(frame.clone(), live.clone(), &transport)
+        .await;
+    let Some(WirePayload::ManagementOutcome(outcome)) = responses.first().map(|f| &f.payload)
+    else {
+        panic!("the intent must answer an outcome, got {responses:?}");
+    };
+    assert_eq!(outcome, &ManagementOutcome::AppliedAsOneTime);
+    assert_eq!(
+        handle
+            .store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::Cancelled
+    );
+
+    // An exact retry replays the stored snapshot without a second admission.
+    let replays = handle.handle_frame(frame, live.clone(), &transport).await;
+    let Some(WirePayload::ManagementOutcome(outcome)) = replays.first().map(|f| &f.payload) else {
+        panic!("the replay must answer an outcome, got {replays:?}");
+    };
+    assert_eq!(outcome, &ManagementOutcome::AppliedAsOneTime);
+
+    // A fresh intent observing the already-cancelled Task answers the same
+    // one-time application: admission happened exactly once.
+    let fresh_id = CommandWireId(RawId::new().as_uuid());
+    let responses = handle
+        .handle_frame(
+            management_intent_frame(&live, ManagementIntentKind::CancelTask, &target, fresh_id),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let Some(WirePayload::ManagementOutcome(outcome)) = responses.first().map(|f| &f.payload)
+    else {
+        panic!("the fresh intent must answer an outcome");
+    };
+    assert_eq!(outcome, &ManagementOutcome::AppliedAsOneTime);
+
+    // A terminal Task for another reason cannot be cancelled: clarify, never
+    // a fabricated admission.
+    let completed = handle
+        .store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: String::from("already done"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: ene_primitive::WallClockWithTz::now(),
+            assignee: AssigneeRef {
+                companion: RawId::new(),
+            },
+            workspace: None,
+        })
+        .await
+        .unwrap();
+    let delegation = DelegationId::generate();
+    let delegated = handle
+        .store
+        .create_delegation(DelegationCreationPremise {
+            delegation,
+            task: completed,
+            agent: TaskAgentEphemeralId::generate(),
+            scope_copy: DelegationScope { workspace: None },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
+    let arrival = orchestrate_result_arrival(
+        &handle.store,
+        delegation,
+        TaskAgentOutput::new(String::from("done")),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        handle
+            .store
+            .adopt_result(TaskResultAdoptionClaim {
+                result: arrival.result,
+                attempt_refs: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    let completed_target = format!("task:{}", completed.task.as_raw().as_uuid().as_hyphenated());
+    let responses = handle
+        .handle_frame(
+            management_intent_frame(
+                &live,
+                ManagementIntentKind::CancelTask,
+                &completed_target,
+                CommandWireId(RawId::new().as_uuid()),
+            ),
+            live,
+            &transport,
+        )
+        .await;
+    let Some(WirePayload::ManagementOutcome(outcome)) = responses.first().map(|f| &f.payload)
+    else {
+        panic!("the completed intent must answer an outcome");
+    };
+    assert_eq!(outcome, &ManagementOutcome::NeedsClarification);
 }
