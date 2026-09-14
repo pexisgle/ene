@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+use crate::cancel::TaskCancelOutcome;
 use crate::delegation::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
 };
@@ -98,6 +99,34 @@ pub trait TaskRepository: Send + Sync {
     /// beyond the current revision are never composed into a [`TaskRecord`];
     /// that is a technical error.
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError>;
+
+    /// Accepts or refuses one cancel request (AU16).
+    ///
+    /// One short `Immediate` transaction reads the current `task.progress` and
+    /// moves `Started` / `InProgress` to
+    /// [`Cancelled`](crate::TaskProgress::Cancelled) with a compare-and-set;
+    /// that commit is the only durable fact of admission. The request carries
+    /// no revision or purpose premise: cancel is Task-level and is never made
+    /// stale by a concurrent steering (the steering forward stands, and the
+    /// cancel is recorded on top of it).
+    ///
+    /// `Completed` / `Failed` return
+    /// [`TaskTerminal`](crate::TaskCancelOutcome::TaskTerminal) and an already
+    /// `Cancelled` Task returns
+    /// [`AlreadyCancelled`](crate::TaskCancelOutcome::AlreadyCancelled), both
+    /// with zero writes (admission happens exactly once). A missing identity
+    /// returns [`MissingTask`](crate::TaskCancelOutcome::MissingTask). An
+    /// unknown stored progress value and a CAS that does not move exactly one
+    /// row are technical errors (fail closed), never a fabricated domain
+    /// answer.
+    ///
+    /// No already-started activity is retracted: `inference_attempt`,
+    /// `data_use`, `action_attempt`, and their certainty stay untouched, and
+    /// no stop flag, stop row, or cancel-specific gate condition is written.
+    /// Later admission attempts are refused by each boundary's existing
+    /// non-terminal compare; already-started activity may still record its
+    /// own facts (arrival/seal, verified correlation, certainty updates).
+    async fn cancel_task(&self, task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError>;
 
     /// Creates one delegation correspondence for a Task revision (AU3).
     ///

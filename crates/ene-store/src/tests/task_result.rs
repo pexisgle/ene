@@ -2218,7 +2218,7 @@ async fn v20_backfill_maps_delegation_existence_and_never_fabricates_terminals()
     let path = dir.path().join("v20-backfill.db");
     let seed = {
         let store = Store::open(&path).await.unwrap();
-        assert_eq!(read_schema_version(&path), Some(21));
+        assert_eq!(read_schema_version(&path), Some(22));
 
         // (A) Task only: fresh creation starts `started`.
         let task_only = store.create_task(task_premise(None)).await.unwrap();
@@ -2291,7 +2291,7 @@ async fn v20_backfill_maps_delegation_existence_and_never_fabricates_terminals()
     );
 
     let reopened = Store::open(&path).await.expect("the V20 migration applies");
-    assert_eq!(read_schema_version(&path), Some(21));
+    assert_eq!(read_schema_version(&path), Some(22));
     assert_eq!(
         table_columns(&path, "task_result"),
         vec![
@@ -2432,7 +2432,7 @@ async fn v20_version_rewind_does_not_overwrite_existing_progress() {
             .unwrap();
     }
     let reopened = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(21));
+    assert_eq!(read_schema_version(&path), Some(22));
     assert_eq!(
         reopened
             .load_task(task.task)

@@ -586,7 +586,7 @@ async fn v21_backfills_task_agent_attempts_from_their_replied_purpose_source() {
     let reopened = Store::open(&path)
         .await
         .expect("the V21 migration must succeed");
-    assert_eq!(read_schema_version(&path), Some(21));
+    assert_eq!(read_schema_version(&path), Some(22));
     assert!(
         table_exists(&reopened, "erasure_condition")
             && table_exists(&reopened, "inference_attempt_data_use"),

@@ -22,11 +22,12 @@ use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, CreateDelegationCommand, DelegatedWorkspace, DelegationCreationPremise,
     DelegationId, DelegationOutcome, DelegationRef, DelegationScope, Task, TaskAgentResultArrival,
-    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
-    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress,
-    TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
-    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord,
-    TaskTechnicalError, WorkspaceAssocId, WorkspaceFolderRef, orchestrate_delegation,
+    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
+    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
+    TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository,
+    TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision,
+    TaskRevisionRecord, TaskTechnicalError, WorkspaceAssocId, WorkspaceFolderRef,
+    orchestrate_delegation,
 };
 
 /// The repository-side script for one `create_delegation` call.
@@ -100,6 +101,12 @@ impl TaskRepository for FakeTaskRepository {
             .lock()
             .expect("fixture script is never poisoned")
             .clone()
+    }
+
+    async fn cancel_task(&self, _task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("cancel_task is outside this fixture's scope"),
+        })
     }
 
     async fn create_delegation(

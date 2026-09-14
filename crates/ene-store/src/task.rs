@@ -36,12 +36,12 @@ use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
     DelegationRef, DelegationScope, Task, TaskAgentEphemeralId, TaskAgentOutput,
-    TaskAgentResultArrival, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry,
-    TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
-    TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef,
-    TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
-    TaskRevision, TaskRevisionRecord, TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociation,
-    WorkspaceFolderRef,
+    TaskAgentResultArrival, TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise,
+    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
+    TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
+    WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -71,6 +71,11 @@ const SQL_MARK_TASK_IN_PROGRESS: &str = "UPDATE task SET progress = 'in_progress
 /// rewritten, so the update must apply exactly once from a non-terminal
 /// value in the same transaction that verified the barrier.
 const SQL_COMPLETE_TASK: &str = "UPDATE task SET progress = 'completed' WHERE task_id = ?1 AND progress IN ('started', 'in_progress')";
+
+/// The cancel admission CAS (AU16): exactly the non-terminal values move to
+/// `cancelled`, and only the admission CAS writes that value. It is not a
+/// stop signal and carries no external-effect meaning.
+const SQL_CANCEL_TASK: &str = "UPDATE task SET progress = 'cancelled' WHERE task_id = ?1 AND progress IN ('started', 'in_progress')";
 
 /// The D1 pointer moves only forward: revision, adopted-purpose identity, and
 /// the in-force purpose text, all in one statement. The assignee is not part
@@ -597,6 +602,53 @@ fn forward_steering_sync(
         task,
         revision: next_revision,
     }))
+}
+
+/// Accepts or refuses one cancel admission (AU16).
+///
+/// One `Immediate` transaction reads the current row and applies the CAS. The
+/// request has no revision premise, so a concurrent steering either precedes
+/// this transaction (its forward stands and the cancel is recorded on top) or
+/// follows it (the steering's own terminal gate refuses). `Completed` /
+/// `Failed` and an already `Cancelled` value return without committing, so a
+/// loser writes nothing. A CAS that does not move exactly one row after a
+/// non-terminal read is an inconsistent unit, never a silent success.
+fn cancel_task_sync(
+    conn: &Mutex<Connection>,
+    task: TaskId,
+) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+    let task_text = encode_id(task.as_raw());
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(task_unavailable)?;
+    let current: Option<RawTask> = tx
+        .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(current) = current else {
+        return Ok(TaskCancelOutcome::MissingTask { task });
+    };
+    let current_progress = decode_progress(current.progress.as_deref())?;
+    if current_progress == TaskProgress::Cancelled {
+        return Ok(TaskCancelOutcome::AlreadyCancelled);
+    }
+    if current_progress.is_terminal() {
+        return Ok(TaskCancelOutcome::TaskTerminal {
+            task,
+            progress: current_progress,
+        });
+    }
+    let moved = tx
+        .execute(SQL_CANCEL_TASK, params![task_text])
+        .map_err(task_unavailable)?;
+    if moved != 1 {
+        return Err(task_unavailable(
+            "cancel CAS did not move exactly the current non-terminal task",
+        ));
+    }
+    tx.commit().map_err(task_unavailable)?;
+    Ok(TaskCancelOutcome::CancelAccepted)
 }
 
 /// Commits one delegation correlation row (AU3).
@@ -1920,6 +1972,11 @@ impl TaskRepository for Store {
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || load_task_sync(&conn, task)).await
+    }
+
+    async fn cancel_task(&self, task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || cancel_task_sync(&conn, task)).await
     }
 
     async fn create_delegation(

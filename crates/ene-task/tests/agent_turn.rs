@@ -27,8 +27,8 @@ use ene_task::{
     DelegationScope, Task, TaskAgentEphemeralId, TaskAgentInference, TaskAgentInferenceError,
     TaskAgentInferenceOutcome, TaskAgentInferencePremise, TaskAgentInferenceProduced,
     TaskAgentNotSent, TaskAgentOutput, TaskAgentResultArrival, TaskAgentTurnError,
-    TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCommitOutcome, TaskCommitPremise,
-    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
+    TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCancelOutcome, TaskCommitOutcome,
+    TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
     TaskContextOriginKind, TaskCreationPremise, TaskId, TaskInstructionRole, TaskInstructionSource,
     TaskInstructionSourceError, TaskInstructionSourceRecord, TaskProgress, TaskPurpose,
     TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
@@ -200,6 +200,12 @@ impl TaskRepository for FakeTaskRepository {
             .expect("fixture script is never poisoned")
             .pop_front()
             .expect("every exercised load_task call has a scripted reply")
+    }
+
+    async fn cancel_task(&self, _task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("cancel_task is outside this fixture's scope"),
+        })
     }
 
     async fn create_delegation(

@@ -5,7 +5,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::{decode_consumer, decode_id, encode_consumer, encode_purpose};
 
-const CURRENT_VERSION: u64 = 21;
+const CURRENT_VERSION: u64 = 22;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -675,6 +675,19 @@ fn migrate_v21(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
     backfill_inference_attempt_data_use(tx)
 }
 
+/// Records the Cancel slice's progress vocabulary addition (V22).
+///
+/// `task.progress` gains the `cancelled` value, but the closed world is a TEXT
+/// column: no column, table, index, or constraint changes. No producer of
+/// `cancelled` existed before V22, so the migration backfills nothing and
+/// rewrites no existing row (`started` / `in_progress` stay, and `completed` /
+/// `failed` are never fabricated). A fresh V22 database and a V21 → V22
+/// upgraded database therefore converge to the same meaning; the version
+/// exists so an upgraded database records the closed world it is read under.
+fn migrate_v22(_tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    Ok(())
+}
+
 /// One pre-V21 attempt row's correlation columns, as read for the backfill.
 struct BackfillAttemptRow {
     ticket: String,
@@ -889,6 +902,9 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 21 {
         migrate_v21(&tx)?;
+    }
+    if stored_version < 22 {
+        migrate_v22(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

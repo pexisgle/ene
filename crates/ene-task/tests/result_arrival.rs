@@ -19,9 +19,9 @@ use std::sync::Mutex;
 use ene_primitive::WallClockWithTz;
 use ene_task::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef, TaskAgentOutput,
-    TaskAgentResultArrival, TaskCommitOutcome, TaskCommitPremise, TaskId, TaskRef, TaskRepository,
-    TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision,
-    TaskTechnicalError, orchestrate_result_arrival,
+    TaskAgentResultArrival, TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskId,
+    TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
+    TaskResultRecord, TaskRevision, TaskTechnicalError, orchestrate_result_arrival,
 };
 
 /// Captures every arrival the orchestration records; it implements no other
@@ -61,6 +61,10 @@ impl TaskRepository for CapturingRepository {
         _task: TaskId,
     ) -> Result<Option<ene_task::TaskRecord>, TaskTechnicalError> {
         Err(unsupported("load_task"))
+    }
+
+    async fn cancel_task(&self, _task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        Err(unsupported("cancel_task"))
     }
 
     async fn create_delegation(
