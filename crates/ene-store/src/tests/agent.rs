@@ -649,3 +649,38 @@ async fn inference_attempt_migration_fails_closed_on_an_unknown_capability() {
         "the failed migration also rolls back the added columns"
     );
 }
+
+#[tokio::test]
+async fn delegation_start_marker_reads_the_claimed_delegation_only() {
+    let store = open_memory().await.unwrap();
+    seed_dialogue_consent(&store).await;
+    let (created, delegation) = seed_delegation(&store).await;
+    let (_other_task, other_delegation) = seed_delegation(&store).await;
+    assert!(
+        !store.delegation_has_started_work(delegation).await.unwrap(),
+        "a fresh delegation has started no durable work"
+    );
+
+    let ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
+        store
+            .begin_inference_attempt(task_agent_claim(
+                ticket,
+                1,
+                task_agent_attempt_premise(delegation, created),
+            ))
+            .await,
+        Ok(AttemptBeginOutcome::Started)
+    );
+    assert!(
+        store.delegation_has_started_work(delegation).await.unwrap(),
+        "the committed inference claim is the durable start marker"
+    );
+    assert!(
+        !store
+            .delegation_has_started_work(other_delegation)
+            .await
+            .unwrap(),
+        "another delegation's attempt is not this delegation's start"
+    );
+}

@@ -118,6 +118,13 @@ impl TaskRepository for CapturingRepository {
         Err(unsupported("load_delegation_result"))
     }
 
+    async fn delegation_has_started_work(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<bool, TaskTechnicalError> {
+        Err(unsupported("delegation_has_started_work"))
+    }
+
     async fn adopt_result(
         &self,
         _claim: TaskResultAdoptionClaim,
