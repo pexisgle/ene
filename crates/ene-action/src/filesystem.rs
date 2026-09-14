@@ -700,8 +700,6 @@ fn requested_components(requested: &str) -> Option<Vec<String>> {
 mod tests {
     use std::fs;
 
-    use std::path::PathBuf;
-
     use tempfile::tempdir;
 
     use super::{ActionOutput, ListEntry, ListEntryKind, TargetRejection, WorkspaceRoot};
@@ -1169,6 +1167,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_mount_boundary_rejects_nested_mount_points() {
+        use std::path::PathBuf;
+
         use super::crosses_linux_mount;
 
         let root = PathBuf::from("/srv/workspace");
@@ -1201,6 +1201,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_mountinfo_lines_decode_kernel_escapes() {
+        use std::path::PathBuf;
+
         use super::{decode_mountinfo_escape, parse_mount_point};
 
         let line = "36 35 98:0 /mnt1 /srv/my\\040workspace rw,noatime master:1 - ext3 /dev/root rw,errors=continue";
