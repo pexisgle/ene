@@ -469,7 +469,7 @@ struct TaskAgentInferencePremise {   // port 入力。prompt は SecretScrubber 
     data_use: Vec<RawId>,            // 論理入力（採用目的＋全採用指示 entry）の canonical source 相関。
                                      // origin.source の集合であり、本文・hash を含まない。重複は許容し、
                                      // source ID で entry identity を dedupe しない。attempt claim が現在の
-                                     // 消去条件と同一トランザクションで coverage を照合する（gate 実装時に有効化）。
+                                     // 消去条件と同一トランザクションで coverage を照合する。
 }
 enum TaskAgentInferenceOutcome {
     Produced {                       // 1 回の inference turn の provider 出力。final Task result ではなく、execution を seal しない
@@ -485,10 +485,10 @@ enum TaskAgentInferenceOutcome {
                                      // 意味しない（NotSent へ丸めない）。
 }
 struct TaskAgentOutput;              // provider 出力本文。Debug では伏字化し、アクセサ経由でのみ読む
-enum TaskAgentNotSent { SetupIncomplete, NotInAllowlist, ConsentStale, OverLimit, EvaluationConsumed }
-// DataUseHeld（現在の消去条件による送信拒否）は、推論側 NotSentReason と対で
+enum TaskAgentNotSent { SetupIncomplete, NotInAllowlist, ConsentStale, OverLimit, EvaluationConsumed, DataUseHeld }
+// DataUseHeld（現在の消去条件による送信拒否）は、推論側 NotSentReason::DataUseHeld と対で
 // Stage 4 erasure-currentness foundation（canonical current-condition store + AU14 claim 内の
-// data-use 照合）が追加します（それまで placeholder を置きません）。
+// data-use 照合）が実装済みです。
 enum TaskAgentInferenceError { InferenceUnavailable { reason: String } } // 技術的失敗（本文・秘密を含めない）
 trait TaskAgentInference: Send + Sync {
     // 論理入力の上限（Unicode scalar values）。orchestrate は最新 exchange を残して古い exchange 全体を
@@ -519,7 +519,7 @@ enum TaskAgentTurnOutcome {
     },                               // 本文の捏造・指示の黙殺・TaskContextEntry の削除/書換え・provider I/O のいずれも行わない
     NotSent(TaskAgentNotSent),       // setup 不足・許可リスト外・同意失効・入力上限・利用済み評価・
                                      // data-use hold（現在の消去条件。DataUseHeld。Stage 4
-                                     // erasure-currentness foundation が追加し、StaleTaskRevision 等へ丸めない）
+                                     // erasure-currentness foundation が AU14 claim 内の data-use 照合で判定し、StaleTaskRevision 等へ丸めない）
     Aborted,                         // 呼び出し元のローカル協調停止で turn を終えた（出力なし）。claim 前の
                                      // fast-path で abort を観測した場合は claim を行わない。claim が durable に
                                      // Started と確定した場合は provider I/O は開始済みかもしれず、不確定利用
