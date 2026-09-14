@@ -698,18 +698,33 @@ impl HostHandle {
     pub async fn reconcile_sealed_results(
         &self,
     ) -> Result<ReconciliationSummary, TaskTechnicalError> {
+        self.reconcile_sealed_results_with_page_size(RECONCILIATION_PAGE_SIZE)
+            .await
+    }
+
+    /// Runs the reconciliation loop with an explicit non-zero page bound.
+    ///
+    /// Production always calls this through [`HostHandle::reconcile_sealed_results`]
+    /// with [`RECONCILIATION_PAGE_SIZE`]. Keeping the traversal independent of
+    /// the concrete bound lets tests exercise multi-page behavior with a tiny
+    /// fixture instead of creating one durable Task per production page slot.
+    async fn reconcile_sealed_results_with_page_size(
+        &self,
+        page_size: u64,
+    ) -> Result<ReconciliationSummary, TaskTechnicalError> {
+        debug_assert_ne!(page_size, 0, "reconciliation page size must be non-zero");
         let mut summary = ReconciliationSummary::default();
         let mut cursor = None;
         loop {
             let page = self
                 .store
-                .list_unadopted_results_after(cursor, RECONCILIATION_PAGE_SIZE)
+                .list_unadopted_results_after(cursor, page_size)
                 .await?;
             let Some(last) = page.last() else {
                 break;
             };
             cursor = Some(*last);
-            let full_page = page.len() as u64 == RECONCILIATION_PAGE_SIZE;
+            let full_page = page.len() as u64 == page_size;
             for candidate in page {
                 summary.evaluated += 1;
                 match reevaluate_result_adoption(&self.store, candidate.result).await {

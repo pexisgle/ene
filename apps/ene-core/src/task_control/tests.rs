@@ -31,9 +31,13 @@ use ene_task::{
     WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
 };
 
-use super::{RECONCILIATION_PAGE_SIZE, TaskProposalHostOutcome};
+use super::TaskProposalHostOutcome;
 use crate::serve::HostHandle;
 use crate::test_support::memory_handle_with;
+
+/// Tiny bound that exercises exactly the same keyset-page transitions without
+/// making test fixture size scale with the production tuning constant.
+const TEST_RECONCILIATION_PAGE_SIZE: u64 = 2;
 
 /// Provider transport that counts calls and never answers usefully. A call
 /// means an execution reached provider I/O when the test pinned zero.
@@ -373,7 +377,7 @@ async fn reconciliation_narrows_to_readoption_possible_candidates() {
     // Permanently unadopted history: cancelled Tasks with late results. They
     // can only answer RecordedToOriginalOnly, so they are not candidates.
     let mut permanent = Vec::new();
-    for index in 0..RECONCILIATION_PAGE_SIZE + 1 {
+    for index in 0..TEST_RECONCILIATION_PAGE_SIZE + 1 {
         let (task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
         assert_eq!(
             handle
@@ -423,7 +427,7 @@ async fn reconciliation_narrows_to_readoption_possible_candidates() {
     // The candidate read is bounded and skips the permanent history.
     let candidates = handle
         .store
-        .list_unadopted_results_after(None, RECONCILIATION_PAGE_SIZE)
+        .list_unadopted_results_after(None, TEST_RECONCILIATION_PAGE_SIZE)
         .await
         .unwrap();
     assert_eq!(
@@ -433,7 +437,10 @@ async fn reconciliation_narrows_to_readoption_possible_candidates() {
     );
     assert_eq!(candidates[0].result, recoverable.result);
 
-    let summary = handle.reconcile_sealed_results().await.unwrap();
+    let summary = handle
+        .reconcile_sealed_results_with_page_size(TEST_RECONCILIATION_PAGE_SIZE)
+        .await
+        .unwrap();
     assert_eq!(summary.evaluated, 1);
     assert_eq!(summary.adopted, 1);
     assert_eq!(
@@ -463,7 +470,7 @@ async fn reconciliation_narrows_to_readoption_possible_candidates() {
 async fn reconciliation_pages_through_many_recoverable_candidates() {
     let (handle, dir) = open_handle("reconcile-pages").await;
     let mut results = Vec::new();
-    for index in 0..RECONCILIATION_PAGE_SIZE + 2 {
+    for index in 0..TEST_RECONCILIATION_PAGE_SIZE + 2 {
         let (_task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
         let result = orchestrate_result_arrival(
             &handle.store,
@@ -476,25 +483,35 @@ async fn reconciliation_pages_through_many_recoverable_candidates() {
     }
     rewrite_result_times(dir.path(), &results);
 
-    // Each storage read is bounded by the page size.
+    // Each storage read is bounded by the injected page size.
     let first_page = handle
         .store
-        .list_unadopted_results_after(None, RECONCILIATION_PAGE_SIZE)
+        .list_unadopted_results_after(None, TEST_RECONCILIATION_PAGE_SIZE)
         .await
         .unwrap();
-    assert_eq!(first_page.len() as u64, RECONCILIATION_PAGE_SIZE);
+    assert_eq!(first_page.len() as u64, TEST_RECONCILIATION_PAGE_SIZE);
     let second_page = handle
         .store
-        .list_unadopted_results_after(first_page.last().copied(), RECONCILIATION_PAGE_SIZE)
+        .list_unadopted_results_after(first_page.last().copied(), TEST_RECONCILIATION_PAGE_SIZE)
         .await
         .unwrap();
     assert_eq!(second_page.len(), 2);
 
-    let summary = handle.reconcile_sealed_results().await.unwrap();
-    assert_eq!(summary.evaluated, RECONCILIATION_PAGE_SIZE + 2);
-    assert_eq!(summary.adopted, RECONCILIATION_PAGE_SIZE + 2);
+    let summary = handle
+        .reconcile_sealed_results_with_page_size(TEST_RECONCILIATION_PAGE_SIZE)
+        .await
+        .unwrap();
+    assert_eq!(summary.evaluated, TEST_RECONCILIATION_PAGE_SIZE + 2);
+    assert_eq!(summary.adopted, TEST_RECONCILIATION_PAGE_SIZE + 2);
     assert_eq!(summary.first_error, None);
-    assert!(handle.reconcile_sealed_results().await.unwrap().adopted == 0);
+    assert!(
+        handle
+            .reconcile_sealed_results_with_page_size(TEST_RECONCILIATION_PAGE_SIZE)
+            .await
+            .unwrap()
+            .adopted
+            == 0
+    );
 }
 
 /// Rewrites the reconciliation keys of the given results to a deterministic

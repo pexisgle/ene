@@ -33,6 +33,7 @@ tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 ene-ctl = { path = "../ene-ctl" }
+ene-store = { path = "../../crates/ene-store", features = ["test-support"] }
 
 [lints]
 workspace = true

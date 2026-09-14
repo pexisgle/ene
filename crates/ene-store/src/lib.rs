@@ -43,8 +43,8 @@ pub enum StoreError {
     SchemaFailed(String),
 }
 
-/// A panic inside the blocking task is the task's own panic: resume it
-/// rather than reporting it as a store failure.
+/// A panic inside the blocking task is the task's own panic: resume it rather
+/// than reporting it as a store failure.
 async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     match tokio::task::spawn_blocking(work).await {
         Ok(value) => value,
@@ -72,6 +72,32 @@ impl Store {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Relaxes SQLite durability for test fixtures while keeping the database
+    /// file, schema, transaction boundaries, and reopen behavior intact.
+    ///
+    /// Tests that exercise logical repository/Host behavior do not need an
+    /// `fsync` after every short transaction. The explicit opt-in keeps the
+    /// production open path unchanged while avoiding that filesystem cost on
+    /// Windows CI. The resulting database remains readable by a later normal
+    /// [`Store::open`]; this helper only weakens crash/power-loss durability of
+    /// the current test connection.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn relax_durability_for_tests(&self) -> Result<(), StoreError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let conn = conn.lock().map_err(|_| {
+                StoreError::OpenFailed(String::from("test store connection lock is poisoned"))
+            })?;
+            conn.pragma_update(None, "journal_mode", "MEMORY")
+                .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
+            conn.pragma_update(None, "synchronous", "OFF")
+                .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
+            Ok(())
+        })
+        .await
     }
 
     /// In-memory store for this crate's tests only; production opens files.
