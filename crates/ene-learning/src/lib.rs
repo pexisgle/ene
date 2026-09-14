@@ -10,9 +10,11 @@
 //! This crate owns the semantics and the [`LearningRepository`] contract; the
 //! persistent implementation lives behind that trait (see `ene-store`), and
 //! inference is supplied as an opaque port by the caller, so this crate takes
-//! no dependency on history, task, permission, credential, or inference
-//! crates. Cross-domain identities arrive as `RawId` premises and are never
-//! converted into another domain's newtype.
+//! no dependency on history, task, permission, or inference crates. Its
+//! `ene-credential` dependency is limited to the non-secret scrub boundary
+//! types re-exported below; credential values and credential state remain
+//! outside this crate. Cross-domain identities arrive as `RawId` premises and
+//! are never converted into another domain's newtype.
 //!
 //! Stage 3 implements the Companion scope only. Global scope is deliberately
 //! absent: a companion-derived memory cannot be widened by accident, and the
