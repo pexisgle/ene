@@ -208,21 +208,27 @@ struct ConversationRound {
 }
 
 /// 個体調整機能が管理する未伝達メッセージの参照情報。
-/// タスク由来はタスクレコード、日常会話由来は活動レコードがマスターデータであり、
+/// タスク由来は Task/Action、日常会話由来は History/活動レコードがマスターデータであり、
 /// 本構造体は伝達状況を確認・照合するためのものである。第2のタスクマスターにしてはならない。
 struct UndeliveredRef {
+    id: UndeliveredId,
     companion: CompanionId,
-    source: UndeliveredSource, // TaskRecord(TaskId) または ActivityRecord(ActivityId)
+    source: UndeliveredSource,
     summary_report_status: ReportStatus,
 }
 
-enum ReportStatus { 
-    Pending,                     // 保留中
-    SummarizedForNextClient,     // 次回端末向けに要約済み
-    Presented,                   // ユーザーへ提示完了
-    PresentationUnknown,         // 提示されたか成否不明
+enum ReportStatus {
+    Pending,                     // 提示をまだ開始していない、または未提示が確認された
+    PresentationUnknown,         // 提示開始済み。提示の成否が確定していない
+    Presented,                   // この通知事項の提示を確認済み。吸収的
 }
 ```
+
+`UndeliveredId` は個体調整が発行する durable identity です。`UndeliveredSource` は `TaskRecord { task, fact }`、`HistoryMessage(message_id)`、`ActivityRecord(activity_id)` の閉じた和型とします。会話返信は既存の History を直接参照し、同じ本文の activity record を作りません。これは活動記録への参照の具体化であり、History の ownership は変えません。
+
+Task の `fact` は `TaskRevision(TaskRef)`、`Delegation(DelegationId)`、`ActionAttempt { attempt, certainty }`、`ResultRecorded(TaskResultId)`、`ResultAdopted(TaskResultId)`、`Terminal { task, progress: Failed | Cancelled }` です。型は発生元を識別する相関であり、状態のコピーや実行指示ではありません。`Started` は初期 TaskRevision、`InProgress` は Delegation、`Completed` は ResultAdopted から説明できるため、同じ遷移の Terminal 通知を重複登録しません。各参照が指す原本と登録契機は [PR §4.6](persistence-recovery.md#46-未伝達は発生元の-fact-と不可分に登録する) に定めます。
+
+cardinality は `(companion, source)` ごとに最大 1 行です。同じ source の再通知は既存 identity と状態を保ちます。後続 fact は新しい行なので、古い ACK は後続 fact を報告済みにできません。送信用の `PresentationReceiptId` は入出力・提示が発行する一時 identity とし、認証済み connection、Round、presence generation、選択した `UndeliveredId` 集合を Host メモリで対応付けます。receipt は接続の置き換え・切断・再起動を跨いで有効になりません。要約済みかどうかは receipt と生成中の表示データから分かる一時状態であり、`Summarized` 列や要約本文の正本は作りません。
 
 - メッセージを生成したこととユーザーに提示されたこと、送信したことと伝達が完了したこと、報告済みであることとユーザーから承認されたことは、それぞれ全く別の事象です。
 - 会話ラウンドの終了は、会話タイムラインの終了や過去ログの消去を意味しません。
@@ -234,7 +240,7 @@ enum ReportStatus {
 
 ```rust
 struct TaskId(/* 不透明なID */);
-struct TaskRevision(u64); // 同一タスクに対する指示や目標の変更順序。
+struct TaskRevision(u64); // 同一タスクに対する指示や目標の変更順序。明示 resume も新しい継続指示。
 // Task のライフサイクル / 進捗（closed world）。Task revision とは別軸であり、リビジョンの前進や
 // 世代番号で lifecycle を代替しない。terminal（Completed / Failed / Cancelled）は吸収的で、結果採用・委任作成・
 // 試行開始・cancel 受付のいずれも terminal から非 terminal へ戻さない。cancel の durable marker は
@@ -310,7 +316,7 @@ struct DelegationRef {
 }
 
 // タスクコンテキストの識別子群は TaskContextEntry（採用された識別子・由来・取得日時）としてタスク側に定義します。
-// 採用目的の本文のマスターデータは task_revision snapshot であり、採用指示の本文のマスターデータは由来レコード（History）です。
+// 採用目的の本文のマスターデータは task_revision snapshot であり、採用指示の本文のマスターデータは由来レコード（History / 第一者管理 activity）です。
 // context entry は本文を複製しません。採用目的の採用識別子は TaskPurposeRef であり、採用指示の採用識別子は entry 自身の
 // TaskContextEntryId です（由来レコードの生IDとは明確に区別されます）。採用指示 entry は採用リビジョンで 1 度だけ書き込み、
 // 現在有効な指示は現在リビジョンまでの採用指示 entry 全体として解決します。
@@ -330,6 +336,7 @@ enum OccurrenceStatus { Missed, Started, CancelledAsTaskContract }
 - タスクレコードの寿命は、担当コンパニオンへの参照によって勝手に決められるものではありません。担当コンパニオンが削除された後であっても、残されたタスクレコードには管理画面等から安全にアクセスできなければなりません。
 - 委任レコードの存在は、Task Agent のプロセス・コンテキスト・メモリが現在も生きていることを意味しません。再起動後は委任の対応関係のみを復元し、ephemeral な実行文脈は失われたものとして扱い、Agent の自動再起動やタスクの自動再開を行いません。委任の継続・停止・受領の状態を再構成するスライスは、それぞれの状態の producer と対で状態表現を追加します。
 - 同じタスクの同じリビジョンに対する複数の委任は許可され、単一委任の制約を課しません（並列委任は正当な実行形態です）。再委任やリトライは新しい委任 identity で開始し、既存の委任 identity を再利用しません。
+- **明示 resume の identity**: `(T, r)` の中断作業を再開する受理は、同じ `TaskId = T` の新 revision `r+1` と、その revision に依拠する新しい `DelegationId`・`TaskAgentEphemeralId` を不可分に作ります。目的が同じなら `TaskPurposeRef` は引き継ぎます。既存の採用指示 entry は再作成せず、再開指示のみ新しい `TaskContextEntryId` で採用します。Workspace の関連付け identity も引き継ぎ、新 delegation の scope は現在の関連付けから凍結します。旧 delegation、旧 result、旧 attempt はすべて元の revision に残り、新 delegation の依拠集合に付け替えません。`TaskRecoveryGeneration`、`current_delegation`、`resumed` flag は不要です。一般の AU3 は同一 revision への複数委任を引き続き許しますが、resume は Task 全体の継続指示なので必ず revision を前進させます（[IB H-A.1](interface-boundaries.md#h-a1-中断-task-の明示-resume)）。
 - 委任は割り当て（assignment）の identity を保存しません。Task Agent の推論割り当ては受付（K-E）時に委任元が依拠する現在の Capability 同意から live に解決し、durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` 対応が担います。解決済みの割り当て経路を、生きた許可として委任から再利用してはなりません。
 - すべての軽微な操作を無理にタスク化する必要はありませんが、まとまった一連の外部作業をタスク化せずに雑に実行することも禁止します。
 
@@ -439,6 +446,8 @@ struct RelocationHint {
     recovery_destination: Option<ClientId>,
 }
 ```
+
+`recovery_destination` は Host restart の復旧意図だけを持つ非現在参照です。`RecoveryWait` の間だけ有効とし、`Present`・通常切断後の `NoActive`・`Stopped` では空にします。`last_client` は最後に成立した Client であり、未成立の移動先で上書きしません。`InTransition` の `active_client` は移動先候補を格納する欄であり、活動開始権限ではありません。`Present` のときだけ active と解釈します。restart の状態別規則は [PR §6.4](persistence-recovery.md#64-host-startup-は復旧と実行開始を分離する) に従います。
 
 - クライアント端末側が主張する一時的な状態（端末が自称する世代番号、ラウンドID、入力候補など）は、入力受付インターフェースを通じて受け取りますが、ホストPC側の正規の滞在記録とは明確に区別します。
 - `PresenceGeneration` が一致していることだけでは不十分であり、実際のネットワーク疎通、必要な機能の可用性、最新の権限ルール、保留状態も合わせて照合します。疎通が確認できない状態を「おそらく繋がっているだろう」と勝手に現在有効とみなしてはいけません。
@@ -590,7 +599,7 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 |---|---|---|
 | **個体・キャラクター適用関係** | `(CompanionId, CharacterId, CharacterRevision, 適用パーツ群, OwnerSelectionRef)` | 編集途中やエクスポートの中断があっても、直前の正常状態と適用関係を保持します。未確認の編集データを勝手にマスターにしてはいけません。 |
 | **会話ログ・活動記録・未伝達メッセージ** | 会話履歴の元データ（発話者、文脈）、保存された活動記録、進行中の意味判断、`UndeliveredRef` と伝達状況 | 画面描画用の一時バッファや音声バッファは消えても構いませんが、ユーザーから受理した指示や未伝達メッセージは決して失ってはいけません。 |
-| **タスク・委任・コンテキスト・ワークスペース・スケジュール** | `(TaskId, TaskRevision, 目標・担当・TaskProgress・待機・未完了事項)`, `(TaskResultId, 依拠 TaskRef, DelegationId = execution lifetime, 結果本文 1 行, 採用検証済み Action 試行相関, 採用リビジョン)`（1 delegation につき最大 1 行で、行の存在がその execution の seal）, `(DelegationId, TaskRef, 委任元・範囲)`（作成スライスは対応関係まで。停止・受領状態は producer スライスで追加）, `TaskContextEntry`（採用された識別情報・由来・取得日時）, ワークスペース関連付け, スケジュール設定とタイムゾーン | 再起動で中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待ちます（cancel された Task は再開せず、再実行は新しい Task の下に新しい delegation を作成して行います）。到着済み・採用未確定の結果は本文と execution seal を保持したまま提示し、採用済み結果と `WithheldByEffectFacts` で記録だけされた結果を区別して、いずれも勝手に採用・完了・再実行しません。Task が `completed` の場合、completion commit 時点で同じ Task の `Unknown` な Action 試行が 0 件だったという Task-wide completion barrier の不変条件を、`action_attempt` の durable facts から復元できます（cache・summary・marker は追加しません）。エージェントの終了やコンパニオンの削除によってタスク記録を勝手に消してはいけません。 |
+| **タスク・委任・コンテキスト・ワークスペース・スケジュール** | `(TaskId, TaskRevision, 目標・担当・TaskProgress・待機・未完了事項)`, `(TaskResultId, 依拠 TaskRef, DelegationId = execution lifetime, 結果本文 1 行, 採用検証済み Action 試行相関, 採用リビジョン)`（1 delegation につき最大 1 行で、行の存在がその execution の seal）, `(DelegationId, TaskRef, 委任元・範囲)`（作成スライスは対応関係まで。停止・受領状態は producer スライスで追加）, `TaskContextEntry`（採用された識別情報・由来・取得日時）, ワークスペース関連付け, スケジュール設定とタイムゾーン | 再起動で中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待ちます（cancel された Task は再開せず、再実行は新しい Task の下に新しい delegation を作成して行います）。到着済み・採用未確定の結果は本文と execution seal を保持したまま提示し、採用済み結果と `WithheldByEffectFacts` で記録だけされた結果を区別して、行の存在だけでは採用・完了・再実行しません。PR §6.4 の起動処理は全 gate を再照合した AU15b の機械的な再評価だけを許可し、provider / Action / runner は起動しません。Task が `completed` の場合、completion commit 時点で同じ Task の `Unknown` な Action 試行が 0 件だったという Task-wide completion barrier の不変条件を、`action_attempt` の durable facts から復元できます（cache・summary・marker は追加しません）。エージェントの終了やコンパニオンの削除によってタスク記録を勝手に消してはいけません。 |
 | **アクションの把握された外部作用・成否不明・停止結果** | `(ActionAttemptId, タスク・委任対応, 具体的操作対象と種別, 確定度, 根拠対応, 保留状態)` | メモリ上のバッファが消えても作用の記録を保持します。成否不明（Unknown）を勝手に未実行に戻してはいけません。 |
 | **長期記憶・要約・根拠・スコープ** | 要約データと `SummaryGroundsRef`, 長期記憶（現在値・重要度・スコープ・過去履歴）, スキル（有効リビジョン・過去履歴・原本対応）, 関係性（現在値・根拠）, コンパニオン状態 | 派生データ（ベクトルインデックス、キャッシュなど）は独立した復元対象とせず、古い派生データから勝手に権限や状態を復活させてはいけません。 |
 | **権限・制約・同意・コスト上限・利用実績** | ルール本文・解釈・スコープ・`RuleRevision`・取り消し履歴, 認可判断ログ, プロバイダ同意・端末条件・禁止ルール・コスト上限, 利用実績（報告済み・不明・処理中の区分） | 過去の許可ログを現在の生きた許可として復活させてはいけません。コスト上限用の利用実績は、キャッシュクリアや再起動を理由に勝手にゼロにリセットしてはいけません。 |
@@ -724,4 +733,3 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 - 未伝達メッセージの保持方式、タスク記録の内部保持形式、端末移動の検知アルゴリズム、画面監視のルーティング文脈の生成方式や頻度。
 
 これらはホストPCとクライアント端末の信頼境界、および各機能の責任分担を遵守した上で、最もシンプルで信頼性の高い実装手法を選択します。
-

@@ -95,12 +95,40 @@ ene の開発では、`.old/` に限らず、いかなる後方互換性も考�
 - **完了基準**: 指定フォルダ内のファイルを読んで新しいレポートを生成するタスクが正常に完了し、不正なファイルアクセスが確実に拒否されること。加えて、会話経由の受け入れシナリオ 4 を F の E2E で確認し、G の `Failed` producer を実装した上で Stage 4 完了とします。
 
 ### Stage 5: クライアントのライフサイクルとホストでの作業継続
-操作画面（クライアント）を閉じても、ホスト側で安全に処理が継続するようにします。
-1. クライアント切断時もホスト側でタスクをそのまま継続
-2. クライアント再接続時の進捗・結果の自動表示
-3. ホスト再起動時の安全対策（タスクを勝手に自動再開せず、保存済み進捗を示してユーザーの再開指示を待つ）
-4. パートナーの存在場所（presence）の整合性維持
-- **完了基準**: 長いタスクの実行中に画面を閉じたり再接続したりしても、タスクが途切れることなく結果を受け取れること。
+
+Client を閉じても Host-only Task は継続し、再接続先で未伝達の進捗・結果を提示します。Host restart で失われた実行は自動で再開せず、保存済み facts の確認と明示 resume によって同じ Task の新 revision・新 delegation として続けます。
+
+**設計の入口**:
+
+| 決定事項 | 所有する文書 |
+|---|---|
+| 製品としての継続・提示・明示再開 | [requirements §Task](../requirements/requirements.md#切断中の報告と中断した作業の再開) |
+| Host-only / Client-dependent の境界 | [Presence Transition §7–8](../design/critical-areas/client-presence-transition.md#7-host-side-taskが継続できる理由と範囲) |
+| connection phase、incarnation、wire retry、read / resume / ACK | [IPC §9–13・18](../design/concrete/host-client-ipc.md#93-connection-authenticationreconnect-authentication) |
+| Task / Delegation / 未伝達の identity | [CI §5.2–5.3・5.6](../design/concrete/correspondence-identity.md#52-会話ラウンド未伝達メッセージ) |
+| resume command / outcome / source、報告の責務 | [IB H-A.1・H-G・X-H](../design/concrete/interface-boundaries.md#h-a1-中断-task-の明示-resume) |
+| 保存項目、source of truth、startup、lifecycle 表 | [PR §4.6・6.4–6.5](../design/concrete/persistence-recovery.md#46-未伝達は発生元の-fact-と不可分に登録する) |
+| commit 順序、launch 登録、connection/presence、ACK race | [CCT §7.4・10.4–10.5](../design/concrete/concurrency-control.md#74-resume-は旧-revision-を閉じて新しい委任を受理する) |
+| E2E の期待結果 | [acceptance S5-01〜24](../requirements/acceptance.md#5-クライアントとホストの動作継続) |
+
+**実装スライス順と完了条件**（各行は必要に応じて小さな PR に分けます。前の gate が揃う前に後の実行経路を enable しません）:
+
+| 順 | 実装範囲と責務 | 完了条件 |
+|---|---|---|
+| A | `ene-core::conn/serve` と `ene-ctl::client` の connection phase、current install、terminal supersede、close admission。Client boot incarnation、descriptor と pairing identity の分離。OS transport と単一 Host lock | #1384/#1385/#1387/#1389 の回帰を接続入口で再現して通す。Linux socket と Windows named pipe が同じ認証/currentness を使う。startup 前の writer 排他、二つの Host、旧 socket の handshake 再入場拒否を検証する |
+| B | `ene-presence` と `ene-store::presence` の AU7、hint、startup 復旧。Round・receipt の invalidation と Host-owned runner の切断独立性 | auth/close と presence commit の race、通常切断と restart の違い、Stopped/NoActive/InTransition の復旧表を満たす。Client を落としても受理済み Host-only Task は続き、Client-dependent admission は止まる |
+| C | `ene-companion` の未伝達 source/status、`ene-store` の親 fact と同時登録。Task/Action/History の bounded report query。startup sealed-result reconciliation と read-only open の分離 | 各 producer の commit/crash で通知漏れ・重複登録なし。Unknown を再提示対象として読み、report query は durable mutation をしない。古い adoption 禁止記述との整合を #1561 の決定で固定する |
+| D | `ene-presentation`、`ene-api`、Host/Client の未伝達購読・新 Round/receipt・提示 ACK。再接続時の Task 一覧/選択を既存 owner query に接続 | 切断中の completion が新 Client に自動提示される。ACK 喪失、51 件以上の backlog、新着競合、buffer 満杯、stale receipt を通す。provider 不調でも report と管理操作を使える |
+| E | `ene-task` の ResumeTaskCommand / TaskResumeOutcome、AU17、採用指示 source の History/第一者 activity 解決。既存 TaskExecutionRegistry の launch 予約と runner を接続 | 同じ Task r+1・新 delegation を不可分に受理し、旧 delegation を起動しない。Unknown/terminal/running/stale/欠如/枯渇を区別する。commit 後・spawn 前の crash で自動再実行ゼロ。会話と第一者管理の両方が同じ owner gate を通る |
+| F | 両 OS の Host 結合・第一者 Client E2E と Stage 4 回帰 | S5-01〜24 と各 OS の実 transport subset、workspace test / clippy / fmt / docs を完了する。implementation Issue は実装と回帰確認後にだけ close する |
+
+**main 調査との対応**（基準 `b1cfe7f4`）: `conn.rs` の paired socket count / implicit supersede、`serve/handshake.rs` の再 challenge、Client connect ごとの incarnation、`serve.rs` の submit 時 attach と通常切断、`task_run.rs` の durable-start probe と一時 registry、`task_control.rs` の一時 Task 選択・canonical report・sealed reconciliation、`ene-store::companion` の History-only 未伝達・sticky Unknown が主な変更対象です。既存の AU3/4/5/14/15/16、Task lifecycle、seal、Task-wide Unknown barrier を再利用します。`main` の Windows transport は Unsupported なので A/F の完了から除外しません。
+
+open Issue は #1384/#1385（Stage 5 defer）、#1387/#1389（接続 identity の前提）を本 Stage で扱います。#1390 の unknown wire variant は protocol evolution の別実装課題、#1508 の learning correction interface と #1530 の ScrubbedText 構築境界はそれぞれの owner の別課題として open を維持します。いずれも既存契約を迂回する根拠にはしません。設計間の不一致と選定理由は [#1561](https://github.com/pexisgle/ene/issues/1561) に記録します。
+
+Stage 5 に専用 recovery manager/session/workflow、Task recovery generation、永続 current-delegation / needs-resume / launch queue、報告用の Task snapshot を追加しません。導出できない伝達状態と既存 source/hint の相関だけを所有先へ足します。Remote network、Voice、Observation、Computer Use、Schedule、全域 Restore、Targeted Deletion の本体は既存の後続 Stage に残し、必要な境界の unsupported/hold を維持します。新 schema は旧 DB の backfill や互換層を設計せず、現在の canonical schema と契約を直接実装します。
+
+- **完了基準**: 切断・再接続・Host restart・明示 resume・遅延結果・提示失敗を通じて、事実を失わず、無断の新規 work と二重実行を起こさないこと。スライスの履歴は PR/Issue で管理し、`PROGRESS.md` は現在の milestone index に留めます。
 
 ### Stage 6: 指定データの完全削除 (Targeted Deletion) と利用量・機密安全
 プライバシー保護のためのデータ完全消去と、API 利用量・費用の透明性を確保します。
