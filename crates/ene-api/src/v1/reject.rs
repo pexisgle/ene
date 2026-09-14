@@ -22,6 +22,14 @@ pub enum RejectKind {
     /// same bytes fails identically, while retrying the original request
     /// replays cleanly.
     ConflictingCommand,
+    /// The connection was superseded by a newer authentication for the same
+    /// device. The socket stays open (IPC §11.3), but the connection can never
+    /// become current again: further service requires a new connection.
+    StaleConnection,
+    /// A pairing, capability, or authentication frame arrived outside the
+    /// connection's current phase. The pending nonce and negotiated terms are
+    /// unchanged; the frame had no effect (IPC §9.3).
+    InvalidHandshakePhase,
 }
 
 /// One rejected message: kind plus operational detail only (never secrets,
@@ -69,6 +77,11 @@ mod tests {
         assert_ne!(
             RejectKind::ConflictingCommand,
             RejectKind::UnsupportedMessage
+        );
+        assert_ne!(RejectKind::StaleConnection, RejectKind::ConflictingCommand);
+        assert_ne!(
+            RejectKind::InvalidHandshakePhase,
+            RejectKind::StaleConnection
         );
     }
 }
