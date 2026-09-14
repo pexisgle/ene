@@ -24,16 +24,16 @@ use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, Secr
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
-    DelegationScope, Task, TaskAgentEphemeralId, TaskAgentInference, TaskAgentInferenceError,
-    TaskAgentInferenceOutcome, TaskAgentInferencePremise, TaskAgentInferenceProduced,
-    TaskAgentNotSent, TaskAgentOutput, TaskAgentResultArrival, TaskAgentTurnError,
-    TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCancelOutcome, TaskCommitOutcome,
-    TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskInstructionRole, TaskInstructionSource,
-    TaskInstructionSourceError, TaskInstructionSourceRecord, TaskProgress, TaskPurpose,
-    TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
-    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord,
-    TaskTechnicalError, orchestrate_task_agent_turn,
+    DelegationScope, Task, TaskAgentActionExchange, TaskAgentEphemeralId, TaskAgentInference,
+    TaskAgentInferenceError, TaskAgentInferenceOutcome, TaskAgentInferencePremise,
+    TaskAgentInferenceProduced, TaskAgentNotSent, TaskAgentObservation, TaskAgentOutput,
+    TaskAgentResultArrival, TaskAgentTurnError, TaskAgentTurnOutcome, TaskAgentTurnPremise,
+    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
+    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
+    TaskInstructionRole, TaskInstructionSource, TaskInstructionSourceError,
+    TaskInstructionSourceRecord, TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef,
+    TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
+    TaskRevision, TaskRevisionRecord, TaskTechnicalError, orchestrate_task_agent_turn,
 };
 
 /// Instruction source for turns whose context carries no adopted instruction:
@@ -269,6 +269,13 @@ impl TaskRepository for FakeTaskRepository {
         }
     }
 
+    async fn delegation_has_started_work(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<bool, TaskTechnicalError> {
+        Ok(false)
+    }
+
     async fn adopt_result(
         &self,
         _claim: TaskResultAdoptionClaim,
@@ -283,13 +290,23 @@ impl TaskRepository for FakeTaskRepository {
 struct ScriptedInference {
     replies: Mutex<VecDeque<Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>>>,
     premises: Mutex<Vec<TaskAgentInferencePremise>>,
+    budget: usize,
 }
 
 impl ScriptedInference {
     fn new(reply: Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>) -> Self {
+        Self::with_budget(reply, usize::MAX)
+    }
+
+    /// Scripts one reply under an explicit input budget.
+    fn with_budget(
+        reply: Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>,
+        budget: usize,
+    ) -> Self {
         Self {
             replies: Mutex::new(VecDeque::from([reply])),
             premises: Mutex::new(Vec::new()),
+            budget,
         }
     }
 
@@ -306,6 +323,10 @@ impl ScriptedInference {
     reason = "in-test fake; async matches the port contract"
 )]
 impl TaskAgentInference for ScriptedInference {
+    fn input_budget(&self) -> usize {
+        self.budget
+    }
+
     async fn infer(
         &self,
         premise: TaskAgentInferencePremise,
@@ -441,8 +462,24 @@ fn record(task: TaskId, current_revision: TaskRevision, purpose_text: &str) -> T
 }
 
 fn premise(delegation: DelegationId) -> TaskAgentTurnPremise {
-    TaskAgentTurnPremise { delegation }
+    TaskAgentTurnPremise {
+        delegation,
+        exchanges: Vec::new(),
+    }
 }
+
+/// The fixed response-format preamble every Task Agent turn starts with.
+///
+/// Pinned here as the provider-visible contract the Host tool-loop parser is
+/// built against; a change to the harness framing must update this constant
+/// and the Host parser together.
+const RESPONSE_FORMAT: &str = "[RESPONSE FORMAT]\n\
+Respond with exactly one JSON object and no other text. One of:\n\
+{\"tool\":\"list\",\"path\":\"<workspace-relative directory>\"}\n\
+{\"tool\":\"read\",\"path\":\"<workspace-relative file>\"}\n\
+{\"tool\":\"create\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+{\"tool\":\"edit\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+{\"final\":\"<final answer>\"}\n";
 
 fn instruction_entry(
     reference: TaskRef,
@@ -541,7 +578,7 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     assert_eq!(received.task, relied, "the port gets the relied revision");
     assert_eq!(
         received.prompt.text,
-        format!("[scrubbed] [PURPOSE]\n{purpose_text}"),
+        format!("[scrubbed] {RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}"),
         "the port gets the scrubber's output, not the raw purpose text"
     );
     assert_eq!(
@@ -556,7 +593,7 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     );
     assert_eq!(
         scrubber.inputs(),
-        vec![format!("[PURPOSE]\n{purpose_text}")],
+        vec![format!("{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}")],
         "the scrubber is asked to scrub exactly the relied snapshot's purpose text in the fixed framing"
     );
     assert_eq!(repository.loaded_delegations(), vec![delegation_id]);
@@ -574,6 +611,203 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
         }
         other => panic!("expected Produced, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn an_over_budget_transcript_drops_oldest_exchanges_with_a_fixed_note() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    let inference = ScriptedInference::with_budget(produced_reply(), 800);
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let old = TaskAgentActionExchange {
+        request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"old.txt\"}")),
+        observation: TaskAgentObservation::new(format!("read ok:\n{}", "o".repeat(400))),
+    };
+    let newest = TaskAgentActionExchange {
+        request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"new.txt\"}")),
+        observation: TaskAgentObservation::new(format!("read ok:\n{}", "n".repeat(100))),
+    };
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        TaskAgentTurnPremise {
+            delegation: delegation_id,
+            exchanges: vec![old, newest],
+        },
+    )
+    .await
+    .expect("a trimmed transcript is still a domain outcome");
+
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+    let raw = scrubber.inputs();
+    assert_eq!(raw.len(), 1);
+    assert!(
+        raw[0].chars().count() <= 800,
+        "the assembled input stays within the port budget, got {}",
+        raw[0].chars().count()
+    );
+    assert!(
+        raw[0].contains("[NOTE] earlier tool exchanges were omitted to fit the input bound"),
+        "the omission is explicit to the model, got {}",
+        raw[0]
+    );
+    assert!(
+        raw[0].contains("new.txt"),
+        "the newest exchange is kept whole"
+    );
+    assert!(
+        !raw[0].contains("old.txt"),
+        "the oldest exchange is dropped whole, never partially"
+    );
+}
+
+#[tokio::test]
+async fn an_exchange_that_cannot_fit_alone_is_not_replaced_by_a_note() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    let inference = ScriptedInference::with_budget(produced_reply(), 800);
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let oversized = TaskAgentActionExchange {
+        request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"huge.txt\"}")),
+        observation: TaskAgentObservation::new(format!("read ok:\n{}", "x".repeat(2_000))),
+    };
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        TaskAgentTurnPremise {
+            delegation: delegation_id,
+            exchanges: vec![oversized],
+        },
+    )
+    .await
+    .expect("an over-budget transcript is still a domain outcome");
+
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+    let raw = scrubber.inputs();
+    assert!(
+        raw[0].contains("huge.txt") && raw[0].contains("xxxx"),
+        "the oversized observation is kept so the port can refuse it, never replaced by a note"
+    );
+    assert!(
+        raw[0].chars().count() > 800,
+        "the turn leaves the over-limit input for the port to refuse honestly"
+    );
+}
+
+#[tokio::test]
+async fn aborted_port_answer_stays_its_own_turn_outcome() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::Aborted));
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a local abort is a domain outcome, not a technical error");
+
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::Aborted,
+        "a stopped turn is neither Produced nor a pre-send NotSent refusal"
+    );
+    assert_eq!(
+        inference.premises().len(),
+        1,
+        "the aborted turn is still one attempted turn"
+    );
+}
+
+#[tokio::test]
+async fn action_exchanges_are_replayed_in_order_and_scrubbed_once() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let purpose_text = "probe adopted purpose";
+    let loaded = record(task, revision(1), purpose_text);
+    let purpose_source = loaded.context[0].origin.source;
+    let fixture = turn_fixture(loaded, delegation_ref);
+
+    let premise = TaskAgentTurnPremise {
+        delegation: fixture.delegation,
+        exchanges: vec![
+            TaskAgentActionExchange {
+                request: TaskAgentOutput::new(String::from(
+                    r#"{"tool":"read","path":"input.txt"}"#,
+                )),
+                observation: TaskAgentObservation::new(String::from("notes")),
+            },
+            TaskAgentActionExchange {
+                request: TaskAgentOutput::new(String::from(
+                    "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# report\"}",
+                )),
+                observation: TaskAgentObservation::new(String::from(
+                    "created at the requested workspace path",
+                )),
+            },
+        ],
+    };
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise,
+    )
+    .await
+    .expect("a produced turn is a domain outcome");
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+
+    let raw_input = format!(
+        "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n\
+         [TOOL CALL]\n{{\"tool\":\"read\",\"path\":\"input.txt\"}}\n\
+         [TOOL RESULT]\nnotes\n\
+         [TOOL CALL]\n{{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# report\"}}\n\
+         [TOOL RESULT]\ncreated at the requested workspace path"
+    );
+    let captured = fixture.inference.premises();
+    let received = captured.first().expect("the premise was captured");
+    assert_eq!(
+        received.prompt.text,
+        format!("[scrubbed] {raw_input}"),
+        "the whole transcript is one framed input with a single scrub"
+    );
+    assert_eq!(
+        fixture.scrubber.inputs(),
+        vec![raw_input],
+        "the scrubber sees the exchange transcript exactly once"
+    );
+    assert_eq!(
+        received.data_use,
+        vec![purpose_source],
+        "execution-local exchanges add no canonical source to the correlation"
+    );
 }
 
 #[tokio::test]
@@ -915,7 +1149,7 @@ async fn scrub_failure_fails_closed_without_sending_or_leaking_the_purpose() {
     }
     assert_eq!(
         scrubber.inputs(),
-        vec![format!("[PURPOSE]\n{purpose_text}")],
+        vec![format!("{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}")],
         "the scrub was attempted on the relied purpose text in the fixed framing"
     );
     assert!(
@@ -1140,7 +1374,7 @@ async fn instruction_bodies_are_resolved_in_context_order_and_scrubbed_once() {
     assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
 
     let raw_input = format!(
-        "[PURPOSE]\n{purpose_text}\n[INSTRUCTION]\nfirst instruction\n[INSTRUCTION]\nsecond instruction"
+        "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[INSTRUCTION]\nfirst instruction\n[INSTRUCTION]\nsecond instruction"
     );
     let captured = fixture.inference.premises();
     let received = captured.first().expect("the premise was captured");

@@ -338,7 +338,9 @@ pub async fn finish_turn(
     else {
         return DialogueOutcome::Interrupted;
     };
-    match inference.dispatch(authorized, prompt, sink).await {
+    // Dialogue has no cooperative stop token: it is not a Task Agent
+    // execution, so no abort exists to forward.
+    match inference.dispatch(authorized, prompt, sink, None).await {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
@@ -393,7 +395,8 @@ pub async fn finish_turn(
         }
         Ok(
             InferenceDispatchOutcome::Completed { adopted: false, .. }
-            | InferenceDispatchOutcome::NotSent(_),
+            | InferenceDispatchOutcome::NotSent(_)
+            | InferenceDispatchOutcome::Aborted,
         )
         | Err(_) => DialogueOutcome::Interrupted,
     }
@@ -643,7 +646,7 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
             Ok(Admission::Admitted(authorized)) => {
                 match self
                     .inference
-                    .dispatch(*authorized, prompt, &mut DiscardSink)
+                    .dispatch(*authorized, prompt, &mut DiscardSink, None)
                     .await
                 {
                     Ok(InferenceDispatchOutcome::Completed {
@@ -652,7 +655,8 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
                     }) => Ok(arrival.output_text),
                     Ok(
                         InferenceDispatchOutcome::Completed { adopted: false, .. }
-                        | InferenceDispatchOutcome::NotSent(_),
+                        | InferenceDispatchOutcome::NotSent(_)
+                        | InferenceDispatchOutcome::Aborted,
                     ) => Err(LearningInferenceError::Declined),
                     Err(error) => Err(LearningInferenceError::Unavailable {
                         reason: error.to_string(),

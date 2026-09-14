@@ -91,8 +91,11 @@ pub enum NotSentReason {
     ///
     /// Produced by admission, never by dispatch.
     SetupIncomplete,
-    /// The stored consent moved away from the premise the use was admitted
-    /// under, before the attempt claim or before adoption.
+    /// The stored consent or credential-set premise moved away from the one
+    /// the use was admitted under before the attempt claim; a duplicate claim
+    /// of the same ticket also answers this. A consent that moves during the
+    /// provider wait is not this refusal: the response is then
+    /// [`InferenceDispatchOutcome::Completed`] with `adopted: false`.
     ConsentStale,
     /// The live-authorization allowlist refused the use.
     ///
@@ -364,8 +367,9 @@ pub enum AttemptBeginOutcome {
     /// issue provider I/O outside any lock. A later consent move cannot
     /// un-start it; result adoption still decides separately.
     Started,
-    /// The expected consent no longer holds (or was never recorded): the
-    /// caller must NOT issue provider I/O for this ticket.
+    /// The expected consent or credential-set premise no longer holds (or was
+    /// never recorded), or this ticket was already claimed: the caller must
+    /// NOT issue provider I/O for this ticket.
     Stale,
     /// The Task Agent delegation/task premise no longer holds: the caller
     /// must NOT issue provider I/O for this ticket. Distinct from
@@ -642,6 +646,55 @@ impl AuthorizedInference {
     }
 }
 
+/// Cooperative, best-effort abort signal for one in-flight dispatch.
+///
+/// The token is local and non-durable: it survives only in this process, and
+/// signalling it proves nothing about a provider request or an external
+/// effect. It exists so a caller can stop a claimed dispatch without losing
+/// the attempt's accounting — dispatch observes it inside the post-claim
+/// provider wait, drops the provider future best-effort, records the
+/// uncertain usage fact, and only then reports
+/// [`InferenceDispatchOutcome::Aborted`]. Dropping the dispatch future from
+/// outside the owner boundary is never a substitute: it would skip that
+/// accounting.
+#[derive(Clone, Default)]
+pub struct DispatchAbort {
+    inner: std::sync::Arc<DispatchAbortInner>,
+}
+
+#[derive(Default)]
+struct DispatchAbortInner {
+    aborted: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl DispatchAbort {
+    /// Raises the signal and wakes a dispatch that is waiting.
+    ///
+    /// `notify_one` (not `notify_waiters`) closes the check-then-wait race:
+    /// the permit is stored when the dispatch is between its flag check and
+    /// its first `notified` poll, so the wakeup is never lost.
+    pub fn abort(&self) {
+        self.inner
+            .aborted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.notify.notify_one();
+    }
+
+    /// Whether the signal is already raised.
+    #[must_use]
+    pub fn is_aborted(&self) -> bool {
+        self.inner.aborted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Waits until the signal is raised; returns immediately when it already is.
+    pub async fn aborted(&self) {
+        while !self.is_aborted() {
+            self.inner.notify.notified().await;
+        }
+    }
+}
+
 /// Outcome of one dispatched (attempted) inference use.
 ///
 /// Usage accounting is already decided and recorded when this returns: a
@@ -657,8 +710,17 @@ pub enum InferenceDispatchOutcome {
         /// Whether the post-await consent check still admitted the reply.
         adopted: bool,
     },
-    /// Definitely never sent; no usage fact was recorded.
+    /// No provider I/O was performed by this dispatch and no usage fact was
+    /// recorded. A duplicate dispatch of an already-claimed ticket answers
+    /// this without sending again.
     NotSent(NotSentReason),
+    /// The local abort signal stopped this dispatch. A dispatch that was
+    /// already claimed records the uncertain usage fact before answering; if
+    /// that fact cannot be recorded, the dispatch fails as a storage
+    /// technical error instead of claiming a clean abort. One refused before
+    /// the claim records no attempt and no usage fact. This never claims
+    /// that a provider request or an external effect stopped.
+    Aborted,
 }
 
 /// The owner boundary for one inference call.
@@ -700,11 +762,19 @@ pub trait InferenceExecutor: Send + Sync {
     /// `sink` receives provider deltas in order while the call runs; the
     /// returned arrival carries the full text for adoption, so display and
     /// durable adoption stay separate facts.
+    ///
+    /// `abort` is the caller's local best-effort stop signal, when one
+    /// exists. A raised signal refuses before the claim (no attempt, no
+    /// provider bytes); a signal that fires during the provider wait drops
+    /// the provider future and records the uncertain usage fact before
+    /// answering [`InferenceDispatchOutcome::Aborted`], so a claimed
+    /// dispatch never loses its accounting.
     async fn dispatch(
         &self,
         authorized: AuthorizedInference,
         prompt: ScrubbedText,
         sink: &mut (dyn DeltaSink + Send),
+        abort: Option<&DispatchAbort>,
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
@@ -722,15 +792,32 @@ pub trait InferenceExecutor: Send + Sync {
 /// its reported counts whether or not the reply is adopted; an adoption read
 /// failure still records the reported counts before propagating the storage
 /// error.
+///
+/// `abort` is the caller's local best-effort stop signal, when one exists.
+/// A signal already raised before the claim refuses without claiming
+/// anything; a signal that fires during the provider wait drops the provider
+/// future best-effort and records the unknown-usage fact for the claimed
+/// attempt before answering [`InferenceDispatchOutcome::Aborted`] — a usage
+/// write failure on that path is a storage technical error, so a claimed
+/// abort can never masquerade as a clean stop with lost accounting. The
+/// accounting is never skipped by the abort: only the provider I/O is.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the owner boundary takes each repository it must sequence in order; a parameter struct would only restate the same wiring"
+)]
 pub async fn dispatch_authorized(
     authorized: AuthorizedInference,
     prompt: ScrubbedText,
     sink: &mut (dyn DeltaSink + Send),
+    abort: Option<&DispatchAbort>,
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
     transport: &impl ProviderTransport,
 ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+    if abort.is_some_and(DispatchAbort::is_aborted) {
+        return Ok(InferenceDispatchOutcome::Aborted);
+    }
     if prompt.text.chars().count() > MAX_INPUT_CHARS {
         return Ok(InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit));
     }
@@ -780,17 +867,32 @@ pub async fn dispatch_authorized(
         }
         Err(error) => return Err(error),
     }
-    let response = match transport
-        .complete_streaming(
-            ProviderRequest {
-                model: model.clone(),
-                credential,
-                input: prompt.text,
-            },
-            sink,
-        )
-        .await
-    {
+    let request = ProviderRequest {
+        model: model.clone(),
+        credential,
+        input: prompt.text,
+    };
+    let response = if let Some(abort) = abort {
+        tokio::select! {
+            biased;
+            () = abort.aborted() => {
+                // The select drops the provider future best-effort; the
+                // accounting below is not best-effort. The attempt is
+                // claimed, so the call may have run: the unknown-usage fact
+                // must be durable before Aborted can promise it, so a
+                // storage failure here is a technical error, never a clean
+                // abort that silently lost the fact.
+                usage
+                    .record_usage(unknown_usage(ticket, &provider, &model))
+                    .await?;
+                return Ok(InferenceDispatchOutcome::Aborted);
+            }
+            response = transport.complete_streaming(request, sink) => response,
+        }
+    } else {
+        transport.complete_streaming(request, sink).await
+    };
+    let response = match response {
         Ok(response) => response,
         Err(error) => {
             // The attempt is claimed, so the call may have run: record the
@@ -957,7 +1059,7 @@ mod dispatch_tests {
 
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
-        AttemptBeginOutcome, AuthorizedInference, DiscardSink, InferenceAttempt,
+        AttemptBeginOutcome, AuthorizedInference, DiscardSink, DispatchAbort, InferenceAttempt,
         InferenceAttemptRecord, InferenceAttemptRepository, InferenceDispatchOutcome,
         InferenceResultArrival, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
         NotSentReason, PermissionEvaluationId, ProviderRequest, ProviderResponse,
@@ -1167,6 +1269,51 @@ mod dispatch_tests {
         }
     }
 
+    /// An attempt repository that raises the caller's abort signal from
+    /// inside the claim, modelling a stop that lands while the claim commits.
+    struct AbortingAttempts(DispatchAbort);
+
+    impl InferenceAttemptRepository for AbortingAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            self.0.abort();
+            Ok(AttemptBeginOutcome::Started)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// Usage repository that fails every write, modelling a storage failure
+    /// right after a claimed abort.
+    struct FailingUsage;
+
+    impl UsageRepository for FailingUsage {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn record_usage(&self, _fact: UsageFact) -> Result<(), InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+    }
+
     /// Transport that counts calls without performing I/O.
     struct CountingTransport(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
@@ -1187,6 +1334,45 @@ mod dispatch_tests {
                     text: String::new(),
                     usage: None,
                 })
+            })
+        }
+    }
+
+    /// Transport whose call reports that it started and then waits forever;
+    /// dropping the call flips `dropped`, proving the abort ended the
+    /// provider future instead of waiting for it.
+    #[derive(Default)]
+    struct DroppingTransport {
+        started: std::sync::Arc<tokio::sync::Notify>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl ProviderTransport for DroppingTransport {
+        fn complete(
+            &self,
+            _req: ProviderRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let started = std::sync::Arc::clone(&self.started);
+            let dropped = std::sync::Arc::clone(&self.dropped);
+            Box::pin(async move {
+                let _probe = DropProbe(dropped);
+                started.notify_one();
+                std::future::pending::<()>().await;
+                unreachable!("the aborted provider future is dropped, never completed")
             })
         }
     }
@@ -1269,6 +1455,7 @@ mod dispatch_tests {
             authorized(),
             prompt("hello"),
             &mut DiscardSink,
+            None,
             &consent,
             &StartedAttempts,
             &usage,
@@ -1293,6 +1480,7 @@ mod dispatch_tests {
             authorized(),
             prompt("x".repeat(MAX_INPUT_CHARS + 1)),
             &mut DiscardSink,
+            None,
             &consent,
             &attempts,
             &usage,
@@ -1324,6 +1512,7 @@ mod dispatch_tests {
             authorized(),
             prompt("the key is sk-new"),
             &mut DiscardSink,
+            None,
             &consent,
             &StaleAttempts,
             &usage,
@@ -1360,6 +1549,7 @@ mod dispatch_tests {
             authorized(),
             prompt("hello"),
             &mut DiscardSink,
+            None,
             &consent,
             &StartedAttempts,
             &usage,
@@ -1388,6 +1578,7 @@ mod dispatch_tests {
             authorized(),
             prompt("hello"),
             &mut DiscardSink,
+            None,
             &consent,
             &StartedAttempts,
             &usage,
@@ -1413,6 +1604,7 @@ mod dispatch_tests {
             authorized(),
             prompt("hello"),
             &mut DiscardSink,
+            None,
             &consent,
             &StartedAttempts,
             &usage,
@@ -1437,6 +1629,7 @@ mod dispatch_tests {
             authorized_task_agent(task_agent_premise()),
             prompt("delegated work"),
             &mut DiscardSink,
+            None,
             &consent,
             &TaskPremiseStaleAttempts,
             &usage,
@@ -1467,6 +1660,7 @@ mod dispatch_tests {
             authorized_task_agent(task_agent_premise()),
             prompt("delegated work"),
             &mut DiscardSink,
+            None,
             &consent,
             &DataUseHeldAttempts,
             &usage,
@@ -1498,6 +1692,7 @@ mod dispatch_tests {
             authorized_task_agent(premise.clone()),
             prompt("delegated work"),
             &mut DiscardSink,
+            None,
             &consent,
             &attempts,
             &usage,
@@ -1541,6 +1736,7 @@ mod dispatch_tests {
             authorized(),
             prompt("hello"),
             &mut DiscardSink,
+            None,
             &consent,
             &attempts,
             &usage,
@@ -1551,6 +1747,175 @@ mod dispatch_tests {
         let claimed = attempts.0.lock().expect("attempt capture lock");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].task_agent, None);
+    }
+
+    #[tokio::test]
+    async fn abort_before_the_claim_claims_nothing_and_records_nothing() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let attempts = RecordingAttempts(Mutex::new(0));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let abort = DispatchAbort::default();
+        abort.abort();
+
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &mut DiscardSink,
+            Some(&abort),
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("an abort is a domain outcome");
+
+        assert_eq!(outcome, InferenceDispatchOutcome::Aborted);
+        assert_eq!(
+            *attempts.0.lock().expect("attempt count lock"),
+            0,
+            "a pre-claim abort never claims an attempt"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a pre-claim abort never reaches the provider"
+        );
+        assert!(
+            usage.0.lock().expect("usage capture lock").is_empty(),
+            "a never-claimed use records no usage fact"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_during_the_provider_wait_records_unknown_usage_and_drops_the_call() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = DroppingTransport::default();
+        let abort = DispatchAbort::default();
+        let started = std::sync::Arc::clone(&transport.started);
+        let dropped = std::sync::Arc::clone(&transport.dropped);
+        let authorized = authorized();
+        let ticket = authorized.ticket;
+        let mut sink = DiscardSink;
+
+        let mut dispatch = Box::pin(dispatch_authorized(
+            authorized,
+            prompt("hello"),
+            &mut sink,
+            Some(&abort),
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        ));
+        let mut started_wait = Box::pin(started.notified());
+        tokio::select! {
+            () = &mut started_wait => {}
+            outcome = &mut dispatch => {
+                panic!("the dispatch must wait for the abort, got {outcome:?}");
+            }
+        }
+        assert!(
+            !dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the provider future is still running before the abort"
+        );
+        abort.abort();
+        let outcome = dispatch.await.expect("the abort answers an outcome");
+        assert_eq!(outcome, InferenceDispatchOutcome::Aborted);
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the abort dropped the in-flight provider future"
+        );
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(facts.len(), 1, "the claimed attempt keeps its accounting");
+        assert_eq!(facts[0].ticket, ticket);
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+        assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn abort_that_lands_during_the_claim_records_the_unknown_fact() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let abort = DispatchAbort::default();
+        let attempts = AbortingAttempts(abort.clone());
+        let authorized = authorized();
+        let ticket = authorized.ticket;
+
+        let outcome = dispatch_authorized(
+            authorized,
+            prompt("hello"),
+            &mut DiscardSink,
+            Some(&abort),
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("an abort is a domain outcome");
+
+        assert_eq!(outcome, InferenceDispatchOutcome::Aborted);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the stop wins before the provider future is ever polled"
+        );
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(
+            facts.len(),
+            1,
+            "the claim that raced the stop still records its accounting"
+        );
+        assert_eq!(facts[0].ticket, ticket);
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn abort_accounting_failure_is_a_technical_error_not_a_clean_abort() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = DroppingTransport::default();
+        let abort = DispatchAbort::default();
+        let started = std::sync::Arc::clone(&transport.started);
+        let dropped = std::sync::Arc::clone(&transport.dropped);
+        let mut sink = DiscardSink;
+
+        let mut dispatch = Box::pin(dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &mut sink,
+            Some(&abort),
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        ));
+        let mut started_wait = Box::pin(started.notified());
+        tokio::select! {
+            () = &mut started_wait => {}
+            outcome = &mut dispatch => {
+                panic!("the dispatch must wait for the abort, got {outcome:?}");
+            }
+        }
+        abort.abort();
+        let result = dispatch.await;
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "a claimed abort whose accounting cannot be written must not answer a clean Aborted"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the abort still dropped the in-flight provider future"
+        );
     }
 
     #[test]

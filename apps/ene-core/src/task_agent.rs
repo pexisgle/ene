@@ -9,8 +9,8 @@
 
 use ene_companion::{HistoryMessage, HistoryRepository, HistoryRole};
 use ene_inference::{
-    Admission, DiscardSink, InferenceDispatchOutcome, InferenceExecutor, InferenceTechnicalError,
-    NotSentReason, TaskAgentAttemptPremise,
+    Admission, DiscardSink, DispatchAbort, InferenceDispatchOutcome, InferenceExecutor,
+    InferenceTechnicalError, NotSentReason, TaskAgentAttemptPremise,
 };
 use ene_primitive::{RawId, RevisionInner};
 use ene_task::{
@@ -20,18 +20,29 @@ use ene_task::{
 };
 
 /// Adapts one [`InferenceExecutor`] to the Task Agent port.
+///
+/// `abort` is the running execution's local cooperative stop token, when the
+/// caller runs under one: the adapter forwards it into the dispatch boundary,
+/// which owns the post-claim accounting, so an abort stops the provider wait
+/// without losing the attempt's usage fact. A bare turn outside an execution
+/// passes `None`.
 pub struct TaskAgentInferenceAdapter<'a, I> {
     executor: &'a I,
+    abort: Option<&'a DispatchAbort>,
 }
 
 impl<'a, I> TaskAgentInferenceAdapter<'a, I> {
     #[must_use]
-    pub fn new(executor: &'a I) -> Self {
-        Self { executor }
+    pub fn new(executor: &'a I, abort: Option<&'a DispatchAbort>) -> Self {
+        Self { executor, abort }
     }
 }
 
 impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, I> {
+    fn input_budget(&self) -> usize {
+        ene_inference::MAX_INPUT_CHARS
+    }
+
     async fn infer(
         &self,
         premise: TaskAgentInferencePremise,
@@ -54,7 +65,7 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
         let mut sink = DiscardSink;
         match self
             .executor
-            .dispatch(*authorized, premise.prompt, &mut sink)
+            .dispatch(*authorized, premise.prompt, &mut sink, self.abort)
             .await
         {
             Ok(InferenceDispatchOutcome::Completed { arrival, adopted }) => {
@@ -64,6 +75,7 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
                 })
             }
             Ok(InferenceDispatchOutcome::NotSent(reason)) => Ok(mirror_not_sent(reason)),
+            Ok(InferenceDispatchOutcome::Aborted) => Ok(TaskAgentInferenceOutcome::Aborted),
             Err(error) => Err(inference_unavailable(error)),
         }
     }
@@ -208,6 +220,7 @@ mod tests {
             _authorized: AuthorizedInference,
             _prompt: ScrubbedText,
             _sink: &mut (dyn DeltaSink + Send),
+            _abort: Option<&DispatchAbort>,
         ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
             self.record("dispatch");
             Err(InferenceTechnicalError::ResponseLost)
@@ -232,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn adapter_admits_only_as_task_agent_and_maps_the_correlation() {
         let executor = RecordingExecutor::default();
-        let adapter = TaskAgentInferenceAdapter::new(&executor);
+        let adapter = TaskAgentInferenceAdapter::new(&executor, None);
         let premise = task_agent_premise();
         let outcome = adapter
             .infer(premise.clone())

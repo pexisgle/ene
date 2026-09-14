@@ -5,7 +5,7 @@ use ene_primitive::WallClockWithTz;
 
 use crate::codec::{decode_consumer, decode_id, encode_consumer, encode_purpose};
 
-const CURRENT_VERSION: u64 = 22;
+const CURRENT_VERSION: u64 = 23;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -688,6 +688,24 @@ fn migrate_v22(_tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Adds the delegation probe's query-support index (V23).
+///
+/// The delegated-execution start probe looks a delegation up in both attempt
+/// tables; `action_attempt.delegation_id` is already indexed (V20), and this
+/// mirrors it for `inference_attempt` so the probe never scans the whole
+/// attempt table as dialogue history grows. The index holds no semantic
+/// state, rewrites no row, and fabricates no value: a fresh V23 database and
+/// a V22 → V23 upgraded database converge to the same meaning, and the
+/// version advance only records that the index exists.
+const MIGRATION_V23_INDEX: &str = "
+CREATE INDEX IF NOT EXISTS idx_inference_attempt_delegation ON inference_attempt (delegation_id);
+";
+
+fn migrate_v23(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(MIGRATION_V23_INDEX)
+        .map_err(|error| error.to_string())
+}
+
 /// One pre-V21 attempt row's correlation columns, as read for the backfill.
 struct BackfillAttemptRow {
     ticket: String,
@@ -905,6 +923,9 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 22 {
         migrate_v22(&tx)?;
+    }
+    if stored_version < 23 {
+        migrate_v23(&tx)?;
     }
     let current =
         i64::try_from(CURRENT_VERSION).map_err(|_| String::from("schema version out of range"))?;

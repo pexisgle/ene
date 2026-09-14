@@ -77,8 +77,15 @@ use ene_presence::{
 use ene_presentation::{OpenRound, RoundId};
 use ene_primitive::RawId;
 use ene_store::Store;
+use ene_task::{
+    CancelTaskCommand, DelegationId, TaskCancelOutcome, TaskRepository as _, TaskTechnicalError,
+};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
+
+use crate::dialogue::{CredentialScrubber, HostInference};
+use crate::task_agent::{HistoryInstructionSource, TaskAgentInferenceAdapter};
+use crate::task_run::{TaskAgentRunError, TaskAgentRunOutcome, TaskAgentRunRefusal};
 
 mod frames;
 mod handshake;
@@ -326,6 +333,12 @@ pub struct HostHandle {
     /// converge through revalidation), so the projection is a genuine
     /// Host-owned mapping entry rather than a function of the domain id.
     pub(crate) companion_wire: String,
+    /// Cooperative stop tokens for running Task Agent executions, keyed by
+    /// delegation (one execution lifetime; registration is atomic per
+    /// delegation). In-memory only: a restart drops every token, and a lost
+    /// token never means the durable work or an external effect stopped. The
+    /// durable attempt facts carry the one-shot start marker across restarts.
+    pub(crate) task_executions: crate::task_run::TaskExecutionRegistry,
 }
 
 impl HostHandle {
@@ -389,6 +402,7 @@ impl HostHandle {
             learning_queue: StdMutex::new(VecDeque::new()),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
+            task_executions: crate::task_run::TaskExecutionRegistry::default(),
         })
     }
 
@@ -439,6 +453,89 @@ impl HostHandle {
             return Ok(None);
         }
         self.store.ensure_running_companion().await.map(Some)
+    }
+
+    /// Accepts one Task cancel request and cooperatively stops its running
+    /// execution (AU16).
+    ///
+    /// The durable admission commits first and is the only authority; the
+    /// local signal afterwards is best-effort. A refused admission
+    /// (`AlreadyCancelled`, `TaskTerminal`, `MissingTask`) signals nothing,
+    /// because no execution of a terminal Task may still be starting work.
+    /// The returned outcome is the Task owner's unchanged domain answer; it
+    /// does not claim that any provider request or external effect stopped.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when the admission commit cannot answer.
+    pub async fn cancel_task(
+        &self,
+        command: CancelTaskCommand,
+    ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        let outcome = self.store.cancel_task(command.task).await?;
+        if outcome == TaskCancelOutcome::CancelAccepted {
+            self.task_executions.cancel(command.task);
+        }
+        Ok(outcome)
+    }
+
+    /// Runs one delegated Task Agent execution through the Host composition.
+    ///
+    /// Atomically registers the cooperative stop token under the delegation
+    /// (a second registration of the same execution lifetime is refused), wires
+    /// the Task-owned ports to the concrete History, credential, and inference
+    /// boundaries, and runs the bounded loop
+    /// ([`DEFAULT_MAX_TURNS`](crate::task_run::DEFAULT_MAX_TURNS)). The abort
+    /// token reaches the provider wait through the inference adapter, so a
+    /// cancel never loses a claimed attempt's usage fact. `transport` is the
+    /// provider transport (a fake in tests). Nothing here decides completion:
+    /// the loop ends at the owner boundaries and the result adoption is the
+    /// Task owner's.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskAgentRunError`] for storage and inference technical failures;
+    /// stale, terminal, sealed, already-started, already-running, refused, and
+    /// not-sent answers stay domain outcomes inside [`TaskAgentRunOutcome`].
+    pub async fn run_task_agent<T: ProviderTransport + Send + Sync>(
+        &self,
+        transport: &T,
+        delegation: DelegationId,
+    ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
+        let Some(correspondence) = self
+            .store
+            .load_delegation(delegation)
+            .await
+            .map_err(TaskAgentRunError::from)?
+        else {
+            return Ok(TaskAgentRunOutcome::Refused(
+                TaskAgentRunRefusal::MissingDelegation { delegation },
+            ));
+        };
+        let Some(registration) = self
+            .task_executions
+            .register(delegation, correspondence.task.task)
+        else {
+            return Ok(TaskAgentRunOutcome::Refused(
+                TaskAgentRunRefusal::ExecutionAlreadyRunning { delegation },
+            ));
+        };
+        let executor = HostInference::new(&self.store, &self.cred_store, &self.tracker, transport);
+        let inference = TaskAgentInferenceAdapter::new(&executor, Some(&registration.cancellation));
+        let instructions = HistoryInstructionSource::new(&self.store);
+        let scrubber = CredentialScrubber {
+            refs: &self.store,
+            store: &self.cred_store,
+        };
+        crate::task_run::run_task_agent_execution(
+            &self.store,
+            &instructions,
+            &inference,
+            &scrubber,
+            crate::task_run::DEFAULT_MAX_TURNS,
+            &registration,
+        )
+        .await
     }
 
     /// Runs the full orchestration pipeline for one inbound frame.

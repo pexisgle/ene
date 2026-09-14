@@ -200,6 +200,21 @@ pub trait TaskRepository: Send + Sync {
         delegation: DelegationId,
     ) -> Result<Option<TaskResultRecord>, TaskTechnicalError>;
 
+    /// Reports whether this delegated execution already started durable work.
+    ///
+    /// The first committed inference attempt (AU14) or Action start (AU5) of
+    /// a delegation is its durable start marker: once one exists, that
+    /// execution lifetime has begun and it is never started again under the
+    /// same identity — a stopped unsealed run, a lost in-process running
+    /// registration, and a restart are all covered by the same durable facts.
+    /// Continued work is a new delegation. The probe reads the durable
+    /// attempt facts and changes nothing; a missing delegation or Task is not
+    /// an error here (the caller's own load answers those domain outcomes).
+    async fn delegation_has_started_work(
+        &self,
+        delegation: DelegationId,
+    ) -> Result<bool, TaskTechnicalError>;
+
     /// Attempts to adopt one recorded final result into its Task (AU15b).
     ///
     /// Inside one short `Immediate` transaction: the result row is read, the

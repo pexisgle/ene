@@ -2,14 +2,18 @@
 //!
 //! One turn runs exactly one delegated inference through the Task-owned
 //! [`TaskAgentInference`] port. The harness assembles the logical input
-//! itself: the relied revision's adopted-purpose text comes from the
-//! `task_revision` snapshot, and each adopted instruction body is resolved
-//! through the Task-owned [`TaskInstructionSource`] port from its canonical
-//! History source. Purpose and instruction bodies are one string with one
-//! fixed framing, scrubbed exactly once, and only the injected
-//! [`SecretScrubber`]'s output reaches the port. This module never
-//! constructs a [`ScrubbedText`] literal, never copies an instruction body
-//! into Task state, and never sends workspace or file content.
+//! itself: a fixed response-format preamble, the relied revision's
+//! adopted-purpose text from the `task_revision` snapshot, each adopted
+//! instruction body resolved through the Task-owned [`TaskInstructionSource`]
+//! port from its canonical History source, and the execution-local Action
+//! transcript (the completed tool calls and their observations) the caller
+//! passes in the premise. Everything is one string with one fixed framing,
+//! scrubbed exactly once, and only the injected [`SecretScrubber`]'s output
+//! reaches the port. This module never constructs a [`ScrubbedText`] literal,
+//! never copies an instruction body into Task state, never persists the
+//! Action transcript, and never sends workspace or file content on its own
+//! (the exchange text is composed by the Host from what the Action owner
+//! observed).
 //!
 //! The ports keep `ene-task` free of permission, credential, and
 //! conversation-history concrete types: the Host composition root
@@ -32,10 +36,15 @@ use crate::task::{TaskId, TaskProgress, TaskRecord, TaskRef};
 /// The delegation identity names a correspondence row, and the row's
 /// existence never proves the ephemeral agent is alive or that delegated work
 /// is running; the turn re-checks the task premise instead of assuming it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `exchanges` is the execution-local transcript of Action requests this
+/// delegation already performed (in order); it is never persisted and is
+/// replayed into the provider-visible logical input for this turn only.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskAgentTurnPremise {
     /// The delegation correspondence to run.
     pub delegation: DelegationId,
+    /// Prior Action exchanges of this execution, oldest first.
+    pub exchanges: Vec<TaskAgentActionExchange>,
 }
 
 /// What the port receives.
@@ -103,6 +112,51 @@ impl core::fmt::Debug for TaskAgentOutput {
     }
 }
 
+/// The execution-local result of one Action request, as the Task Agent
+/// execution observed it.
+///
+/// The text is composed by the Host from the Action owner's observed effect
+/// (or from the refusal class) and is never persisted: the only durable
+/// result body is the final `task_result` row. [`core::fmt::Debug`] redacts
+/// the text because it can carry file content.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TaskAgentObservation(String);
+
+impl TaskAgentObservation {
+    /// Builds the observation text the next turn replays.
+    #[must_use]
+    pub fn new(text: String) -> Self {
+        Self(text)
+    }
+
+    /// The observation text.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for TaskAgentObservation {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_tuple("TaskAgentObservation")
+            .field(&"[redacted]")
+            .finish()
+    }
+}
+
+/// One completed Action exchange of a delegated execution.
+///
+/// `request` is the provider output that asked for the Action and
+/// `observation` is what the execution observed (or the refusal class). The
+/// pair is execution-local transcript, never a canonical source and never
+/// persisted; it exists so the next turn sees what already happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAgentActionExchange {
+    pub request: TaskAgentOutput,
+    pub observation: TaskAgentObservation,
+}
+
 /// Mirror of the inference-side `NotSentReason`; same meanings, Task-owned.
 ///
 /// These describe a use that was refused before any provider I/O; they are
@@ -115,7 +169,10 @@ pub enum TaskAgentNotSent {
     /// The live-authorization allowlist refused the use.
     NotInAllowlist,
     /// The stored consent moved away from the premise the use was admitted
-    /// under before the attempt claim or before adoption.
+    /// under before the attempt claim. A consent that moves during the
+    /// provider wait is not this refusal: the output is then produced with
+    /// `adoption_consent_current = false` and classified by the caller as a
+    /// sent-but-discarded output, never as this pre-send class.
     ConsentStale,
     /// The input exceeds the inference input bound.
     OverLimit,
@@ -145,6 +202,11 @@ pub enum TaskAgentInferenceOutcome {
     StaleTaskPremise,
     /// The use was refused before sending for the given reason.
     NotSent(TaskAgentNotSent),
+    /// The caller's local cooperative stop ended the turn. A turn that was
+    /// already claimed completed its usage accounting before this answer; a
+    /// turn stopped before the claim claimed nothing. The durable cancel
+    /// admission is the Task owner's separate fact.
+    Aborted,
 }
 
 /// Technical failure of the inference port; never prompt or output text.
@@ -167,6 +229,18 @@ pub enum TaskAgentInferenceError {
     reason = "Stage 4 contract style uses native async fn; Send bounds settle with the Host adapter"
 )]
 pub trait TaskAgentInference: Send + Sync {
+    /// The maximum logical-input length this port admits, in Unicode scalar
+    /// values.
+    ///
+    /// [`orchestrate_task_agent_turn`] keeps its assembled logical input
+    /// within this bound by dropping the oldest execution-local Action
+    /// exchanges when the transcript would otherwise outgrow the port; the
+    /// port (dispatch) still enforces its absolute cap, so an input whose
+    /// newest exchange alone exceeds the bound is refused as
+    /// [`TaskAgentNotSent::OverLimit`] instead of being silently truncated.
+    fn input_budget(&self) -> usize;
+
+    /// Runs one claimed inference turn; see the port's budget contract.
     async fn infer(
         &self,
         premise: TaskAgentInferencePremise,
@@ -260,6 +334,11 @@ pub enum TaskAgentTurnOutcome {
     },
     /// The use was refused before any provider I/O.
     NotSent(TaskAgentNotSent),
+    /// The caller's local cooperative stop ended the turn without returning
+    /// any produced output; provider I/O may already have started, and a
+    /// claimed attempt's usage accounting is complete before this answer.
+    /// This outcome claims nothing about Task progress or external effects.
+    Aborted,
 }
 
 /// Orchestrates one Task Agent inference turn.
@@ -271,21 +350,31 @@ pub enum TaskAgentTurnOutcome {
 /// informational, so a competing steering winner between the precheck and
 /// the claim is still reported as stale by the port.
 ///
-/// The logical input is the relied revision's adopted-purpose text followed
-/// by the adopted-instruction bodies in `TaskRecord.context` order. Purpose
-/// and instruction bodies are one string with one fixed framing; the whole
-/// string is scrubbed exactly once and only the scrubber's output crosses
-/// the port. Instruction bodies stay canonical in History: the
+/// The logical input is a fixed response-format preamble, the relied
+/// revision's adopted-purpose text, the adopted-instruction bodies in
+/// `TaskRecord.context` order, and the execution-local Action exchanges the
+/// caller replays (each request followed by its observation, oldest first).
+/// The newest exchanges are kept within the port's
+/// [`input_budget`](TaskAgentInference::input_budget): whole oldest exchanges
+/// are dropped (with a fixed omission note) when the transcript would
+/// outgrow the port, and an exchange that cannot fit even alone is left in
+/// place so the port refuses the over-limit input instead of the model
+/// answering from a silently shortened observation. The whole string is
+/// scrubbed exactly once and only the scrubber's output crosses the port. Instruction bodies stay canonical in History: the
 /// [`TaskInstructionSource`] port reads each adopted entry's source, the
 /// source/role/companion correspondence is verified before the body is
 /// used, and an absent source ends the turn as
 /// [`TaskAgentTurnOutcome::InstructionSourceMissing`] without fabricating,
-/// skipping, or rewriting anything. No workspace or file content enters the
-/// prompt.
+/// skipping, or rewriting anything. The exchange transcript is execution-local
+/// evidence from the Action owner and is never persisted or treated as a
+/// canonical source; it is reproduced for the provider only through this
+/// turn.
 ///
 /// The logical input's canonical source correlation (`data_use`) is the
 /// purpose entry's `origin.source` followed by every adopted instruction's
-/// `origin.source`, in the same order, duplicates retained. It travels to
+/// `origin.source`, in the same order, duplicates retained. The Action
+/// exchange transcript is execution-local and carries no canonical source, so
+/// it adds no `data_use` entry. It travels to
 /// the claim, which compares it against the canonical current
 /// erasure-condition store in the same transaction as the task premise; a
 /// covered source yields [`TaskAgentTurnOutcome::NotSent`] with
@@ -297,7 +386,9 @@ pub enum TaskAgentTurnOutcome {
 /// the claim uses: the claim alone is the linearization point.
 ///
 /// Outcome mapping: `Produced` carries the output and consent flag without
-/// adopting either, and `NotSent` reasons pass through unchanged. A
+/// adopting either, `NotSent` reasons pass through unchanged, and the port's
+/// `Aborted` passes through unchanged (the port completed any claimed
+/// attempt's usage accounting before answering it). A
 /// `StaleTaskPremise` refusal is re-read against durable state and mapped to
 /// [`TaskAgentTurnOutcome::MissingDelegation`],
 /// [`TaskAgentTurnOutcome::MissingTask`],
@@ -402,10 +493,22 @@ pub async fn orchestrate_task_agent_turn(
         });
     };
     // The logical input is assembled in full before the single scrub: the
-    // scrubber sees purpose and every resolved instruction body once, and
-    // only its output may cross the port. A scrub failure fails closed with
-    // no provider I/O and never logs the raw input.
-    let raw_input = assemble_logical_input(purpose_text, &instruction_texts);
+    // scrubber sees purpose, every resolved instruction body, and the
+    // execution-local Action transcript once, and only its output may cross
+    // the port. A scrub failure fails closed with no provider I/O and never
+    // logs the raw input. The transcript is execution-local, so the oldest
+    // exchanges are dropped (with a fixed note) when the port's input budget
+    // would otherwise be outgrown; an exchange that cannot fit even alone is
+    // kept so the port refuses the over-limit input instead of the model
+    // answering from a silently shortened transcript.
+    let (kept_exchanges, omitted) = fit_exchanges(
+        purpose_text,
+        &instruction_texts,
+        &premise.exchanges,
+        inference.input_budget(),
+    );
+    let raw_input =
+        assemble_logical_input(purpose_text, &instruction_texts, kept_exchanges, omitted);
     let Ok(prompt) = scrubber.scrub(&raw_input).await else {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("credential scrub failed"),
@@ -434,25 +537,135 @@ pub async fn orchestrate_task_agent_turn(
             re_read_stale_premise(repository, premise.delegation).await?
         }
         TaskAgentInferenceOutcome::NotSent(reason) => TaskAgentTurnOutcome::NotSent(reason),
+        TaskAgentInferenceOutcome::Aborted => TaskAgentTurnOutcome::Aborted,
     })
 }
 
+/// The fixed response-format preamble every logical input starts with.
+const RESPONSE_FORMAT_PREAMBLE: &str = "[RESPONSE FORMAT]\n\
+     Respond with exactly one JSON object and no other text. One of:\n\
+     {\"tool\":\"list\",\"path\":\"<workspace-relative directory>\"}\n\
+     {\"tool\":\"read\",\"path\":\"<workspace-relative file>\"}\n\
+     {\"tool\":\"create\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+     {\"tool\":\"edit\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+     {\"final\":\"<final answer>\"}\n\
+     [PURPOSE]\n";
+
+const INSTRUCTION_MARKER: &str = "\n[INSTRUCTION]\n";
+const TOOL_CALL_MARKER: &str = "\n[TOOL CALL]\n";
+const TOOL_RESULT_MARKER: &str = "\n[TOOL RESULT]\n";
+
+/// The fixed-class marker that tells the model older exchanges were dropped.
+const OMISSION_NOTE: &str = "\n[NOTE] earlier tool exchanges were omitted to fit the input bound";
+
 /// Assembles the fixed logical-input framing for one turn.
 ///
-/// The purpose comes first, then each resolved instruction body in
-/// `TaskRecord.context` order. The boundary markers are identical for every
-/// turn (including a turn with no instructions), so the provider-visible
-/// purpose/instruction boundary is never body text and never varies by
-/// caller. Instructions are not sorted, deduplicated, or filtered: repeated
-/// adoption of the same source remains repeated input.
-fn assemble_logical_input(purpose: &str, instructions: &[String]) -> String {
-    let mut input = String::from("[PURPOSE]\n");
+/// The protocol preamble comes first (it tells the model how to answer and
+/// never varies), then the purpose, then each resolved instruction body in
+/// `TaskRecord.context` order, then the omission note when older exchanges
+/// were dropped, then the kept Action exchanges of this execution in order.
+/// The boundary markers are identical for every turn (including a turn with
+/// no instructions or exchanges), so the provider-visible boundaries are
+/// never body text and never vary by caller. Instructions are not sorted,
+/// deduplicated, or filtered: repeated adoption of the same source remains
+/// repeated input.
+fn assemble_logical_input(
+    purpose: &str,
+    instructions: &[String],
+    exchanges: &[TaskAgentActionExchange],
+    omitted: bool,
+) -> String {
+    let mut input = String::from(RESPONSE_FORMAT_PREAMBLE);
     input.push_str(purpose);
     for instruction in instructions {
-        input.push_str("\n[INSTRUCTION]\n");
+        input.push_str(INSTRUCTION_MARKER);
         input.push_str(instruction);
     }
+    if omitted {
+        input.push_str(OMISSION_NOTE);
+    }
+    for exchange in exchanges {
+        input.push_str(TOOL_CALL_MARKER);
+        input.push_str(exchange.request.text());
+        input.push_str(TOOL_RESULT_MARKER);
+        input.push_str(exchange.observation.text());
+    }
     input
+}
+
+/// Fits the execution-local transcript into the port's input budget.
+///
+/// Exchanges are kept newest-first (the model most needs what just happened)
+/// and whole oldest exchanges are dropped; dropping them loses no canonical
+/// source because the transcript is execution-local, and the assembled input
+/// carries [`OMISSION_NOTE`] so the omission is visible to the model. When the
+/// newest exchange alone cannot fit, the transcript is left unchanged and the
+/// port refuses the over-limit input: the model must never answer from a
+/// silently shortened observation. The omitted note's length is reserved up
+/// front, so adding it cannot push the input back over the budget.
+fn fit_exchanges<'a>(
+    purpose: &str,
+    instructions: &[String],
+    exchanges: &'a [TaskAgentActionExchange],
+    budget: usize,
+) -> (&'a [TaskAgentActionExchange], bool) {
+    let prefix = RESPONSE_FORMAT_PREAMBLE.chars().count()
+        + purpose.chars().count()
+        + instructions
+            .iter()
+            .map(|text| INSTRUCTION_MARKER.chars().count() + text.chars().count())
+            .sum::<usize>();
+    if prefix >= budget {
+        return (exchanges, false);
+    }
+    let reserved = budget - prefix;
+    let mut used = 0usize;
+    let mut start = exchanges.len();
+    for exchange in exchanges.iter().rev() {
+        let length = exchange_input_len(exchange);
+        if used + length > reserved {
+            break;
+        }
+        used += length;
+        start -= 1;
+    }
+    if start == 0 {
+        return (exchanges, false);
+    }
+    if start == exchanges.len() {
+        // Even the newest exchange alone does not fit: keep the transcript so
+        // the port refuses it instead of fabricating an answer.
+        return (exchanges, false);
+    }
+    // Older exchanges are dropped, so the omission note is included: refit
+    // with its length reserved so the note cannot push the input back over.
+    let Some(available) = reserved.checked_sub(OMISSION_NOTE.chars().count()) else {
+        return (exchanges, false);
+    };
+    let mut used = 0usize;
+    let mut start = exchanges.len();
+    for exchange in exchanges.iter().rev() {
+        let length = exchange_input_len(exchange);
+        if used + length > available {
+            break;
+        }
+        used += length;
+        start -= 1;
+    }
+    if start == exchanges.len() {
+        // The note cannot fit alongside the newest exchange; keep everything
+        // and let the port refuse rather than dropping the observation.
+        return (exchanges, false);
+    }
+    (&exchanges[start..], true)
+}
+
+/// The assembled length of one transcript exchange, in Unicode scalar values.
+fn exchange_input_len(exchange: &TaskAgentActionExchange) -> usize {
+    TOOL_CALL_MARKER.chars().count()
+        + exchange.request.text().chars().count()
+        + TOOL_RESULT_MARKER.chars().count()
+        + exchange.observation.text().chars().count()
 }
 
 /// Maps one stale claim refusal to the durable reason, re-reading only
