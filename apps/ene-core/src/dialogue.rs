@@ -6,9 +6,13 @@
 //! (`ene_inference::InferenceExecutor`) owns admission, the attempt claim,
 //! the provider call, adoption, and usage accounting. The Host maps the
 //! resulting domain outcome to frames and records the open round between the
-//! owner append and dispatch. `HostHandle::confirm_presentation` applies
-//! presentation observations, and `HostHandle::answer_history` restores the
-//! filtered timeline.
+//! owner append and dispatch. A companion reply carrying a
+//! `[task-control]` directive is interpreted by the companion and executed
+//! through [`crate::task_control::HostTaskControl`] against the existing Task
+//! owner boundaries before the reply is stored; the stored reply is the
+//! owner-derived text, never the directive. `HostHandle::confirm_presentation`
+//! applies presentation observations, and `HostHandle::answer_history`
+//! restores the filtered timeline.
 //!
 //! `Stage 2` wire reason vocabulary for
 //! [`NeedsRevalidation`](ene_api::v1::round::RoundIntakeOutcomeWire::NeedsRevalidation)
@@ -728,6 +732,7 @@ impl HostHandle {
                     tx: stream_tx.clone(),
                     seq: 0,
                 };
+                let task_control = crate::task_control::HostTaskControl::new(self, companion);
                 let outcome = {
                     // The open round is Host-owned transient state the
                     // companion must never read directly: hand finish_turn
@@ -746,6 +751,7 @@ impl HostHandle {
                         &executor,
                         &self.store,
                         &scrubber,
+                        &task_control,
                         &mut gate,
                         &is_current,
                     )

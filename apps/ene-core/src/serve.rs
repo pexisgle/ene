@@ -339,6 +339,14 @@ pub struct HostHandle {
     /// token never means the durable work or an external effect stopped. The
     /// durable attempt facts carry the one-shot start marker across restarts.
     pub(crate) task_executions: crate::task_run::TaskExecutionRegistry,
+    /// Transient conversation projection of the Task each dialogue is working
+    /// on, keyed by Companion.
+    ///
+    /// In-memory only and never authority: task control directives from the
+    /// conversation resolve their target through this projection, while every
+    /// operation still goes through the Task owner's durable compare. A
+    /// restart drops it (restart continuation is Stage 5).
+    pub(crate) conversation_tasks: crate::task_control::ConversationTaskProjection,
 }
 
 impl HostHandle {
@@ -403,6 +411,7 @@ impl HostHandle {
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: crate::task_run::TaskExecutionRegistry::default(),
+            conversation_tasks: crate::task_control::ConversationTaskProjection::default(),
         })
     }
 

@@ -172,10 +172,11 @@ impl TaskRepository for FakeTaskRepository {
             .clone())
     }
 
-    async fn list_unadopted_results(
+    async fn list_unadopted_results_after(
         &self,
+        _after: Option<ene_task::UnadoptedResultCursor>,
         _limit: u64,
-    ) -> Result<Vec<TaskResultId>, TaskTechnicalError> {
+    ) -> Result<Vec<ene_task::UnadoptedResultCursor>, TaskTechnicalError> {
         Ok(Vec::new())
     }
 

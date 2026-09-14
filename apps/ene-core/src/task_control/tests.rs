@@ -31,7 +31,7 @@ use ene_task::{
     WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
 };
 
-use super::{STARTUP_RECONCILIATION_LIMIT, TaskProposalHostOutcome};
+use super::{RECONCILIATION_PAGE_SIZE, TaskProposalHostOutcome};
 use crate::serve::HostHandle;
 use crate::test_support::memory_handle_with;
 
@@ -311,7 +311,7 @@ async fn late_certainty_settlement_re_evaluates_the_sealed_result() {
 }
 
 #[tokio::test]
-async fn recovery_reconciliation_is_bounded_and_idempotent() {
+async fn recovery_reconciliation_is_idempotent_and_visits_every_candidate() {
     let (handle, _dir) = open_handle("reconcile").await;
     let (first_task, first_delegation, first_assoc) =
         seed_execution(&handle, "/srv/workspace/ene").await;
@@ -349,14 +349,8 @@ async fn recovery_reconciliation_is_bounded_and_idempotent() {
     .await
     .unwrap();
 
-    // The bounded pass only re-evaluates candidates it read.
-    let bounded = handle.reconcile_sealed_results(1).await.unwrap();
-    assert_eq!(bounded.len(), 1);
-    let adopted = handle
-        .reconcile_sealed_results(STARTUP_RECONCILIATION_LIMIT)
-        .await
-        .unwrap();
-    assert_eq!(adopted.len(), 1);
+    let adopted = handle.reconcile_sealed_results().await.unwrap();
+    assert_eq!(adopted.len(), 2);
     assert_eq!(
         progress(&handle, first_task.task).await,
         TaskProgress::Completed
@@ -372,13 +366,148 @@ async fn recovery_reconciliation_is_bounded_and_idempotent() {
 
     // All candidates are adopted, so a further pass is empty and writes
     // nothing.
+    assert!(handle.reconcile_sealed_results().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn reconciliation_reaches_recoverable_results_behind_permanently_unadopted_ones() {
+    let (handle, dir) = open_handle("reconcile-starvation").await;
+    let mut permanently_unadopted = Vec::new();
+    let mut result_order = Vec::new();
+    for index in 0..RECONCILIATION_PAGE_SIZE + 1 {
+        let (task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
+        assert_eq!(
+            handle
+                .cancel_task(CancelTaskCommand { task: task.task })
+                .await
+                .unwrap(),
+            TaskCancelOutcome::CancelAccepted
+        );
+        let result = orchestrate_result_arrival(
+            &handle.store,
+            delegation,
+            TaskAgentOutput::new(format!("late body {index}")),
+        )
+        .await
+        .unwrap();
+        permanently_unadopted.push((task, result.result));
+        result_order.push(result.result);
+    }
+
+    // One recoverable result sorts strictly after the permanently-unadopted
+    // front.
+    let (recoverable_task, recoverable_delegation, recoverable_assoc) =
+        seed_execution(&handle, "/srv/workspace/ene").await;
+    let attempt = start_attempt(
+        &handle,
+        recoverable_delegation,
+        recoverable_task,
+        recoverable_assoc,
+        &canonical_target("recoverable.md"),
+        OperationKind::Create,
+    )
+    .await;
+    handle
+        .settle_action_certainty(
+            attempt,
+            ActionCertainty::ConfirmedSuccess,
+            EffectGrounds::ObservedAtTarget,
+        )
+        .await
+        .unwrap();
+    let recoverable = orchestrate_result_arrival(
+        &handle.store,
+        recoverable_delegation,
+        TaskAgentOutput::new(String::from("recoverable")),
+    )
+    .await
+    .unwrap();
+    result_order.push(recoverable.result);
+    rewrite_result_times(dir.path(), &result_order);
+
+    // Each storage read is bounded by the page size, and the recoverable
+    // candidate is not in the first page but is reached by the next one.
+    let first_page = handle
+        .store
+        .list_unadopted_results_after(None, RECONCILIATION_PAGE_SIZE)
+        .await
+        .unwrap();
+    assert_eq!(first_page.len() as u64, RECONCILIATION_PAGE_SIZE);
     assert!(
-        handle
-            .reconcile_sealed_results(16)
-            .await
-            .unwrap()
-            .is_empty()
+        first_page
+            .iter()
+            .all(|page| page.result != recoverable.result)
     );
+    let second_page = handle
+        .store
+        .list_unadopted_results_after(first_page.last().copied(), RECONCILIATION_PAGE_SIZE)
+        .await
+        .unwrap();
+    assert_eq!(second_page.len(), 2);
+
+    // One pass visits every candidate: the older permanently-unadopted
+    // results keep their semantics, and the later recoverable result
+    // completes.
+    let outcomes = handle.reconcile_sealed_results().await.unwrap();
+    assert_eq!(
+        outcomes.len() as u64,
+        RECONCILIATION_PAGE_SIZE + 2,
+        "one pass reaches the result behind the permanently-unadopted front"
+    );
+    assert_eq!(
+        progress(&handle, recoverable_task.task).await,
+        TaskProgress::Completed
+    );
+    for (task, result) in &permanently_unadopted {
+        assert_eq!(progress(&handle, task.task).await, TaskProgress::Cancelled);
+        let outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.result == *result)
+            .expect("every permanently-unadopted candidate is evaluated");
+        assert_eq!(
+            outcome.adoption,
+            Ok(TaskResultAcceptance::RecordedToOriginalOnly)
+        );
+    }
+    assert_eq!(
+        attempt_rows(dir.path()),
+        1,
+        "reconciliation never replays an Action"
+    );
+}
+
+/// Rewrites the reconciliation keys of the given results to a deterministic
+/// increasing order, so the starvation regression does not depend on clock
+/// resolution.
+///
+/// The nanoseconds are non-zero and not a multiple of 1000, exactly the
+/// representation `WallClockWithTz::to_rfc3339` produces for such values, so
+/// the stored text parses and re-renders byte-identically and the keyset
+/// cursor comparison is stable.
+fn rewrite_result_times(dir: &std::path::Path, results: &[ene_task::TaskResultId]) {
+    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
+    for (index, result) in results.iter().enumerate() {
+        let recorded_at = format!(
+            "2026-09-08T12:{:02}:{:02}.{:09}+09:00",
+            index / 60,
+            index % 60,
+            7 * index + 1
+        );
+        conn.execute(
+            "UPDATE task_result SET recorded_at = ?1 WHERE result_id = ?2",
+            rusqlite::params![
+                recorded_at,
+                result.as_raw().as_uuid().as_hyphenated().to_string()
+            ],
+        )
+        .expect("the test keyset rewrite must apply");
+    }
+}
+
+fn attempt_rows(dir: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
+    conn.query_row("SELECT COUNT(*) FROM action_attempt", (), |row| row.get(0))
+        .expect("the attempt count must read")
 }
 
 #[tokio::test]

@@ -317,6 +317,7 @@ dependencies = [
  "ene-presence",
  "ene-primitive",
  "ene-task",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

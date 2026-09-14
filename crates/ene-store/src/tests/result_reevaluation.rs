@@ -106,11 +106,14 @@ async fn a_result_sealed_before_a_stop_is_recovered_after_reopen() {
     };
 
     let reopened = Store::open(&path).await.expect("the reopen must succeed");
-    let candidates = reopened.list_unadopted_results(16).await.unwrap();
+    let candidates = reopened
+        .list_unadopted_results_after(None, 16)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates,
-        vec![result.result],
-        "the sealed, unadopted result is the bounded recovery candidate"
+        candidates[0].result, result.result,
+        "the sealed, unadopted result is the recovery candidate"
     );
     assert_eq!(
         reevaluate_result_adoption(&reopened, result.result)
@@ -304,7 +307,7 @@ async fn a_corrupted_result_delegation_correspondence_fails_closed() {
 }
 
 #[tokio::test]
-async fn the_unadopted_listing_excludes_adopted_results_and_respects_the_limit() {
+async fn the_unadopted_listing_excludes_adopted_results_and_pages_by_keyset() {
     let store = open_memory().await.unwrap();
     let (first_task, first_delegation, _) = seed_workspace_execution(&store).await;
     let adopted = finalize(&store, first_delegation, "first").await;
@@ -319,13 +322,39 @@ async fn the_unadopted_listing_excludes_adopted_results_and_respects_the_limit()
         TaskResultAcceptance::AdoptedAsCompletion(first_task)
     );
     let (_second_task, second_delegation, _) = seed_workspace_execution(&store).await;
-    let pending = finalize(&store, second_delegation, "second").await;
+    let second = finalize(&store, second_delegation, "second").await;
+    let (_third_task, third_delegation, _) = seed_workspace_execution(&store).await;
+    let third = finalize(&store, third_delegation, "third").await;
 
-    let listed = store.list_unadopted_results(8).await.unwrap();
-    assert_eq!(listed, vec![pending.result]);
+    let first_page = store.list_unadopted_results_after(None, 1).await.unwrap();
+    assert_eq!(first_page.len(), 1, "the limit bounds the rows read");
+    let second_page = store
+        .list_unadopted_results_after(Some(first_page[0]), 1)
+        .await
+        .unwrap();
+    assert_eq!(second_page.len(), 1);
+    assert_ne!(
+        first_page[0].result, second_page[0].result,
+        "the cursor moves strictly past the previous page"
+    );
+    let mut seen = vec![first_page[0].result, second_page[0].result];
+    seen.sort_by_key(|result| result.as_raw().as_uuid());
+    let mut expected = vec![second.result, third.result];
+    expected.sort_by_key(|result| result.as_raw().as_uuid());
     assert_eq!(
-        store.list_unadopted_results(0).await.unwrap(),
-        Vec::new(),
-        "the limit bounds the rows read"
+        seen, expected,
+        "the two unadopted results are exactly the paged set"
+    );
+    assert!(
+        store
+            .list_unadopted_results_after(Some(second_page[0]), 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the page after the last candidate is empty"
+    );
+    assert_eq!(
+        store.list_unadopted_results_after(None, 0).await.unwrap(),
+        Vec::new()
     );
 }

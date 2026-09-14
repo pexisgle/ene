@@ -10,6 +10,10 @@
 //!
 //! The production triggers live here because they compose two owners:
 //!
+//! - [`HostTaskControl`] is the composition root behind the companion's
+//!   [`DialogueTaskControlPort`]: a companion `[task-control]` directive from
+//!   an ordinary dialogue turn resolves its target through the transient
+//!   conversation projection and maps onto the same owner boundaries below.
 //! - [`HostHandle::propose_task`] receives the dialogue layer's accepted
 //!   proposal, lets the Task owner commit the creation unit, then issues the
 //!   first delegation through the existing AU3 orchestration. Starting the
@@ -25,19 +29,25 @@
 //! - [`HostHandle::task_report`] composes the progress / cancel / completion
 //!   report from canonical Task and Action facts.
 
+use std::collections::HashMap;
+use std::sync::Mutex as StdMutex;
+
 use ene_action::{
     ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, ActionTechnicalError,
     CertaintyUpdateOutcome, EffectGrounds,
 };
 use ene_companion::CompanionId;
 use ene_companion::dialogue::{
-    ProposeSteeringCommand, ProposeTaskCommand, TaskReport, TaskReportAttempt, TaskReportCertainty,
+    DialogueTaskCommand, DialogueTaskControlPort, DialogueTaskControlReply, ProposeSteeringCommand,
+    ProposeTaskCommand, TaskReport, TaskReportAttempt, TaskReportCertainty,
 };
+use ene_primitive::RawId;
 use ene_task::{
-    CreateDelegationCommand, DelegatedWorkspace, DelegationId, DelegationOutcome, DelegationScope,
-    TaskContextOrigin, TaskId, TaskProposalOutcome, TaskPurpose, TaskRef, TaskRepository as _,
-    TaskResultAcceptance, TaskResultId, TaskTechnicalError, WorkspaceNeedRef,
-    orchestrate_delegation, reevaluate_result_adoption,
+    CancelTaskCommand, CreateDelegationCommand, DelegatedWorkspace, DelegationId,
+    DelegationOutcome, DelegationScope, SteeringPremiseRef, TaskCancelOutcome, TaskContextOrigin,
+    TaskContextOriginKind, TaskId, TaskProgress, TaskProposalOutcome, TaskPurpose, TaskRef,
+    TaskRepository as _, TaskResultAcceptance, TaskResultId, TaskTechnicalError,
+    WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_delegation, reevaluate_result_adoption,
 };
 use thiserror::Error;
 
@@ -100,12 +110,247 @@ pub struct SealedResultReconciliation {
     pub adoption: Result<TaskResultAcceptance, TaskTechnicalError>,
 }
 
-/// Candidate results one startup reconciliation pass re-evaluates.
+/// Transient conversation projection of the Task one dialogue is working on.
 ///
-/// The sweep is bounded so startup work never grows with the whole result
-/// history; each pass makes progress from the oldest sealed-but-unadopted
-/// candidate, and the next pass (or an explicit call) continues.
-pub const STARTUP_RECONCILIATION_LIMIT: u64 = 64;
+/// In-memory only, keyed by Companion, and never durable authority: it lets a
+/// task-less companion directive resolve to the Task the conversation most
+/// recently created, while every operation still goes through the Task
+/// owner's durable compare. The projection is dropped on restart, so a
+/// post-restart directive answers "no active task" instead of guessing;
+/// restart continuation is Stage 5.
+#[derive(Default)]
+pub(crate) struct ConversationTaskProjection {
+    current: StdMutex<HashMap<CompanionId, ConversationTask>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConversationTask {
+    task: TaskId,
+    /// `None` when the creation committed but the delegation was refused; the
+    /// report then shows no execution-local result.
+    delegation: Option<DelegationId>,
+}
+
+impl ConversationTaskProjection {
+    fn record(&self, companion: CompanionId, task: TaskId, delegation: Option<DelegationId>) {
+        crate::lock_unpoison(&self.current)
+            .insert(companion, ConversationTask { task, delegation });
+    }
+
+    fn current(&self, companion: CompanionId) -> Option<ConversationTask> {
+        crate::lock_unpoison(&self.current).get(&companion).copied()
+    }
+}
+
+/// Host composition root implementing the companion's Task control port.
+///
+/// The companion interprets its provider output into a
+/// [`DialogueTaskCommand`]; this adapter maps that command onto the existing
+/// Task owner boundaries ([`HostHandle::propose_task`],
+/// [`HostHandle::propose_steering`], [`HostHandle::cancel_task`],
+/// [`HostHandle::task_report`]) and renders the typed outcome. It never
+/// writes Task state itself and never decides completion, cancellation
+/// meaning, or certainty.
+pub(crate) struct HostTaskControl<'a> {
+    handle: &'a HostHandle,
+    companion: CompanionId,
+}
+
+impl<'a> HostTaskControl<'a> {
+    pub(crate) fn new(handle: &'a HostHandle, companion: CompanionId) -> Self {
+        Self { handle, companion }
+    }
+
+    fn no_active_task() -> DialogueTaskControlReply {
+        DialogueTaskControlReply::Answered(String::from(
+            "There is no active task in this conversation.",
+        ))
+    }
+
+    async fn propose(
+        &self,
+        purpose: String,
+        workspace: Option<String>,
+        save_target: Option<String>,
+        origin: RawId,
+    ) -> DialogueTaskControlReply {
+        let workspace_need = workspace.map(|path| WorkspaceNeedRef {
+            folder: WorkspaceFolderRef { path },
+            save_target: save_target.map(|path| WorkspaceFolderRef { path }),
+        });
+        match self
+            .handle
+            .propose_task(
+                self.companion,
+                TaskPurpose { text: purpose },
+                TaskContextOrigin {
+                    kind: TaskContextOriginKind::OwnerConversation,
+                    source: origin,
+                },
+                workspace_need,
+            )
+            .await
+        {
+            Err(_) => DialogueTaskControlReply::Unavailable,
+            Ok(TaskProposalHostOutcome::AcceptedAsTask { task, delegation }) => {
+                self.handle
+                    .conversation_tasks
+                    .record(self.companion, task.task, Some(delegation));
+                DialogueTaskControlReply::Answered(String::from(
+                    "Task accepted (status: in-progress). I will work on it.",
+                ))
+            }
+            Ok(TaskProposalHostOutcome::DelegationRefused { task, .. }) => {
+                self.handle
+                    .conversation_tasks
+                    .record(self.companion, task.task, None);
+                DialogueTaskControlReply::Answered(String::from(
+                    "Task accepted, but no execution could be delegated; it stays without an execution.",
+                ))
+            }
+            Ok(TaskProposalHostOutcome::Proposal(outcome)) => {
+                DialogueTaskControlReply::Answered(task_outcome_text(&outcome))
+            }
+        }
+    }
+
+    async fn report(&self) -> DialogueTaskControlReply {
+        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+            return Self::no_active_task();
+        };
+        match self
+            .handle
+            .task_report(current.task, current.delegation)
+            .await
+        {
+            Err(_) => DialogueTaskControlReply::Unavailable,
+            Ok(None) => Self::no_active_task(),
+            Ok(Some(report)) => DialogueTaskControlReply::Answered(report.render()),
+        }
+    }
+
+    async fn steer(
+        &self,
+        _instruction: String,
+        purpose: Option<String>,
+        origin: RawId,
+    ) -> DialogueTaskControlReply {
+        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+            return Self::no_active_task();
+        };
+        let record = match self.handle.store.load_task(current.task).await {
+            Err(_) => return DialogueTaskControlReply::Unavailable,
+            Ok(None) => return Self::no_active_task(),
+            Ok(Some(record)) => record,
+        };
+        if record.task.progress.is_terminal() {
+            return DialogueTaskControlReply::Answered(format!(
+                "That task is already {}.",
+                progress_label(record.task.progress)
+            ));
+        }
+        // The adopted instruction body is canonical in the committed Owner
+        // message record this turn appended; `origin` references it and the
+        // directive's own summary text is never copied into Task state.
+        let command = ProposeSteeringCommand {
+            premise: SteeringPremiseRef {
+                expected: record.task.reference,
+                purpose: record.task.purpose,
+            },
+            new_purpose: purpose.map(|text| TaskPurpose { text }),
+            instruction_source: origin,
+        };
+        match self.handle.propose_steering(command).await {
+            Err(_) => DialogueTaskControlReply::Unavailable,
+            Ok(TaskProposalOutcome::AcceptedAsSteering(reference)) => {
+                DialogueTaskControlReply::Answered(format!(
+                    "Instruction recorded (revision {}).",
+                    reference.revision.as_u64()
+                ))
+            }
+            Ok(outcome) => DialogueTaskControlReply::Answered(task_outcome_text(&outcome)),
+        }
+    }
+
+    async fn cancel(&self) -> DialogueTaskControlReply {
+        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+            return Self::no_active_task();
+        };
+        match self
+            .handle
+            .cancel_task(CancelTaskCommand { task: current.task })
+            .await
+        {
+            Err(_) => DialogueTaskControlReply::Unavailable,
+            Ok(TaskCancelOutcome::CancelAccepted) => {
+                DialogueTaskControlReply::Answered(String::from(
+                    "Cancel accepted. Running work stops best-effort; already-started effects keep their recorded certainty.",
+                ))
+            }
+            Ok(TaskCancelOutcome::AlreadyCancelled) => {
+                DialogueTaskControlReply::Answered(String::from("The task was already cancelled."))
+            }
+            Ok(TaskCancelOutcome::TaskTerminal { progress, .. }) => {
+                DialogueTaskControlReply::Answered(format!(
+                    "That task is already {}.",
+                    progress_label(progress)
+                ))
+            }
+            Ok(TaskCancelOutcome::MissingTask { .. }) => Self::no_active_task(),
+        }
+    }
+}
+
+impl DialogueTaskControlPort for HostTaskControl<'_> {
+    async fn apply(&self, command: DialogueTaskCommand, origin: RawId) -> DialogueTaskControlReply {
+        match command {
+            DialogueTaskCommand::ProposeTask {
+                purpose,
+                workspace,
+                save_target,
+            } => self.propose(purpose, workspace, save_target, origin).await,
+            DialogueTaskCommand::Report => self.report().await,
+            DialogueTaskCommand::Steer {
+                instruction,
+                purpose,
+            } => self.steer(instruction, purpose, origin).await,
+            DialogueTaskCommand::Cancel => self.cancel().await,
+        }
+    }
+}
+
+fn progress_label(progress: TaskProgress) -> String {
+    progress.as_str().replace('_', "-")
+}
+
+fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
+    match outcome {
+        TaskProposalOutcome::AcceptedAsTask(_) | TaskProposalOutcome::AcceptedAsSteering(_) => {
+            String::from("The instruction was applied.")
+        }
+        TaskProposalOutcome::StalePremise { current } => format!(
+            "The task moved on; nothing was applied (current revision {}).",
+            current.revision.as_u64()
+        ),
+        TaskProposalOutcome::TaskTerminal { progress, .. } => {
+            format!("That task is already {}.", progress_label(*progress))
+        }
+        TaskProposalOutcome::MissingTask { .. } => {
+            String::from("There is no active task in this conversation.")
+        }
+        TaskProposalOutcome::RevisionExhausted { .. } => {
+            String::from("The task cannot take another change.")
+        }
+    }
+}
+
+/// Candidates one reconciliation page reads.
+///
+/// Each storage read is bounded by this page size; a pass keeps advancing the
+/// `(recorded_at, result_id)` keyset cursor until the candidate set is
+/// exhausted, so a permanently unadopted front cannot starve later
+/// candidates.
+pub const RECONCILIATION_PAGE_SIZE: u64 = 64;
 
 impl HostHandle {
     /// Proposes one Task from the Owner conversation and creates its first
@@ -252,34 +497,55 @@ impl HostHandle {
         ))
     }
 
-    /// Re-evaluates a bounded prefix of sealed-but-unadopted results.
+    /// Re-evaluates the whole sealed-but-unadopted candidate set, one bounded
+    /// page at a time.
     ///
     /// This is the explicit recovery producer for results that were durably
     /// recorded (AU15a) but whose adoption commit (AU15b) did not run before
     /// a stop, and for withheld results whose blocking facts settled while
     /// nothing was listening. `adopted_revision IS NULL` is the whole durable
-    /// candidate truth; no pending flag or retry queue exists. The listing is
-    /// bounded and deterministically ordered, and each candidate goes through
-    /// the same [`ene_task::reevaluate_result_adoption`] path, so a
+    /// candidate truth; no pending flag or retry queue exists. The walk uses
+    /// keyset pages over `(recorded_at, result_id)`, so every candidate is
+    /// visited once per pass even when older candidates stay permanently
+    /// unadopted (cancelled / moved revision / still-withheld); a candidate
+    /// already passed is never re-read from the front of the set. Each page
+    /// read is bounded by [`RECONCILIATION_PAGE_SIZE`]. Each candidate goes
+    /// through the same [`ene_task::reevaluate_result_adoption`] path, so a
     /// cancelled, moved-revision, or still-blocked result keeps its existing
     /// semantics. An execution is never resumed and no provider call or
     /// filesystem Action is replayed.
     ///
     /// # Errors
     ///
-    /// [`TaskTechnicalError`] when the candidate listing itself cannot be
-    /// read; per-candidate failures stay in
+    /// [`TaskTechnicalError`] when a candidate listing cannot be read;
+    /// per-candidate failures stay in
     /// [`SealedResultReconciliation::adoption`] so one corrupt result cannot
     /// hide the others.
     pub async fn reconcile_sealed_results(
         &self,
-        limit: u64,
     ) -> Result<Vec<SealedResultReconciliation>, TaskTechnicalError> {
-        let candidates = self.store.list_unadopted_results(limit).await?;
-        let mut outcomes = Vec::with_capacity(candidates.len());
-        for result in candidates {
-            let adoption = reevaluate_result_adoption(&self.store, result).await;
-            outcomes.push(SealedResultReconciliation { result, adoption });
+        let mut outcomes = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = self
+                .store
+                .list_unadopted_results_after(cursor, RECONCILIATION_PAGE_SIZE)
+                .await?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            cursor = Some(*last);
+            let full_page = page.len() as u64 == RECONCILIATION_PAGE_SIZE;
+            for candidate in page {
+                let adoption = reevaluate_result_adoption(&self.store, candidate.result).await;
+                outcomes.push(SealedResultReconciliation {
+                    result: candidate.result,
+                    adoption,
+                });
+            }
+            if !full_page {
+                break;
+            }
         }
         Ok(outcomes)
     }

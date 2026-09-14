@@ -48,6 +48,19 @@ impl TaskResultId {
     }
 }
 
+/// One keyset position in the sealed-but-unadopted candidate set.
+///
+/// The pair is a total order over stored `task_result` rows (the stored
+/// `recorded_at` text and the result identity) used only to page a bounded
+/// reconciliation sweep. It borrows no chronological authority: the wall
+/// clock can move backwards and offsets can differ, so the order is a
+/// storage-total order for traversal, never currentness evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnadoptedResultCursor {
+    pub recorded_at: WallClockWithTz,
+    pub result: TaskResultId,
+}
+
 /// The durable premises of one final result arrival (AU15a).
 ///
 /// The relied Task revision is the delegation row's, never repeated here. The

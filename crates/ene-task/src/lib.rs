@@ -53,7 +53,7 @@ pub use orchestrate::{
 pub use repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
 pub use result::{
     TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord,
+    TaskResultRecord, UnadoptedResultCursor,
 };
 pub use task::{
     AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId,

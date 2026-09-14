@@ -41,8 +41,8 @@ use ene_task::{
     TaskContextOriginKind, TaskCreationPremise, TaskFailureOutcome, TaskFailurePremise, TaskId,
     TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository,
     TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision,
-    TaskRevisionRecord, TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociation,
-    WorkspaceFolderRef,
+    TaskRevisionRecord, TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId,
+    WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -134,9 +134,12 @@ const SQL_SELECT_RESULT_CORRESPONDENCE: &str =
 
 /// The bounded sealed-but-unadopted candidate listing: `adopted_revision IS
 /// NULL` is the whole durable truth of a result that may still need
-/// re-evaluation. Ordered deterministically so a bounded sweep always makes
-/// progress from the same stable prefix.
-const SQL_LIST_UNADOPTED_RESULTS: &str = "SELECT result_id FROM task_result WHERE adopted_revision IS NULL ORDER BY recorded_at, result_id LIMIT ?1";
+/// re-evaluation. The cursor variant continues strictly after
+/// `(recorded_at, result_id)`, so a reconciliation sweep walks the whole
+/// candidate set page by page without re-reading the prefix.
+const SQL_LIST_UNADOPTED_FIRST: &str = "SELECT result_id, recorded_at FROM task_result WHERE adopted_revision IS NULL ORDER BY recorded_at, result_id LIMIT ?1";
+
+const SQL_LIST_UNADOPTED_AFTER: &str = "SELECT result_id, recorded_at FROM task_result WHERE adopted_revision IS NULL AND (recorded_at > ?1 OR (recorded_at = ?1 AND result_id > ?2)) ORDER BY recorded_at, result_id LIMIT ?3";
 
 const SQL_SELECT_RESULT_ATTEMPTS: &str =
     "SELECT attempt_id FROM task_result_attempt WHERE result_id = ?1 ORDER BY attempt_id";
@@ -1734,26 +1737,60 @@ fn load_result_adoption_claim_sync(
     }))
 }
 
-/// Lists the bounded sealed-but-unadopted candidate prefix.
-fn list_unadopted_results_sync(
+/// Lists one bounded page of sealed-but-unadopted candidates.
+///
+/// The cursor is compared against the stored `(recorded_at, result_id)` tuple
+/// in SQL, so each read is bounded by `limit` rows and consecutive pages
+/// partition the candidate set without overlap or gaps. The cursor text is
+/// the writer's own `to_rfc3339` rendering round-tripped through the domain
+/// clock, which is byte-identical for the values the arrival writes. A
+/// permanently unadopted row (cancelled / moved revision / still-withheld)
+/// stays behind the cursor for the rest of the pass instead of pinning the
+/// front of every page.
+fn list_unadopted_results_after_sync(
     conn: &Mutex<Connection>,
+    after: Option<UnadoptedResultCursor>,
     limit: u64,
-) -> Result<Vec<TaskResultId>, TaskTechnicalError> {
+) -> Result<Vec<UnadoptedResultCursor>, TaskTechnicalError> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let guard = lock_shared(conn);
-    let mut statement = guard
-        .prepare(SQL_LIST_UNADOPTED_RESULTS)
-        .map_err(task_unavailable)?;
-    let rows = statement
-        .query_map(params![limit], |row| row.get::<_, String>(0))
-        .map_err(task_unavailable)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(task_unavailable)?;
+    let rows: Vec<(String, String)> = match after {
+        None => {
+            let mut statement = guard
+                .prepare(SQL_LIST_UNADOPTED_FIRST)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![limit], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+        Some(cursor) => {
+            let mut statement = guard
+                .prepare(SQL_LIST_UNADOPTED_AFTER)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(
+                    params![
+                        cursor.recorded_at.to_rfc3339(),
+                        encode_id(cursor.result.as_raw()),
+                        limit
+                    ],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+    };
     rows.into_iter()
-        .map(|text| {
-            decode_id(&text)
-                .map(TaskResultId::from_raw)
-                .map_err(task_unavailable)
+        .map(|(result, recorded_at)| {
+            Ok(UnadoptedResultCursor {
+                recorded_at: decode_clock(&recorded_at)?,
+                result: TaskResultId::from_raw(decode_id(&result).map_err(task_unavailable)?),
+            })
         })
         .collect()
 }
@@ -2268,12 +2305,13 @@ impl TaskRepository for Store {
         run_blocking(move || load_result_adoption_claim_sync(&conn, result)).await
     }
 
-    async fn list_unadopted_results(
+    async fn list_unadopted_results_after(
         &self,
+        after: Option<UnadoptedResultCursor>,
         limit: u64,
-    ) -> Result<Vec<TaskResultId>, TaskTechnicalError> {
+    ) -> Result<Vec<UnadoptedResultCursor>, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || list_unadopted_results_sync(&conn, limit)).await
+        run_blocking(move || list_unadopted_results_after_sync(&conn, after, limit)).await
     }
 
     async fn load_task_action_attempts(

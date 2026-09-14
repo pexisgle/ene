@@ -10,7 +10,7 @@ use crate::delegation::{
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
 use crate::result::{
     TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord,
+    TaskResultRecord, UnadoptedResultCursor,
 };
 use crate::task::{
     TaskCommitPremise, TaskCreationPremise, TaskId, TaskProgress, TaskRecord, TaskRef,
@@ -284,19 +284,26 @@ pub trait TaskRepository: Send + Sync {
         result: TaskResultId,
     ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError>;
 
-    /// Lists sealed results that have not adopted yet, oldest first.
+    /// Lists sealed results that have not adopted yet, starting strictly
+    /// after `after`, in `(recorded_at, result_id)` order.
     ///
     /// `adopted_revision IS NULL` on an existing `task_result` row is the
     /// whole durable truth of "this result may still need re-evaluation"; no
-    /// pending flag, queue state, or retry row exists. `limit` bounds the
-    /// rows read by the storage query, not only the returned vector. The
-    /// listing judges nothing: each candidate still goes through
-    /// [`crate::reevaluate_result_adoption`], which re-evaluates against
-    /// current facts and may legitimately stay withheld.
-    async fn list_unadopted_results(
+    /// pending flag, queue state, or retry row exists. The cursor encodes the
+    /// last candidate a previous page returned, so a bounded reconciliation
+    /// can walk the whole candidate set without ever re-reading the prefix
+    /// and without an unbounded `SELECT` or full in-memory materialization.
+    /// The order is a storage-total order for traversal only, never
+    /// currentness evidence. `limit` bounds the rows read by the storage
+    /// query, not only the returned vector. The listing judges nothing: each
+    /// candidate still goes through [`crate::reevaluate_result_adoption`],
+    /// which re-evaluates against current facts and may legitimately stay
+    /// withheld.
+    async fn list_unadopted_results_after(
         &self,
+        after: Option<UnadoptedResultCursor>,
         limit: u64,
-    ) -> Result<Vec<TaskResultId>, TaskTechnicalError>;
+    ) -> Result<Vec<UnadoptedResultCursor>, TaskTechnicalError>;
 
     /// Lists the Action attempt identities under one Task, in attempt-id
     /// order, for the report composition.
