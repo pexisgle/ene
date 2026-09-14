@@ -10,7 +10,7 @@
 //!
 //! The production triggers live here because they compose two owners:
 //!
-//! - [`HostTaskControl`] is the composition root behind the companion's
+//! - `HostTaskControl` is the composition root behind the companion's
 //!   [`DialogueTaskControlPort`]: a companion `[task-control]` directive from
 //!   an ordinary dialogue turn resolves its target through the transient
 //!   conversation projection and maps onto the same owner boundaries below.

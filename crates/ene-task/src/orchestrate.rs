@@ -356,7 +356,7 @@ pub async fn orchestrate_delegation(
 /// This is the Task-owned finalization boundary the caller (in this stage the
 /// Host or a test; later the Task Agent tool loop) invokes when it decides
 /// that one delegated turn produced the **final** result. One
-/// [`TaskAgentTurnOutcome::Produced`] is only a provider output and may still
+/// [`crate::TaskAgentTurnOutcome::Produced`] is only a provider output and may still
 /// be an Action request or intermediate text: this function is never called
 /// from that outcome automatically, and no provider output parsing or
 /// automatic final-output detection exists here.

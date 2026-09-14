@@ -376,7 +376,7 @@ impl HostHandle {
     ///
     /// This is the state open, not the serving boundary: it performs no
     /// credential sweep and changes no durable state. Callers that serve
-    /// requests run [`HostHandle::sweep_registered_values`] first; read-only
+    /// requests run `sweep_registered_values` first; read-only
     /// and local management paths (pending device lists, device approval)
     /// open without touching registered credential content or the
     /// credential-set revision.
