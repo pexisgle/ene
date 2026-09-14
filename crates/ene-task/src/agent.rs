@@ -169,7 +169,10 @@ pub enum TaskAgentNotSent {
     /// The live-authorization allowlist refused the use.
     NotInAllowlist,
     /// The stored consent moved away from the premise the use was admitted
-    /// under before the attempt claim or before adoption.
+    /// under before the attempt claim. A consent that moves during the
+    /// provider wait is not this refusal: the output is then produced with
+    /// `adoption_consent_current = false` and classified by the caller as a
+    /// sent-but-discarded output, never as this pre-send class.
     ConsentStale,
     /// The input exceeds the inference input bound.
     OverLimit,

@@ -535,7 +535,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let learning_ticket = InferenceTicketId(RawId::new());
     {
         let store = Store::open(&path).await.expect("a fresh store must open");
-        assert_eq!(read_schema_version(&path), Some(22));
+        assert_eq!(read_schema_version(&path), Some(23));
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
             Err(poisoned) => poisoned.into_inner(),
@@ -553,7 +553,8 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     {
         let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
         conn.execute_batch(
-            "ALTER TABLE inference_attempt DROP COLUMN consumer;
+            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
+             ALTER TABLE inference_attempt DROP COLUMN consumer;
              ALTER TABLE inference_attempt DROP COLUMN purpose;
              ALTER TABLE inference_attempt DROP COLUMN credential_set_rev;
              ALTER TABLE inference_attempt DROP COLUMN delegation_id;
@@ -572,7 +573,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let reopened = Store::open(&path)
         .await
         .expect("the V18 migration must succeed");
-    assert_eq!(read_schema_version(&path), Some(22));
+    assert_eq!(read_schema_version(&path), Some(23));
     let columns = table_columns(&path, "inference_attempt");
     for column in [
         "consumer",
@@ -625,7 +626,8 @@ async fn inference_attempt_migration_fails_closed_on_an_unknown_capability() {
     {
         let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
         conn.execute_batch(
-            "ALTER TABLE inference_attempt DROP COLUMN consumer;
+            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
+             ALTER TABLE inference_attempt DROP COLUMN consumer;
              ALTER TABLE inference_attempt DROP COLUMN purpose;
              ALTER TABLE inference_attempt DROP COLUMN credential_set_rev;
              ALTER TABLE inference_attempt DROP COLUMN delegation_id;
@@ -682,5 +684,52 @@ async fn delegation_start_marker_reads_the_claimed_delegation_only() {
             .await
             .unwrap(),
         "another delegation's attempt is not this delegation's start"
+    );
+}
+
+#[tokio::test]
+async fn inference_attempt_delegation_index_is_created_for_fresh_and_upgraded_databases() {
+    use rusqlite::OptionalExtension as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("delegation-index.db");
+    let store = Store::open(&path).await.expect("a fresh store must open");
+    assert_eq!(read_schema_version(&path), Some(23));
+    drop(store);
+    let index = |path: &std::path::Path| -> Option<String> {
+        let conn = rusqlite::Connection::open(path).expect("the store file must open");
+        conn.query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inference_attempt_delegation'",
+            (),
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("the index probe must run")
+    };
+    assert_eq!(
+        index(&path).as_deref(),
+        Some("idx_inference_attempt_delegation"),
+        "a fresh schema carries the probe index"
+    );
+
+    // An upgraded V22 database gains the same index: rewind the version and
+    // drop the index, then reopen through the real migration path.
+    {
+        let conn = rusqlite::Connection::open(&path).expect("the store file must open");
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
+             PRAGMA user_version = 22;",
+        )
+        .expect("the V22 rewind must apply");
+    }
+    let reopened = Store::open(&path)
+        .await
+        .expect("the V22 database must upgrade");
+    drop(reopened);
+    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(
+        index(&path).as_deref(),
+        Some("idx_inference_attempt_delegation"),
+        "the V23 migration adds the probe index to an upgraded database"
     );
 }

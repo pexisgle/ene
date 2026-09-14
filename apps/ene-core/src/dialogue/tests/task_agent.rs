@@ -935,3 +935,113 @@ async fn task_agent_turn_scrubs_a_registered_secret_in_an_instruction_body() {
         "the single scrub over the whole input redacts the secret in place"
     );
 }
+
+/// Transport that advances the dialogue consent revision while the provider
+/// call is in flight, so the dispatch's post-await adoption re-check sees a
+/// moved premise. The directory is set after the Host is opened because the
+/// setup path runs before the task turn.
+#[derive(Default)]
+struct ConsentMovingTransport {
+    data_dir: std::sync::Mutex<Option<std::path::PathBuf>>,
+}
+
+impl ene_inference::ProviderTransport for ConsentMovingTransport {
+    fn complete(
+        &self,
+        _req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let data_dir = self
+            .data_dir
+            .lock()
+            .expect("consent transport directory lock")
+            .clone();
+        Box::pin(async move {
+            if let Some(data_dir) = data_dir {
+                let conn = rusqlite::Connection::open(data_dir.join("app.db"))
+                    .expect("the store file must open for the consent move");
+                conn.execute("UPDATE consent_record SET rev = rev + 1", [])
+                    .expect("the consent revision move must apply");
+            }
+            Ok(ene_inference::ProviderResponse {
+                text: String::from("agent report"),
+                usage: None,
+            })
+        })
+    }
+}
+
+fn durable_usage_count(data_dir: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(data_dir.join("app.db"))
+        .expect("the store file must open for the probe");
+    conn.query_row("SELECT COUNT(*) FROM usage_fact", (), |row| row.get(0))
+        .expect("the usage count must read")
+}
+
+#[tokio::test]
+async fn a_consent_move_during_the_provider_wait_is_reported_with_its_sent_fact() {
+    let live = live_input("dlg-task-agent-consent-lapsed");
+    let transport = ConsentMovingTransport::default();
+    let (handle, dir) = round_test_handle("dlg-task-agent-consent-lapsed", &live, &transport)
+        .await
+        .expect("setup must complete");
+    *transport
+        .data_dir
+        .lock()
+        .expect("consent transport directory lock") = Some(dir.path().to_path_buf());
+    let (_created, delegation, _purpose_source) = seed_task_and_delegation(&handle).await;
+
+    let executor = HostInference {
+        store: &handle.store,
+        cred_store: &handle.cred_store,
+        tracker: &handle.tracker,
+        transport: &transport,
+    };
+    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let scrubber = CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let instructions = HistoryInstructionSource::new(&handle.store);
+    let outcome = orchestrate_task_agent_turn(
+        &handle.store,
+        &instructions,
+        &adapter,
+        &scrubber,
+        TaskAgentTurnPremise {
+            delegation,
+            exchanges: Vec::new(),
+        },
+    )
+    .await
+    .expect("the turn must answer");
+    let TaskAgentTurnOutcome::Produced(produced) = outcome else {
+        panic!("expected Produced, got {outcome:?}");
+    };
+    assert!(
+        !produced.adoption_consent_current,
+        "a consent that moved during the wait is reported, not hidden as not-sent"
+    );
+    assert_eq!(produced.output.text(), "agent report");
+    // The send already happened: the claimed attempt and its usage fact are
+    // durable even though the output can no longer be adopted.
+    assert_eq!(
+        durable_attempt_count(dir.path()),
+        1,
+        "the claimed attempt survives the discarded output"
+    );
+    assert_eq!(
+        durable_usage_count(dir.path()),
+        1,
+        "the answered call keeps its usage accounting"
+    );
+}

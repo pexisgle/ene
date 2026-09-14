@@ -91,8 +91,11 @@ pub enum NotSentReason {
     ///
     /// Produced by admission, never by dispatch.
     SetupIncomplete,
-    /// The stored consent moved away from the premise the use was admitted
-    /// under, before the attempt claim or before adoption.
+    /// The stored consent or credential-set premise moved away from the one
+    /// the use was admitted under before the attempt claim; a duplicate claim
+    /// of the same ticket also answers this. A consent that moves during the
+    /// provider wait is not this refusal: the response is then
+    /// [`InferenceDispatchOutcome::Completed`] with `adopted: false`.
     ConsentStale,
     /// The live-authorization allowlist refused the use.
     ///
@@ -364,8 +367,9 @@ pub enum AttemptBeginOutcome {
     /// issue provider I/O outside any lock. A later consent move cannot
     /// un-start it; result adoption still decides separately.
     Started,
-    /// The expected consent no longer holds (or was never recorded): the
-    /// caller must NOT issue provider I/O for this ticket.
+    /// The expected consent or credential-set premise no longer holds (or was
+    /// never recorded), or this ticket was already claimed: the caller must
+    /// NOT issue provider I/O for this ticket.
     Stale,
     /// The Task Agent delegation/task premise no longer holds: the caller
     /// must NOT issue provider I/O for this ticket. Distinct from
@@ -657,7 +661,9 @@ pub enum InferenceDispatchOutcome {
         /// Whether the post-await consent check still admitted the reply.
         adopted: bool,
     },
-    /// Definitely never sent; no usage fact was recorded.
+    /// No provider I/O was performed by this dispatch and no usage fact was
+    /// recorded. A duplicate dispatch of an already-claimed ticket answers
+    /// this without sending again.
     NotSent(NotSentReason),
 }
 
