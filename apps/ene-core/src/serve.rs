@@ -532,9 +532,8 @@ impl HostHandle {
             &instructions,
             &inference,
             &scrubber,
-            delegation,
             crate::task_run::DEFAULT_MAX_TURNS,
-            &registration.cancellation,
+            &registration,
         )
         .await
     }

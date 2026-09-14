@@ -334,10 +334,10 @@ pub enum TaskAgentTurnOutcome {
     },
     /// The use was refused before any provider I/O.
     NotSent(TaskAgentNotSent),
-    /// The caller's local cooperative stop ended the turn before it produced
-    /// anything. A turn whose attempt was already claimed completed its
-    /// usage accounting; this outcome claims nothing about Task progress or
-    /// external effects.
+    /// The caller's local cooperative stop ended the turn without returning
+    /// any produced output; provider I/O may already have started, and a
+    /// claimed attempt's usage accounting is complete before this answer.
+    /// This outcome claims nothing about Task progress or external effects.
     Aborted,
 }
 

@@ -20,7 +20,6 @@ use std::sync::Mutex;
 
 use ene_action::{ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, OperationKind};
 use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
-use ene_inference::DispatchAbort;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 use ene_task::{
@@ -126,6 +125,7 @@ impl ScriptedInference {
         Self {
             replies: Mutex::new(VecDeque::from(vec![Ok(TaskAgentInferenceOutcome::Aborted)])),
             premises: Mutex::new(Vec::new()),
+            budget: ene_inference::MAX_INPUT_CHARS,
         }
     }
 
@@ -228,14 +228,17 @@ async fn run(
     scrubber: &MarkerScrubber,
     max_turns: u32,
 ) -> Result<TaskAgentRunOutcome, super::TaskAgentRunError> {
+    let registry = TaskExecutionRegistry::default();
+    let registration = registry
+        .register(fixture.delegation, fixture.task.task)
+        .expect("the fixture delegation is not running");
     run_task_agent_execution(
         &fixture.store,
         &NoInstructions,
         inference,
         scrubber,
-        fixture.delegation,
         max_turns,
-        &DispatchAbort::default(),
+        &registration,
     )
     .await
 }
@@ -683,17 +686,19 @@ async fn cancellation_before_the_loop_stops_without_provider_io() {
     let fixture = fixture().await;
     let inference = ScriptedInference::new(vec![r#"{"final":"never sent"}"#]);
     let scrubber = MarkerScrubber::default();
-    let cancellation = DispatchAbort::default();
-    cancellation.abort();
+    let registry = TaskExecutionRegistry::default();
+    let registration = registry
+        .register(fixture.delegation, fixture.task.task)
+        .expect("the fixture delegation is not running");
+    registration.cancellation.abort();
 
     let outcome = run_task_agent_execution(
         &fixture.store,
         &NoInstructions,
         &inference,
         &scrubber,
-        fixture.delegation,
         DEFAULT_MAX_TURNS,
-        &cancellation,
+        &registration,
     )
     .await
     .expect("the local stop is a domain outcome");
@@ -736,6 +741,41 @@ fn a_second_registration_of_one_delegation_is_refused_atomically() {
     assert!(
         registry.register(delegation, task).is_some(),
         "the delegation slot is reusable once its registration is dropped"
+    );
+}
+
+#[test]
+fn concurrent_registrations_admit_exactly_one() {
+    let task = ene_task::TaskId::generate();
+    let delegation = ene_task::DelegationId::generate();
+    let registry = TaskExecutionRegistry::default();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let after_attempt = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let admitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let start = std::sync::Arc::clone(&start);
+            let after_attempt = std::sync::Arc::clone(&after_attempt);
+            let admitted = std::sync::Arc::clone(&admitted);
+            let registry = &registry;
+            scope.spawn(move || {
+                start.wait();
+                let registration = registry.register(delegation, task);
+                if registration.is_some() {
+                    admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                // The winner holds its slot until both threads have attempted
+                // the registration, so the loser always races a live entry.
+                after_attempt.wait();
+                drop(registration);
+            });
+        }
+    });
+    assert_eq!(
+        admitted.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one of two racing registrations is admitted"
     );
 }
 
