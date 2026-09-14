@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{HostHandle, LiveInput, device_client};
+use super::{CredStore, CurrentConnection, HostHandle, LiveInput, device_client};
 use crate::conn::{ConnectionPhase, ConnectionTable, LiveDecision};
 use crate::test_support::{authenticate, live_input, memory_handle};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
@@ -23,7 +23,7 @@ use ene_credential::pairing_proof_hex;
 use ene_inference::fake::FakeProviderTransport;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
-    PresenceRepository, PresenceState, ThinMoveReason,
+    PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
 };
 
 fn sender() -> WireSender {
@@ -1773,6 +1773,303 @@ async fn close_racing_a_new_auth_never_clears_the_new_current() {
         "the paused close re-reads currentness and runs no fallback"
     );
     assert_eq!(active, Some(device_client("laptop")));
+}
+
+/// Attaches `client_ref` as the `Present` client through the production
+/// compare-and-commit, returning the companion and the committed generation.
+async fn attach_present(
+    handle: &HostHandle,
+    client_ref: &str,
+) -> (ene_companion::CompanionId, PresenceGeneration) {
+    use ene_companion::CompanionRepository as _;
+
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion resolves");
+    let current = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the seeded attribution exists");
+    assert_eq!(current.state, PresenceState::NoActive);
+    let client = device_client(client_ref);
+    let begin = handle
+        .store
+        .compare_and_begin_transition(
+            companion.as_raw(),
+            PresenceCheckRef {
+                expected_generation: current.generation,
+                expected_state: PresenceState::NoActive,
+                expected_active: None,
+            },
+            Some(client),
+            ThinMoveReason::InitialAttach,
+        )
+        .await
+        .expect("begin answers");
+    let MoveDecision::TransitioningToNew { generation } = begin else {
+        panic!("the attach begin must transition, got {begin:?}");
+    };
+    let confirmed = handle
+        .store
+        .confirm_transition(
+            companion.as_raw(),
+            generation,
+            LiveReachabilityRef {
+                client,
+                connection_live: true,
+            },
+        )
+        .await
+        .expect("confirm answers");
+    let ConfirmTransitionOutcome::Confirmed(fact) = confirmed else {
+        panic!("the live confirm must crown the pinned client, got {confirmed:?}");
+    };
+    (companion, fact.generation)
+}
+
+#[tokio::test]
+async fn disconnect_falls_back_to_a_permitted_same_machine_client() {
+    let (handle, _dir) = open_handle("disc-fallback").await.unwrap();
+    let (companion, _generation) = attach_present(&handle, "client-a").await;
+    let fallback = CurrentConnection {
+        client_ref: String::from("client-b"),
+        same_machine: true,
+        device_permitted: true,
+    };
+    handle
+        .note_disconnect_with("client-a", &|| vec![fallback.clone()])
+        .await;
+
+    let fact = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(
+        fact.state,
+        PresenceState::Present,
+        "an eligible same-machine candidate takes the fallback"
+    );
+    assert_eq!(fact.active_client, Some(device_client("client-b")));
+    let hint = handle
+        .store
+        .load_hint(companion.as_raw())
+        .await
+        .expect("hint loads")
+        .expect("the hint row exists");
+    assert_eq!(hint.last_client, Some(device_client("client-b")));
+    assert_eq!(hint.recovery_destination, None);
+}
+
+#[tokio::test]
+async fn disconnect_fallback_ignores_non_permitted_or_remote_candidates() {
+    let (handle, _dir) = open_handle("disc-fallback-skip").await.unwrap();
+    let (companion, _generation) = attach_present(&handle, "client-a").await;
+    let remote = CurrentConnection {
+        client_ref: String::from("client-b"),
+        same_machine: false,
+        device_permitted: true,
+    };
+    let forbidden = CurrentConnection {
+        client_ref: String::from("client-c"),
+        same_machine: true,
+        device_permitted: false,
+    };
+    handle
+        .note_disconnect_with("client-a", &|| vec![remote.clone(), forbidden.clone()])
+        .await;
+
+    let fact = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(
+        fact.state,
+        PresenceState::NoActive,
+        "no ineligible candidate may be crowned"
+    );
+    assert_eq!(fact.active_client, None);
+    let hint = handle
+        .store
+        .load_hint(companion.as_raw())
+        .await
+        .expect("hint loads")
+        .expect("the hint row exists");
+    assert_eq!(
+        hint.last_client,
+        Some(device_client("client-a")),
+        "a failed fallback keeps the last confirmed client as history"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_fallback_never_crowns_a_target_that_lost_currentness() {
+    let (handle, _dir) = open_handle("disc-fallback-lost").await.unwrap();
+    let (companion, _generation) = attach_present(&handle, "client-a").await;
+    // The snapshot reports B at selection time and is empty by confirm time:
+    // the confirm-time re-derivation must answer NoActive, never Present.
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let source = || {
+        if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            vec![CurrentConnection {
+                client_ref: String::from("client-b"),
+                same_machine: true,
+                device_permitted: true,
+            }]
+        } else {
+            Vec::new()
+        }
+    };
+    handle.note_disconnect_with("client-a", &source).await;
+
+    let fact = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(
+        fact.state,
+        PresenceState::NoActive,
+        "a target that lost currentness before confirm is never Present"
+    );
+    assert_eq!(fact.active_client, None);
+    let hint = handle
+        .store
+        .load_hint(companion.as_raw())
+        .await
+        .expect("hint loads")
+        .expect("the hint row exists");
+    assert_eq!(hint.last_client, Some(device_client("client-a")));
+}
+
+#[tokio::test]
+async fn plain_state_open_does_not_normalize_presence() {
+    use ene_credential::MemoryCredentialStore;
+
+    let (handle, dir) = open_handle("disc-no-normalize").await.unwrap();
+    let (companion, generation) = attach_present(&handle, "client-a").await;
+    drop(handle);
+
+    // A plain state open (read-only list / report / management paths) must
+    // not run the startup normalization: the row reads back exactly.
+    let reopened = HostHandle::open_with_cred_store(
+        dir.path(),
+        CredStore::Memory(MemoryCredentialStore::new()),
+    )
+    .await
+    .expect("the plain state open succeeds");
+    let untouched = reopened
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(untouched.state, PresenceState::Present);
+    assert_eq!(untouched.generation, generation);
+
+    // The explicit serving boundary normalizes once: Present becomes
+    // RecoveryWait toward the same client with a new generation.
+    reopened
+        .normalize_presence_on_startup()
+        .await
+        .expect("the serving boundary normalizes");
+    let normalized = reopened
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(normalized.state, PresenceState::RecoveryWait);
+    assert_eq!(normalized.generation.as_u64(), generation.as_u64() + 1);
+    let hint = reopened
+        .store
+        .load_hint(companion.as_raw())
+        .await
+        .expect("hint loads")
+        .expect("the hint row exists");
+    assert_eq!(hint.recovery_destination, Some(device_client("client-a")));
+    drop(reopened);
+
+    // Reopening after the normalization keeps the waiting state (the crash
+    // between startup commits must not lose the recovery intent), and a
+    // second explicit normalization refreshes it.
+    let again = HostHandle::open_with_cred_store(
+        dir.path(),
+        CredStore::Memory(MemoryCredentialStore::new()),
+    )
+    .await
+    .expect("the reopen succeeds");
+    let waiting = again
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(waiting.state, PresenceState::RecoveryWait);
+    again
+        .normalize_presence_on_startup()
+        .await
+        .expect("the second serving boundary normalizes");
+    let refreshed = again
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(refreshed.state, PresenceState::RecoveryWait);
+    assert_eq!(
+        refreshed.generation.as_u64(),
+        waiting.generation.as_u64() + 1
+    );
+}
+
+#[tokio::test]
+async fn startup_normalization_refusal_fails_the_serving_boundary() {
+    use ene_credential::MemoryCredentialStore;
+
+    let (handle, dir) = open_handle("disc-normalize-fail").await.unwrap();
+    let (companion, _generation) = attach_present(&handle, "client-a").await;
+    let key = companion.as_raw().as_uuid().as_hyphenated().to_string();
+    drop(handle);
+    {
+        let conn = rusqlite::Connection::open(dir.path().join("app.db"))
+            .expect("the store file opens for the probe");
+        conn.execute(
+            "UPDATE presence_attribution SET generation = ?1 WHERE companion_id = ?2",
+            rusqlite::params![i64::MAX, key],
+        )
+        .expect("the exhaustion fixture writes");
+    }
+    let reopened = HostHandle::open_with_cred_store(
+        dir.path(),
+        CredStore::Memory(MemoryCredentialStore::new()),
+    )
+    .await
+    .expect("the state open succeeds");
+    let refused = reopened.normalize_presence_on_startup().await;
+    assert!(
+        refused.is_err(),
+        "a per-companion refusal must fail startup, not be silently accepted"
+    );
+    let fact = reopened
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(
+        fact.generation.as_u64(),
+        i64::MAX as u64,
+        "the refused companion keeps its old attribution"
+    );
 }
 
 /// A full control channel reports Full instead of queueing: the failed
