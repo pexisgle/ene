@@ -89,9 +89,10 @@ ene の開発では、`.old/` に限らず、いかなる後方互換性も考�
   - C. Cancel
   - D. autonomous Task Agent ↔ Action loop
   - E. Host 結合の Stage 4 E2E（レポート生成・パス脱出拒否・再起動読み戻し・キャンセル・遅延結果）
-  - F. 会話・第一者管理経路からのタスク制御（`ProposeTaskCommand` / `ProposeSteeringCommand` → 作業側 `orchestrate_*`、進捗・結果の報告、cancel 意図の受理）と、その経路を通した Stage 4 受け入れ E2E
-  - A と B を同じ implementation PR にまとめる必要はなく、レビューしやすい最小 stacked PR を優先します。ただし B を A より先に provider-send-enabled として merge しないでください。E の完了だけでは Stage 4 完了とせず、F の経路で受け入れシナリオ 4 を確認して完了とします。
-- **完了基準**: 指定フォルダ内のファイルを読んで新しいレポートを生成するタスクが正常に完了し、不正なファイルアクセスが確実に拒否されること。
+  - F. 会話・第一者管理経路からのタスク制御: `ProposeTaskCommand` と作業側のタスク作成 orchestration（未実装）を `ene-companion` dialogue から開始し、実装済み `propose_steering` / `orchestrate_steering` へ会話の追加指示を配線する。`ManagementIntentKind::CancelTask`（現在 `NeedsClarification`）を `HostHandle::cancel_task` へ配線し、進捗・結果の報告を既存 Task/Action facts から組み立てる。最終 E2E で受け入れシナリオ 4.3（実行中の通常チャット）・4.4（キャンセル時点までの完了内容と残ファイルの報告）・4.5（完了報告の変更ファイル名・保存場所・やり残し）・4.7（既存ファイルを消さない）を会話経由で確認する（4.6 のシェル・外部ネットワーク遮断とパス脱出は closed-world ツール語彙とワークスペース境界で構造的に保証済み）。
+  - G. 作業担当が確定する terminal failure（`Failed`）producer。design が後続スライスへ委ねている Stage 4 item 1 の残り（`interface-boundaries.md` §Task progress / lifecycle）。
+  - A と B を同じ implementation PR にまとめる必要はなく、レビューしやすい最小 stacked PR を優先します。ただし B を A より先に provider-send-enabled として merge しないでください。E の完了だけでは Stage 4 完了とせず、F の受け入れ E2E と G の producer で Stage 4 完了とします。
+- **完了基準**: 指定フォルダ内のファイルを読んで新しいレポートを生成するタスクが正常に完了し、不正なファイルアクセスが確実に拒否されること。加えて、会話経由の受け入れシナリオ 4 を F の E2E で確認し、G の `Failed` producer を実装した上で Stage 4 完了とします。
 
 ### Stage 5: クライアントのライフサイクルとホストでの作業継続
 操作画面（クライアント）を閉じても、ホスト側で安全に処理が継続するようにします。

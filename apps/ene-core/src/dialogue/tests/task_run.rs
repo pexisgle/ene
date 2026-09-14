@@ -1,12 +1,15 @@
-//! Stage 4 final end-to-end: the autonomous file-work task through the Host
-//! composition path.
+//! Stage 4 slice E end-to-end: the autonomous file-work task through the Host
+//! composition path. Conversation / first-party-management task control is
+//! slice F and is not exercised here.
 //!
 //! Real store, real credential/consent setup path (the production management
 //! intents used by the dialogue tests), real workspace filesystem, real Task
 //! Agent loop, and only the provider HTTP transport faked. Covers the
-//! acceptance scenario "read a file and create a Markdown report", the
-//! durable result and attempt correlation, restart read-back without
-//! replay, and the cancel / late-result contract.
+//! file/workspace half of the acceptance scenario ("read a file and create a
+//! Markdown report"), the durable result and attempt correlation, restart
+//! read-back without replay, the cancel / late-result contract, and the
+//! execution-abort accounting, concurrent-run, and one-shot restart
+//! boundaries.
 
 #![allow(
     clippy::expect_used,
@@ -272,6 +275,10 @@ async fn stage4_reads_the_workspace_writes_the_report_and_survives_restart() {
     assert_eq!(
         std::fs::read(workspace.path().join("report.md")).expect("the report exists"),
         b"# Report\nnotes"
+    );
+    assert!(
+        workspace.path().join("input.txt").exists(),
+        "a completed task never deletes the workspace's existing files (acceptance 4.7)"
     );
     // The logical input replayed the observed file content, never the outside
     // sentinel and never a file list the model did not ask for.
