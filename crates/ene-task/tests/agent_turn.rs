@@ -269,6 +269,13 @@ impl TaskRepository for FakeTaskRepository {
         }
     }
 
+    async fn delegation_has_started_work(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<bool, TaskTechnicalError> {
+        Ok(false)
+    }
+
     async fn adopt_result(
         &self,
         _claim: TaskResultAdoptionClaim,

@@ -25,12 +25,11 @@ use ene_store::Store;
 use ene_task::{
     AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
     DelegationScope, TaskAgentEphemeralId, TaskAgentInference, TaskAgentInferenceError,
-    TaskAgentInferenceOutcome, TaskAgentInferencePremise, TaskAgentNotSent, TaskAgentOutput,
-    TaskCancelOutcome, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
-    TaskCreationPremise, TaskInstructionSource, TaskInstructionSourceError,
-    TaskInstructionSourceRecord, TaskProgress, TaskPurpose, TaskRef, TaskRepository as _,
-    TaskResultAcceptance, WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef,
-    WorkspaceNeedRef,
+    TaskAgentInferenceOutcome, TaskAgentInferencePremise, TaskAgentOutput, TaskCancelOutcome,
+    TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise,
+    TaskInstructionSource, TaskInstructionSourceError, TaskInstructionSourceRecord, TaskProgress,
+    TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance, WorkspaceAssocId,
+    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
 };
 
 use super::{
@@ -234,8 +233,8 @@ async fn a_consent_lapse_discards_the_output_without_action_or_result() {
         .expect("a lapsed consent is a domain outcome");
     assert_eq!(
         outcome,
-        TaskAgentRunOutcome::NotSent(TaskAgentNotSent::ConsentStale),
-        "an output that can no longer be adopted is discarded, not used"
+        TaskAgentRunOutcome::ConsentStaleAfterSend { turn: 1 },
+        "a sent-but-discarded output is its own outcome, never the pre-send NotSent refusal"
     );
     assert_eq!(inference.calls(), 1, "the send itself was already started");
     assert!(
@@ -250,6 +249,66 @@ async fn a_consent_lapse_discards_the_output_without_action_or_result() {
             .unwrap()
             .is_none(),
         "a discarded output never seals the execution"
+    );
+}
+
+#[tokio::test]
+async fn a_started_unsealed_execution_is_never_run_again() {
+    let fixture = fixture().await;
+    std::fs::write(fixture.workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    // The first durable attempt of the delegation is its start marker, even
+    // when it is an Action start rather than an inference claim: the
+    // execution already began and may have stopped before its next turn.
+    let started = crate::action::run_workspace_action(
+        &fixture.store,
+        fixture.delegation,
+        OperationKind::Read,
+        String::from("input.txt"),
+        None,
+    )
+    .await
+    .expect("the action answers a domain outcome");
+    assert!(
+        matches!(
+            started,
+            crate::action::WorkspaceActionHostOutcome::Completed { .. }
+        ),
+        "the fixture action must start and observe, got {started:?}"
+    );
+    assert!(
+        fixture
+            .store
+            .delegation_has_started_work(fixture.delegation)
+            .await
+            .unwrap(),
+        "the committed Action attempt is the durable start marker"
+    );
+
+    let inference = ScriptedInference::new(vec![r#"{"final":"never sent"}"#]);
+    let scrubber = MarkerScrubber::default();
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
+        .await
+        .expect("a spent execution is a domain outcome");
+    assert_eq!(
+        outcome,
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::ExecutionAlreadyStarted {
+            delegation: fixture.delegation,
+        }),
+        "a delegation that already started work is never run again"
+    );
+    assert_eq!(
+        inference.calls(),
+        0,
+        "the refused run starts no provider call"
+    );
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .unwrap()
+            .is_none(),
+        "the one-shot refusal writes no seal"
     );
 }
 

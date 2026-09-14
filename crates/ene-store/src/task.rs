@@ -114,6 +114,10 @@ const SQL_SELECT_RESULT_BY_ID: &str = "SELECT task_id, task_revision, delegation
 
 const SQL_SELECT_RESULT_BY_DELEGATION: &str = "SELECT result_id, task_id, task_revision, body, adopted_revision, recorded_at FROM task_result WHERE delegation_id = ?1";
 
+/// The durable start marker of one delegated execution: the first attempt
+/// committed under the delegation, whichever owner rows it.
+const SQL_DELEGATION_HAS_STARTED_WORK: &str = "SELECT EXISTS(SELECT 1 FROM inference_attempt WHERE delegation_id = ?1 UNION ALL SELECT 1 FROM action_attempt WHERE delegation_id = ?1)";
+
 const SQL_INSERT_RESULT: &str = "INSERT INTO task_result (result_id, task_id, task_revision, delegation_id, body, adopted_revision, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 const SQL_SELECT_RESULT_ATTEMPTS: &str =
@@ -1553,6 +1557,20 @@ fn load_task_result_sync(
         .transpose()
 }
 
+fn delegation_has_started_work_sync(
+    conn: &Mutex<Connection>,
+    delegation: DelegationId,
+) -> Result<bool, TaskTechnicalError> {
+    let guard = lock_shared(conn);
+    guard
+        .query_row(
+            SQL_DELEGATION_HAS_STARTED_WORK,
+            params![encode_id(delegation.as_raw())],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(task_unavailable)
+}
+
 fn load_delegation_result_sync(
     conn: &Mutex<Connection>,
     delegation: DelegationId,
@@ -2017,6 +2035,14 @@ impl TaskRepository for Store {
     ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || load_delegation_result_sync(&conn, delegation)).await
+    }
+
+    async fn delegation_has_started_work(
+        &self,
+        delegation: DelegationId,
+    ) -> Result<bool, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || delegation_has_started_work_sync(&conn, delegation)).await
     }
 
     async fn adopt_result(

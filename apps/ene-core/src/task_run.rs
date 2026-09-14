@@ -38,9 +38,11 @@
 //! anything after restart, and does not decide Task completion itself (the
 //! Task owner's adoption does). A delegated execution is run once: when it
 //! stops without a final result (protocol violation, turn bound, unconfirmed
-//! effect, cancel), the caller must not invoke the loop again over the same
-//! delegation — continued work is a new delegation (the design's execution
-//! lifetime), and a cancelled Task is re-executed only as a new Task.
+//! effect, cancel), the loop entry refuses to run it again over the same
+//! delegation on the durable attempt facts (the first claimed inference turn
+//! or Action start is the start marker) — continued work is a new delegation
+//! (the design's execution lifetime), and a cancelled Task is re-executed
+//! only as a new Task.
 
 use ene_action::{ActionCertainty, ActionNotStarted, ObservedEffect, OperationKind};
 use ene_credential::SecretScrubber;
@@ -116,6 +118,14 @@ pub enum TaskAgentRunRefusal {
     ExecutionSealed {
         delegation: ene_task::DelegationId,
     },
+    /// The execution lifetime already started durable work (at least one
+    /// inference claim or Action attempt) and was left unsealed: the same
+    /// delegation is never started again, whether the local running
+    /// registration was lost or the process restarted. Continued work is a
+    /// new delegation.
+    ExecutionAlreadyStarted {
+        delegation: ene_task::DelegationId,
+    },
     MissingWorkspace {
         task: ene_task::TaskId,
     },
@@ -139,11 +149,18 @@ pub enum TaskAgentRunOutcome {
     },
     /// An owner boundary refused the next turn or Action.
     Refused(TaskAgentRunRefusal),
-    /// The inference use was refused before any provider I/O, or the consent
-    /// premise lapsed while the provider was answering so the output was
-    /// discarded before it could drive an Action or be recorded. The
-    /// already-started attempt and its usage fact stay durable.
+    /// The inference use was refused before any provider I/O. The attempt
+    /// was never claimed and no usage fact was recorded.
     NotSent(TaskAgentNotSent),
+    /// The provider call already happened, but the adoption-consent premise
+    /// that admitted the send moved while it was answering: the output is
+    /// discarded before any Action or result record. This is NOT
+    /// [`TaskAgentNotSent`] — the send was started, so the started attempt
+    /// and its usage fact stay durable — and it is not task completion.
+    ConsentStaleAfterSend {
+        /// Turn (1-based) whose output was discarded.
+        turn: u32,
+    },
     /// The provider response did not follow the protocol; nothing ran and no
     /// result was sealed.
     ProtocolViolation {
@@ -193,14 +210,16 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
 /// exact boundary order.
 ///
 /// A provider output whose `adoption_consent_current` is `false` is discarded
-/// as [`TaskAgentRunOutcome::NotSent`] with
-/// [`TaskAgentNotSent::ConsentStale`] before any Action or result record: the
-/// consent premise that admitted the send no longer holds.
+/// as [`TaskAgentRunOutcome::ConsentStaleAfterSend`] before any Action or
+/// result record: the consent premise that admitted the send no longer holds,
+/// while the already-started attempt and its usage fact stay durable. An
+/// output refused before the send at all stays [`TaskAgentRunOutcome::NotSent`].
 ///
 /// One delegated execution is run once. A stopped execution (no final result)
 /// is never continued by calling this function again over the same
-/// delegation; continued work is a new delegation under the design's
-/// execution-lifetime contract.
+/// delegation, and the entry enforces that on the durable attempt facts even
+/// when no in-process registration is held (restart): continued work is a
+/// new delegation under the design's execution-lifetime contract.
 pub async fn run_task_agent_execution(
     store: &Store,
     instructions: &impl TaskInstructionSource,
@@ -209,6 +228,11 @@ pub async fn run_task_agent_execution(
     delegation: ene_task::DelegationId,
     max_turns: u32,
 ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
+    if execution_already_started(store, delegation).await? {
+        return Ok(TaskAgentRunOutcome::Refused(
+            TaskAgentRunRefusal::ExecutionAlreadyStarted { delegation },
+        ));
+    }
     let mut exchanges: Vec<TaskAgentActionExchange> = Vec::new();
     let mut attempt_refs: Vec<RawId> = Vec::new();
     let mut turn = 0_u32;
@@ -268,9 +292,10 @@ pub async fn run_task_agent_execution(
         // consent moved during the network wait, the output must not drive an
         // Action or become a final result (K-E step 5): only the generated
         // result is discarded, while the already-started attempt and usage
-        // fact stay durable and untouched.
+        // fact stay durable and untouched. This is a sent-but-discarded
+        // answer, never the pre-send `NotSent` refusal.
         if !produced.adoption_consent_current {
-            return Ok(TaskAgentRunOutcome::NotSent(TaskAgentNotSent::ConsentStale));
+            return Ok(TaskAgentRunOutcome::ConsentStaleAfterSend { turn });
         }
         match parse_directive(produced.output.text()) {
             Err(reason) => return Ok(TaskAgentRunOutcome::ProtocolViolation { turn, reason }),
@@ -354,6 +379,35 @@ pub async fn run_task_agent_execution(
             }
         }
     }
+}
+
+/// Applies the execution-lifetime one-shot gate.
+///
+/// The first durable attempt (an AU14 inference claim or an AU5 Action start)
+/// of a delegation is its start marker: once committed, the execution
+/// lifetime has begun and a fresh run is refused even when the in-process
+/// running registration was lost or the process restarted without a final
+/// result. Terminal, sealed, and revision-moved delegations keep their own
+/// owner outcomes from the first turn (which also perform no provider I/O),
+/// so the durable probe is only consulted when the execution would otherwise
+/// be allowed to start work.
+async fn execution_already_started(
+    store: &Store,
+    delegation: ene_task::DelegationId,
+) -> Result<bool, TaskAgentRunError> {
+    let Some(correspondence) = store.load_delegation(delegation).await? else {
+        return Ok(false);
+    };
+    let Some(record) = store.load_task(correspondence.task.task).await? else {
+        return Ok(false);
+    };
+    if record.task.reference != correspondence.task || record.task.progress.is_terminal() {
+        return Ok(false);
+    }
+    if store.load_delegation_result(delegation).await?.is_some() {
+        return Ok(false);
+    }
+    Ok(store.delegation_has_started_work(delegation).await?)
 }
 
 /// The follow-up of one completed Action.
