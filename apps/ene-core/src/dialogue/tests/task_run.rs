@@ -36,7 +36,7 @@ use ene_task::{
 };
 
 use crate::serve::{CredStore, HostHandle};
-use crate::task_run::{TaskAgentRunOutcome, TaskAgentRunRefusal};
+use crate::task_run::{TaskAgentProtocolViolation, TaskAgentRunOutcome, TaskAgentRunRefusal};
 
 use super::{live_input, round_test_handle};
 
@@ -84,11 +84,18 @@ impl ProviderTransport for ScriptedTransport {
     }
 }
 
-/// Transport whose first call reports that it started and then waits forever,
-/// so the test can cancel while the provider call is in flight.
-#[derive(Default)]
+/// Transport whose call reports that it started and then waits forever, so
+/// the test can cancel while the provider call is in flight.
+#[derive(Default, Clone)]
 struct BlockingTransport {
     started: Arc<tokio::sync::Notify>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl BlockingTransport {
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl ProviderTransport for BlockingTransport {
@@ -102,8 +109,10 @@ impl ProviderTransport for BlockingTransport {
                 + '_,
         >,
     > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let started = Arc::clone(&self.started);
         Box::pin(async move {
-            self.started.notify_one();
+            started.notify_one();
             std::future::pending::<()>().await;
             Ok(ProviderResponse {
                 text: String::new(),
@@ -111,6 +120,42 @@ impl ProviderTransport for BlockingTransport {
             })
         })
     }
+}
+
+/// One durable usage fact read straight from the Host database.
+#[derive(Debug, PartialEq, Eq)]
+struct UsageRow {
+    source: String,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+}
+
+fn usage_rows(data_dir: &std::path::Path) -> Vec<UsageRow> {
+    let conn = rusqlite::Connection::open(data_dir.join("app.db"))
+        .expect("the store file must open for the probe");
+    let mut statement = conn
+        .prepare("SELECT source, input_tokens, output_tokens FROM usage_fact ORDER BY ticket")
+        .expect("the usage probe statement must prepare");
+    let rows = statement
+        .query_map([], |row| {
+            Ok(UsageRow {
+                source: row.get(0)?,
+                input_tokens: row.get(1)?,
+                output_tokens: row.get(2)?,
+            })
+        })
+        .expect("the usage probe must run");
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("the usage probe rows must decode")
+}
+
+fn inference_attempt_count(data_dir: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(data_dir.join("app.db"))
+        .expect("the store file must open for the probe");
+    conn.query_row("SELECT COUNT(*) FROM inference_attempt", (), |row| {
+        row.get(0)
+    })
+    .expect("the attempt count must read")
 }
 
 fn memory_store() -> MemoryCredentialStore {
@@ -325,6 +370,7 @@ async fn stage4_cancel_stops_the_loop_and_a_late_result_stays_original_only() {
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
     let (task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
     let handle = Arc::new(handle);
+    let observed = transport.clone();
     let started = Arc::clone(&transport.started);
 
     let execution = {
@@ -356,6 +402,24 @@ async fn stage4_cancel_stops_the_loop_and_a_late_result_stays_original_only() {
             .unwrap()
             .is_none(),
         "a stopped execution is not sealed"
+    );
+    // The abort dropped the in-flight provider future only after the claimed
+    // attempt's accounting completed: the attempt and its unknown-usage fact
+    // are durable before Cancelled is observed, and no second call started.
+    assert_eq!(observed.calls(), 1, "exactly one provider call was started");
+    assert_eq!(
+        inference_attempt_count(data_dir.path()),
+        1,
+        "the aborted provider wait kept its claimed attempt"
+    );
+    assert_eq!(
+        usage_rows(data_dir.path()),
+        vec![UsageRow {
+            source: String::from("unknown"),
+            input_tokens: None,
+            output_tokens: None,
+        }],
+        "the claimed attempt records Unknown usage before the cancel returns"
     );
 
     // A delayed final result from the same execution is still recorded and
@@ -438,5 +502,123 @@ async fn stage4_cancel_stops_the_loop_and_a_late_result_stays_original_only() {
     assert!(
         refusing_transport.inputs().is_empty(),
         "the cancelled Task sends no provider call"
+    );
+}
+
+#[tokio::test]
+async fn stage4_a_concurrent_execution_of_one_delegation_is_refused() {
+    let live = live_input("stage4-concurrent");
+    let transport = BlockingTransport::default();
+    let (handle, _data_dir) = round_test_handle("stage4-concurrent", &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let (task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
+    let handle = Arc::new(handle);
+    let started = Arc::clone(&transport.started);
+
+    let execution = {
+        let handle = Arc::clone(&handle);
+        let first = transport.clone();
+        tokio::spawn(async move { handle.run_task_agent(&first, delegation).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("the first provider call starts");
+
+    // The in-memory registration is atomic per delegation: the second loop is
+    // refused before it can start any provider call or Action.
+    let refused = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("the concurrent refusal is a domain outcome");
+    assert_eq!(
+        refused,
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::ExecutionAlreadyRunning { delegation })
+    );
+    assert_eq!(
+        transport.calls(),
+        1,
+        "the refused concurrent run starts no provider call"
+    );
+
+    // Stop the first execution so the test reaps it deterministically.
+    assert_eq!(
+        handle
+            .cancel_task(CancelTaskCommand { task: task.task })
+            .await
+            .unwrap(),
+        TaskCancelOutcome::CancelAccepted
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), execution)
+        .await
+        .expect("the first execution stops after the admission")
+        .expect("the join succeeds")
+        .expect("the stop is a domain outcome");
+    assert_eq!(outcome, TaskAgentRunOutcome::Cancelled);
+    assert_eq!(transport.calls(), 1, "still exactly one provider call");
+}
+
+#[tokio::test]
+async fn stage4_a_stopped_unsealed_execution_is_not_restarted_after_reopen() {
+    let live = live_input("stage4-one-shot");
+    let transport = ScriptedTransport::new(vec![String::from("I could answer, but I will not.")]);
+    let (handle, data_dir) = round_test_handle("stage4-one-shot", &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let (task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
+
+    let outcome = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("a malformed answer is a domain outcome");
+    assert_eq!(
+        outcome,
+        TaskAgentRunOutcome::ProtocolViolation {
+            turn: 1,
+            reason: TaskAgentProtocolViolation::NotAJsonObject,
+        }
+    );
+    // The execution started (one claimed attempt), stopped unsealed, and the
+    // Task is still non-terminal, so only the durable start marker can
+    // prevent a second run.
+    assert_eq!(inference_attempt_count(data_dir.path()), 1);
+    let loaded = handle.store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(loaded.task.progress, TaskProgress::InProgress);
+    assert!(
+        handle
+            .store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(handle);
+
+    // A restart drops the in-memory registration, but the durable attempt
+    // facts refuse a fresh run under the same delegation.
+    let reopened =
+        HostHandle::open_with_cred_store(data_dir.path(), CredStore::Memory(memory_store()))
+            .await
+            .expect("the host reopens");
+    let refusing_transport = ScriptedTransport::new(Vec::new());
+    let refused = reopened
+        .run_task_agent(&refusing_transport, delegation)
+        .await
+        .expect("the one-shot refusal is a domain outcome");
+    assert_eq!(
+        refused,
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::ExecutionAlreadyStarted { delegation }),
+        "a stopped unsealed execution is never restarted under the same identity"
+    );
+    assert!(
+        refusing_transport.inputs().is_empty(),
+        "the refused restart sends no provider call"
+    );
+    assert_eq!(
+        inference_attempt_count(data_dir.path()),
+        1,
+        "the one-shot refusal claims nothing new"
     );
 }

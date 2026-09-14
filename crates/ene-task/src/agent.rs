@@ -386,7 +386,9 @@ pub enum TaskAgentTurnOutcome {
 /// the claim uses: the claim alone is the linearization point.
 ///
 /// Outcome mapping: `Produced` carries the output and consent flag without
-/// adopting either, and `NotSent` reasons pass through unchanged. A
+/// adopting either, `NotSent` reasons pass through unchanged, and the port's
+/// `Aborted` passes through unchanged (the port completed any claimed
+/// attempt's usage accounting before answering it). A
 /// `StaleTaskPremise` refusal is re-read against durable state and mapped to
 /// [`TaskAgentTurnOutcome::MissingDelegation`],
 /// [`TaskAgentTurnOutcome::MissingTask`],

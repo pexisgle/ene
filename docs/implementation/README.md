@@ -88,8 +88,9 @@ ene の開発では、`.old/` に限らず、いかなる後方互換性も考�
   - B. adopted-instruction History bounded read + prompt wiring（`load_message`、`TaskInstructionSource`、body resolution、correspondence validation、assembly、scrub）と、A を通した actual provider send
   - C. Cancel
   - D. autonomous Task Agent ↔ Action loop
-  - E. Stage 4 final E2E
-  - A と B を同じ implementation PR にまとめる必要はなく、レビューしやすい最小 stacked PR を優先します。ただし B を A より先に provider-send-enabled として merge しないでください。
+  - E. Host 結合の Stage 4 E2E（レポート生成・パス脱出拒否・再起動読み戻し・キャンセル・遅延結果）
+  - F. 会話・第一者管理経路からのタスク制御（`ProposeTaskCommand` / `ProposeSteeringCommand` → 作業側 `orchestrate_*`、進捗・結果の報告、cancel 意図の受理）と、その経路を通した Stage 4 受け入れ E2E
+  - A と B を同じ implementation PR にまとめる必要はなく、レビューしやすい最小 stacked PR を優先します。ただし B を A より先に provider-send-enabled として merge しないでください。E の完了だけでは Stage 4 完了とせず、F の経路で受け入れシナリオ 4 を確認して完了とします。
 - **完了基準**: 指定フォルダ内のファイルを読んで新しいレポートを生成するタスクが正常に完了し、不正なファイルアクセスが確実に拒否されること。
 
 ### Stage 5: クライアントのライフサイクルとホストでの作業継続
