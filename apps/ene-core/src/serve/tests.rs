@@ -1,8 +1,11 @@
-use super::{HostHandle, LiveInput, conn_key, device_client};
-use crate::test_support::{live_input, memory_handle};
+use std::sync::Arc;
+
+use super::{HostHandle, LiveInput, device_client};
+use crate::conn::{ConnectionPhase, ConnectionTable, LiveDecision};
+use crate::test_support::{authenticate, live_input, memory_handle};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{
-    AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, PairingRequest, PairingResult,
+    AuthProof, AuthResult, CapabilityAdvertise, NegotiatedConnection, PairingRequest, PairingResult,
 };
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, RationaleOrigin,
@@ -13,10 +16,15 @@ use ene_api::v1::refs::{
     WireMessageType,
 };
 use ene_api::v1::refs::{ClientLocalId, CommandWireId, CompanionWireRef, TextLangWire};
+use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
+use ene_companion::CompanionRepository as _;
 use ene_credential::pairing_proof_hex;
 use ene_inference::fake::FakeProviderTransport;
-use ene_presence::{ClientId, PresenceRepository};
+use ene_presence::{
+    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
+    PresenceRepository, PresenceState, ThinMoveReason,
+};
 
 fn sender() -> WireSender {
     WireSender {
@@ -37,24 +45,48 @@ fn stamped(mut frame: super::WireFrame, live: &LiveInput) -> super::WireFrame {
     frame
 }
 
-/// Builds the paired [`LiveInput`] premises for one device on a fresh id.
-///
-/// Constructed explicitly (never the shared helper): auth-flow tests bind
-/// several frames to one connection, so the id must stay fixed across
-/// them. `authed` holds: these premises stand in for a connection table
-/// entry after its `Accepted`, so post-accept domain frames pass the
-/// gate; bypass tests override it explicitly.
-fn paired_input(device_wire: &str) -> LiveInput {
-    LiveInput {
-        client_ref: device_wire.to_string(),
-        connection_live: true,
-        peer_uid_ok: true,
-        paired_device: Some(device_wire.to_string()),
-        connection_known: true,
-        authed: true,
-        connection_id: ConnectionWireId(uuid::Uuid::new_v4()),
-        negotiated: None,
+/// A fresh table-backed connection in the accepted phase.
+fn fresh_conn() -> (Arc<ConnectionTable>, ConnectionWireId) {
+    let table = Arc::new(ConnectionTable::new());
+    let id = table.note_accept();
+    (table, id)
+}
+
+/// The current premises of a table-backed connection.
+fn live_of(table: &Arc<ConnectionTable>, id: &ConnectionWireId) -> LiveInput {
+    table.test_live(id).expect("the connection must exist")
+}
+
+/// Drives a connection to authenticated-and-current for `device_wire`.
+fn authenticate_conn(table: &Arc<ConnectionTable>, id: &ConnectionWireId, device_wire: &str) {
+    authenticate(table, id, device_wire);
+}
+
+/// Runs one frame through the real connection-table premises, as the socket
+/// loop does: `live_for` pins/checks the envelope, then the handle decides.
+async fn dispatch(
+    handle: &HostHandle,
+    table: &Arc<ConnectionTable>,
+    id: &ConnectionWireId,
+    frame: super::WireFrame,
+    transport: &FakeProviderTransport,
+) -> Vec<super::WireFrame> {
+    match table.live_for(id, &frame.envelope) {
+        LiveDecision::Ready(live) => handle.handle_frame(frame, live, transport).await,
+        LiveDecision::Duplicate | LiveDecision::Invalid => Vec::new(),
     }
+}
+
+fn negotiated_v1() -> NegotiatedConnection {
+    NegotiatedConnection {
+        version: ProtocolVersion::V1,
+    }
+}
+
+/// Builds a paired [`LiveInput`] with an authenticated table-backed
+/// connection for `device_wire`.
+fn paired_input(device_wire: &str) -> LiveInput {
+    live_input(device_wire)
 }
 
 fn pairing_frame(descriptor: &str) -> super::WireFrame {
@@ -70,13 +102,15 @@ fn pairing_frame(descriptor: &str) -> super::WireFrame {
     }
 }
 
-fn advertise_frame(protocol: ProtocolVersion) -> super::WireFrame {
+fn advertise_frame(device: Option<uuid::Uuid>, protocol: ProtocolVersion) -> super::WireFrame {
+    let mut envelope = new_outgoing_envelope(
+        ProtocolVersion::V1,
+        sender(),
+        WireMessageType(String::from("CapabilityAdvertise")),
+    );
+    envelope.sender.device_id = device.map(DeviceWireId);
     super::WireFrame {
-        envelope: new_outgoing_envelope(
-            ProtocolVersion::V1,
-            sender(),
-            WireMessageType(String::from("CapabilityAdvertise")),
-        ),
+        envelope,
         payload: WirePayload::CapabilityAdvertise(CapabilityAdvertise {
             supported_protocol: vec![protocol],
             platform: String::from("test"),
@@ -102,6 +136,13 @@ fn submit_frame() -> super::WireFrame {
             },
         }),
     }
+}
+
+/// One submit frame claiming `device`, as a paired connection's frames do.
+fn submit_for(device: DeviceWireId) -> super::WireFrame {
+    let mut frame = submit_frame();
+    frame.envelope.sender.device_id = Some(device);
+    frame
 }
 
 fn history_frame() -> super::WireFrame {
@@ -152,11 +193,18 @@ fn management_intent_frame(
 
 /// Premises for a connection that never paired (and so cannot be authed).
 fn unpaired_input() -> LiveInput {
+    let (table, id) = fresh_conn();
     LiveInput {
+        client_ref: String::from("client-a"),
+        connection_live: true,
+        peer_uid_ok: true,
         paired_device: None,
         connection_known: false,
         authed: false,
-        ..live_input("client-a")
+        connection_id: id,
+        negotiated: None,
+        phase: ConnectionPhase::Accepted,
+        authority: table,
     }
 }
 
@@ -166,6 +214,74 @@ fn fake_transport() -> FakeProviderTransport {
 
 async fn open_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
     memory_handle(tag).await
+}
+
+/// Marks the device's deterministic client as the Present active client, so
+/// close-admission fallbacks have something to move.
+async fn make_present(handle: &HostHandle, device_wire: &str) {
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must ensure");
+    let current = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("the attribution must load")
+        .expect("the attribution must exist");
+    let client = device_client(device_wire);
+    let expected = PresenceCheckRef {
+        expected_generation: current.generation,
+        expected_state: current.state,
+        expected_active: current.active_client,
+    };
+    let begun = handle
+        .store
+        .compare_and_begin_transition(
+            companion.as_raw(),
+            expected,
+            Some(client),
+            ThinMoveReason::InitialAttach,
+        )
+        .await;
+    let MoveDecision::TransitioningToNew { generation } = begun.expect("begin must answer") else {
+        panic!("a fresh attribution must admit the begin");
+    };
+    let confirmed = handle
+        .store
+        .confirm_transition(
+            companion.as_raw(),
+            generation,
+            LiveReachabilityRef {
+                client,
+                connection_live: true,
+            },
+        )
+        .await;
+    assert!(
+        matches!(confirmed, Ok(ConfirmTransitionOutcome::Confirmed(_))),
+        "the live confirm must crown the client: {confirmed:?}"
+    );
+}
+
+async fn presence_state(handle: &HostHandle) -> (PresenceState, Option<ClientId>, u64) {
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must ensure");
+    let attribution = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("the attribution must load")
+        .expect("the attribution must exist");
+    (
+        attribution.state,
+        attribution.active_client,
+        attribution.generation.as_u64(),
+    )
 }
 
 #[test]
@@ -192,7 +308,7 @@ async fn pairing_denies_an_unauthorized_peer() {
     let (handle, _dir) = open_handle("pair-deny").await.unwrap();
     let denied_input = LiveInput {
         peer_uid_ok: false,
-        ..live_input("client-a")
+        ..unpaired_input()
     };
     let transport = fake_transport();
     let responses = handle
@@ -241,8 +357,10 @@ async fn pairing_denies_a_blank_descriptor() {
 async fn pairing_pends_then_pairs_after_owner_approval() {
     let (handle, _dir) = open_handle("pair-flow").await.unwrap();
     let transport = fake_transport();
+    let (table, id) = fresh_conn();
+    let live = live_of(&table, &id);
     let pending = handle
-        .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
+        .handle_frame(pairing_frame("laptop"), live.clone(), &transport)
         .await;
     assert_eq!(pending.len(), 1, "the request answers once");
     let first = pending.first().unwrap();
@@ -252,6 +370,11 @@ async fn pairing_pends_then_pairs_after_owner_approval() {
             WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation)
         ),
         "a fresh descriptor pends, never auto-approves"
+    );
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Accepted),
+        "a pending request never advances the phase"
     );
     let listed = handle.pending_devices().await;
     let descriptors = listed.unwrap();
@@ -266,7 +389,7 @@ async fn pairing_pends_then_pairs_after_owner_approval() {
     let paired_frame = pairing_frame("laptop");
     let expected_reply = paired_frame.envelope.message_id;
     let paired = handle
-        .handle_frame(paired_frame, unpaired_input(), &transport)
+        .handle_frame(paired_frame, live.clone(), &transport)
         .await;
     let answer = paired.first().unwrap();
     assert!(
@@ -281,33 +404,42 @@ async fn pairing_pends_then_pairs_after_owner_approval() {
         Some(expected_reply),
         "the reply links back to the request"
     );
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Paired),
+        "the issued device key is recorded in the same phase operation"
+    );
 }
 
 #[tokio::test]
-async fn an_already_paired_connection_cannot_pair_again() {
+async fn re_pairing_on_a_paired_connection_is_invalid_phase() {
     let (handle, _dir) = open_handle("pair-immutable").await.unwrap();
     let transport = fake_transport();
+    let (table, id) = fresh_conn();
+    assert!(table.note_paired(&id, "device-1"));
     let responses = handle
-        .handle_frame(
-            pairing_frame("other box"),
-            paired_input("device-1"),
-            &transport,
-        )
+        .handle_frame(pairing_frame("other box"), live_of(&table, &id), &transport)
         .await;
     assert_eq!(responses.len(), 1, "the refusal answers exactly one frame");
     let first = responses.first().unwrap();
     assert!(
         matches!(
             &first.payload,
-            WirePayload::PairingResult(PairingResult::Denied { .. })
+            WirePayload::Reject(notice) if notice.kind == RejectKind::InvalidHandshakePhase
         ),
-        "a paired connection never re-pairs"
+        "a paired connection never re-pairs, got {:?}",
+        first.payload
     );
     let pending = handle.pending_devices().await;
     let descriptors = pending.unwrap();
     assert!(
         descriptors.is_empty(),
         "the refused descriptor leaves no pending entry"
+    );
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Paired),
+        "the refused request changes no phase"
     );
 }
 
@@ -370,7 +502,7 @@ async fn unsolicited_challenge_and_result_answer_nothing() {
             sender(),
             WireMessageType(String::from("AuthChallenge")),
         ),
-        payload: WirePayload::AuthChallenge(AuthChallenge {
+        payload: WirePayload::AuthChallenge(ene_api::v1::handshake::AuthChallenge {
             nonce: String::from("nonce-1"),
         }),
     };
@@ -396,14 +528,13 @@ async fn unsolicited_challenge_and_result_answer_nothing() {
 }
 
 fn proof_frame(device_id: DeviceWireId, proof: &str) -> super::WireFrame {
+    // The incarnation matches `sender()`: one connection pins its first
+    // incarnation, so every frame on it must echo the same process identity.
     let mut envelope = new_outgoing_envelope(
         ProtocolVersion::V1,
         WireSender {
             device_id: Some(device_id),
-            incarnation_id: ClientIncarnationId {
-                counter: 5,
-                random: 6,
-            },
+            incarnation_id: sender().incarnation_id,
             connection_id: None,
         },
         WireMessageType(String::from("AuthProof")),
@@ -421,9 +552,8 @@ fn proof_frame(device_id: DeviceWireId, proof: &str) -> super::WireFrame {
 async fn challenge_proof_accepts_and_binds_the_connection() {
     let (handle, _dir) = open_handle("auth-flow").await.unwrap();
     let transport = fake_transport();
-    let pending = handle
-        .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
-        .await;
+    let (table, id) = fresh_conn();
+    let pending = dispatch(&handle, &table, &id, pairing_frame("laptop"), &transport).await;
     assert!(
         pending.first().is_some_and(|first| matches!(
             &first.payload,
@@ -444,12 +574,11 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
     );
     let (record, secret) = approved.unwrap().unwrap();
     let device_wire = record.wire.clone();
-    let paired = handle
-        .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
-        .await;
+    let device_uuid = uuid::Uuid::parse_str(&device_wire).unwrap();
+    let paired = dispatch(&handle, &table, &id, pairing_frame("laptop"), &transport).await;
     let answer = paired.first().unwrap();
     let WirePayload::PairingResult(PairingResult::Paired { device_id }) = &answer.payload else {
-        return;
+        panic!("the approved descriptor must pair, got {paired:?}");
     };
     let device_id = *device_id;
     assert_eq!(
@@ -466,14 +595,19 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
         record.id.0.as_uuid().as_hyphenated().to_string(),
         "the issued key never renders the domain identity"
     );
-    let live = paired_input(&device_wire);
-    let challenged = handle
-        .handle_frame(
-            advertise_frame(ProtocolVersion::V1),
-            live.clone(),
-            &transport,
-        )
-        .await;
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Paired),
+        "the table records the issued key"
+    );
+    let challenged = dispatch(
+        &handle,
+        &table,
+        &id,
+        advertise_frame(Some(device_uuid), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
     assert_eq!(
         challenged.len(),
         2,
@@ -487,21 +621,26 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
     }
     let challenge_frame = challenged.get(1).unwrap();
     let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
-        return;
+        panic!("the second answer must be the challenge");
     };
     let nonce = challenge.nonce.clone();
     assert!(!nonce.is_empty(), "the challenge carries a fresh nonce");
+    assert_eq!(
+        table.challenge_nonce_of(&id).as_ref(),
+        Some(&nonce),
+        "the nonce is pending in the connection's challenged phase"
+    );
     let proof = pairing_proof_hex(&secret, &nonce);
     let attempt = proof_frame(device_id, &proof);
     let expected_reply = attempt.envelope.message_id;
-    let answered = handle.handle_frame(attempt, live.clone(), &transport).await;
+    let answered = dispatch(&handle, &table, &id, attempt, &transport).await;
     assert_eq!(answered.len(), 2, "a proof answers result plus fact");
     let accepted = answered.first().unwrap();
     assert!(
         matches!(
             &accepted.payload,
             WirePayload::AuthResult(AuthResult::Accepted { connection_id })
-            if *connection_id == live.connection_id
+            if *connection_id == id
         ),
         "a valid proof is accepted with this connection id, got {:?}",
         accepted.payload
@@ -518,17 +657,20 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
     );
     assert_eq!(
         accepted.envelope.sender.incarnation_id,
-        ClientIncarnationId {
-            counter: 5,
-            random: 6,
-        },
+        sender().incarnation_id,
         "the result echoes the inbound incarnation"
     );
     assert_eq!(
         accepted.envelope.sender.connection_id,
-        Some(live.connection_id),
+        Some(id),
         "the result echoes the connection"
     );
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Authenticated),
+        "the install happened before the acceptance was sent"
+    );
+    assert!(table.current_authenticated(&device_wire));
     let fact = answered.get(1).unwrap();
     assert!(
         matches!(&fact.payload, WirePayload::PresenceAttribution(_)),
@@ -537,43 +679,77 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
     );
     assert_eq!(
         fact.envelope.sender.connection_id,
-        Some(live.connection_id),
+        Some(id),
         "the piggybacked fact rides the acceptance, so it reveals too"
     );
-    let replayed = handle
-        .handle_frame(proof_frame(device_id, &proof), live.clone(), &transport)
-        .await;
+
+    // A retried proof after the install cannot race again: the phase left
+    // `Challenged`, so the frame is refused without touching currentness.
+    let replayed = dispatch(
+        &handle,
+        &table,
+        &id,
+        proof_frame(device_id, &proof),
+        &transport,
+    )
+    .await;
     assert!(
         replayed.first().is_some_and(|first| matches!(
             &first.payload,
-            WirePayload::AuthResult(AuthResult::Rejected { .. })
+            WirePayload::Reject(notice) if notice.kind == RejectKind::InvalidHandshakePhase
         )),
-        "the consumed nonce never answers twice, got {replayed:?}"
+        "a retried proof outside the challenged phase is refused, got {replayed:?}"
     );
-    for response in &replayed {
-        assert_eq!(
-            response.envelope.sender.connection_id, None,
-            "a rejection hides the connection id even post-accept"
-        );
-    }
-    let rechallenged = handle
-        .handle_frame(
-            advertise_frame(ProtocolVersion::V1),
-            live.clone(),
-            &transport,
-        )
-        .await;
-    let fresh = rechallenged.get(1).unwrap();
-    let WirePayload::AuthChallenge(fresh_challenge) = &fresh.payload else {
-        return;
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Authenticated),
+        "the refused retry changes no phase"
+    );
+    assert!(table.current_authenticated(&device_wire));
+
+    // Re-advertising after the install is refused with the nonce untouched.
+    let rechallenged = dispatch(
+        &handle,
+        &table,
+        &id,
+        advertise_frame(Some(device_uuid), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    assert!(
+        rechallenged.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::InvalidHandshakePhase
+        )),
+        "re-advertising after authentication is refused, got {rechallenged:?}"
+    );
+    assert_eq!(table.challenge_nonce_of(&id), None);
+
+    // A fresh connection for the same device can challenge again, and a bad
+    // proof there consumes the nonce, closes the phase, and leaves the
+    // current authenticated connection untouched.
+    let (second_table, second) = fresh_conn();
+    let second_challenged = dispatch(
+        &handle,
+        &second_table,
+        &second,
+        advertise_frame(Some(device_uuid), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    let Some(WirePayload::AuthChallenge(second_challenge)) =
+        second_challenged.get(1).map(|f| &f.payload)
+    else {
+        panic!("the reconnect must challenge, got {second_challenged:?}");
     };
-    assert_ne!(
-        fresh_challenge.nonce, nonce,
-        "re-advertising mints a fresh nonce"
-    );
-    let wrong = handle
-        .handle_frame(proof_frame(device_id, "deadbeef"), live.clone(), &transport)
-        .await;
+    let wrong = dispatch(
+        &handle,
+        &second_table,
+        &second,
+        proof_frame(device_id, "deadbeef"),
+        &transport,
+    )
+    .await;
     assert!(
         wrong.first().is_some_and(|first| matches!(
             &first.payload,
@@ -582,46 +758,52 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
         )),
         "a bad proof is rejected, got {wrong:?}"
     );
-    let rechallenged = handle
-        .handle_frame(
-            advertise_frame(ProtocolVersion::V1),
-            live.clone(),
-            &transport,
-        )
-        .await;
-    let fresh = rechallenged.get(1).unwrap();
-    assert!(
-        matches!(&fresh.payload, WirePayload::AuthChallenge(_)),
-        "re-advertising challenges again, got {:?}",
-        fresh.payload
+    assert_eq!(
+        second_table.challenge_nonce_of(&second),
+        None,
+        "the failed proof consumed its nonce"
     );
-    let unknown_device = DeviceWireId(uuid::Uuid::new_v4());
-    let unknown = handle
-        .handle_frame(
-            proof_frame(unknown_device, "deadbeef"),
-            live.clone(),
-            &transport,
-        )
-        .await;
-    assert!(
-        unknown.first().is_some_and(|first| matches!(
-            &first.payload,
-            WirePayload::AuthResult(AuthResult::Rejected { .. })
-        )),
-        "an unknown device is rejected, got {unknown:?}"
+    assert_eq!(
+        second_table.phase_of(&second),
+        Some(ConnectionPhase::Closed),
+        "a failed authentication closes the connection phase"
     );
-    let bound = handle
-        .handle_frame(stamped(submit_frame(), &live), live.clone(), &transport)
-        .await;
     assert!(
-        !bound
-            .first()
-            .is_some_and(|first| matches!(&first.payload, WirePayload::DisconnectNotice(_))),
+        table.current_authenticated(&device_wire),
+        "the failed challenge never touches the existing current"
+    );
+    assert_eq!(
+        second_table.challenge_nonce_of(&second),
+        None,
+        "a closed connection never mints another nonce"
+    );
+    assert_eq!(
+        second_challenged.get(1).map(|f| &f.payload),
+        Some(&WirePayload::AuthChallenge(second_challenge.clone())),
+        "the challenge nonce was single-use"
+    );
+
+    // The authenticated connection passes the domain gate; a foreign
+    // connection id closes with the unpaired notice.
+    let live = live_of(&table, &id);
+    let bound = dispatch(
+        &handle,
+        &table,
+        &id,
+        stamped(submit_for(device_id), &live),
+        &transport,
+    )
+    .await;
+    assert!(
+        !bound.is_empty()
+            && !bound
+                .first()
+                .is_some_and(|first| matches!(&first.payload, WirePayload::DisconnectNotice(_))),
         "a connection-bound frame passes the gate, got {bound:?}"
     );
-    let mut stray = submit_frame();
+    let mut stray = submit_for(device_id);
     stray.envelope.sender.connection_id = Some(ConnectionWireId(uuid::Uuid::new_v4()));
-    let dropped = handle.handle_frame(stray, live.clone(), &transport).await;
+    let dropped = dispatch(&handle, &table, &id, stray, &transport).await;
     assert!(
         dropped.first().is_some_and(|first| matches!(
             &first.payload,
@@ -635,7 +817,6 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
 async fn pre_accept_denials_and_closes_hide_the_connection_id() {
     let (handle, _dir) = open_handle("auth-hidden").await.unwrap();
     let transport = fake_transport();
-    let live = live_input("client-a");
     let denied = handle
         .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
         .await;
@@ -662,13 +843,15 @@ async fn pre_accept_denials_and_closes_hide_the_connection_id() {
         )),
         "an unauthorized peer is denied, got {refused:?}"
     );
-    let mismatch = handle
-        .handle_frame(
-            advertise_frame(ProtocolVersion { major: 9, minor: 0 }),
-            live.clone(),
-            &transport,
-        )
-        .await;
+    let (table, id) = fresh_conn();
+    let mismatch = dispatch(
+        &handle,
+        &table,
+        &id,
+        advertise_frame(None, ProtocolVersion { major: 9, minor: 0 }),
+        &transport,
+    )
+    .await;
     assert!(
         mismatch
             .first()
@@ -710,12 +893,10 @@ async fn unauthed_domain_frame_closes_even_without_a_connection_id() {
     let transport = fake_transport();
     // A paired device that skipped the proof: the bypass attempt carries
     // no connection id because pre-accept responses never reveal it.
-    let bypass = LiveInput {
-        paired_device: Some(String::from("laptop")),
-        connection_known: true,
-        authed: false,
-        ..live_input("client-a")
-    };
+    let (table, id) = fresh_conn();
+    assert!(table.note_paired(&id, "laptop"));
+    let bypass = live_of(&table, &id);
+    assert!(!bypass.authed, "pairing alone is not authentication");
     let without_id = submit_frame();
     assert_eq!(
         without_id.envelope.sender.connection_id, None,
@@ -756,33 +937,40 @@ async fn unauthed_domain_frame_closes_even_without_a_connection_id() {
 }
 
 #[tokio::test]
-async fn superseded_connection_replay_closes_despite_a_known_id() {
+async fn superseded_connection_replay_is_stale_not_a_close() {
     let (handle, _dir) = open_handle("gate-superseded").await.unwrap();
     let transport = fake_transport();
-    // The connection table reports a superseded connection as unauthed
-    // (see the conn-level supersede test): the envelope echoes the table
-    // id exactly, yet the gate must still drop the frame because the
-    // device authenticated anew elsewhere.
-    let stale = LiveInput {
-        paired_device: Some(String::from("laptop")),
-        connection_known: true,
-        authed: false,
-        ..live_input("client-a")
-    };
+    // Two table-backed connections for one device: the second install
+    // supersedes the first, which still holds a live socket.
+    let table = Arc::new(ConnectionTable::new());
+    let first = table.note_accept();
+    authenticate_conn(&table, &first, "laptop");
+    let second = table.note_accept();
+    authenticate_conn(&table, &second, "laptop");
+    let stale = live_of(&table, &first);
+    assert_eq!(stale.phase, ConnectionPhase::Superseded);
+    assert!(!stale.authed, "a superseded connection is never authed");
     let replay = stamped(submit_frame(), &stale);
     assert_eq!(
         replay.envelope.sender.connection_id,
         Some(stale.connection_id),
         "the replay echoes the table id exactly"
     );
-    let dropped = handle.handle_frame(replay, stale, &transport).await;
+    let answers = handle.handle_frame(replay, stale, &transport).await;
     assert!(
-        dropped.first().is_some_and(|first| matches!(
+        answers.first().is_some_and(|first| matches!(
             &first.payload,
-            WirePayload::DisconnectNotice(notice) if notice.reason == "unpaired"
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
         )),
-        "a known-id replay on a superseded connection closes, got {dropped:?}"
+        "a known-id replay on a superseded connection is a typed stale rejection, got {answers:?}"
     );
+    assert!(
+        !answers
+            .iter()
+            .any(|answer| matches!(answer.payload, WirePayload::DisconnectNotice(_))),
+        "a stale rejection keeps the socket open (IPC §11.3)"
+    );
+    assert!(table.current_authenticated("laptop"));
 }
 
 #[tokio::test]
@@ -799,9 +987,15 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
     )
     .await;
     let first = opened.unwrap();
-    let pending = first
-        .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
-        .await;
+    let (first_table, first_id) = fresh_conn();
+    let pending = dispatch(
+        &first,
+        &first_table,
+        &first_id,
+        pairing_frame("laptop"),
+        &transport,
+    )
+    .await;
     assert!(
         pending.first().is_some_and(|first| matches!(
             &first.payload,
@@ -829,27 +1023,29 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
     .await;
     let second = reopened.unwrap();
     let device_wire = record.wire.clone();
-    let live = paired_input(&device_wire);
-    let challenged = second
-        .handle_frame(
-            advertise_frame(ProtocolVersion::V1),
-            live.clone(),
-            &transport,
-        )
-        .await;
+    let device_uuid = uuid::Uuid::parse_str(&device_wire).unwrap();
+    let (table, id) = fresh_conn();
+    let challenged = dispatch(
+        &second,
+        &table,
+        &id,
+        advertise_frame(Some(device_uuid), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
     let challenge_frame = challenged.get(1).unwrap();
     let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
-        return;
+        panic!("the reconnect must challenge, got {challenged:?}");
     };
     let proof = pairing_proof_hex(&secret, &challenge.nonce);
-    let device_uuid = uuid::Uuid::parse_str(&device_wire).unwrap();
-    let answered = second
-        .handle_frame(
-            proof_frame(DeviceWireId(device_uuid), &proof),
-            live,
-            &transport,
-        )
-        .await;
+    let answered = dispatch(
+        &second,
+        &table,
+        &id,
+        proof_frame(DeviceWireId(device_uuid), &proof),
+        &transport,
+    )
+    .await;
     assert!(
         answered.first().is_some_and(|first| matches!(
             &first.payload,
@@ -859,8 +1055,10 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
     );
 }
 
+/// A proof without a challenge is out of phase: typed rejection, never a
+/// fabricated rejection reason or an acceptance.
 #[tokio::test]
-async fn proof_without_challenge_is_rejected() {
+async fn proof_without_challenge_is_invalid_phase() {
     let (handle, _dir) = open_handle("auth-nochallenge").await.unwrap();
     let transport = fake_transport();
     let proof = super::WireFrame {
@@ -873,17 +1071,16 @@ async fn proof_without_challenge_is_rejected() {
             proof: String::from("proof-1"),
         }),
     };
-    let live = live_input("client-a");
-    let responses = handle.handle_frame(proof, live.clone(), &transport).await;
-    assert_eq!(responses.len(), 1, "a proof answers exactly one frame");
+    let (table, id) = fresh_conn();
+    let responses = dispatch(&handle, &table, &id, proof, &transport).await;
+    assert_eq!(responses.len(), 1, "the refusal answers exactly one frame");
     let first = responses.first().unwrap();
     assert!(
         matches!(
             &first.payload,
-            WirePayload::AuthResult(AuthResult::Rejected { reason })
-            if reason == "no pending challenge"
+            WirePayload::Reject(notice) if notice.kind == RejectKind::InvalidHandshakePhase
         ),
-        "a proof with no pending challenge is rejected, got {:?}",
+        "a proof with no pending challenge is out of phase, got {:?}",
         first.payload
     );
     assert_eq!(
@@ -895,20 +1092,70 @@ async fn proof_without_challenge_is_rejected() {
         sender().incarnation_id,
         "hiding the connection never drops the incarnation echo"
     );
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Accepted),
+        "the refused proof changes no phase"
+    );
+}
+
+/// Re-advertising after the challenge is refused and changes neither the
+/// nonce nor the negotiated terms (#1385).
+#[tokio::test]
+async fn re_advertising_keeps_the_nonce_and_is_invalid_phase() {
+    let (handle, _dir) = open_handle("caps-repeat").await.unwrap();
+    let transport = fake_transport();
+    let device = DeviceWireId(uuid::Uuid::from_u128(11));
+    let device_wire = device.0.as_hyphenated().to_string();
+    let (table, id) = fresh_conn();
+    assert!(table.note_paired(&id, &device_wire));
+    let first = dispatch(
+        &handle,
+        &table,
+        &id,
+        advertise_frame(Some(device.0), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    let Some(WirePayload::AuthChallenge(challenge)) = first.get(1).map(|f| &f.payload) else {
+        panic!("the first advertise must challenge, got {first:?}");
+    };
+    let nonce = challenge.nonce.clone();
+    let terms = table.negotiated_of(&id).expect("the terms must record");
+    let repeat = dispatch(
+        &handle,
+        &table,
+        &id,
+        advertise_frame(Some(device.0), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    assert!(
+        repeat.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::InvalidHandshakePhase
+        )),
+        "a repeat capability frame is refused, got {repeat:?}"
+    );
+    assert_eq!(
+        table.challenge_nonce_of(&id).as_ref(),
+        Some(&nonce),
+        "the refusal never mints a new nonce"
+    );
+    assert_eq!(
+        table.negotiated_of(&id),
+        Some(terms),
+        "the refusal never changes the negotiated terms"
+    );
+    assert_eq!(table.phase_of(&id), Some(ConnectionPhase::Challenged));
 }
 
 #[tokio::test]
 async fn negotiated_version_is_fixed_per_connection() {
-    use ene_api::v1::handshake::NegotiatedConnection;
-
     let (handle, _dir) = open_handle("version-fixed").await.unwrap();
     let transport = fake_transport();
-    let negotiated = LiveInput {
-        negotiated: Some(NegotiatedConnection {
-            version: ProtocolVersion::V1,
-        }),
-        ..paired_input("device-1")
-    };
+    let mut negotiated = live_input("device-1");
+    negotiated.negotiated = Some(negotiated_v1());
     let mut mixed = submit_frame();
     mixed.envelope.protocol = ProtocolVersion {
         major: 1,
@@ -1002,16 +1249,20 @@ async fn reject_sender_follows_the_auth_boundary() {
 #[tokio::test]
 async fn capability_mismatch_ends_with_a_disconnect_notice() {
     let (handle, _dir) = open_handle("caps-mismatch").await.unwrap();
-    let frame = advertise_frame(ProtocolVersion { major: 9, minor: 0 });
+    let (table, id) = fresh_conn();
+    let frame = advertise_frame(None, ProtocolVersion { major: 9, minor: 0 });
     let transport = fake_transport();
-    let responses = handle
-        .handle_frame(frame, live_input("client-a"), &transport)
-        .await;
+    let responses = dispatch(&handle, &table, &id, frame, &transport).await;
     assert_eq!(responses.len(), 1, "mismatch answers exactly one frame");
     let first = responses.first().unwrap();
     assert!(
         matches!(&first.payload, WirePayload::DisconnectNotice(_)),
         "a major mismatch disconnects"
+    );
+    assert_eq!(
+        table.phase_of(&id),
+        Some(ConnectionPhase::Accepted),
+        "a refused negotiation changes no phase"
     );
 }
 
@@ -1020,11 +1271,14 @@ async fn capability_match_negotiates_and_challenges_without_attaching() {
     use ene_companion::CompanionRepository as _;
 
     let (handle, _dir) = open_handle("caps-ok").await.unwrap();
-    let live = live_input("client-a");
-    let frame = advertise_frame(ProtocolVersion::V1);
+    let device = DeviceWireId(uuid::Uuid::from_u128(13));
+    let device_wire = device.0.as_hyphenated().to_string();
+    let (table, id) = fresh_conn();
+    assert!(table.note_paired(&id, &device_wire));
+    let frame = advertise_frame(Some(device.0), ProtocolVersion::V1);
     let expected_reply = frame.envelope.message_id;
     let transport = fake_transport();
-    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    let responses = dispatch(&handle, &table, &id, frame, &transport).await;
     assert_eq!(
         responses.len(),
         2,
@@ -1043,7 +1297,7 @@ async fn capability_match_negotiates_and_challenges_without_attaching() {
     );
     let second = responses.get(1).unwrap();
     let WirePayload::AuthChallenge(challenge) = &second.payload else {
-        return;
+        panic!("the second answer must be the challenge");
     };
     assert!(
         !challenge.nonce.is_empty(),
@@ -1055,14 +1309,10 @@ async fn capability_match_negotiates_and_challenges_without_attaching() {
             "pre-accept negotiation hides the connection id"
         );
     }
-    let recorded = match handle.pending_nonces.lock() {
-        Ok(map) => map.get(&conn_key(&live.connection_id)).cloned(),
-        Err(_) => None,
-    };
     assert_eq!(
-        recorded.as_ref(),
+        table.challenge_nonce_of(&id).as_ref(),
         Some(&challenge.nonce),
-        "the challenge nonce is pending for this connection"
+        "the challenge nonce is pending in the connection's phase"
     );
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();
@@ -1079,7 +1329,10 @@ async fn disconnect_without_presence_is_a_no_op() {
     use ene_companion::CompanionRepository as _;
 
     let (handle, _dir) = open_handle("disc-noop").await.unwrap();
-    handle.note_disconnect("never-attached").await;
+    let live = live_input("never-attached");
+    handle
+        .close_connection(&live.authority, live.connection_id)
+        .await;
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
@@ -1089,6 +1342,350 @@ async fn disconnect_without_presence_is_a_no_op() {
         ene_presence::PresenceState::NoActive,
         "a disconnect with nothing attached changes nothing"
     );
+}
+
+/// #1384 / S5-04: a superseded connection's capability, proof, and domain
+/// frames are all refused as stale, with no new nonce, no current change, and
+/// no domain effect.
+#[tokio::test]
+async fn superseded_connection_replays_are_stale_and_have_no_effect() {
+    let (handle, _dir) = open_handle("stale-replay").await.unwrap();
+    let transport = fake_transport();
+    // Complete one real pairing to obtain an approved device and secret.
+    let (probe_table, probe_id) = fresh_conn();
+    let pending = dispatch(
+        &handle,
+        &probe_table,
+        &probe_id,
+        pairing_frame("laptop"),
+        &transport,
+    )
+    .await;
+    assert!(
+        pending.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation)
+        )),
+        "the probe must pend, got {pending:?}"
+    );
+    let approved = handle.approve_device("laptop").await;
+    let Ok(Some((record, secret))) = approved else {
+        panic!("owner approval must pair, got {approved:?}");
+    };
+    let device_wire = record.wire.clone();
+    let device = DeviceWireId(uuid::Uuid::parse_str(&device_wire).unwrap());
+    let paired = dispatch(
+        &handle,
+        &probe_table,
+        &probe_id,
+        pairing_frame("laptop"),
+        &transport,
+    )
+    .await;
+    assert!(
+        paired.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::PairingResult(PairingResult::Paired { .. })
+        )),
+        "the approved descriptor must pair, got {paired:?}"
+    );
+
+    // C1 authenticates.
+    let (table, c1) = fresh_conn();
+    let challenged = dispatch(
+        &handle,
+        &table,
+        &c1,
+        advertise_frame(Some(device.0), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    let Some(WirePayload::AuthChallenge(challenge)) = challenged.get(1).map(|f| &f.payload) else {
+        panic!("C1 must challenge, got {challenged:?}");
+    };
+    let accepted = dispatch(
+        &handle,
+        &table,
+        &c1,
+        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        &transport,
+    )
+    .await;
+    assert!(
+        accepted.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::AuthResult(AuthResult::Accepted { .. })
+        )),
+        "C1 must authenticate, got {accepted:?}"
+    );
+
+    // C2 authenticates on a fresh connection: C1 is superseded.
+    let c2 = table.note_accept();
+    let challenged = dispatch(
+        &handle,
+        &table,
+        &c2,
+        advertise_frame(Some(device.0), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    let Some(WirePayload::AuthChallenge(challenge)) = challenged.get(1).map(|f| &f.payload) else {
+        panic!("C2 must challenge, got {challenged:?}");
+    };
+    let accepted = dispatch(
+        &handle,
+        &table,
+        &c2,
+        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        &transport,
+    )
+    .await;
+    assert!(
+        accepted.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::AuthResult(AuthResult::Accepted { .. })
+        )),
+        "C2 must authenticate, got {accepted:?}"
+    );
+    assert_eq!(table.phase_of(&c1), Some(ConnectionPhase::Superseded));
+    assert!(table.current_authenticated(&device_wire));
+
+    // C1 replays capability, proof, and a domain frame: all stale, none may
+    // mint a nonce, change the terms, touch the current, or create a round.
+    let stale_capability = dispatch(
+        &handle,
+        &table,
+        &c1,
+        advertise_frame(Some(device.0), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    assert!(
+        stale_capability.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+        )),
+        "C1 capability replay must be stale, got {stale_capability:?}"
+    );
+    let stale_proof = dispatch(
+        &handle,
+        &table,
+        &c1,
+        proof_frame(device, "deadbeef"),
+        &transport,
+    )
+    .await;
+    assert!(
+        stale_proof.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+        )),
+        "C1 proof replay must be stale, got {stale_proof:?}"
+    );
+    let c1_live = live_of(&table, &c1);
+    let stale_input = dispatch(
+        &handle,
+        &table,
+        &c1,
+        stamped(submit_for(device), &c1_live),
+        &transport,
+    )
+    .await;
+    assert!(
+        stale_input.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+        )),
+        "C1 domain replay must be stale, got {stale_input:?}"
+    );
+    for response in [&stale_capability, &stale_proof, &stale_input] {
+        assert!(
+            !response
+                .iter()
+                .any(|answer| matches!(answer.payload, WirePayload::DisconnectNotice(_))),
+            "stale rejections keep the socket open (IPC §11.3)"
+        );
+    }
+    assert_eq!(
+        table.challenge_nonce_of(&c1),
+        None,
+        "a superseded connection never mints another nonce"
+    );
+    assert_eq!(
+        table.phase_of(&c1),
+        Some(ConnectionPhase::Superseded),
+        "C1 stays superseded"
+    );
+    assert!(
+        table.current_authenticated(&device_wire),
+        "C1 never reclaims the current slot"
+    );
+    assert!(
+        handle
+            .open_round_for(&device_wire, handle.companion_wire())
+            .is_none(),
+        "a stale input creates no conversation round"
+    );
+    let (state, active, _) = presence_state(&handle).await;
+    assert_eq!(state, PresenceState::NoActive);
+    assert_eq!(active, None, "a stale input never attaches presence");
+}
+
+/// #1385: capability replay on a superseded connection is stale, and the
+/// superseded connection can never move its device claim to another device.
+#[tokio::test]
+async fn superseded_capability_replay_is_stale_and_never_moves_device() {
+    let (handle, _dir) = open_handle("stale-unknown").await.unwrap();
+    let transport = fake_transport();
+    let device = uuid::Uuid::from_u128(7);
+    let device_wire = device.as_hyphenated().to_string();
+    let table = Arc::new(ConnectionTable::new());
+    let first = table.note_accept();
+    authenticate_conn(&table, &first, &device_wire);
+    let second = table.note_accept();
+    authenticate_conn(&table, &second, &device_wire);
+    let replay = dispatch(
+        &handle,
+        &table,
+        &first,
+        advertise_frame(Some(device), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    assert!(
+        replay.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+        )),
+        "a superseded capability replay is stale, got {replay:?}"
+    );
+    assert_eq!(table.challenge_nonce_of(&first), None);
+    // A different claim on a superseded connection cannot be attributed to
+    // it at all: the table drops the frame without a reply (IPC §5).
+    let moved = dispatch(
+        &handle,
+        &table,
+        &first,
+        advertise_frame(Some(uuid::Uuid::from_u128(99)), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    assert!(
+        moved.is_empty(),
+        "a superseded connection can never move its device claim, got {moved:?}"
+    );
+    assert_eq!(
+        table.phase_of(&first),
+        Some(ConnectionPhase::Superseded),
+        "the dropped frame changes no phase"
+    );
+    assert!(table.current_authenticated(&device_wire));
+}
+
+/// S5-03 / #1384: with a lingering superseded socket, closing the current
+/// connection still satisfies the presence fallback condition (no current
+/// authenticated connection), and the lingering socket cannot revive it.
+#[tokio::test]
+async fn current_close_falls_back_even_with_a_lingering_superseded_socket() {
+    let (handle, _dir) = open_handle("close-linger").await.unwrap();
+    let table = Arc::new(ConnectionTable::new());
+    let first = table.note_accept();
+    authenticate_conn(&table, &first, "laptop");
+    let second = table.note_accept();
+    authenticate_conn(&table, &second, "laptop");
+    make_present(&handle, "laptop").await;
+    let (state, _, _) = presence_state(&handle).await;
+    assert_eq!(state, PresenceState::Present);
+
+    // Closing the current connection falls back even though C1 lingers.
+    handle.close_connection(&table, second).await;
+    let (state, active, _) = presence_state(&handle).await;
+    assert_eq!(
+        state,
+        PresenceState::NoActive,
+        "the current close falls back with a lingering superseded socket"
+    );
+    assert_eq!(active, None);
+    assert!(!table.current_authenticated("laptop"));
+    assert_eq!(table.phase_of(&first), Some(ConnectionPhase::Superseded));
+
+    // The lingering socket's close runs once more but never revives the old
+    // current: the fallback finds nothing Present to move.
+    handle.close_connection(&table, first).await;
+    assert!(!table.current_authenticated("laptop"));
+    let (state, active, _) = presence_state(&handle).await;
+    assert_eq!(state, PresenceState::NoActive);
+    assert_eq!(active, None);
+}
+
+/// S5-05 order 1: the old connection's close completes before the new
+/// authentication. The fallback runs (the old connection was current), and
+/// the later install becomes current without reviving presence.
+#[tokio::test]
+async fn close_before_auth_falls_back_and_the_install_does_not_revive() {
+    let (handle, _dir) = open_handle("close-then-auth").await.unwrap();
+    let table = Arc::new(ConnectionTable::new());
+    let first = table.note_accept();
+    authenticate_conn(&table, &first, "laptop");
+    make_present(&handle, "laptop").await;
+    handle.close_connection(&table, first).await;
+    let (state, _, _) = presence_state(&handle).await;
+    assert_eq!(state, PresenceState::NoActive, "the close falls back");
+    assert!(!table.current_authenticated("laptop"));
+
+    let second = table.note_accept();
+    authenticate_conn(&table, &second, "laptop");
+    assert!(table.current_authenticated("laptop"));
+    let (state, active, _) = presence_state(&handle).await;
+    assert_eq!(
+        state,
+        PresenceState::NoActive,
+        "authentication alone never revives presence"
+    );
+    assert_eq!(active, None);
+}
+
+/// S5-05 order 2: the new authentication installs while the old close is
+/// paused before its table section. The close then re-reads currentness and
+/// never clears the new current nor runs the fallback.
+#[tokio::test]
+async fn close_racing_a_new_auth_never_clears_the_new_current() {
+    let (handle, _dir) = open_handle("auth-then-close").await.unwrap();
+    let handle = Arc::new(handle);
+    let table = Arc::new(ConnectionTable::new());
+    let first = table.note_accept();
+    authenticate_conn(&table, &first, "laptop");
+    make_present(&handle, "laptop").await;
+
+    let gate = handle.arm_close_gate();
+    let close_handle = Arc::clone(&handle);
+    let close_table = Arc::clone(&table);
+    let closing = tokio::spawn(async move {
+        close_handle.close_connection(&close_table, first).await;
+    });
+    gate.wait_entered().await;
+    // The new authentication installs while the close is paused.
+    let second = table.note_accept();
+    authenticate_conn(&table, &second, "laptop");
+    assert_eq!(table.phase_of(&first), Some(ConnectionPhase::Superseded));
+    gate.release();
+    closing.await.expect("the close task must finish");
+
+    assert!(
+        table.current_authenticated("laptop"),
+        "the old close never clears the new current"
+    );
+    assert_eq!(
+        table.phase_of(&second),
+        Some(ConnectionPhase::Authenticated)
+    );
+    let (state, active, _) = presence_state(&handle).await;
+    assert_eq!(
+        state,
+        PresenceState::Present,
+        "the paused close re-reads currentness and runs no fallback"
+    );
+    assert_eq!(active, Some(device_client("laptop")));
 }
 
 /// A full control channel reports Full instead of queueing: the failed

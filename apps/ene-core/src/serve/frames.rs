@@ -98,6 +98,29 @@ pub(crate) fn outgoing_frame(
     WireFrame { envelope, payload }
 }
 
+/// Builds one typed `StaleConnection` rejection answering `frame`.
+///
+/// A superseded connection keeps its socket (IPC §11.3): the frame's
+/// attribution was verifiable, so the honest typed outcome is sent instead of
+/// a drop. The rejection never reveals the connection id (the connection is no
+/// longer authenticated), and it is never a retry signal.
+pub(crate) fn stale_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+    reject_frame(frame, live, RejectKind::StaleConnection, detail.to_string())
+}
+
+/// Builds one typed `InvalidHandshakePhase` rejection answering `frame`.
+///
+/// The offending handshake frame had no effect: the pending nonce and the
+/// negotiated terms are unchanged (IPC §9.3).
+pub(crate) fn invalid_phase_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+    reject_frame(
+        frame,
+        live,
+        RejectKind::InvalidHandshakePhase,
+        detail.to_string(),
+    )
+}
+
 /// Builds one typed wire rejection answering `frame`.
 ///
 /// Per IPC §5, a rejection on an authenticated connection (`live.authed`)
