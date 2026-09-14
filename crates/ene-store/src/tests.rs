@@ -6947,6 +6947,7 @@ mod action;
 mod agent;
 mod cancel;
 mod erasure;
+mod presence;
 mod result_reevaluation;
 mod task_failure;
 mod task_result;
