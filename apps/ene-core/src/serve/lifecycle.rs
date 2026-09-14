@@ -8,7 +8,7 @@ use ene_credential::EnvCredentialStore;
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
 
 #[cfg(unix)]
-pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
+pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -32,7 +32,7 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
+pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     std::fs::create_dir_all(data_dir)
         .map_err(|error| CoreError::Store(format!("create data directory: {error}")))?;
     Ok(())
@@ -48,12 +48,21 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 /// [`crate::conn`]: this entry point passes
 /// the data directory, never the socket path.
 ///
+/// Startup is ordered around the single-writer lock (PR §6.4): the `0700`
+/// data directory and the exclusive `host.lock` come first, then the store
+/// open (which runs migrations), then the explicit startup mutations (the
+/// credential sweep and sealed-result reconciliation), and only then the
+/// listener. A second Host in the same directory is refused before any of
+/// that runs.
+///
 /// # Errors
 ///
-/// Returns [`CoreError::Store`] when the state cannot be opened and
+/// Returns [`CoreError::AlreadyRunning`] when another Host holds the data
+/// directory, [`CoreError::Store`] when the state cannot be opened, and
 /// [`CoreError::Bind`] (or [`CoreError::UnsupportedPlatform`]) when the
 /// listener cannot run.
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
+    let _lock = crate::host_lock::HostLock::acquire(data_dir)?;
     let handle = HostHandle::open(data_dir).await?;
     // Serving boundary, before the listener binds: sweep every registered
     // value out of durable content and advance the credential-set revision
