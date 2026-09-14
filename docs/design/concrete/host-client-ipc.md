@@ -267,8 +267,6 @@ struct ObservedMarks {
 
 ## 8. Capability negotiation
 
-## 8. Capability negotiation
-
 Client 端末によって、3D立ち絵（Body）、音声合成/認識（Voice）、画面キャプチャ（Screen capture）、PC操作（Computer Use）、システム通知、OSトレイなどの対応能力（Capability）は異なります。そのため、接続確立時に Client の対応機能を Host 側へ申告して交渉を行います。
 
 ```rust
@@ -316,6 +314,21 @@ struct NegotiatedConnection {
 2. 認証が成功した際、Host はそのコネクション専用の `ConnectionWireId` を発行し、デバイスごとの現在の有効な接続を更新します。以降、Client から Host への電文には必ず `sender.connection_id` を付与します。認証前の電文はペアリングおよび認証手続き専用のものに限定し、業務的なドメイン操作は一切受け付けません。
 3. 再接続（Reconnect）時は、常に新しいコネクションとしてゼロから認証をやり直します。古い `ConnectionWireId`、古いストリーム、古いチケット、古いやり取り（Round）をそのまま引き継いではなりません。古いコネクション ID を乗せた電文は、ドメイン処理を実行する前に `StaleConnection` として安全に拒否します。
 
+#### connection phase と replacement（Stage 5）
+
+current の選択に paired socket count を使う案は、未認証・superseded の残存によって切断を見失うため採用しません。認証ごとに presence generation を進める案も、同じ Client の接続 replacement と帰属移動を混同します。現在の connection slot と不可逆な phase を使い、帰属が変わらない replacement では generation を保持しつつ古い Round/receipt を失効させます。
+
+`authenticated` は、その connection で所有証明が成功した事実です。`current` は Host の device ごとの current slot がその connection を指すことです。domain ingress と presence の到達性に使えるのは、両方を満たし、閉じておらず、device が現在も有効な connection だけです。paired socket の数や過去の認証成功回数は使用しません（[#1384](https://github.com/pexisgle/ene/issues/1384)）。
+
+connection は `Accepted → Paired → Challenged → Authenticated → Superseded | Closed` の一方向に進めます。失敗した認証は `Closed`、任意 phase の transport 終了も `Closed` とします。新規 pairing は承認完了で Accepted から Paired へ進みます。再接続では最初の `CapabilityAdvertise.sender.device_id` を既存の非失効 device と照合し、Accepted からの device bind・Paired への移行・capability 受付を一つの phase 操作にします（ID 解決だけでは authenticated/current になりません）。以後 `CapabilityAdvertise` は Paired で一度だけ受け、nonce は Challenged の AuthProof 一度で消費します。phase 不一致には `InvalidHandshakePhase` を返し、nonce や negotiated terms を変更しません。Superseded は復活不能で、同じ socket の pairing/capability/auth を含め、帰属を検証できる電文は `StaleConnection` とします（[#1385](https://github.com/pexisgle/ene/issues/1385)）。§11.3 の型付き stale 拒否後も socket を維持してよいものの、新規認証には必ず別 connection を開きます。
+
+- AuthProof の検証後、Host は短い connection 所有区間で phase と device の有効性を再確認し、旧 current を Superseded にして新 current を設置します。`AuthResult::Accepted` はこの変更の後に送ります。応答が失われても旧 current へ戻しません。認証処理が同時ならこの設置順で最後の成功 connection が current になり、非 current の socket が AuthProof を再送して競争し直すことはできません。
+- replacement が同じ Client の `Present` 中に、current 不在区間なしで成立した場合、帰属先と PresenceGeneration は維持します。ただし旧 connection の Round、stream、presentation receipt、再試行 epoch は無効になり、新 connection は新しい Round だけを使います。旧 socket を持つことは新 connection の認証や提示の成功を意味しません。
+- close は connection identity を比較して current slot を除去します。superseded/unauthed connection の close は新 current を消しません。current の close 後に stale socket が残っても、presence fallback の条件は成立します。古い close 通知を非同期で処理する際の再比較は [CCT §10.4](concurrency-control.md#104-connection-の現在性と-presence-commit) に従います。
+- Stage 5 の local transport は EOF、read/write error、明示 DisconnectNotice を確定した切断とします。応答待ちの timeout だけで帰属を捨てません。可用性を確認できない間は Client-dependent admission を止めます。将来の remote heartbeat はこの判定へ証拠を供給するものであり、Stage 5 に新設しません。
+- 新規 `PairingRequest` は Host の権限・制約 owner が不透明な pending identity（既存の pending device ID）を発行し、同じ connection・request_id・同一本文の再送には同じ pending を返し、対応は元 connection の終了まで保持します。異なる本文での request_id 再利用は拒否し、認証後の command epoch を使いません。承認は pending ID と元 connection を指定し、その行を CAS して Paired にします。Host restart / 元接続終了後の未承認 pending は認証に使えず、新接続は新しい要求を出します。pending の表示属性や画面上の行番号から承認先を逆引きしません。
+- device descriptor は表示属性です。既存ペアリングの再接続は保存済みの `DeviceWireId` から Host が device を解決して認証し、descriptor を identity lookup に使いません。同じ descriptor の新規要求にはそれぞれ別の pending request identity と Owner 確認を与えます（[#1389](https://github.com/pexisgle/ene/issues/1389)）。descriptor による接続 identity の取り違えを、Stage 5 の replacement として扱ってはなりません。
+
 ### 9.4 revoke
 
 - ユーザーは、ペアリング済みのデバイス一覧、最終接続日時、許可された機能を確認し、デバイス単位で即座にアクセス権を失効（Revoke）させることができます（セキュリティ要件）。§18 の第一者管理画面での最終確認を経て、`ene-permission` が失効を判断し、`ene-credential` のデバイス認証ストア（E）にある検証材料を確実に無効化・削除します。同時に `ene-presence` は現在の接続セッションを切断します。以降の認証拒否は、ストア（E）から有効な材料が完全に消去されたことを根拠として行い、単なるフラグの書き換えだけに頼りません。消去が完了する前に「失効完了」とみなしてはならず、途中で失敗した場合は未完了の保留状態として扱います。
@@ -330,13 +343,15 @@ struct NegotiatedConnection {
 
 | トランスポート方式 | 主な用途 | 採用する通信技術 |
 |---|---|---|
-| **同一マシン内通信 (Same-machine)** | Host と同じ PC 上で動作する Client | OS ローカルソケット（Linux: Unixドメインソケット、Windows: 名前付きパイプまたは loopback ＋ OS ピア認証）。OS のユーザーアカウント権限による保護を前提とし、TLS は必須としません。フレームは長さプレフィックス（4バイト・ビッグエンディアン、上限値付き）で区切ります |
+| **同一マシン内通信 (Same-machine)** | Host と同じ PC 上で動作する Client | OS ローカルソケット（Linux: Unixドメインソケット、Windows: 名前付きパイプ＋OS ピア認証）。OS のユーザーアカウント権限による保護を前提とし、TLS は必須としません。フレームは長さプレフィックス（4バイト・ビッグエンディアン、上限値付き）で区切ります |
 | **LAN / リモート端末通信** | 別の PC や端末で動作する Client（同一 LAN または VPN 経由） | WebSocket（バイナリメッセージ）＋ TLS。外部のリレーサーバーやクラウドサービス、外部アカウントへの依存は一切排除します。1本の接続上で論理ストリームを多重化（ペイロードの `StreamWireId` で識別）します |
 | **将来の通信方式** | 将来的な拡張 | 新しいトランスポートアダプターを追加することで対応します。電文のセマンティクス、DTO 定義、バージョン管理、認証要件は一切変更しません |
 
 現時点では QUIC 等の複雑なプロトコルは採用しません。現在のトポロジー（単一ユーザーが管理する単一 Host、少数の Client 端末、チケット制による低頻度な画面キャプチャ、WebSocket で十分なストリーム多重化）においては過剰設計（Over-engineering）となるためです。必要になった段階でアダプターとして素直に追加できる設計としています（第28節）。
 
 「Host PC 上で動いている Client であるか」の判定は、Host のトランスポートアダプターが接続経路および OS のピア認証情報から判定する `transport_class = SameMachine | Remote` に基づいて行います。Client 端末から送られてくるプラットフォーム情報や IP アドレスなどの自己申告を鵜呑みにして判定してはなりません。この情報は接続記録に保持され、実際の処理時にもリアルタイムに再確認されます。なお、管理画面における「信頼された第一者（first-party）」の資格判定には、これに加えて §18 で定める厳格な確認境界が必須となります。
+
+Stage 5 の Windows は Tokio の named-pipe adapter を使い、`PIPE_REJECT_REMOTE_CLIENTS`、最初の server instance の排他作成、Host の logon SID に限定した明示 DACL を必須にします。接続時に OS peer token を照合し、既定 DACL や Client の自己申告だけで SameMachine / 第一者と認めません。Linux は保護された runtime directory の Unix socket と peer UID を使います。OS peer の同一性は第一者管理資格と pairing proof を代替せず、実際の管理操作は §18 の gate も通します。DACL の根拠は [Microsoft の named-pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights) に従います。
 
 ### 10.2 transport adapter boundary
 
@@ -369,7 +384,11 @@ enum TransportFrame {
 | **起動世代 (Client Incarnation)** | `ClientIncarnationId` | Client がプロセス起動ごとに発行（永続カウンタ ＋ 乱数） | Client アプリのプロセス世代の識別。アプリを再起動するたびに必ず新しくなる |
 | **存在世代 (Presence Generation)** | `PresenceGeneration`（値の写し） | Host 側のキャラクター帰属ライフサイクルが発行 | そのキャラクターがどの帰属期間に存在しているかの識別 |
 
-これら3つを1つの「セッション ID」に押し込んではいけません。コネクションが変われば、起動世代の新旧にかかわらず古いコネクションは無効（Stale）です。アプリが再起動して起動世代が変われば、接続の新旧にかかわらず古い起動世代からの電文は無効（Stale）です。そして存在世代はキャラクターの帰属区間を表すものであり、接続やプロセスの新旧で代用できません。
+これら3つを1つの「セッション ID」に押し込んではいけません。コネクションが変われば、起動世代の新旧にかかわらず古いコネクションは無効（Stale）です。Host は current connection に束縛した incarnation と一致しない電文を Stale にします。incarnation の大小は認証の優先順位ではなく、新しい socket で所有証明を成功させた旧プロセスが最後に install すれば current を置き換え得ます。旧 incarnation を永久失効させる high-water record は追加しません。そして存在世代はキャラクターの帰属区間を表すものであり、接続やプロセスの新旧で代用できません。
+
+Client は process boot 時にローカルな Client data directory ごとの永続 counter を排他更新し、乱数と組み合わせた `ClientIncarnationId` を一度だけ生成して全 connection で再利用します（[#1387](https://github.com/pexisgle/ene/issues/1387)）。同じ process の reconnect では counter を進めません。counter の読込・書込・排他・上限確認に失敗した場合は接続を開始せず、PID や時刻へ fallback しません。
+
+counter の owner は Client で、`client-incarnation.counter` に 1 個の u64 を保持します。初回 pairing 前にも生成でき、接続先 Host や DeviceWireId の発行には依存しません。安定した別ファイル `client-incarnation.lock` の OS 排他を取り、counter 読込 → checked increment → 同じ directory 内の temp file の sync / atomic rename を完了してから生成値を公開します。counter 初期値は 0、最初の公開値は 1 です。元ファイルが存在するのに読めない・壊れている場合は初期化し直しません。restart ではこの counter だけを読み戻し、過去の incarnation 自体は復元しません。接続 metadata の全消去時だけ counter も除去し、新しい乱数との組で旧区間と区別します。これは接続用 metadata であり、私的な本文キャッシュではありません。Host の照合は §11.1 の current slot と認証済み組の一致によります。
 
 ### 11.2 wire property
 
@@ -474,6 +493,39 @@ enum MoveOutcome {
 
 - Client から Host へ送信される提示確認電文 `ConfirmPresentation { Presented | Unknown | Failed }` において、`Presented` は「その端末の画面に表示した / スピーカーから音を出した」という出力確認の事実にすぎず、タスクの達成や外部作用の成功、ユーザーの承認を意味するものではありません。出力が確認できなかった場合（`Unknown`）は成否不明として保持し、勝手に完了扱いにしてはなりません。
 - 通信エラー、デコード失敗、Client アプリのクラッシュ等による配信失敗（Delivery failure）が発生した場合、Host は該当するメッセージを「未伝達（Undelivered）」として永続化し、次回復帰した Client または別端末において要約報告します。配信失敗を理由にして勝手に報告完了とみなしたり、メッセージを闇に葬ったり、無制限に自動再送を繰り返したりしてはなりません。再送を行う場合は、新しい Round や新しいストリームとして現在の前提条件を再照合します。
+
+#### Stage 5 の未伝達提示 DTO
+
+```rust
+struct UndeliveredSummary {
+    receipt: PresentationReceiptWireRef,
+    round: RoundWireId,
+    presence_generation: u64,
+    items: Vec<UndeliveredItemView>, // 今回実際に表示する事項だけ。最大 50
+    reports: Vec<TaskReportView>,  // 下記の bounded な表示 DTO。同じ Task はまとめる
+    has_more: bool,
+}
+struct UndeliveredItemView {
+    reference: UndeliveredWireRef,
+    source: UndeliveredSourceView, // CI §5.2 の source を表示用に写す。Task/attempt/result refs と certainty を保持
+    excerpt: String,              // source 本文の bounded な抜粋。scrub 後のみ
+    truncated: bool,
+}
+struct UndeliveredAck {
+    receipt: PresentationReceiptWireRef,
+    status: PresentationStatus,    // Presented | Unknown | Failed
+}
+```
+
+`TaskReportView` は `{ task, revision, progress, details_available }` という Task の現在の見出し情報とし、記録/採用・certainty・要約は今回の items の source に限定します。同一 Task の全 Action/result を展開しません。`HistoryMessage` / `ActivityRecord` も items の型付き表示内容として同じ上限に含めます。source 本文は最大 2 KiB の UTF-8 境界で切った抜粋と省略表示にし、frame 全体が §10.3 / §22 の合意した上限に収まるまで選択件数を減らします。選ぶのは取得したページの prefix とし、cursor は実際に処理した prefix の末尾だけ進めます。frame から外した後続事項は次ページに残します。1 件も収まらない場合は FrameTooLarge を返して提示を保留し、未提示行や cursor を更新しません。receipt は実際に載せた source に限り、要約として提示したことへの ACK であって原文の全文閲覧を要求しません。残りの facts は paged な `GetTaskReport`、本文は `GetReportSource { source, cursor, limit_bytes }` で読みます。後者は同じ source に束縛した byte cursor と `4..=16384`（省略時 4096）の上限を持ち、UTF-8 境界で区切ります。source owner の消去・閲覧条件に従い、read による ACK や実行は行いません。本文を安全に scrub した bounded view を作れなければ InputUnavailable とし、生の断片を送信しません。
+
+認証完了後、Client は表示用の Task 一覧・未伝達一覧を取得します。通常の再接続で `NoActive` の場合も管理ビューは読めますが、Companion としての要約提示は正式な presence 成立後に行います。Client の「この画面で開く」操作は新しい `MoveIntent(OwnerSummon)` として伝え、認証だけから召喚を合成しません。Host restart の `RecoveryWait` だけが元 Client への自動復旧を行います。復旧・召喚成立時は Owner が問い合わせなくても未伝達を提示します。
+
+各接続の購読で backlog と以降の新着を扱い、同じ Companion に同時に発行する receipt は 1 個とします。ページは最大 50 件です。`begin_presentation` の commit 時から monotonic clock で 30 秒を receipt の期限とし、ACK・送信失敗・期限到来のいずれかで receipt を解放して次ページへ進みます。失敗を確定できない行は PresentationUnknown を保ち、期限後の ACK は StalePresentation とします。送信待ちもこの期限内に含め、接続が残っていても ACK 喪失で後続を止めません。
+
+購読は走査済み挿入キーをメモリで保持し、新着 pass はその先だけを走査します。明示再表示または新たな有効接続・presence の開始時だけ先頭へ戻します。`Unknown` / `Failed` は新着 pass を含めた同じ購読内で再送せず、次の明示再表示または次の有効な接続・presence 成立時に再提示します。送信 buffer は bounded とし、満杯・切断でも Task runner の継続を待たせません。本文生成と receipt 作成、登録、ACK の所有境界は IB H-G / X-H、PR §4.6 に従います。
+
+Client は最終 frame を含む今回の事項を画面に反映してから `Presented` を送ります。一部しか描画できなかった batch は `Unknown` / `Failed` とし、Host は全件を提示済みにしません。Host は current connection・incarnation、receipt、Round、presence generation、選択 ID 集合を照合します。認証後でも未知の receipt は `UnknownRef`、古い receipt は `StalePresentation`、古い connection は `StaleConnection` です。新しい接続へ古い ACK を付け替えてはなりません。receipt が失われた restart 後は新 receipt で再提示します。
 
 ## 14. Observation
 
@@ -606,6 +658,20 @@ enum ManagementOutcome {
 - Host は要求された intent をドメイン前提構造体（`ProposeControlChangeCommand` など）へマッピングし、各ドメイン担当者の検証・確定を経て `ManagementOutcome` を返します。Client が電文の送信に成功したことや、Client 側の画面表示を書き換えたことだけをもって確定とみなしてはなりません。
 - `ManagementOutcome::HeldByOperation` は、管理意図（management intent）の判断がまだ確定・記録されていない状態を示しており、各ドメインにおける安全保留（`HeldByGlobalHold`。IB §13.2）とは概念が異なります。ドメイン側の保留状態を Client へ提示する必要がある場合は、それを担当するスライスが自身の通信用 DTO として個別に追加します。
 - Client が受け取る閲覧ビュー（ルール概要、同意状態、利用量上限、デバイス一覧、監査ログ概要など）は、表示用にフィルタリングされた派生データ（Display fact）にすぎず、マスターデータではありません。秘密情報、過去の判定結果のコピー、権限ルールの全文などを送ることはありません。ビューに付与されたリビジョン番号は表示の整合性を確認するための写しであり、Client がそれを自らの権限の根拠として利用することはできません。
+
+#### Stage 5 の Task 読込・resume・retry
+
+第一者 Client は `ListTasks { cursor, limit }`、`GetTaskReport { task, cursor, limit }`、`ResumeTask { task, expected_revision, expected_purpose, instruction }` を使用します。Task/目的は Host 発行の opaque wire ref、revision は比較用の値の写しとし、resume outcome は IB H-A.1 の variant をそのまま表示用 DTO に写します。query の limit は `1..=50`、省略時は 50、不正値は `UnsupportedFieldValue`、cursor は Host が発行し、別 query/Task への流用は `StaleBaseView` とします。read は state の起動・修復・再評価・提示済み更新をしません。
+
+Task 一覧は canonical TaskId の byte 順、report の明細は ActionAttempt → TaskResult の種別順と各 canonical ID の byte 順に keyset page を作ります。cursor は query 種別・Task・最後の key に束縛し、SQL の LIMIT と索引で上流の work を制限します。各 page は一つの read transaction の現在値であり、複数 page 全体の snapshot を保証しません。ページ間で変わった lifecycle/revision は更新として明示し、resume の前提は Owner に提示した TaskRef/purpose の組に固定します。opaque ref の登録も返す page の範囲だけに限定します。
+
+会話対象の選択は第一者の `SelectTask { task }` で行い、Host が該当 Task の現在の report と `TaskRef/purpose` を返して既存の会話 projection に保持します。これはメモリ上の表示選択であり、Task/通知への durable mutation や execution 起動をしません。担当 Companion が異なる Task は選択できず、wire ref 欠如は UnknownRef です。restart / reconnect では未選択に戻り、任意の LLM 出力から選択を復元しません。
+
+Task 一覧は保存済み lifecycle と現在の実行登録の有無を分け、未完了で実行登録のない Task には明示 resume を提供します。report は全 revision の Action 事実と sealed/adopted result を paged に読め、会話の一時的な Task 選択がなくても利用できます。会話からの再開も対象を選択した同じ command に写し、LLM の出力だけで対象・前提を最新化しません。第一者管理の resume は presence や dialogue provider の成功を必要とせず、online の serving Host へ届けます。offline DB を開く CLI から runner を直接起動しません。
+
+同じ retry epoch・command ID・fingerprint の再送は、処理中なら `InFlight`、確定後なら初回の outcome と Task/delegation の参照を返し、再度 commit/launch しません。結果保持に失敗した実行済み command は `OutcomeUnavailable` と query への導線を返し、再実行しません。epoch が変わったら旧 command の自動再送は禁止します。ACK/応答を失った Owner は read query で状態を確認でき、同じ古い `expected_revision` を新 command で提出しても、前の受理が commit 済みなら `StalePremise` です。Host restart を跨ぐ専用 resume receipt table は作りません。
+
+wire ref はこの接続の query で Host が canonical ID から発行・解決します。restart 後に古い wire ref が解決不能なら `UnknownRef` とし、Client は query で再取得します。wire ref を TaskId へ cast したり、失われた会話 projection を履歴の全文走査で推測したりしません。
 
 ## 19. Body / presentation resources
 

@@ -82,9 +82,37 @@
 7. タスクが完了または終了しても、作業フォルダ内のファイルが勝手に消去されないことを確認する。
 
 ### 5. クライアントとホストの動作継続
-1. 時間のかかるファイル作業タスクを開始した状態で、操作画面（クライアント）のウィンドウを閉じる。
-2. バックグラウンドのホストPC上で作業がそのまま継続し、再度クライアントを開いたときに進捗や結果を正しく確認できることを確認する。
-3. 作業中にホストPC側が終了・再起動した場合、危険を避けるためタスクは勝手に自動再開せず、保存されていた進捗を示した上でユーザーの再開指示を待つことを確認する。
+
+Stage 5 は以下を接続入口から永続化・再読込・画面提示まで通して確認します。provider は待機・遅延・失敗を制御できるテストサーバーを使い、実際の送信回数と Workspace 変更回数を数えます。race は sleep の偶然に頼らず、対象 commit の前後で停止できる barrier を使って両順序を検証します。内部の型・拒否名は設計への対応を示す検証ラベルであり、通常 UI には平易な日本語/英語を表示します。
+
+| ID | 操作・障害 | 期待結果 |
+|---|---|---|
+| S5-01 | ファイル作業を始め、provider 応答待ちで Client を閉じる | Host-only Task は継続する。切断で cancel/Failed にならず、書込と結果は Host に残る。実行中も別の有効な会話 Round を開始できる |
+| S5-02 | Client 不在中に progress、Action settlement、final result、completion が発生する | 未伝達参照が各 fact と不可分に残る。再接続・正式な presence 成立で、変更ファイル・保存先・残作業を自動表示する。送信だけでは Presented にならない |
+| S5-03 | 同じ device の C1 を認証・在席させ、C2 を認証し C2 だけ閉じる（#1384） | C1 は superseded のまま。未認証 socket を残した場合も、current 不在なら利用可能な Host-local Client または NoActive へ遷移する |
+| S5-04 | C2 認証後、C1 が CapabilityAdvertise / AuthProof / domain input を再送する（#1385） | すべて旧 connection として拒否。新 nonce・current の奪回・Task 作成・presence 復活はゼロ |
+| S5-05 | C1 close の処理と C2 auth、fallback target close と confirm を両順序で競合させる | 最新 current と帰属を同じ admission 区間で比較する。古い close が新 current を消さず、消えた target を Present にしない |
+| S5-06 | 同一 process で reconnect、その後 Client process を再起動する（#1387） | 前者は同じ incarnation と新 connection、後者は新 incarnation。counter の同時更新を直列化し、書込失敗では接続しない。旧 process が別 socket で再認証した場合は最後の install が current を決める。同じ descriptor の二つの新規 pairing は別 identity になる（#1389） |
+| S5-07 | 通常切断後に再接続し、古い Round・未送信入力・操作・ACK を送る | 再生・再採用しない。管理ビューは読めるが、通常の NoActive からの会話には新しい summon が必要。認証だけでは以前の presence を復活させない |
+| S5-08 | 結果を表示した直後、ACK 前に切断・Client crash・Host crash を起こす | Unknown の未伝達を保持し、次の新 receipt で再提示する。ACK 喪失による重複表示は許すが、同じ作業は再実行しない |
+| S5-09 | 進捗の表示中に completion を commit し、先の進捗の ACK を返す | 先の receipt に含まれた事項だけ Presented。新しい completion は未提示として次に表示される。重複 ACK、遅延 Failed、旧 connection の ACK は新着や提示済み状態を壊さない |
+| S5-10 | 51 件以上の未伝達、一部 Unknown / Failed、購読開始と同時の新着、送信 buffer 満杯 | DB でページ上限を適用し、合意 frame 上限によって 50 件未満に分割しても全件を取りこぼさず表示する。不成功の先頭事項を無限再送せず後続へ進む。接続を維持した ACK 喪失でも 30 秒後に後続へ進み、late ACK は stale。新着 pass が失敗済み行を自動再送しない。接続の遅さが Host Task を止めない |
+| S5-11 | Task fact / undelivered transaction を commit 前後で crash させる。作用後の settlement 保存も失敗させる | 前者は両方なしまたは両方あり。後者は先に保存された Unknown が残り、成功・未実行へ推定しない。通知補完や Action replay を必要としない |
+| S5-12 | read-only の一覧・report・診断を、実行中/停止済み Host のデータに対して繰り返す | presence generation、TaskRevision、report status を変えず、startup repair・結果再評価・runner を起動しない |
+| S5-13 | Present、NoActive、InTransition、RecoveryWait、Stopped の各状態で Host を再起動する | Present の元 Client だけを再認証後に復旧する。NoActive/InTransition は自動移動せず、RecoveryWait は元 Client を待つ。Stopped は復旧しない。復旧途中の再 crash でも二重存在しない |
+| S5-14 | restart 復旧待ちの間に別 Client へ summon または Stop、その後に元 Client が到着する | 先に確定した現在状態を維持し、旧復旧意図を適用しない。元 Client が不在でも別端末を無条件に選ばない |
+| S5-15 | Started、attempt 0 件の delegation、実行済み unsealed delegation を残して Host restart | 保存した lifecycle と進捗を提示し、どの古い delegation も launch しない。AI 呼出しと外部作用はゼロ |
+| S5-16 | 中断 Task の進捗を確認して明示 resume | 同じ Task の r+1、新 delegation、新 Agent identity を 1 回だけ作る。目的 identity・既存指示・Workspace association を保持し、旧 result/attempt は旧 delegation に残る。2 turn 目以降も既実行 facts が推論入力に残り、旧操作を replay しない |
+| S5-17 | 二つの resume、resume と steering/cancel/completion/Action start を競合させる | revision・terminal・Unknown・実行登録の各 gate が先勝ちを決める。stale 要求を最新前提に付け替えない。cancel は新 revision にも有効で、敗者の新規 work はゼロ。seal 後も登録中は AlreadyRunning、解放後に採用可能な結果があれば ResultAvailable |
+| S5-18 | resume の応答喪失、同じ command retry、commit 後・launch 前の Host crash | 同じ epoch の retry は初回 outcome を返し二度 launch しない。restart 後の旧 command 自動再送はしない。commit 済みなら旧 expected revision の新要求は stale、未実行状態を示して新たな明示指示を待つ |
+| S5-19 | resume 後に旧 result、旧 failure、旧 Action settlement が到着する | result は元 execution へ一度記録して seal、採用は original-only、failure は stale。settlement は元 attempt にだけ反映する。旧証拠を新 delegation の依拠集合へ付け替えない |
+| S5-20 | sealed-but-unadopted result を残して restart、Unknown を後から客観的に settlement | startup/settlement は既存 AU15b のみ再評価する。条件が満たされれば Completed、失敗/Unknown が残れば Withheld。provider/Action の再実行はゼロ |
+| S5-21 | 旧 revision を含む Unknown が残る Task を resume し、Completed/Failed/Cancelled にも要求する | Unknown は保留、terminal は拒否。ACK や再接続で gate を解除しない。非 terminal の技術的障害を Failed と表示しない |
+| S5-22 | Workspace 不在、指示 source 不在、同意失効、利用上限、消去 condition、store 読書き失敗 | 対応する拒否/保留/技術的障害を区別し、前提不明のまま送信・作用を始めない。未伝達 source の消去後も本文を復活させず Presented を捏造しない。resume の既実行 facts の read 後に消去 condition が先勝ちした AU14 は 0 送信。入力予算超過でも必要な作用を黙って省略しない |
+| S5-23 | 二つの Host を同じ data directory で同時に起動する | 一方だけが startup mutation と serving を行う。敗者は presence を再初期化せず、Task を読み戻しただけで起動しない |
+| S5-24 | Client-dependent activity が必要だが端末不在、または capability 未実装 | 該当 activity を保留/unsupported とし、Host-only Task や既存ファイルを一律キャンセル・削除しない。別端末の作用へ代替しない |
+
+Linux / Windows の共通 Host 結合テストで全項目を検証し、両 OS の実 transport を使う第一者 Client E2E で S5-01〜09、S5-13、S5-15〜20、S5-23 を通します。Stage 4 のファイル境界・cancel・通常会話の受け入れ条件も維持します。未実装の Windows listener を mock の成功だけで完了扱いにしません。
 
 ### 6. エラー発生時の安全性とデータ保護
 以下の異常・エラーが発生しても、保存済みの会話履歴や記憶、タスクの記録が破損せず、テキスト管理画面から安全に状態確認や復旧ができることを検証する：

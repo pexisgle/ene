@@ -103,7 +103,7 @@ ene はホストPC上で動作する非同期システムです。並行処理�
 | **SD-Presence** | コンパニオンごとの滞在帰属（`CompanionId`） | 滞在先帰属の遷移（`旧端末 → 移行中 → 新端末`）、世代番号のインクリメント、アクティブ端末の切り替え、復旧ヒントの更新 | 異なるコンパニオンの滞在処理。同一コンパニオンであっても表示、音声再生、画面観測などの非帰属処理 | 端末との通信疎通確認はDBの外で行います。移行期間中は新旧どちらの端末でも端末依存の新規処理を開始しません。 |
 | **SD-Cap** | コスト上限ごと（`CapId`） | 利用枠の仮押さえ（reservation）の登録と上限チェック、確定時の仮押さえから実績への振り替え、不要枠の解放 | 異なるコスト上限の消費。同一上限の読み取りや集計表示。仮押さえ完了後の推論処理そのもの | 同一トランザクション内でチェックし、処理中や成否不明の枠を勝手にゼロとみなしてはいけません。 |
 | **SD-CharApply** | コンパニオンごとのキャラ適用（`CompanionId`） | 適用中キャラクターポインタの更新と履歴追加（期待リビジョンの照合付き） | 異なるコンパニオンへの適用。新しいキャラクター定義自体の追加登録 | キャラクター定義そのものの管理と、各個体への適用関係の管理は明確に分離します。 |
-| **SD-Undelivered** | 未伝達メッセージごと（`undelivered_id`） | 伝達状況の更新（`保留中 → 要約済み → 伝達完了/不明`）。会話由来は会話履歴と同一トランザクション、タスク由来はタスク保存後の別トランザクションで登録 | 異なる未伝達メッセージの処理。同一メッセージの読み取りや要約の生成処理 | 画面や音声でユーザーに伝達されたことが確認できるまで「伝達完了」にしてはいけません。 |
+| **SD-Undelivered** | 未伝達メッセージごと（`undelivered_id`） | 伝達状況の更新（`Pending → PresentationUnknown → Presented`）。会話・Task・Action 由来のいずれも親 fact と同一の短いトランザクションで参照を登録（PR §4.6） | 異なる未伝達メッセージの処理。同一メッセージの読み取りや要約の生成処理 | 画面や音声でユーザーに伝達されたことが確認できるまで「伝達完了」にしてはいけません。 |
 | **SD-Deletion** | 削除操作ごと（`DeletionOperationId`）および全域スキャン | 削除操作と消去条件の先行永続化、各参加コンポーネントの完了集約と残存検証、検索用トークンの完全消去、全域完了のアトミック確定 | 各コンポーネント内部での局所的な削除作業や検証。削除対象外の通常業務。異なる削除操作同士 | 削除条件を先に永続化してから削除を進めます。検索トークンが復元可能な間は完了とみなさず `finalizing` 状態を維持します。 |
 | **SD-Restore** | バックアップ復元の切替（単一の `restore_generation_state`） | ステージング検証完了後の復元世代番号の更新と、マスターポインタの切り替えの瞬間のみ | ステージング領域での検証作業、通常データの読み書き（切替の瞬間を除く）、バックアップファイルの作成、派生データの再構築 | 切替前は復元前の正常データがマスター、切替後は復元データがマスターとなり、中途半端な混合状態を作りません。 |
 | **SD-RuleConsent** | ルール・同意ごと（`RuleId` / `AssignmentId` など） | ルール本文、解釈、スコープ、ユーザー同意リビジョンの更新、取り消し履歴の記録 | ルールの評価（読み取りと照合）そのもの。異なるルールや同意の変更 | 権限の評価処理とルールの更新処理は分離し、過去の許可ログを安易に生きた許可として使い回しません。 |
@@ -337,6 +337,27 @@ BEGIN IMMEDIATE;
 
 採用判定では、`purpose` を identity / adopted_revision の対応で照合し、目的本文の文字列一致を使いません。Action の確定度は ene-action owner の事実のまま読み取るだけで、Task owner は書き換えません。`Unknown` は新しい客観的証拠が確定するまで保持し、seal 後に証拠が付いて `ConfirmedSuccess` へ進んだ場合は同じ result の再評価で完了が成立し得ます（membership は seal 時点のまま）。attempt 集合は delegation（execution lifetime）から durable に列挙した authoritative set だけであり、caller の `attempt_refs` はこの集合との完全一致にのみ使います（単独で集合を狭めたり広げたりできません）。Task-wide completion barrier は result-local authoritative set とは別の gate であり、同じ `TaskId` に属する全 revision / 全 delegation の試行を `action_attempt` から `task_id` と `certainty` で読み、`Unknown` が 1 件も無いことを Completed CAS と同じ不分区間で要求します（timestamps・delegation liveness・ephemeral alive flag は使いません）。cross-delegation / 旧 revision の `ConfirmedSuccess` / `ConfirmedFailure` は barrier だけを理由に完了を block せず、in-flight の inference attempt と unsealed delegation の存在も barrier に含めません。barrier で見つけた試行は `task_result_attempt` に刻印しません。到着 record と seal は採用判定より先に確定するため、採用判定の成否や途中クラッシュで本文を失いません。同じ result identity の retry は本文行と attempt 相関行を増やさず、二重の terminal transition を行いません。同じ delegation の異なる result identity は 2 つ目の final result として受理されません。
 
+### 7.4 resume は旧 revision を閉じて新しい委任を受理する
+
+AU17 は、IB H-A.1 の条件比較、新 revision・採用指示 entry・新 delegation の作成、Task 現在値、対応する未伝達登録を 1 つの `Immediate` transaction で確定します。revision 前進だけが残る、delegation だけが見える、通知だけが欠ける状態を公開しません。目的変更を伴わない再開でも revision を進める理由は、新しい Owner 継続指示と旧 execution の区間を区別するためです。
+
+durable facts だけで実行中かは判定できません。Host は既存 `TaskExecutionRegistry` の短い同期区間に、委任の launch 予約と登録・解除、resume の「同じ Task に予約/登録なし」の判定を集めます。AU3/AU17 の本番 producer は、ここで compare/commit した delegation の launch 予約を lock 解放前に登録します。runner はその予約を引き継いで実行し、別の呼出しが DB の delegation ID だけを渡して開始する入口は公開しません。初回 AU14/AU5 の前も予約を確認し、開始済み試行の probe と seal/terminal/revision gate を維持します。attempt が 0 件の古い delegation も、この process に受理された予約がなければ `ExecutionUnavailable` として launch しません。
+
+DB を使う同期処理は `spawn_blocking` に移してから registry の短い lock と SQLite transaction を取得します。lock 中の `.await`、provider I/O、外部作用、本文の組立ては禁止です。commit 成功後に runner の spawn が失敗した場合は予約を解除して未実行を表示し、同じ delegation の自動再 launch は行いません。resume の受理は durable に残ります。Task registry の不在を根拠にした自動起動スキャンは作りません。
+
+| race / crash | 確定する結果 |
+|---|---|
+| 同じ r への resume が二つ到着 | 一方だけ r+1 と新 delegation を作る。もう一方は StalePremise（同一 command retry は初回 outcome）。新規実行は最大 1 個 |
+| resume と AU3 / runner 起動 | AU3 の予約が先なら AlreadyRunning。resume が先なら旧 r の AU3 は stale。登録確認と commit の間へ launch を割り込ませない |
+| resume と steering | revision CAS の先勝ち。敗者は stale で書込/launch なし。最新 revision へ要求を自動で付け替えない |
+| resume と cancel / confirmed failure / completion | terminal commit が先なら TaskTerminal。resume が先なら旧 failure/result adoption は stale/original-only。cancel は Task 単位なので新 revision にも成立し、後続 admission を止める |
+| resume と AU15a seal / AU15b adoption | seal が先でも実行登録が残る間は AlreadyRunning。登録解放後に現 revision の採用条件を満たせる結果があれば ResultAvailable。adoption が先なら TaskTerminal。resume が先なら旧 result は元 delegation へ記録のみ。seal は採用や新しい work の権限にならない |
+| resume と Action start / certainty settlement | Task-wide Unknown の照合を AU5 / settlement と同じ DB transaction 順序に置く。Unknown が残る時点では HeldByUnknownEffects。settlement 先勝ちなら現在 facts で判定。resume 後の旧 revision の新規 AU5 は拒否 |
+| AU17 commit 前の crash / commit 後・spawn 前の crash | 前者は全 rollback。後者は r+1 と新 delegation・指示・通知が残り、予約は失われる。いずれも startup は実行しない |
+| 再開後に旧 execution の結果が届く | 元 identity で AU15a、AU15b は RecordedToOriginalOnly。旧結果で新 TaskRevision を完了せず、Unknown も消さない |
+
+task_report と一覧は現在の Task 行・result・Action facts を read transaction で整合して読みます。表示の「実行登録あり」はメモリ上の補助事実で、次の resume の permission ではありません。resume は必ず上記の比較をやり直します。
+
 ## 8. 外部アクション（認可と実行結果追跡の分離）
 
 外部サービスやツールへの作用（ファイル操作、API呼び出しなど）そのものは、データベースのようにロールバックして取り消せません。そのため、「アクション開始前の厳密な照合」と「開始後の確実な結果追跡」を明確に分離します。
@@ -412,7 +433,7 @@ BEGIN IMMEDIATE;
 - **端末間の移動（move）**: 切り替え期間中は「旧端末」「移行中」「新端末」「アクティブ端末なし」「停止中」「復旧待ち」の状態を厳密に区別します。移行期間中は新旧どちらの端末でも端末依存の新規処理を開始しません。移動元で実行中だった処理は安全な区切りまで完了させ、古い端末で実行していた外部アクションを別の端末へ勝手に自動継続させてはいけません。
 - **通信切断時のフォールバック（disconnect）**: 一時的なネットワーク切断が発生しても、滞在記録を直ちに破棄してはいけません。疎通や排他性が確認できない間は新規処理を開始しません。正常な切断やプロセスの終了が確定した場合は、ホストPC上で利用可能なデスクトップ端末（同一マシンであることが検証され、認証とデバイス権限が確認できたもの）へ安全にフォールバック（`旧端末 → 移行中 → 新端末`）します。候補が存在しない場合は「アクティブ端末なし（`NoActive`）」とします。ホスト側の画面を勝手に自動起動したり、通常の切断を障害復旧待ち（`RecoveryWait`）と混同してはいけません。
 - **再接続（reconnect）**: 端末が申告する世代番号、ホスト側の最新世代番号、実際の接続疎通、最新の権限や保留状態を突き合わせます。古い一時キャッシュや過去の承認情報だけで接続を認めてはいけません。通信状態が確認できない場合に「おそらく繋がっているだろう」と推定してはいけません。前回の会話ラウンドの入力や未提示の出力を、新しい会話ラウンドへ勝手に付け替えてはいけません。
-- **ホスト再起動後の滞在復元**: 保存されている滞在記録、復旧ヒント、および現在の実際の接続・認証・排他性を突き合わせて再構成します。稼働中（Running）だったコンパニオンは、接続が確認できた場合にのみ元の端末へ自動復元し、確認できなければアクティブ端末なしとします。停止中（Stopped）のコンパニオンを勝手に稼働させてはいけません。滞在状態が復旧したからといって、過去のタスクやアクションを勝手に再開してはいけません。
+- **ホスト再起動後の滞在復元**: 保存されている滞在記録、復旧ヒント、および現在の実際の接続・認証・排他性を突き合わせて再構成します。稼働中（Running）だったコンパニオンは、接続が確認できた場合にのみ元の端末へ自動復元し、元 Client が未接続なら PR §6.4 の RecoveryWait を保持します。再起動前が NoActive / InTransition だった場合は NoActive とします。停止中（Stopped）のコンパニオンを勝手に稼働させてはいけません。滞在状態が復旧したからといって、過去のタスクやアクションを勝手に再開してはいけません。
 - **一時停止（Stop）**: 一時停止操作は「滞在の解除」として記録され、移動や呼び出しと競合した場合は常に停止操作を優先します。通信が回復したことだけを理由に勝手に再開・再配置してはいけません。
 - **端末移動と通信切断の競合（summon A→B vs disconnect）**: 両者を `SD-Presence` の順序で直列化します。先に確定した方の世代番号が最新となり、後着は新しい状態に対する再要求として評価します。二重滞在や古い処理の勝手な自動継続は決して行いません。
 - **古い端末メッセージの隔離（stale Client message）**: 会話ラウンドやアクション試行、画面観測データには現在の滞在世代番号（`PresenceGeneration`）を添えておき、古い世代のデータだけを根拠に新しい処理を開始しないようにブロックします。
@@ -420,16 +441,18 @@ BEGIN IMMEDIATE;
 ### 10.3 処理フローの例（滞在先の切り替え）
 
 ```text
--- 移行開始 (SD-Presence の短いトランザクション)
+-- §10.4 の connection 同期区間内で移行開始（短い transaction）
 BEGIN IMMEDIATE;
   cur = SELECT state, generation, active_client FROM presence_attribution WHERE companion_id = ?;
-  IF cur.generation != expected_generation OR cur.state != expected_state THEN
-    ROLLBACK; 
-    RETURN StalePremise; -- 前提が変わっていたためやり直し
+  IF cur.generation != expected_generation OR cur.state != expected_state OR cur.active_client != expected_client THEN
+    ROLLBACK;
+    RETURN StalePresence; -- 最新前提へ自動で付け替えない
   END IF;
+  CHECK Companion が Running、現在の意図・接続・許可、および generation の checked increment;
   UPDATE presence_attribution
-    SET state = 'InTransition', generation = cur.generation + 1 
+    SET state = 'InTransition', active_client = target_candidate, generation = cur.generation + 1
     WHERE companion_id = ?;
+  UPDATE relocation_hint ...; -- last_client は最後の正式帰属、recovery_destination は解除
   INSERT INTO presence_transition_log(...旧端末から移行中への遷移...);
 COMMIT;
 
@@ -437,14 +460,49 @@ COMMIT;
 -- 移動元での未完了処理を安全な区切りまで完了させ、新端末の準備を行う
 ...
 
--- 移行完了 (新端末の接続・権限・排他性の確認結果を受けて確定)
+-- §10.4 の connection 同期区間を再取得して移行完了
 BEGIN IMMEDIATE;
-  UPDATE presence_attribution 
-    SET state = 'Present', active_client = ?, generation = ? 
+  cur = SELECT state, generation, active_client FROM presence_attribution WHERE companion_id = ?;
+  IF cur.state != 'InTransition' OR cur.generation != transition_generation OR cur.active_client != target_candidate THEN
+    ROLLBACK; RETURN StalePresence;
+  END IF;
+  CHECK Companion が Running;
+  -- 現在の connection・許可が一致する候補だけを Present にする。失われた候補なら NoActive。
+  UPDATE presence_attribution
+    SET state = confirmed_state, active_client = confirmed_client
     WHERE companion_id = ?;
-  INSERT INTO presence_transition_log(...移行中から新端末への遷移...);
+  UPDATE relocation_hint ...; -- Present になった場合だけ last_client を更新
+  INSERT INTO presence_transition_log(...移行中から Present または NoActive への遷移...);
 COMMIT;
 ```
+
+### 10.4 connection の現在性と presence commit
+
+`LiveInput { authed: true }` の事前 snapshot は commit の根拠にしません。connection table owner は auth install、supersede、close、device revoke と、presence/Client-dependent command の admission を同じ短い同期区間で直列化します。`spawn_blocking` 内で connection table の lock を取得し、current `(device, incarnation, connection)` を検証したまま必要な短い SQLite compare/commit を完了します。先に snapshot を取り、lock を解放してから DB へ await する形は禁止します。本文解決・proof の準備・入出力は外で行い、最終の device 有効性確認と phase/nonce 消費は install の区間に含めます。device revoke もこの順序を守り、古い検証結果の install を防ぎます。
+
+lock の順序は connection table → 必要なら Task execution registry → SQLite 接続です。各操作は必要な lock だけを取り、逆順に取得しません。これは接続の admission と commit を結ぶ局所的な同期区間であり、Task runner や全 request を囲む global async lock ではありません。§15.2 の await 禁止は維持します。cancel や settlement は DB commit 後に lock を解放してから通知し、通知先からこの lock を逆取得しません。
+
+presence の begin は `(companion, state, active_client, generation)` を CAS し generation を 1 進め、hint と遷移ログを同時に記録します。confirm は同じ InTransition generation と移動先候補を比較し、その場の current authenticated connection と device 利用許可が一致する場合だけ Present にします。候補が失われたら NoActive、前提が変わっていれば StalePresence で書込なしです。confirm は同じ遷移内なので generation を再度進めません。再度の begin と startup invalidation は新 generation を発行します。
+
+| 接続と帰属の競合 | 期待結果 |
+|---|---|
+| C1 auth → C2 auth → C2 close、C1 が残存（#1384） | C1 は Superseded。current は空。Present を維持せず、利用可能な別の Host-local Client または NoActive へ fallback |
+| C2 auth 後に C1 が capability/auth を再送（#1385） | StaleConnection。新 nonce を発行せず、C2 の current を変更しない |
+| C1 close 通知の処理前に C2 auth | commit 区間で C2 の current を見て C1 の close による fallback は行わない。presence は C2 が使う現在の帰属のまま |
+| fallback begin が先、同じ device が再認証 | 既に始まった通常切断遷移を認証で取り消さない。NoActive または選定済み fallback へ確定。再接続側は新しい summon が必要 |
+| fallback target の認証失効・close と confirm | confirm より前なら Present にしない。confirm 後なら新しい切断遷移が帰属を外す。古い bool で Present を確定しない |
+| Owner summon / Stop と restart recovery | generation CAS に従う。Stop の lifecycle が確定した後は recovery/summon を拒否。別 Client の summon が先なら元 Client の late auth は復旧しない |
+| DB 書込失敗・遷移途中の crash | 遷移が確定したとは返さない。残った InTransition では admission を拒否し、次の startup は NoActive へ置く |
+
+fallback 候補は current authenticated、SameMachine の OS peer 確認、必要な device 許可を満たす別 Client に限定します。複数なら `ClientId` のバイト列昇順で最初を選び、confirm でも再照合します。候補なし・確認不能なら NoActive とし、UI を起動しません。新しい優先端末設定や fallback manager は設けません。
+
+### 10.5 未伝達 ACK は選択した事項だけを確定する
+
+発生元 fact と未伝達登録は PR §4.6 の同一 transaction です。表示に使う source facts を read transaction で読み、同じ Task を現在の report へまとめます。receipt に含めるのは、その report に実際に含めた通知 ID だけです。後から追加された行や、同じ Task の未選択ページを ACK の対象にしません。
+
+提示開始と ACK は connection/receipt の同期区間を経て、行ごとの status と source の存在・current erasure 条件を同じ DB transaction で比較します。成功 ACK は選択行だけを Presented にし、重複 ACK は書込なしの AlreadyPresented とします。旧 connection、失効した receipt、別 Round/generation の ACK は状態を変えません。古い receipt の Failed/Unknown で、新 receipt が確定した Presented を戻しません。
+
+登録 commit 後の wakeup は配送保証を担いません。購読開始では wakeup receiver を設置してから durable backlog を読み、走査中の commit は走査済み挿入キーより後の次 pass に回します。接続後の new fact を coalesced wakeup で知らせ、通知落ち・receiver lag は同じ走査下限から durable query を再開します。Unknown / Failed を新着のたびに再送しません。restart では DB の未提示行を読みます。receipt や送信 queue の消失は報告漏れになりません。
 
 ## 11. 個人データ完全削除との競合（Targeted Deletion との race）
 

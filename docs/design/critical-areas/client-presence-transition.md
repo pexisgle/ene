@@ -146,6 +146,10 @@ Host PC再起動後の「復旧待ち（以前の接続先は記録されてい�
 
 ## 7. Host-side Taskが継続できる理由と範囲
 
+Stage 5 の Host-only 実行は、Stage 4 の Workspace 内ファイル操作と Task Agent 推論が対象です。各開始境界では、Task が current かつ非 terminal、delegation が unsealed であることに加え、権限・同意・利用上限・消去条件の照合を必須とします。`NoActive` はそれらの許可を失効させません。実行 Future、停止 handle、provider transport は Host が所有し、接続の読書き loop や出力 sink の寿命に従属させません。
+
+通常のテキスト Round と未伝達報告の画面提示は Client-dependent です。入力受付後の切断で新しい対話処理を始めず、既に確定した Task 指示は Task owner に残します。生成済みの保存対象返信は元 Round の履歴と未伝達に記録し、未完の stream や未受理入力は再生しません。Computer Use・Voice・Observation の実装は後続 Stage に残し、Stage 5 の未実装 capability は `Unsupported` / `Unavailable` のままとします。利用不能な処理を Host のファイル操作へ置き換えません。
+
 タスクを継続できるかどうかの唯一の判断基準は、**「その処理に本当にクライアント端末が必要かどうか」**です。タスクの重要度、進行度、あるいはキャラクターが今どの端末にいるか（あるいは端末不在か）は継続可否の基準ではありません。「クライアントが必要なステップ」以外はHost PC上で継続可能であり、「クライアントに依存するステップ」のみが一時停止・待機となります。この基準により、通常のHost作業は、クライアント端末の接続状態や画面表示、移動の完了などを存続条件としません。
 
 - 実行が許可されているHost PC上のタスク、タスクAgent、定期スケジュール、ファイル保存などは、クライアント不在（activeなし）の状態であってもそのまま継続できます。待機のためだけにLLMをループで呼び出し続ける（ポーリングする）ような無駄な実装は行いません。
@@ -176,6 +180,8 @@ Host PC再起動後の「復旧待ち（以前の接続先は記録されてい�
 切断検知や排他性の具体的な実装技術は実装に委ねられます。本質的に要求されるのは、「操作の排他性が確認できないクライアント端末では、画面・音声の入出力、環境観測、自発的対話、PC操作を継続してはならない」ということです。
 
 ### 8.2 Reconnect
+
+接続の認証成功、現在有効な connection、正式な presence は別の事実です。同じ device の新しい connection が認証を完了すると、旧 connection は回復不能な superseded となります。旧 socket の再 handshake、古い close 通知、未認証 socket の残存によって帰属を復活・維持させません。現在の認証済み接続が失われたかを presence commit と直列化して判定します（[IPC §9.3](../concrete/host-client-ipc.md#93-connection-authenticationreconnect-authentication)、[CCT §10.4](../concrete/concurrency-control.md#104-connection-の現在性と-presence-commit)）。
 
 再接続してきたクライアント端末が、古い一時データや実行中だったアクションの情報を持っていたとしても、それだけで現在の存在、権限、タスクの再開を勝手に成立させてはなりません。Host PCが持つ最新のマスターデータ、帰属先、消去状況に従い、未確定の入力と受理済みの入力を明確に区別します。クライアント側のコピーでHostのマスターデータを上書きしてはならず、未送信だった操作を自動実行キューとしてそのままリプレイしてはなりません。
 
