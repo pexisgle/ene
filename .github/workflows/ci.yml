@@ -22,15 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build binaries
-        # The binary-level E2E drives target/debug binaries as subprocesses;
-        # `cargo test` alone does not link them.
         run: cargo build --locked --workspace
       - name: Run tests
         run: cargo test --locked --workspace
@@ -42,7 +40,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Run tests
         run: cargo test --locked --workspace
