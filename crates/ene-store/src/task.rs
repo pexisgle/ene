@@ -34,15 +34,15 @@ use std::sync::Mutex;
 use ene_action::ActionCertainty;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
-    DelegationRef, DelegationScope, Task, TaskAgentEphemeralId, TaskAgentOutput,
-    TaskAgentResultArrival, TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise,
-    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationPremise, TaskFailureOutcome, TaskFailurePremise, TaskId,
-    TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository,
-    TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision,
-    TaskRevisionRecord, TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId,
-    WorkspaceAssociation, WorkspaceFolderRef,
+    AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
+    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness, Task,
+    TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskCreationPremise,
+    TaskFailureOutcome, TaskFailurePremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
+    TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
+    UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -133,13 +133,17 @@ const SQL_SELECT_RESULT_CORRESPONDENCE: &str =
     "SELECT task_id, task_revision, delegation_id FROM task_result WHERE result_id = ?1";
 
 /// The bounded sealed-but-unadopted candidate listing: `adopted_revision IS
-/// NULL` is the whole durable truth of a result that may still need
-/// re-evaluation. The cursor variant continues strictly after
-/// `(recorded_at, result_id)`, so a reconciliation sweep walks the whole
-/// candidate set page by page without re-reading the prefix.
-const SQL_LIST_UNADOPTED_FIRST: &str = "SELECT result_id, recorded_at FROM task_result WHERE adopted_revision IS NULL ORDER BY recorded_at, result_id LIMIT ?1";
+/// NULL` is the durable "may still need re-evaluation" marker, narrowed to
+/// candidates where re-adoption is still possible from canonical facts (the
+/// Task is non-terminal and the relied revision is the current revision). The
+/// cursor variant continues strictly after `(recorded_at, result_id)`, so a
+/// reconciliation sweep walks the whole candidate set page by page without
+/// re-reading the prefix. A result that can only answer
+/// `RecordedToOriginalOnly` (cancelled / moved-revision / terminal Task) is
+/// not a candidate, so permanent history never re-runs on every startup.
+const SQL_LIST_UNADOPTED_FIRST: &str = "SELECT r.result_id, r.recorded_at FROM task_result r JOIN task t ON t.task_id = r.task_id WHERE r.adopted_revision IS NULL AND t.progress IN ('started', 'in_progress') AND t.revision = r.task_revision ORDER BY r.recorded_at, r.result_id LIMIT ?1";
 
-const SQL_LIST_UNADOPTED_AFTER: &str = "SELECT result_id, recorded_at FROM task_result WHERE adopted_revision IS NULL AND (recorded_at > ?1 OR (recorded_at = ?1 AND result_id > ?2)) ORDER BY recorded_at, result_id LIMIT ?3";
+const SQL_LIST_UNADOPTED_AFTER: &str = "SELECT r.result_id, r.recorded_at FROM task_result r JOIN task t ON t.task_id = r.task_id WHERE r.adopted_revision IS NULL AND t.progress IN ('started', 'in_progress') AND t.revision = r.task_revision AND (r.recorded_at > ?1 OR (r.recorded_at = ?1 AND r.result_id > ?2)) ORDER BY r.recorded_at, r.result_id LIMIT ?3";
 
 const SQL_SELECT_RESULT_ATTEMPTS: &str =
     "SELECT attempt_id FROM task_result_attempt WHERE result_id = ?1 ORDER BY attempt_id";
@@ -276,10 +280,50 @@ fn decode_clock(text: &str) -> Result<WallClockWithTz, TaskTechnicalError> {
     WallClockWithTz::parse_rfc3339(text).map_err(task_unavailable)
 }
 
+/// Requires the relied Owner utterance to still be the newest accepted Owner
+/// input for its companion, inside the caller's transaction.
+///
+/// The comparison is the same rowid discipline the reply append uses: a
+/// committed Owner row is an accepted input by construction, so any newer
+/// Owner row for the companion supersedes the turn. A premise whose message
+/// row does not exist fails closed (not current). Reading the expected row and
+/// the newer-row probe inside the same `Immediate` transaction as the Task
+/// write is what makes the Task side effect linearize against Owner input.
+fn owner_message_is_current(
+    tx: &rusqlite::Transaction<'_>,
+    currentness: &OwnerMessageCurrentness,
+) -> Result<bool, TaskTechnicalError> {
+    let expected_rowid: Option<i64> = tx
+        .query_row(
+            crate::companion::SQL_SELECT_OWNER_ROWID,
+            params![encode_id(currentness.message)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(expected_rowid) = expected_rowid else {
+        return Ok(false);
+    };
+    let newer = tx
+        .query_row(
+            crate::companion::SQL_EXISTS_NEWER_OWNER,
+            params![
+                encode_id(currentness.companion),
+                crate::codec::encode_role(ene_companion::HistoryRole::Owner),
+                expected_rowid
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    Ok(newer.is_none())
+}
+
 fn create_task_sync(
     conn: &Mutex<Connection>,
     premise: TaskCreationPremise,
-) -> Result<TaskRef, TaskTechnicalError> {
+    currentness: Option<OwnerMessageCurrentness>,
+) -> Result<TaskCreationOutcome, TaskTechnicalError> {
     let revision = TaskRevision::initial();
     let reference = TaskRef {
         task: premise.task,
@@ -292,6 +336,11 @@ fn create_task_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    if let Some(currentness) = currentness
+        && !owner_message_is_current(&tx, &currentness)?
+    {
+        return Ok(TaskCreationOutcome::Superseded);
+    }
     tx.execute(
         SQL_INSERT_TASK,
         params![
@@ -346,7 +395,7 @@ fn create_task_sync(
         .map_err(task_unavailable)?;
     }
     tx.commit().map_err(task_unavailable)?;
-    Ok(reference)
+    Ok(TaskCreationOutcome::Created(reference))
 }
 
 /// The adopted-purpose entry read for validation before a steering commit.
@@ -466,6 +515,7 @@ pub(crate) fn validated_adopted_purpose_source(
 fn forward_steering_sync(
     conn: &Mutex<Connection>,
     premise: TaskCommitPremise,
+    currentness: Option<OwnerMessageCurrentness>,
 ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
     let task = premise.expected.task;
     let task_text = encode_id(task.as_raw());
@@ -473,6 +523,11 @@ fn forward_steering_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    if let Some(currentness) = currentness
+        && !owner_message_is_current(&tx, &currentness)?
+    {
+        return Ok(TaskCommitOutcome::Superseded);
+    }
     let current: Option<RawTask> = tx
         .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
         .optional()
@@ -641,12 +696,18 @@ fn forward_steering_sync(
 fn cancel_task_sync(
     conn: &Mutex<Connection>,
     task: TaskId,
+    currentness: Option<OwnerMessageCurrentness>,
 ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
     let task_text = encode_id(task.as_raw());
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    if let Some(currentness) = currentness
+        && !owner_message_is_current(&tx, &currentness)?
+    {
+        return Ok(TaskCancelOutcome::Superseded);
+    }
     let current: Option<RawTask> = tx
         .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
         .optional()
@@ -2212,7 +2273,14 @@ impl TaskRepository for Store {
         premise: TaskCreationPremise,
     ) -> Result<TaskRef, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || create_task_sync(&conn, premise)).await
+        match run_blocking(move || create_task_sync(&conn, premise, None)).await? {
+            TaskCreationOutcome::Created(reference) => Ok(reference),
+            // The unguarded creation has no currentness premise, so it can
+            // never answer supersession.
+            TaskCreationOutcome::Superseded => Err(task_unavailable(
+                "unguarded task creation cannot answer supersession",
+            )),
+        }
     }
 
     async fn forward_steering(
@@ -2220,7 +2288,7 @@ impl TaskRepository for Store {
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || forward_steering_sync(&conn, premise)).await
+        run_blocking(move || forward_steering_sync(&conn, premise, None)).await
     }
 
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError> {
@@ -2230,7 +2298,7 @@ impl TaskRepository for Store {
 
     async fn cancel_task(&self, task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || cancel_task_sync(&conn, task)).await
+        run_blocking(move || cancel_task_sync(&conn, task, None)).await
     }
 
     async fn fail_task(
@@ -2320,5 +2388,34 @@ impl TaskRepository for Store {
     ) -> Result<Vec<RawId>, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || load_task_action_attempts_sync(&conn, task)).await
+    }
+}
+
+impl ConversationTaskRepository for Store {
+    async fn create_task_from_conversation(
+        &self,
+        premise: TaskCreationPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || create_task_sync(&conn, premise, Some(currentness))).await
+    }
+
+    async fn forward_steering_from_conversation(
+        &self,
+        premise: TaskCommitPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || forward_steering_sync(&conn, premise, Some(currentness))).await
+    }
+
+    async fn cancel_task_from_conversation(
+        &self,
+        task: TaskId,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || cancel_task_sync(&conn, task, Some(currentness))).await
     }
 }

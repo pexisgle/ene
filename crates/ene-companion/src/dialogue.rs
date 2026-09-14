@@ -31,8 +31,8 @@
 
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
-    Admission, AuthorizedInference, DiscardSink, InferenceDispatchOutcome, InferenceExecutor,
-    NotSentReason,
+    Admission, AuthorizedInference, DeltaFlow, DeltaSink, DiscardSink, InferenceDispatchOutcome,
+    InferenceExecutor, NotSentReason,
 };
 use ene_learning::{
     ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn, FormationDecision,
@@ -42,9 +42,11 @@ use ene_learning::{
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, SteeringPremiseRef, SteeringProposalPremise, TaskContextOrigin, TaskProgress,
+    AssigneeRef, ConversationTaskRepository, OwnerMessageCurrentness, SteeringPremiseRef,
+    SteeringProposalPremise, TaskContextOrigin, TaskCreationOutcome, TaskProgress,
     TaskProposalOutcome, TaskProposalPremise, TaskPurpose, TaskRepository, TaskTechnicalError,
-    WorkspaceNeedRef, orchestrate_task_creation,
+    WorkspaceNeedRef, orchestrate_steering_current, orchestrate_task_creation,
+    orchestrate_task_creation_current,
 };
 
 use crate::{
@@ -324,7 +326,127 @@ pub async fn begin_turn(
 /// through the existing owner boundaries, the directive line is stripped from
 /// storage, and the stored reply is the owner-derived text. A malformed
 /// directive clarifies without executing anything; `Unavailable` closes the
-/// stream interrupted rather than storing a fabricated reply.
+/// Presentation sink that never lets a `[task-control]` directive reach the
+/// user-visible stream.
+///
+/// Ordinary text streams as it arrives: complete lines are published unless
+/// they begin the directive, and the trailing partial line is published
+/// unless it is still a prefix of the marker (the only text that could grow
+/// into a directive). Once a line beginning with [`TASK_CONTROL_MARKER`]
+/// completes — or the trailing partial reaches the full marker — that text
+/// and everything after it are suppressed, and only the owner-derived reply
+/// tail is presented. This keeps live streaming for ordinary chat while
+/// keeping the streamed text equal to the durable reply for control turns.
+struct ControlHoldingSink<'a> {
+    inner: &'a mut (dyn DeltaSink + Send),
+    pending: String,
+    marker_seen: bool,
+}
+
+impl<'a> ControlHoldingSink<'a> {
+    fn new(inner: &'a mut (dyn DeltaSink + Send)) -> Self {
+        Self {
+            inner,
+            pending: String::new(),
+            marker_seen: false,
+        }
+    }
+
+    /// Finalizes the trailing partial: a line that begins the marker
+    /// withholds itself and switches to marker mode, so an unterminated
+    /// directive is still never presented. Returns whether the reply carries
+    /// a directive.
+    fn finalize_marker(&mut self) -> bool {
+        if !self.marker_seen && self.pending.trim_start().starts_with(TASK_CONTROL_MARKER) {
+            self.marker_seen = true;
+            self.pending.clear();
+        }
+        self.marker_seen
+    }
+
+    async fn push(&mut self, delta: &str) -> DeltaFlow {
+        if self.marker_seen {
+            return DeltaFlow::Continue;
+        }
+        self.pending.push_str(delta);
+        // Publish every complete line that is not a directive.
+        while let Some(newline) = self.pending.find('\n') {
+            if self.pending[..newline]
+                .trim_start()
+                .starts_with(TASK_CONTROL_MARKER)
+            {
+                self.marker_seen = true;
+                self.pending.clear();
+                return DeltaFlow::Continue;
+            }
+            let line: String = self.pending.drain(..=newline).collect();
+            if let DeltaFlow::Abort(reason) = self.inner.push_delta(&line).await {
+                self.pending.clear();
+                return DeltaFlow::Abort(reason);
+            }
+        }
+        // The trailing partial is streamed immediately unless it could still
+        // grow into a directive line; only a marker prefix is withheld, so
+        // ordinary chat keeps its live streaming behaviour.
+        let trimmed = self.pending.trim_start();
+        if trimmed.starts_with(TASK_CONTROL_MARKER) {
+            self.marker_seen = true;
+            self.pending.clear();
+            return DeltaFlow::Continue;
+        }
+        if trimmed.len() < TASK_CONTROL_MARKER.len() && TASK_CONTROL_MARKER.starts_with(trimmed) {
+            return DeltaFlow::Continue;
+        }
+        if !self.pending.is_empty() {
+            let pending = core::mem::take(&mut self.pending);
+            if let DeltaFlow::Abort(reason) = self.inner.push_delta(&pending).await {
+                return DeltaFlow::Abort(reason);
+            }
+        }
+        DeltaFlow::Continue
+    }
+
+    /// Flushes an ordinary (non-directive) reply's trailing partial line.
+    ///
+    /// [`Self::finalize_marker`] must have run first, so a trailing directive
+    /// has already switched to marker mode.
+    async fn finish_ordinary(&mut self) -> DeltaFlow {
+        if self.marker_seen || self.pending.is_empty() {
+            return DeltaFlow::Continue;
+        }
+        let pending = core::mem::take(&mut self.pending);
+        self.inner.push_delta(&pending).await
+    }
+
+    /// Presents the owner-derived tail after a suppressed directive.
+    async fn present(&mut self, text: &str) -> DeltaFlow {
+        self.inner.push_delta(text).await
+    }
+}
+
+impl DeltaSink for ControlHoldingSink<'_> {
+    fn push_delta<'a>(
+        &'a mut self,
+        delta: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
+        Box::pin(self.push(delta))
+    }
+}
+
+/// Joins the pre-directive reply text with the owner-derived tail exactly as
+/// the stream presented it.
+///
+/// [`interpret_task_control`] returns the pre-directive prefix with its line
+/// terminator, and the presentation sink already published that prefix, so
+/// appending the tail reconstructs the durable reply verbatim.
+fn control_reply_text(pre: &str, tail: &str) -> String {
+    format!("{pre}{tail}")
+}
+
+/// The clarification shown for a malformed task-control directive.
+const TASK_CONTROL_CLARIFICATION: &str =
+    "I could not interpret the task instruction; nothing was changed.";
+
 #[expect(
     clippy::too_many_arguments,
     reason = "each parameter is one distinct owner boundary the turn composes; grouping them would restate the boundary set"
@@ -361,8 +483,14 @@ pub async fn finish_turn(
         return DialogueOutcome::Interrupted;
     };
     // Dialogue has no cooperative stop token: it is not a Task Agent
-    // execution, so no abort exists to forward.
-    match inference.dispatch(authorized, prompt, sink, None).await {
+    // execution, so no abort exists to forward. The presentation sink holds
+    // back any potential task-control directive line, so provider output can
+    // never leak the protocol to the client.
+    let mut holder = ControlHoldingSink::new(sink);
+    match inference
+        .dispatch(authorized, prompt, &mut holder, None)
+        .await
+    {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
@@ -384,35 +512,58 @@ pub async fn finish_turn(
             // task-control directive is executed through the composition
             // root's port before anything is stored, and the stored reply is
             // the owner-derived text. The directive line itself is never
-            // stored or shown. A technical failure closes the stream
+            // stored or shown, and the streamed text is the same reply the
+            // History row carries. A technical failure closes the stream
             // interrupted rather than storing a reply no operation produced.
-            let (reply_text, reply_credential_set) = match interpret_task_control(&text.text) {
-                DialogueTaskInterpretation::Conversation { .. } => {
-                    (text.text.clone(), text.credential_set)
-                }
-                DialogueTaskInterpretation::Command { command, .. } => {
-                    match task_control.apply(command, message).await {
-                        DialogueTaskControlReply::Answered(reply) => {
-                            let Ok(scrubbed) = scrubber.scrub(&reply).await else {
+            // Finalize the trailing partial before deciding: an unterminated
+            // directive line suppresses itself and counts as a directive.
+            let task_control_present = holder.finalize_marker();
+            let (reply_text, reply_credential_set) = if task_control_present {
+                match interpret_task_control(&text.text) {
+                    DialogueTaskInterpretation::Command { text: pre, command } => {
+                        match task_control.apply(command, message).await {
+                            DialogueTaskControlReply::Answered(tail) => {
+                                if let DeltaFlow::Abort(_) = holder.present(&tail).await {
+                                    return DialogueOutcome::Interrupted;
+                                }
+                                let Ok(scrubbed_tail) = scrubber.scrub(&tail).await else {
+                                    return DialogueOutcome::Interrupted;
+                                };
+                                (
+                                    control_reply_text(&pre, &scrubbed_tail.text),
+                                    scrubbed_tail.credential_set,
+                                )
+                            }
+                            DialogueTaskControlReply::Unavailable => {
                                 return DialogueOutcome::Interrupted;
-                            };
-                            (scrubbed.text, scrubbed.credential_set)
-                        }
-                        DialogueTaskControlReply::Unavailable => {
-                            return DialogueOutcome::Interrupted;
+                            }
                         }
                     }
+                    DialogueTaskInterpretation::Invalid { text: pre } => {
+                        if let DeltaFlow::Abort(_) =
+                            holder.present(TASK_CONTROL_CLARIFICATION).await
+                        {
+                            return DialogueOutcome::Interrupted;
+                        }
+                        (
+                            control_reply_text(&pre, TASK_CONTROL_CLARIFICATION),
+                            text.credential_set,
+                        )
+                    }
+                    // The raw stream showed a directive the scrubbed text no
+                    // longer carries; fail closed instead of presenting an
+                    // unproven reply.
+                    DialogueTaskInterpretation::Conversation { .. } => {
+                        return DialogueOutcome::Interrupted;
+                    }
                 }
-                DialogueTaskInterpretation::Invalid { text: cleaned } => {
-                    let clarification =
-                        "I could not interpret the task instruction; nothing was changed.";
-                    let reply = if cleaned.is_empty() {
-                        clarification.to_owned()
-                    } else {
-                        format!("{cleaned}\n\n{clarification}")
-                    };
-                    (reply, text.credential_set)
-                }
+            } else {
+                // Ordinary reply: flush the held trailing partial line so the
+                // presented text is the whole reply. A stale presentation
+                // premise is best-effort; durable adoption authority stays in
+                // the append transaction.
+                let _ = holder.finish_ordinary().await;
+                (text.text.clone(), text.credential_set)
             };
             let reply = AppendHistoryCommand {
                 companion: input.companion,
@@ -771,6 +922,30 @@ pub async fn propose_steering(
     .await
 }
 
+/// Proposes one conversation-sourced steering change, conditional on the
+/// relied Owner input still being current.
+///
+/// Identical to [`propose_steering`] except that the Task owner compares the
+/// Owner-message currentness premise inside the revision commit: a newer
+/// accepted Owner input supersedes the turn and answers
+/// [`TaskProposalOutcome::Superseded`] with zero writes.
+pub async fn propose_steering_current(
+    command: ProposeSteeringCommand,
+    repository: &impl ConversationTaskRepository,
+    currentness: OwnerMessageCurrentness,
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
+    orchestrate_steering_current(
+        repository,
+        SteeringProposalPremise {
+            premise: command.premise,
+            new_purpose: command.new_purpose,
+            instruction_source: command.instruction_source,
+        },
+        currentness,
+    )
+    .await
+}
+
 /// One Task proposal from the Owner conversation (H-A caller side).
 ///
 /// The dialogue layer builds this from accepted conversation evidence — the
@@ -820,6 +995,33 @@ pub async fn propose_task(
     .await
 }
 
+/// Proposes one conversation-sourced Task, conditional on the relied Owner
+/// input still being current.
+///
+/// Identical to [`propose_task`] except that the Task owner compares the
+/// Owner-message currentness premise inside the creation transaction: a newer
+/// accepted Owner input supersedes the turn and answers
+/// [`TaskCreationOutcome::Superseded`] with zero writes.
+pub async fn propose_task_current(
+    command: ProposeTaskCommand,
+    repository: &impl ConversationTaskRepository,
+    currentness: OwnerMessageCurrentness,
+) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+    orchestrate_task_creation_current(
+        repository,
+        TaskProposalPremise {
+            requester: AssigneeRef {
+                companion: command.requester.as_raw(),
+            },
+            purpose: command.purpose,
+            origin: command.origin,
+            workspace_need: command.workspace_need,
+        },
+        currentness,
+    )
+    .await
+}
+
 /// Marker introducing one companion-emitted Task control directive.
 ///
 /// The companion's reply may carry at most one final line beginning with this
@@ -836,13 +1038,9 @@ pub const TASK_CONTROL_MARKER: &str = "[task-control]";
 /// `instruction` / `purpose` bodies are redacted from [`core::fmt::Debug`].
 #[derive(Clone, PartialEq, Eq)]
 pub enum DialogueTaskCommand {
-    /// Propose a new Task; the workspace folder is present only when the
-    /// conversation resolved one.
-    ProposeTask {
-        purpose: String,
-        workspace: Option<String>,
-        save_target: Option<String>,
-    },
+    /// Propose a new Task. The Workspace is deliberately absent: it is the
+    /// trusted first-party premise, never provider output.
+    ProposeTask { purpose: String },
     /// Ask for the current Task's progress / completion report.
     Report,
     /// Propose an additional instruction for the current Task.
@@ -857,15 +1055,9 @@ pub enum DialogueTaskCommand {
 impl core::fmt::Debug for DialogueTaskCommand {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::ProposeTask {
-                purpose,
-                workspace,
-                save_target,
-            } => formatter
+            Self::ProposeTask { purpose } => formatter
                 .debug_struct("ProposeTask")
                 .field("purpose", &"[redacted]")
-                .field("workspace", workspace)
-                .field("save_target", save_target)
                 .field("purpose_len", &purpose.chars().count())
                 .finish(),
             Self::Report => formatter.write_str("Report"),
@@ -922,18 +1114,21 @@ pub fn interpret_task_control(text: &str) -> DialogueTaskInterpretation {
             text: text.to_owned(),
         };
     }
-    let cleaned = lines
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !marker_lines.contains(index))
-        .map(|(_, line)| *line)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_owned();
+    let first_marker = marker_lines[0];
+    // The pre-directive prefix is the reply text before the directive line,
+    // including the line terminator that separated them: the presentation
+    // stream published exactly those complete lines, and the durable reply
+    // must match the streamed text.
+    let cleaned = if first_marker == 0 {
+        String::new()
+    } else {
+        let mut prefix = lines[..first_marker].join("\n");
+        prefix.push('\n');
+        prefix
+    };
     let last_non_empty = lines.iter().rposition(|line| !line.trim().is_empty());
-    let command = if marker_lines.len() == 1 && Some(marker_lines[0]) == last_non_empty {
-        let body = lines[marker_lines[0]]
+    let command = if marker_lines.len() == 1 && Some(first_marker) == last_non_empty {
+        let body = lines[first_marker]
             .trim_start()
             .strip_prefix(TASK_CONTROL_MARKER)
             .unwrap_or("")
@@ -974,11 +1169,7 @@ fn parse_task_command(body: &str) -> Option<DialogueTaskCommand> {
             if purpose.trim().is_empty() {
                 return None;
             }
-            Some(DialogueTaskCommand::ProposeTask {
-                purpose,
-                workspace: optional_string(object, "workspace")?,
-                save_target: optional_string(object, "save_target")?,
-            })
+            Some(DialogueTaskCommand::ProposeTask { purpose })
         }
         "report" => Some(DialogueTaskCommand::Report),
         "steer" => {
@@ -1303,14 +1494,23 @@ mod task_control_tests {
     #[test]
     fn every_closed_world_command_parses_and_strips_the_marker() {
         let propose = command(
-            "Sure, I will do that.\n[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\",\"workspace\":\"/srv/ws\",\"save_target\":null}",
+            "Sure, I will do that.\n[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\"}",
         );
         assert_eq!(
             propose,
             DialogueTaskCommand::ProposeTask {
                 purpose: String::from("read input.txt"),
-                workspace: Some(String::from("/srv/ws")),
-                save_target: None,
+            }
+        );
+        // A provider-injected workspace field is ignored: it is not part of
+        // the closed world, and the Workspace authority is the trusted
+        // first-party premise.
+        assert_eq!(
+            command(
+                "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\",\"workspace\":\"/etc\"}"
+            ),
+            DialogueTaskCommand::ProposeTask {
+                purpose: String::from("read input.txt"),
             }
         );
         assert_eq!(
@@ -1332,7 +1532,10 @@ mod task_control_tests {
         );
         match interpret_task_control("Working on it.\n[task-control] {\"kind\":\"report\"}") {
             DialogueTaskInterpretation::Command { text, .. } => {
-                assert_eq!(text, "Working on it.", "the marker line is stripped");
+                assert_eq!(
+                    text, "Working on it.\n",
+                    "the pre-directive prefix keeps its line terminator so the durable reply matches the streamed text"
+                );
             }
             other => panic!("expected a command, got {other:?}"),
         }
@@ -1362,9 +1565,7 @@ mod task_control_tests {
     fn the_command_debug_redacts_instruction_bodies() {
         let rendered = format!(
             "{:?}",
-            command(
-                "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"private purpose\",\"workspace\":null}"
-            )
+            command("[task-control] {\"kind\":\"propose_task\",\"purpose\":\"private purpose\"}")
         );
         assert!(!rendered.contains("private purpose"), "{rendered}");
         let rendered = format!(

@@ -429,6 +429,15 @@ where
     let owner = std::fs::metadata(&socket)
         .map_err(|error| CoreError::Bind(format!("read socket metadata: {error}")))?
         .uid();
+    // Production Task Agent launcher: the serving process owns the shared
+    // handle and provider transport, so an accepted conversation delegation
+    // starts the existing runner in the background without any test-side
+    // runner invocation.
+    let launcher = std::sync::Arc::new(crate::task_run::BackgroundTaskAgent::new(
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    let _ = handle.install_task_launcher(launcher);
     let table = Arc::new(ConnectionTable::new());
     loop {
         let Ok((stream, _)) = listener.accept().await else {

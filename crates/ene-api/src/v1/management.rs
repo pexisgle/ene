@@ -41,6 +41,31 @@ pub const SETUP_COMPLETE_TARGET: &str = "setup:complete";
 /// exactly what the Host parses.
 pub const TASK_TARGET_PREFIX: &str = "task:";
 
+/// Fixed prefix of one Workspace-targeting first-party management intent:
+/// `workspace:` plus the Owner-selected absolute folder path. The remainder is
+/// kept verbatim (paths may contain `:`), and the Host validates it
+/// canonically before it becomes a trusted premise.
+pub const WORKSPACE_TARGET_PREFIX: &str = "workspace:";
+
+/// Plain constructor: it does not validate. The Host parse and validation
+/// stay authoritative.
+#[must_use]
+pub fn workspace_target(path: &str) -> ManagementTargetWire {
+    ManagementTargetWire(format!("{WORKSPACE_TARGET_PREFIX}{path}"))
+}
+
+/// Exact rule: strip the `workspace:` prefix and require a non-empty
+/// remainder, else [`None`]. The remainder is the Owner-authored path
+/// verbatim; validation happens Host-side.
+#[must_use]
+pub fn parse_workspace_target(target: &ManagementTargetWire) -> Option<&str> {
+    let rest = target.0.strip_prefix(WORKSPACE_TARGET_PREFIX)?;
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest)
+}
+
 /// Plain constructor: it does not validate. The Host parse stays
 /// authoritative.
 #[must_use]
@@ -126,6 +151,10 @@ pub enum ManagementIntentKind {
     StopCompanion,
     DeleteCompanion,
     CancelTask,
+    /// Select the Owner-confirmed Workspace folder for Task work. This is the
+    /// trusted first-party premise a Task association may use; provider
+    /// output never carries one.
+    SelectWorkspace,
     ManageSchedule,
     /// Deny or refuse rule/consent handling.
     DenyOrRefuse,
@@ -269,7 +298,8 @@ mod tests {
     use super::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
         SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, consent_target, credential_target,
-        parse_consent_target, parse_credential_target, parse_task_target, task_target,
+        parse_consent_target, parse_credential_target, parse_task_target, parse_workspace_target,
+        task_target, workspace_target,
     };
     use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
@@ -455,6 +485,25 @@ mod tests {
                 parse_task_target(&ManagementTargetWire(String::from(raw))),
                 None,
                 "the task grammar rejects {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_target_roundtrips_with_colons_and_rejects_empty() {
+        let target = workspace_target("/srv/workspace/ene");
+        assert_eq!(parse_workspace_target(&target), Some("/srv/workspace/ene"));
+        let windows = workspace_target("C:\\Users\\ene\\workspace");
+        assert_eq!(
+            parse_workspace_target(&windows),
+            Some("C:\\Users\\ene\\workspace"),
+            "the Owner-authored path stays verbatim, colons included"
+        );
+        for raw in ["workspace:", "task:abc", "setup:show", ""] {
+            assert_eq!(
+                parse_workspace_target(&ManagementTargetWire(String::from(raw))),
+                None,
+                "the workspace grammar rejects {raw:?}"
             );
         }
     }

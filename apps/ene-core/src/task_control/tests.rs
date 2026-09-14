@@ -311,7 +311,7 @@ async fn late_certainty_settlement_re_evaluates_the_sealed_result() {
 }
 
 #[tokio::test]
-async fn recovery_reconciliation_is_idempotent_and_visits_every_candidate() {
+async fn recovery_reconciliation_is_idempotent_and_reports_bounded_counts() {
     let (handle, _dir) = open_handle("reconcile").await;
     let (first_task, first_delegation, first_assoc) =
         seed_execution(&handle, "/srv/workspace/ene").await;
@@ -349,8 +349,10 @@ async fn recovery_reconciliation_is_idempotent_and_visits_every_candidate() {
     .await
     .unwrap();
 
-    let adopted = handle.reconcile_sealed_results().await.unwrap();
-    assert_eq!(adopted.len(), 2);
+    let summary = handle.reconcile_sealed_results().await.unwrap();
+    assert_eq!(summary.evaluated, 2);
+    assert_eq!(summary.adopted, 2);
+    assert_eq!(summary.first_error, None);
     assert_eq!(
         progress(&handle, first_task.task).await,
         TaskProgress::Completed
@@ -359,21 +361,18 @@ async fn recovery_reconciliation_is_idempotent_and_visits_every_candidate() {
         progress(&handle, second_task.task).await,
         TaskProgress::Completed
     );
-    assert!(matches!(
-        adopted[0].adoption,
-        Ok(TaskResultAcceptance::AdoptedAsCompletion(_))
-    ));
 
-    // All candidates are adopted, so a further pass is empty and writes
-    // nothing.
-    assert!(handle.reconcile_sealed_results().await.unwrap().is_empty());
+    // All candidates are adopted, so a further pass evaluates nothing.
+    let summary = handle.reconcile_sealed_results().await.unwrap();
+    assert_eq!(summary, super::ReconciliationSummary::default());
 }
 
 #[tokio::test]
-async fn reconciliation_reaches_recoverable_results_behind_permanently_unadopted_ones() {
-    let (handle, dir) = open_handle("reconcile-starvation").await;
-    let mut permanently_unadopted = Vec::new();
-    let mut result_order = Vec::new();
+async fn reconciliation_narrows_to_readoption_possible_candidates() {
+    let (handle, dir) = open_handle("reconcile-narrow").await;
+    // Permanently unadopted history: cancelled Tasks with late results. They
+    // can only answer RecordedToOriginalOnly, so they are not candidates.
+    let mut permanent = Vec::new();
     for index in 0..RECONCILIATION_PAGE_SIZE + 1 {
         let (task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
         assert_eq!(
@@ -390,12 +389,10 @@ async fn reconciliation_reaches_recoverable_results_behind_permanently_unadopted
         )
         .await
         .unwrap();
-        permanently_unadopted.push((task, result.result));
-        result_order.push(result.result);
+        permanent.push((task, result.result));
     }
 
-    // One recoverable result sorts strictly after the permanently-unadopted
-    // front.
+    // One candidate where re-adoption is still possible from canonical facts.
     let (recoverable_task, recoverable_delegation, recoverable_assoc) =
         seed_execution(&handle, "/srv/workspace/ene").await;
     let attempt = start_attempt(
@@ -422,52 +419,38 @@ async fn reconciliation_reaches_recoverable_results_behind_permanently_unadopted
     )
     .await
     .unwrap();
-    result_order.push(recoverable.result);
-    rewrite_result_times(dir.path(), &result_order);
 
-    // Each storage read is bounded by the page size, and the recoverable
-    // candidate is not in the first page but is reached by the next one.
-    let first_page = handle
+    // The candidate read is bounded and skips the permanent history.
+    let candidates = handle
         .store
         .list_unadopted_results_after(None, RECONCILIATION_PAGE_SIZE)
         .await
         .unwrap();
-    assert_eq!(first_page.len() as u64, RECONCILIATION_PAGE_SIZE);
-    assert!(
-        first_page
-            .iter()
-            .all(|page| page.result != recoverable.result)
-    );
-    let second_page = handle
-        .store
-        .list_unadopted_results_after(first_page.last().copied(), RECONCILIATION_PAGE_SIZE)
-        .await
-        .unwrap();
-    assert_eq!(second_page.len(), 2);
-
-    // One pass visits every candidate: the older permanently-unadopted
-    // results keep their semantics, and the later recoverable result
-    // completes.
-    let outcomes = handle.reconcile_sealed_results().await.unwrap();
     assert_eq!(
-        outcomes.len() as u64,
-        RECONCILIATION_PAGE_SIZE + 2,
-        "one pass reaches the result behind the permanently-unadopted front"
+        candidates.len(),
+        1,
+        "only the recoverable result is a candidate"
     );
+    assert_eq!(candidates[0].result, recoverable.result);
+
+    let summary = handle.reconcile_sealed_results().await.unwrap();
+    assert_eq!(summary.evaluated, 1);
+    assert_eq!(summary.adopted, 1);
     assert_eq!(
         progress(&handle, recoverable_task.task).await,
         TaskProgress::Completed
     );
-    for (task, result) in &permanently_unadopted {
+    for (task, result) in &permanent {
         assert_eq!(progress(&handle, task.task).await, TaskProgress::Cancelled);
-        let outcome = outcomes
-            .iter()
-            .find(|outcome| outcome.result == *result)
-            .expect("every permanently-unadopted candidate is evaluated");
-        assert_eq!(
-            outcome.adoption,
-            Ok(TaskResultAcceptance::RecordedToOriginalOnly)
-        );
+        // The late result stays durable and unadopted; it is simply not a
+        // re-adoption candidate.
+        let stored = handle
+            .store
+            .load_task_result(*result)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.adopted_revision.is_none());
     }
     assert_eq!(
         attempt_rows(dir.path()),
@@ -476,8 +459,46 @@ async fn reconciliation_reaches_recoverable_results_behind_permanently_unadopted
     );
 }
 
+#[tokio::test]
+async fn reconciliation_pages_through_many_recoverable_candidates() {
+    let (handle, dir) = open_handle("reconcile-pages").await;
+    let mut results = Vec::new();
+    for index in 0..RECONCILIATION_PAGE_SIZE + 2 {
+        let (_task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
+        let result = orchestrate_result_arrival(
+            &handle.store,
+            delegation,
+            TaskAgentOutput::new(format!("body {index}")),
+        )
+        .await
+        .unwrap();
+        results.push(result.result);
+    }
+    rewrite_result_times(dir.path(), &results);
+
+    // Each storage read is bounded by the page size.
+    let first_page = handle
+        .store
+        .list_unadopted_results_after(None, RECONCILIATION_PAGE_SIZE)
+        .await
+        .unwrap();
+    assert_eq!(first_page.len() as u64, RECONCILIATION_PAGE_SIZE);
+    let second_page = handle
+        .store
+        .list_unadopted_results_after(first_page.last().copied(), RECONCILIATION_PAGE_SIZE)
+        .await
+        .unwrap();
+    assert_eq!(second_page.len(), 2);
+
+    let summary = handle.reconcile_sealed_results().await.unwrap();
+    assert_eq!(summary.evaluated, RECONCILIATION_PAGE_SIZE + 2);
+    assert_eq!(summary.adopted, RECONCILIATION_PAGE_SIZE + 2);
+    assert_eq!(summary.first_error, None);
+    assert!(handle.reconcile_sealed_results().await.unwrap().adopted == 0);
+}
+
 /// Rewrites the reconciliation keys of the given results to a deterministic
-/// increasing order, so the starvation regression does not depend on clock
+/// increasing order, so paging regression does not depend on clock
 /// resolution.
 ///
 /// The nanoseconds are non-zero and not a multiple of 1000, exactly the

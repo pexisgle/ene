@@ -13,7 +13,8 @@ use crate::result::{
     TaskResultRecord, UnadoptedResultCursor,
 };
 use crate::task::{
-    TaskCommitPremise, TaskCreationPremise, TaskId, TaskProgress, TaskRecord, TaskRef,
+    TaskCommitPremise, TaskCreationOutcome, TaskCreationPremise, TaskId, TaskProgress, TaskRecord,
+    TaskRef,
 };
 
 /// Technical failure for Task persistence.
@@ -38,6 +39,10 @@ pub enum TaskCommitOutcome {
     CommittedAs(TaskRef),
     /// The expected revision no longer matches; nothing was changed.
     StaleExpected { current: TaskRef },
+    /// A newer accepted Owner input superseded the relied utterance; nothing
+    /// was changed. Only the conversation-sourced guarded commit answers
+    /// this.
+    Superseded,
     /// The Task is terminal (`Completed` / `Failed`); the revision and the
     /// context are unchanged. Absorbing, so it is distinct from revision
     /// staleness.
@@ -49,6 +54,22 @@ pub enum TaskCommitOutcome {
     MissingTask { task: TaskId },
     /// No representable next revision exists; nothing was changed.
     RevisionExhausted { task: TaskId },
+}
+
+/// The Owner-utterance currentness premise of one conversation-sourced Task
+/// control commit.
+///
+/// `message` is the committed Owner message record the directive's turn
+/// relied on. The commit succeeds only while that record is still the newest
+/// accepted Owner input for `companion`; a newer accepted input supersedes
+/// the turn and the commit answers a `Superseded` outcome with zero writes.
+/// The pair is comparison material for the store's single transaction, never
+/// authority: the Task owner still performs its own revision, terminal, and
+/// correspondence compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OwnerMessageCurrentness {
+    pub companion: RawId,
+    pub message: RawId,
 }
 
 /// Durable Task boundary.
@@ -284,12 +305,17 @@ pub trait TaskRepository: Send + Sync {
         result: TaskResultId,
     ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError>;
 
-    /// Lists sealed results that have not adopted yet, starting strictly
-    /// after `after`, in `(recorded_at, result_id)` order.
+    /// Lists sealed results that have not adopted yet and can still be
+    /// re-adopted, starting strictly after `after`, in
+    /// `(recorded_at, result_id)` order.
     ///
-    /// `adopted_revision IS NULL` on an existing `task_result` row is the
-    /// whole durable truth of "this result may still need re-evaluation"; no
-    /// pending flag, queue state, or retry row exists. The cursor encodes the
+    /// The candidate predicate is canonical-facts only: `adopted_revision IS
+    /// NULL` on an existing `task_result` row, the Task is non-terminal, and
+    /// the Task's current revision equals the result's relied revision. A
+    /// result that can only answer `RecordedToOriginalOnly` (cancelled /
+    /// moved revision / terminal Task) is therefore not a candidate, so
+    /// permanent history is not re-evaluated on every startup; no pending
+    /// flag, queue state, or retry row is introduced. The cursor encodes the
     /// last candidate a previous page returned, so a bounded reconciliation
     /// can walk the whole candidate set without ever re-reading the prefix
     /// and without an unbounded `SELECT` or full in-memory materialization.
@@ -319,4 +345,43 @@ pub trait TaskRepository: Send + Sync {
         &self,
         task: TaskId,
     ) -> Result<Vec<RawId>, TaskTechnicalError>;
+}
+
+/// Conversation-sourced Task control commits.
+///
+/// These are the same Task owner operations as [`TaskRepository`], but the
+/// store additionally requires the Owner message premise to still be current
+/// inside the same short transaction as the Task write: a newer accepted
+/// Owner input supersedes the dialogue turn, and the commit answers
+/// `Superseded` with zero writes instead of acting on the past. They exist so
+/// a superseded turn can never commit a Task side effect; the store
+/// implements them on the one SQLite master that holds both the History and
+/// the Task tables. First-party callers use the unguarded operations.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 4 contract style uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait ConversationTaskRepository: TaskRepository {
+    /// Creates one Task iff the relied Owner input is still current.
+    async fn create_task_from_conversation(
+        &self,
+        premise: TaskCreationPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCreationOutcome, TaskTechnicalError>;
+
+    /// Commits one steering forward iff the relied Owner input is still
+    /// current.
+    async fn forward_steering_from_conversation(
+        &self,
+        premise: TaskCommitPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCommitOutcome, TaskTechnicalError>;
+
+    /// Accepts or refuses one cancel admission iff the relied Owner input is
+    /// still current.
+    async fn cancel_task_from_conversation(
+        &self,
+        task: TaskId,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCancelOutcome, TaskTechnicalError>;
 }

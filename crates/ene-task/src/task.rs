@@ -254,6 +254,20 @@ pub struct TaskCreationPremise {
     pub workspace: Option<WorkspaceAssociationPremise>,
 }
 
+/// The Task owner's domain result of one Task creation.
+///
+/// The unguarded [`TaskRepository::create_task`](crate::TaskRepository::create_task)
+/// always creates; the conversation-sourced guarded commit can additionally
+/// answer [`Self::Superseded`] when a newer Owner input overtook the turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCreationOutcome {
+    /// The creation unit committed.
+    Created(TaskRef),
+    /// A newer accepted Owner input superseded the relied utterance; nothing
+    /// was written.
+    Superseded,
+}
+
 /// A purpose adoption proposed by one steering commit (AU4).
 ///
 /// The repository stamps the adopted revision (`expected.revision + 1`) after

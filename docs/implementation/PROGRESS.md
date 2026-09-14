@@ -25,7 +25,10 @@
     - ✅ 実行中の外部作用の確定度（`ConfirmedSuccess` / `ConfirmedFailure` / `Unknown`）の保持と、不明な作用の自動再実行禁止
     - ✅ タスクのライフサイクル（開始、進行中、完了、失敗、キャンセル）と方針指示（steering）、対象フォルダ（Workspace）との紐付け、委任、権限チェック、ワークスペース境界（一覧・読込・作成・編集のみ）とパス脱出の遮断
     - ✅ スライス F（会話・第一者管理経路）:
-      - 会話の production 経路: companion が provider 出力の最終行に付す closed-world の `[task-control]` directive を dialogue の `finish_turn` が解釈し、composition root の `DialogueTaskControlPort` が既存 Task owner 境界（Task 作成・委任・steering・progress/report・cancel）へ写す。directive 行は History に保存せず、返信は owner の typed outcome から構成した文面になる。通常の Owner message だけで一連の操作が起動し、テスト側の直接 API 呼び出しを必要としない。
+      - 会話の production 経路: companion が provider 出力の最終行に付す closed-world の `[task-control]` directive を dialogue の `finish_turn` が解釈し、composition root の `DialogueTaskControlPort` が既存 Task owner 境界（Task 作成・委任・steering・progress/report・cancel）へ写す。directive 行は presentation と History の双方から隠し、返信は owner の typed outcome から構成した最終表示と History が一致する。通常の Owner message だけで一連の操作が起動し、テスト側の直接 API 呼び出しを必要としない。
+      - Workspace authority: Task の Workspace association は第一者管理経路で Owner が選択し Host が canonical directory として検証した trusted premise からのみ成立する。provider / model 出力の任意 path は association / delegation scope / Action authority にならない。
+      - Owner currentness: 会話起点の Task 作成・steering・cancel は、依拠した Owner message がまだ最新の accepted Owner input であることを書き込みと同じ不分区間で比較し、superseded turn を `Superseded`（書き込みなし）として拒否する（check-then-act の窓を作らない）。
+      - 実行開始: Task 作成 + delegation の受理後、serving composition（shared handle と provider transport）が install した launcher が既存 `run_task_agent` を background 起動する。会話 turn は実行完了を await せず、runner の technical failure を `TaskProgress::Failed` に写さない。
       - 会話からの Task 提案（`ProposeTaskCommand` → 作業担当の Task 作成 orchestration。Task / context / Workspace association 識別子は作業担当が発行）と、既存 AU3 委任・既存 Task Agent 実行経路への接続。会話層から SQL / Workspace / delegation 行を直接書かない。
       - 会話からの追加指示を既存 `propose_steering` / `orchestrate_steering`（AU4）へ接続。stale な依拠 revision は既存 outcome のまま扱い、会話側で retry / 上書きしない。
       - 会話および第一者管理経路（`ManagementIntentKind::CancelTask`）の cancel を既存 `HostHandle::cancel_task`（AU16）へ接続。受理と停止完了を混同せず、cancel 専用の gate / state を追加しない。
