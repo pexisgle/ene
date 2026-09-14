@@ -1,10 +1,12 @@
-//! Test-only helpers: scratch directories and memory-backed handles.
+//! Test-only helpers: scratch directories and memory-backed credentials.
 //!
 //! Each test owns a [`tempfile::TempDir`], which removes the directory on
-//! drop, so early returns and panics need no manual cleanup. Handles open
-//! file-backed stores under those directories with a
-//! [`MemoryCredentialStore`], which keeps tests hermetic: the environment
-//! store reads the real process environment once when it is constructed.
+//! drop, so early returns and panics need no manual cleanup. Handles keep the
+//! real file-backed SQLite store so reopen/restart semantics and direct
+//! `app.db` inspection remain meaningful, but logical Host tests opt out of
+//! SQLite crash-durability fsyncs through `ene-store` test support. Credential
+//! values stay in [`MemoryCredentialStore`], keeping tests hermetic: the
+//! environment store reads the real process environment once when constructed.
 
 use ene_api::v1::refs::ConnectionWireId;
 use ene_credential::MemoryCredentialStore;
@@ -23,8 +25,11 @@ pub(crate) async fn memory_handle_with(
         .expect("test scratch directory must be creatable");
     let store = MemoryCredentialStore::new();
     setup(&store);
-    let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(store)).await;
-    handle.ok().map(|handle| (handle, dir))
+    let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(store))
+        .await
+        .ok()?;
+    handle.store.relax_durability_for_tests().await.ok()?;
+    Some((handle, dir))
 }
 
 pub(crate) async fn memory_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
