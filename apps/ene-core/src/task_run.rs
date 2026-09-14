@@ -288,8 +288,9 @@ pub enum TaskAgentRunOutcome {
         attempt: ene_action::ActionAttemptId,
     },
     /// The cooperative stop signal fired before a new provider call or Action
-    /// start, or aborted an in-flight provider wait through the inference
-    /// boundary after its usage accounting completed. The durable cancel
+    /// start, or won the claimed dispatch's provider wait through the
+    /// inference boundary (the provider future may have been in flight or not
+    /// yet polled) after its usage accounting completed. The durable cancel
     /// admission is the Task owner's separate fact; this variant claims
     /// nothing about provider or external-effect completion.
     Cancelled,
