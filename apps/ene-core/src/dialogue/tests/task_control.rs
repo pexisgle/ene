@@ -593,4 +593,13 @@ async fn a_transient_provider_failure_never_becomes_a_task_failure() {
         .expect("the task exists");
     assert_eq!(report.progress, TaskProgress::InProgress);
     assert!(report.result_body.is_none());
+    let rendered = report.render();
+    assert!(
+        rendered.contains("task status: in-progress"),
+        "a progress query answers from the current durable state: {rendered}"
+    );
+    assert!(
+        rendered.contains("result: none"),
+        "a progress query reports no sealed result yet: {rendered}"
+    );
 }
