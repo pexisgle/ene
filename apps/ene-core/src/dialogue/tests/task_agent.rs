@@ -1006,7 +1006,7 @@ async fn a_consent_move_during_the_provider_wait_is_reported_with_its_sent_fact(
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,

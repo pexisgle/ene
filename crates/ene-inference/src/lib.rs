@@ -687,12 +687,6 @@ impl DispatchAbort {
         self.inner.aborted.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Whether two handles refer to the same signal.
-    #[must_use]
-    pub fn same_signal(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.inner, &other.inner)
-    }
-
     /// Waits until the signal is raised; returns immediately when it already is.
     pub async fn aborted(&self) {
         while !self.is_aborted() {
@@ -721,10 +715,11 @@ pub enum InferenceDispatchOutcome {
     /// this without sending again.
     NotSent(NotSentReason),
     /// The local abort signal stopped this dispatch. A dispatch that was
-    /// already claimed records the uncertain usage fact before answering;
-    /// one refused before the claim records no attempt and no usage fact.
-    /// This never claims that a provider request or an external effect
-    /// stopped.
+    /// already claimed records the uncertain usage fact before answering; if
+    /// that fact cannot be recorded, the dispatch fails as a storage
+    /// technical error instead of claiming a clean abort. One refused before
+    /// the claim records no attempt and no usage fact. This never claims
+    /// that a provider request or an external effect stopped.
     Aborted,
 }
 
@@ -802,7 +797,9 @@ pub trait InferenceExecutor: Send + Sync {
 /// A signal already raised before the claim refuses without claiming
 /// anything; a signal that fires during the provider wait drops the provider
 /// future best-effort and records the unknown-usage fact for the claimed
-/// attempt before answering [`InferenceDispatchOutcome::Aborted`]. The
+/// attempt before answering [`InferenceDispatchOutcome::Aborted`] — a usage
+/// write failure on that path is a storage technical error, so a claimed
+/// abort can never masquerade as a clean stop with lost accounting. The
 /// accounting is never skipped by the abort: only the provider I/O is.
 #[expect(
     clippy::too_many_arguments,
@@ -881,9 +878,13 @@ pub async fn dispatch_authorized(
             () = abort.aborted() => {
                 // The select drops the provider future best-effort; the
                 // accounting below is not best-effort. The attempt is
-                // claimed, so the call may have run: record the uncertain
-                // usage before reporting the abort.
-                record_usage_decision(usage, unknown_usage(ticket, &provider, &model)).await;
+                // claimed, so the call may have run: the unknown-usage fact
+                // must be durable before Aborted can promise it, so a
+                // storage failure here is a technical error, never a clean
+                // abort that silently lost the fact.
+                usage
+                    .record_usage(unknown_usage(ticket, &provider, &model))
+                    .await?;
                 return Ok(InferenceDispatchOutcome::Aborted);
             }
             response = transport.complete_streaming(request, sink) => response,
@@ -1265,6 +1266,51 @@ mod dispatch_tests {
             _ticket: InferenceTicketId,
         ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
             Ok(None)
+        }
+    }
+
+    /// An attempt repository that raises the caller's abort signal from
+    /// inside the claim, modelling a stop that lands while the claim commits.
+    struct AbortingAttempts(DispatchAbort);
+
+    impl InferenceAttemptRepository for AbortingAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            self.0.abort();
+            Ok(AttemptBeginOutcome::Started)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// Usage repository that fails every write, modelling a storage failure
+    /// right after a claimed abort.
+    struct FailingUsage;
+
+    impl UsageRepository for FailingUsage {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn record_usage(&self, _fact: UsageFact) -> Result<(), InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
         }
     }
 
@@ -1789,6 +1835,87 @@ mod dispatch_tests {
         assert_eq!(facts[0].source, UsageSource::Unknown);
         assert_eq!(facts[0].input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn abort_that_lands_during_the_claim_records_the_unknown_fact() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let abort = DispatchAbort::default();
+        let attempts = AbortingAttempts(abort.clone());
+        let authorized = authorized();
+        let ticket = authorized.ticket;
+
+        let outcome = dispatch_authorized(
+            authorized,
+            prompt("hello"),
+            &mut DiscardSink,
+            Some(&abort),
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("an abort is a domain outcome");
+
+        assert_eq!(outcome, InferenceDispatchOutcome::Aborted);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the stop wins before the provider future is ever polled"
+        );
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(
+            facts.len(),
+            1,
+            "the claim that raced the stop still records its accounting"
+        );
+        assert_eq!(facts[0].ticket, ticket);
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn abort_accounting_failure_is_a_technical_error_not_a_clean_abort() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = DroppingTransport::default();
+        let abort = DispatchAbort::default();
+        let started = std::sync::Arc::clone(&transport.started);
+        let dropped = std::sync::Arc::clone(&transport.dropped);
+        let mut sink = DiscardSink;
+
+        let mut dispatch = Box::pin(dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &mut sink,
+            Some(&abort),
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        ));
+        let mut started_wait = Box::pin(started.notified());
+        tokio::select! {
+            () = &mut started_wait => {}
+            outcome = &mut dispatch => {
+                panic!("the dispatch must wait for the abort, got {outcome:?}");
+            }
+        }
+        abort.abort();
+        let result = dispatch.await;
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "a claimed abort whose accounting cannot be written must not answer a clean Aborted"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the abort still dropped the in-flight provider future"
+        );
     }
 
     #[test]

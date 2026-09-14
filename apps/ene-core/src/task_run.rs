@@ -145,14 +145,13 @@ impl TaskExecutionRegistry {
         signalled
     }
 
-    fn remove(&self, delegation: ene_task::DelegationId, token: &DispatchAbort) {
-        let mut running = crate::lock_unpoison(&self.running);
-        if running
-            .get(&delegation)
-            .is_some_and(|stored| stored.cancellation.same_signal(token))
-        {
-            running.remove(&delegation);
-        }
+    /// Removes the entry held by one registration.
+    ///
+    /// Registration never overwrites an occupied slot, so the entry is
+    /// always the dropping registration's own and no identity check is
+    /// needed to keep it from removing a newer execution's token.
+    fn remove(&self, delegation: ene_task::DelegationId) {
+        crate::lock_unpoison(&self.running).remove(&delegation);
     }
 }
 
@@ -166,7 +165,7 @@ pub struct TaskExecutionRegistration<'a> {
 
 impl Drop for TaskExecutionRegistration<'_> {
     fn drop(&mut self) {
-        self.registry.remove(self.delegation, &self.cancellation);
+        self.registry.remove(self.delegation);
     }
 }
 
@@ -334,15 +333,19 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
 /// while the already-started attempt and its usage fact stay durable. An
 /// output refused before the send at all stays [`TaskAgentRunOutcome::NotSent`].
 ///
-/// `cancellation` is the local cooperative stop signal for this execution. It
-/// is checked before every provider call and Action start, and it is handed to
-/// the inference port (via the Host adapter) so an in-flight provider call is
-/// aborted best-effort with its usage fact recorded before the turn answers
-/// [`TaskAgentTurnOutcome::Aborted`]. The signal is never authority: the
-/// durable cancel admission (AU16) is the Task owner's commit, and stopping
-/// locally proves nothing about provider or external effects. A final answer
-/// that was already produced is still recorded and adoption still runs, so a
-/// cancel race resolves through the ordinary `RecordedToOriginalOnly` path.
+/// The execution's in-process identity and cooperative stop token come from
+/// `registration`: holding a [`TaskExecutionRegistration`] is what makes the
+/// per-delegation refusal real, because [`TaskExecutionRegistry::register`]
+/// never admits a second registration for the same delegation while this one
+/// is held. The token is checked before every provider call and Action start,
+/// and it is handed to the inference port (via the Host adapter) so an
+/// in-flight provider call is aborted best-effort with its usage fact recorded
+/// before the turn answers [`TaskAgentTurnOutcome::Aborted`]. The signal is
+/// never authority: the durable cancel admission (AU16) is the Task owner's
+/// commit, and stopping locally proves nothing about provider or external
+/// effects. A final answer that was already produced is still recorded and
+/// adoption still runs, so a cancel race resolves through the ordinary
+/// `RecordedToOriginalOnly` path.
 ///
 /// One delegated execution is run once. A stopped execution (no final result)
 /// is never continued by calling this function again over the same
@@ -354,10 +357,11 @@ pub async fn run_task_agent_execution(
     instructions: &impl TaskInstructionSource,
     inference: &impl TaskAgentInference,
     scrubber: &impl SecretScrubber,
-    delegation: ene_task::DelegationId,
     max_turns: u32,
-    cancellation: &DispatchAbort,
+    registration: &TaskExecutionRegistration<'_>,
 ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
+    let delegation = registration.delegation;
+    let cancellation = &registration.cancellation;
     if execution_already_started(store, delegation).await? {
         return Ok(TaskAgentRunOutcome::Refused(
             TaskAgentRunRefusal::ExecutionAlreadyStarted { delegation },
