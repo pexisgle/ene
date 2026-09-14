@@ -39,8 +39,8 @@ mod tests;
 pub enum StoreError {
     #[error("store open failed: {0}")]
     OpenFailed(String),
-    #[error("store migration failed: {0}")]
-    MigrationFailed(String),
+    #[error("store schema initialization failed: {0}")]
+    SchemaFailed(String),
 }
 
 /// A panic inside the blocking task is the task's own panic: resume it
@@ -58,8 +58,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// Reopening an existing file is idempotent: the schema setup and the
-    /// running-companion seed tolerate an already-migrated database.
+    /// Initializes an empty database or opens the exact current schema.
+    /// Unsupported schemas are rejected without changes.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
         let path = path.to_path_buf();
         run_blocking(move || Self::open_sync(&path)).await
@@ -68,7 +68,7 @@ impl Store {
     fn open_sync(path: &Path) -> Result<Self, StoreError> {
         let mut conn =
             Connection::open(path).map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-        migrate::run(&mut conn).map_err(StoreError::MigrationFailed)?;
+        migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -84,7 +84,7 @@ impl Store {
     fn open_in_memory_sync() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()
             .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-        migrate::run(&mut conn).map_err(StoreError::MigrationFailed)?;
+        migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })

@@ -471,40 +471,6 @@ fn validate_adopted_purpose_provenance(
     Ok(())
 }
 
-/// Validates the adopted-purpose correspondence of one relied revision and
-/// returns the canonical source the send depended on.
-///
-/// This is the storage-local invariant the normal Task read applies at the
-/// current revision, resolved here for an arbitrary relied revision: the D2
-/// `task_revision` snapshot must exist and its adopted-purpose pointer is the
-/// authoritative premise; the revision's adopted-purpose rows are probed
-/// without narrowing the payload, exactly one must exist, carry a payload
-/// equal to the snapshot pointer, and have decodable provenance. A missing
-/// snapshot, a duplicated row (a NULL payload never hides one), a pointer
-/// disagreement, or malformed provenance is a technical error, never a
-/// guessed source.
-pub(crate) fn validated_adopted_purpose_source(
-    conn: &Connection,
-    task_text: &str,
-    revision: i64,
-) -> Result<String, TaskTechnicalError> {
-    let snapshot: RawTaskRevision = conn
-        .query_row(
-            SQL_SELECT_TASK_REVISION,
-            params![task_text, revision],
-            raw_revision_row,
-        )
-        .optional()
-        .map_err(task_unavailable)?
-        .ok_or_else(|| {
-            task_unavailable("task revision snapshot missing for the relied revision")
-        })?;
-    let expected_adopted = decode_revision(snapshot.purpose_adopted_revision)?;
-    let entry = validated_adopted_purpose_entry(conn, task_text, revision, expected_adopted)?;
-    validate_adopted_purpose_provenance(&entry)?;
-    Ok(entry.origin_source)
-}
-
 /// Commits one steering forward (AU4).
 ///
 /// The current row is read inside the `Immediate` transaction, so the compare
