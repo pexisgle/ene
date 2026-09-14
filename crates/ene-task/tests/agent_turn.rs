@@ -711,6 +711,40 @@ async fn an_exchange_that_cannot_fit_alone_is_not_replaced_by_a_note() {
 }
 
 #[tokio::test]
+async fn aborted_port_answer_stays_its_own_turn_outcome() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    let inference = ScriptedInference::new(Ok(TaskAgentInferenceOutcome::Aborted));
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        premise(delegation_id),
+    )
+    .await
+    .expect("a local abort is a domain outcome, not a technical error");
+
+    assert_eq!(
+        outcome,
+        TaskAgentTurnOutcome::Aborted,
+        "a stopped turn is neither Produced nor a pre-send NotSent refusal"
+    );
+    assert_eq!(
+        inference.premises().len(),
+        1,
+        "the aborted turn is still one attempted turn"
+    );
+}
+
+#[tokio::test]
 async fn action_exchanges_are_replayed_in_order_and_scrubbed_once() {
     let task = TaskId::generate();
     let relied = reference(task, 1);

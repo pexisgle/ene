@@ -1140,7 +1140,8 @@ async fn cancel_task_admission_wires_the_cooperative_stop() {
     // delegation, so the key is just a fresh identity.
     let registration = handle
         .task_executions
-        .register(DelegationId::generate(), task.task);
+        .register(DelegationId::generate(), task.task)
+        .expect("the running execution registers");
     assert_eq!(
         handle
             .cancel_task(CancelTaskCommand { task: task.task })
@@ -1149,7 +1150,7 @@ async fn cancel_task_admission_wires_the_cooperative_stop() {
         TaskCancelOutcome::CancelAccepted
     );
     assert!(
-        registration.cancellation.is_cancelled(),
+        registration.cancellation.is_aborted(),
         "the admission signals the running execution"
     );
     let loaded = handle.store.load_task(task.task).await.unwrap().unwrap();
@@ -1227,7 +1228,8 @@ async fn cancel_task_admission_wires_the_cooperative_stop() {
     ));
     let completed_registration = handle
         .task_executions
-        .register(completed_delegation, completed.task);
+        .register(completed_delegation, completed.task)
+        .expect("the running execution registers");
     assert_eq!(
         handle
             .cancel_task(CancelTaskCommand {
@@ -1241,7 +1243,7 @@ async fn cancel_task_admission_wires_the_cooperative_stop() {
         }
     );
     assert!(
-        !completed_registration.cancellation.is_cancelled(),
+        !completed_registration.cancellation.is_aborted(),
         "a refused admission never signals"
     );
 }

@@ -111,7 +111,7 @@ async fn task_agent_turn_dispatches_under_the_inherited_consent() {
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -187,7 +187,7 @@ async fn task_agent_turn_is_data_use_held_when_the_purpose_source_is_covered() {
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -272,7 +272,7 @@ async fn task_agent_turn_is_stale_after_steering_and_never_sends() {
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -328,7 +328,7 @@ async fn task_agent_turn_is_execution_sealed_after_finalization() {
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -392,7 +392,7 @@ async fn task_agent_turn_is_terminal_after_completion() {
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -556,7 +556,7 @@ async fn task_agent_turn_sends_purpose_and_instruction_through_the_real_composit
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -653,7 +653,7 @@ async fn task_agent_turn_is_data_use_held_when_the_instruction_source_is_covered
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -746,7 +746,7 @@ async fn task_agent_turn_with_an_instruction_never_sends_after_steering_wins() {
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -799,7 +799,7 @@ async fn reopened_handle_does_not_replay_a_turn_and_resolves_the_instruction_aga
             tracker: &handle.tracker,
             transport: &transport,
         };
-        let adapter = TaskAgentInferenceAdapter::new(&executor);
+        let adapter = TaskAgentInferenceAdapter::new(&executor, None);
         let scrubber = CredentialScrubber {
             refs: &handle.store,
             store: &handle.cred_store,
@@ -848,7 +848,7 @@ async fn reopened_handle_does_not_replay_a_turn_and_resolves_the_instruction_aga
         tracker: &reopened.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &reopened.store,
         store: &reopened.cred_store,
@@ -905,7 +905,7 @@ async fn task_agent_turn_scrubs_a_registered_secret_in_an_instruction_body() {
         tracker: &handle.tracker,
         transport: &transport,
     };
-    let adapter = TaskAgentInferenceAdapter::new(&executor);
+    let adapter = TaskAgentInferenceAdapter::new(&executor, None);
     let scrubber = CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,

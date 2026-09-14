@@ -334,8 +334,10 @@ pub struct HostHandle {
     /// Host-owned mapping entry rather than a function of the domain id.
     pub(crate) companion_wire: String,
     /// Cooperative stop tokens for running Task Agent executions, keyed by
-    /// Task. In-memory only: a restart drops every token, and a lost token
-    /// never means the durable work or an external effect stopped.
+    /// delegation (one execution lifetime; registration is atomic per
+    /// delegation). In-memory only: a restart drops every token, and a lost
+    /// token never means the durable work or an external effect stopped. The
+    /// durable attempt facts carry the one-shot start marker across restarts.
     pub(crate) task_executions: crate::task_run::TaskExecutionRegistry,
 }
 
@@ -479,19 +481,22 @@ impl HostHandle {
 
     /// Runs one delegated Task Agent execution through the Host composition.
     ///
-    /// Registers the cooperative stop token under the delegation's Task, wires
+    /// Atomically registers the cooperative stop token under the delegation
+    /// (a second registration of the same execution lifetime is refused), wires
     /// the Task-owned ports to the concrete History, credential, and inference
     /// boundaries, and runs the bounded loop
-    /// ([`DEFAULT_MAX_TURNS`](crate::task_run::DEFAULT_MAX_TURNS)). `transport`
-    /// is the provider transport (a fake in tests). Nothing here decides
-    /// completion: the loop ends at the owner boundaries and the result
-    /// adoption is the Task owner's.
+    /// ([`DEFAULT_MAX_TURNS`](crate::task_run::DEFAULT_MAX_TURNS)). The abort
+    /// token reaches the provider wait through the inference adapter, so a
+    /// cancel never loses a claimed attempt's usage fact. `transport` is the
+    /// provider transport (a fake in tests). Nothing here decides completion:
+    /// the loop ends at the owner boundaries and the result adoption is the
+    /// Task owner's.
     ///
     /// # Errors
     ///
     /// [`TaskAgentRunError`] for storage and inference technical failures;
-    /// stale, terminal, sealed, refused, and not-sent answers stay domain
-    /// outcomes inside [`TaskAgentRunOutcome`].
+    /// stale, terminal, sealed, already-started, already-running, refused, and
+    /// not-sent answers stay domain outcomes inside [`TaskAgentRunOutcome`].
     pub async fn run_task_agent<T: ProviderTransport + Send + Sync>(
         &self,
         transport: &T,
@@ -507,11 +512,16 @@ impl HostHandle {
                 TaskAgentRunRefusal::MissingDelegation { delegation },
             ));
         };
-        let registration = self
+        let Some(registration) = self
             .task_executions
-            .register(delegation, correspondence.task.task);
+            .register(delegation, correspondence.task.task)
+        else {
+            return Ok(TaskAgentRunOutcome::Refused(
+                TaskAgentRunRefusal::ExecutionAlreadyRunning { delegation },
+            ));
+        };
         let executor = HostInference::new(&self.store, &self.cred_store, &self.tracker, transport);
-        let inference = TaskAgentInferenceAdapter::new(&executor);
+        let inference = TaskAgentInferenceAdapter::new(&executor, Some(&registration.cancellation));
         let instructions = HistoryInstructionSource::new(&self.store);
         let scrubber = CredentialScrubber {
             refs: &self.store,

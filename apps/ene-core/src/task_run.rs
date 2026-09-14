@@ -33,11 +33,14 @@
 //! Tasks and moved revisions are refused by the existing gates on the next
 //! turn or Action start and end the loop as [`TaskAgentRunRefusal`].
 //!
-//! A local cooperative stop signal ([`ExecutionCancellation`]) stops the loop
-//! before the next provider call or Action and drops an in-flight provider
-//! call best-effort. It is never authority: the durable AU16 admission is the
-//! Task owner's commit, and dropping a local future is not evidence that a
-//! provider request or external effect stopped.
+//! A local cooperative stop signal ([`DispatchAbort`]) stops the loop before
+//! the next provider call or Action and aborts an in-flight provider call
+//! best-effort. The abort travels through the inference port so a claimed
+//! attempt records its unknown-usage fact before the turn answers; the loop
+//! never drops the turn future itself, which would skip that accounting. The
+//! signal is never authority: the durable AU16 admission is the Task owner's
+//! commit, and aborting locally is not evidence that a provider request or
+//! external effect stopped.
 //!
 //! What this module deliberately does not do: it does not create Tasks or
 //! delegations, does not retry provider calls or Actions, does not resume
@@ -52,6 +55,7 @@
 
 use ene_action::{ActionCertainty, ActionNotStarted, ObservedEffect, OperationKind};
 use ene_credential::SecretScrubber;
+use ene_inference::DispatchAbort;
 use ene_primitive::RawId;
 use ene_store::Store;
 use ene_task::{
@@ -69,53 +73,6 @@ use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_wo
 /// forever; reaching it stops the execution without sealing a result.
 pub const DEFAULT_MAX_TURNS: u32 = 16;
 
-/// Cooperative stop signal for one running Task Agent execution.
-///
-/// This is a local, best-effort handle: it survives only in this process, and
-/// signalling it proves nothing about a provider call or an external effect.
-/// The durable cancel admission (AU16) is the Task owner's commit; this token
-/// only stops the loop from starting new work and drops the in-flight turn
-/// future so the transport call is aborted best-effort.
-#[derive(Clone, Default)]
-pub struct ExecutionCancellation {
-    inner: std::sync::Arc<CancellationInner>,
-}
-
-#[derive(Default)]
-struct CancellationInner {
-    cancelled: std::sync::atomic::AtomicBool,
-    notify: tokio::sync::Notify,
-}
-
-impl ExecutionCancellation {
-    /// Raises the signal and wakes the execution, if it is waiting.
-    ///
-    /// `notify_one` (not `notify_waiters`) closes the check-then-wait race:
-    /// the permit is stored when the loop is between its flag check and its
-    /// first `notified` poll, so the wakeup is never lost.
-    pub fn cancel(&self) {
-        self.inner
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.inner.notify.notify_one();
-    }
-
-    /// Whether the signal is already raised.
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.inner
-            .cancelled
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Waits until the signal is raised; returns immediately when it already is.
-    pub async fn cancelled(&self) {
-        while !self.is_cancelled() {
-            self.inner.notify.notified().await;
-        }
-    }
-}
-
 /// Tracks the running Task Agent executions of this process, keyed by
 /// delegation (one delegated execution lifetime).
 ///
@@ -124,6 +81,12 @@ impl ExecutionCancellation {
 /// one Task are allowed (AU3 allows several delegations of one revision); a
 /// cancel signals every token registered for that Task, and a registration
 /// removes only its own entry.
+///
+/// Registration is atomic per delegation: a second registration for the same
+/// delegation is refused while the first is held, so two loops can never
+/// start provider calls or Actions for one execution lifetime. The durable
+/// attempt facts ([`TaskAgentRunRefusal::ExecutionAlreadyStarted`]) cover
+/// what the in-memory registry cannot: a restart or a lost registration.
 #[derive(Default)]
 pub struct TaskExecutionRegistry {
     running: std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, RunningExecution>>,
@@ -131,32 +94,38 @@ pub struct TaskExecutionRegistry {
 
 struct RunningExecution {
     task: ene_task::TaskId,
-    cancellation: ExecutionCancellation,
+    cancellation: DispatchAbort,
 }
 
 impl TaskExecutionRegistry {
     /// Registers one running execution and returns its cancellable handle.
     ///
-    /// The returned registration removes the entry on drop, so an abandoned
+    /// `None` means another execution of the same delegation is already
+    /// running in this process; the caller must refuse before any provider
+    /// call or Action. The non-overwrite is part of the same lock section as
+    /// the insert, so two racers cannot both observe "not running". The
+    /// returned registration removes its own entry on drop, so an abandoned
     /// future cannot leave a stale token behind.
     pub fn register(
         &self,
         delegation: ene_task::DelegationId,
         task: ene_task::TaskId,
-    ) -> TaskExecutionRegistration<'_> {
-        let cancellation = ExecutionCancellation::default();
-        crate::lock_unpoison(&self.running).insert(
-            delegation,
-            RunningExecution {
-                task,
-                cancellation: cancellation.clone(),
-            },
-        );
-        TaskExecutionRegistration {
+    ) -> Option<TaskExecutionRegistration<'_>> {
+        let mut running = crate::lock_unpoison(&self.running);
+        let entry = match running.entry(delegation) {
+            std::collections::hash_map::Entry::Occupied(_) => return None,
+            std::collections::hash_map::Entry::Vacant(entry) => entry,
+        };
+        let cancellation = DispatchAbort::default();
+        entry.insert(RunningExecution {
+            task,
+            cancellation: cancellation.clone(),
+        });
+        Some(TaskExecutionRegistration {
             registry: self,
             delegation,
             cancellation,
-        }
+        })
     }
 
     /// Signals every running execution of `task`, if any is registered.
@@ -169,18 +138,18 @@ impl TaskExecutionRegistry {
         let mut signalled = false;
         for execution in running.values() {
             if execution.task == task {
-                execution.cancellation.cancel();
+                execution.cancellation.abort();
                 signalled = true;
             }
         }
         signalled
     }
 
-    fn remove(&self, delegation: ene_task::DelegationId, token: &ExecutionCancellation) {
+    fn remove(&self, delegation: ene_task::DelegationId, token: &DispatchAbort) {
         let mut running = crate::lock_unpoison(&self.running);
         if running
             .get(&delegation)
-            .is_some_and(|stored| std::sync::Arc::ptr_eq(&stored.cancellation.inner, &token.inner))
+            .is_some_and(|stored| stored.cancellation.same_signal(token))
         {
             running.remove(&delegation);
         }
@@ -192,7 +161,7 @@ pub struct TaskExecutionRegistration<'a> {
     registry: &'a TaskExecutionRegistry,
     delegation: ene_task::DelegationId,
     /// The cooperative stop token for the execution.
-    pub cancellation: ExecutionCancellation,
+    pub cancellation: DispatchAbort,
 }
 
 impl Drop for TaskExecutionRegistration<'_> {
@@ -264,6 +233,12 @@ pub enum TaskAgentRunRefusal {
     ExecutionAlreadyStarted {
         delegation: ene_task::DelegationId,
     },
+    /// Another execution of the same delegation is already running in this
+    /// process. The atomic registration refusal happens before any provider
+    /// call or Action, so two loops can never run one execution lifetime.
+    ExecutionAlreadyRunning {
+        delegation: ene_task::DelegationId,
+    },
     MissingWorkspace {
         task: ene_task::TaskId,
     },
@@ -313,8 +288,9 @@ pub enum TaskAgentRunOutcome {
         attempt: ene_action::ActionAttemptId,
     },
     /// The cooperative stop signal fired before a new provider call or Action
-    /// start (an in-flight provider call was dropped best-effort). The durable
-    /// cancel admission is the Task owner's separate fact; this variant claims
+    /// start, or aborted an in-flight provider wait through the inference
+    /// boundary after its usage accounting completed. The durable cancel
+    /// admission is the Task owner's separate fact; this variant claims
     /// nothing about provider or external-effect completion.
     Cancelled,
 }
@@ -359,13 +335,14 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
 /// output refused before the send at all stays [`TaskAgentRunOutcome::NotSent`].
 ///
 /// `cancellation` is the local cooperative stop signal for this execution. It
-/// is checked before every provider call and Action start, and an in-flight
-/// provider call is dropped best-effort when the signal fires. The signal is
-/// never authority: the durable cancel admission (AU16) is the Task owner's
-/// commit, and stopping locally proves nothing about provider or external
-/// effects. A final answer that was already produced is still recorded and
-/// adoption still runs, so a cancel race resolves through the ordinary
-/// `RecordedToOriginalOnly` path.
+/// is checked before every provider call and Action start, and it is handed to
+/// the inference port (via the Host adapter) so an in-flight provider call is
+/// aborted best-effort with its usage fact recorded before the turn answers
+/// [`TaskAgentTurnOutcome::Aborted`]. The signal is never authority: the
+/// durable cancel admission (AU16) is the Task owner's commit, and stopping
+/// locally proves nothing about provider or external effects. A final answer
+/// that was already produced is still recorded and adoption still runs, so a
+/// cancel race resolves through the ordinary `RecordedToOriginalOnly` path.
 ///
 /// One delegated execution is run once. A stopped execution (no final result)
 /// is never continued by calling this function again over the same
@@ -379,7 +356,7 @@ pub async fn run_task_agent_execution(
     scrubber: &impl SecretScrubber,
     delegation: ene_task::DelegationId,
     max_turns: u32,
-    cancellation: &ExecutionCancellation,
+    cancellation: &DispatchAbort,
 ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
     if execution_already_started(store, delegation).await? {
         return Ok(TaskAgentRunOutcome::Refused(
@@ -390,30 +367,28 @@ pub async fn run_task_agent_execution(
     let mut attempt_refs: Vec<RawId> = Vec::new();
     let mut turn = 0_u32;
     loop {
-        if cancellation.is_cancelled() {
+        if cancellation.is_aborted() {
             return Ok(TaskAgentRunOutcome::Cancelled);
         }
         if turn >= max_turns {
             return Ok(TaskAgentRunOutcome::TurnLimitReached { turns: turn });
         }
         turn += 1;
-        // `biased` makes the stop signal win when both are ready: a new
-        // provider call is never started after the signal fired, and an
-        // in-flight one is dropped instead of being awaited to completion.
-        let outcome = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Ok(TaskAgentRunOutcome::Cancelled),
-            outcome = orchestrate_task_agent_turn(
-                store,
-                instructions,
-                inference,
-                scrubber,
-                TaskAgentTurnPremise {
-                    delegation,
-                    exchanges: exchanges.clone(),
-                },
-            ) => outcome?,
-        };
+        // The turn is always awaited to its own answer: the abort reaches the
+        // provider wait through the inference port, which owns the post-claim
+        // usage accounting. Dropping the turn future here would skip that
+        // accounting and lose the claimed attempt's usage fact.
+        let outcome = orchestrate_task_agent_turn(
+            store,
+            instructions,
+            inference,
+            scrubber,
+            TaskAgentTurnPremise {
+                delegation,
+                exchanges: exchanges.clone(),
+            },
+        )
+        .await?;
         let produced = match outcome {
             TaskAgentTurnOutcome::Produced(produced) => produced,
             TaskAgentTurnOutcome::StaleTaskRevision { current } => {
@@ -449,6 +424,9 @@ pub async fn run_task_agent_execution(
             TaskAgentTurnOutcome::NotSent(reason) => {
                 return Ok(TaskAgentRunOutcome::NotSent(reason));
             }
+            TaskAgentTurnOutcome::Aborted => {
+                return Ok(TaskAgentRunOutcome::Cancelled);
+            }
         };
         // The consent premise travels with the provider output. If the stored
         // consent moved during the network wait, the output must not drive an
@@ -474,7 +452,7 @@ pub async fn run_task_agent_execution(
                 return Ok(TaskAgentRunOutcome::Finalized { result, acceptance });
             }
             Ok(TaskAgentDirective::Act(request)) => {
-                if cancellation.is_cancelled() {
+                if cancellation.is_aborted() {
                     return Ok(TaskAgentRunOutcome::Cancelled);
                 }
                 let action = run_workspace_action(
