@@ -21,6 +21,7 @@ mod delegation;
 mod failure;
 mod instruction;
 mod orchestrate;
+mod report;
 mod repository;
 mod result;
 mod task;
@@ -49,6 +50,10 @@ pub use orchestrate::{
     SteeringProposalPremise, TaskProposalOutcome, TaskProposalPremise, orchestrate_delegation,
     orchestrate_result_arrival, orchestrate_steering, orchestrate_steering_current,
     orchestrate_task_creation, orchestrate_task_creation_current, reevaluate_result_adoption,
+};
+pub use report::{
+    REPORT_PAGE_MAX, TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportRowKind,
+    TaskReportSourcePage, TaskReportSourceRef,
 };
 pub use repository::{
     ConversationTaskRepository, OwnerMessageCurrentness, TaskCommitOutcome, TaskRepository,

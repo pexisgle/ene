@@ -706,21 +706,6 @@ fn select_pass_bound(conn: &Connection) -> Result<u64, String> {
     decode_u64(raw)
 }
 
-/// The valid UTF-8 prefix of one byte-bounded page.
-///
-/// A byte cap may cut a multi-byte character; the cut character belongs to
-/// the next page, and only an actually invalid sequence fails closed.
-fn utf8_prefix(bytes: &[u8]) -> Result<&str, String> {
-    match core::str::from_utf8(bytes) {
-        Ok(text) => Ok(text),
-        Err(error) if error.error_len().is_none() => {
-            core::str::from_utf8(&bytes[..error.valid_up_to()])
-                .map_err(|_| String::from("malformed undelivered excerpt bytes"))
-        }
-        Err(_) => Err(String::from("malformed undelivered excerpt bytes")),
-    }
-}
-
 impl UndeliveredRepository for Store {
     async fn compare_and_mark_reported(
         &self,
@@ -931,7 +916,7 @@ impl Store {
                 return Ok(None);
             };
             let total_bytes = decode_u64(total_raw).map_err(undelivered_unavailable)?;
-            let text = utf8_prefix(&bytes)
+            let text = crate::codec::utf8_prefix(&bytes)
                 .map_err(undelivered_unavailable)?
                 .to_owned();
             Ok(Some(UndeliveredExcerpt { text, total_bytes }))

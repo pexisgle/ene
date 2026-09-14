@@ -175,6 +175,21 @@ pub(crate) fn decode_report_status(text: &str) -> Result<ReportStatus, String> {
     }
 }
 
+/// The valid UTF-8 prefix of one byte-bounded page.
+///
+/// A byte cap may cut a multi-byte character; the cut character belongs to
+/// the next page, and only an actually invalid sequence fails closed.
+pub(crate) fn utf8_prefix(bytes: &[u8]) -> Result<&str, String> {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if error.error_len().is_none() => {
+            core::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|_| String::from("malformed bounded excerpt bytes"))
+        }
+        Err(_) => Err(String::from("malformed bounded excerpt bytes")),
+    }
+}
+
 /// Storage names of the undelivered source kinds (PR §4.6).
 pub(crate) const SOURCE_KIND_TASK_REVISION: &str = "task_revision";
 pub(crate) const SOURCE_KIND_DELEGATION: &str = "delegation";

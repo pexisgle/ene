@@ -36,14 +36,16 @@ use ene_companion::{TaskFact, TerminalKindWire, UndeliveredSource};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
-    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness, Task,
-    TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome,
-    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
-    TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskCreationPremise,
-    TaskFailureOutcome, TaskFailurePremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
-    TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
-    TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
-    UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
+    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness,
+    REPORT_PAGE_MAX, Task, TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival,
+    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
+    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome,
+    TaskCreationPremise, TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId,
+    TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow,
+    TaskReportRowCursor, TaskReportRowKind, TaskReportSourcePage, TaskReportSourceRef,
+    TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
+    TaskRevision, TaskRevisionRecord, TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId,
+    WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -200,6 +202,26 @@ const ORIGIN_KIND_SCHEDULE_OCCURRENCE: &str = "schedule_occurrence";
 /// purpose provenance, so the storage name has one definition.
 pub(crate) const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
 const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
+
+/// The bounded Task-headline page. The completion marker is a canonical fact
+/// probe (`adopted_revision` equals the current revision), never a cached
+/// flag; the two variants share one column list and decoder so a page boundary
+/// cannot change meaning.
+const SQL_LIST_TASKS_FIRST: &str = "SELECT task_id, revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task ORDER BY task_id LIMIT ?1";
+
+const SQL_LIST_TASKS_AFTER: &str = "SELECT task_id, revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task WHERE task_id > ?1 ORDER BY task_id LIMIT ?2";
+
+/// The bounded report-detail page: Action attempts (rank 0) before Task
+/// results (rank 1), each in canonical ID byte order. Bodies are not read.
+const SQL_LIST_REPORT_ROWS_FIRST: &str = "SELECT row_kind, row_id, adopted FROM (SELECT 'action_attempt' AS row_kind, attempt_id AS row_id, NULL AS adopted, 0 AS rank FROM action_attempt WHERE task_id = ?1 UNION ALL SELECT 'task_result', result_id, adopted_revision, 1 FROM task_result WHERE task_id = ?1) ORDER BY rank, row_id LIMIT ?2";
+
+const SQL_LIST_REPORT_ROWS_AFTER: &str = "SELECT row_kind, row_id, adopted FROM (SELECT 'action_attempt' AS row_kind, attempt_id AS row_id, NULL AS adopted, 0 AS rank FROM action_attempt WHERE task_id = ?1 UNION ALL SELECT 'task_result', result_id, adopted_revision, 1 FROM task_result WHERE task_id = ?1) WHERE rank > ?2 OR (rank = ?2 AND row_id > ?3) ORDER BY rank, row_id LIMIT ?4";
+
+/// Byte-bounded body pages: `substr(CAST(x AS BLOB), start, len)` keeps the
+/// read in SQLite instead of decoding the whole body and truncating in Rust.
+const SQL_REPORT_REVISION_PAGE: &str = "SELECT length(CAST(purpose_text AS BLOB)), substr(CAST(purpose_text AS BLOB), ?3, ?4) FROM task_revision WHERE task_id = ?1 AND revision = ?2";
+
+const SQL_REPORT_RESULT_PAGE: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST(body AS BLOB), ?2, ?3) FROM task_result WHERE result_id = ?1";
 
 fn task_unavailable(reason: impl core::fmt::Display) -> TaskTechnicalError {
     TaskTechnicalError::StorageUnavailable {
@@ -1941,6 +1963,186 @@ fn load_task_action_attempts_sync(
         .collect())
 }
 
+/// Lists one bounded page of Task lifecycle headlines.
+///
+/// SELECT-only: the progress, revision, assignee, and completion marker are
+/// read from the current rows, and no reconciliation, adoption, presence, or
+/// registration write runs. The `limit` clamp is applied before SQL so the
+/// bound is on the rows read.
+fn list_tasks_after_sync(
+    conn: &Mutex<Connection>,
+    after: Option<TaskId>,
+    limit: u32,
+) -> Result<Vec<TaskHeadline>, TaskTechnicalError> {
+    let cap = i64::from(limit.clamp(1, REPORT_PAGE_MAX));
+    let guard = lock_shared(conn);
+    let rows: Vec<(String, i64, Option<String>, String, bool)> = match after {
+        None => {
+            let mut statement = guard
+                .prepare(SQL_LIST_TASKS_FIRST)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![cap], raw_headline_row)
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+        Some(after) => {
+            let mut statement = guard
+                .prepare(SQL_LIST_TASKS_AFTER)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![encode_id(after.as_raw()), cap], raw_headline_row)
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+    };
+    rows.into_iter().map(decode_headline).collect()
+}
+
+type RawHeadline = (String, i64, Option<String>, String, bool);
+
+fn raw_headline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHeadline> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn decode_headline(raw: RawHeadline) -> Result<TaskHeadline, TaskTechnicalError> {
+    let (task, revision, progress, assignee, adopted_result) = raw;
+    Ok(TaskHeadline {
+        task: TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?),
+        revision: decode_revision(revision)?,
+        progress: decode_progress(progress.as_deref())?,
+        assignee: decode_id(&assignee).map_err(task_unavailable)?,
+        adopted_result,
+    })
+}
+
+/// Lists one bounded page of one Task's report detail rows.
+///
+/// The page carries identities plus the result adoption marker only; a body
+/// is never read here. `limit` is clamped before SQL.
+fn list_task_report_rows_after_sync(
+    conn: &Mutex<Connection>,
+    task: TaskId,
+    after: Option<TaskReportRowCursor>,
+    limit: u32,
+) -> Result<Vec<TaskReportRow>, TaskTechnicalError> {
+    let cap = i64::from(limit.clamp(1, REPORT_PAGE_MAX));
+    let task_text = encode_id(task.as_raw());
+    let guard = lock_shared(conn);
+    let rows: Vec<(String, String, Option<i64>)> = match after {
+        None => {
+            let mut statement = guard
+                .prepare(SQL_LIST_REPORT_ROWS_FIRST)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![task_text, cap], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+        Some(cursor) => {
+            let rank: i64 = match cursor.kind {
+                TaskReportRowKind::ActionAttempt => 0,
+                TaskReportRowKind::TaskResult => 1,
+            };
+            let mut statement = guard
+                .prepare(SQL_LIST_REPORT_ROWS_AFTER)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![task_text, rank, encode_id(cursor.id), cap], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+    };
+    rows.into_iter()
+        .map(|(kind_text, id_text, adopted)| {
+            let kind = match kind_text.as_str() {
+                "action_attempt" => TaskReportRowKind::ActionAttempt,
+                "task_result" => TaskReportRowKind::TaskResult,
+                _ => return Err(task_unavailable("unknown task report row kind")),
+            };
+            if kind == TaskReportRowKind::ActionAttempt && adopted.is_some() {
+                return Err(task_unavailable(
+                    "action attempt report row carries an adoption marker",
+                ));
+            }
+            Ok(TaskReportRow {
+                kind,
+                id: decode_id(&id_text).map_err(task_unavailable)?,
+                adopted_revision: adopted.map(decode_revision).transpose()?,
+            })
+        })
+        .collect()
+}
+
+/// Reads one byte-bounded page of a task-owned report source body.
+///
+/// SELECT-only and byte-bounded in SQL; the returned cursor lands exactly on
+/// the next byte so no character is skipped or repeated.
+fn load_report_source_bounded_sync(
+    conn: &Mutex<Connection>,
+    source: TaskReportSourceRef,
+    cursor_bytes: u64,
+    limit_bytes: u32,
+) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError> {
+    let cap = i64::from(limit_bytes.max(1));
+    // SQLite `substr` is 1-based; a cursor at or past the end reads empty and
+    // reports no next page.
+    let start = i64::try_from(cursor_bytes)
+        .map_err(|_| task_unavailable("report source cursor out of range"))?
+        .saturating_add(1);
+    let guard = lock_shared(conn);
+    let found: Option<(i64, Vec<u8>)> = match source {
+        TaskReportSourceRef::RevisionPurpose { task, revision } => guard
+            .query_row(
+                SQL_REPORT_REVISION_PAGE,
+                params![
+                    encode_id(task.as_raw()),
+                    encode_u64(revision.as_u64()).map_err(task_unavailable)?,
+                    start,
+                    cap
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(task_unavailable)?,
+        TaskReportSourceRef::ResultBody(result) => guard
+            .query_row(
+                SQL_REPORT_RESULT_PAGE,
+                params![encode_id(result.as_raw()), start, cap],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(task_unavailable)?,
+    };
+    let Some((total_raw, bytes)) = found else {
+        return Ok(None);
+    };
+    let total_bytes = decode_u64(total_raw).map_err(task_unavailable)?;
+    let text = crate::codec::utf8_prefix(&bytes)
+        .map_err(task_unavailable)?
+        .to_owned();
+    let end = cursor_bytes.saturating_add(text.len() as u64);
+    Ok(Some(TaskReportSourcePage {
+        text,
+        total_bytes,
+        next: (end < total_bytes).then_some(end),
+    }))
+}
+
 fn load_delegation_result_sync(
     conn: &Mutex<Connection>,
     delegation: DelegationId,
@@ -2471,6 +2673,38 @@ impl TaskRepository for Store {
     ) -> Result<Vec<RawId>, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || load_task_action_attempts_sync(&conn, task)).await
+    }
+
+    async fn list_tasks_after(
+        &self,
+        after: Option<TaskId>,
+        limit: u32,
+    ) -> Result<Vec<TaskHeadline>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || list_tasks_after_sync(&conn, after, limit)).await
+    }
+
+    async fn list_task_report_rows_after(
+        &self,
+        task: TaskId,
+        after: Option<TaskReportRowCursor>,
+        limit: u32,
+    ) -> Result<Vec<TaskReportRow>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || list_task_report_rows_after_sync(&conn, task, after, limit)).await
+    }
+
+    async fn load_report_source_bounded(
+        &self,
+        source: TaskReportSourceRef,
+        cursor_bytes: u64,
+        limit_bytes: u32,
+    ) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            load_report_source_bounded_sync(&conn, source, cursor_bytes, limit_bytes)
+        })
+        .await
     }
 }
 
