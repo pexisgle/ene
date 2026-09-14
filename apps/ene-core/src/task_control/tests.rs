@@ -492,10 +492,7 @@ async fn reconciliation_pages_through_many_recoverable_candidates() {
     assert_eq!(first_page.len() as u64, TEST_RECONCILIATION_PAGE_SIZE);
     let second_page = handle
         .store
-        .list_unadopted_results_after(
-            first_page.last().copied(),
-            TEST_RECONCILIATION_PAGE_SIZE,
-        )
+        .list_unadopted_results_after(first_page.last().copied(), TEST_RECONCILIATION_PAGE_SIZE)
         .await
         .unwrap();
     assert_eq!(second_page.len(), 2);
