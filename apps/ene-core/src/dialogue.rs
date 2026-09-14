@@ -976,6 +976,7 @@ impl HostHandle {
     }
 
     /// Whether a queued formation pass is waiting.
+    #[cfg(unix)]
     pub(crate) fn has_pending_learning(&self) -> bool {
         !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
@@ -1002,6 +1003,7 @@ impl HostHandle {
     /// keeps a genuine overlap from overwriting newer recognition. Stopped
     /// companions are skipped because stopping must not start new internal
     /// activity. A pass failure drops its item, so there is no retry storm.
+    #[cfg(any(unix, test))]
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
         let _serialized = self.learning_worker.lock().await;
         loop {

@@ -322,6 +322,7 @@ pub struct HostHandle {
     pub(crate) learning_queue: StdMutex<VecDeque<ene_learning::ExperienceCandidate>>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.
+    #[cfg(any(unix, test))]
     pub(crate) learning_worker: AsyncMutex<()>,
     /// Opaque companion projection issued by this handle.
     ///
@@ -425,6 +426,7 @@ impl HostHandle {
             auth_store,
             pending_nonces: StdMutex::new(HashMap::new()),
             learning_queue: StdMutex::new(VecDeque::new()),
+            #[cfg(any(unix, test))]
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: crate::task_run::TaskExecutionRegistry::default(),

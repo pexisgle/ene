@@ -54,9 +54,12 @@
 //! [`LiveInput`]: crate::serve::LiveInput
 //! [`MetadataExt::uid`](std::os::unix::fs::MetadataExt): <https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html>
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex as StdMutex;
 
 use ene_inference::ProviderTransport;
 
