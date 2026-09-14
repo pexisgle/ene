@@ -32,6 +32,10 @@ impl<'a, I> TaskAgentInferenceAdapter<'a, I> {
 }
 
 impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, I> {
+    fn input_budget(&self) -> usize {
+        ene_inference::MAX_INPUT_CHARS
+    }
+
     async fn infer(
         &self,
         premise: TaskAgentInferencePremise,

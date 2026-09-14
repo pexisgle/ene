@@ -290,13 +290,23 @@ impl TaskRepository for FakeTaskRepository {
 struct ScriptedInference {
     replies: Mutex<VecDeque<Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>>>,
     premises: Mutex<Vec<TaskAgentInferencePremise>>,
+    budget: usize,
 }
 
 impl ScriptedInference {
     fn new(reply: Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>) -> Self {
+        Self::with_budget(reply, usize::MAX)
+    }
+
+    /// Scripts one reply under an explicit input budget.
+    fn with_budget(
+        reply: Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>,
+        budget: usize,
+    ) -> Self {
         Self {
             replies: Mutex::new(VecDeque::from([reply])),
             premises: Mutex::new(Vec::new()),
+            budget,
         }
     }
 
@@ -313,6 +323,10 @@ impl ScriptedInference {
     reason = "in-test fake; async matches the port contract"
 )]
 impl TaskAgentInference for ScriptedInference {
+    fn input_budget(&self) -> usize {
+        self.budget
+    }
+
     async fn infer(
         &self,
         premise: TaskAgentInferencePremise,
@@ -597,6 +611,103 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
         }
         other => panic!("expected Produced, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn an_over_budget_transcript_drops_oldest_exchanges_with_a_fixed_note() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    let inference = ScriptedInference::with_budget(produced_reply(), 800);
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let old = TaskAgentActionExchange {
+        request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"old.txt\"}")),
+        observation: TaskAgentObservation::new(format!("read ok:\n{}", "o".repeat(400))),
+    };
+    let newest = TaskAgentActionExchange {
+        request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"new.txt\"}")),
+        observation: TaskAgentObservation::new(format!("read ok:\n{}", "n".repeat(100))),
+    };
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        TaskAgentTurnPremise {
+            delegation: delegation_id,
+            exchanges: vec![old, newest],
+        },
+    )
+    .await
+    .expect("a trimmed transcript is still a domain outcome");
+
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+    let raw = scrubber.inputs();
+    assert_eq!(raw.len(), 1);
+    assert!(
+        raw[0].chars().count() <= 800,
+        "the assembled input stays within the port budget, got {}",
+        raw[0].chars().count()
+    );
+    assert!(
+        raw[0].contains("[NOTE] earlier tool exchanges were omitted to fit the input bound"),
+        "the omission is explicit to the model, got {}",
+        raw[0]
+    );
+    assert!(
+        raw[0].contains("new.txt"),
+        "the newest exchange is kept whole"
+    );
+    assert!(
+        !raw[0].contains("old.txt"),
+        "the oldest exchange is dropped whole, never partially"
+    );
+}
+
+#[tokio::test]
+async fn an_exchange_that_cannot_fit_alone_is_not_replaced_by_a_note() {
+    let task = TaskId::generate();
+    let relied = reference(task, 1);
+    let delegation_ref = delegation(relied);
+    let delegation_id = delegation_ref.delegation;
+    let repository = FakeTaskRepository::new();
+    repository.script_delegation(Ok(Some(delegation_ref)));
+    repository.script_task(Ok(Some(record(task, revision(1), "probe purpose"))));
+    let inference = ScriptedInference::with_budget(produced_reply(), 800);
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let oversized = TaskAgentActionExchange {
+        request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"huge.txt\"}")),
+        observation: TaskAgentObservation::new(format!("read ok:\n{}", "x".repeat(2_000))),
+    };
+    let outcome = orchestrate_task_agent_turn(
+        &repository,
+        &NoInstructionSource,
+        &inference,
+        &scrubber,
+        TaskAgentTurnPremise {
+            delegation: delegation_id,
+            exchanges: vec![oversized],
+        },
+    )
+    .await
+    .expect("an over-budget transcript is still a domain outcome");
+
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+    let raw = scrubber.inputs();
+    assert!(
+        raw[0].contains("huge.txt") && raw[0].contains("xxxx"),
+        "the oversized observation is kept so the port can refuse it, never replaced by a note"
+    );
+    assert!(
+        raw[0].chars().count() > 800,
+        "the turn leaves the over-limit input for the port to refuse honestly"
+    );
 }
 
 #[tokio::test]

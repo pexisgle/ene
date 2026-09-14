@@ -224,6 +224,18 @@ pub enum TaskAgentInferenceError {
     reason = "Stage 4 contract style uses native async fn; Send bounds settle with the Host adapter"
 )]
 pub trait TaskAgentInference: Send + Sync {
+    /// The maximum logical-input length this port admits, in Unicode scalar
+    /// values.
+    ///
+    /// [`orchestrate_task_agent_turn`] keeps its assembled logical input
+    /// within this bound by dropping the oldest execution-local Action
+    /// exchanges when the transcript would otherwise outgrow the port; the
+    /// port (dispatch) still enforces its absolute cap, so an input whose
+    /// newest exchange alone exceeds the bound is refused as
+    /// [`TaskAgentNotSent::OverLimit`] instead of being silently truncated.
+    fn input_budget(&self) -> usize;
+
+    /// Runs one claimed inference turn; see the port's budget contract.
     async fn infer(
         &self,
         premise: TaskAgentInferencePremise,
@@ -332,8 +344,13 @@ pub enum TaskAgentTurnOutcome {
 /// revision's adopted-purpose text, the adopted-instruction bodies in
 /// `TaskRecord.context` order, and the execution-local Action exchanges the
 /// caller replays (each request followed by its observation, oldest first).
-/// The whole string is scrubbed exactly once and only the scrubber's output
-/// crosses the port. Instruction bodies stay canonical in History: the
+/// The newest exchanges are kept within the port's
+/// [`input_budget`](TaskAgentInference::input_budget): whole oldest exchanges
+/// are dropped (with a fixed omission note) when the transcript would
+/// outgrow the port, and an exchange that cannot fit even alone is left in
+/// place so the port refuses the over-limit input instead of the model
+/// answering from a silently shortened observation. The whole string is
+/// scrubbed exactly once and only the scrubber's output crosses the port. Instruction bodies stay canonical in History: the
 /// [`TaskInstructionSource`] port reads each adopted entry's source, the
 /// source/role/companion correspondence is verified before the body is
 /// used, and an absent source ends the turn as
@@ -467,8 +484,19 @@ pub async fn orchestrate_task_agent_turn(
     // scrubber sees purpose, every resolved instruction body, and the
     // execution-local Action transcript once, and only its output may cross
     // the port. A scrub failure fails closed with no provider I/O and never
-    // logs the raw input.
-    let raw_input = assemble_logical_input(purpose_text, &instruction_texts, &premise.exchanges);
+    // logs the raw input. The transcript is execution-local, so the oldest
+    // exchanges are dropped (with a fixed note) when the port's input budget
+    // would otherwise be outgrown; an exchange that cannot fit even alone is
+    // kept so the port refuses the over-limit input instead of the model
+    // answering from a silently shortened transcript.
+    let (kept_exchanges, omitted) = fit_exchanges(
+        purpose_text,
+        &instruction_texts,
+        &premise.exchanges,
+        inference.input_budget(),
+    );
+    let raw_input =
+        assemble_logical_input(purpose_text, &instruction_texts, kept_exchanges, omitted);
     let Ok(prompt) = scrubber.scrub(&raw_input).await else {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("credential scrub failed"),
@@ -500,43 +528,131 @@ pub async fn orchestrate_task_agent_turn(
     })
 }
 
+/// The fixed response-format preamble every logical input starts with.
+const RESPONSE_FORMAT_PREAMBLE: &str = "[RESPONSE FORMAT]\n\
+     Respond with exactly one JSON object and no other text. One of:\n\
+     {\"tool\":\"list\",\"path\":\"<workspace-relative directory>\"}\n\
+     {\"tool\":\"read\",\"path\":\"<workspace-relative file>\"}\n\
+     {\"tool\":\"create\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+     {\"tool\":\"edit\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
+     {\"final\":\"<final answer>\"}\n\
+     [PURPOSE]\n";
+
+const INSTRUCTION_MARKER: &str = "\n[INSTRUCTION]\n";
+const TOOL_CALL_MARKER: &str = "\n[TOOL CALL]\n";
+const TOOL_RESULT_MARKER: &str = "\n[TOOL RESULT]\n";
+
+/// The fixed-class marker that tells the model older exchanges were dropped.
+const OMISSION_NOTE: &str = "\n[NOTE] earlier tool exchanges were omitted to fit the input bound";
+
 /// Assembles the fixed logical-input framing for one turn.
 ///
 /// The protocol preamble comes first (it tells the model how to answer and
 /// never varies), then the purpose, then each resolved instruction body in
-/// `TaskRecord.context` order, then every completed Action exchange of this
-/// execution in order. The boundary markers are identical for every turn
-/// (including a turn with no instructions or exchanges), so the
-/// provider-visible boundaries are never body text and never vary by caller.
-/// Instructions are not sorted, deduplicated, or filtered: repeated adoption
-/// of the same source remains repeated input.
+/// `TaskRecord.context` order, then the omission note when older exchanges
+/// were dropped, then the kept Action exchanges of this execution in order.
+/// The boundary markers are identical for every turn (including a turn with
+/// no instructions or exchanges), so the provider-visible boundaries are
+/// never body text and never vary by caller. Instructions are not sorted,
+/// deduplicated, or filtered: repeated adoption of the same source remains
+/// repeated input.
 fn assemble_logical_input(
     purpose: &str,
     instructions: &[String],
     exchanges: &[TaskAgentActionExchange],
+    omitted: bool,
 ) -> String {
-    let mut input = String::from(
-        "[RESPONSE FORMAT]\n\
-         Respond with exactly one JSON object and no other text. One of:\n\
-         {\"tool\":\"list\",\"path\":\"<workspace-relative directory>\"}\n\
-         {\"tool\":\"read\",\"path\":\"<workspace-relative file>\"}\n\
-         {\"tool\":\"create\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
-         {\"tool\":\"edit\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
-         {\"final\":\"<final answer>\"}\n\
-         [PURPOSE]\n",
-    );
+    let mut input = String::from(RESPONSE_FORMAT_PREAMBLE);
     input.push_str(purpose);
     for instruction in instructions {
-        input.push_str("\n[INSTRUCTION]\n");
+        input.push_str(INSTRUCTION_MARKER);
         input.push_str(instruction);
     }
+    if omitted {
+        input.push_str(OMISSION_NOTE);
+    }
     for exchange in exchanges {
-        input.push_str("\n[TOOL CALL]\n");
+        input.push_str(TOOL_CALL_MARKER);
         input.push_str(exchange.request.text());
-        input.push_str("\n[TOOL RESULT]\n");
+        input.push_str(TOOL_RESULT_MARKER);
         input.push_str(exchange.observation.text());
     }
     input
+}
+
+/// Fits the execution-local transcript into the port's input budget.
+///
+/// Exchanges are kept newest-first (the model most needs what just happened)
+/// and whole oldest exchanges are dropped; dropping them loses no canonical
+/// source because the transcript is execution-local, and the assembled input
+/// carries [`OMISSION_NOTE`] so the omission is visible to the model. When the
+/// newest exchange alone cannot fit, the transcript is left unchanged and the
+/// port refuses the over-limit input: the model must never answer from a
+/// silently shortened observation. The omitted note's length is reserved up
+/// front, so adding it cannot push the input back over the budget.
+fn fit_exchanges<'a>(
+    purpose: &str,
+    instructions: &[String],
+    exchanges: &'a [TaskAgentActionExchange],
+    budget: usize,
+) -> (&'a [TaskAgentActionExchange], bool) {
+    let prefix = RESPONSE_FORMAT_PREAMBLE.chars().count()
+        + purpose.chars().count()
+        + instructions
+            .iter()
+            .map(|text| INSTRUCTION_MARKER.chars().count() + text.chars().count())
+            .sum::<usize>();
+    if prefix >= budget {
+        return (exchanges, false);
+    }
+    let reserved = budget - prefix;
+    let mut used = 0usize;
+    let mut start = exchanges.len();
+    for exchange in exchanges.iter().rev() {
+        let length = exchange_input_len(exchange);
+        if used + length > reserved {
+            break;
+        }
+        used += length;
+        start -= 1;
+    }
+    if start == 0 {
+        return (exchanges, false);
+    }
+    if start == exchanges.len() {
+        // Even the newest exchange alone does not fit: keep the transcript so
+        // the port refuses it instead of fabricating an answer.
+        return (exchanges, false);
+    }
+    // Older exchanges are dropped, so the omission note is included: refit
+    // with its length reserved so the note cannot push the input back over.
+    let Some(available) = reserved.checked_sub(OMISSION_NOTE.chars().count()) else {
+        return (exchanges, false);
+    };
+    let mut used = 0usize;
+    let mut start = exchanges.len();
+    for exchange in exchanges.iter().rev() {
+        let length = exchange_input_len(exchange);
+        if used + length > available {
+            break;
+        }
+        used += length;
+        start -= 1;
+    }
+    if start == exchanges.len() {
+        // The note cannot fit alongside the newest exchange; keep everything
+        // and let the port refuse rather than dropping the observation.
+        return (exchanges, false);
+    }
+    (&exchanges[start..], true)
+}
+
+/// The assembled length of one transcript exchange, in Unicode scalar values.
+fn exchange_input_len(exchange: &TaskAgentActionExchange) -> usize {
+    TOOL_CALL_MARKER.chars().count()
+        + exchange.request.text().chars().count()
+        + TOOL_RESULT_MARKER.chars().count()
+        + exchange.observation.text().chars().count()
 }
 
 /// Maps one stale claim refusal to the durable reason, re-reading only
