@@ -60,13 +60,17 @@ use crate::serve::{HostHandle, LiveInput};
 use crate::task_run::BackgroundTaskAgent;
 use crate::test_support::live_input;
 
-/// Provider transport with scripted replies that blocks once the script runs
-/// out, so a test can hold the Task Agent in flight while exercising the
-/// conversation path. Released calls are never needed when the test cancels;
-/// the abort reaches the blocked provider wait through the inference port.
+/// Provider transport with scripted replies that can block at a chosen call,
+/// so a test can hold one Task Agent execution in flight while another runs.
+/// It also captures every logical input so a test can prove the adopted
+/// instruction reached the replacement execution.
 pub(super) struct GateTransport {
     replies: Mutex<VecDeque<String>>,
     calls: AtomicUsize,
+    inputs: Mutex<Vec<String>>,
+    /// 1-based call index to block at before returning its scripted reply;
+    /// `0` blocks only when the script runs out.
+    block_at: AtomicUsize,
     arrived: Notify,
     release: Semaphore,
 }
@@ -76,9 +80,26 @@ impl GateTransport {
         Self {
             replies: Mutex::new(replies.into_iter().collect()),
             calls: AtomicUsize::new(0),
+            inputs: Mutex::new(Vec::new()),
+            block_at: AtomicUsize::new(0),
             arrived: Notify::new(),
             release: Semaphore::new(0),
         }
+    }
+
+    /// Blocks the given 1-based call until the test releases it.
+    pub(super) fn block_at(self, call: usize) -> Self {
+        self.block_at.store(call, Ordering::SeqCst);
+        self
+    }
+
+    /// Releases one blocked call.
+    pub(super) fn release(&self) {
+        self.release.add_permits(1);
+    }
+
+    pub(super) fn inputs(&self) -> Vec<String> {
+        self.inputs.lock().expect("input capture lock").clone()
     }
 
     fn calls(&self) -> usize {
@@ -96,7 +117,7 @@ impl GateTransport {
 impl ProviderTransport for GateTransport {
     fn complete(
         &self,
-        _req: ProviderRequest,
+        req: ProviderRequest,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
@@ -104,32 +125,34 @@ impl ProviderTransport for GateTransport {
                 + '_,
         >,
     > {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inputs
+            .lock()
+            .expect("input capture lock")
+            .push(req.input.clone());
         let reply = self.replies.lock().expect("gate script lock").pop_front();
+        let block_at = self.block_at.load(Ordering::SeqCst);
+        let blocked = reply.is_none() || (block_at != 0 && call == block_at);
         let arrived = &self.arrived;
         let release = &self.release;
         Box::pin(async move {
             arrived.notify_waiters();
-            let text = match reply {
-                Some(text) => text,
-                None => {
-                    let permit = release.acquire().await.expect("gate stays open");
-                    permit.forget();
-                    String::from("released")
-                }
-            };
+            if blocked {
+                let permit = release.acquire().await.expect("gate stays open");
+                permit.forget();
+            }
+            let text = reply.unwrap_or_else(|| String::from("released"));
             Ok(ProviderResponse { text, usage: None })
         })
     }
 }
 
 /// One provider reply carrying exactly one companion task-control directive.
-fn control_reply(text: &str, directive: serde_json::Value) -> String {
-    if text.is_empty() {
-        format!("[task-control] {directive}")
-    } else {
-        format!("{text}\n[task-control] {directive}")
-    }
+///
+/// The directive must be the reply's first non-empty line with no other
+/// prose, so the reply is exactly the marker line.
+fn task_reply(directive: serde_json::Value) -> String {
+    format!("[task-control] {directive}")
 }
 
 fn sender() -> WireSender {
@@ -322,6 +345,36 @@ fn probe_workspace_rows(dir: &Path, folder: &str) -> i64 {
     .expect("the workspace probe must read")
 }
 
+fn delegation_count(dir: &Path) -> i64 {
+    probe_count(dir, "delegation")
+}
+
+/// The Task's newest delegation, discovered from the store for assertions
+/// (the production launcher already started it).
+fn latest_delegation(dir: &Path, task: TaskId) -> DelegationId {
+    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
+    let text: String = conn
+        .query_row(
+            "SELECT delegation_id FROM delegation WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            rusqlite::params![task.as_raw().as_uuid().as_hyphenated().to_string()],
+            |row| row.get(0),
+        )
+        .expect("the conversation must have created a delegation");
+    DelegationId::from_raw(RawId::from_uuid(
+        uuid::Uuid::parse_str(&text).expect("the stored delegation identity parses"),
+    ))
+}
+
+fn action_attempts(dir: &Path, delegation: DelegationId) -> i64 {
+    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
+    conn.query_row(
+        "SELECT COUNT(*) FROM action_attempt WHERE delegation_id = ?1",
+        rusqlite::params![delegation.as_raw().as_uuid().as_hyphenated().to_string()],
+        |row| row.get(0),
+    )
+    .expect("the action attempt probe must read")
+}
+
 async fn progress(handle: &HostHandle, task: TaskId) -> TaskProgress {
     handle
         .store
@@ -390,17 +443,15 @@ async fn owner_selection_and_conversation_control_hide_the_directive() {
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
     let dialogue = ScriptedTransport::new(vec![
-        control_reply(
-            "Sure, I will start on that.",
+        task_reply(
             json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
         ),
-        control_reply(
-            "I will add it.",
+        task_reply(
             json!({"kind": "steer", "instruction": "add an executive summary", "purpose": null}),
         ),
-        control_reply("", json!({"kind": "report"})),
-        control_reply("", json!({"kind": "cancel"})),
-        control_reply("", json!({"kind": "report"})),
+        task_reply(json!({"kind": "report"})),
+        task_reply(json!({"kind": "cancel"})),
+        task_reply(json!({"kind": "report"})),
     ]);
     let (handle, dir) = round_test_handle("conversation-control", &live, &dialogue)
         .await
@@ -526,14 +577,13 @@ async fn production_launcher_runs_the_task_and_the_conversation_reports_cancel()
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
     let dialogue = ScriptedTransport::new(vec![
-        control_reply(
-            "Starting on the report.",
+        task_reply(
             json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
         ),
-        control_reply("", json!({"kind": "report"})),
+        task_reply(json!({"kind": "report"})),
         String::from("You are welcome."),
-        control_reply("", json!({"kind": "cancel"})),
-        control_reply("", json!({"kind": "report"})),
+        task_reply(json!({"kind": "cancel"})),
+        task_reply(json!({"kind": "report"})),
     ]);
     let agent = Arc::new(GateTransport::new(vec![
         String::from(r#"{"tool":"read","path":"input.txt"}"#),
@@ -659,11 +709,10 @@ async fn production_launcher_completes_and_the_conversation_reports_completion()
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
     let dialogue = ScriptedTransport::new(vec![
-        control_reply(
-            "I will write the report.",
+        task_reply(
             json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
         ),
-        control_reply("", json!({"kind": "report"})),
+        task_reply(json!({"kind": "report"})),
     ]);
     let agent = Arc::new(ScriptedTransport::new(vec![
         String::from(r#"{"tool":"read","path":"input.txt"}"#),
@@ -719,41 +768,46 @@ async fn production_launcher_completes_and_the_conversation_reports_completion()
 }
 
 #[tokio::test]
-async fn provider_workspace_injection_never_becomes_authority() {
-    let live = live_input("conversation-inject");
+async fn production_launcher_steers_a_running_task_and_the_new_revision_executes() {
+    let live = live_input("conversation-steer-run");
     let workspace = tempfile::tempdir().expect("workspace directory");
-    let outside = tempfile::tempdir().expect("outside directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
-    std::fs::write(outside.path().join("secret.txt"), b"secret").expect("outside fixture");
     let dialogue = ScriptedTransport::new(vec![
-        // The adversarial provider output tries to widen the boundary to the
-        // outside directory. The directive's unknown `workspace` field is
-        // ignored; the trusted Owner selection is the only authority.
-        control_reply(
-            "I will use the other folder.",
-            json!({
-                "kind": "propose_task",
-                "purpose": "read input.txt and write report.md",
-                "workspace": outside.path().to_string_lossy(),
-                "save_target": outside.path().to_string_lossy(),
-            }),
+        task_reply(
+            json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
         ),
-        control_reply("", json!({"kind": "report"})),
+        task_reply(
+            json!({"kind": "steer", "instruction": "add an executive summary", "purpose": null}),
+        ),
+        task_reply(json!({"kind": "report"})),
     ]);
-    let agent = Arc::new(ScriptedTransport::new(vec![
-        String::from(r#"{"tool":"read","path":"input.txt"}"#),
-        String::from(
-            "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
-        ),
-        String::from(r#"{"final":"created report.md"}"#),
-    ]));
-    let (handle, dir) = round_test_handle("conversation-inject", &live, &dialogue)
+    let agent = Arc::new(
+        GateTransport::new(vec![
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
+            ),
+            // Call 3 is held while the rev1 execution runs; after the
+            // steering it must be refused as stale and never executed.
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"stale.md\",\"content\":\"must not run\"}",
+            ),
+            // Calls 4..6 belong to the replacement rev2 execution.
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+            String::from("{\"tool\":\"create\",\"path\":\"summary.md\",\"content\":\"# Summary\"}"),
+            String::from(r#"{"final":"created report.md and summary.md"}"#),
+        ])
+        .block_at(3),
+    );
+    let (handle, dir) = round_test_handle("conversation-steer-run", &live, &dialogue)
         .await
         .expect("the production setup path completes");
     let handle = Arc::new(handle);
     select_workspace(&handle, &live, workspace.path()).await;
     install_launcher(&handle, Arc::clone(&agent));
 
+    // Owner 1: the rev1 execution starts and blocks at its third provider
+    // call.
     send_owner_message(
         &handle,
         &live,
@@ -762,43 +816,194 @@ async fn provider_workspace_injection_never_becomes_authority() {
         "please read input.txt and write report.md",
     )
     .await;
+    agent.wait_calls(3).await;
+    let task = only_task(dir.path());
+    assert_eq!(progress(&handle, task).await, TaskProgress::InProgress);
+    let old_delegation = latest_delegation(dir.path(), task);
+    assert!(workspace.path().join("report.md").exists());
+
+    // Owner 2: steer while rev1 is running. AU4 advances the revision, the
+    // Host creates a fresh delegation for rev2, and the launcher starts it.
+    let responses = send_owner_message(
+        &handle,
+        &live,
+        &dialogue,
+        "steer",
+        "also add an executive summary",
+    )
+    .await;
+    assert!(!contains_directive(&responses), "{responses:?}");
+    let reply = latest_companion_message(&handle).await;
+    assert!(reply.contains("I will continue with it"), "{reply}");
+
+    wait_progress(&handle, task, TaskProgress::Completed).await;
+    assert_eq!(
+        delegation_count(dir.path()),
+        2,
+        "steering creates a new delegation for the new revision"
+    );
+    let new_delegation = latest_delegation(dir.path(), task);
+    assert_ne!(
+        new_delegation, old_delegation,
+        "the old delegation is never reused"
+    );
+
+    // The replacement execution read the adopted instruction and did the
+    // work; the old execution's post-steer create never ran.
+    let inputs = agent.inputs();
+    assert!(inputs.len() >= 4, "{inputs:?}");
+    assert!(
+        inputs[3].contains("add an executive summary"),
+        "the rev2 prompt carries the adopted instruction: {}",
+        inputs[3]
+    );
+    assert_eq!(
+        std::fs::read(workspace.path().join("summary.md")).expect("summary exists"),
+        b"# Summary"
+    );
+    assert!(!workspace.path().join("stale.md").exists());
+
+    // The old delegation can neither act on the new revision nor adopt it.
+    assert!(
+        handle
+            .store
+            .load_delegation_result(old_delegation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        action_attempts(dir.path(), old_delegation),
+        2,
+        "the old execution keeps exactly its rev1 actions"
+    );
+    let record = handle.store.load_task(task).await.unwrap().unwrap();
+    let adopted = record.task.adopted_result.expect("rev2 completed");
+    let stored = handle
+        .store
+        .load_task_result(adopted)
+        .await
+        .unwrap()
+        .expect("the adopted result reads");
+    assert_eq!(
+        stored.delegation, new_delegation,
+        "the current result belongs to the replacement execution"
+    );
+
+    // Releasing the old blocked call proves its create is refused by the
+    // existing revision gate: nothing more runs and nothing is adopted.
+    agent.release();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!workspace.path().join("stale.md").exists());
+    assert_eq!(action_attempts(dir.path(), old_delegation), 2);
+
+    // Owner 3: the report is composed from the completed rev2 execution.
+    let responses = send_owner_message(&handle, &live, &dialogue, "report", "how did it go?").await;
+    assert!(!contains_directive(&responses), "{responses:?}");
+    let reply = latest_companion_message(&handle).await;
+    assert!(reply.contains("task status: completed"), "{reply}");
+    assert!(reply.contains("summary.md"), "{reply}");
+    assert_eq!(streamed_text(&responses), reply);
+}
+
+#[tokio::test]
+async fn a_control_report_presents_only_the_scrubbed_typed_outcome() {
+    let live = live_input("conversation-secret");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    let dialogue = ScriptedTransport::new(vec![
+        task_reply(
+            json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
+        ),
+        task_reply(json!({"kind": "report"})),
+    ]);
+    // The registered fixture bearer is `test-bearer`; the Task Agent result
+    // body echoes it, so the report rendering would expose it raw without the
+    // scrub-before-presentation order.
+    let agent = Arc::new(ScriptedTransport::new(vec![
+        String::from(r#"{"tool":"read","path":"input.txt"}"#),
+        String::from(r#"{"final":"the credential is test-bearer"}"#),
+    ]));
+    let (handle, dir) = round_test_handle("conversation-secret", &live, &dialogue)
+        .await
+        .expect("the production setup path completes");
+    let handle = Arc::new(handle);
+    select_workspace(&handle, &live, workspace.path()).await;
+    install_launcher(&handle, Arc::clone(&agent));
+
+    send_owner_message(&handle, &live, &dialogue, "ask-task", "write the report").await;
     let task = only_task(dir.path());
     wait_progress(&handle, task, TaskProgress::Completed).await;
 
-    // The association and the delegation scope carry the trusted selection,
-    // never the injected path.
-    let record = handle
-        .store
-        .load_task(task)
+    let responses = send_owner_message(&handle, &live, &dialogue, "report", "how did it go?").await;
+    let presented = streamed_text(&responses);
+    let reply = latest_companion_message(&handle).await;
+    assert_eq!(
+        presented, reply,
+        "the presented text equals the durable companion reply"
+    );
+    for text in [&presented, &reply] {
+        assert!(
+            !text.contains("test-bearer"),
+            "the raw credential never appears: {text}"
+        );
+        assert!(!text.contains("[task-control]"), "{text}");
+        assert!(!text.contains("\"kind\""), "{text}");
+        assert!(
+            text.contains(ene_credential::REDACTED_CREDENTIAL),
+            "the scrubbed text carries the redaction marker: {text}"
+        );
+    }
+    assert!(
+        reply.contains("result (adopted): the credential is [credential]"),
+        "{reply}"
+    );
+    assert!(!contains_directive(&responses), "{responses:?}");
+}
+
+#[tokio::test]
+async fn provider_workspace_injection_is_invalid_and_changes_nothing() {
+    let live = live_input("conversation-inject");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let outside = tempfile::tempdir().expect("outside directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    let dialogue = ScriptedTransport::new(vec![
+        // The adversarial provider output tries to widen the boundary. The
+        // closed-world schema has no workspace field, so the proposal is
+        // invalid and nothing is created; the trusted Owner selection stays
+        // the only authority.
+        task_reply(json!({
+            "kind": "propose_task",
+            "purpose": "read input.txt and write report.md",
+            "workspace": outside.path().to_string_lossy(),
+            "save_target": outside.path().to_string_lossy(),
+        })),
+    ]);
+    let (handle, dir) = round_test_handle("conversation-inject", &live, &dialogue)
         .await
-        .unwrap()
-        .expect("the task must load");
-    let association = record.workspace.expect("the trusted association exists");
-    assert_eq!(association.folder.path, canonical_str(workspace.path()));
-    let conn = rusqlite::Connection::open(dir.path().join("app.db")).expect("the store file opens");
-    let scope_folder: String = conn
-        .query_row("SELECT scope_folder FROM delegation LIMIT 1", (), |row| {
-            row.get(0)
-        })
-        .expect("the delegation scope exists");
-    assert_eq!(scope_folder, canonical_str(workspace.path()));
+        .expect("the production setup path completes");
+    select_workspace(&handle, &live, workspace.path()).await;
+
+    let responses = send_owner_message(
+        &handle,
+        &live,
+        &dialogue,
+        "ask-task",
+        "please read input.txt and write report.md",
+    )
+    .await;
+    assert!(!contains_directive(&responses), "{responses:?}");
+    let reply = latest_companion_message(&handle).await;
+    assert!(reply.contains("could not interpret"), "{reply}");
+    assert!(!reply.contains("[task-control]"), "{reply}");
+    assert_eq!(probe_count(dir.path(), "task"), 0);
+    assert_eq!(probe_count(dir.path(), "delegation"), 0);
     assert_eq!(
         probe_workspace_rows(dir.path(), &canonical_str(outside.path())),
         0,
         "the injected path never becomes an association"
     );
-
-    // The Action ran inside the trusted workspace only.
-    assert_eq!(
-        std::fs::read(workspace.path().join("report.md")).expect("report exists"),
-        b"# Report\nnotes"
-    );
-    assert!(
-        !outside.path().join("report.md").exists(),
-        "the injected path received no Action"
-    );
-    let responses = send_owner_message(&handle, &live, &dialogue, "report", "status?").await;
-    assert!(!contains_directive(&responses), "{responses:?}");
+    assert!(!outside.path().join("report.md").exists());
 }
 
 #[tokio::test]
@@ -806,11 +1011,8 @@ async fn a_transient_provider_failure_never_becomes_a_task_failure() {
     let live = live_input("conversation-transient");
     let workspace = tempfile::tempdir().expect("workspace directory");
     let dialogue = ScriptedTransport::new(vec![
-        control_reply(
-            "I will start.",
-            json!({"kind": "propose_task", "purpose": "write the report"}),
-        ),
-        control_reply("", json!({"kind": "report"})),
+        task_reply(json!({"kind": "propose_task", "purpose": "write the report"})),
+        task_reply(json!({"kind": "report"})),
     ]);
     let (handle, dir) = round_test_handle("conversation-transient", &live, &dialogue)
         .await
@@ -870,10 +1072,7 @@ async fn superseded_propose_directive_creates_no_task() {
     let live = live_input("race-propose");
     let workspace = tempfile::tempdir().expect("workspace directory");
     let dialogue = Arc::new(ScriptedTransport::new(vec![
-        control_reply(
-            "Sure.",
-            json!({"kind": "propose_task", "purpose": "write the report"}),
-        ),
+        task_reply(json!({"kind": "propose_task", "purpose": "write the report"})),
         String::from("Never mind, hold on."),
     ]));
     let (handle, dir) = round_test_handle("race-propose", &live, &*dialogue)
@@ -929,14 +1128,8 @@ async fn superseded_steer_directive_keeps_the_revision() {
     let live = live_input("race-steer");
     let workspace = tempfile::tempdir().expect("workspace directory");
     let dialogue = Arc::new(ScriptedTransport::new(vec![
-        control_reply(
-            "Starting.",
-            json!({"kind": "propose_task", "purpose": "write the report"}),
-        ),
-        control_reply(
-            "Adding it.",
-            json!({"kind": "steer", "instruction": "add a summary", "purpose": null}),
-        ),
+        task_reply(json!({"kind": "propose_task", "purpose": "write the report"})),
+        task_reply(json!({"kind": "steer", "instruction": "add a summary", "purpose": null})),
         String::from("Hold on."),
     ]));
     let (handle, dir) = round_test_handle("race-steer", &live, &*dialogue)
@@ -991,11 +1184,8 @@ async fn superseded_cancel_directive_does_not_cancel() {
     let live = live_input("race-cancel");
     let workspace = tempfile::tempdir().expect("workspace directory");
     let dialogue = Arc::new(ScriptedTransport::new(vec![
-        control_reply(
-            "Starting.",
-            json!({"kind": "propose_task", "purpose": "write the report"}),
-        ),
-        control_reply("", json!({"kind": "cancel"})),
+        task_reply(json!({"kind": "propose_task", "purpose": "write the report"})),
+        task_reply(json!({"kind": "cancel"})),
         String::from("Hold on."),
     ]));
     let (handle, dir) = round_test_handle("race-cancel", &live, &*dialogue)
@@ -1046,9 +1236,7 @@ async fn superseded_cancel_directive_does_not_cancel() {
 #[tokio::test]
 async fn conversation_invalid_directive_clarifies_without_changing_anything() {
     let live = live_input("conversation-invalid");
-    let dialogue = ScriptedTransport::new(vec![String::from(
-        "I am not sure.\n[task-control] {this is not json}",
-    )]);
+    let dialogue = ScriptedTransport::new(vec![String::from("[task-control] {this is not json}")]);
     let (handle, dir) = round_test_handle("conversation-invalid", &live, &dialogue)
         .await
         .expect("the production setup path completes");

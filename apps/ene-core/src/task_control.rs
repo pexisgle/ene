@@ -374,10 +374,32 @@ impl<'a> HostTaskControl<'a> {
             // written and no reply is adopted.
             Ok(TaskProposalOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
             Ok(TaskProposalOutcome::AcceptedAsSteering(reference)) => {
-                DialogueTaskControlReply::Answered(format!(
-                    "Instruction recorded (revision {}).",
-                    reference.revision.as_u64()
-                ))
+                // The new revision needs its own execution lifetime: create a
+                // fresh delegation (never reuse or replay the old one), point
+                // the conversation at it, and launch it. A concurrent
+                // steering/cancel between AU4 and AU3 is answered by the
+                // existing stale/terminal outcome; the old runner keeps
+                // stopping on the revision gate.
+                match self.handle.delegate_task(reference).await {
+                    Err(_) => DialogueTaskControlReply::Unavailable,
+                    Ok(DelegationOutcome::Delegated(delegation)) => {
+                        self.handle.conversation_tasks.record(
+                            self.companion,
+                            reference.task,
+                            Some(delegation.delegation),
+                        );
+                        if let Some(launcher) = self.handle.task_launcher() {
+                            launcher.launch(delegation.delegation);
+                        }
+                        DialogueTaskControlReply::Answered(format!(
+                            "Instruction recorded (revision {}). I will continue with it.",
+                            reference.revision.as_u64()
+                        ))
+                    }
+                    Ok(outcome) => {
+                        DialogueTaskControlReply::Answered(delegation_outcome_text(&outcome))
+                    }
+                }
             }
             Ok(outcome) => DialogueTaskControlReply::Answered(task_outcome_text(&outcome)),
         }
@@ -468,6 +490,22 @@ fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
         // The guarded mapping consumes supersession before this renderer.
         TaskProposalOutcome::Superseded => {
             String::from("The request was superseded by a newer message.")
+        }
+    }
+}
+
+fn delegation_outcome_text(outcome: &DelegationOutcome) -> String {
+    match outcome {
+        DelegationOutcome::Delegated(_) => String::from("The execution was delegated."),
+        DelegationOutcome::StaleTaskRevision { current } => format!(
+            "The task moved on again; the latest instruction was not executed (current revision {}).",
+            current.revision.as_u64()
+        ),
+        DelegationOutcome::TaskTerminal { progress, .. } => {
+            format!("That task is already {}.", progress_label(*progress))
+        }
+        DelegationOutcome::MissingTask { .. } => {
+            String::from("There is no active task in this conversation.")
         }
     }
 }
