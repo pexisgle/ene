@@ -109,10 +109,10 @@ async fn fixture() -> Fixture {
 }
 
 /// Answers one provider output per turn and captures every premise.
-#[derive(Default)]
 struct ScriptedInference {
     replies: Mutex<VecDeque<Result<TaskAgentInferenceOutcome, TaskAgentInferenceError>>>,
     premises: Mutex<Vec<TaskAgentInferencePremise>>,
+    budget: usize,
 }
 
 impl ScriptedInference {
@@ -135,7 +135,14 @@ impl ScriptedInference {
                     .collect(),
             ),
             premises: Mutex::new(Vec::new()),
+            budget: ene_inference::MAX_INPUT_CHARS,
         }
+    }
+
+    /// Overrides the input budget this fake port admits.
+    fn with_budget(mut self, budget: usize) -> Self {
+        self.budget = budget;
+        self
     }
 
     fn premises(&self) -> Vec<TaskAgentInferencePremise> {
@@ -148,6 +155,10 @@ impl ScriptedInference {
 }
 
 impl TaskAgentInference for ScriptedInference {
+    fn input_budget(&self) -> usize {
+        self.budget
+    }
+
     async fn infer(
         &self,
         premise: TaskAgentInferencePremise,
@@ -249,6 +260,47 @@ async fn a_consent_lapse_discards_the_output_without_action_or_result() {
             .unwrap()
             .is_none(),
         "a discarded output never seals the execution"
+    );
+}
+
+#[tokio::test]
+async fn a_transcript_that_outgrows_the_budget_keeps_the_task_running() {
+    let fixture = fixture().await;
+    std::fs::write(fixture.workspace.path().join("input.txt"), "n".repeat(200))
+        .expect("input fixture");
+    let inference = ScriptedInference::new(vec![
+        r#"{"tool":"read","path":"input.txt"}"#,
+        r#"{"tool":"read","path":"input.txt"}"#,
+        r#"{"final":"read the file twice"}"#,
+    ])
+    .with_budget(750);
+    let scrubber = MarkerScrubber::default();
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
+        .await
+        .expect("a trimmed transcript is a domain outcome");
+    assert!(
+        matches!(outcome, TaskAgentRunOutcome::Finalized { .. }),
+        "the execution continues instead of wedging on the input bound, got {outcome:?}"
+    );
+    let raw = scrubber.inputs();
+    assert_eq!(raw.len(), 3, "one scrub per turn");
+    for (index, input) in raw.iter().enumerate() {
+        assert!(
+            input.chars().count() <= 750,
+            "turn {} stays within the port budget, got {}",
+            index + 1,
+            input.chars().count()
+        );
+    }
+    assert_eq!(
+        raw[2].matches("[TOOL CALL]").count(),
+        1,
+        "only the newest exchange is kept once the transcript outgrows the budget"
+    );
+    assert!(
+        raw[2].contains("[NOTE] earlier tool exchanges were omitted to fit the input bound"),
+        "the dropped exchanges are stated to the model"
     );
 }
 
