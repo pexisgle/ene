@@ -1222,11 +1222,13 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         authorized: AuthorizedInference,
         prompt: ScrubbedText,
         sink: &mut (dyn DeltaSink + Send),
+        abort: Option<&ene_inference::DispatchAbort>,
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
         ene_inference::dispatch_authorized(
             authorized,
             prompt,
             sink,
+            abort,
             self.store,
             self.store,
             self.store,

@@ -20,6 +20,7 @@ use std::sync::Mutex;
 
 use ene_action::{ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, OperationKind};
 use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
+use ene_inference::DispatchAbort;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 use ene_task::{
@@ -33,9 +34,9 @@ use ene_task::{
 };
 
 use super::{
-    CompletedFollowUp, DEFAULT_MAX_TURNS, ExecutionCancellation, TaskAgentDirective,
-    TaskAgentProtocolViolation, TaskAgentRunOutcome, TaskAgentRunRefusal, TaskExecutionRegistry,
-    completed_follow_up, parse_directive, run_task_agent_execution,
+    CompletedFollowUp, DEFAULT_MAX_TURNS, TaskAgentDirective, TaskAgentProtocolViolation,
+    TaskAgentRunOutcome, TaskAgentRunRefusal, TaskExecutionRegistry, completed_follow_up,
+    parse_directive, run_task_agent_execution,
 };
 
 /// One Task with a real workspace association and one delegation.
@@ -118,6 +119,14 @@ struct ScriptedInference {
 impl ScriptedInference {
     fn new(replies: Vec<&str>) -> Self {
         Self::with_consent(replies, true)
+    }
+
+    /// Scripts one turn that reports the local abort before producing output.
+    fn aborted() -> Self {
+        Self {
+            replies: Mutex::new(VecDeque::from(vec![Ok(TaskAgentInferenceOutcome::Aborted)])),
+            premises: Mutex::new(Vec::new()),
+        }
     }
 
     /// Scripts replies whose post-wait consent flag is `adoption_consent_current`.
@@ -226,7 +235,7 @@ async fn run(
         scrubber,
         fixture.delegation,
         max_turns,
-        &ExecutionCancellation::default(),
+        &DispatchAbort::default(),
     )
     .await
 }
@@ -648,12 +657,34 @@ async fn cancelled_task_refuses_the_next_turn_without_provider_io() {
 }
 
 #[tokio::test]
+async fn an_aborted_turn_stops_the_loop_as_cancelled() {
+    let fixture = fixture().await;
+    let inference = ScriptedInference::aborted();
+    let scrubber = MarkerScrubber::default();
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
+        .await
+        .expect("an abort is a domain outcome");
+    assert_eq!(outcome, TaskAgentRunOutcome::Cancelled);
+    assert_eq!(inference.calls(), 1, "the aborted turn was the last turn");
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .unwrap()
+            .is_none(),
+        "an aborted turn never seals the execution"
+    );
+}
+
+#[tokio::test]
 async fn cancellation_before_the_loop_stops_without_provider_io() {
     let fixture = fixture().await;
     let inference = ScriptedInference::new(vec![r#"{"final":"never sent"}"#]);
     let scrubber = MarkerScrubber::default();
-    let cancellation = ExecutionCancellation::default();
-    cancellation.cancel();
+    let cancellation = DispatchAbort::default();
+    cancellation.abort();
 
     let outcome = run_task_agent_execution(
         &fixture.store,
@@ -679,81 +710,32 @@ async fn cancellation_before_the_loop_stops_without_provider_io() {
     );
 }
 
-/// Inference that reports it started and then waits forever, so the test can
-/// signal cancellation while the provider call is in flight. The pending
-/// future is dropped by the loop's `select`, so the release is never needed.
-#[derive(Default)]
-struct BlockingInference {
-    started: tokio::sync::Notify,
-    calls: std::sync::atomic::AtomicUsize,
-}
-
-impl BlockingInference {
-    async fn wait_started(&self) {
-        self.started.notified().await;
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-impl TaskAgentInference for BlockingInference {
-    async fn infer(
-        &self,
-        _premise: TaskAgentInferencePremise,
-    ) -> Result<TaskAgentInferenceOutcome, TaskAgentInferenceError> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.started.notify_one();
-        std::future::pending::<()>().await;
-        unreachable!("the in-flight future is dropped on cancellation")
-    }
-}
-
-#[tokio::test]
-async fn cancel_during_the_provider_call_drops_it_and_stops_the_loop() {
-    let fixture = fixture().await;
-    let inference = BlockingInference::default();
+#[test]
+fn a_second_registration_of_one_delegation_is_refused_atomically() {
+    let task = ene_task::TaskId::generate();
+    let delegation = ene_task::DelegationId::generate();
     let registry = TaskExecutionRegistry::default();
-    let registration = registry.register(fixture.delegation, fixture.task.task);
-    let cancellation = registration.cancellation.clone();
-    let scrubber = MarkerScrubber::default();
 
-    let execution = run_task_agent_execution(
-        &fixture.store,
-        &NoInstructions,
-        &inference,
-        &scrubber,
-        fixture.delegation,
-        DEFAULT_MAX_TURNS,
-        &cancellation,
-    );
-    tokio::pin!(execution);
-    tokio::select! {
-        () = inference.wait_started() => {
-            assert!(registry.cancel(fixture.task.task), "the running token is signalled");
-            assert_eq!(
-                execution.await.expect("the stop is a domain outcome"),
-                TaskAgentRunOutcome::Cancelled
-            );
-        }
-        outcome = &mut execution => {
-            panic!("the execution must not finish before cancellation, got {outcome:?}");
-        }
-    }
-    assert_eq!(
-        inference.calls(),
-        1,
-        "exactly one provider call was started"
-    );
+    let first = registry
+        .register(delegation, task)
+        .expect("the first registration is accepted");
     assert!(
-        fixture
-            .store
-            .load_delegation_result(fixture.delegation)
-            .await
-            .unwrap()
-            .is_none(),
-        "dropping the in-flight call never seals the execution"
+        registry.register(delegation, task).is_none(),
+        "a concurrent second execution of the same delegation is refused"
+    );
+    let sibling = registry
+        .register(ene_task::DelegationId::generate(), task)
+        .expect("a sibling delegation of the same Task is still allowed");
+    assert!(
+        registry.cancel(task),
+        "both running executions are signalled"
+    );
+    assert!(first.cancellation.is_aborted());
+    assert!(sibling.cancellation.is_aborted());
+    drop(first);
+    assert!(
+        registry.register(delegation, task).is_some(),
+        "the delegation slot is reusable once its registration is dropped"
     );
 }
 
@@ -767,17 +749,23 @@ fn registry_signals_every_running_execution_of_the_task_only() {
     let registry = TaskExecutionRegistry::default();
     assert!(!registry.cancel(task), "no token is registered yet");
 
-    let registration = registry.register(delegation, task);
-    let sibling_registration = registry.register(sibling, task);
-    let other = registry.register(elsewhere, other_task);
+    let registration = registry
+        .register(delegation, task)
+        .expect("the first registration is accepted");
+    let sibling_registration = registry
+        .register(sibling, task)
+        .expect("a sibling delegation is accepted");
+    let other = registry
+        .register(elsewhere, other_task)
+        .expect("another Task's delegation is accepted");
     assert!(registry.cancel(task));
-    assert!(registration.cancellation.is_cancelled());
+    assert!(registration.cancellation.is_aborted());
     assert!(
-        sibling_registration.cancellation.is_cancelled(),
+        sibling_registration.cancellation.is_aborted(),
         "every running execution of the Task is signalled"
     );
     assert!(
-        !other.cancellation.is_cancelled(),
+        !other.cancellation.is_aborted(),
         "another Task's execution is untouched"
     );
 

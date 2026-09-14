@@ -202,6 +202,11 @@ pub enum TaskAgentInferenceOutcome {
     StaleTaskPremise,
     /// The use was refused before sending for the given reason.
     NotSent(TaskAgentNotSent),
+    /// The caller's local cooperative stop ended the turn. A turn that was
+    /// already claimed completed its usage accounting before this answer; a
+    /// turn stopped before the claim claimed nothing. The durable cancel
+    /// admission is the Task owner's separate fact.
+    Aborted,
 }
 
 /// Technical failure of the inference port; never prompt or output text.
@@ -329,6 +334,11 @@ pub enum TaskAgentTurnOutcome {
     },
     /// The use was refused before any provider I/O.
     NotSent(TaskAgentNotSent),
+    /// The caller's local cooperative stop ended the turn before it produced
+    /// anything. A turn whose attempt was already claimed completed its
+    /// usage accounting; this outcome claims nothing about Task progress or
+    /// external effects.
+    Aborted,
 }
 
 /// Orchestrates one Task Agent inference turn.
@@ -525,6 +535,7 @@ pub async fn orchestrate_task_agent_turn(
             re_read_stale_premise(repository, premise.delegation).await?
         }
         TaskAgentInferenceOutcome::NotSent(reason) => TaskAgentTurnOutcome::NotSent(reason),
+        TaskAgentInferenceOutcome::Aborted => TaskAgentTurnOutcome::Aborted,
     })
 }
 
