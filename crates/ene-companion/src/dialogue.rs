@@ -1075,7 +1075,8 @@ pub const TASK_CONTROL_MARKER: &str = "[task-control]";
 /// target is the conversation's current Task, resolved by the composition
 /// root, so a model output can never name an arbitrary Task. The
 /// `instruction` / `purpose` bodies are redacted from [`core::fmt::Debug`].
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DialogueTaskCommand {
     /// Propose a new Task. The Workspace is deliberately absent: it is the
     /// trusted first-party premise, never provider output.
@@ -1173,62 +1174,15 @@ pub fn interpret_task_control(text: &str) -> DialogueTaskInterpretation {
 /// required fields, and wrong types are all invalid, so a provider cannot
 /// smuggle an extension (for example a Workspace path) into the command.
 fn parse_task_command(body: &str) -> Option<DialogueTaskCommand> {
-    use serde_json::Value;
-
-    fn has_exact_fields(object: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
-        object.keys().all(|key| allowed.contains(&key.as_str()))
-    }
-
-    fn optional_string(
-        object: &serde_json::Map<String, Value>,
-        key: &str,
-    ) -> Option<Option<String>> {
-        match object.get(key) {
-            None | Some(Value::Null) => Some(None),
-            Some(Value::String(text)) => Some(Some(text.clone())),
-            Some(_) => None,
-        }
-    }
-
-    let value: Value = serde_json::from_str(body).ok()?;
-    let object = value.as_object()?;
-    match object.get("kind")?.as_str()? {
-        "propose_task" => {
-            if !has_exact_fields(object, &["kind", "purpose"]) {
-                return None;
-            }
-            let purpose = object.get("purpose")?.as_str()?.to_owned();
-            if purpose.trim().is_empty() {
-                return None;
-            }
-            Some(DialogueTaskCommand::ProposeTask { purpose })
-        }
-        "report" => {
-            if !has_exact_fields(object, &["kind"]) {
-                return None;
-            }
-            Some(DialogueTaskCommand::Report)
-        }
-        "steer" => {
-            if !has_exact_fields(object, &["kind", "instruction", "purpose"]) {
-                return None;
-            }
-            let instruction = object.get("instruction")?.as_str()?.to_owned();
-            if instruction.trim().is_empty() {
-                return None;
-            }
-            Some(DialogueTaskCommand::Steer {
-                instruction,
-                purpose: optional_string(object, "purpose")?,
-            })
-        }
-        "cancel" => {
-            if !has_exact_fields(object, &["kind"]) {
-                return None;
-            }
-            Some(DialogueTaskCommand::Cancel)
-        }
-        _ => None,
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let fields = value.as_object()?.len();
+    let command: DialogueTaskCommand = serde_json::from_value(value).ok()?;
+    match &command {
+        // Serde accepts extra fields on internally tagged unit variants.
+        DialogueTaskCommand::Report | DialogueTaskCommand::Cancel if fields != 1 => None,
+        DialogueTaskCommand::ProposeTask { purpose } if purpose.trim().is_empty() => None,
+        DialogueTaskCommand::Steer { instruction, .. } if instruction.trim().is_empty() => None,
+        _ => Some(command),
     }
 }
 

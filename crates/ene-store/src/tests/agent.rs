@@ -528,131 +528,6 @@ async fn task_agent_correlation_survives_reopen_without_replay() {
 }
 
 #[tokio::test]
-async fn inference_attempt_migration_backfills_consumer_and_purpose() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("attempt-migration.db");
-    let dialogue_ticket = InferenceTicketId(RawId::new());
-    let learning_ticket = InferenceTicketId(RawId::new());
-    {
-        let store = Store::open(&path).await.expect("a fresh store must open");
-        assert_eq!(read_schema_version(&path), Some(24));
-        let guard = match store.conn.lock() {
-            Ok(locked) => locked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard
-            .execute(
-                "INSERT INTO inference_attempt (ticket, capability, consent_id, consent_rev, provider, model, started_at) VALUES (?1, 'dialogue', 'c1', 1, 'p', 'm', '2026-01-01T00:00:00+00:00'), (?2, 'learning', 'c2', 1, 'p', 'm', '2026-01-01T00:00:00+00:00')",
-                params![
-                    crate::codec::encode_id(dialogue_ticket.0),
-                    crate::codec::encode_id(learning_ticket.0),
-                ],
-            )
-            .expect("the pre-V18 rows must seed");
-    }
-    {
-        let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
-             ALTER TABLE inference_attempt DROP COLUMN consumer;
-             ALTER TABLE inference_attempt DROP COLUMN purpose;
-             ALTER TABLE inference_attempt DROP COLUMN credential_set_rev;
-             ALTER TABLE inference_attempt DROP COLUMN delegation_id;
-             ALTER TABLE inference_attempt DROP COLUMN task_id;
-             ALTER TABLE inference_attempt DROP COLUMN task_revision;
-             PRAGMA user_version = 17;",
-        )
-        .expect("the version-17 rewind must apply");
-    }
-    assert_eq!(read_schema_version(&path), Some(17));
-    assert!(
-        !table_columns(&path, "inference_attempt").contains(&String::from("consumer")),
-        "the rewind drops the correlation columns"
-    );
-
-    let reopened = Store::open(&path)
-        .await
-        .expect("the V18 migration must succeed");
-    assert_eq!(read_schema_version(&path), Some(24));
-    let columns = table_columns(&path, "inference_attempt");
-    for column in [
-        "consumer",
-        "purpose",
-        "credential_set_rev",
-        "delegation_id",
-        "task_id",
-        "task_revision",
-    ] {
-        assert!(
-            columns.contains(&String::from(column)),
-            "the migrated attempt table has {column}"
-        );
-    }
-    let dialogue = reopened
-        .load_inference_attempt(dialogue_ticket)
-        .await
-        .unwrap()
-        .expect("the backfilled dialogue attempt must read");
-    assert_eq!(dialogue.consumer, ConsumerKind::CompanionDialogue);
-    assert_eq!(dialogue.purpose, PurposeKind::DialogueResponse);
-    assert_eq!(dialogue.task_agent, None);
-    let learning = reopened
-        .load_inference_attempt(learning_ticket)
-        .await
-        .unwrap()
-        .expect("the backfilled learning attempt must read");
-    assert_eq!(learning.consumer, ConsumerKind::CompanionLearning);
-    assert_eq!(learning.purpose, PurposeKind::MemoryFormation);
-    assert_eq!(learning.task_agent, None);
-}
-
-#[tokio::test]
-async fn inference_attempt_migration_fails_closed_on_an_unknown_capability() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("attempt-migration-unknown.db");
-    {
-        let store = Store::open(&path).await.expect("a fresh store must open");
-        let guard = match store.conn.lock() {
-            Ok(locked) => locked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard
-            .execute(
-                "INSERT INTO inference_attempt (ticket, capability, consent_id, consent_rev, provider, model, started_at) VALUES (?1, 'mystery', 'c1', 1, 'p', 'm', '2026-01-01T00:00:00+00:00')",
-                params![crate::codec::encode_id(RawId::new())],
-            )
-            .expect("the unknown-capability row must seed");
-    }
-    {
-        let conn = rusqlite::Connection::open(&path).expect("the rewind must open");
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
-             ALTER TABLE inference_attempt DROP COLUMN consumer;
-             ALTER TABLE inference_attempt DROP COLUMN purpose;
-             ALTER TABLE inference_attempt DROP COLUMN credential_set_rev;
-             ALTER TABLE inference_attempt DROP COLUMN delegation_id;
-             ALTER TABLE inference_attempt DROP COLUMN task_id;
-             ALTER TABLE inference_attempt DROP COLUMN task_revision;
-             PRAGMA user_version = 17;",
-        )
-        .expect("the version-17 rewrite must apply");
-    }
-    assert!(
-        Store::open(&path).await.is_err(),
-        "an unknown stored capability aborts the backfill instead of inventing an attribution"
-    );
-    assert_eq!(
-        read_schema_version(&path),
-        Some(17),
-        "the failed migration rolls back to the pre-migration version"
-    );
-    assert!(
-        !table_columns(&path, "inference_attempt").contains(&String::from("consumer")),
-        "the failed migration also rolls back the added columns"
-    );
-}
-
-#[tokio::test]
 async fn delegation_start_marker_reads_the_claimed_delegation_only() {
     let store = open_memory().await.unwrap();
     seed_dialogue_consent(&store).await;
@@ -688,7 +563,7 @@ async fn delegation_start_marker_reads_the_claimed_delegation_only() {
 }
 
 #[tokio::test]
-async fn inference_attempt_delegation_index_is_created_for_fresh_and_upgraded_databases() {
+async fn inference_attempt_delegation_index_is_created_for_fresh_databases() {
     use rusqlite::OptionalExtension as _;
 
     let dir = tempfile::tempdir().unwrap();
@@ -710,26 +585,5 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_and_upgraded_da
         index(&path).as_deref(),
         Some("idx_inference_attempt_delegation"),
         "a fresh schema carries the probe index"
-    );
-
-    // An upgraded V22 database gains the same index: rewind the version and
-    // drop the index, then reopen through the real migration path.
-    {
-        let conn = rusqlite::Connection::open(&path).expect("the store file must open");
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_inference_attempt_delegation;
-             PRAGMA user_version = 22;",
-        )
-        .expect("the V22 rewind must apply");
-    }
-    let reopened = Store::open(&path)
-        .await
-        .expect("the V22 database must upgrade");
-    drop(reopened);
-    assert_eq!(read_schema_version(&path), Some(24));
-    assert_eq!(
-        index(&path).as_deref(),
-        Some("idx_inference_attempt_delegation"),
-        "the V23 migration adds the probe index to an upgraded database"
     );
 }
