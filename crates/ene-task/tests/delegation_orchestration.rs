@@ -183,6 +183,38 @@ impl TaskRepository for FakeTaskRepository {
             reason: String::from("adopt_result is outside this fixture's scope"),
         })
     }
+
+    async fn fail_task(
+        &self,
+        _premise: ene_task::TaskFailurePremise,
+    ) -> Result<ene_task::TaskFailureOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("fail_task is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_result_adoption_claim(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_result_adoption_claim is outside this fixture's scope"),
+        })
+    }
+
+    async fn list_unadopted_results(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<TaskResultId>, TaskTechnicalError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_task_action_attempts(
+        &self,
+        _task: TaskId,
+    ) -> Result<Vec<ene_primitive::RawId>, TaskTechnicalError> {
+        Ok(Vec::new())
+    }
 }
 
 fn clock() -> WallClockWithTz {

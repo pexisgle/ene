@@ -131,6 +131,34 @@ impl TaskRepository for CapturingRepository {
     ) -> Result<TaskResultAcceptance, TaskTechnicalError> {
         Err(unsupported("adopt_result"))
     }
+
+    async fn fail_task(
+        &self,
+        _premise: ene_task::TaskFailurePremise,
+    ) -> Result<ene_task::TaskFailureOutcome, TaskTechnicalError> {
+        Err(unsupported("fail_task"))
+    }
+
+    async fn load_result_adoption_claim(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError> {
+        Err(unsupported("load_result_adoption_claim"))
+    }
+
+    async fn list_unadopted_results(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<TaskResultId>, TaskTechnicalError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_task_action_attempts(
+        &self,
+        _task: TaskId,
+    ) -> Result<Vec<ene_primitive::RawId>, TaskTechnicalError> {
+        Ok(Vec::new())
+    }
 }
 
 fn unsupported(method: &str) -> TaskTechnicalError {

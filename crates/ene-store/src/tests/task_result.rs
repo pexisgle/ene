@@ -88,7 +88,9 @@ fn workspace_task_premise() -> (TaskCreationPremise, WorkspaceAssocId) {
 
 /// Seeds one Task with a confirmed workspace association and one delegation
 /// whose copied scope relies on exactly that association.
-async fn seed_workspace_execution(store: &Store) -> (TaskRef, DelegationId, WorkspaceAssocId) {
+pub(super) async fn seed_workspace_execution(
+    store: &Store,
+) -> (TaskRef, DelegationId, WorkspaceAssocId) {
     let workspace = task_workspace("/srv/workspace/ene", None);
     let assoc = workspace.assoc;
     let created = store
@@ -121,7 +123,7 @@ async fn create_workspace_delegation(
     delegation
 }
 
-fn attempt_premise(
+pub(super) fn attempt_premise(
     attempt: ActionAttemptId,
     delegation: DelegationId,
     task: TaskRef,
@@ -141,7 +143,7 @@ fn attempt_premise(
 }
 
 /// Starts one Action attempt (AU5), requiring `Started`.
-async fn start_attempt(
+pub(super) async fn start_attempt(
     store: &Store,
     delegation: DelegationId,
     task: TaskRef,
@@ -157,7 +159,7 @@ async fn start_attempt(
     attempt
 }
 
-async fn settle(
+pub(super) async fn settle(
     store: &Store,
     attempt: ActionAttemptId,
     certainty: ActionCertainty,
@@ -171,20 +173,24 @@ async fn settle(
 }
 
 /// Records one final result through the explicit finalization boundary.
-async fn finalize(store: &Store, delegation: DelegationId, body: &str) -> TaskResultRecord {
+pub(super) async fn finalize(
+    store: &Store,
+    delegation: DelegationId,
+    body: &str,
+) -> TaskResultRecord {
     orchestrate_result_arrival(store, delegation, TaskAgentOutput::new(body.to_owned()))
         .await
         .expect("finalization records the result before any adoption")
 }
 
-fn claim(result: TaskResultId, attempts: &[ActionAttemptId]) -> TaskResultAdoptionClaim {
+pub(super) fn claim(result: TaskResultId, attempts: &[ActionAttemptId]) -> TaskResultAdoptionClaim {
     TaskResultAdoptionClaim {
         result,
         attempt_refs: attempts.iter().map(|attempt| attempt.as_raw()).collect(),
     }
 }
 
-fn raw_exec(store: &Store, sql: &str) {
+pub(super) fn raw_exec(store: &Store, sql: &str) {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
@@ -2218,7 +2224,7 @@ async fn v20_backfill_maps_delegation_existence_and_never_fabricates_terminals()
     let path = dir.path().join("v20-backfill.db");
     let seed = {
         let store = Store::open(&path).await.unwrap();
-        assert_eq!(read_schema_version(&path), Some(23));
+        assert_eq!(read_schema_version(&path), Some(24));
 
         // (A) Task only: fresh creation starts `started`.
         let task_only = store.create_task(task_premise(None)).await.unwrap();
@@ -2291,7 +2297,7 @@ async fn v20_backfill_maps_delegation_existence_and_never_fabricates_terminals()
     );
 
     let reopened = Store::open(&path).await.expect("the V20 migration applies");
-    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(read_schema_version(&path), Some(24));
     assert_eq!(
         table_columns(&path, "task_result"),
         vec![
@@ -2432,7 +2438,7 @@ async fn v20_version_rewind_does_not_overwrite_existing_progress() {
             .unwrap();
     }
     let reopened = Store::open(&path).await.unwrap();
-    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(read_schema_version(&path), Some(24));
     assert_eq!(
         reopened
             .load_task(task.task)

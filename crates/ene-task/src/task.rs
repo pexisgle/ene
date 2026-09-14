@@ -138,10 +138,12 @@ pub struct AssigneeRef {
 /// absorbing. The admission gates (delegation, steering, Task Agent inference
 /// claim, Action start) require a non-terminal progress in their own atomic
 /// compare; `Completed` is only produced by the adoption commit, `Cancelled`
-/// by the cancel admission CAS (AU16), and `Failed` has no producer in this
-/// stage (provider failures, `NotSent`, Action `Unknown`, withheld results,
-/// and cancel are not Task failure). `Cancelled` means the cancel request was
-/// accepted, never that running work or an external effect stopped.
+/// by the cancel admission CAS (AU16), and `Failed` only by the confirmed
+/// terminal-failure commit ([`crate::TaskRepository::fail_task`]) whose
+/// closed-world classification has no variant for provider failures,
+/// `NotSent`, Action `Unknown`, withheld results, or cancel. `Cancelled` means
+/// the cancel request was accepted, never that running work or an external
+/// effect stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskProgress {
     /// The Task was accepted; delegation is possible while non-terminal.
@@ -151,7 +153,8 @@ pub enum TaskProgress {
     /// The Task owner adopted a final result after verifying the relied Action
     /// facts and the Task-wide completion barrier.
     Completed,
-    /// Task failure confirmed by the Task owner; no producer exists yet.
+    /// Confirmed terminal failure committed by the Task owner through
+    /// [`crate::TaskRepository::fail_task`].
     Failed,
     /// The cancel request was accepted (AU16). Absorbing; the Task is never
     /// resumed in place, and already-started activity keeps its own facts.

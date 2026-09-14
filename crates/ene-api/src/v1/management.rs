@@ -36,6 +36,26 @@ pub const SETUP_SHOW_TARGET: &str = "setup:show";
 /// Fixed Setup command target marking Setup complete.
 pub const SETUP_COMPLETE_TARGET: &str = "setup:complete";
 
+/// Fixed prefix of one Task-targeting management intent: `task:` plus the
+/// Task identity. The grammar is shared Host-side so a Client or CLI builds
+/// exactly what the Host parses.
+pub const TASK_TARGET_PREFIX: &str = "task:";
+
+/// Plain constructor: it does not validate. The Host parse stays
+/// authoritative.
+#[must_use]
+pub fn task_target(task: uuid::Uuid) -> ManagementTargetWire {
+    ManagementTargetWire(format!("{TASK_TARGET_PREFIX}{}", task.as_hyphenated()))
+}
+
+/// Exact rule: strip the `task:` prefix and require the remainder to parse as
+/// a UUID, else [`None`]. No other text is a Task target.
+#[must_use]
+pub fn parse_task_target(target: &ManagementTargetWire) -> Option<uuid::Uuid> {
+    let rest = target.0.strip_prefix(TASK_TARGET_PREFIX)?;
+    uuid::Uuid::parse_str(rest).ok()
+}
+
 /// Plain constructor: it does not validate. Non-empty `provider` and
 /// `label` are enforced at Host parse, which stays authoritative.
 #[must_use]
@@ -249,7 +269,7 @@ mod tests {
     use super::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
         SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, consent_target, credential_target,
-        parse_consent_target, parse_credential_target,
+        parse_consent_target, parse_credential_target, parse_task_target, task_target,
     };
     use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
@@ -417,6 +437,26 @@ mod tests {
     fn setup_command_targets_are_fixed_strings() {
         assert_eq!(SETUP_SHOW_TARGET, "setup:show");
         assert_eq!(SETUP_COMPLETE_TARGET, "setup:complete");
+    }
+
+    #[test]
+    fn task_target_roundtrips_and_rejects_other_text() {
+        let id = uuid::Uuid::new_v4();
+        let target = task_target(id);
+        assert_eq!(parse_task_target(&target), Some(id));
+        for raw in [
+            "task:not-a-uuid",
+            "task:",
+            "credential:openai:personal",
+            "setup:show",
+            "",
+        ] {
+            assert_eq!(
+                parse_task_target(&ManagementTargetWire(String::from(raw))),
+                None,
+                "the task grammar rejects {raw:?}"
+            );
+        }
     }
 
     #[test]

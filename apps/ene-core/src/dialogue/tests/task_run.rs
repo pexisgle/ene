@@ -44,20 +44,20 @@ use crate::task_run::{TaskAgentProtocolViolation, TaskAgentRunOutcome, TaskAgent
 use super::{live_input, round_test_handle};
 
 /// One scripted provider response per call, in call order.
-struct ScriptedTransport {
+pub(super) struct ScriptedTransport {
     replies: Mutex<VecDeque<String>>,
     inputs: Mutex<Vec<String>>,
 }
 
 impl ScriptedTransport {
-    fn new(replies: Vec<String>) -> Self {
+    pub(super) fn new(replies: Vec<String>) -> Self {
         Self {
             replies: Mutex::new(replies.into_iter().collect()),
             inputs: Mutex::new(Vec::new()),
         }
     }
 
-    fn inputs(&self) -> Vec<String> {
+    pub(super) fn inputs(&self) -> Vec<String> {
         self.inputs.lock().expect("input capture lock").clone()
     }
 }

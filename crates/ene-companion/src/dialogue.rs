@@ -14,10 +14,11 @@
 //! without opening a turn, while a conflicting reuse rejects just as
 //! early.
 //!
-//! Steering follows the same caller-proposes split: [`propose_steering`]
-//! maps an accepted conversation command onto the Task owner's value premise
-//! and returns the owner's outcome unchanged. Adoption decisions and
-//! identities stay with `ene-task`.
+//! Task control follows the same caller-proposes split: [`propose_task`] and
+//! [`propose_steering`] map accepted conversation commands onto the Task
+//! owner's value premises and return the owner's outcomes unchanged. Adoption
+//! decisions and identities stay with `ene-task`, and [`TaskReport`] renders
+//! user-facing facts the composition root read from the durable owners.
 
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
@@ -32,8 +33,9 @@ use ene_learning::{
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    SteeringPremiseRef, SteeringProposalPremise, TaskProposalOutcome, TaskPurpose, TaskRepository,
-    TaskTechnicalError,
+    AssigneeRef, SteeringPremiseRef, SteeringProposalPremise, TaskContextOrigin, TaskProgress,
+    TaskProposalOutcome, TaskProposalPremise, TaskPurpose, TaskRepository, TaskTechnicalError,
+    WorkspaceNeedRef, orchestrate_task_creation,
 };
 
 use crate::{
@@ -713,4 +715,308 @@ pub async fn propose_steering(
         },
     )
     .await
+}
+
+/// One Task proposal from the Owner conversation (H-A caller side).
+///
+/// The dialogue layer builds this from accepted conversation evidence — the
+/// Owner's request is a canonical History record and `origin` references it;
+/// the purpose text is the proposal, never a committed Task state. The command
+/// carries no identity: `orchestrate_task_creation` mints the Task, context
+/// entry, and confirmed workspace association identities. A workspace need is
+/// present only when the conversation resolved one; the Task owner confirms
+/// the association.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposeTaskCommand {
+    /// The Companion proposing the Task; adopted as the Task assignee.
+    pub requester: CompanionId,
+    /// The purpose text proposed for adoption.
+    pub purpose: TaskPurpose,
+    /// The conversation record the request came from.
+    pub origin: TaskContextOrigin,
+    /// The workspace conditions the request relies on, when any.
+    pub workspace_need: Option<WorkspaceNeedRef>,
+}
+
+/// Proposes one Task to the Task owner and returns its decision.
+///
+/// The caller only proposes. This maps the command onto the Task owner's
+/// value premise and delegates to [`ene_task::orchestrate_task_creation`],
+/// which mints every identity and commits the creation unit. The returned
+/// [`TaskProposalOutcome`] is the owner's outcome unchanged
+/// ([`TaskProposalOutcome::AcceptedAsTask`] on success). Creating a delegation
+/// is a separate owner request issued by the composition root that received
+/// the accepted reference; this function never mints a
+/// [`DelegationId`](ene_task::DelegationId) and never starts an execution.
+pub async fn propose_task(
+    command: ProposeTaskCommand,
+    repository: &impl TaskRepository,
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
+    orchestrate_task_creation(
+        repository,
+        TaskProposalPremise {
+            requester: AssigneeRef {
+                companion: command.requester.as_raw(),
+            },
+            purpose: command.purpose,
+            origin: command.origin,
+            workspace_need: command.workspace_need,
+        },
+    )
+    .await
+}
+
+/// Display certainty of one Action attempt in a Task report.
+///
+/// A companion-owned projection of the Action owner's closed world, so the
+/// report layer never re-decides certainty: the composition root maps the
+/// owner's read verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskReportCertainty {
+    ConfirmedSuccess,
+    ConfirmedFailure,
+    Unknown,
+}
+
+/// One Action attempt as shown in a Task report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReportAttempt {
+    /// Closed-world operation label (list/read/create/edit).
+    pub operation: String,
+    /// The target recorded when the attempt started.
+    pub target: String,
+    /// The Action owner's certainty, projected verbatim.
+    pub certainty: TaskReportCertainty,
+}
+
+/// User-facing Task report facts composed from canonical owner reads.
+///
+/// The composition root fills this from durable facts only — `task.progress`,
+/// the adopted/unadopted `task_result` body and its verified correlation, and
+/// the `action_attempt` records — and this layer owns the report layout. It
+/// carries no durable state and rewrites no owner fact: a report never
+/// rewrites certainty, progress, or adoption, and an `Unknown` effect is
+/// reported as unknown, never as success or failure.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TaskReport {
+    pub progress: TaskProgress,
+    /// The current workspace association folder, when one exists.
+    pub workspace_folder: Option<String>,
+    /// The association's save target, when declared.
+    pub save_target: Option<String>,
+    /// The sealed final result body, adopted or not.
+    pub result_body: Option<String>,
+    /// Whether the result body was adopted as the Task completion.
+    pub result_adopted: bool,
+    /// The verified result-local correlation, when a result exists.
+    pub correlated_attempts: Vec<TaskReportAttempt>,
+    /// Every other Action attempt under the Task.
+    pub other_attempts: Vec<TaskReportAttempt>,
+}
+
+impl core::fmt::Debug for TaskReport {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("TaskReport")
+            .field("progress", &self.progress)
+            .field("workspace_folder", &self.workspace_folder)
+            .field("save_target", &self.save_target)
+            .field(
+                "result_body",
+                &self.result_body.as_ref().map(|_| "[redacted]"),
+            )
+            .field("result_adopted", &self.result_adopted)
+            .field("correlated_attempts", &self.correlated_attempts)
+            .field("other_attempts", &self.other_attempts)
+            .finish()
+    }
+}
+
+impl TaskReport {
+    /// Renders the user-facing report from the canonical facts.
+    ///
+    /// Confirmed create/edit targets are the completed changes, the workspace
+    /// folder is the save location, and attempts that are not
+    /// [`TaskReportCertainty::ConfirmedSuccess`] are listed as remaining or
+    /// unconfirmed effects instead of being folded into success.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut text = format!("task status: {}", progress_label(self.progress));
+        if let Some(folder) = &self.workspace_folder {
+            text.push_str(&format!("\nworkspace: {folder}"));
+        }
+        if let Some(save_target) = &self.save_target {
+            text.push_str(&format!("\nsave target: {save_target}"));
+        }
+        match (&self.result_body, self.result_adopted) {
+            (Some(body), true) => {
+                text.push_str(&format!("\nresult (adopted): {}", body.trim()));
+            }
+            (Some(body), false) => {
+                text.push_str(&format!(
+                    "\nresult (recorded, not adopted): {}",
+                    body.trim()
+                ));
+            }
+            (None, _) => text.push_str("\nresult: none"),
+        }
+        if !self.correlated_attempts.is_empty() {
+            text.push_str("\nresult-correlated attempts:");
+            for attempt in &self.correlated_attempts {
+                text.push_str(&format!("\n- {}", attempt_label(attempt)));
+            }
+        }
+        let changes: Vec<&TaskReportAttempt> = self
+            .correlated_attempts
+            .iter()
+            .chain(self.other_attempts.iter())
+            .filter(|attempt| is_completed_change(attempt))
+            .collect();
+        text.push_str("\ncompleted changes:");
+        if changes.is_empty() {
+            text.push_str("\n- none");
+        } else {
+            for attempt in changes {
+                text.push_str(&format!("\n- {} {}", attempt.operation, attempt.target));
+            }
+        }
+        let remaining: Vec<&TaskReportAttempt> = self
+            .correlated_attempts
+            .iter()
+            .chain(self.other_attempts.iter())
+            .filter(|attempt| attempt.certainty != TaskReportCertainty::ConfirmedSuccess)
+            .collect();
+        text.push_str("\nremaining/unconfirmed effects:");
+        if remaining.is_empty() {
+            text.push_str("\n- none");
+        } else {
+            for attempt in remaining {
+                text.push_str(&format!("\n- {}", attempt_label(attempt)));
+            }
+        }
+        text
+    }
+}
+
+fn progress_label(progress: TaskProgress) -> &'static str {
+    match progress {
+        TaskProgress::Started => "started",
+        TaskProgress::InProgress => "in-progress",
+        TaskProgress::Completed => "completed",
+        TaskProgress::Failed => "failed",
+        TaskProgress::Cancelled => "cancelled",
+    }
+}
+
+fn is_completed_change(attempt: &TaskReportAttempt) -> bool {
+    attempt.certainty == TaskReportCertainty::ConfirmedSuccess
+        && matches!(attempt.operation.as_str(), "create" | "edit")
+}
+
+fn attempt_label(attempt: &TaskReportAttempt) -> String {
+    let certainty = match attempt.certainty {
+        TaskReportCertainty::ConfirmedSuccess => "confirmed success",
+        TaskReportCertainty::ConfirmedFailure => "confirmed failure",
+        TaskReportCertainty::Unknown => "unknown",
+    };
+    format!("{} {} ({certainty})", attempt.operation, attempt.target)
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::{TaskProgress, TaskReport, TaskReportAttempt, TaskReportCertainty};
+
+    fn attempt(operation: &str, target: &str, certainty: TaskReportCertainty) -> TaskReportAttempt {
+        TaskReportAttempt {
+            operation: operation.to_owned(),
+            target: target.to_owned(),
+            certainty,
+        }
+    }
+
+    #[test]
+    fn a_completed_report_names_the_changes_the_location_and_no_remainder() {
+        let report = TaskReport {
+            progress: TaskProgress::Completed,
+            workspace_folder: Some(String::from("/srv/workspace/ene")),
+            save_target: None,
+            result_body: Some(String::from("report.md was created")),
+            result_adopted: true,
+            correlated_attempts: vec![attempt(
+                "create",
+                "/srv/workspace/ene/report.md",
+                TaskReportCertainty::ConfirmedSuccess,
+            )],
+            other_attempts: Vec::new(),
+        };
+        let rendered = report.render();
+        assert!(rendered.contains("task status: completed"), "{rendered}");
+        assert!(
+            rendered.contains("workspace: /srv/workspace/ene"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("report.md was created"), "{rendered}");
+        assert!(
+            rendered.contains("create /srv/workspace/ene/report.md"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("remaining/unconfirmed effects:\n- none"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_effect_is_reported_as_unknown_not_as_success_or_failure() {
+        let report = TaskReport {
+            progress: TaskProgress::Cancelled,
+            workspace_folder: None,
+            save_target: None,
+            result_body: None,
+            result_adopted: false,
+            correlated_attempts: Vec::new(),
+            other_attempts: vec![
+                attempt(
+                    "create",
+                    "/srv/workspace/ene/half.md",
+                    TaskReportCertainty::Unknown,
+                ),
+                attempt(
+                    "edit",
+                    "/srv/workspace/ene/notes.md",
+                    TaskReportCertainty::ConfirmedFailure,
+                ),
+            ],
+        };
+        let rendered = report.render();
+        assert!(rendered.contains("task status: cancelled"), "{rendered}");
+        assert!(rendered.contains("result: none"), "{rendered}");
+        assert!(
+            rendered.contains("create /srv/workspace/ene/half.md (unknown)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("edit /srv/workspace/ene/notes.md (confirmed failure)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("completed changes:\n- none"),
+            "an unconfirmed effect is never listed as a completed change: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_debug_rendering_redacts_the_result_body() {
+        let report = TaskReport {
+            progress: TaskProgress::Completed,
+            workspace_folder: None,
+            save_target: None,
+            result_body: Some(String::from("private final words")),
+            result_adopted: true,
+            correlated_attempts: Vec::new(),
+            other_attempts: Vec::new(),
+        };
+        let rendered = format!("{report:?}");
+        assert!(!rendered.contains("private final words"), "{rendered}");
+    }
 }

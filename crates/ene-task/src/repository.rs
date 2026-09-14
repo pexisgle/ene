@@ -1,11 +1,13 @@
 //! The durable boundary for Task creation, steering, delegation, and reload.
 
+use ene_primitive::RawId;
 use thiserror::Error;
 
 use crate::cancel::TaskCancelOutcome;
 use crate::delegation::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
 };
+use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
 use crate::result::{
     TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
     TaskResultRecord,
@@ -128,6 +130,34 @@ pub trait TaskRepository: Send + Sync {
     /// own facts (arrival/seal, verified correlation, certainty updates).
     async fn cancel_task(&self, task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError>;
 
+    /// Commits one confirmed terminal failure (the `Failed` producer).
+    ///
+    /// One short `Immediate` transaction reads the current `task.progress`
+    /// and moves `Started` / `InProgress` to
+    /// [`Failed`](crate::TaskProgress::Failed) with a compare-and-set; that
+    /// commit is the only durable fact of failure. The premise carries the
+    /// relied `TaskRef` and, when the observation came from a delegated
+    /// execution, its delegation. Before any write the commit verifies that
+    /// the delegation exists, that it belongs to the premise's Task (a
+    /// delegation of another Task is a fail-closed technical error), that its
+    /// relied revision matches the premise, and that the current Task revision
+    /// still equals the relied revision. `Completed` / `Cancelled` return
+    /// [`TaskTerminal`](crate::TaskFailureOutcome::TaskTerminal) and an
+    /// already `Failed` Task returns
+    /// [`AlreadyFailed`](crate::TaskFailureOutcome::AlreadyFailed), both with
+    /// zero writes. A stale revision returns
+    /// [`StalePremise`](crate::TaskFailureOutcome::StalePremise) and a missing
+    /// identity returns the matching `Missing*` variant. No already-started
+    /// activity is retracted or re-executed: inference attempts, `data_use`,
+    /// Action attempts, certainty, and result arrival stay untouched, and no
+    /// failure-specific flag, row, or gate condition is written. `kind` is
+    /// the caller's confirmed classification and is not persisted separately:
+    /// the progress value is the single terminal truth.
+    async fn fail_task(
+        &self,
+        premise: TaskFailurePremise,
+    ) -> Result<TaskFailureOutcome, TaskTechnicalError>;
+
     /// Creates one delegation correspondence for a Task revision (AU3).
     ///
     /// [`orchestrate_delegation`](crate::orchestrate_delegation) mints the
@@ -236,4 +266,50 @@ pub trait TaskRepository: Send + Sync {
         &self,
         claim: TaskResultAdoptionClaim,
     ) -> Result<TaskResultAcceptance, TaskTechnicalError>;
+
+    /// Re-derives the adoption claim of one stored result from durable facts.
+    ///
+    /// `None` means the result row does not exist. `Some(claim)` carries
+    /// exactly the result-local Action attempt identities enumerated from the
+    /// result's sealed delegation (execution lifetime), verified against the
+    /// result's copied `(task, revision)` correspondence. The claim is
+    /// comparison material for [`Self::adopt_result`], which re-enumerates
+    /// the authoritative set itself; the producer never caches an old blocker
+    /// list or previously stamped set. A missing delegation row yields the
+    /// empty set here and is answered as
+    /// [`MissingDelegation`](crate::TaskResultAcceptance::MissingDelegation)
+    /// by the adoption commit.
+    async fn load_result_adoption_claim(
+        &self,
+        result: TaskResultId,
+    ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError>;
+
+    /// Lists sealed results that have not adopted yet, oldest first.
+    ///
+    /// `adopted_revision IS NULL` on an existing `task_result` row is the
+    /// whole durable truth of "this result may still need re-evaluation"; no
+    /// pending flag, queue state, or retry row exists. `limit` bounds the
+    /// rows read by the storage query, not only the returned vector. The
+    /// listing judges nothing: each candidate still goes through
+    /// [`crate::reevaluate_result_adoption`], which re-evaluates against
+    /// current facts and may legitimately stay withheld.
+    async fn list_unadopted_results(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<TaskResultId>, TaskTechnicalError>;
+
+    /// Lists the Action attempt identities under one Task, in attempt-id
+    /// order, for the report composition.
+    ///
+    /// The enumeration is the same Task-wide input the completion barrier
+    /// reads: every revision and every delegation of the Task, from either the
+    /// attempt's copied `task_id` or its delegation's correspondence, with
+    /// each row's copied correlation verified. It is a read; it writes
+    /// nothing, changes no certainty, and decides nothing. A Task with no
+    /// attempts returns the empty set, and a caller-composed report may then
+    /// load each attempt from its Action owner.
+    async fn load_task_action_attempts(
+        &self,
+        task: TaskId,
+    ) -> Result<Vec<RawId>, TaskTechnicalError>;
 }

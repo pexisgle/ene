@@ -535,7 +535,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let learning_ticket = InferenceTicketId(RawId::new());
     {
         let store = Store::open(&path).await.expect("a fresh store must open");
-        assert_eq!(read_schema_version(&path), Some(23));
+        assert_eq!(read_schema_version(&path), Some(24));
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
             Err(poisoned) => poisoned.into_inner(),
@@ -573,7 +573,7 @@ async fn inference_attempt_migration_backfills_consumer_and_purpose() {
     let reopened = Store::open(&path)
         .await
         .expect("the V18 migration must succeed");
-    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(read_schema_version(&path), Some(24));
     let columns = table_columns(&path, "inference_attempt");
     for column in [
         "consumer",
@@ -694,7 +694,7 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_and_upgraded_da
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("delegation-index.db");
     let store = Store::open(&path).await.expect("a fresh store must open");
-    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(read_schema_version(&path), Some(24));
     drop(store);
     let index = |path: &std::path::Path| -> Option<String> {
         let conn = rusqlite::Connection::open(path).expect("the store file must open");
@@ -726,7 +726,7 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_and_upgraded_da
         .await
         .expect("the V22 database must upgrade");
     drop(reopened);
-    assert_eq!(read_schema_version(&path), Some(23));
+    assert_eq!(read_schema_version(&path), Some(24));
     assert_eq!(
         index(&path).as_deref(),
         Some("idx_inference_attempt_delegation"),

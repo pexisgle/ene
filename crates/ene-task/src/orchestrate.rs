@@ -10,11 +10,91 @@ use crate::delegation::{
     TaskAgentEphemeralId,
 };
 use crate::repository::{TaskCommitOutcome, TaskRepository, TaskTechnicalError};
-use crate::result::{TaskAgentResultArrival, TaskResultId, TaskResultRecord};
+use crate::result::{TaskAgentResultArrival, TaskResultAcceptance, TaskResultId, TaskResultRecord};
 use crate::task::{
-    SteeringPremiseRef, TaskCommitPremise, TaskId, TaskInstructionAdoptionPremise, TaskProgress,
-    TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
+    AssigneeRef, SteeringPremiseRef, TaskCommitPremise, TaskCreationPremise, TaskId,
+    TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
 };
+use crate::workspace::{WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceNeedRef};
+
+/// The Task-side premise for one Task proposal (H-A).
+///
+/// The caller maps its command-level request into this shape: it carries the
+/// requester it proposes as the Task assignee, the proposed purpose text and
+/// origin, and the workspace conditions. All identities
+/// ([`TaskId`], [`TaskContextEntryId`], [`WorkspaceAssocId`]) and the
+/// acquisition time are minted by [`orchestrate_task_creation`], never by the
+/// caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProposalPremise {
+    /// The Companion the caller proposes as the Task assignee.
+    pub requester: AssigneeRef,
+    /// The purpose text proposed for adoption.
+    pub purpose: TaskPurpose,
+    /// The record the purpose proposal came from.
+    pub origin: TaskContextOrigin,
+    /// The workspace conditions the proposal relies on; the owner confirms
+    /// the association when they are present.
+    pub workspace_need: Option<WorkspaceNeedRef>,
+}
+
+/// Orchestrates one Task creation proposal against the repository (AU2).
+///
+/// The orchestration mints the Task, its initial adopted-purpose context
+/// entry, and — when the premise carries workspace conditions — the confirmed
+/// workspace association identity, then writes the whole
+/// [`TaskCreationPremise`] in one atomic commit. The requester becomes the
+/// Task assignee. The returned outcome is [`TaskProposalOutcome::AcceptedAsTask`]
+/// with the committed reference; the other [`TaskProposalOutcome`] variants
+/// describe steering premises and cannot arise from a fresh creation, so a
+/// creation never fabricates them. Repository technical errors stay `Err`.
+pub async fn orchestrate_task_creation(
+    repository: &impl TaskRepository,
+    premise: TaskProposalPremise,
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
+    let workspace = premise
+        .workspace_need
+        .map(|need| WorkspaceAssociationPremise {
+            assoc: WorkspaceAssocId::generate(),
+            need,
+        });
+    let reference = repository
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: premise.purpose,
+            entry: TaskContextEntryId::generate(),
+            origin: premise.origin,
+            acquired_at: WallClockWithTz::now(),
+            assignee: premise.requester,
+            workspace,
+        })
+        .await?;
+    Ok(TaskProposalOutcome::AcceptedAsTask(reference))
+}
+
+/// Re-evaluates one sealed result against the current canonical facts (AU15b
+/// re-evaluation).
+///
+/// The producer only decides *that* one stored result needs a fresh adoption
+/// judgement; the judgement itself stays [`TaskRepository::adopt_result`],
+/// which re-enumerates the authoritative attempt set from the result's sealed
+/// delegation, re-reads the current Action certainty, and re-checks the
+/// current revision / purpose identity and the Task-wide completion barrier
+/// inside its own short transaction. The claim passed here is re-derived from
+/// durable facts by [`TaskRepository::load_result_adoption_claim`]; no old
+/// blocker list is cached and no adoption state is duplicated. A missing
+/// result row is the owner's `MissingResult` domain answer, and a missing
+/// delegation is answered by the adoption commit itself. No provider call,
+/// filesystem Action, or Task Agent run is triggered.
+pub async fn reevaluate_result_adoption(
+    repository: &impl TaskRepository,
+    result: TaskResultId,
+) -> Result<TaskResultAcceptance, TaskTechnicalError> {
+    let Some(claim) = repository.load_result_adoption_claim(result).await? else {
+        return Ok(TaskResultAcceptance::MissingResult { result });
+    };
+    repository.adopt_result(claim).await
+}
 
 /// The Task-side premise for one steering proposal (H-A).
 ///
@@ -33,9 +113,11 @@ pub struct SteeringProposalPremise {
     pub instruction_source: RawId,
 }
 
-/// The Task owner's domain result for one steering proposal (H-A).
+/// The Task owner's domain result for one steering or creation proposal (H-A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskProposalOutcome {
+    /// A fresh Task was created exactly once ([`orchestrate_task_creation`]).
+    AcceptedAsTask(TaskRef),
     /// The steering commit created exactly one new revision.
     AcceptedAsSteering(TaskRef),
     /// The relied-on revision or purpose does not match the durable current
