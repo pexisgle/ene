@@ -139,6 +139,123 @@ pub enum ThinMoveReason {
     InitialAttach,
     DisconnectObserved,
     RestartRecovery,
+    /// Stop accepted: the transition moves the attribution to
+    /// [`PresenceState::Stopped`]. Stop outranks move and recovery, so it is
+    /// recorded as its own reason rather than folded into a move.
+    Stop,
+}
+
+/// Relocation hint for one companion.
+///
+/// [`last_client`](Self::last_client) is the client of the last confirmed
+/// [`PresenceState::Present`] attribution. It is history, not a current
+/// reference: an [`PresenceState::InTransition`] candidate lives in
+/// [`PresenceAttribution::active_client`] and must never overwrite it, and a
+/// [`PresenceState::NoActive`] fallback that fails to confirm must not
+/// promote it either.
+///
+/// [`recovery_destination`](Self::recovery_destination) is a non-current
+/// reference valid only during [`PresenceState::RecoveryWait`]. Restart
+/// recovery (§6.4) sets it to the client that was `Present` before the Host
+/// restart; leaving `RecoveryWait` — a transition begin, a confirm, or a stop
+/// — clears it. A normal disconnect never sets it, and the record alone never
+/// establishes presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RelocationHint {
+    pub companion: RawId,
+    pub last_client: Option<ClientId>,
+    pub recovery_destination: Option<ClientId>,
+}
+
+/// One fallback candidate premise for the normal-disconnect fallback.
+///
+/// The caller derives each flag out of band (connection currentness,
+/// transport classification, device permission) and the selection function
+/// only compares them; none of them is inferred from the hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FallbackCandidate {
+    pub client: ClientId,
+    /// The connection layer reports this client's connection as the current
+    /// authenticated one.
+    pub current_authenticated: bool,
+    /// The OS transport classification confirms a same-machine peer.
+    pub same_machine: bool,
+    /// The device permission currently allows the client.
+    pub device_permitted: bool,
+}
+
+/// Selects the normal-disconnect fallback target (CCT §10.4).
+///
+/// Only a candidate that is current-authenticated, same-machine verified,
+/// device-permitted, and not the closing client is eligible; among the
+/// eligible ones the lexicographically smallest [`ClientId`] bytes win.
+/// [`None`] means no eligible candidate, which callers confirm as
+/// [`PresenceState::NoActive`]: the Host never guesses a client and never
+/// auto-starts one.
+#[must_use]
+pub fn select_fallback_candidate(
+    closing: ClientId,
+    candidates: &[FallbackCandidate],
+) -> Option<ClientId> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.current_authenticated
+                && candidate.same_machine
+                && candidate.device_permitted
+                && candidate.client != closing
+        })
+        .map(|candidate| candidate.client)
+        .min_by_key(|client| *client.as_raw().as_uuid().as_bytes())
+}
+
+/// One companion whose startup normalization was refused.
+///
+/// The refusal names the companion and the reason; the stored attribution is
+/// left untouched (never guessed, never rewritten).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupNormalizationFailure {
+    pub companion: RawId,
+    pub reason: StartupNormalizationFailureReason,
+}
+
+/// Why one companion's startup normalization was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupNormalizationFailureReason {
+    /// No encodable generation successor exists; the old attribution stays
+    /// and activity must not start from it.
+    GenerationExhausted,
+    /// A `RecoveryWait` row carries no recovery destination, so the recovery
+    /// intent cannot be preserved.
+    MissingRecoveryDestination,
+    /// A `Present` row carries no active client to recover toward.
+    MalformedAttribution,
+    /// A `companion` row exists without a presence attribution row.
+    MissingAttribution,
+}
+
+/// Report of one explicit startup normalization pass (PR §6.4).
+///
+/// Each companion is normalized in its own short transaction; `failures`
+/// records the companions that were refused. A caller that must not serve
+/// with an unknown presence state fails startup when this list is non-empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupNormalizationReport {
+    /// The committed facts, one per companion whose row changed.
+    pub normalized: Vec<PresenceAttribution>,
+    /// The companions whose row was left untouched.
+    pub failures: Vec<StartupNormalizationFailure>,
+}
+
+/// Outcome of one explicit stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopCompanionOutcome {
+    /// The stop committed; carries the new `Stopped` fact.
+    Stopped(PresenceAttribution),
+    /// The attribution was already `Stopped`; nothing was written.
+    AlreadyStopped(PresenceAttribution),
+    /// No presence attribution row exists for this companion.
+    MissingCompanion,
 }
 
 /// Outcome of a compare-and-begin-transition attempt.
@@ -198,6 +315,41 @@ pub trait PresenceRepository {
         companion: RawId,
     ) -> Result<Option<PresenceAttribution>, PresenceTechnicalError>;
 
+    /// Loads the relocation hint for one companion.
+    ///
+    /// Returns [`None`] when no hint row exists. The hint is never authority:
+    /// callers must re-derive currentness before establishing presence.
+    async fn load_hint(
+        &self,
+        companion: RawId,
+    ) -> Result<Option<RelocationHint>, PresenceTechnicalError>;
+
+    /// Runs the explicit startup normalization (PR §6.4) over every companion
+    /// row.
+    ///
+    /// This is a startup boundary, never a periodic sweep, and the plain
+    /// state open must not run it. Each companion is normalized in its own
+    /// short `Immediate` transaction (attribution, hint, and transition-log
+    /// row together) with [`ThinMoveReason::RestartRecovery`], so one
+    /// companion's refusal cannot roll back another's commit. A companion
+    /// whose next generation cannot be encoded is refused and left untouched
+    /// in [`StartupNormalizationReport::failures`]; storage failures are
+    /// [`PresenceTechnicalError`].
+    async fn normalize_on_startup(
+        &self,
+    ) -> Result<StartupNormalizationReport, PresenceTechnicalError>;
+
+    /// Stops one companion's presence: from any state to
+    /// [`PresenceState::Stopped`], clearing the active client and the
+    /// recovery destination while keeping `last_client` as history.
+    ///
+    /// Stop outranks moves and recovery; a companion already `Stopped` is
+    /// answered idempotently with no write.
+    async fn stop_companion(
+        &self,
+        companion: RawId,
+    ) -> Result<StopCompanionOutcome, PresenceTechnicalError>;
+
     /// Compares `expected` against the current attribution and, on match,
     /// begins a transition toward `to_client` for `reason`.
     ///
@@ -248,10 +400,69 @@ pub enum ConfirmTransitionOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::ClientId;
+    use super::{ClientId, FallbackCandidate, RawId, select_fallback_candidate};
+    use uuid::Uuid;
+
+    fn client(hex: &str) -> ClientId {
+        let uuid = Uuid::parse_str(hex).expect("fixture uuid");
+        ClientId::from_raw(RawId::from_uuid(uuid))
+    }
+
+    fn candidate(
+        client: ClientId,
+        current_authenticated: bool,
+        same_machine: bool,
+        device_permitted: bool,
+    ) -> FallbackCandidate {
+        FallbackCandidate {
+            client,
+            current_authenticated,
+            same_machine,
+            device_permitted,
+        }
+    }
 
     #[test]
     fn generated_client_ids_differ() {
         assert_ne!(ClientId::generate(), ClientId::generate());
+    }
+
+    #[test]
+    fn fallback_requires_current_same_machine_and_permitted() {
+        let closing = client("00000000-0000-0000-0000-000000000001");
+        let other = client("00000000-0000-0000-0000-000000000002");
+        for (current, same_machine, permitted) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let candidates = [candidate(other, current, same_machine, permitted)];
+            assert_eq!(
+                select_fallback_candidate(closing, &candidates),
+                None,
+                "a candidate missing current/same-machine/permitted must not be eligible"
+            );
+        }
+        let eligible = [candidate(other, true, true, true)];
+        assert_eq!(select_fallback_candidate(closing, &eligible), Some(other));
+    }
+
+    #[test]
+    fn fallback_excludes_the_closing_client() {
+        let closing = client("00000000-0000-0000-0000-000000000001");
+        let candidates = [candidate(closing, true, true, true)];
+        assert_eq!(select_fallback_candidate(closing, &candidates), None);
+    }
+
+    #[test]
+    fn fallback_picks_the_lexicographically_smallest_client_bytes() {
+        let closing = client("00000000-0000-0000-0000-000000000001");
+        let small = client("00000000-0000-0000-0000-0000000000ff");
+        let large = client("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        let candidates = [
+            candidate(large, true, true, true),
+            candidate(small, true, true, true),
+        ];
+        assert_eq!(select_fallback_candidate(closing, &candidates), Some(small));
     }
 }
