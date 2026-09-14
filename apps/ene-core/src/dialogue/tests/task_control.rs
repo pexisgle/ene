@@ -46,7 +46,7 @@ use ene_api::v1::round::StreamClose;
 use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
 use ene_inference::fake::{FakeFailure, FakeProviderTransport};
 use ene_inference::{
-    InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
+    DeltaFlow, InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::{RawId, RevisionInner};
@@ -1249,4 +1249,144 @@ async fn conversation_invalid_directive_clarifies_without_changing_anything() {
     assert_eq!(streamed_text(&responses), reply);
     assert_eq!(probe_count(dir.path(), "task"), 0);
     assert_eq!(probe_count(dir.path(), "delegation"), 0);
+}
+
+/// Emits the given chunks as provider deltas, so a marker split across delta
+/// boundaries can be exercised through the production streaming path.
+struct ChunkedStreamingTransport {
+    deltas: Vec<String>,
+}
+
+impl ChunkedStreamingTransport {
+    fn new(deltas: &[&str]) -> Self {
+        Self {
+            deltas: deltas.iter().map(|delta| (*delta).to_owned()).collect(),
+        }
+    }
+
+    fn full_text(&self) -> String {
+        self.deltas.concat()
+    }
+}
+
+impl ProviderTransport for ChunkedStreamingTransport {
+    fn complete(
+        &self,
+        _req: ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
+                + Send
+                + '_,
+        >,
+    > {
+        let text = self.full_text();
+        Box::pin(async move { Ok(ProviderResponse { text, usage: None }) })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        _req: ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            for delta in &self.deltas {
+                if let DeltaFlow::Abort(reason) = sink.push_delta(delta).await {
+                    return Err(InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    });
+                }
+            }
+            Ok(ProviderResponse {
+                text: self.full_text(),
+                usage: None,
+            })
+        })
+    }
+}
+
+/// The reserved protocol must never leak, wherever the marker appears and
+/// however the provider chunks it.
+async fn late_marker_fails_closed(tag: &str, deltas: &[&str]) {
+    let live = live_input(tag);
+    let transport = ChunkedStreamingTransport::new(deltas);
+    let (handle, dir) = round_test_handle(tag, &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let generation = current_generation(&handle).await.expect("generation");
+    let responses = handle
+        .handle_frame(
+            request_frame(&handle, &live, Some(generation), "late", "do the thing"),
+            live.clone(),
+            &transport,
+        )
+        .await;
+
+    // No Task operation ran.
+    assert_eq!(probe_count(dir.path(), "task"), 0);
+    assert_eq!(probe_count(dir.path(), "delegation"), 0);
+    assert_eq!(probe_count(dir.path(), "action_attempt"), 0);
+
+    // The marker and its JSON never reach a response frame.
+    let displayed = streamed_text(&responses);
+    assert!(!displayed.contains("[task-control]"), "{displayed}");
+    assert!(!displayed.contains("\"kind\""), "{displayed}");
+    assert!(
+        responses.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamClose(close) if close.status == StreamClose::Interrupted
+        )),
+        "the stream closes interrupted: {responses:?}"
+    );
+    assert!(!closes_completed(&responses), "{responses:?}");
+
+    // No malformed control reply is appended to durable History.
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let timeline = handle
+        .store
+        .load_timeline(companion, None, None, 100)
+        .await
+        .expect("the timeline must load");
+    assert_eq!(
+        timeline.len(),
+        1,
+        "only the owner row remains: {timeline:?}"
+    );
+    for item in &timeline {
+        assert!(!item.text.contains("[task-control]"), "{}", item.text);
+        assert!(!item.text.contains("\"kind\""), "{}", item.text);
+    }
+}
+
+#[tokio::test]
+async fn a_late_marker_in_one_delta_fails_closed() {
+    late_marker_fails_closed(
+        "late-same",
+        &["hello\n[task-control] {\"kind\":\"cancel\"}"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_late_marker_split_across_deltas_fails_closed() {
+    late_marker_fails_closed(
+        "late-split",
+        &["hello\n[task-", "control] {\"kind\":\"cancel\"}"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_mid_prose_marker_fails_closed() {
+    late_marker_fails_closed("late-mid", &["hello [task-control] {\"kind\":\"report\"}"]).await;
 }

@@ -320,111 +320,178 @@ pub async fn begin_turn(
 /// turn's Owner message identity as its premise, and the store refuses the
 /// append when a newer accepted Owner input committed first, even inside
 /// the same round. After the durable append, the Experience premise is
-/// pinned for the post-response Learning pass. A reply carrying a
-/// `[task-control]` directive is interpreted before the append: the
-/// composition root's [`DialogueTaskControlPort`] executes the command
-/// through the existing owner boundaries, the directive line is stripped from
-/// storage, and the stored reply is the owner-derived text. A malformed
-/// directive clarifies without executing anything; `Unavailable` closes the
-/// Presentation sink that never lets a `[task-control]` directive reach the
-/// user-visible stream.
+/// pinned for the post-response Learning pass. A reply carrying the reserved
+/// `[task-control]` protocol is interpreted before the append: a valid
+/// first-line-only command runs through the composition root's port and the
+/// stored reply is the scrubbed owner outcome, while a marker that is not a
+/// valid first-line command is a reserved-protocol violation — no command
+/// executes, no reply is stored, and the stream closes interrupted. A
+/// technical failure (`Unavailable`) closes interrupted instead of storing a
+/// reply no operation produced.
+/// The clarification shown for a malformed task-control directive.
+const TASK_CONTROL_CLARIFICATION: &str =
+    "I could not interpret the task instruction; nothing was changed.";
+
+/// How the presentation sink classified one provider reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlPresentation {
+    /// No marker anywhere: ordinary conversation.
+    Ordinary,
+    /// The first non-whitespace content is the marker: a directive candidate
+    /// for the parser to validate.
+    Directive,
+    /// The marker appeared after ordinary text: reserved-protocol violation,
+    /// fail closed.
+    LateMarker,
+}
+
+/// The sink's marker-detection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlMode {
+    /// No non-whitespace content yet.
+    Undecided,
+    /// Ordinary reply; rolling marker detection.
+    Ordinary,
+    /// The marker is at the reply start; suppress the rest.
+    Directive,
+    /// A marker appeared after ordinary text; suppress the rest and fail
+    /// closed.
+    LateMarker,
+}
+
+/// Presentation sink that never lets the reserved `[task-control]` protocol
+/// reach the user-visible stream.
 ///
-/// The directive is the reply's first non-empty line, so the sink buffers
-/// only until that first non-empty line diverges from the marker: ordinary
-/// chat then streams as it arrives, and a marker switches to suppression.
-/// Directive turns therefore never present provider prose; the caller
-/// presents only the scrubbed typed owner outcome.
-#[derive(Default)]
+/// Ordinary text streams as it arrives, with a rolling hold of only the
+/// trailing suffix that could still become the marker (at most
+/// `TASK_CONTROL_MARKER.len() - 1` bytes), so a marker split across provider
+/// deltas is still detected and suppressed. A marker at the first
+/// non-whitespace position switches to directive mode; a marker anywhere else
+/// switches to late-marker mode and the caller closes the turn interrupted.
+/// Directive turns present only the scrubbed typed owner outcome.
 struct ControlHoldingSink<'a> {
     inner: Option<&'a mut (dyn DeltaSink + Send)>,
-    /// Buffered text until the first non-empty line is decided.
-    pending: String,
-    /// `None` until decided, then whether this reply is a directive.
-    directive: Option<bool>,
+    /// Undecided: all buffered text. Ordinary: the held marker-prefix tail.
+    buffer: String,
+    mode: ControlMode,
 }
 
 impl<'a> ControlHoldingSink<'a> {
     fn new(inner: &'a mut (dyn DeltaSink + Send)) -> Self {
         Self {
             inner: Some(inner),
-            pending: String::new(),
-            directive: None,
+            buffer: String::new(),
+            mode: ControlMode::Undecided,
         }
     }
 
-    /// Decides the reply shape from the buffered prefix.
-    ///
-    /// Returns `Some(true)` once the marker is confirmed, `Some(false)` once
-    /// the first non-empty line diverges from it (ordinary chat), and `None`
-    /// while the prefix is still only whitespace or a marker prefix.
-    fn decide(&self) -> Option<bool> {
-        let candidate = self.pending.trim_start();
-        if candidate.is_empty() {
-            return None;
-        }
-        if candidate.starts_with(TASK_CONTROL_MARKER) {
-            return Some(true);
-        }
-        if candidate.len() < TASK_CONTROL_MARKER.len() && TASK_CONTROL_MARKER.starts_with(candidate)
-        {
-            return None;
-        }
-        Some(false)
+    async fn push_raw(&mut self, text: &str) -> DeltaFlow {
+        let Some(inner) = self.inner.as_mut() else {
+            return DeltaFlow::Continue;
+        };
+        inner.push_delta(text).await
     }
 
-    /// Finalizes the buffered prefix and returns whether this reply is a
-    /// directive. Whitespace-only output is ordinary.
-    async fn finalize(&mut self) -> bool {
-        if self.directive.is_none() {
-            self.directive = Some(self.decide().unwrap_or(false));
+    /// Publishes ordinary text, holding only a trailing suffix that could
+    /// still become the marker.
+    async fn flush_ordinary(&mut self) -> DeltaFlow {
+        if let Some(position) = self.buffer.find(TASK_CONTROL_MARKER) {
+            // A marker appeared after ordinary text: present what preceded it
+            // and suppress from here on. The caller closes interrupted, so
+            // nothing of the malformed reply is stored.
+            let prefix = self.buffer[..position].to_owned();
+            self.buffer.clear();
+            self.mode = ControlMode::LateMarker;
+            if prefix.is_empty() {
+                return DeltaFlow::Continue;
+            }
+            return self.push_raw(&prefix).await;
         }
-        if self.directive == Some(false) && !self.pending.is_empty() {
-            let pending = core::mem::take(&mut self.pending);
-            if let Some(inner) = self.inner.as_mut()
-                && let DeltaFlow::Abort(_) = inner.push_delta(&pending).await
+        // Hold the longest suffix that is a proper prefix of the marker.
+        let max_hold = (TASK_CONTROL_MARKER.len() - 1).min(self.buffer.len());
+        let mut hold = 0;
+        for length in (1..=max_hold).rev() {
+            let start = self.buffer.len() - length;
+            if self.buffer.is_char_boundary(start)
+                && TASK_CONTROL_MARKER.starts_with(&self.buffer[start..])
             {
-                return false;
+                hold = length;
+                break;
             }
         }
-        self.directive == Some(true)
+        let publish_len = self.buffer.len() - hold;
+        if publish_len == 0 {
+            return DeltaFlow::Continue;
+        }
+        let publish: String = self.buffer.drain(..publish_len).collect();
+        self.push_raw(&publish).await
+    }
+
+    /// Classifies the buffered undecided prefix, switching modes when enough
+    /// text is known.
+    async fn decide_undecided(&mut self) -> DeltaFlow {
+        let Some(start) = self
+            .buffer
+            .find(|character: char| !character.is_whitespace())
+        else {
+            return DeltaFlow::Continue;
+        };
+        if let Some(position) = self.buffer.find(TASK_CONTROL_MARKER) {
+            // The marker is reserved: at the first position it is a directive
+            // candidate, anywhere else it is a fail-closed violation.
+            if position == start {
+                self.mode = ControlMode::Directive;
+            } else {
+                self.mode = ControlMode::LateMarker;
+            }
+            self.buffer.clear();
+            return DeltaFlow::Continue;
+        }
+        let candidate = &self.buffer[start..];
+        if candidate.len() < TASK_CONTROL_MARKER.len() && TASK_CONTROL_MARKER.starts_with(candidate)
+        {
+            return DeltaFlow::Continue;
+        }
+        self.mode = ControlMode::Ordinary;
+        self.flush_ordinary().await
     }
 
     async fn push(&mut self, delta: &str) -> DeltaFlow {
-        if self.directive == Some(true) {
-            return DeltaFlow::Continue;
-        }
-        if self.directive == Some(false) {
-            let Some(inner) = self.inner.as_mut() else {
-                return DeltaFlow::Continue;
-            };
-            return inner.push_delta(delta).await;
-        }
-        self.pending.push_str(delta);
-        match self.decide() {
-            Some(true) => {
-                self.directive = Some(true);
-                self.pending.clear();
-                DeltaFlow::Continue
+        match self.mode {
+            ControlMode::Directive | ControlMode::LateMarker => DeltaFlow::Continue,
+            ControlMode::Ordinary => {
+                self.buffer.push_str(delta);
+                self.flush_ordinary().await
             }
-            Some(false) => {
-                self.directive = Some(false);
-                let pending = core::mem::take(&mut self.pending);
-                let Some(inner) = self.inner.as_mut() else {
-                    return DeltaFlow::Continue;
-                };
-                inner.push_delta(&pending).await
+            ControlMode::Undecided => {
+                self.buffer.push_str(delta);
+                self.decide_undecided().await
             }
-            None => DeltaFlow::Continue,
+        }
+    }
+
+    /// Finalizes the reply and returns its classification.
+    ///
+    /// A held ordinary tail is flushed; a directive or late marker stays
+    /// suppressed.
+    async fn finalize(&mut self) -> ControlPresentation {
+        match self.mode {
+            ControlMode::Directive => ControlPresentation::Directive,
+            ControlMode::LateMarker => ControlPresentation::LateMarker,
+            ControlMode::Undecided | ControlMode::Ordinary => {
+                if !self.buffer.is_empty() {
+                    let text = core::mem::take(&mut self.buffer);
+                    let _ = self.push_raw(&text).await;
+                }
+                ControlPresentation::Ordinary
+            }
         }
     }
 
     /// Presents the owner-derived text after a suppressed directive. The
     /// caller must have scrubbed it already.
     async fn present(&mut self, text: &str) -> DeltaFlow {
-        let Some(inner) = self.inner.as_mut() else {
-            return DeltaFlow::Continue;
-        };
-        inner.push_delta(text).await
+        self.push_raw(text).await
     }
 }
 
@@ -436,10 +503,6 @@ impl DeltaSink for ControlHoldingSink<'_> {
         Box::pin(self.push(delta))
     }
 }
-
-/// The clarification shown for a malformed task-control directive.
-const TASK_CONTROL_CLARIFICATION: &str =
-    "I could not interpret the task instruction; nothing was changed.";
 
 #[expect(
     clippy::too_many_arguments,
@@ -502,44 +565,44 @@ pub async fn finish_turn(
             if !is_current() {
                 return DialogueOutcome::Interrupted;
             }
-            // The companion interprets its own output: a trailing
-            // task-control directive is executed through the composition
-            // root's port before anything is stored, and the stored reply is
-            // the owner-derived text. The directive line itself is never
-            // stored or shown, and the streamed text is the same reply the
-            // History row carries. A technical failure closes the stream
-            // interrupted rather than storing a reply no operation produced.
-            // Finalize the buffered first line before deciding: a marker
-            // prefix switches to directive mode, ordinary text is published.
-            let task_control_present = holder.finalize().await;
-            let (reply_text, reply_credential_set) = if task_control_present {
-                let tail = match interpret_task_control(&text.text) {
-                    DialogueTaskInterpretation::Command { command } => {
-                        match task_control.apply(command, message).await {
-                            DialogueTaskControlReply::Answered(tail) => tail,
-                            DialogueTaskControlReply::Unavailable => {
-                                return DialogueOutcome::Interrupted;
+            // Finalize the presentation classification before anything is
+            // stored: a late marker is a reserved-protocol violation and
+            // closes interrupted with no command and no reply row.
+            let presentation = holder.finalize().await;
+            let (reply_text, reply_credential_set) = match presentation {
+                ControlPresentation::LateMarker => return DialogueOutcome::Interrupted,
+                ControlPresentation::Ordinary => (text.text.clone(), text.credential_set),
+                ControlPresentation::Directive => {
+                    let tail = match interpret_task_control(&text.text) {
+                        DialogueTaskInterpretation::Command { command } => {
+                            match task_control.apply(command, message).await {
+                                DialogueTaskControlReply::Answered(tail) => tail,
+                                DialogueTaskControlReply::Unavailable => {
+                                    return DialogueOutcome::Interrupted;
+                                }
                             }
                         }
-                    }
-                    DialogueTaskInterpretation::Invalid => TASK_CONTROL_CLARIFICATION.to_owned(),
-                    // The sink saw a directive the scrubbed text does not
-                    // carry; fail closed instead of presenting unproven text.
-                    DialogueTaskInterpretation::Conversation { .. } => {
+                        DialogueTaskInterpretation::Invalid => {
+                            TASK_CONTROL_CLARIFICATION.to_owned()
+                        }
+                        // The sink saw a directive the scrubbed text does not
+                        // carry; fail closed instead of presenting unproven
+                        // text.
+                        DialogueTaskInterpretation::Conversation { .. } => {
+                            return DialogueOutcome::Interrupted;
+                        }
+                    };
+                    // Scrub before any user-visible publication: the
+                    // presented text and the durable reply are the same
+                    // scrubbed string.
+                    let Ok(scrubbed) = scrubber.scrub(&tail).await else {
+                        return DialogueOutcome::Interrupted;
+                    };
+                    if let DeltaFlow::Abort(_) = holder.present(&scrubbed.text).await {
                         return DialogueOutcome::Interrupted;
                     }
-                };
-                // Scrub before any user-visible publication: the presented
-                // text and the durable reply are the same scrubbed string.
-                let Ok(scrubbed) = scrubber.scrub(&tail).await else {
-                    return DialogueOutcome::Interrupted;
-                };
-                if let DeltaFlow::Abort(_) = holder.present(&scrubbed.text).await {
-                    return DialogueOutcome::Interrupted;
+                    (scrubbed.text, scrubbed.credential_set)
                 }
-                (scrubbed.text, scrubbed.credential_set)
-            } else {
-                (text.text.clone(), text.credential_set)
             };
             let reply = AppendHistoryCommand {
                 companion: input.companion,
@@ -1067,25 +1130,28 @@ pub enum DialogueTaskInterpretation {
 
 /// Interprets one companion reply for an embedded Task control command.
 ///
-/// The protocol is closed-world: the reply's first non-empty line must be
-/// `[task-control] {json}`, and it must be the only non-empty line. Anything
-/// else is ordinary conversation when the first non-empty line does not begin
-/// with the marker, and invalid when it does but the line is malformed or
-/// carries additional prose. A control reply therefore has no provider prose,
-/// so only the scrubbed typed owner outcome is ever presented or stored.
+/// `[task-control]` is a reserved internal protocol: it may appear only as the
+/// reply's first non-empty line, it must be the only non-empty line, and its
+/// JSON must be one closed-world command. A reply with no marker at all is
+/// ordinary conversation; a marker anywhere else — after prose, mid-line, with
+/// trailing prose, malformed, or repeated — is invalid and fails closed: the
+/// caller executes no Task operation and stores no reply text containing the
+/// protocol. A control reply therefore has no provider prose, so only the
+/// scrubbed typed owner outcome is ever presented or stored.
 #[must_use]
 pub fn interpret_task_control(text: &str) -> DialogueTaskInterpretation {
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(first_non_empty) = lines.iter().position(|line| !line.trim().is_empty()) else {
+    if !text.contains(TASK_CONTROL_MARKER) {
         return DialogueTaskInterpretation::Conversation {
             text: text.to_owned(),
         };
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(first_non_empty) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return DialogueTaskInterpretation::Invalid;
     };
     let trimmed = lines[first_non_empty].trim_start();
     if !trimmed.starts_with(TASK_CONTROL_MARKER) {
-        return DialogueTaskInterpretation::Conversation {
-            text: text.to_owned(),
-        };
+        return DialogueTaskInterpretation::Invalid;
     }
     let trailing_prose = lines
         .iter()
@@ -1471,15 +1537,21 @@ mod task_control_tests {
     }
 
     #[test]
-    fn a_marker_after_prose_is_not_a_control_reply() {
-        // The directive must be the first non-empty line; trailing prose
-        // keeps the whole reply ordinary conversation.
-        match interpret_task_control("Sure, I will do that.\n[task-control] {\"kind\":\"report\"}")
-        {
-            DialogueTaskInterpretation::Conversation { text } => {
-                assert!(text.contains("[task-control]"));
-            }
-            other => panic!("expected conversation, got {other:?}"),
+    fn a_marker_after_prose_is_invalid() {
+        // The marker is reserved: after prose (or mid-line) it fails closed
+        // instead of leaking through as ordinary conversation.
+        for text in [
+            "Sure, I will do that.\n[task-control] {\"kind\":\"report\"}",
+            "hello [task-control] {\"kind\":\"report\"}",
+            "hello\n[task-control] {\"kind\":\"cancel\"}\nmore",
+        ] {
+            assert!(
+                matches!(
+                    interpret_task_control(text),
+                    DialogueTaskInterpretation::Invalid
+                ),
+                "{text:?} must fail closed"
+            );
         }
     }
 
