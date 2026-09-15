@@ -519,10 +519,10 @@ impl HostHandle {
     /// content prepared under an unknown credential set; reconciliation
     /// neither resumes an execution nor replays a provider call or Action,
     /// and a still-blocked result stays withheld. The
-    /// [`serve`](crate::serve::lifecycle::serve) entry point runs this
+    /// [`crate::serve::lifecycle::serve`] entry point runs this
     /// between the store open and the listener bind; Host-integration tests
     /// run it to restart faithfully without a second listener. Like
-    /// [`serve`](crate::serve::lifecycle::serve), any refusal fails startup:
+    /// [`crate::serve::lifecycle::serve`], any refusal fails startup:
     /// the Host must not serve with an unknown presence state or unreadable
     /// result state.
     ///
