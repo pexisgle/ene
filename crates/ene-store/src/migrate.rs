@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 26;
+const CURRENT_VERSION: i64 = 27;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -279,6 +279,7 @@ CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
 CREATE INDEX idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_term_memory ON learning_memory_term (memory_id);
+CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
 CREATE UNIQUE INDEX idx_paired_device_wire ON paired_device (wire);
 CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
 CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
@@ -340,7 +341,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 27] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 28] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

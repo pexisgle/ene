@@ -10,7 +10,7 @@
 use super::frames::{
     invalid_phase_reject, outgoing_frame, outgoing_frame_pre_auth, stale_reject, unpaired_close,
 };
-use super::{HostHandle, LiveInput};
+use super::{HostHandle, LiveInput, device_client};
 use crate::conn::{ChallengeOutcome, ConnectionPhase, InstallOutcome, NonceAdmission};
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::{
@@ -299,6 +299,22 @@ impl HostHandle {
                                 &attribution,
                             )),
                         ));
+                        // Recovery auto-present: a reconnected still-present
+                        // client gets its absence backlog without an Owner
+                        // query. Unsolicited (no reply_to), silence when empty,
+                        // one bounded frame at most. Auth alone never restores
+                        // presence, so anything but Present-for-this-device
+                        // presents nothing.
+                        if let Some(device) = live.paired_device.clone()
+                            && attribution.active_client == Some(device_client(&device))
+                        {
+                            for summary in self
+                                .auto_present_for(frame, live, companion, &attribution)
+                                .await
+                            {
+                                out.push(summary);
+                            }
+                        }
                     }
                     out
                 }

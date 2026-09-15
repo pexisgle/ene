@@ -19,6 +19,11 @@ use super::round::{
     ConfirmPresentationWire, HistoryRequest, HistoryResponse, RoundIntakeOutcomeWire,
     SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
+use super::undelivered::{
+    GetReportSource, GetTaskReport, ListTasks, ReportSourceResponse, ResumeTask,
+    ResumeTaskOutcomeWire, SelectTask, SelectTaskResponse, TaskListResponse, TaskReportResponse,
+    UndeliveredAck, UndeliveredAckOutcome, UndeliveredRequest, UndeliveredResponse,
+};
 
 /// Externally tagged; unknown variants are rejected at deserialization,
 /// never defaulted.
@@ -45,6 +50,20 @@ pub enum WirePayload {
     ManagementOutcome(ManagementOutcome),
     ManagementViewRequest(ManagementViewRequest),
     ManagementView(ManagementView),
+    UndeliveredRequest(UndeliveredRequest),
+    UndeliveredResponse(UndeliveredResponse),
+    UndeliveredAck(UndeliveredAck),
+    UndeliveredAckOutcome(UndeliveredAckOutcome),
+    ListTasks(ListTasks),
+    TaskListResponse(TaskListResponse),
+    GetTaskReport(GetTaskReport),
+    TaskReportResponse(TaskReportResponse),
+    GetReportSource(GetReportSource),
+    ReportSourceResponse(ReportSourceResponse),
+    SelectTask(SelectTask),
+    SelectTaskResponse(SelectTaskResponse),
+    ResumeTask(ResumeTask),
+    ResumeTaskOutcome(ResumeTaskOutcomeWire),
     Reject(RejectNotice),
 }
 
@@ -76,6 +95,20 @@ impl WirePayload {
             Self::ManagementOutcome(_) => "ManagementOutcome",
             Self::ManagementViewRequest(_) => "ManagementViewRequest",
             Self::ManagementView(_) => "ManagementView",
+            Self::UndeliveredRequest(_) => "UndeliveredRequest",
+            Self::UndeliveredResponse(_) => "UndeliveredResponse",
+            Self::UndeliveredAck(_) => "UndeliveredAck",
+            Self::UndeliveredAckOutcome(_) => "UndeliveredAckOutcome",
+            Self::ListTasks(_) => "ListTasks",
+            Self::TaskListResponse(_) => "TaskListResponse",
+            Self::GetTaskReport(_) => "GetTaskReport",
+            Self::TaskReportResponse(_) => "TaskReportResponse",
+            Self::GetReportSource(_) => "GetReportSource",
+            Self::ReportSourceResponse(_) => "ReportSourceResponse",
+            Self::SelectTask(_) => "SelectTask",
+            Self::SelectTaskResponse(_) => "SelectTaskResponse",
+            Self::ResumeTask(_) => "ResumeTask",
+            Self::ResumeTaskOutcome(_) => "ResumeTaskOutcome",
             Self::Reject(_) => "Reject",
         }
     }

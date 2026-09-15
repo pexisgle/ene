@@ -105,8 +105,8 @@ pub(crate) mod lifecycle;
 use lifecycle::ensure_data_dir;
 
 pub(crate) use frames::{
-    invalid_phase_reject, outgoing_envelope, outgoing_frame, reject_frame, stale_reject,
-    unpaired_close,
+    invalid_phase_reject, outgoing_envelope, outgoing_fact, outgoing_frame, reject_frame,
+    stale_reject, unpaired_close,
 };
 pub use lifecycle::serve;
 
@@ -454,6 +454,17 @@ pub struct HostHandle {
     /// operation still goes through the Task owner's durable compare. A
     /// restart drops it (restart continuation is Stage 5).
     pub(crate) conversation_tasks: crate::task_control::ConversationTaskProjection,
+    /// Host-memory presentation subscriptions, receipts, query-scoped refs,
+    /// cursors, and resume retry-epoch slots (IPC §13.3, §18.2).
+    ///
+    /// Short `std` mutex sections only (clone out before every await, never
+    /// hold across an await); transitions serialize on
+    /// [`HostHandle::presentation_lock`]. Restart drops all of it while the
+    /// database persists.
+    pub(crate) presentations: StdMutex<crate::presentation::PresentationState>,
+    /// Serializes presentation begin/ack transitions (CCT §10.5). Held only
+    /// across short store roundtrips, never across provider I/O.
+    pub(crate) presentation_lock: AsyncMutex<()>,
     /// Trusted first-party Task premises (the Owner-selected Workspace).
     ///
     /// In-memory only and never provider output: the model can propose a Task
@@ -537,6 +548,8 @@ impl HostHandle {
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: crate::task_run::TaskExecutionRegistry::default(),
             conversation_tasks: crate::task_control::ConversationTaskProjection::default(),
+            presentations: StdMutex::new(crate::presentation::PresentationState::default()),
+            presentation_lock: AsyncMutex::new(()),
             trusted_task_premises: crate::task_control::TrustedTaskPremises::default(),
             task_launcher: OnceLock::new(),
             #[cfg(test)]
@@ -972,6 +985,76 @@ impl HostHandle {
                     }
                 }
             }
+            WirePayload::UndeliveredRequest(request) => {
+                if Self::gate_trips(&frame, &live) {
+                    return emit_end(sink, unpaired_close(&frame, &live));
+                }
+                for response in self.request_undelivered(&frame, &live, request).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::UndeliveredAck(ack) => {
+                if Self::gate_trips(&frame, &live) {
+                    return emit_end(sink, unpaired_close(&frame, &live));
+                }
+                for response in self.ack_undelivered(&frame, &live, ack).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::ListTasks(query) => {
+                if Self::gate_trips(&frame, &live) {
+                    return emit_end(sink, unpaired_close(&frame, &live));
+                }
+                for response in self.list_tasks_wire(&frame, &live, query).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::GetTaskReport(query) => {
+                if Self::gate_trips(&frame, &live) {
+                    return emit_end(sink, unpaired_close(&frame, &live));
+                }
+                for response in self.report_wire(&frame, &live, query).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::GetReportSource(query) => {
+                if Self::gate_trips(&frame, &live) {
+                    return emit_end(sink, unpaired_close(&frame, &live));
+                }
+                for response in self.report_source_wire(&frame, &live, query).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::SelectTask(query) => {
+                if Self::gate_trips(&frame, &live) {
+                    return emit_end(sink, unpaired_close(&frame, &live));
+                }
+                for response in self.select_task_wire(&frame, &live, query).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::ResumeTask(command) => {
+                if Self::gate_trips(&frame, &live) {
+                    return emit_end(sink, unpaired_close(&frame, &live));
+                }
+                for response in self.resume_task_wire(&frame, &live, command).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
             // Inbound rejects, stray acks, and future variants answer
             // nothing: only the Host rejects, and only in response.
             _ => {}
@@ -1010,6 +1093,15 @@ impl HostHandle {
             return GateDecision::Unpaired;
         }
         GateDecision::Pass
+    }
+
+    /// Presentation-slice admission: trips exactly when [`Self::gate`]
+    /// would not pass, so the premises stay single-sourced in the
+    /// connection table. The answer stays the terminal unpaired close —
+    /// the stale-vs-close distinction of the other arms is a later-slice
+    /// concern for these handlers, never a guessed pass.
+    fn gate_trips(frame: &WireFrame, live: &LiveInput) -> bool {
+        !matches!(Self::gate(frame, live), GateDecision::Pass)
     }
 
     pub(crate) fn round_for(&self, wire: &str) -> Option<RoundId> {

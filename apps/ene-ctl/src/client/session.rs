@@ -126,6 +126,23 @@ impl SessionState {
         let position = find_deferred_reply(&self.deferred, own)?;
         self.deferred.remove(position).map(|frame| frame.payload)
     }
+
+    /// Drains deferred auto-presented summaries (unsolicited facts the Host
+    /// pushed without `reply_to`). The caller paints them and ACKs each
+    /// receipt it fully painted; unpainted ones stay Unknown Host-side.
+    pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
+        let mut summaries = Vec::new();
+        let mut rest = VecDeque::with_capacity(self.deferred.len());
+        for frame in self.deferred.drain(..) {
+            if matches!(frame.payload, WirePayload::UndeliveredResponse(_)) {
+                summaries.push(frame);
+            } else {
+                rest.push_back(frame);
+            }
+        }
+        self.deferred = rest;
+        summaries
+    }
 }
 
 pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {

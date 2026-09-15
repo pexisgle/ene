@@ -535,6 +535,20 @@ impl HostHandle {
                 AttachOutcome::Attached(fresh) => {
                     attached_generation = Some(fresh.generation);
                     attribution = fresh;
+                    // Summon auto-present: this submit just established
+                    // formal presence, so the absence backlog presents
+                    // without an Owner query. Best-effort and bounded: a
+                    // full buffer drops the push (the explicit request
+                    // path re-presents), and the new turn's own reply
+                    // still streams normally afterwards.
+                    for summary in self
+                        .auto_present_for(frame, live, companion, &attribution)
+                        .await
+                    {
+                        if sink.emit(summary).is_err() {
+                            break;
+                        }
+                    }
                 }
                 AttachOutcome::Raced => {
                     let Ok(Some(current)) = self.store.load_attribution(companion.as_raw()).await

@@ -117,13 +117,16 @@ impl PreparedRequest {
     /// [`ManagementIntent`](ene_api::v1::management::ManagementIntent) keeps
     /// its `intent_id` (the Host's management idempotency key, never a second
     /// minted id), a
-    /// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) mints a fresh
+    /// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) or
+    /// [`ResumeTask`](ene_api::v1::undelivered::ResumeTask) mints a fresh
     /// [`CommandWireId`], and a pure request carries none.
     #[must_use]
     pub fn new(payload: WirePayload) -> Self {
         let command_id = match &payload {
             WirePayload::ManagementIntent(intent) => Some(intent.intent_id),
-            WirePayload::SubmitTextInput(_) => Some(CommandWireId(uuid::Uuid::new_v4())),
+            WirePayload::SubmitTextInput(_) | WirePayload::ResumeTask(_) => {
+                Some(CommandWireId(uuid::Uuid::new_v4()))
+            }
             _ => None,
         };
         Self {
@@ -157,6 +160,21 @@ pub fn frame_for_session(
     if matches!(frame.payload, WirePayload::SubmitTextInput(_)) {
         frame.envelope.observed.presence_generation_view = generation;
     }
+    frame
+}
+
+/// Stamps both observed marks for presentation ACKs: the Client echoes the
+/// round and generation the summary showed, and the Host compares them
+/// against the receipt instead of trusting any claim of currentness.
+pub fn observed_frame(
+    payload: WirePayload,
+    sender: WireSender,
+    generation: Option<u64>,
+    round: Option<ene_api::v1::refs::RoundWireId>,
+) -> WireFrame {
+    let mut frame = frame_for(payload, sender);
+    frame.envelope.observed.presence_generation_view = generation;
+    frame.envelope.observed.round_view = round;
     frame
 }
 
