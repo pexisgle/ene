@@ -1,10 +1,12 @@
 //! Host transport: socket path, frame builders, handshake, request/response.
 //!
 //! The CLI dials the Host over a Unix-domain socket at [`socket_path`]
-//! (`ene.sock` inside the resolved data directory). Every connect runs pairing
-//! first, then capability advertisement: already-paired descriptors re-pair
-//! idempotently to the same device key. Device identity and secret
-//! provisioning live in [`crate::device`].
+//! (`ene.sock` inside the resolved data directory). A run without a stored
+//! device pairs first (opening or polling a pending request by its opaque
+//! pending id, remembered in the `client-pending.json` progress file), then
+//! advertises capability; a run with a stored device skips pairing and
+//! resolves its DeviceWireId at capability time, never by descriptor (#1389).
+//! Device identity and secret provisioning live in [`crate::device`].
 //!
 //! A first run sends [`ene_api::v1::handshake::PairingRequest`]
 //! (display descriptor, pre-pairing sender with no device ID), which must
@@ -53,10 +55,12 @@
 //! per-frame step of that loop; the deferred queue holds the rest.
 //!
 //! A still-pending pairing answers
-//! [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation):
-//! the operator approves the device on the Host-local trusted surface, re-runs
-//! the client once with the shown secret in the environment so it reaches the
-//! `0600` device file, and later runs read the file. A denied pairing exits 2
+//! [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation)
+//! with the opaque pending ID: the operator approves that ID on the
+//! Host-local trusted surface, re-runs the client once with the shown secret
+//! in the environment so it reaches the `0600` device file (the remembered
+//! pending ID polls the same request and learns the device key), and later
+//! runs read the file. A denied pairing exits 2
 //! with the Host reason plus that guidance. A stored device the Host no longer
 //! knows fails later at the domain gate (unknown sender: close plus
 //! `DisconnectNotice`), never with a dedicated capability-time outcome.
@@ -68,7 +72,7 @@
 //! cannot leak conversation text. All other error messages carry operations,
 //! payload-kind names, refs, or generations — never bodies or secrets.
 //!
-//! Non-Unix platforms get stubs returning
+//! Platforms without a supported transport get stubs returning
 //! [`crate::errors::CliError::UnsupportedPlatform`];
 //! the pure builders below stay shared.
 

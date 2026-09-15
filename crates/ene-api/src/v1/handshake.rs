@@ -12,10 +12,17 @@ use super::refs::DeviceWireId;
 /// Starts pairing for a new device: Owner-confirmable descriptor only.
 /// Sent pre-pairing, so its envelope carries no device ID (see the bootstrap
 /// rule on [`super::envelope::WireSender`]).
+///
+/// `pending_id` polls a previously issued pending request: [`None`] opens a
+/// new request (the Host mints a fresh opaque pending identity), [`Some`]
+/// re-asks about that pending after Owner approval. The descriptor stays
+/// display-only in both cases and is never an identity lookup key (#1389).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PairingRequest {
     /// Display only. Never authority.
     pub device_descriptor: String,
+    /// Previously issued pending identity being polled, if any.
+    pub pending_id: Option<String>,
 }
 
 /// Pairing outcome: an Ok-side outcome, never a retryable error.
@@ -23,8 +30,10 @@ pub struct PairingRequest {
 pub enum PairingResult {
     /// Owner confirmed; the device key is now issued.
     Paired { device_id: DeviceWireId },
-    /// Waiting on the Host-local trusted-surface confirmation.
-    PendingOwnerConfirmation,
+    /// Waiting on the Host-local trusted-surface confirmation. Carries the
+    /// opaque pending identity the approval names; the descriptor is not the
+    /// approval key (#1389).
+    PendingOwnerConfirmation { pending_id: String },
     Denied {
         /// Operational reason. Never a secret or a body copy.
         reason: String,
@@ -110,6 +119,7 @@ mod tests {
     fn pairing_request_keeps_display_descriptor() {
         let request = PairingRequest {
             device_descriptor: String::from("Owner laptop"),
+            pending_id: None,
         };
         let rendered = format!("{request:?}");
         assert!(

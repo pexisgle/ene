@@ -33,9 +33,10 @@ pub fn proof_frame(
 #[must_use]
 pub fn pending_guidance() -> String {
     format!(
-        "pairing is pending owner confirmation; approve the device on the \
-         Host-local trusted surface, then re-run ene-ctl once with {} set \
-         to the shown secret (it is stored to the 0600 client device file)",
+        "pairing is pending owner confirmation; approve the pending ID on the \
+         Host-local trusted surface (`approve-device` lists pending IDs), then \
+         re-run ene-ctl once with {} set to the shown secret (the device key \
+         is issued on the next run and stored to the 0600 client device file)",
         device::BOOTSTRAP_SECRET_ENV,
     )
 }
@@ -160,11 +161,17 @@ pub fn frame_for_session(
 }
 
 /// Pre-pairing sender: the Host issues the device ID after Owner
-/// confirmation.
-pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> WireFrame {
+/// confirmation. `pending_id` polls a previously issued pending after
+/// approval; [`None`] opens a new request.
+pub fn pairing_frame(
+    descriptor: &str,
+    incarnation: ClientIncarnationId,
+    pending_id: Option<String>,
+) -> WireFrame {
     frame_for(
         WirePayload::PairingRequest(PairingRequest {
             device_descriptor: String::from(descriptor),
+            pending_id,
         }),
         WireSender {
             device_id: None,

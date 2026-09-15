@@ -31,14 +31,18 @@ impl HostHandle {
     ///
     /// Denial carries an operational reason only. A non-blank descriptor goes
     /// to
-    /// [`request_pairing`](DevicePairingRepository::request_pairing): an
-    /// already-paired descriptor re-issues its device key as
-    /// [`Paired`](PairingResult::Paired) (the connection table then records
-    /// the issued device in the same phase operation), while a fresh
-    /// descriptor answers
-    /// [`PendingOwnerConfirmation`](PairingResult::PendingOwnerConfirmation)
-    /// until the Host-local `approve-device` inlet records the Owner decision.
-    /// Blank descriptors are denied with [`Denied`](PairingResult::Denied):
+    /// [`request_pairing`](DevicePairingRepository::request_pairing) with this
+    /// connection as the origin and the request's poll id: a new request
+    /// mints a fresh opaque pending identity (same-descriptor requests never
+    /// share one, #1389), while a poll for an already-approved id re-issues
+    /// its device key as [`Paired`](PairingResult::Paired) (the connection
+    /// table then records the issued device in the same phase operation) and
+    /// a poll for a waiting id returns its stored pending only on its origin
+    /// connection — a new connection opens a new request instead, since the
+    /// mapping is kept only until the origin connection ends. A stale poll id
+    /// (cleared by a restart, or never issued) mints a fresh pending so the
+    /// client converges, and a poll whose body differs is denied. Blank
+    /// descriptors are denied with [`Denied`](PairingResult::Denied):
     /// the pairing outcome has no `NeedsClarification` variant, so refusal is
     /// the honest shape. A store failure likewise denies (operational reason
     /// only); the Client retries the same request, which is idempotent.
@@ -55,7 +59,15 @@ impl HostHandle {
         if descriptor.is_empty() {
             return vec![denied_pairing(frame, live, "blank device descriptor")];
         }
-        match DevicePairingRepository::request_pairing(&self.store, descriptor).await {
+        let origin = live.connection_id.0.as_hyphenated().to_string();
+        match DevicePairingRepository::request_pairing(
+            &self.store,
+            descriptor,
+            origin,
+            request.pending_id.clone(),
+        )
+        .await
+        {
             Ok(DevicePairingStatus::Paired { device }) => {
                 // The issued key is the stored opaque projection, never the
                 // domain identity: the connection layer records this string
@@ -80,12 +92,25 @@ impl HostHandle {
                     WirePayload::PairingResult(PairingResult::Paired { device_id }),
                 )]
             }
-            Ok(DevicePairingStatus::Pending { .. }) => vec![outgoing_frame_pre_auth(
+            Ok(DevicePairingStatus::Pending { pending }) => vec![outgoing_frame_pre_auth(
                 frame,
                 live,
-                WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation),
+                WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation {
+                    pending_id: pending.pending_id,
+                }),
             )],
-            Err(_) => vec![denied_pairing(frame, live, "pairing store unavailable")],
+            Err(error) => {
+                let reason = error.to_string();
+                if reason.contains("poll body mismatch") {
+                    vec![denied_pairing(
+                        frame,
+                        live,
+                        "pairing poll body mismatch; open a new request",
+                    )]
+                } else {
+                    vec![denied_pairing(frame, live, "pairing store unavailable")]
+                }
+            }
         }
     }
 

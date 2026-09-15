@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 24;
+const CURRENT_VERSION: i64 = 25;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -158,11 +158,14 @@ CREATE TABLE paired_device (
 device_id TEXT PRIMARY KEY,
 descriptor TEXT NOT NULL,
 paired_at TEXT NOT NULL,
-wire TEXT NULL
+wire TEXT NULL,
+pending_id TEXT NULL UNIQUE
 );
 CREATE TABLE pairing_pending (
-descriptor TEXT PRIMARY KEY,
-requested_at TEXT NOT NULL
+pending_id TEXT PRIMARY KEY,
+descriptor TEXT NOT NULL,
+requested_at TEXT NOT NULL,
+origin_connection TEXT NOT NULL
 );
 CREATE TABLE presence_attribution (
 companion_id TEXT PRIMARY KEY,
@@ -256,7 +259,6 @@ CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
 CREATE INDEX idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_term_memory ON learning_memory_term (memory_id);
-CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
 CREATE UNIQUE INDEX idx_paired_device_wire ON paired_device (wire);
 CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
 CREATE INDEX idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
@@ -317,7 +319,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 25] {
+        for version in [-1, 0, 1, 23, 24, 26] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

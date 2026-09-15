@@ -44,7 +44,7 @@ fn platform_display_names_os_and_arch() {
 
 #[test]
 fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
-    let frame = pairing_frame("Owner laptop", incarnation());
+    let frame = pairing_frame("Owner laptop", incarnation(), None);
     let WirePayload::PairingRequest(request) = &frame.payload else {
         return Err(String::from("pairing builder must emit PairingRequest"));
     };
@@ -270,6 +270,10 @@ fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
     assert!(
         first.counter == 1,
         "first published counter is 1, got {first:?}"
+    );
+    assert!(
+        first.random <= i64::MAX as u64,
+        "random stays in the non-negative SQLite INTEGER range history stores, got {first:?}"
     );
     // Same-process reconnect reuses the one boot identity without advancing.
     let second = boot_incarnation(&dir);

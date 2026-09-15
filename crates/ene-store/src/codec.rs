@@ -424,14 +424,18 @@ pub(crate) fn decode_device_record(
 }
 
 pub(crate) fn decode_pending_pairing(
+    pending_id: String,
     descriptor: String,
     requested_text: &str,
+    origin_connection: String,
 ) -> Result<PendingPairing, String> {
     let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
         .map_err(|_| String::from("malformed pairing request timestamp"))?;
     Ok(PendingPairing {
+        pending_id,
         descriptor,
         requested_at,
+        origin_connection,
     })
 }
 

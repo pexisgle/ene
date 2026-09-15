@@ -74,13 +74,13 @@ mod tests {
     /// migrations run inside the open), then mutate.
     async fn offline_approve(
         dir: &Path,
-        descriptor: &str,
+        pending_id: &str,
     ) -> Result<Option<(ene_credential::DeviceRecord, String)>, CoreError> {
         let _lock = HostLock::acquire(dir)?;
         let handle =
             HostHandle::open_with_cred_store(dir, CredStore::Memory(MemoryCredentialStore::new()))
                 .await?;
-        handle.approve_device(descriptor).await
+        handle.approve_device(pending_id).await
     }
 
     async fn open_handle(dir: &Path) -> HostHandle {
@@ -162,11 +162,11 @@ mod tests {
             "the refused startup must not open or migrate the store"
         );
         drop(winner);
-        let admitted = offline_approve(dir.path(), "laptop").await;
+        let admitted = offline_approve(dir.path(), "unknown-pending-id").await;
         assert!(
             matches!(admitted, Ok(None)),
             "the released lock must admit the mutation command, which then \
-             reports the unknown descriptor, got {admitted:?}"
+             reports the unknown pending id, got {admitted:?}"
         );
         assert!(database.exists(), "the admitted startup opens the store");
     }
@@ -179,18 +179,20 @@ mod tests {
         let winner = HostLock::acquire(dir.path());
         assert!(winner.is_ok(), "the winning lock must be held: {winner:?}");
         let handle = open_handle(dir.path()).await;
-        let requested =
-            DevicePairingRepository::request_pairing(&handle.store, String::from("laptop")).await;
-        assert!(
-            matches!(
-                requested,
-                Ok(ene_credential::DevicePairingStatus::Pending { .. })
-            ),
-            "the fresh descriptor must pend, got {requested:?}"
-        );
+        let requested = DevicePairingRepository::request_pairing(
+            &handle.store,
+            String::from("laptop"),
+            String::from("test-connection"),
+            None,
+        )
+        .await;
+        let Ok(ene_credential::DevicePairingStatus::Pending { pending }) = requested else {
+            panic!("the fresh descriptor must pend, got {requested:?}");
+        };
+        let pending_id = pending.pending_id.clone();
         let before = generation(&handle).await;
 
-        let refused = offline_approve(dir.path(), "laptop").await;
+        let refused = offline_approve(dir.path(), &pending_id).await;
         assert!(
             matches!(refused, Err(CoreError::AlreadyRunning)),
             "the mutation command must be refused while the Host runs, got {refused:?}"
@@ -201,15 +203,16 @@ mod tests {
             "the refused command must not advance the presence generation"
         );
         let pending = handle.pending_devices().await.expect("pendings must list");
-        assert_eq!(
-            pending,
-            vec![String::from("laptop")],
+        assert!(
+            pending
+                .iter()
+                .any(|entry| entry.pending_id == pending_id && entry.descriptor == "laptop"),
             "the refused command must not approve the pending device"
         );
 
         drop(winner);
         assert!(
-            matches!(offline_approve(dir.path(), "laptop").await, Ok(Some(_))),
+            matches!(offline_approve(dir.path(), &pending_id).await, Ok(Some(_))),
             "the released lock must admit the mutation and approve the pending device"
         );
         let pending = handle.pending_devices().await.expect("pendings must list");

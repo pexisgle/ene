@@ -577,6 +577,7 @@ async fn redelivery_keeps_the_connection_serving() {
     let pairing = framed(
         WirePayload::PairingRequest(PairingRequest {
             device_descriptor: String::from("dup-device"),
+            pending_id: None,
         }),
         incarnation,
         duplicate,
