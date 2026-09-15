@@ -5,9 +5,12 @@
 //! itself: a fixed response-format preamble, the relied revision's
 //! adopted-purpose text from the `task_revision` snapshot, each adopted
 //! instruction body resolved through the Task-owned [`TaskInstructionSource`]
-//! port from its canonical History source, and the execution-local Action
-//! transcript (the completed tool calls and their observations) the caller
-//! passes in the premise. Everything is one string with one fixed framing,
+//! port from its canonical History or first-party activity source, the
+//! every-turn past-executed facts block (the Task's recorded Action attempts
+//! and results as attribution-only lines, always present and never an
+//! omission candidate), and the execution-local Action transcript (the
+//! completed tool calls and their observations) the caller passes in the
+//! premise. Everything is one string with one fixed framing,
 //! scrubbed exactly once, and only the injected [`SecretScrubber`]'s output
 //! reaches the port. This module never constructs a [`ScrubbedText`] literal,
 //! never copies an instruction body into Task state, never persists the
@@ -352,17 +355,22 @@ pub enum TaskAgentTurnOutcome {
 ///
 /// The logical input is a fixed response-format preamble, the relied
 /// revision's adopted-purpose text, the adopted-instruction bodies in
-/// `TaskRecord.context` order, and the execution-local Action exchanges the
-/// caller replays (each request followed by its observation, oldest first).
+/// `TaskRecord.context` order, the every-turn past-executed facts block, and
+/// the execution-local Action exchanges the caller replays (each request
+/// followed by its observation, oldest first).
 /// The newest exchanges are kept within the port's
 /// [`input_budget`](TaskAgentInference::input_budget): whole oldest exchanges
 /// are dropped (with a fixed omission note) when the transcript would
 /// outgrow the port, and an exchange that cannot fit even alone is left in
 /// place so the port refuses the over-limit input instead of the model
-/// answering from a silently shortened observation. The whole string is
-/// scrubbed exactly once and only the scrubber's output crosses the port. Instruction bodies stay canonical in History: the
-/// [`TaskInstructionSource`] port reads each adopted entry's source, the
-/// source/role/companion correspondence is verified before the body is
+/// answering from a silently shortened observation. The past-executed facts
+/// block is never dropped: it is reserved up front like the purpose and
+/// instructions, and a block that alone outgrows the budget fails the turn
+/// as [`TaskAgentTurnError::InputUnavailable`]. The whole string is
+/// scrubbed exactly once and only the scrubber's output crosses the port. Instruction bodies stay canonical in History or in the first-party
+/// activity record: the
+/// [`TaskInstructionSource`] port reads each adopted entry's origin, the
+/// kind/source/role/companion correspondence is verified before the body is
 /// used, and an absent source ends the turn as
 /// [`TaskAgentTurnOutcome::InstructionSourceMissing`] without fabricating,
 /// skipping, or rewriting anything. The exchange transcript is execution-local
@@ -372,7 +380,8 @@ pub enum TaskAgentTurnOutcome {
 ///
 /// The logical input's canonical source correlation (`data_use`) is the
 /// purpose entry's `origin.source` followed by every adopted instruction's
-/// `origin.source`, in the same order, duplicates retained. The Action
+/// `origin.source` and then every past-executed fact's source, in the same
+/// order, duplicates retained. The Action
 /// exchange transcript is execution-local and carries no canonical source, so
 /// it adds no `data_use` entry. It travels to
 /// the claim, which compares it against the canonical current
@@ -453,17 +462,22 @@ pub async fn orchestrate_task_agent_turn(
                 });
             }
             TaskContextItem::AdoptedInstruction => {
-                // The body producer exists only for Owner conversation
-                // sources; a Spontaneous / ScheduleOccurrence item stays
-                // fail closed until its producer designs a body resolution,
-                // and is never silently skipped.
-                if entry.origin.kind != TaskContextOriginKind::OwnerConversation {
+                // The body producer exists only for Owner conversation and
+                // Owner management sources; a Spontaneous /
+                // ScheduleOccurrence item stays fail closed until its
+                // producer designs a body resolution, and is never silently
+                // skipped.
+                if !matches!(
+                    entry.origin.kind,
+                    TaskContextOriginKind::OwnerConversation
+                        | TaskContextOriginKind::OwnerManagement
+                ) {
                     return Err(TaskAgentTurnError::InputUnavailable {
                         reason: String::from("unsupported instruction origin kind"),
                     });
                 }
                 let loaded = instructions
-                    .load_owner_instruction(entry.origin.source)
+                    .load_owner_instruction(entry.origin)
                     .await
                     .map_err(|_| TaskAgentTurnError::InputUnavailable {
                         reason: String::from("instruction source read failed"),
@@ -474,7 +488,8 @@ pub async fn orchestrate_task_agent_turn(
                         source: entry.origin.source,
                     });
                 };
-                if loaded.source != entry.origin.source
+                if loaded.kind != entry.origin.kind
+                    || loaded.source != entry.origin.source
                     || loaded.role != TaskInstructionRole::Owner
                     || loaded.companion != record.task.assignee.companion
                 {
@@ -492,6 +507,25 @@ pub async fn orchestrate_task_agent_turn(
             reason: String::from("task context has no adopted purpose entry"),
         });
     };
+    // The every-turn past-executed facts block (H-A.1): the Task's recorded
+    // Action attempts (all revisions and delegations) and recorded results
+    // as attribution-only lines, in the same fixed framing whether or not
+    // any exist. The block is never an omission candidate like the
+    // execution-local transcript: when recorded facts exceed the bounded
+    // read, or the block alone outgrows the port budget, the turn refuses
+    // instead of reasoning from a shortened history.
+    let past = repository
+        .load_past_executed_facts(record.task.reference.task)
+        .await
+        .map_err(storage_error)?;
+    if past.has_more {
+        return Err(TaskAgentTurnError::InputUnavailable {
+            reason: String::from("past executed facts exceed the turn bound"),
+        });
+    }
+    for fact in &past.facts {
+        data_use.push(fact.source);
+    }
     // The logical input is assembled in full before the single scrub: the
     // scrubber sees purpose, every resolved instruction body, and the
     // execution-local Action transcript once, and only its output may cross
@@ -504,11 +538,32 @@ pub async fn orchestrate_task_agent_turn(
     let (kept_exchanges, omitted) = fit_exchanges(
         purpose_text,
         &instruction_texts,
+        &past.facts,
         &premise.exchanges,
         inference.input_budget(),
     );
-    let raw_input =
-        assemble_logical_input(purpose_text, &instruction_texts, kept_exchanges, omitted);
+    let raw_input = assemble_logical_input(
+        purpose_text,
+        &instruction_texts,
+        &past.facts,
+        kept_exchanges,
+        omitted,
+    );
+    // A never-omitted block that alone outgrows the port budget is never
+    // silently shortened and never sent: no transcript trimming could help,
+    // so the turn refuses before scrubbing or reaching the port. A
+    // transcript overflow around a fitting block keeps its existing
+    // port-refusal behavior: the port refuses the over-limit input as
+    // `OverLimit` instead of the model answering from a silently shortened
+    // transcript.
+    if raw_input.chars().count() > inference.input_budget()
+        && fixed_input_len(purpose_text, &instruction_texts, &past.facts)
+            >= inference.input_budget()
+    {
+        return Err(TaskAgentTurnError::InputUnavailable {
+            reason: String::from("past executed facts exceed the input budget"),
+        });
+    }
     let Ok(prompt) = scrubber.scrub(&raw_input).await else {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("credential scrub failed"),
@@ -552,6 +607,7 @@ const RESPONSE_FORMAT_PREAMBLE: &str = "[RESPONSE FORMAT]\n\
      [PURPOSE]\n";
 
 const INSTRUCTION_MARKER: &str = "\n[INSTRUCTION]\n";
+const PAST_FACTS_MARKER: &str = "\n[PAST EXECUTED FACTS]\n";
 const TOOL_CALL_MARKER: &str = "\n[TOOL CALL]\n";
 const TOOL_RESULT_MARKER: &str = "\n[TOOL RESULT]\n";
 
@@ -562,16 +618,19 @@ const OMISSION_NOTE: &str = "\n[NOTE] earlier tool exchanges were omitted to fit
 ///
 /// The protocol preamble comes first (it tells the model how to answer and
 /// never varies), then the purpose, then each resolved instruction body in
-/// `TaskRecord.context` order, then the omission note when older exchanges
-/// were dropped, then the kept Action exchanges of this execution in order.
+/// `TaskRecord.context` order, then the past-executed facts block (the
+/// marker with zero or more attribution lines, always present and never an
+/// omission candidate), then the omission note when older exchanges were
+/// dropped, then the kept Action exchanges of this execution in order.
 /// The boundary markers are identical for every turn (including a turn with
-/// no instructions or exchanges), so the provider-visible boundaries are
-/// never body text and never vary by caller. Instructions are not sorted,
-/// deduplicated, or filtered: repeated adoption of the same source remains
-/// repeated input.
+/// no instructions, no facts, or no exchanges), so the provider-visible
+/// boundaries are never body text and never vary by caller. Instructions
+/// and facts are not sorted, deduplicated, or filtered: repeated adoption
+/// of the same source remains repeated input.
 fn assemble_logical_input(
     purpose: &str,
     instructions: &[String],
+    facts: &[crate::report::PastExecutedFact],
     exchanges: &[TaskAgentActionExchange],
     omitted: bool,
 ) -> String {
@@ -580,6 +639,11 @@ fn assemble_logical_input(
     for instruction in instructions {
         input.push_str(INSTRUCTION_MARKER);
         input.push_str(instruction);
+    }
+    input.push_str(PAST_FACTS_MARKER);
+    for fact in facts {
+        input.push_str(&fact.line);
+        input.push('\n');
     }
     if omitted {
         input.push_str(OMISSION_NOTE);
@@ -603,18 +667,38 @@ fn assemble_logical_input(
 /// port refuses the over-limit input: the model must never answer from a
 /// silently shortened observation. The omitted note's length is reserved up
 /// front, so adding it cannot push the input back over the budget.
-fn fit_exchanges<'a>(
+/// The never-omitted head of the logical input: the protocol preamble,
+/// the relied purpose, every resolved instruction body, and the
+/// past-executed facts block. When this alone reaches the port budget, no
+/// transcript trimming could produce a fitting input.
+fn fixed_input_len(
     purpose: &str,
     instructions: &[String],
-    exchanges: &'a [TaskAgentActionExchange],
-    budget: usize,
-) -> (&'a [TaskAgentActionExchange], bool) {
-    let prefix = RESPONSE_FORMAT_PREAMBLE.chars().count()
+    facts: &[crate::report::PastExecutedFact],
+) -> usize {
+    RESPONSE_FORMAT_PREAMBLE.chars().count()
         + purpose.chars().count()
         + instructions
             .iter()
             .map(|text| INSTRUCTION_MARKER.chars().count() + text.chars().count())
-            .sum::<usize>();
+            .sum::<usize>()
+        // The facts block is never an omission candidate, so its length is
+        // reserved up front like the purpose and instructions.
+        + PAST_FACTS_MARKER.chars().count()
+        + facts
+            .iter()
+            .map(|fact| fact.line.chars().count() + 1)
+            .sum::<usize>()
+}
+
+fn fit_exchanges<'a>(
+    purpose: &str,
+    instructions: &[String],
+    facts: &[crate::report::PastExecutedFact],
+    exchanges: &'a [TaskAgentActionExchange],
+    budget: usize,
+) -> (&'a [TaskAgentActionExchange], bool) {
+    let prefix = fixed_input_len(purpose, instructions, facts);
     if prefix >= budget {
         return (exchanges, false);
     }
