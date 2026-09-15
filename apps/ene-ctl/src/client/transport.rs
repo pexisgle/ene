@@ -2,25 +2,25 @@
 
 use std::path::Path;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthChallenge;
 use ene_api::v1::payload::WirePayload;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_credential::pairing_proof_hex;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::device;
 use crate::errors::CliError;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, missing_secret_guidance, pairing_frame,
     pending_guidance, proof_frame, unreadable_device_file_guidance,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::session::{
     AuthDecision, FrameDecision, SessionState, decide_auth, decide_frame, stale_generation_of,
 };

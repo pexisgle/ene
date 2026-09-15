@@ -97,10 +97,10 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
 #[cfg(any(unix, test))]
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::handshake::NegotiatedConnection;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_plugin_ipc::{MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
@@ -700,7 +700,7 @@ where
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::serve::STREAM_BUFFER_FRAMES;
 
 /// Writes one response frame to the connection.
