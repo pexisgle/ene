@@ -11,7 +11,7 @@
 //! `AddrInUse` as a possible live peer and probes before deciding to unlink a
 //! stale path; a probe timeout fails safe toward live.
 //!
-//! Per-connection state lives in [`ConnectionTable`], owned by this module:
+//! Per-connection state lives in `ConnectionTable`, owned by this module:
 //! [`run`] mints one [`ConnectionWireId`] per accepted connection, and every
 //! connection advances through the one-way [`ConnectionPhase`] machine
 //! (IPC §9.3): `Accepted → Paired → Challenged → Authenticated → Superseded |
@@ -63,12 +63,9 @@
 //! [`LiveInput`]: crate::serve::LiveInput
 //! [`MetadataExt::uid`](std::os::unix::fs::MetadataExt): <https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html>
 
-#[cfg(unix)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(unix)]
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use ene_inference::ProviderTransport;
 

@@ -23,7 +23,7 @@
 //!   and management frames never attach. Socket close decides and commits the
 //!   [`DisconnectObserved`](ene_presence::ThinMoveReason::DisconnectObserved)
 //!   fallback in one connection-table section through
-//!   [`HostHandle::close_connection`] (CCT §10.4): the fallback runs only when
+//!   `HostHandle::close_connection` (CCT §10.4): the fallback runs only when
 //!   the closing connection was still the device's current authenticated one.
 //! - Domain ingress and the presence reachability premise use only a
 //!   connection that is authenticated, current for its device, open, and
