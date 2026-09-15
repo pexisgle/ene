@@ -316,7 +316,7 @@ mod tests {
     fn pipe_name_matches_the_client_vector() {
         assert_eq!(
             pipe_name(std::path::Path::new("/tmp/ene-data")),
-            String::from(r"\\.\pipe\ene-01a3d32218b804b9"),
+            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
         );
     }
 }

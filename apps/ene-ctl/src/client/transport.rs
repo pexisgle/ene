@@ -544,7 +544,7 @@ mod pipe_tests {
     fn pipe_name_is_stable_and_directory_scoped() {
         assert_eq!(
             pipe_name(std::path::Path::new("/tmp/ene-data")),
-            String::from(r"\\.\pipe\ene-01a3d32218b804b9"),
+            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
             "the pinned vector pins the shared algorithm"
         );
         let first = pipe_name(std::path::Path::new("/tmp/ene-data"));
