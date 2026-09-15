@@ -2,8 +2,9 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use ene_companion::{
-    CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError, HistoryMessage,
-    HistoryRole, ReportStatus, RoundIntentMark, UndeliveredTechnicalError,
+    ActionCertaintyWire, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
+    HistoryMessage, HistoryRole, ReportStatus, RoundIntentMark, TaskFact, TerminalKindWire,
+    UndeliveredSource, UndeliveredTechnicalError,
 };
 use ene_credential::{
     CredentialTechnicalError, DeviceId, DeviceRecord, PendingCredentialApproval, PendingPairing,
@@ -171,6 +172,152 @@ pub(crate) fn decode_report_status(text: &str) -> Result<ReportStatus, String> {
         "presented" => Ok(ReportStatus::Presented),
         "presentation_unknown" => Ok(ReportStatus::PresentationUnknown),
         _ => Err(String::from("unknown report status")),
+    }
+}
+
+/// The valid UTF-8 prefix of one byte-bounded page.
+///
+/// A byte cap may cut a multi-byte character; the cut character belongs to
+/// the next page, and only an actually invalid sequence fails closed.
+pub(crate) fn utf8_prefix(bytes: &[u8]) -> Result<&str, String> {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if error.error_len().is_none() => {
+            core::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|_| String::from("malformed bounded excerpt bytes"))
+        }
+        Err(_) => Err(String::from("malformed bounded excerpt bytes")),
+    }
+}
+
+/// Storage names of the undelivered source kinds (PR §4.6).
+pub(crate) const SOURCE_KIND_TASK_REVISION: &str = "task_revision";
+pub(crate) const SOURCE_KIND_DELEGATION: &str = "delegation";
+pub(crate) const SOURCE_KIND_ACTION_ATTEMPT: &str = "action_attempt";
+pub(crate) const SOURCE_KIND_RESULT_RECORDED: &str = "result_recorded";
+pub(crate) const SOURCE_KIND_RESULT_ADOPTED: &str = "result_adopted";
+pub(crate) const SOURCE_KIND_TERMINAL: &str = "terminal";
+pub(crate) const SOURCE_KIND_HISTORY_MESSAGE: &str = "history_message";
+pub(crate) const SOURCE_KIND_ACTIVITY_RECORD: &str = "activity_record";
+
+/// Encodes one source as `(source_kind, source_id, source_phase)`.
+///
+/// `source_phase` is the revision decimal for `task_revision`, the certainty
+/// name for `action_attempt`, `failed` / `cancelled` for `terminal`, and the
+/// empty string (never NULL) for kinds without a phase, so the source-key
+/// uniqueness constraint compares every part and a later fact is a new key.
+pub(crate) fn encode_undelivered_source(source: &UndeliveredSource) -> (String, String, String) {
+    let kind;
+    let id;
+    let phase;
+    match source {
+        UndeliveredSource::TaskRecord { fact, .. } => match fact {
+            TaskFact::TaskRevision { task, revision } => {
+                kind = SOURCE_KIND_TASK_REVISION;
+                id = encode_id(*task);
+                phase = revision.to_string();
+            }
+            TaskFact::Delegation(delegation) => {
+                kind = SOURCE_KIND_DELEGATION;
+                id = encode_id(*delegation);
+                phase = String::new();
+            }
+            TaskFact::ActionAttempt { attempt, certainty } => {
+                kind = SOURCE_KIND_ACTION_ATTEMPT;
+                id = encode_id(*attempt);
+                phase = certainty.as_str().to_owned();
+            }
+            TaskFact::ResultRecorded(result) => {
+                kind = SOURCE_KIND_RESULT_RECORDED;
+                id = encode_id(*result);
+                phase = String::new();
+            }
+            TaskFact::ResultAdopted(result) => {
+                kind = SOURCE_KIND_RESULT_ADOPTED;
+                id = encode_id(*result);
+                phase = String::new();
+            }
+            TaskFact::Terminal { task, progress } => {
+                kind = SOURCE_KIND_TERMINAL;
+                id = encode_id(*task);
+                phase = progress.as_str().to_owned();
+            }
+        },
+        UndeliveredSource::HistoryMessage(message) => {
+            kind = SOURCE_KIND_HISTORY_MESSAGE;
+            id = encode_id(*message);
+            phase = String::new();
+        }
+        UndeliveredSource::ActivityRecord(activity) => {
+            kind = SOURCE_KIND_ACTIVITY_RECORD;
+            id = encode_id(*activity);
+            phase = String::new();
+        }
+    }
+    (kind.to_owned(), id, phase)
+}
+
+/// Decodes one stored source key back to its typed form.
+///
+/// An unknown kind, an undecodable identity, a non-decimal revision phase,
+/// an unknown certainty, and an unknown terminal phase are unreadable rows
+/// and fail closed.
+pub(crate) fn decode_undelivered_source(
+    kind: &str,
+    id: &str,
+    phase: &str,
+) -> Result<UndeliveredSource, String> {
+    let raw = decode_id(id)?;
+    match kind {
+        SOURCE_KIND_TASK_REVISION => {
+            let revision = phase
+                .parse::<u64>()
+                .map_err(|_| String::from("malformed task revision source phase"))?;
+            Ok(UndeliveredSource::TaskRecord {
+                task: raw,
+                fact: TaskFact::TaskRevision {
+                    task: raw,
+                    revision,
+                },
+            })
+        }
+        SOURCE_KIND_DELEGATION => Ok(UndeliveredSource::TaskRecord {
+            task: raw,
+            fact: TaskFact::Delegation(raw),
+        }),
+        SOURCE_KIND_ACTION_ATTEMPT => {
+            let certainty = ActionCertaintyWire::from_name(phase)
+                .ok_or_else(|| String::from("unknown action certainty source phase"))?;
+            Ok(UndeliveredSource::TaskRecord {
+                task: raw,
+                fact: TaskFact::ActionAttempt {
+                    attempt: raw,
+                    certainty,
+                },
+            })
+        }
+        SOURCE_KIND_RESULT_RECORDED => Ok(UndeliveredSource::TaskRecord {
+            task: raw,
+            fact: TaskFact::ResultRecorded(raw),
+        }),
+        SOURCE_KIND_RESULT_ADOPTED => Ok(UndeliveredSource::TaskRecord {
+            task: raw,
+            fact: TaskFact::ResultAdopted(raw),
+        }),
+        SOURCE_KIND_TERMINAL => {
+            let progress = TerminalKindWire::from_name(phase)
+                .ok_or_else(|| String::from("unknown terminal source phase"))?;
+            Ok(UndeliveredSource::TaskRecord {
+                task: raw,
+                fact: TaskFact::Terminal {
+                    task: raw,
+                    progress,
+                },
+            })
+        }
+        SOURCE_KIND_HISTORY_MESSAGE => Ok(UndeliveredSource::HistoryMessage(raw)),
+        SOURCE_KIND_ACTIVITY_RECORD => Ok(UndeliveredSource::ActivityRecord(raw)),
+        _ => Err(String::from("unknown undelivered source kind")),
     }
 }
 

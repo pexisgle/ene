@@ -32,17 +32,20 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use ene_action::ActionCertainty;
+use ene_companion::{TaskFact, TerminalKindWire, UndeliveredSource};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
-    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness, Task,
-    TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome,
-    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
-    TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskCreationPremise,
-    TaskFailureOutcome, TaskFailurePremise, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef,
-    TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
-    TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
-    UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
+    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness,
+    REPORT_PAGE_MAX, Task, TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival,
+    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
+    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome,
+    TaskCreationPremise, TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId,
+    TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow,
+    TaskReportRowCursor, TaskReportRowKind, TaskReportSourcePage, TaskReportSourceRef,
+    TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
+    TaskRevision, TaskRevisionRecord, TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId,
+    WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -61,6 +64,10 @@ const SQL_INSERT_WORKSPACE_ASSOC: &str =
 
 const SQL_SELECT_TASK: &str =
     "SELECT revision, purpose_adopted_revision, progress, assignee FROM task WHERE task_id = ?1";
+
+/// The destination of a Task-derived notification: the Task's assignee, read
+/// in the same transaction as the parent fact.
+const SQL_SELECT_TASK_ASSIGNEE: &str = "SELECT assignee FROM task WHERE task_id = ?1";
 
 /// Advances the progress of a non-terminal Task to `in_progress` inside the
 /// AU3 transaction. The terminal check is the transaction's own read; the
@@ -196,10 +203,56 @@ const ORIGIN_KIND_SCHEDULE_OCCURRENCE: &str = "schedule_occurrence";
 pub(crate) const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
 const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
 
+/// The bounded Task-headline page. The completion marker is a canonical fact
+/// probe (`adopted_revision` equals the current revision), never a cached
+/// flag; the two variants share one column list and decoder so a page boundary
+/// cannot change meaning.
+const SQL_LIST_TASKS_FIRST: &str = "SELECT task_id, revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task ORDER BY task_id LIMIT ?1";
+
+const SQL_LIST_TASKS_AFTER: &str = "SELECT task_id, revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task WHERE task_id > ?1 ORDER BY task_id LIMIT ?2";
+
+/// The bounded report-detail page: Action attempts (rank 0) before Task
+/// results (rank 1), each in canonical ID byte order. Bodies are not read.
+const SQL_LIST_REPORT_ROWS_FIRST: &str = "SELECT row_kind, row_id, adopted FROM (SELECT 'action_attempt' AS row_kind, attempt_id AS row_id, NULL AS adopted, 0 AS rank FROM action_attempt WHERE task_id = ?1 UNION ALL SELECT 'task_result', result_id, adopted_revision, 1 FROM task_result WHERE task_id = ?1) ORDER BY rank, row_id LIMIT ?2";
+
+const SQL_LIST_REPORT_ROWS_AFTER: &str = "SELECT row_kind, row_id, adopted FROM (SELECT 'action_attempt' AS row_kind, attempt_id AS row_id, NULL AS adopted, 0 AS rank FROM action_attempt WHERE task_id = ?1 UNION ALL SELECT 'task_result', result_id, adopted_revision, 1 FROM task_result WHERE task_id = ?1) WHERE rank > ?2 OR (rank = ?2 AND row_id > ?3) ORDER BY rank, row_id LIMIT ?4";
+
+/// Byte-bounded body pages: `substr(CAST(x AS BLOB), start, len)` keeps the
+/// read in SQLite instead of decoding the whole body and truncating in Rust.
+const SQL_REPORT_REVISION_PAGE: &str = "SELECT length(CAST(purpose_text AS BLOB)), substr(CAST(purpose_text AS BLOB), ?3, ?4) FROM task_revision WHERE task_id = ?1 AND revision = ?2";
+
+const SQL_REPORT_RESULT_PAGE: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST(body AS BLOB), ?2, ?3) FROM task_result WHERE result_id = ?1";
+
 fn task_unavailable(reason: impl core::fmt::Display) -> TaskTechnicalError {
     TaskTechnicalError::StorageUnavailable {
         reason: reason.to_string(),
     }
+}
+
+/// Registers one Task-owned undelivered source against the assignee companion
+/// inside the caller's parent transaction (AU1b).
+///
+/// The destination is derived from the same row the commit read or wrote, and
+/// the source key comes from the fact itself; a failed registration returns an
+/// error so the caller's transaction rolls the parent fact back with it. The
+/// source-key uniqueness constraint keeps a repeated commit a no-op.
+fn register_task_undelivered(
+    tx: &rusqlite::Transaction<'_>,
+    companion_text: &str,
+    task: RawId,
+    fact: TaskFact,
+) -> Result<(), TaskTechnicalError> {
+    let source = UndeliveredSource::TaskRecord { task, fact };
+    crate::companion::register_undelivered_tx(
+        tx,
+        companion_text,
+        RawId::new(),
+        &source,
+        None,
+        None,
+        WallClockWithTz::now(),
+    )
+    .map_err(task_unavailable)
 }
 
 fn decode_revision(raw: i64) -> Result<TaskRevision, TaskTechnicalError> {
@@ -394,6 +447,18 @@ fn create_task_sync(
         )
         .map_err(task_unavailable)?;
     }
+    // AU2 commits the initial revision, so the initial `TaskRevision` fact is
+    // registered in the same transaction (AU1b); a failure rolls the whole
+    // creation back.
+    register_task_undelivered(
+        &tx,
+        &assignee_text,
+        premise.task.as_raw(),
+        TaskFact::TaskRevision {
+            task: premise.task.as_raw(),
+            revision: revision.as_u64(),
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskCreationOutcome::Created(reference))
 }
@@ -643,6 +708,17 @@ fn forward_steering_sync(
         params![task_text, next_raw, adopted_raw, purpose_text],
     )
     .map_err(task_unavailable)?;
+    // AU4 commits the new revision; register its `TaskRevision` fact in the
+    // same transaction so a failed registration leaves no partial forward.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::TaskRevision {
+            task: task.as_raw(),
+            revision: next_revision.as_u64(),
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskCommitOutcome::CommittedAs(TaskRef {
         task,
@@ -699,6 +775,18 @@ fn cancel_task_sync(
             "cancel CAS did not move exactly the current non-terminal task",
         ));
     }
+    // The cancel admission is the terminal transition: register it in the
+    // same commit. `AlreadyCancelled` / terminal returns above leave no row,
+    // so a repeated cancel never duplicates the notification.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::Terminal {
+            task: task.as_raw(),
+            progress: TerminalKindWire::Cancelled,
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskCancelOutcome::CancelAccepted)
 }
@@ -786,6 +874,17 @@ fn fail_task_sync(
             "failure CAS did not move exactly the relied non-terminal task",
         ));
     }
+    // The failure commit is the terminal transition; the notification shares
+    // the same transaction (AU1b).
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::Terminal {
+            task: task.as_raw(),
+            progress: TerminalKindWire::Failed,
+        },
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskFailureOutcome::FailedAs(TaskRef {
         task,
@@ -915,6 +1014,14 @@ fn create_delegation_sync(
             "task progress did not advance with delegation creation",
         ));
     }
+    // AU3 registers the delegation fact for the delegator (the assignee the
+    // commit read) in the same transaction.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.task.as_raw(),
+        TaskFact::Delegation(delegation.as_raw()),
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(DelegationOutcome::Delegated(DelegationRef {
         delegation,
@@ -1651,6 +1758,28 @@ fn record_task_result_arrival_sync(
         ],
     )
     .map_err(task_unavailable)?;
+    // The Task row is the notification destination; a missing row is durable
+    // corruption, not a reason to skip the registration.
+    let assignee: Option<String> = tx
+        .query_row(SQL_SELECT_TASK_ASSIGNEE, params![task_text], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(assignee) = assignee else {
+        return Err(task_unavailable(
+            "task row missing for final result arrival",
+        ));
+    };
+    // AU15a registers the recorded-result fact in the same transaction. The
+    // idempotent same-identity retry above registers nothing: the source key
+    // already owns its row.
+    register_task_undelivered(
+        &tx,
+        &assignee,
+        delegation_task,
+        TaskFact::ResultRecorded(arrival.result.as_raw()),
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskResultRecord {
         result: arrival.result,
@@ -1832,6 +1961,186 @@ fn load_task_action_attempts_sync(
         .into_iter()
         .map(|(attempt, _)| attempt)
         .collect())
+}
+
+/// Lists one bounded page of Task lifecycle headlines.
+///
+/// SELECT-only: the progress, revision, assignee, and completion marker are
+/// read from the current rows, and no reconciliation, adoption, presence, or
+/// registration write runs. The `limit` clamp is applied before SQL so the
+/// bound is on the rows read.
+fn list_tasks_after_sync(
+    conn: &Mutex<Connection>,
+    after: Option<TaskId>,
+    limit: u32,
+) -> Result<Vec<TaskHeadline>, TaskTechnicalError> {
+    let cap = i64::from(limit.clamp(1, REPORT_PAGE_MAX));
+    let guard = lock_shared(conn);
+    let rows: Vec<(String, i64, Option<String>, String, bool)> = match after {
+        None => {
+            let mut statement = guard
+                .prepare(SQL_LIST_TASKS_FIRST)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![cap], raw_headline_row)
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+        Some(after) => {
+            let mut statement = guard
+                .prepare(SQL_LIST_TASKS_AFTER)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![encode_id(after.as_raw()), cap], raw_headline_row)
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+    };
+    rows.into_iter().map(decode_headline).collect()
+}
+
+type RawHeadline = (String, i64, Option<String>, String, bool);
+
+fn raw_headline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHeadline> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn decode_headline(raw: RawHeadline) -> Result<TaskHeadline, TaskTechnicalError> {
+    let (task, revision, progress, assignee, adopted_result) = raw;
+    Ok(TaskHeadline {
+        task: TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?),
+        revision: decode_revision(revision)?,
+        progress: decode_progress(progress.as_deref())?,
+        assignee: decode_id(&assignee).map_err(task_unavailable)?,
+        adopted_result,
+    })
+}
+
+/// Lists one bounded page of one Task's report detail rows.
+///
+/// The page carries identities plus the result adoption marker only; a body
+/// is never read here. `limit` is clamped before SQL.
+fn list_task_report_rows_after_sync(
+    conn: &Mutex<Connection>,
+    task: TaskId,
+    after: Option<TaskReportRowCursor>,
+    limit: u32,
+) -> Result<Vec<TaskReportRow>, TaskTechnicalError> {
+    let cap = i64::from(limit.clamp(1, REPORT_PAGE_MAX));
+    let task_text = encode_id(task.as_raw());
+    let guard = lock_shared(conn);
+    let rows: Vec<(String, String, Option<i64>)> = match after {
+        None => {
+            let mut statement = guard
+                .prepare(SQL_LIST_REPORT_ROWS_FIRST)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![task_text, cap], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+        Some(cursor) => {
+            let rank: i64 = match cursor.kind {
+                TaskReportRowKind::ActionAttempt => 0,
+                TaskReportRowKind::TaskResult => 1,
+            };
+            let mut statement = guard
+                .prepare(SQL_LIST_REPORT_ROWS_AFTER)
+                .map_err(task_unavailable)?;
+            statement
+                .query_map(params![task_text, rank, encode_id(cursor.id), cap], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(task_unavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(task_unavailable)?
+        }
+    };
+    rows.into_iter()
+        .map(|(kind_text, id_text, adopted)| {
+            let kind = match kind_text.as_str() {
+                "action_attempt" => TaskReportRowKind::ActionAttempt,
+                "task_result" => TaskReportRowKind::TaskResult,
+                _ => return Err(task_unavailable("unknown task report row kind")),
+            };
+            if kind == TaskReportRowKind::ActionAttempt && adopted.is_some() {
+                return Err(task_unavailable(
+                    "action attempt report row carries an adoption marker",
+                ));
+            }
+            Ok(TaskReportRow {
+                kind,
+                id: decode_id(&id_text).map_err(task_unavailable)?,
+                adopted_revision: adopted.map(decode_revision).transpose()?,
+            })
+        })
+        .collect()
+}
+
+/// Reads one byte-bounded page of a task-owned report source body.
+///
+/// SELECT-only and byte-bounded in SQL; the returned cursor lands exactly on
+/// the next byte so no character is skipped or repeated.
+fn load_report_source_bounded_sync(
+    conn: &Mutex<Connection>,
+    source: TaskReportSourceRef,
+    cursor_bytes: u64,
+    limit_bytes: u32,
+) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError> {
+    let cap = i64::from(limit_bytes.max(1));
+    // SQLite `substr` is 1-based; a cursor at or past the end reads empty and
+    // reports no next page.
+    let start = i64::try_from(cursor_bytes)
+        .map_err(|_| task_unavailable("report source cursor out of range"))?
+        .saturating_add(1);
+    let guard = lock_shared(conn);
+    let found: Option<(i64, Vec<u8>)> = match source {
+        TaskReportSourceRef::RevisionPurpose { task, revision } => guard
+            .query_row(
+                SQL_REPORT_REVISION_PAGE,
+                params![
+                    encode_id(task.as_raw()),
+                    encode_u64(revision.as_u64()).map_err(task_unavailable)?,
+                    start,
+                    cap
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(task_unavailable)?,
+        TaskReportSourceRef::ResultBody(result) => guard
+            .query_row(
+                SQL_REPORT_RESULT_PAGE,
+                params![encode_id(result.as_raw()), start, cap],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(task_unavailable)?,
+    };
+    let Some((total_raw, bytes)) = found else {
+        return Ok(None);
+    };
+    let total_bytes = decode_u64(total_raw).map_err(task_unavailable)?;
+    let text = crate::codec::utf8_prefix(&bytes)
+        .map_err(task_unavailable)?
+        .to_owned();
+    let end = cursor_bytes.saturating_add(text.len() as u64);
+    Ok(Some(TaskReportSourcePage {
+        text,
+        total_bytes,
+        next: (end < total_bytes).then_some(end),
+    }))
 }
 
 fn load_delegation_result_sync(
@@ -2226,6 +2535,16 @@ fn adopt_result_sync(
             "task completion did not apply exactly once",
         ));
     }
+    // AU15b registers the adoption fact in the same transaction as the
+    // `adopted_revision` stamp and the completion CAS. The idempotent adopted
+    // retry above and the non-adopting outcomes (`RecordedToOriginalOnly`,
+    // `WithheldByEffectFacts`) register nothing: they commit no adoption.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task_id.as_raw(),
+        TaskFact::ResultAdopted(claim.result.as_raw()),
+    )?;
     tx.commit().map_err(task_unavailable)?;
     Ok(TaskResultAcceptance::AdoptedAsCompletion(TaskRef {
         task: task_id,
@@ -2354,6 +2673,38 @@ impl TaskRepository for Store {
     ) -> Result<Vec<RawId>, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || load_task_action_attempts_sync(&conn, task)).await
+    }
+
+    async fn list_tasks_after(
+        &self,
+        after: Option<TaskId>,
+        limit: u32,
+    ) -> Result<Vec<TaskHeadline>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || list_tasks_after_sync(&conn, after, limit)).await
+    }
+
+    async fn list_task_report_rows_after(
+        &self,
+        task: TaskId,
+        after: Option<TaskReportRowCursor>,
+        limit: u32,
+    ) -> Result<Vec<TaskReportRow>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || list_task_report_rows_after_sync(&conn, task, after, limit)).await
+    }
+
+    async fn load_report_source_bounded(
+        &self,
+        source: TaskReportSourceRef,
+        cursor_bytes: u64,
+        limit_bytes: u32,
+    ) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            load_report_source_bounded_sync(&conn, source, cursor_bytes, limit_bytes)
+        })
+        .await
     }
 }
 

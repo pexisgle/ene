@@ -363,10 +363,13 @@ async fn pending_empty(dir: &std::path::Path) -> bool {
         let Ok(companion) = store.ensure_running_companion().await else {
             break;
         };
-        let Ok(pending) = store.list_pending(companion).await else {
+        let Ok(page) = store
+            .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+            .await
+        else {
             break;
         };
-        if pending.is_empty() {
+        if page.entries.is_empty() {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

@@ -69,7 +69,7 @@ use ene_companion::dialogue::{
 };
 use ene_companion::{
     CommandId, CompanionId, CompanionLifecycle, CompanionRepository, HistoryRepository,
-    HistoryRole, PresentationMark, ReportStatus, RequestFingerprint, RoundIntentMark,
+    HistoryRole, PresentationMark, RequestFingerprint, RoundIntentMark, UNDELIVERED_PAGE_MAX,
     UndeliveredRepository,
 };
 use ene_credential::{
@@ -820,10 +820,12 @@ impl HostHandle {
     /// Applies one presentation observation with no reply.
     ///
     /// Confirmation is an observation, never a report of completion: matching
-    /// pending undelivered entries for the round move to presented (or to
-    /// presentation-unknown for any non-presented status, including wire
-    /// `Failed`). Failures end silently; the durable report state stays
-    /// authoritative either way.
+    /// unpresented entries for the round move to presented on a presented
+    /// status, and a non-presented status is a presentation start against
+    /// `Pending` (the row stays re-presentable) or a current not-presented
+    /// receipt against `PresentationUnknown` (the row returns to `Pending`).
+    /// Failures end silently; the durable report state stays authoritative
+    /// either way.
     pub(crate) async fn confirm_presentation(
         &self,
         _frame: &WireFrame,
@@ -839,15 +841,21 @@ impl HostHandle {
         let Ok(companion) = self.store.ensure_running_companion().await else {
             return Vec::new();
         };
-        let Ok(pending) = self.store.list_pending(companion).await else {
+        // The bounded first page is enough for this observation path; the
+        // full reconnect backlog subscription belongs to the presentation
+        // slice, which re-pages with a cursor.
+        let Ok(page) = self
+            .store
+            .list_unpresented(companion, None, UNDELIVERED_PAGE_MAX)
+            .await
+        else {
             return Vec::new();
         };
-        for entry in pending {
-            if entry.round == mark.round
-                && entry.status == ReportStatus::Pending
+        for entry in page.entries {
+            if entry.round == Some(mark.round)
                 && self
                     .store
-                    .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
+                    .compare_and_mark_reported(entry.id, entry.status, mark)
                     .await
                     .is_err()
             {

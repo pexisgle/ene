@@ -160,6 +160,32 @@ impl TaskRepository for CapturingRepository {
     ) -> Result<Vec<ene_primitive::RawId>, TaskTechnicalError> {
         Ok(Vec::new())
     }
+
+    async fn list_tasks_after(
+        &self,
+        _after: Option<TaskId>,
+        _limit: u32,
+    ) -> Result<Vec<ene_task::TaskHeadline>, TaskTechnicalError> {
+        Err(unsupported("list_tasks_after"))
+    }
+
+    async fn list_task_report_rows_after(
+        &self,
+        _task: TaskId,
+        _after: Option<ene_task::TaskReportRowCursor>,
+        _limit: u32,
+    ) -> Result<Vec<ene_task::TaskReportRow>, TaskTechnicalError> {
+        Err(unsupported("list_task_report_rows_after"))
+    }
+
+    async fn load_report_source_bounded(
+        &self,
+        _source: ene_task::TaskReportSourceRef,
+        _cursor_bytes: u64,
+        _limit_bytes: u32,
+    ) -> Result<Option<ene_task::TaskReportSourcePage>, TaskTechnicalError> {
+        Err(unsupported("load_report_source_bounded"))
+    }
 }
 
 fn unsupported(method: &str) -> TaskTechnicalError {

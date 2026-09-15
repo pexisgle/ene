@@ -600,35 +600,65 @@ async fn undelivered_register_mark_and_stale_mark() {
         matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
         "reply must commit"
     );
-    let entry = registered.unwrap();
+    let entry = registered.expect("registration must return the entry");
     assert_eq!(entry.status, ReportStatus::Pending);
-    let pending = UndeliveredRepository::list_pending(&store, companion).await;
-    let items = pending.unwrap();
-    assert_eq!(items.len(), 1, "one entry must be pending");
-    let marked = store
+    assert!(entry.round.is_some(), "conversation sources carry a round");
+    assert!(entry.presence_generation.is_some());
+    let round = entry.round.unwrap();
+
+    let listed = store
+        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+        .await
+        .unwrap();
+    assert_eq!(listed.entries.len(), 1, "one entry must be unpresented");
+    assert_eq!(listed.entries[0].id, entry.id);
+    assert_eq!(listed.next, None, "a short page drains the pass");
+
+    // Presentation start: Pending -> PresentationUnknown, still re-listed.
+    let started = store
         .compare_and_mark_reported(
             entry.id,
             ReportStatus::Pending,
             PresentationMark {
-                round: entry.round,
-                presented: true,
+                round,
+                presented: false,
             },
         )
         .await;
     assert_eq!(
-        marked,
-        Ok(ReportStatusTransition::PendingToPresented),
-        "pending to presented must compare-and-mark"
+        started,
+        Ok(ReportStatusTransition::MarkedPresentationUnknown)
     );
-    let pending_after = UndeliveredRepository::list_pending(&store, companion).await;
-    let drained = pending_after.unwrap();
-    assert!(drained.is_empty(), "presented entry must leave pending");
+    let relisted = store
+        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+        .await
+        .unwrap();
+    assert_eq!(relisted.entries.len(), 1, "Unknown must be re-listed");
+    assert_eq!(
+        relisted.entries[0].status,
+        ReportStatus::PresentationUnknown
+    );
+
+    // A current not-presented receipt returns the row to Pending.
+    let failed = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round,
+                presented: false,
+            },
+        )
+        .await;
+    assert_eq!(failed, Ok(ReportStatusTransition::FailedToPending));
+
+    // A mismatched expected status on the pending row is stale.
     let stale = store
         .compare_and_mark_reported(
             entry.id,
-            ReportStatus::Pending,
+            ReportStatus::PresentationUnknown,
             PresentationMark {
-                round: entry.round,
+                round,
                 presented: true,
             },
         )
@@ -636,7 +666,74 @@ async fn undelivered_register_mark_and_stale_mark() {
     assert_eq!(
         stale,
         Ok(ReportStatusTransition::StaleSource),
-        "repeat mark on a moved row must be stale"
+        "a mismatched expected status must be stale"
+    );
+
+    // Confirmed presentation is absorbing.
+    let presented = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::Pending,
+            PresentationMark {
+                round,
+                presented: true,
+            },
+        )
+        .await;
+    assert_eq!(presented, Ok(ReportStatusTransition::PendingToPresented));
+    let duplicate = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round,
+                presented: true,
+            },
+        )
+        .await;
+    assert_eq!(
+        duplicate,
+        Ok(ReportStatusTransition::AlreadyPresented),
+        "duplicate ACK writes nothing"
+    );
+    let downgrade = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round,
+                presented: false,
+            },
+        )
+        .await;
+    assert_eq!(
+        downgrade,
+        Ok(ReportStatusTransition::AlreadyPresented),
+        "presented absorbs a later not-presented receipt"
+    );
+    let drained = store
+        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+        .await
+        .unwrap();
+    assert!(
+        drained.entries.is_empty(),
+        "presented entries leave the unpresented list"
+    );
+
+    let stale = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::Pending,
+            PresentationMark {
+                round,
+                presented: true,
+            },
+        )
+        .await;
+    assert_eq!(
+        stale,
+        Ok(ReportStatusTransition::AlreadyPresented),
+        "a presented row absorbs every later mark, stale premise included"
     );
 }
 
@@ -1077,8 +1174,14 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
     );
     let count = history_row_count(&store, companion);
     assert_eq!(count, Some(1), "replay must not append a second row");
-    let pending = UndeliveredRepository::list_pending(&store, companion).await;
-    let items = pending.unwrap();
+    let pending = UndeliveredRepository::list_unpresented(
+        &store,
+        companion,
+        None,
+        ene_companion::UNDELIVERED_PAGE_MAX,
+    )
+    .await;
+    let items = pending.unwrap().entries;
     assert_eq!(items.len(), 1, "replay must not duplicate undelivered");
     let looked_up = store.lookup_command(companion, &command).await;
     let item = looked_up.unwrap().unwrap();
@@ -6948,6 +7051,8 @@ mod agent;
 mod cancel;
 mod erasure;
 mod presence;
+mod report_reads;
 mod result_reevaluation;
 mod task_failure;
 mod task_result;
+mod undelivered;

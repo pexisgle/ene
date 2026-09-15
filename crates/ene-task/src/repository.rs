@@ -8,6 +8,9 @@ use crate::delegation::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
 };
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
+use crate::report::{
+    TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage, TaskReportSourceRef,
+};
 use crate::result::{
     TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
     TaskResultRecord, UnadoptedResultCursor,
@@ -345,6 +348,54 @@ pub trait TaskRepository: Send + Sync {
         &self,
         task: TaskId,
     ) -> Result<Vec<RawId>, TaskTechnicalError>;
+
+    /// Lists one bounded page of Task lifecycle headlines in canonical
+    /// `TaskId` byte order, starting strictly after `after`.
+    ///
+    /// `limit` is clamped to `1..=REPORT_PAGE_MAX` and applied by the SQL
+    /// query, so the bound is on the rows read. Every headline is stored
+    /// facts only — current revision, progress, assignee, and the adopted
+    /// result marker — never a body. The read runs no reconciliation, starts
+    /// no runner, and re-evaluates no stored result: "currently executing" is
+    /// Host memory, so a non-terminal Task with no registration is reported
+    /// as saved and not running.
+    async fn list_tasks_after(
+        &self,
+        after: Option<TaskId>,
+        limit: u32,
+    ) -> Result<Vec<TaskHeadline>, TaskTechnicalError>;
+
+    /// Lists one bounded page of one Task's report detail rows: Action
+    /// attempts first, then Task results, each in canonical ID byte order.
+    ///
+    /// The rows carry identities and the result adoption marker only, enough
+    /// to build the report headline and detail list without loading a body;
+    /// the caller reads each Action attempt from its owner. `after` continues
+    /// strictly past a previously returned row. `limit` is clamped to
+    /// `1..=REPORT_PAGE_MAX` and applied by SQL. SELECT-only.
+    async fn list_task_report_rows_after(
+        &self,
+        task: TaskId,
+        after: Option<TaskReportRowCursor>,
+        limit: u32,
+    ) -> Result<Vec<TaskReportRow>, TaskTechnicalError>;
+
+    /// Reads one byte-bounded page of a task-owned report source body.
+    ///
+    /// `cursor_bytes` is the byte offset to start at (`0` is the head);
+    /// `limit_bytes` bounds the returned page. The text ends on a UTF-8
+    /// character boundary and `next` is the byte cursor that continues
+    /// exactly after it, so a caller can page a body larger than one frame
+    /// without decoding it whole. `None` means the addressed row is gone:
+    /// absence is reported, never an empty success. SELECT-only; no body is
+    /// cached and no status, revision, or adoption changes. The wire-level
+    /// `4..=16384` clamp and the display excerpt belong to the caller.
+    async fn load_report_source_bounded(
+        &self,
+        source: TaskReportSourceRef,
+        cursor_bytes: u64,
+        limit_bytes: u32,
+    ) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError>;
 }
 
 /// Conversation-sourced Task control commits.
