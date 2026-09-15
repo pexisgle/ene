@@ -38,10 +38,10 @@ use ene_task::{
     orchestrate_result_arrival,
 };
 
-use crate::serve::{CredStore, HostHandle};
+use crate::serve::{CredStore, HostHandle, device_client};
 use crate::task_run::{TaskAgentProtocolViolation, TaskAgentRunOutcome, TaskAgentRunRefusal};
 
-use super::{live_input, round_test_handle};
+use super::{live_input, round_test_handle, submit_frame, timeline_count};
 
 /// One scripted provider response per call, in call order.
 pub(super) struct ScriptedTransport {
@@ -119,6 +119,43 @@ impl ProviderTransport for BlockingTransport {
             std::future::pending::<()>().await;
             Ok(ProviderResponse {
                 text: String::new(),
+                usage: None,
+            })
+        })
+    }
+}
+
+/// Transport whose first provider call reports that it started and then
+/// waits for the test's release, so a disconnect can be observed while the
+/// Host-owned runner is genuinely in flight.
+#[derive(Default, Clone)]
+struct GatedTransport {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ProviderTransport for GatedTransport {
+    fn complete(
+        &self,
+        _req: ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
+                + Send
+                + '_,
+        >,
+    > {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let started = Arc::clone(&self.started);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            if call == 0 {
+                started.notify_one();
+                release.notified().await;
+            }
+            Ok(ProviderResponse {
+                text: String::from(r#"{"final":"report done"}"#),
                 usage: None,
             })
         })
@@ -230,6 +267,166 @@ async fn seed_task(
         .expect("delegation creation commits");
     assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
     (task, delegation, assoc)
+}
+
+#[tokio::test]
+async fn a_client_disconnect_leaves_a_host_owned_runner_running_and_stops_client_admissions() {
+    use ene_api::v1::payload::WirePayload;
+    use ene_api::v1::round::RoundIntakeOutcomeWire;
+    use ene_companion::CompanionRepository as _;
+    use ene_presence::{
+        ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
+        PresenceRepository as _, PresenceState, ThinMoveReason,
+    };
+
+    let live = live_input("stage5-host-only");
+    let transport = GatedTransport::default();
+    let (handle, _data_dir) = round_test_handle("stage5-host-only", &live, &transport)
+        .await
+        .expect("the production setup path completes");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let (task, delegation, _assoc) = seed_task(&handle, workspace.path()).await;
+
+    // The client is Present before the runner starts (the production attach
+    // shape: NoActive generation zero compare-and-commit).
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the running companion resolves");
+    let seeded = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the seeded attribution exists");
+    assert_eq!(seeded.state, PresenceState::NoActive);
+    let client = device_client("stage5-host-only");
+    let begin = handle
+        .store
+        .compare_and_begin_transition(
+            companion.as_raw(),
+            PresenceCheckRef {
+                expected_generation: seeded.generation,
+                expected_state: PresenceState::NoActive,
+                expected_active: None,
+            },
+            Some(client),
+            ThinMoveReason::InitialAttach,
+        )
+        .await
+        .expect("begin answers");
+    let MoveDecision::TransitioningToNew { generation } = begin else {
+        panic!("the attach begin must transition, got {begin:?}");
+    };
+    let confirmed = handle
+        .store
+        .confirm_transition(
+            companion.as_raw(),
+            generation,
+            LiveReachabilityRef {
+                client,
+                connection_live: true,
+            },
+        )
+        .await
+        .expect("confirm answers");
+    let ConfirmTransitionOutcome::Confirmed(present) = confirmed else {
+        panic!("the live confirm must crown the client, got {confirmed:?}");
+    };
+    let attached_generation = present.generation.as_u64();
+
+    let handle = Arc::new(handle);
+    let runner = {
+        let handle = Arc::clone(&handle);
+        let transport = transport.clone();
+        tokio::spawn(async move { handle.run_task_agent(&transport, delegation).await })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        transport.started.notified(),
+    )
+    .await
+    .expect("the provider call starts");
+
+    // The client closes while the runner waits on the provider.
+    handle.note_disconnect("stage5-host-only").await;
+    let detached = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(
+        detached.state,
+        PresenceState::NoActive,
+        "the disconnect clears presence"
+    );
+    assert_ne!(
+        detached.generation.as_u64(),
+        attached_generation,
+        "the disconnect advances the generation"
+    );
+
+    // Client-dependent admission stops: a Round premised on the
+    // pre-disconnect generation is stale, admits no turn, and does not
+    // re-attach the client behind the Host's back.
+    let stale = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(attached_generation),
+                None,
+                "local-disc",
+                "after disconnect",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        stale.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound {
+                current_generation,
+                ..
+            }) if *current_generation == detached.generation.as_u64()
+        )),
+        "the stale client admission must answer stale with the current generation, got {stale:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.expect("the timeline reads"),
+        0,
+        "no client-dependent turn is admitted while the client is gone"
+    );
+    let still_detached = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution loads")
+        .expect("the attribution exists");
+    assert_eq!(still_detached.state, PresenceState::NoActive);
+
+    // The Host-owned runner is independent of the connection: the same
+    // execution finishes and adopts its result after the client is gone.
+    transport.release.notify_one();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), runner)
+        .await
+        .expect("the runner finishes")
+        .expect("the join succeeds")
+        .expect("the run answers a domain outcome");
+    let TaskAgentRunOutcome::Finalized { result, acceptance } = outcome else {
+        panic!("the runner must finalize, got {outcome:?}");
+    };
+    assert_eq!(acceptance, TaskResultAcceptance::AdoptedAsCompletion(task));
+    assert_eq!(result.body.text(), "report done");
+    let loaded = handle.store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(
+        loaded.task.progress,
+        TaskProgress::Completed,
+        "the disconnect never cancelled the Host-owned work"
+    );
 }
 
 #[tokio::test]

@@ -183,6 +183,11 @@ new_gen INTEGER NOT NULL,
 reason TEXT NOT NULL,
 at TEXT NOT NULL
 );
+CREATE TABLE relocation_hint (
+companion_id TEXT PRIMARY KEY,
+last_client TEXT,
+recovery_destination TEXT
+);
 CREATE TABLE task (
 task_id TEXT PRIMARY KEY,
 revision INTEGER NOT NULL,

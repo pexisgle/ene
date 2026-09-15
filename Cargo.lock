@@ -431,6 +431,7 @@ dependencies = [
  "ene-primitive",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

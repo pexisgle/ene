@@ -31,6 +31,8 @@ const SQL_SELECT_LIFECYCLE: &str = "SELECT lifecycle FROM companion WHERE compan
 
 const SQL_INSERT_ATTRIBUTION: &str = "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)";
 
+const SQL_INSERT_HINT: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, NULL, NULL)";
+
 const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
 
 const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND (?2 IS NULL OR round_id = ?2) AND (?3 IS NULL OR at_utc >= ?3) ORDER BY rowid ASC LIMIT ?4";
@@ -335,6 +337,11 @@ impl CompanionRepository for Store {
                 ],
             )
             .map_err(|error| companion_unavailable(error.to_string()))?;
+            // The relocation hint row is seeded empty with the companion: it
+            // records history only, and recovery writes are upserts that
+            // never invent a client.
+            tx.execute(SQL_INSERT_HINT, params![fresh_text])
+                .map_err(|error| companion_unavailable(error.to_string()))?;
             tx.commit()
                 .map_err(|error| companion_unavailable(error.to_string()))?;
             Ok(CompanionId::from_raw(fresh))

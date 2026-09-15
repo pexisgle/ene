@@ -51,7 +51,8 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 /// Startup is ordered around the single-writer lock (PR §6.4): the `0700`
 /// data directory and the exclusive `host.lock` come first, then the store
 /// open (which runs migrations), then the explicit startup mutations (the
-/// credential sweep and sealed-result reconciliation), and only then the
+/// presence normalization, the unapproved-pairing cleanup, the credential
+/// sweep, and sealed-result reconciliation), and only then the
 /// listener. A second Host in the same directory is refused before any of
 /// that runs.
 ///
@@ -64,6 +65,14 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let _lock = crate::host_lock::HostLock::acquire(data_dir)?;
     let handle = HostHandle::open(data_dir).await?;
+    // Startup presence normalization (PR §6.4 step 2), after the state open
+    // and before the pairing cleanup, the credential sweep, and the
+    // sealed-result reconciliation: the sweep and reconciliation contracts do
+    // not depend on presence, while every client-dependent admission does, so
+    // the normalized state is established first. A refusal (generation
+    // exhaustion, malformed recovery intent, missing attribution) fails
+    // startup: the Host must not serve with an unknown presence state.
+    handle.normalize_presence_on_startup().await?;
     // Pairing startup boundary, before the credential sweep: unapproved
     // pendings never survive a restart, so a new connection always opens a
     // new request and a stale poll converges on a fresh pending (#1389).

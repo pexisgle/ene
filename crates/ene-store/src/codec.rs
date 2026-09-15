@@ -15,13 +15,16 @@ use ene_permission::{
 };
 use ene_presence::{
     ClientId, PresenceAttribution, PresenceGeneration, PresenceState, PresenceTechnicalError,
-    ThinMoveReason,
+    RelocationHint, ThinMoveReason,
 };
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
+
+const SQL_SELECT_HINT: &str =
+    "SELECT last_client, recovery_destination FROM relocation_hint WHERE companion_id = ?1";
 
 const SQL_SELECT_CONSENT: &str =
     "SELECT id, rev, provider, model, credential_id FROM consent_record WHERE capability = ?1";
@@ -201,6 +204,7 @@ pub(crate) fn encode_move_reason(reason: ThinMoveReason) -> &'static str {
         ThinMoveReason::InitialAttach => "initial_attach",
         ThinMoveReason::DisconnectObserved => "disconnect_observed",
         ThinMoveReason::RestartRecovery => "restart_recovery",
+        ThinMoveReason::Stop => "stop",
     }
 }
 
@@ -554,6 +558,38 @@ pub(crate) fn decode_attribution(
         state,
         active_client,
         generation,
+    })
+}
+
+/// Reads the relocation hint row for `key`, the encoded companion id used as
+/// the table's primary key. A missing row is [`None`], never a defaulted hint.
+pub(crate) fn select_hint(conn: &Connection, key: &str) -> Result<Option<RelocationHint>, String> {
+    let found: Option<(Option<String>, Option<String>)> = conn
+        .query_row(SQL_SELECT_HINT, params![key], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(|error| error.to_string())?;
+    found
+        .map(|(last_text, destination_text)| {
+            decode_hint(key, last_text.as_deref(), destination_text.as_deref())
+        })
+        .transpose()
+}
+
+pub(crate) fn decode_hint(
+    companion_text: &str,
+    last_text: Option<&str>,
+    destination_text: Option<&str>,
+) -> Result<RelocationHint, String> {
+    let decode_client = |text: Option<&str>| -> Result<Option<ClientId>, String> {
+        text.map(|value| decode_id(value).map(ClientId::from_raw))
+            .transpose()
+    };
+    Ok(RelocationHint {
+        companion: decode_id(companion_text)?,
+        last_client: decode_client(last_text)?,
+        recovery_destination: decode_client(destination_text)?,
     })
 }
 

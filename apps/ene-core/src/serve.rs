@@ -80,10 +80,9 @@ use ene_credential::{
 };
 use ene_inference::ProviderTransport;
 use ene_permission::EvaluationTracker;
-use ene_presence::ClientId;
-#[cfg(any(unix, windows, test))]
 use ene_presence::{
-    LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceState, ThinMoveReason,
+    ClientId, ConfirmTransitionOutcome, FallbackCandidate, LiveReachabilityRef, MoveDecision,
+    PresenceCheckRef, PresenceRepository, PresenceState, ThinMoveReason, select_fallback_candidate,
 };
 use ene_presentation::{OpenRound, RoundId};
 use ene_primitive::RawId;
@@ -366,6 +365,26 @@ pub(crate) fn device_client(device_wire: &str) -> ClientId {
     )))
 }
 
+/// One currently authenticated connection as the presence fallback sees it.
+///
+/// The real connection table lives in [`crate::conn`] (slice A), which owns
+/// authentication, supersede, and close admission. The fallback below receives
+/// a snapshot source instead of reading the table itself, so the connection
+/// layer decides who is current and presence never guesses it. The serving
+/// close path ([`HostHandle::close_connection`]) admits through the table's
+/// own section and answers `NoActive`; callers that already hold a
+/// table-derived snapshot (for example [`crate::conn::ConnectionTable`]
+/// polled via [`ConnectionTable::current_authenticated`](crate::conn::ConnectionTable::current_authenticated))
+/// pass it here so an eligible same-machine candidate can take the fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentConnection {
+    /// Paired device wire string of the current authenticated connection.
+    pub client_ref: String,
+    /// Transport classification: same-machine (verified OS peer) or remote.
+    pub same_machine: bool,
+    /// Device permission currently allows client-dependent activity.
+    pub device_permitted: bool,
+}
 /// `Stage 2` Host handle: durable store, evaluation tracker, and Host maps.
 ///
 /// Interior mutability: `open_rounds` and `rounds` sit behind short `std`
@@ -1267,6 +1286,145 @@ fn note_disconnect_sync(store: &Store, companion: ene_companion::CompanionId, cl
         .is_err()
     {
         // The unconfirmed transition stands: the next intake reports held.
+    }
+}
+
+impl HostHandle {
+    /// Startup presence boundary: normalizes every companion row (PR §6.4).
+    ///
+    /// The serving Host runs this after the state open and before the
+    /// listener binds, alongside the credential sweep and sealed-result
+    /// reconciliation. A refusal (generation exhaustion, malformed recovery
+    /// intent, missing attribution) fails startup: serving with an unknown
+    /// presence state would present a client as current that nobody verified.
+    /// Read-only and local management paths never call this; the plain state
+    /// open does not normalize presence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Store`] when the normalization cannot be read or
+    /// committed, or when any companion is refused.
+    pub(crate) async fn normalize_presence_on_startup(&self) -> Result<(), CoreError> {
+        let report = self
+            .store
+            .normalize_on_startup()
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        if report.failures.is_empty() {
+            return Ok(());
+        }
+        Err(CoreError::Store(format!(
+            "presence normalization refused {} companion(s): {:?}",
+            report.failures.len(),
+            report.failures
+        )))
+    }
+
+    /// Observes a socket close for `client_ref` and clears presence when owned.
+    ///
+    /// Async fallback path: the serving close admission is
+    /// `HostHandle::close_connection`, which decides currentness inside the
+    /// connection-table section and commits through the synchronous store
+    /// primitives. This form is for callers without a table section; it
+    /// passes an empty snapshot — the connection layer's cross-device
+    /// currentness lives behind [`crate::conn`], not here — so the fallback
+    /// deterministically answers `NoActive`, never a guessed client.
+    /// Callers holding a table-derived snapshot use
+    /// `HostHandle::note_disconnect_with` instead.
+    pub async fn note_disconnect(&self, client_ref: &str) {
+        self.note_disconnect_with(client_ref, &|| Vec::new()).await;
+    }
+
+    /// Observes a socket close and runs the normal-disconnect fallback.
+    ///
+    /// `current` is the connection layer's snapshot source: each call returns
+    /// the currently authenticated connections, so the confirm below
+    /// re-derives the chosen target's currentness instead of trusting the
+    /// snapshot taken at selection time (S5-05). Candidates must be
+    /// current-authenticated, SameMachine-verified, device-permitted, and not
+    /// the closing client; [`select_fallback_candidate`] picks the
+    /// lexicographically smallest. With no eligible candidate — or a target
+    /// that stopped being current before confirm — the transition confirms
+    /// `NoActive`: the Host never crowns a client nobody verified and never
+    /// auto-starts one.
+    ///
+    /// Best-effort compare-and-commit for
+    /// [`DisconnectObserved`](ene_presence::ThinMoveReason::DisconnectObserved):
+    /// only a `Present` attribution owned by the deterministic mapping of
+    /// `client_ref` moves; any other state, a lost compare race, or a store
+    /// failure leaves attribution untouched.
+    pub(crate) async fn note_disconnect_with(
+        &self,
+        client_ref: &str,
+        current: &(dyn Fn() -> Vec<CurrentConnection> + Send + Sync),
+    ) {
+        let closing = device_client(client_ref);
+        let Ok(companion) = self.store.ensure_running_companion().await else {
+            return;
+        };
+        let Ok(Some(fact)) = self.store.load_attribution(companion.as_raw()).await else {
+            return;
+        };
+        if fact.state != PresenceState::Present || fact.active_client != Some(closing) {
+            return;
+        }
+        let candidates = current()
+            .into_iter()
+            .filter(|connection| connection.client_ref != client_ref)
+            .map(|connection| FallbackCandidate {
+                client: device_client(&connection.client_ref),
+                current_authenticated: true,
+                same_machine: connection.same_machine,
+                device_permitted: connection.device_permitted,
+            })
+            .collect::<Vec<_>>();
+        let target = select_fallback_candidate(closing, &candidates);
+        let expected = PresenceCheckRef {
+            expected_generation: fact.generation,
+            expected_state: fact.state,
+            expected_active: fact.active_client,
+        };
+        let Ok(MoveDecision::TransitioningToNew { generation }) = self
+            .store
+            .compare_and_begin_transition(
+                companion.as_raw(),
+                expected,
+                target,
+                ThinMoveReason::DisconnectObserved,
+            )
+            .await
+        else {
+            return;
+        };
+        let live = match target {
+            Some(client) => {
+                // Re-derive at confirm time: a target that is no longer the
+                // current authenticated connection confirms `NoActive`, not
+                // `Present`.
+                let still_current = current().iter().any(|connection| {
+                    connection.same_machine
+                        && connection.device_permitted
+                        && device_client(&connection.client_ref) == client
+                });
+                LiveReachabilityRef {
+                    client,
+                    connection_live: still_current,
+                }
+            }
+            None => LiveReachabilityRef {
+                client: closing,
+                connection_live: false,
+            },
+        };
+        // Rejected and errored confirms alike leave the transition
+        // unconfirmed; the next intake reads the `InTransition`
+        // attribution and reports held, which is honest.
+        if !matches!(
+            self.store
+                .confirm_transition(companion.as_raw(), generation, live)
+                .await,
+            Ok(ConfirmTransitionOutcome::Confirmed(_))
+        ) {}
     }
 }
 
