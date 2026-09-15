@@ -81,7 +81,7 @@ use ene_credential::{
 use ene_inference::ProviderTransport;
 use ene_permission::EvaluationTracker;
 use ene_presence::ClientId;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use ene_presence::{
     LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceState, ThinMoveReason,
 };

@@ -94,7 +94,7 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SOCKET_NAME)
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::handshake::NegotiatedConnection;
 #[cfg(any(unix, windows))]
@@ -105,7 +105,7 @@ use ene_plugin_ipc::{MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use crate::serve::LiveInput;
 
 /// Bound on the per-connection transport duplicate-suppression cache, enough
