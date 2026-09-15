@@ -12,22 +12,31 @@
 //! stale path; a probe timeout fails safe toward live.
 //!
 //! Per-connection state lives in `ConnectionTable`, owned by this module:
-//! [`run`] mints one [`ConnectionWireId`] per accepted connection, pins the
-//! first incarnation it sees (a mismatch later drops the connection without a
-//! reply, since the frame cannot be attributed to the pinned owner), and
-//! records pairing/authentication only from [`HostHandle::handle_frame`]
-//! answers. A newer authentication by the same device supersedes the older
-//! connection, which goes stale implicitly. Each frame's [`LiveInput`]
-//! premises come from this table, never from Client self-reports; the ingress
-//! gate in [`HostHandle::handle_frame`] trusts exactly these conn-filled
-//! premises, and the envelope connection id must equal the table id on every
-//! post-capability frame (the id is revealed only in `AuthResult::Accepted`,
-//! so echoing it is the auth binding). Socket close forgets the entry and
-//! reports the paired device to
-//! [`HostHandle::note_disconnect`](crate::serve::HostHandle::note_disconnect)
-//! only when it was the device's last live connection: connection close and
-//! presence loss are deliberately separate, because one device may hold
-//! several live connections.
+//! [`run`] mints one [`ConnectionWireId`] per accepted connection, and every
+//! connection advances through the one-way [`ConnectionPhase`] machine
+//! (IPC §9.3): `Accepted → Paired → Challenged → Authenticated → Superseded |
+//! Closed`. `authenticated` means the ownership proof succeeded on this
+//! connection; `current` means the Host's per-device current slot still points
+//! at it. Domain ingress and presence reachability use only a connection that
+//! is authenticated, current, open, and bound to a valid device — never
+//! paired-socket counts or past authentication successes (#1384). A newer
+//! authentication for the same device supersedes the previous connection
+//! irreversibly; superseded sockets answer typed `StaleConnection` rejections
+//! while staying open (IPC §11.3) and can never become current again. Close
+//! admission compares connection identity before clearing the current slot:
+//! closing a superseded or unauthenticated connection never clears the newer
+//! current, and the presence fallback condition is the absence of a current
+//! authenticated connection, not a zero live-socket count.
+//!
+//! Each frame's [`LiveInput`] premises come from this table, never from Client
+//! self-reports; the ingress gate in [`HostHandle::handle_frame`] trusts
+//! exactly these conn-filled premises. [`LiveInput`] also carries the table
+//! handle, so the handshake phase operations (device bind, nonce consumption,
+//! auth install) and the close admission that runs the presence
+//! compare/commit (CCT §10.4) are short connection-ownership sections: the
+//! table section is never held across an `.await`, and the SQLite work runs
+//! synchronously inside `spawn_blocking`. Lock order: connection table → Task
+//! execution registry → SQLite.
 //!
 //! Same-user proof without new dependencies: after binding, the listener reads
 //! the socket file owner through [`MetadataExt::uid`](std::os::unix::fs::MetadataExt)
@@ -54,12 +63,9 @@
 //! [`LiveInput`]: crate::serve::LiveInput
 //! [`MetadataExt::uid`](std::os::unix::fs::MetadataExt): <https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html>
 
-#[cfg(unix)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(unix)]
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use ene_inference::ProviderTransport;
 
@@ -84,20 +90,18 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SOCKET_NAME)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 use ene_api::v1::envelope::WireEnvelope;
-#[cfg(unix)]
-use ene_api::v1::handshake::{AuthResult, NegotiatedConnection, PairingResult};
+use ene_api::v1::handshake::NegotiatedConnection;
 #[cfg(unix)]
 use ene_api::v1::payload::WirePayload;
-#[cfg(unix)]
 use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
 #[cfg(unix)]
 use ene_plugin_ipc::{MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 use crate::serve::LiveInput;
 
 /// Bound on the per-connection transport duplicate-suppression cache, enough
@@ -106,7 +110,7 @@ use crate::serve::LiveInput;
 /// are sender-minted UUIDs, so a repeat after roll-off is a true transport
 /// duplicate, never a fresh send (fresh sends, including transport retries,
 /// always mint new ids).
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const SEEN_MESSAGE_CAP: usize = 128;
 
 /// Separates transport redelivery from terminal violations: a duplicate
@@ -115,27 +119,112 @@ const SEEN_MESSAGE_CAP: usize = 128;
 /// the connection. Collapsing both into `None` would turn legitimate
 /// redelivery into connection loss, a distinct observable effect the §6.2
 /// silent-drop contract forbids.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum LiveDecision {
+pub(crate) enum LiveDecision {
     Ready(LiveInput),
     Duplicate,
     Invalid,
 }
 
-#[cfg(unix)]
+/// One-way connection phase (IPC §9.3).
+///
+/// `Accepted → Paired → Challenged → Authenticated → Superseded | Closed`.
+/// A failed authentication ends in `Closed`, as does the transport ending in
+/// any phase. `Superseded` and `Closed` are terminal: a superseded connection
+/// never returns to a serviceable phase (IPC §11.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionPhase {
+    /// The connection exists; it has not paired or presented a device.
+    Accepted,
+    /// A `PairingResult::Paired` issued a device key on this connection, or a
+    /// reconnect capability frame bound an existing device.
+    Paired,
+    /// Capability terms and a single-use challenge nonce are pending proof.
+    Challenged,
+    /// The ownership proof succeeded on this connection.
+    Authenticated,
+    /// A newer authentication for the same device replaced this connection as
+    /// the device's current one. Irreversible.
+    Superseded,
+    /// The connection cannot proceed: authentication failed, or the transport
+    /// ended. Irreversible.
+    Closed,
+}
+
+impl ConnectionPhase {
+    /// Whether the phase is terminal and can never become serviceable again.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Superseded | Self::Closed)
+    }
+
+    /// Whether this connection was replaced by a newer authentication.
+    #[must_use]
+    pub fn is_superseded(self) -> bool {
+        self == Self::Superseded
+    }
+}
+
+/// How one capability phase operation ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChallengeOutcome {
+    /// The device is bound (reconnect) or was already bound, the terms were
+    /// recorded, and a fresh nonce is pending proof.
+    Challenged,
+    /// The connection was superseded by a newer authentication.
+    Superseded,
+    /// The connection is not in a phase that admits a capability frame.
+    WrongPhase,
+    /// The table no longer holds the connection.
+    Unknown,
+}
+
+/// How consuming a challenge nonce ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NonceAdmission {
+    /// The single-use nonce for this challenge.
+    Nonce(String),
+    /// The connection is challenged but the nonce was already consumed.
+    Missing,
+    /// The connection was superseded by a newer authentication.
+    Superseded,
+    /// The connection is not in the challenged phase.
+    WrongPhase,
+    /// The table no longer holds the connection.
+    Unknown,
+}
+
+/// How installing an authenticated connection ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallOutcome {
+    /// This connection is now authenticated and current; the previous current
+    /// connection, if any, is superseded.
+    Installed,
+    /// The connection was superseded before this install: the proof no longer
+    /// counts and the newer current is untouched.
+    Superseded,
+    /// The connection is not in the challenged phase.
+    WrongPhase,
+    /// The table no longer holds the connection.
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectionRecord {
+    phase: ConnectionPhase,
+    /// Host-issued device wire string bound to this connection: set once by a
+    /// `Paired` answer or by the reconnect device bind, never moved to
+    /// another device afterwards.
     paired_device: Option<String>,
     incarnation: Option<ClientIncarnationId>,
-    /// Set by [`ConnectionTable::note_authed`] and never cleared; currency
-    /// after a superseding authentication lives in
-    /// [`ConnectionTableInner::device_current`].
-    authed: bool,
-    /// Host-selected terms from the capability answer; re-advertising
-    /// supersedes (latest wins) and the ingress gate enforces the recorded
-    /// major on later frames.
+    /// Host-selected terms from the capability answer. Written exactly once,
+    /// when the challenge is issued; a later capability frame is refused
+    /// without touching them.
     negotiated: Option<NegotiatedConnection>,
+    /// The single-use challenge nonce, consumed by the first `AuthProof` in
+    /// the challenged phase.
+    nonce: Option<String>,
     /// Recently seen transport message ids, oldest-first, bounded by
     /// [`SEEN_MESSAGE_CAP`]. Transport duplicate suppression only (IPC
     /// §6.1–6.2): never a domain identity, never consulted for correlation
@@ -146,72 +235,176 @@ struct ConnectionRecord {
 /// Every method takes a short section over the inner maps and never awaits
 /// while holding it. Poisoning recovers the committed table: sections run
 /// plain map operations that never panic while holding the guard.
-#[cfg(unix)]
 #[derive(Debug, Default)]
-struct ConnectionTable {
-    /// The per-device live count shares this section so pairing and close
-    /// stay atomic.
+pub(crate) struct ConnectionTable {
     inner: StdMutex<ConnectionTableInner>,
 }
 
-/// `device_live` counts connections currently holding each paired device
-/// string: [`ConnectionTable::note_paired`] increments once when a connection
-/// first records its device (immutable per connection thereafter), and
-/// [`ConnectionTable::note_closed`] decrements. Presence falls back only at
-/// zero, keeping connection close (transport fact) separate from presence
-/// loss (domain fact).
-#[cfg(unix)]
 #[derive(Debug, Default)]
 struct ConnectionTableInner {
     records: HashMap<ConnectionWireId, ConnectionRecord>,
-    device_live: HashMap<String, usize>,
-    /// Set by [`ConnectionTable::note_authed`]: a newer authentication by the
-    /// same device overwrites the entry, so the older connection goes stale
-    /// implicitly — [`ConnectionTable::live_for`] reports `authed` only while
-    /// the entry still names the connection. Closing the current connection
-    /// clears the entry (a newer entry is never cleared by an older close);
-    /// survivors stay unauthed until they complete a fresh challenge.
+    /// The per-device current connection slot. [`ConnectionTable::install_authenticated`]
+    /// overwrites it (superseding the previous record), and
+    /// [`ConnectionTable::note_closed`] clears it only when the closing
+    /// connection still owns the slot. Paired-socket counts are deliberately
+    /// not tracked: currentness, not liveness, decides reachability (#1384).
     device_current: HashMap<String, ConnectionWireId>,
 }
 
-/// Zero-count entries are removed (rather than kept at zero) so that
-/// "still live" reads as map membership with no separate bookkeeping.
-#[cfg(unix)]
-fn decrement_live(counts: &mut HashMap<String, usize>, device: &str) {
-    if let Some(count) = counts.get_mut(device) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            counts.remove(device);
-        }
-    }
-}
-
-#[cfg(unix)]
 impl ConnectionTable {
-    fn new() -> Self {
+    #[cfg(any(unix, test))]
+    pub(crate) fn new() -> Self {
         Self {
             inner: StdMutex::new(ConnectionTableInner::default()),
         }
     }
 
-    fn note_accept(&self) -> ConnectionWireId {
+    #[cfg(any(unix, test))]
+    pub(crate) fn note_accept(&self) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
         crate::lock_unpoison(&self.inner).records.insert(
             id,
             ConnectionRecord {
+                phase: ConnectionPhase::Accepted,
                 paired_device: None,
                 incarnation: None,
-                authed: false,
                 negotiated: None,
+                nonce: None,
                 seen_messages: std::collections::VecDeque::new(),
             },
         );
         id
     }
 
-    fn note_negotiated(&self, id: &ConnectionWireId, terms: NegotiatedConnection) {
-        if let Some(record) = crate::lock_unpoison(&self.inner).records.get_mut(id) {
-            record.negotiated = Some(terms);
+    /// Records a Host-issued device key: `Accepted → Paired`, set-once.
+    ///
+    /// Called only after the pairing repository answered `Paired` on this
+    /// connection, so the table records issuance, never a Client claim. Any
+    /// other phase, or a second device, changes nothing.
+    pub(crate) fn note_paired(&self, id: &ConnectionWireId, device_wire: &str) -> bool {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return false;
+        };
+        if record.phase != ConnectionPhase::Accepted || record.paired_device.is_some() {
+            return false;
+        }
+        record.paired_device = Some(device_wire.to_string());
+        record.phase = ConnectionPhase::Paired;
+        true
+    }
+
+    /// Records one capability frame as the connection's single challenge.
+    ///
+    /// This is one phase operation (IPC §9.3): on `Accepted` it binds
+    /// `bind_device` (the reconnect device the Host already resolved in the
+    /// device store) and moves straight to `Challenged`; on `Paired` (the
+    /// fresh pairing completed) it requires no new bind. Terms and the nonce
+    /// are written only here, so a repeat or out-of-phase capability frame
+    /// cannot change them.
+    pub(crate) fn note_challenged(
+        &self,
+        id: &ConnectionWireId,
+        bind_device: Option<&str>,
+        terms: NegotiatedConnection,
+        nonce: String,
+    ) -> ChallengeOutcome {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return ChallengeOutcome::Unknown;
+        };
+        match record.phase {
+            ConnectionPhase::Accepted => {
+                let Some(device) = bind_device else {
+                    return ChallengeOutcome::WrongPhase;
+                };
+                record.paired_device = Some(device.to_string());
+            }
+            ConnectionPhase::Paired => {
+                if let Some(bind) = bind_device
+                    && record.paired_device.as_deref() != Some(bind)
+                {
+                    return ChallengeOutcome::WrongPhase;
+                }
+            }
+            ConnectionPhase::Superseded => return ChallengeOutcome::Superseded,
+            ConnectionPhase::Challenged
+            | ConnectionPhase::Authenticated
+            | ConnectionPhase::Closed => return ChallengeOutcome::WrongPhase,
+        }
+        record.phase = ConnectionPhase::Challenged;
+        record.negotiated = Some(terms);
+        record.nonce = Some(nonce);
+        ChallengeOutcome::Challenged
+    }
+
+    /// Consumes the challenge nonce if this connection is still challenged.
+    pub(crate) fn take_nonce(&self, id: &ConnectionWireId) -> NonceAdmission {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return NonceAdmission::Unknown;
+        };
+        match record.phase {
+            ConnectionPhase::Challenged => match record.nonce.take() {
+                Some(nonce) => NonceAdmission::Nonce(nonce),
+                None => NonceAdmission::Missing,
+            },
+            ConnectionPhase::Superseded => NonceAdmission::Superseded,
+            ConnectionPhase::Accepted
+            | ConnectionPhase::Paired
+            | ConnectionPhase::Authenticated
+            | ConnectionPhase::Closed => NonceAdmission::WrongPhase,
+        }
+    }
+
+    /// Installs this connection as authenticated and current in one section.
+    ///
+    /// The phase and the bound device are re-checked here, so a proof that
+    /// raced a newer authentication cannot install over it: a superseded
+    /// record answers [`InstallOutcome::Superseded`] and leaves the newer
+    /// current alone. Installation supersedes the device's previous current
+    /// record irreversibly; a lost `AuthResult::Accepted` response never rolls
+    /// the install back.
+    pub(crate) fn install_authenticated(&self, id: &ConnectionWireId) -> InstallOutcome {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let previous = {
+            let Some(record) = table.records.get_mut(id) else {
+                return InstallOutcome::Unknown;
+            };
+            match record.phase {
+                ConnectionPhase::Challenged => {}
+                ConnectionPhase::Superseded => return InstallOutcome::Superseded,
+                ConnectionPhase::Accepted
+                | ConnectionPhase::Paired
+                | ConnectionPhase::Authenticated
+                | ConnectionPhase::Closed => return InstallOutcome::WrongPhase,
+            }
+            let Some(device) = record.paired_device.clone() else {
+                return InstallOutcome::WrongPhase;
+            };
+            record.phase = ConnectionPhase::Authenticated;
+            table.device_current.insert(device, *id)
+        };
+        if let Some(previous) = previous
+            && previous != *id
+            && let Some(record) = table.records.get_mut(&previous)
+            && record.phase == ConnectionPhase::Authenticated
+        {
+            record.phase = ConnectionPhase::Superseded;
+        }
+        InstallOutcome::Installed
+    }
+
+    /// Ends a failed authentication: `Challenged → Closed`.
+    ///
+    /// Only the challenged phase moves; a superseded record stays superseded
+    /// (that phase is irreversible), and any other phase is left as it is.
+    pub(crate) fn note_auth_failed(&self, id: &ConnectionWireId) {
+        let mut table = crate::lock_unpoison(&self.inner);
+        if let Some(record) = table.records.get_mut(id)
+            && record.phase == ConnectionPhase::Challenged
+        {
+            record.phase = ConnectionPhase::Closed;
         }
     }
 
@@ -219,26 +412,32 @@ impl ConnectionTable {
     ///
     /// Returns [`LiveDecision::Invalid`] when the connection is unknown (the
     /// table forgot it), when the envelope incarnation mismatches the pinned
-    /// first incarnation, or when the envelope device claim is missing or
-    /// disagrees with the table: the caller drops the connection without a
-    /// reply in all three cases (a missing or mismatched claim is a
+    /// first incarnation, or when a paired connection's envelope claim is
+    /// missing or disagrees with the table: the caller drops the connection
+    /// without a reply in all three cases (a missing or mismatched claim is a
     /// protocol violation or theft attempt, and answering it would be an
-    /// oracle). The `client_ref` is table-derived (paired device) or
-    /// the pinned incarnation pair — never the envelope claim, which is
-    /// only equality-checked; authority travels in `paired_device` plus
-    /// `connection_known` plus `authed`, all table-filled, and
-    /// `connection_id` carries the table key the gate requires envelopes
-    /// to echo on post-capability frames. `authed` holds only while the
-    /// record completed the challenge AND is still the device's current
-    /// authed connection: a superseded connection reports unauthed even
-    /// though its record keeps the flag.
-    fn live_for(&self, id: &ConnectionWireId, envelope: &WireEnvelope) -> LiveDecision {
+    /// oracle). An unbound `Accepted` record tolerates a device claim: the
+    /// reconnect path resolves it, and the claim is never authority on its
+    /// own. The `client_ref` is table-derived (paired device) or the pinned
+    /// incarnation pair — never the envelope claim, which is only
+    /// equality-checked; authority travels in `paired_device` plus
+    /// `connection_known` plus `authed`, all table-filled. `authed` holds only
+    /// while the record completed the challenge AND is still the device's
+    /// current connection: a superseded connection reports unauthed even
+    /// though its record keeps its phase. `phase` is the snapshot the gate
+    /// uses to answer typed stale rejections.
+    #[cfg(any(unix, test))]
+    pub(crate) fn live_for(
+        self: &Arc<Self>,
+        id: &ConnectionWireId,
+        envelope: &WireEnvelope,
+    ) -> LiveDecision {
         let mut table = crate::lock_unpoison(&self.inner);
         // Transport duplicate suppression first: a redelivered message id is
         // dropped before it can pin incarnation, pair, or touch any domain
         // mapping. Fresh sends — including transport retries, which always
         // mint new ids — pass through and are recorded bounded-oldest-first.
-        let (device, record_authed) = {
+        let (device, phase, negotiated) = {
             let Some(record) = table.records.get_mut(id) else {
                 return LiveDecision::Invalid;
             };
@@ -255,105 +454,139 @@ impl ConnectionTable {
                 Some(pinned) if pinned != seen => return LiveDecision::Invalid,
                 Some(_) => {}
             }
-            (record.paired_device.clone(), record.authed)
+            (
+                record.paired_device.clone(),
+                record.phase,
+                record.negotiated.clone(),
+            )
         };
         let claimed = envelope
             .sender
             .device_id
             .as_ref()
             .map(|id| id.0.as_hyphenated().to_string());
-        let client_ref = match (&device, claimed) {
-            (Some(paired), Some(claim)) if paired == &claim => paired.clone(),
-            (None, None) => {
+        let client_ref = match (&device, &claimed) {
+            (Some(paired), Some(claim)) if paired == claim => paired.clone(),
+            (Some(_), _) => return LiveDecision::Invalid,
+            (None, _) => {
                 let incarnation = envelope.sender.incarnation_id;
                 format!("incarnation-{}-{}", incarnation.counter, incarnation.random)
             }
-            _ => return LiveDecision::Invalid,
         };
         let current = device
             .as_ref()
             .is_some_and(|paired| table.device_current.get(paired) == Some(id));
-        let negotiated = table
-            .records
-            .get(id)
-            .and_then(|record| record.negotiated.clone());
         LiveDecision::Ready(LiveInput {
             client_ref,
             connection_live: true,
             peer_uid_ok: true,
             paired_device: device,
             connection_known: true,
-            authed: record_authed && current,
+            authed: phase == ConnectionPhase::Authenticated && current,
             connection_id: *id,
             negotiated,
+            phase,
+            authority: Arc::clone(self),
         })
     }
 
-    /// Marks the connection paired with the Host-issued device wire string.
+    /// Whether `device` currently has an authenticated connection.
     ///
-    /// Called only after [`HostHandle::handle_frame`] answers `Paired` on
-    /// this connection, so the table records issuance, never a Client claim.
-    /// The paired device is immutable once set: a connection can never move
-    /// its live count to another device, and closing it can never strand an
-    /// earlier device's liveness. Host ingress denies a second pairing
-    /// request; this set-once check keeps the invariant even if such a
-    /// response is emitted.
-    fn note_paired(&self, id: &ConnectionWireId, device_wire: &str) {
-        let mut table = crate::lock_unpoison(&self.inner);
-        let Some(record) = table.records.get_mut(id) else {
-            return;
-        };
-        if record.paired_device.is_some() {
-            return;
-        }
-        record.paired_device = Some(device_wire.to_string());
-        *table
-            .device_live
-            .entry(device_wire.to_string())
-            .or_insert(0) += 1;
+    /// The presence fallback trigger is this absence, not a zero live-socket
+    /// count: a lingering superseded or unauthenticated socket never satisfies
+    /// it (#1384).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "presence/Client-dependent admission consumes this predicate in the presence slice; slice A tests it directly"
+        )
+    )]
+    pub(crate) fn current_authenticated(&self, device: &str) -> bool {
+        let table = crate::lock_unpoison(&self.inner);
+        table.device_current.get(device).is_some_and(|id| {
+            table
+                .records
+                .get(id)
+                .is_some_and(|record| record.phase == ConnectionPhase::Authenticated)
+        })
     }
 
-    /// Marks the connection authenticated after an `Accepted` answer.
+    /// Forgets a closed connection and runs the presence fallback in the same
+    /// section when it was the device's current authenticated connection.
     ///
-    /// Called only after [`HostHandle::handle_frame`] answers `Accepted` on
-    /// this connection, so the table records authentication, never a Client
-    /// claim. An unpaired connection records nothing: acceptance without a
-    /// paired device cannot happen, and failing closed here keeps it that way.
-    fn note_authed(&self, id: &ConnectionWireId) {
+    /// The current slot is compared against this connection's identity before
+    /// clearing, so a superseded or unauthenticated close never clears a newer
+    /// current (S5-05). `on_fallback` runs while the section is still held, so
+    /// its synchronous presence compare/commit (CCT §10.4) cannot interleave
+    /// with a competing authentication install; it must not call back into
+    /// this table. Forgetting is idempotent.
+    #[cfg(any(unix, test))]
+    pub(crate) fn note_closed(
+        &self,
+        id: &ConnectionWireId,
+        on_fallback: impl FnOnce(&str),
+    ) -> Option<String> {
         let mut table = crate::lock_unpoison(&self.inner);
-        let Some(record) = table.records.get_mut(id) else {
-            return;
-        };
-        let Some(device) = record.paired_device.clone() else {
-            return;
-        };
-        record.authed = true;
-        table.device_current.insert(device, *id);
-    }
-
-    /// Forgets a closed connection, returning its paired device, if any, and
-    /// whether that device still holds another live connection.
-    ///
-    /// The caller reports the device to
-    /// [`HostHandle::note_disconnect`](crate::serve::HostHandle::note_disconnect)
-    /// only when `device_still_live` is false: closing one of several live
-    /// connections is a transport fact, not presence loss. Forgetting is
-    /// idempotent, and closing the current authed connection clears its
-    /// currency entry; an entry naming a newer connection is left alone.
-    fn note_closed(&self, id: &ConnectionWireId) -> (Option<String>, bool) {
-        let mut table = crate::lock_unpoison(&self.inner);
-        let Some(record) = table.records.remove(id) else {
-            return (None, false);
-        };
-        let Some(device) = record.paired_device else {
-            return (None, false);
-        };
-        decrement_live(&mut table.device_live, &device);
+        let record = table.records.remove(id)?;
+        let device = record.paired_device?;
         if table.device_current.get(&device) == Some(id) {
             table.device_current.remove(&device);
+            on_fallback(&device);
         }
-        let still_live = table.device_live.contains_key(&device);
-        (Some(device), still_live)
+        Some(device)
+    }
+
+    /// Current phase of a connection, or [`None`] when the table forgot it.
+    pub(crate) fn phase_of(&self, id: &ConnectionWireId) -> Option<ConnectionPhase> {
+        crate::lock_unpoison(&self.inner)
+            .records
+            .get(id)
+            .map(|record| record.phase)
+    }
+
+    /// Test-only pending-challenge snapshot.
+    #[cfg(test)]
+    pub(crate) fn challenge_nonce_of(&self, id: &ConnectionWireId) -> Option<String> {
+        crate::lock_unpoison(&self.inner)
+            .records
+            .get(id)
+            .and_then(|record| record.nonce.clone())
+    }
+
+    /// Test-only negotiated-terms snapshot.
+    #[cfg(test)]
+    pub(crate) fn negotiated_of(&self, id: &ConnectionWireId) -> Option<NegotiatedConnection> {
+        crate::lock_unpoison(&self.inner)
+            .records
+            .get(id)
+            .and_then(|record| record.negotiated.clone())
+    }
+
+    /// Test-only [`LiveInput`] snapshot for a connection, without an envelope.
+    ///
+    /// Mirrors [`ConnectionTable::live_for`]'s premise derivation so direct
+    /// handle tests can drive the real table.
+    #[cfg(test)]
+    pub(crate) fn test_live(self: &Arc<Self>, id: &ConnectionWireId) -> Option<LiveInput> {
+        let table = crate::lock_unpoison(&self.inner);
+        let record = table.records.get(id)?;
+        let device = record.paired_device.clone();
+        let current = device
+            .as_ref()
+            .is_some_and(|paired| table.device_current.get(paired) == Some(id));
+        Some(LiveInput {
+            client_ref: device.clone().unwrap_or_else(|| String::from("unpaired")),
+            connection_live: true,
+            peer_uid_ok: true,
+            paired_device: device,
+            connection_known: true,
+            authed: record.phase == ConnectionPhase::Authenticated && current,
+            connection_id: *id,
+            negotiated: record.negotiated.clone(),
+            phase: record.phase,
+            authority: Arc::clone(self),
+        })
     }
 }
 
@@ -466,32 +699,20 @@ where
 #[cfg(unix)]
 use crate::serve::STREAM_BUFFER_FRAMES;
 
-/// Applies one response's table bookkeeping and writes it to the socket.
+/// Writes one response frame to the socket.
 ///
-/// Returns `false` when the connection can no longer carry frames (encode or
-/// write failure). The accepted connection id authenticates only when it is
-/// the table key the handle echoed back.
+/// The phase and current-slot bookkeeping happens where each answer is
+/// decided, inside the connection-ownership sections (IPC §9.3); this loop
+/// only carries bytes. Returns `false` when the connection can no longer
+/// carry frames (encode or write failure).
 #[cfg(unix)]
 async fn write_response(
     stream: &mut tokio::net::UnixStream,
-    table: &ConnectionTable,
-    connection: &ConnectionWireId,
     response: WireFrame,
     terminal: &mut bool,
 ) -> bool {
     use tokio::io::AsyncWriteExt as _;
 
-    if let WirePayload::PairingResult(PairingResult::Paired { device_id }) = &response.payload {
-        table.note_paired(connection, &device_id.0.as_hyphenated().to_string());
-    }
-    if let WirePayload::AuthResult(AuthResult::Accepted { connection_id }) = &response.payload
-        && *connection_id == *connection
-    {
-        table.note_authed(connection);
-    }
-    if let WirePayload::NegotiatedConnection(negotiated) = &response.payload {
-        table.note_negotiated(connection, negotiated.clone());
-    }
     if matches!(response.payload, WirePayload::DisconnectNotice(_)) {
         *terminal = true;
     }
@@ -505,10 +726,9 @@ async fn write_response(
 /// An incarnation mismatch, a corrupt or oversize frame, or a terminal
 /// [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) in the
 /// responses ends the connection; close always forgets the table entry and
-/// reports a paired device to
-/// [`HostHandle::note_disconnect`](crate::serve::HostHandle::note_disconnect)
-/// only when no other live connection still holds that device (see
-/// [`ConnectionTable::note_closed`]).
+/// runs the presence fallback through
+/// [`HostHandle::close_connection`](crate::serve::HostHandle::close_connection)
+/// when this was the device's current authenticated connection.
 async fn serve_connection<T>(
     mut stream: tokio::net::UnixStream,
     connection: ConnectionWireId,
@@ -565,9 +785,7 @@ async fn serve_connection<T>(
         loop {
             if host_done {
                 while let Ok(response) = frame_rx.try_recv() {
-                    if !write_response(&mut stream, &table, &connection, response, &mut terminal)
-                        .await
-                    {
+                    if !write_response(&mut stream, response, &mut terminal).await {
                         failed = true;
                         break;
                     }
@@ -582,15 +800,7 @@ async fn serve_connection<T>(
                 maybe = frame_rx.recv() => {
                     match maybe {
                         Some(response) => {
-                            if !write_response(
-                                &mut stream,
-                                &table,
-                                &connection,
-                                response,
-                                &mut terminal,
-                            )
-                            .await
-                            {
+                            if !write_response(&mut stream, response, &mut terminal).await {
                                 failed = true;
                                 break;
                             }
@@ -617,12 +827,7 @@ async fn serve_connection<T>(
             break;
         }
     }
-    let (device, still_live) = table.note_closed(&connection);
-    if let Some(device) = device
-        && !still_live
-    {
-        handle.note_disconnect(&device).await;
-    }
+    handle.close_connection(&table, connection).await;
 }
 
 /// Windows stub: no listener yet.

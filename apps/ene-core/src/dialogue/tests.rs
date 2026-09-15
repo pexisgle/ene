@@ -1585,7 +1585,9 @@ async fn disconnect_clears_an_attached_device() {
         )),
         "the send attaches and accepts, got {accepted:?}"
     );
-    handle.note_disconnect("client-a").await;
+    handle
+        .close_connection(&live.authority, live.connection_id)
+        .await;
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
@@ -1631,7 +1633,9 @@ async fn replay_after_disconnect_neither_stales_nor_reattaches() {
         )),
         "the send attaches and accepts, got {accepted:?}"
     );
-    handle.note_disconnect("client-a").await;
+    handle
+        .close_connection(&live.authority, live.connection_id)
+        .await;
     // The durable replay check precedes presence attach: the same
     // command replays its original accept even though the device is
     // NoActive again, and presence stays untouched (no re-attach, no

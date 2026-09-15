@@ -20,21 +20,30 @@
 //!   [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation).
 //! - Presence attach happens only on the
 //!   [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) path: capability
-//!   and management frames never attach. Socket close runs the symmetric
-//!   compare-and-commit for
+//!   and management frames never attach. Socket close decides and commits the
 //!   [`DisconnectObserved`](ene_presence::ThinMoveReason::DisconnectObserved)
-//!   through [`HostHandle::note_disconnect`], which [`crate::conn`] calls with
-//!   the paired device string.
+//!   fallback in one connection-table section through
+//!   `HostHandle::close_connection` (CCT §10.4): the fallback runs only when
+//!   the closing connection was still the device's current authenticated one.
+//! - Domain ingress and the presence reachability premise use only a
+//!   connection that is authenticated, current for its device, open, and
+//!   paired: the connection table decides that (IPC §9.3, #1384), never a
+//!   paired-socket count or a past authentication. A superseded connection
+//!   answers typed `StaleConnection` rejections with the socket kept open
+//!   (IPC §11.3).
 //! - Presence `active_client` names a device through `device_client`, a
 //!   deterministic `UUID v5` mapping rather than issuance.
-//! - Authentication is challenge/proof over the pairing secret. Pending nonces
-//!   live in memory only, so a restart fails closed; pairing secrets live only
-//!   in `device-auth.json` (plus the transient approve-time display scope),
-//!   with no secret cache.
+//! - Authentication is challenge/proof over the pairing secret. Challenge
+//!   nonces live in the connection table in memory only, so a restart fails
+//!   closed; pairing secrets live only in `device-auth.json` (plus the
+//!   transient approve-time display scope), with no secret cache.
 //! - The response sender reveals the connection id only on and after
 //!   [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): every
 //!   pre-accept response carries [`None`], so a peer that never completed the
 //!   challenge never learns the id the ingress gate requires it to echo.
+//! - The single-writer `host.lock` ([`crate::host_lock`]) is taken before the
+//!   state open, so a second Host in the same data directory is refused
+//!   before any startup mutation (PR §6.4).
 //! - [`HostHandle::handle_frame`] is infallible by contract: infrastructure
 //!   failures map to retry-safe outcome frames (hold or revalidate), never to
 //!   fabricated domain facts.
@@ -71,9 +80,10 @@ use ene_credential::{
 };
 use ene_inference::ProviderTransport;
 use ene_permission::EvaluationTracker;
+use ene_presence::ClientId;
+#[cfg(any(unix, test))]
 use ene_presence::{
-    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
-    PresenceRepository, PresenceState, ThinMoveReason,
+    LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceState, ThinMoveReason,
 };
 use ene_presentation::{OpenRound, RoundId};
 use ene_primitive::RawId;
@@ -84,17 +94,21 @@ use ene_task::{
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+use crate::conn::{ConnectionPhase, ConnectionTable};
 use crate::dialogue::{CredentialScrubber, HostInference};
 use crate::task_agent::{HistoryInstructionSource, TaskAgentInferenceAdapter};
 use crate::task_run::{TaskAgentRunError, TaskAgentRunOutcome, TaskAgentRunRefusal};
 
 mod frames;
 mod handshake;
-mod lifecycle;
+pub(crate) mod lifecycle;
 
 use lifecycle::ensure_data_dir;
 
-pub(crate) use frames::{outgoing_envelope, outgoing_frame, reject_frame, unpaired_close};
+pub(crate) use frames::{
+    invalid_phase_reject, outgoing_envelope, outgoing_frame, reject_frame, stale_reject,
+    unpaired_close,
+};
 pub use lifecycle::serve;
 
 /// Binary-local Host failure.
@@ -107,6 +121,10 @@ pub use lifecycle::serve;
 pub enum CoreError {
     #[error("store unavailable: {0}")]
     Store(String),
+    /// Another Host already holds the single-writer lock for this data
+    /// directory (PR §6.4); the loser refuses startup before any mutation.
+    #[error("another Host is already running for this data directory")]
+    AlreadyRunning,
     #[error("bind failed: {0}")]
     Bind(String),
     #[error("inference failed: {0}")]
@@ -221,16 +239,21 @@ impl CredentialStore for CredStore {
 /// otherwise the incarnation pair), `connection_live` carries the out-of-band
 /// reachability premise, `peer_uid_ok` carries the same-user proof for this
 /// connection, `paired_device` carries the device wire string the connection
-/// table paired on this connection (if any), `connection_known` reports
+/// table bound on this connection (if any), `connection_known` reports
 /// whether the connection table knows this connection at all, `authed`
 /// reports whether this connection completed the challenge/proof exchange and
-/// is still the device's current authed connection (a newer authentication by
-/// the same device supersedes it), and `connection_id` is the table key
-/// itself. The gate in [`HostHandle::handle_frame`] trusts these conn-filled
-/// premises; direct handle callers (tests) construct them explicitly. All
-/// fields are public so connection adapters and integration tests can
-/// construct the value directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// is still the device's current authenticated connection (a newer
+/// authentication by the same device supersedes it), and `connection_id` is
+/// the table key itself. `phase` is the connection's one-way phase snapshot
+/// (IPC §9.3): the gate answers a typed `StaleConnection` for superseded
+/// connections and only then treats the remaining premises as a terminal
+/// unpaired-close decision. `authority` is the table handle the handshake
+/// paths use to re-check phase, consume the nonce, and install currentness
+/// inside one short section, and the close admission uses it to serialize the
+/// presence compare/commit (CCT §10.4). The gate in
+/// [`HostHandle::handle_frame`] trusts these conn-filled premises; direct
+/// handle callers (tests) construct them explicitly through the table.
+#[derive(Debug, Clone)]
 pub struct LiveInput {
     pub client_ref: String,
     pub connection_live: bool,
@@ -245,6 +268,87 @@ pub struct LiveInput {
     /// the Client: later frames must match this version, so version mixing
     /// within one connection is impossible. [`None`] before negotiation.
     pub negotiated: Option<NegotiatedConnection>,
+    /// One-way connection phase snapshot for gate decisions.
+    pub phase: ConnectionPhase,
+    /// The connection table behind these premises.
+    ///
+    /// Crate-internal: the connection layer mints it with the connection, so
+    /// external callers cannot fabricate a table-backed connection.
+    pub(crate) authority: std::sync::Arc<ConnectionTable>,
+}
+
+impl PartialEq for LiveInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.client_ref == other.client_ref
+            && self.connection_live == other.connection_live
+            && self.peer_uid_ok == other.peer_uid_ok
+            && self.paired_device == other.paired_device
+            && self.connection_known == other.connection_known
+            && self.authed == other.authed
+            && self.connection_id == other.connection_id
+            && self.negotiated == other.negotiated
+            && self.phase == other.phase
+            && std::sync::Arc::ptr_eq(&self.authority, &other.authority)
+    }
+}
+
+impl Eq for LiveInput {}
+
+/// What the domain gate decided for one frame (IPC §11.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateDecision {
+    /// The frame may proceed to its domain handler.
+    Pass,
+    /// The connection was superseded: answer a typed `StaleConnection` and
+    /// keep the socket open.
+    Stale,
+    /// The connection cannot serve domain frames: answer the terminal
+    /// unpaired close.
+    Unpaired,
+}
+
+/// Test-only gate that pauses the close-admission section (S5-05).
+///
+/// The gate is entered before the connection-table section, so a test can let
+/// a competing authentication install complete while the close is paused and
+/// observe that the close then re-reads currentness instead of acting on a
+/// stale snapshot.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct TestCloseGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl Default for TestCloseGate {
+    fn default() -> Self {
+        Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TestCloseGate {
+    /// Pauses until the test releases the gate, marking entry first.
+    pub(crate) async fn pause(&self) {
+        self.entered.add_permits(1);
+        let permit = self.release.acquire().await.expect("gate stays open");
+        permit.forget();
+    }
+
+    /// Waits until a paused close has entered the gate.
+    pub(crate) async fn wait_entered(&self) {
+        let permit = self.entered.acquire().await.expect("gate is entered");
+        permit.forget();
+    }
+
+    /// Releases one paused close.
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
 }
 
 /// Maps a paired device wire string to its per-process [`ClientId`].
@@ -260,14 +364,6 @@ pub(crate) fn device_client(device_wire: &str) -> ClientId {
         &Uuid::NAMESPACE_URL,
         device_wire.as_bytes(),
     )))
-}
-
-/// Keys the pending-nonce map by connection: the hyphenated wire form of the id.
-///
-/// The same string form the connection layer uses for paired devices, so map
-/// keys match across the Host/connection boundary by construction.
-pub(crate) fn conn_key(id: &ConnectionWireId) -> String {
-    id.0.as_hyphenated().to_string()
 }
 
 /// `Stage 2` Host handle: durable store, evaluation tracker, and Host maps.
@@ -286,8 +382,8 @@ pub(crate) fn conn_key(id: &ConnectionWireId) -> String {
 ///
 /// Map keys: `open_rounds` is keyed by `(client ref, companion key)`; round
 /// refs issued on the wire resolve back through `rounds` (wire string to
-/// domain round); `pending_nonces` is keyed by the hyphenated connection id
-/// string.
+/// domain round). Challenge nonces and currentness live in the connection
+/// layer's `ConnectionTable`, not here.
 pub struct HostHandle {
     pub(crate) store: Store,
     pub(crate) tracker: AsyncMutex<EvaluationTracker>,
@@ -302,15 +398,6 @@ pub struct HostHandle {
     /// [`FileDeviceAuthStore`] contract for custody, file protection, and the
     /// backup-exclusion rule.
     pub(crate) auth_store: FileDeviceAuthStore,
-    /// Single-use auth nonces by connection key.
-    ///
-    /// In-memory and transient: a restart drops every pending nonce, so
-    /// post-restart Clients re-run capability-plus-proof rather than
-    /// resuming. Fail-closed: a proof with no pending nonce answers
-    /// [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected), never
-    /// acceptance. Each nonce is consumed on first proof regardless of
-    /// outcome, so a captured proof cannot replay.
-    pub(crate) pending_nonces: StdMutex<HashMap<String, String>>,
     /// In-memory, best-effort queue of pinned Experience premises whose
     /// completed replies await a Learning formation pass.
     ///
@@ -365,6 +452,9 @@ pub struct HostHandle {
     #[cfg(test)]
     pub(crate) task_control_gate:
         StdMutex<Option<std::sync::Arc<crate::task_control::TestTaskControlGate>>>,
+    /// Test-only deterministic gate for the close-admission section.
+    #[cfg(test)]
+    pub(crate) close_gate: StdMutex<Option<std::sync::Arc<TestCloseGate>>>,
 }
 
 impl HostHandle {
@@ -424,7 +514,6 @@ impl HostHandle {
             rounds: StdMutex::new(HashMap::new()),
             cred_store,
             auth_store,
-            pending_nonces: StdMutex::new(HashMap::new()),
             learning_queue: StdMutex::new(VecDeque::new()),
             #[cfg(any(unix, test))]
             learning_worker: AsyncMutex::new(()),
@@ -435,6 +524,8 @@ impl HostHandle {
             task_launcher: OnceLock::new(),
             #[cfg(test)]
             task_control_gate: StdMutex::new(None),
+            #[cfg(test)]
+            close_gate: StdMutex::new(None),
         })
     }
 
@@ -700,45 +791,90 @@ impl HostHandle {
             _ => {}
         }
         match &frame.payload {
-            WirePayload::PairingRequest(request) => {
-                for response in self.pair(&frame, request, &live).await {
-                    if sink.emit(response).is_err() {
-                        break;
+            WirePayload::PairingRequest(request) => match live.phase {
+                ConnectionPhase::Superseded => emit_end(
+                    sink,
+                    stale_reject(&frame, &live, "pairing on a superseded connection"),
+                ),
+                ConnectionPhase::Accepted => {
+                    for response in self.pair(&frame, request, &live).await {
+                        if sink.emit(response).is_err() {
+                            break;
+                        }
                     }
                 }
-            }
-            WirePayload::CapabilityAdvertise(advertise) => {
-                if live.paired_device.is_none() {
-                    return emit_end(sink, unpaired_close(&frame, &live));
-                }
-                for response in self.advertise(&frame, advertise, &live) {
-                    if sink.emit(response).is_err() {
-                        break;
+                _ => emit_end(
+                    sink,
+                    invalid_phase_reject(&frame, &live, "pairing outside the accepted phase"),
+                ),
+            },
+            WirePayload::CapabilityAdvertise(advertise) => match live.phase {
+                ConnectionPhase::Superseded => emit_end(
+                    sink,
+                    stale_reject(&frame, &live, "capability on a superseded connection"),
+                ),
+                ConnectionPhase::Accepted | ConnectionPhase::Paired => {
+                    for response in self.advertise(&frame, advertise, &live).await {
+                        if sink.emit(response).is_err() {
+                            break;
+                        }
                     }
                 }
-            }
-            WirePayload::AuthProof(proof) => {
-                for response in self.verify_proof(&frame, proof, &live).await {
-                    if sink.emit(response).is_err() {
-                        break;
+                _ => emit_end(
+                    sink,
+                    invalid_phase_reject(&frame, &live, "capability outside its phase"),
+                ),
+            },
+            WirePayload::AuthProof(proof) => match live.phase {
+                ConnectionPhase::Superseded => emit_end(
+                    sink,
+                    stale_reject(&frame, &live, "auth proof on a superseded connection"),
+                ),
+                ConnectionPhase::Challenged => {
+                    for response in self.verify_proof(&frame, proof, &live).await {
+                        if sink.emit(response).is_err() {
+                            break;
+                        }
                     }
                 }
-            }
+                _ => emit_end(
+                    sink,
+                    invalid_phase_reject(&frame, &live, "auth proof outside the challenged phase"),
+                ),
+            },
             // Inbound challenges and results are never solicited (the Host
             // mints challenges and issues results), so both answer nothing —
             // the same silence as the catch-all below, spelled out so the
             // auth direction stays explicit.
             WirePayload::AuthChallenge(_) | WirePayload::AuthResult(_) => {}
             WirePayload::SubmitTextInput(submit) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                match Self::gate(&frame, &live) {
+                    GateDecision::Pass => {}
+                    GateDecision::Stale => {
+                        return emit_end(
+                            sink,
+                            stale_reject(&frame, &live, "input on a superseded connection"),
+                        );
+                    }
+                    GateDecision::Unpaired => {
+                        return emit_end(sink, unpaired_close(&frame, &live));
+                    }
                 }
                 self.submit_text(&frame, submit, &live, transport, sink, stream_tx)
                     .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                match Self::gate(&frame, &live) {
+                    GateDecision::Pass => {}
+                    GateDecision::Stale => {
+                        return emit_end(
+                            sink,
+                            stale_reject(&frame, &live, "presentation on a superseded connection"),
+                        );
+                    }
+                    GateDecision::Unpaired => {
+                        return emit_end(sink, unpaired_close(&frame, &live));
+                    }
                 }
                 for response in self.confirm_presentation(&frame, confirm).await {
                     if sink.emit(response).is_err() {
@@ -747,8 +883,17 @@ impl HostHandle {
                 }
             }
             WirePayload::HistoryRequest(request) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                match Self::gate(&frame, &live) {
+                    GateDecision::Pass => {}
+                    GateDecision::Stale => {
+                        return emit_end(
+                            sink,
+                            stale_reject(&frame, &live, "history on a superseded connection"),
+                        );
+                    }
+                    GateDecision::Unpaired => {
+                        return emit_end(sink, unpaired_close(&frame, &live));
+                    }
                 }
                 for response in self.answer_history(&frame, request, &live).await {
                     if sink.emit(response).is_err() {
@@ -757,8 +902,17 @@ impl HostHandle {
                 }
             }
             WirePayload::ManagementIntent(intent) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                match Self::gate(&frame, &live) {
+                    GateDecision::Pass => {}
+                    GateDecision::Stale => {
+                        return emit_end(
+                            sink,
+                            stale_reject(&frame, &live, "intent on a superseded connection"),
+                        );
+                    }
+                    GateDecision::Unpaired => {
+                        return emit_end(sink, unpaired_close(&frame, &live));
+                    }
                 }
                 for response in self.apply_intent(&frame, intent, &live).await {
                     if sink.emit(response).is_err() {
@@ -767,8 +921,17 @@ impl HostHandle {
                 }
             }
             WirePayload::ManagementViewRequest(request) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                match Self::gate(&frame, &live) {
+                    GateDecision::Pass => {}
+                    GateDecision::Stale => {
+                        return emit_end(
+                            sink,
+                            stale_reject(&frame, &live, "view on a superseded connection"),
+                        );
+                    }
+                    GateDecision::Unpaired => {
+                        return emit_end(sink, unpaired_close(&frame, &live));
+                    }
                 }
                 for response in self.answer_view(&frame, request, &live).await {
                     if sink.emit(response).is_err() {
@@ -782,29 +945,38 @@ impl HostHandle {
         }
     }
 
-    /// Reports whether the ingress gate trips for `frame` under `live`.
+    /// Decides what the domain gate does with `frame` under `live`.
     ///
     /// Pairing, capability, and proof frames never reach this gate (see
     /// [`HostHandle::handle_frame`]): pairing is pre-pairing by definition,
     /// capability predates authentication, and the proof is the
-    /// authentication. Every later frame needs all four premises: a device
-    /// paired on this connection, a known connection entry, a completed
-    /// authentication that is still current for the device (a newer
-    /// authentication by the same device supersedes this connection, so a
-    /// replayed id on the old connection still trips), and an envelope
-    /// connection id equal to the table id. Equality is the auth binding: the
-    /// id is minted per accept and revealed only in
+    /// authentication. A frame from a superseded connection answers a typed
+    /// `StaleConnection` and the socket stays open (IPC §11.3): its
+    /// attribution is verifiable from the table, so silence or a drop would
+    /// lose the honest outcome. Every other non-serviceable frame needs all
+    /// four premises — a device bound on this connection, a known connection
+    /// entry, a completed authentication that is still current for the device
+    /// (a newer authentication by the same device supersedes this connection),
+    /// and an envelope connection id equal to the table id. Equality is the
+    /// auth binding: the id is minted per accept and revealed only in
     /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted), so echoing
-    /// it proves the sender completed the challenge on this connection.
-    /// Trips on unauthenticated domain service; the answer is a terminal
-    /// disconnect, not a [`Reject`](ene_api::v1::payload::WirePayload::Reject)
-    /// (which exists for post-auth declines): an unauthenticated peer learns
-    /// nothing beyond the drop, never an oracle denial.
-    fn gate_trips(frame: &WireFrame, live: &LiveInput) -> bool {
-        live.paired_device.is_none()
+    /// it proves the sender completed the challenge on this connection. A
+    /// failed premise answers the terminal unpaired close, not a
+    /// [`Reject`](ene_api::v1::payload::WirePayload::Reject): an
+    /// unauthenticated peer learns nothing beyond the drop, never an oracle
+    /// denial.
+    fn gate(frame: &WireFrame, live: &LiveInput) -> GateDecision {
+        if live.phase.is_superseded() {
+            return GateDecision::Stale;
+        }
+        if live.paired_device.is_none()
             || !live.connection_known
             || !live.authed
             || frame.envelope.sender.connection_id != Some(live.connection_id)
+        {
+            return GateDecision::Unpaired;
+        }
+        GateDecision::Pass
     }
 
     pub(crate) fn round_for(&self, wire: &str) -> Option<RoundId> {
@@ -960,57 +1132,106 @@ impl HostHandle {
             .collect())
     }
 
-    /// Observes a socket close for `client_ref` and clears presence when owned.
+    /// Admits one transport close and runs the presence fallback if owned.
     ///
-    /// Best-effort compare-and-commit to `NoActive` for
+    /// The close decision and the presence compare/commit share one short
+    /// connection-table section inside `spawn_blocking` (CCT §10.4): the
+    /// table re-reads whether this connection is still the device's current
+    /// authenticated one before clearing it, so a close racing a newer
+    /// authentication never clears the new current, and a superseded
+    /// connection's close never triggers the fallback (#1384, S5-05). The
+    /// callback runs synchronously while the section is held, so the presence
+    /// commit cannot interleave with an authentication install; the lock order
+    /// is connection table → task registry → SQLite (this path takes the
+    /// table section, then SQLite, and never the registry in between).
+    ///
+    /// The fallback itself is a best-effort compare-and-commit to `NoActive`
+    /// for
     /// [`DisconnectObserved`](ene_presence::ThinMoveReason::DisconnectObserved):
-    /// only a `Present` attribution owned by the deterministic mapping of
-    /// `client_ref` moves (through compare-and-begin plus confirm with a
-    /// not-live premise); any other state, a lost compare race, or a store
-    /// failure leaves attribution untouched. [`crate::conn`] passes the
-    /// paired device wire string, so the deterministic mapping re-derives the
-    /// same [`ClientId`] the submit path attached, including after restarts.
-    pub async fn note_disconnect(&self, client_ref: &str) {
-        let client = device_client(client_ref);
-        let Ok(companion) = self.store.ensure_running_companion().await else {
-            return;
-        };
-        let Ok(Some(current)) = self.store.load_attribution(companion.as_raw()).await else {
-            return;
-        };
-        if current.state != PresenceState::Present || current.active_client != Some(client) {
-            return;
+    /// only a `Present` attribution owned by the deterministic mapping of the
+    /// closed device moves (compare-and-begin plus confirm with a not-live
+    /// premise); any other state, a lost compare race, or a store failure
+    /// leaves attribution untouched. Target selection for a Host-local
+    /// fallback client is a later slice; this keeps the single-step move to
+    /// `NoActive`.
+    #[cfg(any(unix, test))]
+    pub(crate) async fn close_connection(
+        &self,
+        table: &std::sync::Arc<ConnectionTable>,
+        connection: ConnectionWireId,
+    ) {
+        #[cfg(test)]
+        let close_gate = crate::lock_unpoison(&self.close_gate).clone();
+        #[cfg(test)]
+        if let Some(gate) = close_gate {
+            gate.pause().await;
         }
-        let expected = PresenceCheckRef {
-            expected_generation: current.generation,
-            expected_state: current.state,
-            expected_active: current.active_client,
-        };
-        let Ok(MoveDecision::TransitioningToNew { generation }) = self
-            .store
-            .compare_and_begin_transition(
-                companion.as_raw(),
-                expected,
-                None,
-                ThinMoveReason::DisconnectObserved,
-            )
-            .await
-        else {
-            return;
-        };
-        let premise = LiveReachabilityRef {
-            client,
-            connection_live: false,
-        };
-        // Rejected and errored confirms alike leave the transition
-        // unconfirmed; the next intake reads the `InTransition`
-        // attribution and reports held, which is honest.
-        if !matches!(
-            self.store
-                .confirm_transition(companion.as_raw(), generation, premise)
-                .await,
-            Ok(ConfirmTransitionOutcome::Confirmed(_))
-        ) {}
+        let companion = self.store.ensure_running_companion().await.ok();
+        let store = self.store.clone();
+        let table = std::sync::Arc::clone(table);
+        let joined = tokio::task::spawn_blocking(move || {
+            table.note_closed(&connection, |device| {
+                if let Some(companion) = companion {
+                    note_disconnect_sync(&store, companion, device);
+                }
+            });
+        })
+        .await;
+        if let Err(join) = joined {
+            std::panic::resume_unwind(join.into_panic());
+        }
+    }
+
+    /// Arms the test-only close-admission gate and returns it.
+    #[cfg(test)]
+    pub(crate) fn arm_close_gate(&self) -> std::sync::Arc<TestCloseGate> {
+        let gate = std::sync::Arc::new(TestCloseGate::default());
+        *crate::lock_unpoison(&self.close_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+}
+
+/// The synchronous presence fallback for one close admission.
+///
+/// Runs while the connection table section is held (CCT §10.4), so every
+/// store call here is the sync form; it must never await and never call back
+/// into the connection table.
+#[cfg(any(unix, test))]
+fn note_disconnect_sync(store: &Store, companion: ene_companion::CompanionId, client_ref: &str) {
+    let client = device_client(client_ref);
+    let Ok(Some(current)) = store.load_attribution_sync(companion.as_raw()) else {
+        return;
+    };
+    if current.state != PresenceState::Present || current.active_client != Some(client) {
+        return;
+    }
+    let expected = PresenceCheckRef {
+        expected_generation: current.generation,
+        expected_state: current.state,
+        expected_active: current.active_client,
+    };
+    let Ok(MoveDecision::TransitioningToNew { generation }) = store
+        .compare_and_begin_transition_sync(
+            companion.as_raw(),
+            expected,
+            None,
+            ThinMoveReason::DisconnectObserved,
+        )
+    else {
+        return;
+    };
+    let premise = LiveReachabilityRef {
+        client,
+        connection_live: false,
+    };
+    // Rejected and errored confirms alike leave the transition unconfirmed;
+    // the next intake reads the `InTransition` attribution and reports held,
+    // which is honest.
+    if store
+        .confirm_transition_sync(companion.as_raw(), generation, premise)
+        .is_err()
+    {
+        // The unconfirmed transition stands: the next intake reports held.
     }
 }
 

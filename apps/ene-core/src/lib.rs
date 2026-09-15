@@ -36,6 +36,7 @@
 pub mod action;
 pub mod conn;
 pub mod dialogue;
+pub mod host_lock;
 pub mod serve;
 pub mod setup;
 pub mod task_agent;

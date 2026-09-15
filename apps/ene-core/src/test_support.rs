@@ -8,9 +8,16 @@
 //! values stay in [`MemoryCredentialStore`], keeping tests hermetic: the
 //! environment store reads the real process environment once when constructed.
 
+use std::sync::Arc;
+
+use ene_api::v1::envelope::ProtocolVersion;
+use ene_api::v1::handshake::NegotiatedConnection;
 use ene_api::v1::refs::ConnectionWireId;
 use ene_credential::MemoryCredentialStore;
 
+use crate::conn::{
+    ChallengeOutcome, ConnectionPhase, ConnectionTable, InstallOutcome, NonceAdmission,
+};
 use crate::serve::{CredStore, HostHandle, LiveInput};
 
 /// `setup` provisions bearers before the store moves into the handle; the
@@ -36,19 +43,55 @@ pub(crate) async fn memory_handle(tag: &str) -> Option<(HostHandle, tempfile::Te
     memory_handle_with(tag, |_| {}).await
 }
 
-/// Builds a [`LiveInput`] for a paired, known, authenticated connection on a
-/// freshly minted table id, with `paired_device` carrying the client ref as
-/// the device wire string. Tests of the gate itself override these fields
-/// explicitly.
+/// Drives one connection table record to authenticated-and-current without
+/// any transport, the way the handshake paths do over a socket.
+pub(crate) fn authenticate(table: &Arc<ConnectionTable>, id: &ConnectionWireId, device_wire: &str) {
+    assert!(
+        table.note_paired(id, device_wire),
+        "the connection must be accepted and unpaired"
+    );
+    let terms = NegotiatedConnection {
+        version: ProtocolVersion::V1,
+    };
+    assert!(
+        matches!(
+            table.note_challenged(id, None, terms, String::from("test-nonce")),
+            ChallengeOutcome::Challenged
+        ),
+        "the paired connection must accept one challenge"
+    );
+    assert!(
+        matches!(
+            table.take_nonce(id),
+            NonceAdmission::Nonce(nonce) if nonce == "test-nonce"
+        ),
+        "the challenge nonce must be pending"
+    );
+    assert_eq!(
+        table.install_authenticated(id),
+        InstallOutcome::Installed,
+        "the verified proof installs the connection"
+    );
+    assert_eq!(
+        table.phase_of(id),
+        Some(ConnectionPhase::Authenticated),
+        "the install must authenticate the connection"
+    );
+    assert!(
+        table.current_authenticated(device_wire),
+        "the install must make the connection current for its device"
+    );
+}
+
+/// Builds a [`LiveInput`] for a paired, known, authenticated-and-current
+/// connection on a freshly minted table id, with `paired_device` carrying the
+/// client ref as the device wire string. Tests of the gate itself override
+/// these fields explicitly.
 pub(crate) fn live_input(client_ref: &str) -> LiveInput {
-    LiveInput {
-        client_ref: client_ref.to_string(),
-        connection_live: true,
-        peer_uid_ok: true,
-        paired_device: Some(client_ref.to_string()),
-        connection_known: true,
-        authed: true,
-        connection_id: ConnectionWireId(uuid::Uuid::new_v4()),
-        negotiated: None,
-    }
+    let table = Arc::new(ConnectionTable::new());
+    let id = table.note_accept();
+    authenticate(&table, &id, client_ref);
+    table
+        .test_live(&id)
+        .expect("the authenticated connection must snapshot")
 }

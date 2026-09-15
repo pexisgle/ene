@@ -83,6 +83,21 @@ async fn wait_for_socket(dir: &std::path::Path) -> bool {
     false
 }
 
+/// Waits until a listener actually accepts on the socket path: a stopped
+/// Host leaves the path behind, so existence alone is not readiness.
+async fn wait_for_listener(dir: &std::path::Path) -> bool {
+    for _ in 0..100 {
+        if tokio::net::UnixStream::connect(dir.join("ene.sock"))
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<WirePayload, String> {
     match tokio::time::timeout(Duration::from_secs(10), client.request(payload)).await {
         Ok(Ok(answer)) => Ok(answer),
@@ -512,6 +527,18 @@ fn workspace_binary(name: &str) -> Option<std::path::PathBuf> {
 /// listener holding the test socket.
 struct KillOnDrop(Option<std::process::Child>);
 
+impl KillOnDrop {
+    /// Stops the serving child and waits for exit, so the OS has released the
+    /// single-writer `host.lock` before an offline mutation command runs
+    /// (PR §6.4).
+    fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            drop(child.kill());
+            drop(child.wait());
+        }
+    }
+}
+
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
@@ -589,7 +616,7 @@ async fn binaries_drive_pairing_setup_and_views() {
     server.stderr(std::process::Stdio::null());
     let server = server.spawn();
     let server = server.unwrap();
-    let _server = KillOnDrop(Some(server));
+    let mut server = KillOnDrop(Some(server));
     let bound = wait_for_socket(&dir).await;
     let listing: Vec<String> = std::fs::read_dir(&dir)
         .map(|entries| {
@@ -637,6 +664,10 @@ async fn binaries_drive_pairing_setup_and_views() {
         "one pending device must list, got {pending_out:?}"
     );
     let descriptor = descriptor.unwrap();
+    // `approve-device` is an offline mutation command: it takes the
+    // single-writer lock, so the serving Host stops for the approval and
+    // restarts after (PR §6.4).
+    server.stop();
     let mut approve = std::process::Command::new(&core);
     approve.args([
         "approve-device",
@@ -665,6 +696,12 @@ async fn binaries_drive_pairing_setup_and_views() {
     );
     let secret = secret.unwrap();
     assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    server = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")])
+        .expect("the Host must respawn after the offline approval");
+    assert!(
+        wait_for_listener(&dir).await,
+        "the restarted Host must accept after the offline approval"
+    );
 
     let status = run_cli(
         &ctl,
@@ -714,6 +751,9 @@ async fn binaries_drive_pairing_setup_and_views() {
         "unapproved setup must hold at exit 2, got {setup:?}"
     );
 
+    // The credential approval is an offline mutation command too: stop the
+    // serving Host, approve, restart.
+    server.stop();
     let mut approve_cred = std::process::Command::new(&core);
     // The approval process must be able to read the bearer: it sweeps any
     // prior plaintext occurrence before the ref becomes usable.
@@ -735,6 +775,13 @@ async fn binaries_drive_pairing_setup_and_views() {
         credential_approved.status.success(),
         "approve-credential must exit 0: {}",
         String::from_utf8_lossy(&credential_approved.stderr)
+    );
+    server.stop();
+    let _respawned = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")])
+        .expect("the Host must respawn after the offline credential approval");
+    assert!(
+        wait_for_listener(&dir).await,
+        "the restarted Host must accept after the offline credential approval"
     );
 
     let setup = run_cli(
@@ -985,7 +1032,10 @@ fn spawn_serve_binary(
 async fn pair_via_binaries(
     ctl: &std::path::Path,
     core: &std::path::Path,
+    dir: &std::path::Path,
     config: &str,
+    server: &mut KillOnDrop,
+    server_env: &[(&str, &str)],
 ) -> Option<String> {
     let status = run_cli(
         ctl,
@@ -998,6 +1048,9 @@ async fn pair_via_binaries(
         matches!(status, Some((2, _, _))),
         "pre-pairing status must pend pairing, got {status:?}"
     );
+    // The approval is an offline mutation command: it takes the single-writer
+    // lock, so the serving Host stops first and restarts after (PR §6.4).
+    server.stop();
     // The real client pairs under its platform descriptor, so approve
     // whatever it actually requested (like the operator channel would).
     let listed = std::process::Command::new(core)
@@ -1038,6 +1091,11 @@ async fn pair_via_binaries(
         .find_map(|line| line.strip_prefix("pairing secret (show once): "))
         .map(str::to_string)?;
     assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    *server = spawn_serve_binary(core, config, server_env)?;
+    assert!(
+        wait_for_listener(dir).await,
+        "the restarted Host must accept after the offline approval"
+    );
     let status = run_cli(
         ctl,
         &["--config", config, "status"],
@@ -1074,10 +1132,21 @@ async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
     };
     let server = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")]);
     assert!(server.is_some(), "serve must spawn");
-    let _server = server;
+    let Some(mut server) = server else {
+        return;
+    };
     assert!(wait_for_socket(&dir).await, "listener must bind");
 
-    let Some(secret) = pair_via_binaries(&ctl, &core, &config).await else {
+    let Some(secret) = pair_via_binaries(
+        &ctl,
+        &core,
+        &dir,
+        &config,
+        &mut server,
+        &[("ENE_OPENAI_API_KEY", "sk-test-only")],
+    )
+    .await
+    else {
         return;
     };
     let device_file = ene_ctl::device::device_file_path(&dir);
@@ -1193,13 +1262,13 @@ async fn binaries_drive_send_stream_history_and_restart() {
 
     let server = spawn_serve_binary(&core, &config, &server_env);
     assert!(server.is_some(), "serve must spawn");
-    let Some(server) = server else {
+    let Some(mut server) = server else {
         fake.abort();
         return;
     };
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
 
-    let secret = pair_via_binaries(&ctl, &core, &config).await;
+    let secret = pair_via_binaries(&ctl, &core, &dir, &config, &mut server, &server_env).await;
     assert!(secret.is_some(), "binary pairing must complete");
     let setup_args = [
         "--config",
@@ -1215,6 +1284,9 @@ async fn binaries_drive_send_stream_history_and_restart() {
         matches!(setup, Some((2, _, _))),
         "unapproved setup must hold at exit 2, got {setup:?}"
     );
+    // The credential approval is an offline mutation command: it owns the
+    // data directory while the Host is stopped, then the Host restarts.
+    server.stop();
     let approve_cred = std::process::Command::new(&core)
         .env("ENE_OPENAI_API_KEY", "sk-test-only")
         .args([
@@ -1232,6 +1304,12 @@ async fn binaries_drive_send_stream_history_and_restart() {
     assert!(
         matches!(&approve_cred, Ok(output) if output.status.success()),
         "approve-credential must exit 0"
+    );
+    server = spawn_serve_binary(&core, &config, &server_env)
+        .expect("the Host must respawn after the offline credential approval");
+    assert!(
+        wait_for_listener(&dir).await,
+        "the restarted Host must accept after the offline credential approval"
     );
     let setup = run_cli(&ctl, &setup_args, &[], Duration::from_secs(10)).await;
     assert!(

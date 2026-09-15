@@ -291,14 +291,23 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
 /// trusted inlet, and nowhere else; the operator provisions it into the
 /// client's protected device file.
 ///
+/// This is an offline mutation, so it takes the single-writer
+/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store
+/// (PR §6.4): a running Host owns the mutation and the command is refused.
+///
 /// # Errors
 ///
-/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
-/// cannot be opened, and [`CoreError::Approve`] when the descriptor is
+/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
+/// directory, [`CoreError::Store`] when the runtime cannot be built or the
+/// state cannot be opened, and [`CoreError::Approve`] when the descriptor is
 /// unknown (listing the pending descriptors) or the approval write fails.
 fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
+
+    use ene_core::host_lock::HostLock;
+
     block_on(async {
+        let _lock = HostLock::acquire(data_dir)?;
         let handle = HostHandle::open(data_dir).await?;
         if let Some((_, secret)) = handle.approve_device(descriptor).await? {
             let mut stdout = std::io::stdout().lock();
@@ -324,13 +333,20 @@ fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError
 
 /// Unknown pairs fail with the pending set so the Owner can retry exactly.
 ///
+/// Like `approve-device`, this offline mutation takes the single-writer
+/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store.
+///
 /// # Errors
 ///
-/// Returns [`CoreError::Store`] when the runtime cannot be built or the
+/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
+/// directory, [`CoreError::Store`] when the runtime cannot be built or the
 /// state cannot be opened, and [`CoreError::Approve`] when the pair is
 /// unknown.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
+    use ene_core::host_lock::HostLock;
+
     block_on(async {
+        let _lock = HostLock::acquire(data_dir)?;
         let handle = HostHandle::open(data_dir).await?;
         if handle.approve_credential(provider, label).await? {
             return Ok(());

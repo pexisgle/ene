@@ -53,6 +53,11 @@ async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stat
 }
 
 /// SQLite-backed host for every repository contract.
+///
+/// Cloning is a cheap handle copy over the same connection: the connection
+/// table's close admission moves one clone into its `spawn_blocking` section
+/// while the owning handle keeps the store.
+#[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
