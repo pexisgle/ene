@@ -236,7 +236,7 @@ pub fn load_stored_device(data_dir: &Path) -> DeviceFileState {
 /// `Stored` secret only needs a write when the paired device identity
 /// changed (the Host forgot the device and issued a fresh key), so a normal
 /// reconnect never rewrites the file. `Missing` has nothing to persist.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 #[must_use]
 pub(crate) fn must_persist_after_acceptance(
     source: SecretSource,
