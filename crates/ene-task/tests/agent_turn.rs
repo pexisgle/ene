@@ -43,7 +43,7 @@ struct NoInstructionSource;
 impl TaskInstructionSource for NoInstructionSource {
     async fn load_owner_instruction(
         &self,
-        _source: RawId,
+        _origin: TaskContextOrigin,
     ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
         panic!("a purpose-only context must not read an instruction source")
     }
@@ -54,7 +54,7 @@ impl TaskInstructionSource for NoInstructionSource {
 struct FakeInstructionSource {
     replies:
         Mutex<VecDeque<Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError>>>,
-    loaded: Mutex<Vec<RawId>>,
+    loaded: Mutex<Vec<TaskContextOrigin>>,
 }
 
 impl FakeInstructionSource {
@@ -75,23 +75,27 @@ impl FakeInstructionSource {
             .push_back(reply);
     }
 
-    fn loaded(&self) -> Vec<RawId> {
+    fn loaded(&self) -> Vec<TaskContextOrigin> {
         self.loaded
             .lock()
             .expect("fixture capture is never poisoned")
             .clone()
+    }
+
+    fn loaded_sources(&self) -> Vec<RawId> {
+        self.loaded().iter().map(|origin| origin.source).collect()
     }
 }
 
 impl TaskInstructionSource for FakeInstructionSource {
     async fn load_owner_instruction(
         &self,
-        source: RawId,
+        origin: TaskContextOrigin,
     ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
         self.loaded
             .lock()
             .expect("fixture capture is never poisoned")
-            .push(source);
+            .push(origin);
         self.replies
             .lock()
             .expect("fixture script is never poisoned")
@@ -105,6 +109,7 @@ impl TaskInstructionSource for FakeInstructionSource {
 struct FakeTaskRepository {
     delegations: Mutex<VecDeque<Result<Option<DelegationRef>, TaskTechnicalError>>>,
     tasks: Mutex<VecDeque<Result<Option<TaskRecord>, TaskTechnicalError>>>,
+    past_facts: Mutex<VecDeque<Result<ene_task::PastExecutedFactsPage, TaskTechnicalError>>>,
     /// Scripted seal reads; an unscripted read answers `None` (not sealed),
     /// which is the state of every delegation that has not finalized.
     delegation_results: Mutex<VecDeque<Result<Option<TaskResultRecord>, TaskTechnicalError>>>,
@@ -119,6 +124,7 @@ impl FakeTaskRepository {
             delegations: Mutex::new(VecDeque::new()),
             tasks: Mutex::new(VecDeque::new()),
             delegation_results: Mutex::new(VecDeque::new()),
+            past_facts: Mutex::new(VecDeque::new()),
             loaded_delegations: Mutex::new(Vec::new()),
             loaded_tasks: Mutex::new(Vec::new()),
             loaded_delegation_results: Mutex::new(Vec::new()),
@@ -151,6 +157,16 @@ impl FakeTaskRepository {
 
     fn script_task(&self, reply: Result<Option<TaskRecord>, TaskTechnicalError>) {
         self.tasks
+            .lock()
+            .expect("fixture script is never poisoned")
+            .push_back(reply);
+    }
+
+    fn script_past_facts(
+        &self,
+        reply: Result<ene_task::PastExecutedFactsPage, TaskTechnicalError>,
+    ) {
+        self.past_facts
             .lock()
             .expect("fixture script is never poisoned")
             .push_back(reply);
@@ -348,6 +364,33 @@ impl TaskRepository for FakeTaskRepository {
         Err(TaskTechnicalError::StorageUnavailable {
             reason: String::from("load_report_source_bounded is outside this fixture's scope"),
         })
+    }
+
+    async fn commit_task_resume(
+        &self,
+        _premise: ene_task::TaskResumeCommitPremise,
+    ) -> Result<ene_task::TaskResumeOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("commit_task_resume is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_past_executed_facts(
+        &self,
+        _task: TaskId,
+    ) -> Result<ene_task::PastExecutedFactsPage, TaskTechnicalError> {
+        match self
+            .past_facts
+            .lock()
+            .expect("fixture script is never poisoned")
+            .pop_front()
+        {
+            Some(reply) => reply,
+            None => Ok(ene_task::PastExecutedFactsPage {
+                facts: Vec::new(),
+                has_more: false,
+            }),
+        }
     }
 }
 
@@ -566,7 +609,24 @@ fn source_record(
     role: TaskInstructionRole,
     text: &str,
 ) -> TaskInstructionSourceRecord {
+    source_record_with_kind(
+        TaskContextOriginKind::OwnerConversation,
+        source,
+        companion,
+        role,
+        text,
+    )
+}
+
+fn source_record_with_kind(
+    kind: TaskContextOriginKind,
+    source: RawId,
+    companion: RawId,
+    role: TaskInstructionRole,
+    text: &str,
+) -> TaskInstructionSourceRecord {
     TaskInstructionSourceRecord {
+        kind,
         source,
         companion,
         role,
@@ -643,7 +703,7 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     assert_eq!(received.task, relied, "the port gets the relied revision");
     assert_eq!(
         received.prompt.text,
-        format!("[scrubbed] {RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}"),
+        format!("[scrubbed] {RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[PAST EXECUTED FACTS]\n"),
         "the port gets the scrubber's output, not the raw purpose text"
     );
     assert_eq!(
@@ -658,7 +718,9 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     );
     assert_eq!(
         scrubber.inputs(),
-        vec![format!("{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}")],
+        vec![format!(
+            "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[PAST EXECUTED FACTS]\n"
+        )],
         "the scrubber is asked to scrub exactly the relied snapshot's purpose text in the fixed framing"
     );
     assert_eq!(repository.loaded_delegations(), vec![delegation_id]);
@@ -850,7 +912,7 @@ async fn action_exchanges_are_replayed_in_order_and_scrubbed_once() {
     assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
 
     let raw_input = format!(
-        "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n\
+        "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[PAST EXECUTED FACTS]\n\n\
          [TOOL CALL]\n{{\"tool\":\"read\",\"path\":\"input.txt\"}}\n\
          [TOOL RESULT]\nnotes\n\
          [TOOL CALL]\n{{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# report\"}}\n\
@@ -1214,7 +1276,9 @@ async fn scrub_failure_fails_closed_without_sending_or_leaking_the_purpose() {
     }
     assert_eq!(
         scrubber.inputs(),
-        vec![format!("{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}")],
+        vec![format!(
+            "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[PAST EXECUTED FACTS]\n"
+        )],
         "the scrub was attempted on the relied purpose text in the fixed framing"
     );
     assert!(
@@ -1439,7 +1503,7 @@ async fn instruction_bodies_are_resolved_in_context_order_and_scrubbed_once() {
     assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
 
     let raw_input = format!(
-        "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[INSTRUCTION]\nfirst instruction\n[INSTRUCTION]\nsecond instruction"
+        "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[INSTRUCTION]\nfirst instruction\n[INSTRUCTION]\nsecond instruction\n[PAST EXECUTED FACTS]\n"
     );
     let captured = fixture.inference.premises();
     let received = captured.first().expect("the premise was captured");
@@ -1459,7 +1523,7 @@ async fn instruction_bodies_are_resolved_in_context_order_and_scrubbed_once() {
         "purpose and every resolved body are scrubbed exactly once, together"
     );
     assert_eq!(
-        fixture.instructions.loaded(),
+        fixture.instructions.loaded_sources(),
         vec![first, second],
         "sources are resolved in context order without dedupe"
     );
@@ -1526,7 +1590,10 @@ async fn duplicate_source_adoption_keeps_both_bodies_and_correlations() {
         vec![purpose_source, repeated, repeated],
         "entry-level correlation duplicates are preserved"
     );
-    assert_eq!(fixture.instructions.loaded(), vec![repeated, repeated]);
+    assert_eq!(
+        fixture.instructions.loaded_sources(),
+        vec![repeated, repeated]
+    );
 }
 
 #[tokio::test]
@@ -1573,8 +1640,9 @@ async fn missing_instruction_source_ends_the_turn_without_scrub_or_send() {
 async fn instruction_correspondence_mismatches_fail_closed() {
     type RecordBuilder = fn(RawId, RawId) -> TaskInstructionSourceRecord;
     // Each case violates exactly one correspondence condition: the loaded
-    // source identity differs, the companion differs, or the role differs.
-    let cases: [(&str, RecordBuilder); 3] = [
+    // source identity differs, the companion differs, the role differs, or
+    // the resolved kind differs from the entry's origin kind.
+    let cases: [(&str, RecordBuilder); 4] = [
         ("wrong source identity", |_source, companion| {
             source_record(RawId::new(), companion, TaskInstructionRole::Owner, "body")
         }),
@@ -1583,6 +1651,15 @@ async fn instruction_correspondence_mismatches_fail_closed() {
         }),
         ("wrong role", |source, companion| {
             source_record(source, companion, TaskInstructionRole::Companion, "body")
+        }),
+        ("wrong kind", |source, companion| {
+            source_record_with_kind(
+                TaskContextOriginKind::OwnerManagement,
+                source,
+                companion,
+                TaskInstructionRole::Owner,
+                "body",
+            )
         }),
     ];
     for (name, build) in cases {
@@ -1747,5 +1824,212 @@ async fn instruction_scrub_failure_fails_closed_without_leaking_the_input() {
     assert!(
         fixture.inference.premises().is_empty(),
         "a failed scrub never reaches the port"
+    );
+}
+
+#[tokio::test]
+async fn past_executed_facts_render_every_turn_with_sources_after_instructions() {
+    let purpose_text = "probe adopted purpose";
+    let loaded = record(TaskId::generate(), revision(1), purpose_text);
+    let relied = loaded.task.reference;
+    let companion = loaded.task.assignee.companion;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    let purpose_source = loaded.context[0].origin.source;
+    let instruction = RawId::new();
+    loaded.context.push(instruction_entry(
+        relied,
+        instruction,
+        TaskContextOriginKind::OwnerConversation,
+    ));
+    let fixture = turn_fixture(loaded, delegation_ref);
+    fixture.instructions.script(Ok(Some(source_record(
+        instruction,
+        companion,
+        TaskInstructionRole::Owner,
+        "the instruction",
+    ))));
+    let attempt = RawId::new();
+    let result = RawId::new();
+    fixture.repository.script_past_facts(Ok(ene_task::PastExecutedFactsPage {
+        facts: vec![
+            ene_task::PastExecutedFact {
+                source: attempt,
+                line: String::from("action 11111111-1111-1111-1111-111111111111 create /tmp/a.txt confirmed_success"),
+            },
+            ene_task::PastExecutedFact {
+                source: result,
+                line: String::from("result 22222222-2222-2222-2222-222222222222 rev=1 adopted=none"),
+            },
+        ],
+        has_more: false,
+    }));
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await
+    .expect("a produced turn is a domain outcome");
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+
+    let raw_input = format!(
+        "{RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[INSTRUCTION]\nthe instruction\n[PAST EXECUTED FACTS]\naction 11111111-1111-1111-1111-111111111111 create /tmp/a.txt confirmed_success\nresult 22222222-2222-2222-2222-222222222222 rev=1 adopted=none\n"
+    );
+    let captured = fixture.inference.premises();
+    let received = captured.first().expect("the premise was captured");
+    assert_eq!(
+        received.prompt.text,
+        format!("[scrubbed] {raw_input}"),
+        "the facts block follows the instructions in the fixed framing"
+    );
+    assert_eq!(
+        received.data_use,
+        vec![purpose_source, instruction, attempt, result],
+        "fact sources join the correlation after the purpose and instructions"
+    );
+    assert_eq!(
+        fixture.scrubber.inputs(),
+        vec![raw_input],
+        "facts are scrubbed once with the rest of the logical input"
+    );
+}
+
+#[tokio::test]
+async fn truncated_past_facts_refuse_instead_of_reasoning_from_a_prefix() {
+    let task = TaskId::generate();
+    let fixture = turn_fixture(
+        record(task, revision(1), "probe purpose"),
+        delegation(reference(task, 1)),
+    );
+    fixture
+        .repository
+        .script_past_facts(Ok(ene_task::PastExecutedFactsPage {
+            facts: Vec::new(),
+            has_more: true,
+        }));
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await;
+    match outcome {
+        Err(TaskAgentTurnError::InputUnavailable { reason }) => {
+            assert_eq!(reason, "past executed facts exceed the turn bound");
+        }
+        other => panic!("a truncated history must fail closed, got {other:?}"),
+    }
+    assert!(
+        fixture.scrubber.inputs().is_empty(),
+        "a truncated history is never scrubbed"
+    );
+    assert!(
+        fixture.inference.premises().is_empty(),
+        "a truncated history never reaches the port"
+    );
+}
+
+#[tokio::test]
+async fn past_facts_that_outgrow_the_budget_refuse_without_silent_omission() {
+    let task = TaskId::generate();
+    let fixture = turn_fixture(
+        record(task, revision(1), "probe purpose"),
+        delegation(reference(task, 1)),
+    );
+    fixture
+        .repository
+        .script_past_facts(Ok(ene_task::PastExecutedFactsPage {
+            facts: vec![ene_task::PastExecutedFact {
+                source: RawId::new(),
+                line: format!(
+                    "action {} create /tmp/a.txt confirmed_success",
+                    "f".repeat(600)
+                ),
+            }],
+            has_more: false,
+        }));
+    // Re-budget the port below the facts block: the transcript is already
+    // empty, so only the never-omitted block can be at fault.
+    let inference = ScriptedInference::with_budget(produced_reply(), 500);
+    let scrubber = FakeScrubber::new(FakeScrubReply::Scrubbed);
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &inference,
+        &scrubber,
+        premise(fixture.delegation),
+    )
+    .await;
+    match outcome {
+        Err(TaskAgentTurnError::InputUnavailable { reason }) => {
+            assert_eq!(reason, "past executed facts exceed the input budget");
+        }
+        other => panic!("an over-budget history must fail closed, got {other:?}"),
+    }
+    assert!(
+        scrubber.inputs().is_empty(),
+        "an over-budget history is never scrubbed"
+    );
+    assert!(
+        inference.premises().is_empty(),
+        "an over-budget history never reaches the port"
+    );
+}
+
+#[tokio::test]
+async fn owner_management_instructions_resolve_like_conversation_ones() {
+    let purpose_text = "probe adopted purpose";
+    let loaded = record(TaskId::generate(), revision(1), purpose_text);
+    let relied = loaded.task.reference;
+    let companion = loaded.task.assignee.companion;
+    let delegation_ref = delegation(relied);
+    let mut loaded = loaded;
+    let activity = RawId::new();
+    loaded.context.push(instruction_entry(
+        relied,
+        activity,
+        TaskContextOriginKind::OwnerManagement,
+    ));
+    let fixture = turn_fixture(loaded, delegation_ref);
+    fixture.instructions.script(Ok(Some(source_record_with_kind(
+        TaskContextOriginKind::OwnerManagement,
+        activity,
+        companion,
+        TaskInstructionRole::Owner,
+        "the management instruction",
+    ))));
+
+    let outcome = orchestrate_task_agent_turn(
+        &fixture.repository,
+        &fixture.instructions,
+        &fixture.inference,
+        &fixture.scrubber,
+        premise(fixture.delegation),
+    )
+    .await
+    .expect("a produced turn is a domain outcome");
+    assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+
+    let captured = fixture.inference.premises();
+    let received = captured.first().expect("the premise was captured");
+    assert!(
+        received.prompt.text.contains("the management instruction"),
+        "the activity body resolves into the logical input"
+    );
+    assert_eq!(
+        fixture.instructions.loaded(),
+        vec![TaskContextOrigin {
+            kind: TaskContextOriginKind::OwnerManagement,
+            source: activity,
+        }],
+        "the origin kind selects the read"
     );
 }

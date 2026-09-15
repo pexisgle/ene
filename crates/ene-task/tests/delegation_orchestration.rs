@@ -248,6 +248,25 @@ impl TaskRepository for FakeTaskRepository {
             reason: String::from("load_report_source_bounded is outside this fixture's scope"),
         })
     }
+
+    async fn commit_task_resume(
+        &self,
+        _premise: ene_task::TaskResumeCommitPremise,
+    ) -> Result<ene_task::TaskResumeOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("commit_task_resume is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_past_executed_facts(
+        &self,
+        _task: TaskId,
+    ) -> Result<ene_task::PastExecutedFactsPage, TaskTechnicalError> {
+        Ok(ene_task::PastExecutedFactsPage {
+            facts: Vec::new(),
+            has_more: false,
+        })
+    }
 }
 
 fn clock() -> WallClockWithTz {

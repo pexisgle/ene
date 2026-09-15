@@ -7053,6 +7053,7 @@ mod erasure;
 mod presence;
 mod report_reads;
 mod result_reevaluation;
+mod resume;
 mod task_failure;
 mod task_result;
 mod undelivered;

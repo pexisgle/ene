@@ -1,17 +1,21 @@
 //! Task-owned instruction-body source port.
 //!
-//! The canonical body of an adopted instruction is the History record its
-//! `origin.source` references; the Task side never copies that body into
-//! `task_context_entry`, a delegation, an inference attempt, or a task
-//! result. The port is Task-owned so `ene-task` never imports the
-//! conversation-history owner's concrete types: the Host composition root
-//! implements it against `HistoryRepository::load_message`.
+//! The canonical body of an adopted instruction is the History record or the
+//! first-party management activity record its `origin.source` references; the
+//! Task side never copies that body into `task_context_entry`, a delegation,
+//! an inference attempt, or a task result. The port is Task-owned so
+//! `ene-task` never imports the conversation-history or activity owner's
+//! concrete types: the Host composition root implements it against
+//! `HistoryRepository::load_message` and the activity single-record read.
 //!
-//! The port contract is a single-message bounded read by the canonical
-//! source identity. Absence is [`Ok(None)`]; a malformed durable row is an
-//! error the caller must fail closed on, never a composed substitute.
+//! The port contract is a single-record bounded read by the canonical origin:
+//! `origin.kind` selects the History or activity table and `origin.source` is
+//! the primary key read. Absence is [`Ok(None)`]; a malformed durable row is
+//! an error the caller must fail closed on, never a composed substitute.
 
 use ene_primitive::RawId;
+
+use crate::context::{TaskContextOrigin, TaskContextOriginKind};
 
 /// The conversation role of one source record, as the Task side needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,13 +28,18 @@ pub enum TaskInstructionRole {
 
 /// One resolved instruction source record.
 ///
-/// This carries only what the Task Agent turn needs: the canonical source
-/// identity, the speaking companion as an opaque [`RawId`], the mapped role,
-/// and the body text. The body stays canonical in History; this value lives
-/// only for the turn. [`core::fmt::Debug`] redacts the text.
+/// This carries only what the Task Agent turn needs: the origin kind the
+/// caller resolved (which must equal the entry's `origin.kind`), the
+/// canonical source identity, the speaking companion as an opaque [`RawId`],
+/// the mapped role, and the body text. The body stays canonical in History
+/// or the activity record; this value lives only for the turn.
+/// [`core::fmt::Debug`] redacts the text.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TaskInstructionSourceRecord {
-    /// The History record identity. The caller verifies it equals the
+    /// The origin kind of the resolved record. The caller verifies it equals
+    /// the entry's `origin.kind`.
+    pub kind: TaskContextOriginKind,
+    /// The canonical record identity. The caller verifies it equals the
     /// `origin.source` it resolved.
     pub source: RawId,
     /// The speaking companion in the same [`RawId`] space as
@@ -66,15 +75,16 @@ pub enum TaskInstructionSourceError {
 
 /// Reads the canonical body of one adopted instruction source.
 ///
-/// The implementation must resolve `source` with a direct single-message
-/// read of the History primary key; loading a timeline and searching it,
-/// reading a recent window, or resolving a command is not a substitute.
+/// The implementation resolves `origin.kind` to the History or activity table
+/// and reads `origin.source` (the primary key) directly: a bounded
+/// single-record read. Loading a timeline and searching it, reading a recent
+/// window, or resolving a command is not a substitute.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 4 contract style uses native async fn; Send bounds settle with the Host adapter"
 )]
 pub trait TaskInstructionSource: Send + Sync {
-    /// Loads the source record for `source`, if the canonical row exists.
+    /// Loads the source record for `origin`, if the canonical row exists.
     ///
     /// Returns `Ok(None)` when the referenced record is absent; it is a domain
     /// fact the caller reports as a missing instruction source, not a
@@ -82,7 +92,7 @@ pub trait TaskInstructionSource: Send + Sync {
     /// A malformed durable row is a [`TaskInstructionSourceError`].
     async fn load_owner_instruction(
         &self,
-        source: RawId,
+        origin: TaskContextOrigin,
     ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError>;
 }
 
@@ -93,6 +103,7 @@ mod tests {
     #[test]
     fn source_record_debug_redacts_the_body() {
         let record = TaskInstructionSourceRecord {
+            kind: super::TaskContextOriginKind::OwnerConversation,
             source: ene_primitive::RawId::new(),
             companion: ene_primitive::RawId::new(),
             role: super::TaskInstructionRole::Owner,

@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use ene_companion::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
-    CompanionTechnicalError, HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole,
-    PresentationMark, ReportStatus, ReportStatusTransition, TaskFact, UNDELIVERED_PAGE_MAX,
-    UndeliveredCursor, UndeliveredId, UndeliveredPage, UndeliveredRef, UndeliveredRepository,
-    UndeliveredSource, UndeliveredTechnicalError,
+    ActivityId, ActivityRepository, AppendHistoryCommand, CommandId, CompanionId,
+    CompanionLifecycle, CompanionRepository, CompanionTechnicalError, HistoryAppendOutcome,
+    HistoryMessage, HistoryRepository, HistoryRole, ManagementActivity, PresentationMark,
+    RecordResumeActivityCommand, ReportStatus, ReportStatusTransition, TaskFact,
+    UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredPage, UndeliveredRef,
+    UndeliveredRepository, UndeliveredSource, UndeliveredTechnicalError,
 };
 use ene_permission::CapabilityKind;
 use ene_presence::{PresenceGeneration, PresenceState};
@@ -30,6 +31,17 @@ const SQL_INSERT_COMPANION: &str =
     "INSERT INTO companion (companion_id, lifecycle, created_at) VALUES (?1, ?2, ?3)";
 
 const SQL_SELECT_LIFECYCLE: &str = "SELECT lifecycle FROM companion WHERE companion_id = ?1";
+
+/// The companion lifecycle read for the Task resume commit (AU17): the same
+/// row the History appends compare, read inside the resume transaction so
+/// the `Running` requirement linearizes with the revision forward.
+pub(crate) const SQL_SELECT_COMPANION_LIFECYCLE: &str =
+    "SELECT lifecycle FROM companion WHERE companion_id = ?1";
+
+/// The Owner-message premise read for the Task resume commit (AU17):
+/// role and companion of the relied message, without its body.
+pub(crate) const SQL_SELECT_HISTORY_PREMISE: &str =
+    "SELECT role, companion_id FROM history_message WHERE message_id = ?1";
 
 const SQL_INSERT_ATTRIBUTION: &str = "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)";
 
@@ -920,6 +932,189 @@ impl Store {
                 .map_err(undelivered_unavailable)?
                 .to_owned();
             Ok(Some(UndeliveredExcerpt { text, total_bytes }))
+        })
+        .await
+    }
+}
+
+/// The stored activity kind this slice records; an unknown stored value is
+/// an unreadable row and is rejected on read.
+const ACTIVITY_KIND_RESUME_INSTRUCTION: &str = "resume_instruction";
+
+const SQL_INSERT_ACTIVITY: &str = "INSERT INTO activity_record (activity_id, companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at, command_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (command_id) DO NOTHING";
+
+/// The single-record bounded read: `activity_id` is the primary key, so the
+/// lookup touches exactly the addressed row and never scans the table.
+const SQL_SELECT_ACTIVITY: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at FROM activity_record WHERE activity_id = ?1";
+
+const SQL_SELECT_ACTIVITY_BY_COMMAND: &str = "SELECT activity_id, companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at FROM activity_record WHERE command_id = ?1";
+
+/// The activity premise read for the Task resume commit (AU17): the selected
+/// Task ref and purpose the instruction was recorded for, without its body.
+pub(crate) const SQL_SELECT_ACTIVITY_PREMISE: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision FROM activity_record WHERE activity_id = ?1";
+
+fn activity_unavailable(reason: impl core::fmt::Display) -> CompanionTechnicalError {
+    CompanionTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
+}
+
+/// One decoded `activity_record` row: the stored columns without the
+/// primary key, which the caller already holds.
+struct StoredActivityRow {
+    companion_text: String,
+    kind_text: String,
+    task_text: Option<String>,
+    task_revision: Option<i64>,
+    purpose_adopted_revision: Option<i64>,
+    body: String,
+    created_at: String,
+}
+
+fn decode_activity_row(
+    activity: ActivityId,
+    row: StoredActivityRow,
+) -> Result<ManagementActivity, CompanionTechnicalError> {
+    if row.kind_text != ACTIVITY_KIND_RESUME_INSTRUCTION {
+        return Err(activity_unavailable("unknown activity record kind"));
+    }
+    let (Some(task_text), Some(task_revision), Some(purpose_adopted_revision)) = (
+        row.task_text,
+        row.task_revision,
+        row.purpose_adopted_revision,
+    ) else {
+        return Err(activity_unavailable(
+            "resume activity record missing its selected task",
+        ));
+    };
+    let task = decode_id(&task_text).map_err(activity_unavailable)?;
+    Ok(ManagementActivity {
+        id: activity,
+        companion: CompanionId::from_raw(
+            decode_id(&row.companion_text).map_err(activity_unavailable)?,
+        ),
+        task: ene_task::TaskRef {
+            task: ene_task::TaskId::from_raw(task),
+            revision: ene_task::TaskRevision::from_u64(
+                decode_u64(task_revision).map_err(activity_unavailable)?,
+            ),
+        },
+        purpose: ene_task::TaskPurposeRef {
+            task: ene_task::TaskId::from_raw(task),
+            adopted_revision: ene_task::TaskRevision::from_u64(
+                decode_u64(purpose_adopted_revision).map_err(activity_unavailable)?,
+            ),
+        },
+        body: row.body,
+        created_at: WallClockWithTz::parse_rfc3339(&row.created_at)
+            .map_err(activity_unavailable)?,
+    })
+}
+
+impl ActivityRepository for Store {
+    async fn record_resume_activity(
+        &self,
+        cmd: RecordResumeActivityCommand,
+    ) -> Result<ActivityId, CompanionTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| activity_unavailable(error.to_string()))?;
+            let command_text = encode_id(cmd.command);
+            tx.execute(
+                SQL_INSERT_ACTIVITY,
+                params![
+                    encode_id(ActivityId::generate().as_raw()),
+                    encode_id(cmd.companion.as_raw()),
+                    ACTIVITY_KIND_RESUME_INSTRUCTION,
+                    encode_id(cmd.task.task.as_raw()),
+                    encode_u64(cmd.task.revision.as_u64()).map_err(activity_unavailable)?,
+                    encode_u64(cmd.purpose.adopted_revision.as_u64())
+                        .map_err(activity_unavailable)?,
+                    cmd.body,
+                    WallClockWithTz::now().to_rfc3339(),
+                    command_text,
+                ],
+            )
+            .map_err(|error| activity_unavailable(error.to_string()))?;
+            // The same epoch key always names the same activity: a retry
+            // reads the winner back, and different content under one key
+            // fails closed instead of recording a second row.
+            let found: Option<(String, StoredActivityRow)> = tx
+                .query_row(
+                    SQL_SELECT_ACTIVITY_BY_COMMAND,
+                    params![command_text],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            StoredActivityRow {
+                                companion_text: row.get(1)?,
+                                kind_text: row.get(2)?,
+                                task_text: row.get(3)?,
+                                task_revision: row.get(4)?,
+                                purpose_adopted_revision: row.get(5)?,
+                                body: row.get(6)?,
+                                created_at: row.get(7)?,
+                            },
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| activity_unavailable(error.to_string()))?;
+            let Some((activity_text, stored)) = found else {
+                return Err(activity_unavailable(
+                    "resume activity record missing after insert",
+                ));
+            };
+            let activity =
+                ActivityId::from_raw(decode_id(&activity_text).map_err(activity_unavailable)?);
+            let reread = decode_activity_row(activity, stored)?;
+            if reread.companion != cmd.companion
+                || reread.task != cmd.task
+                || reread.purpose != cmd.purpose
+                || reread.body != cmd.body
+            {
+                return Err(activity_unavailable(
+                    "resume activity command reuses a key with different content",
+                ));
+            }
+            tx.commit()
+                .map_err(|error| activity_unavailable(error.to_string()))?;
+            Ok(activity)
+        })
+        .await
+    }
+
+    async fn load_activity(
+        &self,
+        activity: ActivityId,
+    ) -> Result<Option<ManagementActivity>, CompanionTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let found: Option<StoredActivityRow> = guard
+                .query_row(
+                    SQL_SELECT_ACTIVITY,
+                    params![encode_id(activity.as_raw())],
+                    |row| {
+                        Ok(StoredActivityRow {
+                            companion_text: row.get(0)?,
+                            kind_text: row.get(1)?,
+                            task_text: row.get(2)?,
+                            task_revision: row.get(3)?,
+                            purpose_adopted_revision: row.get(4)?,
+                            body: row.get(5)?,
+                            created_at: row.get(6)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|error| activity_unavailable(error.to_string()))?;
+            found
+                .map(|row| decode_activity_row(activity, row))
+                .transpose()
         })
         .await
     }

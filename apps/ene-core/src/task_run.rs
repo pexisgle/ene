@@ -90,9 +90,37 @@ pub const DEFAULT_MAX_TURNS: u32 = 16;
 /// start provider calls or Actions for one execution lifetime. The durable
 /// attempt facts ([`TaskAgentRunRefusal::ExecutionAlreadyStarted`]) cover
 /// what the in-memory registry cannot: a restart or a lost registration.
+///
+/// Launch reservations ([`TaskExecutionRegistry::reserve`]) are the other
+/// half: an AU3/AU17 producer records the committed delegation here in the
+/// same commit scope as the store commit, and the runner only starts a
+/// delegation holding a reservation. A restart drops every reservation, so
+/// an old delegation never launches without a new explicit commit; the
+/// commit succeeding while the later spawn fails releases the reservation
+/// with no automatic relaunch.
 #[derive(Default)]
 pub struct TaskExecutionRegistry {
     running: std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, RunningExecution>>,
+    reservations:
+        std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, ene_task::TaskId>>,
+    /// Serializes the Host-side launch critical section (CCT §7.4): the
+    /// reservation/registration check, the store commit, and the new
+    /// reservation record share one scope per process. Lock order is always
+    /// registry scope first, then SQLite inside the store's blocking
+    /// section; the scope never crosses a SQLite transaction boundary on
+    /// this thread, and no provider I/O, external effect, or prompt
+    /// assembly runs under it.
+    commit_scope: tokio::sync::Mutex<()>,
+}
+
+/// Admission answer of one launch reservation take.
+pub enum TakeReservation<'a> {
+    /// The reservation was consumed and the execution registered.
+    Admitted(TaskExecutionRegistration<'a>),
+    /// Another execution of the same delegation is already running.
+    AlreadyRunning,
+    /// No launch reservation covers the delegation in this process.
+    Unreserved,
 }
 
 struct RunningExecution {
@@ -146,6 +174,114 @@ impl TaskExecutionRegistry {
             }
         }
         signalled
+    }
+
+    /// Enters the Host-side launch critical section (CCT §7.4).
+    ///
+    /// The holder runs the reservation/registration check, the store
+    /// commit, and the new reservation record under this scope, so an
+    /// AU3/AU17 commit and its launch reservation are one atomic section
+    /// against every other producer in this process. The scope is a Tokio
+    /// mutex: it is held across the store commit's `.await` (which parks
+    /// this task while the store's blocking thread owns SQLite briefly),
+    /// but never across provider I/O, external effects, or prompt
+    /// assembly, and never in the opposite order with SQLite.
+    pub async fn commit_scope(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.commit_scope.lock().await
+    }
+
+    /// Records the launch reservation for one committed delegation.
+    ///
+    /// Call under [`Self::commit_scope`] right after the store commit that
+    /// created the delegation. Returns `false` — recording nothing — when
+    /// the delegation is already reserved or running: the caller must treat
+    /// that as a lost race with no automatic relaunch. The check is
+    /// delegation-scoped on purpose: steering a running Task commits a new
+    /// revision with its own delegation while the old execution is still
+    /// stopping on the revision gate, so a Task-wide refusal here would
+    /// block every steering of a running Task. The Task-wide "same Task
+    /// already launching" question stays a separate
+    /// [`Self::task_has_reservation_or_running`] read under the same commit
+    /// scope, where the resume admission orders it. A reservation is
+    /// consumed by [`Self::take_reservation`], released by [`Self::release`],
+    /// and dropped by a restart.
+    pub fn reserve(&self, delegation: ene_task::DelegationId, task: ene_task::TaskId) -> bool {
+        let running = crate::lock_unpoison(&self.running);
+        let mut reservations = crate::lock_unpoison(&self.reservations);
+        if running.contains_key(&delegation) || reservations.contains_key(&delegation) {
+            return false;
+        }
+        reservations.insert(delegation, task);
+        true
+    }
+
+    /// Releases one launch reservation without starting anything.
+    ///
+    /// Used when the commit succeeded but the later spawn failed or no
+    /// runner exists: the delegation stays durable and unexecuted, and a
+    /// retry is a new explicit commit, never an automatic relaunch.
+    pub fn release(&self, delegation: ene_task::DelegationId) {
+        crate::lock_unpoison(&self.reservations).remove(&delegation);
+    }
+
+    /// Whether the Task has any launch reservation or running registration
+    /// in this process.
+    ///
+    /// Read under [`Self::commit_scope`] as the resume "same Task" check:
+    /// memory-only, never durable authority, and never evidence that an
+    /// effect stopped.
+    pub fn task_has_reservation_or_running(&self, task: ene_task::TaskId) -> bool {
+        crate::lock_unpoison(&self.running)
+            .values()
+            .any(|execution| execution.task == task)
+            || crate::lock_unpoison(&self.reservations)
+                .values()
+                .any(|reserved| *reserved == task)
+    }
+
+    /// Consumes one launch reservation and registers the execution.
+    ///
+    /// `AlreadyRunning` wins over `Unreserved`: a delegation that is
+    /// already running in this process is refused even if its reservation
+    /// row is somehow also present. An `Unreserved` delegation never starts
+    /// provider calls or Actions — after a restart, only a new explicit
+    /// commit reserves again. The returned registration removes its own
+    /// running entry on drop, exactly like [`Self::register`].
+    pub fn take_reservation(
+        &self,
+        delegation: ene_task::DelegationId,
+        task: ene_task::TaskId,
+    ) -> TakeReservation<'_> {
+        // Lock order is running first, then reservations — the same order
+        // `reserve` uses — and no `.await` runs under either.
+        let mut running = crate::lock_unpoison(&self.running);
+        if running.contains_key(&delegation) {
+            return TakeReservation::AlreadyRunning;
+        }
+        let mut reservations = crate::lock_unpoison(&self.reservations);
+        match reservations.remove(&delegation) {
+            Some(reserved_task) if reserved_task == task => {}
+            Some(reserved_task) => {
+                // A reservation pairing a different Task with this
+                // delegation identity is corrupted: put it back and refuse.
+                reservations.insert(delegation, reserved_task);
+                return TakeReservation::Unreserved;
+            }
+            None => return TakeReservation::Unreserved,
+        }
+        let cancellation = DispatchAbort::default();
+        running.insert(
+            delegation,
+            RunningExecution {
+                task,
+                cancellation: cancellation.clone(),
+            },
+        );
+        TakeReservation::Admitted(TaskExecutionRegistration {
+            registry: self,
+            delegation,
+            cancellation,
+        })
     }
 
     /// Removes the entry held by one registration.
@@ -239,6 +375,13 @@ pub enum TaskAgentRunRefusal {
     /// process. The atomic registration refusal happens before any provider
     /// call or Action, so two loops can never run one execution lifetime.
     ExecutionAlreadyRunning {
+        delegation: ene_task::DelegationId,
+    },
+    /// No launch reservation covers the delegation in this process, so the
+    /// runner refuses before any provider call or Action. After a restart
+    /// only a new explicit AU3/AU17 commit reserves again: the runner never
+    /// restores a launch target from the delegation rows.
+    ExecutionUnavailable {
         delegation: ene_task::DelegationId,
     },
     MissingWorkspace {

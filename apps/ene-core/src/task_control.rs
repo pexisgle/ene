@@ -44,11 +44,13 @@ use ene_companion::dialogue::{
 use ene_primitive::RawId;
 use ene_task::{
     ConversationTaskRepository as _, CreateDelegationCommand, DelegatedWorkspace, DelegationId,
-    DelegationOutcome, DelegationScope, OwnerMessageCurrentness, SteeringPremiseRef,
-    TaskCancelOutcome, TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskId,
-    TaskProgress, TaskProposalOutcome, TaskPurpose, TaskRef, TaskRepository as _,
-    TaskResultAcceptance, TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef,
-    orchestrate_delegation, reevaluate_result_adoption,
+    DelegationOutcome, DelegationScope, OwnerMessageCurrentness, ResumeInstructionSource,
+    ResumeTaskCommand, SteeringPremiseRef, TaskCancelOutcome, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationOutcome, TaskId, TaskProgress, TaskProposalOutcome,
+    TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance, TaskResumeOutcome,
+    TaskResumeReadiness, TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef,
+    orchestrate_delegation, orchestrate_resume, orchestrate_resume_current,
+    reevaluate_result_adoption,
 };
 use thiserror::Error;
 
@@ -291,10 +293,10 @@ impl<'a> HostTaskControl<'a> {
                             Some(delegation.delegation),
                         );
                         // Production launcher: the existing runner starts in
-                        // the background; this turn never awaits it.
-                        if let Some(launcher) = self.handle.task_launcher() {
-                            launcher.launch(delegation.delegation);
-                        }
+                        // the background; this turn never awaits it. Without
+                        // a launcher the reservation is released and the
+                        // delegation stays durable and unexecuted.
+                        self.handle.launch_or_release(delegation.delegation);
                         DialogueTaskControlReply::Answered(String::from(
                             "Task accepted (status: in-progress). I will work on it.",
                         ))
@@ -388,9 +390,7 @@ impl<'a> HostTaskControl<'a> {
                             reference.task,
                             Some(delegation.delegation),
                         );
-                        if let Some(launcher) = self.handle.task_launcher() {
-                            launcher.launch(delegation.delegation);
-                        }
+                        self.handle.launch_or_release(delegation.delegation);
                         DialogueTaskControlReply::Answered(format!(
                             "Instruction recorded (revision {}). I will continue with it.",
                             reference.revision.as_u64()
@@ -441,6 +441,61 @@ impl<'a> HostTaskControl<'a> {
             Ok(TaskCancelOutcome::MissingTask { .. }) => Self::no_active_task(),
         }
     }
+
+    async fn resume(&self, origin: RawId) -> DialogueTaskControlReply {
+        // The directive carries no target: the conversation projection holds
+        // at most one Task per companion, so a missing projection is
+        // answered with a clarification asking which Task to resume, and
+        // ambiguity cannot arise. The model never names a Task, revision,
+        // purpose, or body: the Host composes the premise from durable
+        // state and references the turn's own Owner message as the resume
+        // instruction source.
+        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+            return DialogueTaskControlReply::Answered(String::from(
+                "There is no active task in this conversation. Tell me which task to resume.",
+            ));
+        };
+        let record = match self.handle.store.load_task(current.task).await {
+            Err(_) => return DialogueTaskControlReply::Unavailable,
+            Ok(None) => return Self::no_active_task(),
+            Ok(Some(record)) => record,
+        };
+        let currentness = OwnerMessageCurrentness {
+            companion: self.companion.as_raw(),
+            message: origin,
+        };
+        let command = ResumeTaskCommand {
+            premise: SteeringPremiseRef {
+                expected: record.task.reference,
+                purpose: record.task.purpose,
+            },
+            instruction: ResumeInstructionSource::OwnerHistory {
+                message: origin,
+                currentness,
+            },
+        };
+        match self.handle.resume_task_current(command, currentness).await {
+            Err(_) => DialogueTaskControlReply::Unavailable,
+            // The turn was superseded before the resume commit: nothing was
+            // written and no reply is adopted.
+            Ok(TaskResumeOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
+            Ok(TaskResumeOutcome::Resumed { task, delegation }) => {
+                // The new revision needs its own execution lifetime, and it
+                // just committed one: point the conversation at it. The
+                // launcher already started it inside the resume scope.
+                self.handle.conversation_tasks.record(
+                    self.companion,
+                    task.task,
+                    Some(delegation.delegation),
+                );
+                DialogueTaskControlReply::Answered(format!(
+                    "Task resumed (revision {}). I will continue with it.",
+                    task.revision.as_u64()
+                ))
+            }
+            Ok(outcome) => DialogueTaskControlReply::Answered(resume_outcome_text(&outcome)),
+        }
+    }
 }
 
 impl DialogueTaskControlPort for HostTaskControl<'_> {
@@ -461,6 +516,7 @@ impl DialogueTaskControlPort for HostTaskControl<'_> {
                 purpose,
             } => self.steer(instruction, purpose, origin).await,
             DialogueTaskCommand::Cancel => self.cancel(origin).await,
+            DialogueTaskCommand::Resume => self.resume(origin).await,
         }
     }
 }
@@ -489,6 +545,58 @@ fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
         }
         // The guarded mapping consumes supersession before this renderer.
         TaskProposalOutcome::Superseded => {
+            String::from("The request was superseded by a newer message.")
+        }
+    }
+}
+
+fn resume_outcome_text(outcome: &TaskResumeOutcome) -> String {
+    match outcome {
+        TaskResumeOutcome::Resumed { .. } => String::from("The task was resumed."),
+        TaskResumeOutcome::StalePremise { current } => format!(
+            "The task moved on; nothing was resumed (current revision {}).",
+            current.revision.as_u64()
+        ),
+        TaskResumeOutcome::TaskTerminal { progress, .. } => {
+            format!("That task is already {}.", progress_label(*progress))
+        }
+        TaskResumeOutcome::AlreadyRunning { .. } => {
+            String::from("That task is already running; nothing was resumed.")
+        }
+        TaskResumeOutcome::HeldByUnknownEffects { .. } => String::from(
+            "The task has effects with unknown outcomes; resume stays on hold until they settle.",
+        ),
+        TaskResumeOutcome::ResultAvailable { .. } => {
+            String::from("The task has a recorded result to review first; nothing was resumed.")
+        }
+        TaskResumeOutcome::NeedsRevalidation(hold) => String::from(match hold {
+            ene_task::TaskResumeHold::CompanionUnavailable => {
+                "The task owner is unavailable; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::WorkspaceUnavailable => {
+                "The task has no workspace to continue in; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::InstructionUnavailable => {
+                "The resume instruction is unavailable; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::PermissionUnavailable => {
+                "A permission check is needed first; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::DataUseHeld => {
+                "Some task content is under a deletion hold; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::ExecutionUnavailable => {
+                "No runner is available to continue the task; nothing was resumed."
+            }
+        }),
+        TaskResumeOutcome::MissingTask { .. } => {
+            String::from("There is no active task in this conversation.")
+        }
+        TaskResumeOutcome::RevisionExhausted { .. } => {
+            String::from("The task cannot take another change.")
+        }
+        // The guarded mapping consumes supersession before this renderer.
+        TaskResumeOutcome::Superseded => {
             String::from("The request was superseded by a newer message.")
         }
     }
@@ -568,7 +676,16 @@ impl HostHandle {
     /// The committed unit supplies the boundary copy; the Task owner confirms
     /// the association and revision inside its own commit. This is the shared
     /// delegation step of the first-party and conversation proposal paths.
+    ///
+    /// The commit and the launch reservation share the registry commit scope
+    /// (CCT §7.4): the scope serializes this producer against every other
+    /// AU3/AU17 producer in the process, so the committed delegation is
+    /// reserved before any concurrent resume can observe the Task as free.
+    /// A lost reservation race is a technical error: the delegation is
+    /// durable but unlaunchable, and a retry is a new explicit delegation,
+    /// never an automatic relaunch.
     async fn delegate_task(&self, task: TaskRef) -> Result<DelegationOutcome, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
         let Some(record) = self.store.load_task(task.task).await? else {
             // The AU2 commit just succeeded: a missing read is an
             // inconsistent unit, never a domain refusal.
@@ -586,7 +703,40 @@ impl HostHandle {
             },
             None => DelegationScope { workspace: None },
         };
-        orchestrate_delegation(&self.store, CreateDelegationCommand { task, scope_copy }).await
+        let outcome =
+            orchestrate_delegation(&self.store, CreateDelegationCommand { task, scope_copy })
+                .await?;
+        if let DelegationOutcome::Delegated(delegation) = &outcome {
+            // The delegation id is freshly minted and the scope serializes
+            // this producer, so the reservation cannot already exist; a
+            // refusal here is a corrupted registry, never a lost race with
+            // another Task.
+            if !self
+                .task_executions
+                .reserve(delegation.delegation, task.task)
+            {
+                return Err(TaskTechnicalError::StorageUnavailable {
+                    reason: String::from("delegation launch reservation lost its race"),
+                });
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Starts the committed delegation's runner, or releases its launch
+    /// reservation when no runner exists.
+    ///
+    /// A handle without an installed launcher (unit tests, an offline
+    /// opener) accepts the delegation but starts no execution: the release
+    /// keeps the reservation from pinning the Task as running forever, and
+    /// the delegation stays durable and unexecuted. Production always
+    /// installs a launcher, so the reservation is consumed by the run.
+    fn launch_or_release(&self, delegation: DelegationId) {
+        if let Some(launcher) = self.task_launcher() {
+            launcher.launch(delegation);
+        } else {
+            self.task_executions.release(delegation);
+        }
     }
 
     /// Proposes one steering change from the Owner conversation.
@@ -604,6 +754,97 @@ impl HostHandle {
         command: ProposeSteeringCommand,
     ) -> Result<TaskProposalOutcome, TaskTechnicalError> {
         ene_companion::dialogue::propose_steering(command, &self.store).await
+    }
+
+    /// Host-known readiness for one resume commit.
+    ///
+    /// Read under the launch commit scope: the final permission / cap
+    /// judgement stays with the AU14/AU5 gates (`permission_available` is
+    /// always `true` here), while the Task's reservation/registration state
+    /// and the launcher's presence are read now so the commit orders them
+    /// in its refusal priority. No presence check and no provider call are
+    /// involved: an explicit Owner instruction is sufficient premise.
+    fn resume_readiness(&self, task: TaskId) -> TaskResumeReadiness {
+        TaskResumeReadiness {
+            permission_available: true,
+            execution_free: !self.task_executions.task_has_reservation_or_running(task),
+            launch_possible: self.task_launcher().is_some(),
+        }
+    }
+
+    /// Reserves and launches one resumed delegation, if the outcome carries
+    /// one.
+    ///
+    /// Call under the launch commit scope right after the resume commit, so
+    /// the commit and the reservation are one critical section (CCT §7.4).
+    /// A lost reservation race is a technical error: the revision forward
+    /// is durable but unlaunchable, and continuing is a new explicit
+    /// resume, never an automatic relaunch. Without an installed launcher
+    /// the commit already refused with `ExecutionUnavailable`, so reaching
+    /// here always launches.
+    fn reserve_and_launch_resumed(
+        &self,
+        outcome: &TaskResumeOutcome,
+    ) -> Result<(), TaskTechnicalError> {
+        let TaskResumeOutcome::Resumed { delegation, .. } = outcome else {
+            return Ok(());
+        };
+        if !self
+            .task_executions
+            .reserve(delegation.delegation, delegation.task.task)
+        {
+            return Err(TaskTechnicalError::StorageUnavailable {
+                reason: String::from("resume launch reservation lost its race"),
+            });
+        }
+        self.launch_or_release(delegation.delegation);
+        Ok(())
+    }
+
+    /// Resumes one Task explicitly from the first-party management inlet
+    /// (H-A.1 / AU17, unguarded).
+    ///
+    /// The caller composes the command from durable state: the premise is
+    /// the Task's current revision and purpose, and the instruction is the
+    /// recorded first-party activity. The Task owner compares everything
+    /// inside its single commit; a newer revision, terminal progress,
+    /// unknown effects, or an adoptable sealed result refuses with zero
+    /// writes. `Resumed` means the revision forward and the new delegation
+    /// committed and the runner launched; a launcher refusal or technical
+    /// failure after the commit is reported separately.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when the store cannot answer.
+    pub async fn resume_task(
+        &self,
+        command: ResumeTaskCommand,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
+        let readiness = self.resume_readiness(command.premise.expected.task);
+        let outcome = orchestrate_resume(&self.store, command, readiness).await?;
+        self.reserve_and_launch_resumed(&outcome)?;
+        Ok(outcome)
+    }
+
+    /// Resumes one Task explicitly from the Owner conversation (H-A.1 /
+    /// AU17, guarded).
+    ///
+    /// Identical to [`HostHandle::resume_task`] except that the commit
+    /// additionally requires the relied Owner input to still be the newest
+    /// accepted one; a superseded turn answers `Superseded` with zero
+    /// writes and launches nothing.
+    async fn resume_task_current(
+        &self,
+        command: ResumeTaskCommand,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
+        let readiness = self.resume_readiness(command.premise.expected.task);
+        let outcome =
+            orchestrate_resume_current(&self.store, command, readiness, currentness).await?;
+        self.reserve_and_launch_resumed(&outcome)?;
+        Ok(outcome)
     }
 
     /// Settles one Action attempt's late objective evidence and, when the

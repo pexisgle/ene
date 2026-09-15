@@ -186,6 +186,23 @@ impl TaskRepository for CapturingRepository {
     ) -> Result<Option<ene_task::TaskReportSourcePage>, TaskTechnicalError> {
         Err(unsupported("load_report_source_bounded"))
     }
+
+    async fn commit_task_resume(
+        &self,
+        _premise: ene_task::TaskResumeCommitPremise,
+    ) -> Result<ene_task::TaskResumeOutcome, TaskTechnicalError> {
+        Err(unsupported("commit_task_resume"))
+    }
+
+    async fn load_past_executed_facts(
+        &self,
+        _task: TaskId,
+    ) -> Result<ene_task::PastExecutedFactsPage, TaskTechnicalError> {
+        Ok(ene_task::PastExecutedFactsPage {
+            facts: Vec::new(),
+            has_more: false,
+        })
+    }
 }
 
 fn unsupported(method: &str) -> TaskTechnicalError {

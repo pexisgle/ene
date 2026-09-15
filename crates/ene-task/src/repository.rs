@@ -9,12 +9,14 @@ use crate::delegation::{
 };
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
 use crate::report::{
-    TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage, TaskReportSourceRef,
+    PastExecutedFactsPage, TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage,
+    TaskReportSourceRef,
 };
 use crate::result::{
     TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
     TaskResultRecord, UnadoptedResultCursor,
 };
+use crate::resume::{TaskResumeCommitPremise, TaskResumeOutcome};
 use crate::task::{
     TaskCommitPremise, TaskCreationOutcome, TaskCreationPremise, TaskId, TaskProgress, TaskRecord,
     TaskRef,
@@ -396,6 +398,51 @@ pub trait TaskRepository: Send + Sync {
         cursor_bytes: u64,
         limit_bytes: u32,
     ) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError>;
+
+    /// Commits one explicit resume (AU17): the same Task at `r+1` with the
+    /// purpose carried over, the resume instruction adopted, and one new
+    /// delegation and agent.
+    ///
+    /// Inside one short `Immediate` transaction the commit compares, in
+    /// refusal priority, the Task's existence, its non-terminal progress,
+    /// the expected revision and purpose identity, the readiness premises,
+    /// the Task-wide `Unknown` barrier (every revision and delegation),
+    /// adoptable sealed results of the current revision, the
+    /// re-checkable holds (companion lifecycle, workspace association,
+    /// instruction source, permission premise, erasure coverage, launch
+    /// availability), and the representable next revision. The first
+    /// refusal wins with zero writes; a successful commit writes the new
+    /// revision snapshot, the carried-forward adopted-purpose entry, the new
+    /// adopted-instruction entry (provenance only, never the body), the
+    /// current pointer, the new delegation with its scope frozen from the
+    /// current workspace association, the `Started → InProgress` advance,
+    /// and the same-transaction undelivered registrations atomically. Older
+    /// revisions, context entries, delegations, results, and attempts are
+    /// retained untouched: no recovery generation, current-delegation
+    /// pointer, resume flag, or receipt state exists.
+    ///
+    /// The caller mints every identity in the premise; the repository stamps
+    /// only the post-CAS `(task, revision)` references.
+    async fn commit_task_resume(
+        &self,
+        premise: TaskResumeCommitPremise,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError>;
+
+    /// Reads the Task's past-executed facts for the every-turn prompt block
+    /// (H-A.1).
+    ///
+    /// The page carries attribution only — every recorded Action attempt
+    /// (all revisions and delegations) and every recorded result, oldest
+    /// first, as fixed-class lines without bodies — capped at
+    /// [`PAST_FACTS_ENTRY_CAP`](crate::PAST_FACTS_ENTRY_CAP). `has_more`
+    /// means recorded facts exist beyond the page, so the turn refuses
+    /// instead of reasoning from the prefix. SELECT-only: no status,
+    /// revision, adoption, or certainty changes, no runner starts, and no
+    /// reconciliation runs.
+    async fn load_past_executed_facts(
+        &self,
+        task: TaskId,
+    ) -> Result<PastExecutedFactsPage, TaskTechnicalError>;
 }
 
 /// Conversation-sourced Task control commits.
@@ -435,4 +482,12 @@ pub trait ConversationTaskRepository: TaskRepository {
         task: TaskId,
         currentness: OwnerMessageCurrentness,
     ) -> Result<TaskCancelOutcome, TaskTechnicalError>;
+
+    /// Commits one explicit resume iff the relied Owner input is still
+    /// current.
+    async fn commit_task_resume_from_conversation(
+        &self,
+        premise: TaskResumeCommitPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError>;
 }

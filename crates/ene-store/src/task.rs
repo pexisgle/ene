@@ -32,25 +32,32 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use ene_action::ActionCertainty;
-use ene_companion::{TaskFact, TerminalKindWire, UndeliveredSource};
+use ene_companion::{HistoryRole, TaskFact, TerminalKindWire, UndeliveredSource};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
     DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness,
-    REPORT_PAGE_MAX, Task, TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival,
+    PAST_FACTS_ENTRY_CAP, PastExecutedFact, PastExecutedFactsPage, REPORT_PAGE_MAX,
+    ResumeInstructionSource, Task, TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival,
     TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
     TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome,
     TaskCreationPremise, TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId,
     TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow,
     TaskReportRowCursor, TaskReportRowKind, TaskReportSourcePage, TaskReportSourceRef,
     TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
-    TaskRevision, TaskRevisionRecord, TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId,
-    WorkspaceAssociation, WorkspaceFolderRef,
+    TaskResumeCommitPremise, TaskResumeHold, TaskResumeOutcome, TaskRevision, TaskRevisionRecord,
+    TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation,
+    WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
-use crate::codec::{decode_id, decode_u64, encode_id, encode_u64, lock_shared};
+use crate::codec::{
+    decode_id, decode_lifecycle, decode_role, decode_u64, encode_id, encode_u64, lock_shared,
+};
+use crate::companion::{
+    SQL_SELECT_ACTIVITY_PREMISE, SQL_SELECT_COMPANION_LIFECYCLE, SQL_SELECT_HISTORY_PREMISE,
+};
 use crate::run_blocking;
 
 const SQL_INSERT_TASK: &str = "INSERT INTO task (task_id, revision, purpose_adopted_revision, purpose_text, assignee, progress) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
@@ -203,6 +210,38 @@ const ORIGIN_KIND_SCHEDULE_OCCURRENCE: &str = "schedule_occurrence";
 pub(crate) const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
 const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
 
+/// The stored `origin_kind` for a first-party Owner management source. The
+/// body stays canonical in the companion-owned activity record, exactly like
+/// a History source.
+const ORIGIN_KIND_OWNER_MANAGEMENT: &str = "owner_management";
+
+/// The erasure coverage probe for the resume commit (AU17): a canonical
+/// source covered by any durable erasure condition holds the resume as
+/// [`TaskResumeHold::DataUseHeld`](ene_task::TaskResumeHold::DataUseHeld).
+/// Presence in the canonical table is the hold; no placeholder default
+/// means "no condition".
+const SQL_SOURCE_COVERED_BY_ERASURE: &str =
+    "SELECT EXISTS(SELECT 1 FROM erasure_condition_source WHERE source = ?1)";
+
+/// The current-revision sealed-but-unadopted results for the resume
+/// availability check: `adopted_revision IS NULL` on the relied revision is
+/// the durable "may still adopt" marker. Bodies are never read here.
+const SQL_UNADOPTED_RESULTS_AT_REVISION: &str = "SELECT result_id, delegation_id FROM task_result WHERE task_id = ?1 AND task_revision = ?2 AND adopted_revision IS NULL ORDER BY result_id";
+
+/// The past-facts detail walk: Action attempts (rank 0) before Task results
+/// (rank 1), each oldest first, capped one past the turn bound so
+/// truncation is detected instead of silently reasoned from.
+const SQL_PAST_FACT_ROWS: &str = "SELECT row_kind, row_id FROM (SELECT 'action_attempt' AS row_kind, attempt_id AS row_id, 0 AS rank, rowid AS seq FROM action_attempt WHERE task_id = ?1 UNION ALL SELECT 'task_result', result_id, 1, rowid FROM task_result WHERE task_id = ?1) ORDER BY rank, seq LIMIT ?2";
+
+/// One past attempt's attribution columns. Bodies are never read: the facts
+/// block carries identity, operation, target, and certainty only.
+const SQL_PAST_ATTEMPT_FACT: &str =
+    "SELECT operation, real_target, certainty FROM action_attempt WHERE attempt_id = ?1";
+
+/// One past result's attribution columns. The body is never read: the facts
+/// block carries the relied revision and the adoption marker only.
+const SQL_PAST_RESULT_FACT: &str =
+    "SELECT task_revision, adopted_revision FROM task_result WHERE result_id = ?1";
 /// The bounded Task-headline page. The completion marker is a canonical fact
 /// probe (`adopted_revision` equals the current revision), never a cached
 /// flag; the two variants share one column list and decoder so a page boundary
@@ -278,6 +317,7 @@ fn decode_certainty(raw: &str) -> Result<ActionCertainty, TaskTechnicalError> {
 fn encode_origin_kind(kind: TaskContextOriginKind) -> &'static str {
     match kind {
         TaskContextOriginKind::OwnerConversation => ORIGIN_KIND_OWNER_CONVERSATION,
+        TaskContextOriginKind::OwnerManagement => ORIGIN_KIND_OWNER_MANAGEMENT,
         TaskContextOriginKind::Spontaneous => ORIGIN_KIND_SPONTANEOUS,
         TaskContextOriginKind::ScheduleOccurrence => ORIGIN_KIND_SCHEDULE_OCCURRENCE,
     }
@@ -286,6 +326,7 @@ fn encode_origin_kind(kind: TaskContextOriginKind) -> &'static str {
 fn decode_origin_kind(text: &str) -> Result<TaskContextOriginKind, TaskTechnicalError> {
     match text {
         ORIGIN_KIND_OWNER_CONVERSATION => Ok(TaskContextOriginKind::OwnerConversation),
+        ORIGIN_KIND_OWNER_MANAGEMENT => Ok(TaskContextOriginKind::OwnerManagement),
         ORIGIN_KIND_SPONTANEOUS => Ok(TaskContextOriginKind::Spontaneous),
         ORIGIN_KIND_SCHEDULE_OCCURRENCE => Ok(TaskContextOriginKind::ScheduleOccurrence),
         _ => Err(task_unavailable("unknown task context origin kind")),
@@ -2552,6 +2593,606 @@ fn adopt_result_sync(
     }))
 }
 
+/// The deferred instruction-source verdict of the resume compare.
+///
+/// The source is validated early so its outcome can be ordered exactly:
+/// a freshness loss is [`TaskResumeOutcome::Superseded`] (guarded) while
+/// any other unusable source waits behind the `Unknown` barrier and the
+/// adoptable-result check as
+/// [`TaskResumeHold::InstructionUnavailable`].
+enum ResumeSourceVerdict {
+    Usable,
+    Superseded,
+    Hold,
+}
+
+/// One decoded `activity_record` premise row for the resume compare: the
+/// companion, kind, and selected Task ref the instruction was recorded
+/// for, without its body.
+struct StoredActivityPremise {
+    companion_text: String,
+    kind_text: String,
+    task_text: Option<String>,
+    task_revision: Option<i64>,
+    purpose_revision: Option<i64>,
+}
+
+/// Validates the resume instruction's canonical source inside the commit.
+///
+/// `OwnerHistory` requires the message row to exist with the Owner role
+/// and the Task's assignee companion, and to still be the newest accepted
+/// Owner input. `OwnerManagement` requires the activity row to exist and
+/// to name exactly the command's expected Task ref and purpose. An absent
+/// or unsuitable row is a hold (or supersession for a guarded freshness
+/// loss); a malformed row, a foreign Task reference, and any other
+/// inconsistency fail closed as a technical error, never an empty premise.
+fn validate_resume_source(
+    tx: &rusqlite::Transaction<'_>,
+    instruction: &ResumeInstructionSource,
+    task: TaskId,
+    expected: TaskRef,
+    purpose: TaskPurposeRef,
+    assignee: AssigneeRef,
+    guarded: bool,
+) -> Result<ResumeSourceVerdict, TaskTechnicalError> {
+    match *instruction {
+        ResumeInstructionSource::OwnerHistory {
+            message,
+            currentness,
+        } => {
+            let found: Option<(String, String)> = tx
+                .query_row(
+                    SQL_SELECT_HISTORY_PREMISE,
+                    params![encode_id(message)],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(task_unavailable)?;
+            let Some((role_text, companion_text)) = found else {
+                return Ok(ResumeSourceVerdict::Hold);
+            };
+            let role = decode_role(&role_text).map_err(task_unavailable)?;
+            if role != HistoryRole::Owner {
+                return Ok(ResumeSourceVerdict::Hold);
+            }
+            if decode_id(&companion_text).map_err(task_unavailable)? != assignee.companion {
+                return Ok(ResumeSourceVerdict::Hold);
+            }
+            // The instruction is only current while no newer accepted Owner
+            // input overtook it. A guarded turn reports that loss as
+            // supersession; an unguarded caller has no turn to supersede.
+            let premise = OwnerMessageCurrentness {
+                companion: assignee.companion,
+                message,
+            };
+            if !owner_message_is_current(tx, &premise)? {
+                if guarded && currentness.message == message {
+                    return Ok(ResumeSourceVerdict::Superseded);
+                }
+                return Ok(ResumeSourceVerdict::Hold);
+            }
+            Ok(ResumeSourceVerdict::Usable)
+        }
+        ResumeInstructionSource::OwnerManagement { activity } => {
+            let found: Option<StoredActivityPremise> = tx
+                .query_row(
+                    SQL_SELECT_ACTIVITY_PREMISE,
+                    params![encode_id(activity)],
+                    |row| {
+                        Ok(StoredActivityPremise {
+                            companion_text: row.get(0)?,
+                            kind_text: row.get(1)?,
+                            task_text: row.get(2)?,
+                            task_revision: row.get(3)?,
+                            purpose_revision: row.get(4)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(task_unavailable)?;
+            let Some(premise_row) = found else {
+                return Ok(ResumeSourceVerdict::Hold);
+            };
+            let (companion_text, kind_text, task_text, task_revision, purpose_revision) = (
+                premise_row.companion_text,
+                premise_row.kind_text,
+                premise_row.task_text,
+                premise_row.task_revision,
+                premise_row.purpose_revision,
+            );
+            if kind_text != "resume_instruction" {
+                return Err(task_unavailable("unknown activity record kind"));
+            }
+            if decode_id(&companion_text).map_err(task_unavailable)? != assignee.companion {
+                return Ok(ResumeSourceVerdict::Hold);
+            }
+            // The activity names the Task it was recorded for; resuming a
+            // different Task from it is a forged reference, never a hold.
+            let (Some(task_text), Some(task_revision), Some(purpose_revision)) =
+                (task_text, task_revision, purpose_revision)
+            else {
+                return Err(task_unavailable(
+                    "resume activity record missing its selected task",
+                ));
+            };
+            if decode_id(&task_text).map_err(task_unavailable)? != task.as_raw()
+                || decode_revision(task_revision)? != expected.revision
+                || decode_revision(purpose_revision)? != purpose.adopted_revision
+            {
+                return Err(task_unavailable(
+                    "resume activity does not name the resumed task premise",
+                ));
+            }
+            Ok(ResumeSourceVerdict::Usable)
+        }
+    }
+}
+
+/// Whether one canonical source is covered by a durable erasure condition.
+///
+/// Coverage is read from the canonical table in the same transaction as
+/// the resume compare; an empty table is an authoritative "no covering
+/// condition", never a placeholder default.
+fn source_covered_by_erasure(
+    tx: &rusqlite::Transaction<'_>,
+    source: RawId,
+) -> Result<bool, TaskTechnicalError> {
+    tx.query_row(
+        SQL_SOURCE_COVERED_BY_ERASURE,
+        params![encode_id(source)],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(task_unavailable)
+}
+
+/// Whether the current revision carries a sealed result adoption may still
+/// complete.
+///
+/// Each unadopted result at the relied revision is judged result-locally:
+/// its delegation's authoritative attempt set must be entirely
+/// `ConfirmedSuccess` (an execution with no attempts qualifies vacuously).
+/// A result blocked only by a confirmed failure never holds a resume back;
+/// the Task-wide `Unknown` barrier already refused above. Correspondence
+/// disagreements fail closed instead of rounding to availability.
+fn has_adoptable_sealed_result(
+    tx: &rusqlite::Transaction<'_>,
+    task: TaskId,
+    current_revision: TaskRevision,
+) -> Result<bool, TaskTechnicalError> {
+    let current_raw = encode_u64(current_revision.as_u64()).map_err(task_unavailable)?;
+    let mut statement = tx
+        .prepare(SQL_UNADOPTED_RESULTS_AT_REVISION)
+        .map_err(task_unavailable)?;
+    let rows = statement
+        .query_map(params![encode_id(task.as_raw()), current_raw], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(task_unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(task_unavailable)?;
+    for (result_text, delegation_text) in rows {
+        let _ = result_text;
+        let delegation =
+            DelegationId::from_raw(decode_id(&delegation_text).map_err(task_unavailable)?);
+        let authoritative = enumerate_delegation_attempts(tx, delegation, task, current_revision)?;
+        if authoritative
+            .iter()
+            .all(|(_, certainty)| *certainty == ActionCertainty::ConfirmedSuccess)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Commits one explicit resume (AU17) in a single short transaction.
+///
+/// Every compare shares the `Immediate` boundary with every write: a
+/// concurrent steering, cancel, failure, Action start, or adoption either
+/// precedes the transaction (and is answered by the matching refusal) or
+/// follows it (and meets the new revision through the existing gates).
+/// Refusals return without committing, so the transaction rolls back to
+/// the pre-resume state with zero writes.
+fn commit_task_resume_sync(
+    conn: &Mutex<Connection>,
+    premise: TaskResumeCommitPremise,
+    currentness: Option<OwnerMessageCurrentness>,
+) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+    let task = premise.command.premise.expected.task;
+    let task_text = encode_id(task.as_raw());
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(task_unavailable)?;
+    let current: Option<RawTask> = tx
+        .query_row(SQL_SELECT_TASK, params![task_text], raw_task_row)
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(current) = current else {
+        return Ok(TaskResumeOutcome::MissingTask { task });
+    };
+    let current_progress = decode_progress(current.progress.as_deref())?;
+    if current_progress.is_terminal() {
+        return Ok(TaskResumeOutcome::TaskTerminal {
+            task,
+            progress: current_progress,
+        });
+    }
+    let current_revision = decode_revision(current.revision)?;
+    let current_purpose = decode_revision(current.purpose_adopted_revision)?;
+    if current_revision != premise.command.premise.expected.revision
+        || current_purpose != premise.command.premise.purpose.adopted_revision
+    {
+        return Ok(TaskResumeOutcome::StalePremise {
+            current: TaskRef {
+                task,
+                revision: current_revision,
+            },
+        });
+    }
+    if let Some(currentness) = currentness
+        && !owner_message_is_current(&tx, &currentness)?
+    {
+        return Ok(TaskResumeOutcome::Superseded);
+    }
+    if !premise.readiness.execution_free {
+        return Ok(TaskResumeOutcome::AlreadyRunning { task });
+    }
+    // The Task-wide completion barrier input, reused: any `Unknown` attempt
+    // under the Task, across every revision and delegation, holds the
+    // resume until objective evidence settles it.
+    if enumerate_task_attempts(&tx, task)?
+        .iter()
+        .any(|(_, certainty)| *certainty == ActionCertainty::Unknown)
+    {
+        return Ok(TaskResumeOutcome::HeldByUnknownEffects { task });
+    }
+    if has_adoptable_sealed_result(&tx, task, current_revision)? {
+        return Ok(TaskResumeOutcome::ResultAvailable { task });
+    }
+    let assignee = decode_assignee(&current.assignee)?;
+    // The re-checkable holds, in variant order. The instruction source is
+    // validated now but its hold waits behind the barrier and availability
+    // checks above; only a guarded freshness loss short-circuits earlier.
+    let source = validate_resume_source(
+        &tx,
+        &premise.command.instruction,
+        task,
+        premise.command.premise.expected,
+        TaskPurposeRef {
+            task,
+            adopted_revision: current_purpose,
+        },
+        assignee,
+        currentness.is_some(),
+    )?;
+    if matches!(source, ResumeSourceVerdict::Superseded) {
+        return Ok(TaskResumeOutcome::Superseded);
+    }
+    let lifecycle: Option<String> = tx
+        .query_row(
+            SQL_SELECT_COMPANION_LIFECYCLE,
+            params![encode_id(assignee.companion)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some(lifecycle) = lifecycle else {
+        return Err(task_unavailable(
+            "resume task assignee has no companion row",
+        ));
+    };
+    let running = decode_lifecycle(&lifecycle).map_err(task_unavailable)?
+        == ene_companion::CompanionLifecycle::Running;
+    let mut associations = {
+        let mut statement = tx
+            .prepare(SQL_SELECT_WORKSPACE_ASSOCS)
+            .map_err(task_unavailable)?;
+        statement
+            .query_map(params![task_text], |row| {
+                Ok(RawWorkspaceAssoc {
+                    assoc: row.get(0)?,
+                    folder: row.get(1)?,
+                    save_target: row.get(2)?,
+                })
+            })
+            .map_err(task_unavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(task_unavailable)?
+    };
+    if associations.len() > 1 {
+        return Err(task_unavailable(
+            "multiple workspace associations for the task",
+        ));
+    }
+    let association = associations.pop();
+    // The purpose provenance the carry-forward re-stamps: validated before
+    // the first write so the forward never normalizes a unit the reads
+    // reject, and its source joins the erasure coverage check below.
+    let current_purpose_entry =
+        validated_adopted_purpose_entry(&tx, &task_text, current.revision, current_purpose)?;
+    validate_adopted_purpose_provenance(&current_purpose_entry)?;
+    let purpose_source =
+        decode_id(&current_purpose_entry.origin_source).map_err(task_unavailable)?;
+    let instruction_source = match premise.command.instruction {
+        ResumeInstructionSource::OwnerHistory { message, .. } => message,
+        ResumeInstructionSource::OwnerManagement { activity } => activity,
+    };
+    let hold = if !running {
+        Some(TaskResumeHold::CompanionUnavailable)
+    } else if association.is_none() {
+        Some(TaskResumeHold::WorkspaceUnavailable)
+    } else if matches!(source, ResumeSourceVerdict::Hold) {
+        Some(TaskResumeHold::InstructionUnavailable)
+    } else if !premise.readiness.permission_available {
+        Some(TaskResumeHold::PermissionUnavailable)
+    } else if source_covered_by_erasure(&tx, purpose_source)?
+        || source_covered_by_erasure(&tx, instruction_source)?
+    {
+        Some(TaskResumeHold::DataUseHeld)
+    } else if !premise.readiness.launch_possible {
+        Some(TaskResumeHold::ExecutionUnavailable)
+    } else {
+        None
+    };
+    if let Some(hold) = hold {
+        return Ok(TaskResumeOutcome::NeedsRevalidation(hold));
+    }
+    let Some(next_revision) = current_revision.checked_next() else {
+        return Ok(TaskResumeOutcome::RevisionExhausted { task });
+    };
+    let Ok(next_raw) = encode_u64(next_revision.as_u64()) else {
+        return Ok(TaskResumeOutcome::RevisionExhausted { task });
+    };
+    let Some(association) = association else {
+        return Err(task_unavailable(
+            "workspace association missing after the hold",
+        ));
+    };
+    let snapshot: RawTaskRevision = tx
+        .query_row(
+            SQL_SELECT_TASK_REVISION,
+            params![task_text, current.revision],
+            raw_revision_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?
+        .ok_or_else(|| {
+            task_unavailable("task revision snapshot missing for the current revision")
+        })?;
+    // The purpose is carried over: the adopted identity stays, the text
+    // stays the snapshot's, and only the entry identity is new.
+    tx.execute(
+        SQL_INSERT_TASK_REVISION,
+        params![
+            task_text,
+            next_raw,
+            current.purpose_adopted_revision,
+            snapshot.purpose_text,
+            current.assignee
+        ],
+    )
+    .map_err(task_unavailable)?;
+    tx.execute(
+        SQL_INSERT_TASK_CONTEXT_ENTRY,
+        params![
+            encode_id(premise.adopted_purpose_entry.as_raw()),
+            task_text,
+            next_raw,
+            ITEM_KIND_ADOPTED_PURPOSE,
+            current.purpose_adopted_revision,
+            current_purpose_entry.origin_kind,
+            current_purpose_entry.origin_source,
+            current_purpose_entry.acquired_at
+        ],
+    )
+    .map_err(task_unavailable)?;
+    let (origin_kind, origin_source) = match premise.command.instruction {
+        ResumeInstructionSource::OwnerHistory { message, .. } => {
+            (ORIGIN_KIND_OWNER_CONVERSATION, encode_id(message))
+        }
+        ResumeInstructionSource::OwnerManagement { activity } => {
+            (ORIGIN_KIND_OWNER_MANAGEMENT, encode_id(activity))
+        }
+    };
+    tx.execute(
+        SQL_INSERT_TASK_CONTEXT_ENTRY,
+        params![
+            encode_id(premise.adopted_instruction_entry.as_raw()),
+            task_text,
+            next_raw,
+            ITEM_KIND_ADOPTED_INSTRUCTION,
+            Option::<i64>::None,
+            origin_kind,
+            origin_source,
+            premise.accepted_at.to_rfc3339(),
+        ],
+    )
+    .map_err(task_unavailable)?;
+    tx.execute(
+        SQL_UPDATE_TASK,
+        params![
+            task_text,
+            next_raw,
+            current.purpose_adopted_revision,
+            snapshot.purpose_text
+        ],
+    )
+    .map_err(task_unavailable)?;
+    // `Started` advances to `InProgress` with the first delegation;
+    // `InProgress` stays. Exactly one row must move, or nothing commits.
+    let advanced = tx
+        .execute(SQL_MARK_TASK_IN_PROGRESS, params![task_text])
+        .map_err(task_unavailable)?;
+    if advanced != 1 {
+        return Err(task_unavailable(
+            "task progress did not advance with resume delegation creation",
+        ));
+    }
+    let workspace = decode_workspace(association, task)?;
+    let scope = DelegationScope {
+        workspace: Some(DelegatedWorkspace {
+            assoc: workspace.assoc,
+            folder: workspace.folder,
+            save_target: workspace.save_target,
+        }),
+    };
+    let (scope_assoc, scope_folder, scope_save_target) = match &scope.workspace {
+        None => (None, None, None),
+        Some(workspace) => (
+            Some(encode_id(workspace.assoc.as_raw())),
+            Some(workspace.folder.path.as_str()),
+            workspace
+                .save_target
+                .as_ref()
+                .map(|target| target.path.as_str()),
+        ),
+    };
+    tx.execute(
+        SQL_INSERT_DELEGATION,
+        params![
+            encode_id(premise.delegation.as_raw()),
+            task_text,
+            next_raw,
+            current.assignee,
+            encode_id(premise.agent.as_raw()),
+            scope_assoc,
+            scope_folder,
+            scope_save_target,
+        ],
+    )
+    .map_err(task_unavailable)?;
+    // AU17 registers the new revision and the new delegation in the same
+    // transaction as the forward that created them.
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::TaskRevision {
+            task: task.as_raw(),
+            revision: next_revision.as_u64(),
+        },
+    )?;
+    register_task_undelivered(
+        &tx,
+        &current.assignee,
+        task.as_raw(),
+        TaskFact::Delegation(premise.delegation.as_raw()),
+    )?;
+    tx.commit().map_err(task_unavailable)?;
+    Ok(TaskResumeOutcome::Resumed {
+        task: TaskRef {
+            task,
+            revision: next_revision,
+        },
+        delegation: DelegationRef {
+            delegation: premise.delegation,
+            task: TaskRef {
+                task,
+                revision: next_revision,
+            },
+            delegator: assignee,
+            agent: premise.agent,
+            scope,
+        },
+    })
+}
+
+/// Reads the Task's past-executed facts for the every-turn prompt block.
+///
+/// The walk is Task-scoped and bounded: attempts first, then results, each
+/// oldest first, capped one past
+/// [`PAST_FACTS_ENTRY_CAP`](ene_task::PAST_FACTS_ENTRY_CAP) so truncation
+/// is reported instead of reasoned from. Each row contributes attribution
+/// only — never a body. SELECT-only.
+fn load_past_executed_facts_sync(
+    conn: &Mutex<Connection>,
+    task: TaskId,
+) -> Result<PastExecutedFactsPage, TaskTechnicalError> {
+    let cap = i64::try_from(PAST_FACTS_ENTRY_CAP).unwrap_or(i64::MAX);
+    let guard = lock_shared(conn);
+    let mut statement = guard
+        .prepare(SQL_PAST_FACT_ROWS)
+        .map_err(task_unavailable)?;
+    let rows = statement
+        .query_map(
+            params![encode_id(task.as_raw()), cap.saturating_add(1)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(task_unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(task_unavailable)?;
+    let has_more = rows.len() as i64 > cap;
+    let mut facts = Vec::with_capacity(rows.len().min(PAST_FACTS_ENTRY_CAP));
+    for (kind_text, id_text) in rows.into_iter().take(PAST_FACTS_ENTRY_CAP) {
+        let id = decode_id(&id_text).map_err(task_unavailable)?;
+        match kind_text.as_str() {
+            "action_attempt" => {
+                let found: Option<(String, String, String)> = guard
+                    .query_row(SQL_PAST_ATTEMPT_FACT, params![id_text], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .optional()
+                    .map_err(task_unavailable)?;
+                let Some((operation, target, certainty)) = found else {
+                    return Err(task_unavailable(
+                        "past executed action attempt is not readable",
+                    ));
+                };
+                // Closed-world columns only; an unknown stored name is an
+                // unreadable row, never a guessed line.
+                let operation = ene_action::OperationKind::from_name(&operation)
+                    .ok_or_else(|| task_unavailable("unknown past action operation"))?;
+                if target.is_empty() {
+                    return Err(task_unavailable("past action target is missing"));
+                }
+                let certainty = decode_certainty(&certainty)?;
+                facts.push(PastExecutedFact {
+                    source: id,
+                    line: format!(
+                        "action {} {} {} {}",
+                        id.as_uuid(),
+                        operation.as_str(),
+                        target,
+                        certainty.as_str()
+                    ),
+                });
+            }
+            "task_result" => {
+                let found: Option<(i64, Option<i64>)> = guard
+                    .query_row(SQL_PAST_RESULT_FACT, params![id_text], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .optional()
+                    .map_err(task_unavailable)?;
+                let Some((relied_revision, adopted_revision)) = found else {
+                    return Err(task_unavailable(
+                        "past executed task result is not readable",
+                    ));
+                };
+                let adopted = adopted_revision
+                    .map(decode_revision)
+                    .transpose()?
+                    .map(|revision| revision.as_u64().to_string())
+                    .unwrap_or_else(|| String::from("none"));
+                facts.push(PastExecutedFact {
+                    source: id,
+                    line: format!(
+                        "result {} rev={} adopted={}",
+                        id.as_uuid(),
+                        decode_revision(relied_revision)?.as_u64(),
+                        adopted
+                    ),
+                });
+            }
+            _ => {
+                return Err(task_unavailable("unknown past executed fact row kind"));
+            }
+        }
+    }
+    Ok(PastExecutedFactsPage { facts, has_more })
+}
+
 impl TaskRepository for Store {
     async fn create_task(
         &self,
@@ -2706,6 +3347,22 @@ impl TaskRepository for Store {
         })
         .await
     }
+
+    async fn commit_task_resume(
+        &self,
+        premise: TaskResumeCommitPremise,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || commit_task_resume_sync(&conn, premise, None)).await
+    }
+
+    async fn load_past_executed_facts(
+        &self,
+        task: TaskId,
+    ) -> Result<PastExecutedFactsPage, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || load_past_executed_facts_sync(&conn, task)).await
+    }
 }
 
 impl ConversationTaskRepository for Store {
@@ -2734,5 +3391,14 @@ impl ConversationTaskRepository for Store {
     ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || cancel_task_sync(&conn, task, Some(currentness))).await
+    }
+
+    async fn commit_task_resume_from_conversation(
+        &self,
+        premise: TaskResumeCommitPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || commit_task_resume_sync(&conn, premise, Some(currentness))).await
     }
 }
