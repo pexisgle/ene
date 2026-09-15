@@ -2,7 +2,7 @@
 //! queries (IPC §13.3, §18.2).
 //!
 //! Composition over existing owner boundaries only: the companion owner's
-//! [`UndeliveredRepository`](ene_companion::UndeliveredRepository) (slice C's
+//! [`UndeliveredRepository`] (slice C's
 //! `list_unpresented` + pass bounds + excerpts), the Task owner's bounded
 //! report queries, and the Task owner's resume gate (slice E). No lifecycle,
 //! no durable state, no runner: subscriptions, receipts, wire-ref maps,
