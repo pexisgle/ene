@@ -1,8 +1,5 @@
 //! Pure outbound frame builders: pairing, capability, auth proof, requests.
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{AuthProof, CapabilityAdvertise, PairingRequest};
 use ene_api::v1::payload::WirePayload;
@@ -12,28 +9,6 @@ use ene_api::v1::refs::{
 use ene_plugin_ipc::WireFrame;
 
 use crate::device;
-
-static INCARNATION_SEQ: AtomicU64 = AtomicU64::new(0);
-
-static INCARNATION_START: OnceLock<u64> = OnceLock::new();
-
-/// Uniqueness needs are modest (disambiguating restarts of one device) and a
-/// collision only risks a duplicate-suppression alias, never a privilege
-/// change: pid plus process-local counter plus start-time nanoseconds from
-/// `std` only, no OS RNG dependency. Distinct envelope dimension from
-/// connection identity and presence generation.
-pub fn new_incarnation() -> ClientIncarnationId {
-    let start = *INCARNATION_START.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos() as u64)
-    });
-    let seq = INCARNATION_SEQ.fetch_add(1, Ordering::Relaxed);
-    ClientIncarnationId {
-        counter: u64::from(std::process::id()),
-        random: start.wrapping_add(seq),
-    }
-}
 
 /// The proof is the pairing-secret HMAC over the single-use challenge nonce;
 /// the sender names the paired device and hides the connection id (still

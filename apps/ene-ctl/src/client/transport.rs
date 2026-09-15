@@ -17,8 +17,8 @@ use crate::errors::CliError;
 
 #[cfg(unix)]
 use super::frames::{
-    PreparedRequest, capability_frame, frame_for, missing_secret_guidance, new_incarnation,
-    pairing_frame, pending_guidance, proof_frame, unreadable_device_file_guidance,
+    PreparedRequest, capability_frame, frame_for, missing_secret_guidance, pairing_frame,
+    pending_guidance, proof_frame, unreadable_device_file_guidance,
 };
 #[cfg(unix)]
 use super::session::{
@@ -86,7 +86,7 @@ impl Client {
                     error.kind()
                 ))
             })?;
-        let incarnation = new_incarnation();
+        let incarnation = crate::incarnation::boot_incarnation(data_dir)?;
         let file_state = device::load_stored_device(data_dir);
         let stored_device = file_state.stored().cloned();
         let (secret, source) = device::resolve_device_secret(
