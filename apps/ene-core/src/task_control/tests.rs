@@ -134,6 +134,9 @@ async fn seed_execution(
         .await
         .expect("delegation creation commits");
     assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
+    // The production AU3 path reserves the committed delegation before the
+    // runner starts; the seed reproduces that pairing explicitly.
+    assert!(handle.task_executions.reserve(delegation, task.task));
     (task, delegation, assoc)
 }
 
@@ -736,4 +739,303 @@ async fn an_admission_not_sent_never_becomes_a_task_failure() {
         TaskProgress::InProgress,
         "NotSent is never a confirmed Task failure"
     );
+}
+
+// ---- Stage 5 slice E: explicit resume and launch reservation (appended) ----
+
+use std::sync::Mutex as StdMutex;
+
+use ene_companion::dialogue::{
+    DialogueTaskCommand, DialogueTaskControlPort, DialogueTaskControlReply,
+};
+use ene_companion::{
+    AppendHistoryCommand, CompanionId, HistoryAppendOutcome, HistoryRepository as _, HistoryRole,
+};
+use ene_presence::PresenceRepository as _;
+use ene_task::{
+    OwnerMessageCurrentness, ResumeInstructionSource, ResumeTaskCommand, SteeringPremiseRef,
+    TaskResumeOutcome,
+};
+
+use super::HostTaskControl;
+use crate::task_run::TaskAgentLauncher;
+
+/// Records every launched delegation without running anything.
+#[derive(Default)]
+struct RecordingLauncher {
+    launched: StdMutex<Vec<DelegationId>>,
+}
+
+impl RecordingLauncher {
+    fn launched(&self) -> Vec<DelegationId> {
+        self.launched.lock().expect("launch capture lock").clone()
+    }
+}
+
+impl TaskAgentLauncher for RecordingLauncher {
+    fn launch(&self, delegation: DelegationId) {
+        self.launched
+            .lock()
+            .expect("launch capture lock")
+            .push(delegation);
+    }
+}
+
+fn install_recording_launcher(handle: &HostHandle) -> std::sync::Arc<RecordingLauncher> {
+    let launcher = std::sync::Arc::new(RecordingLauncher::default());
+    assert!(handle.install_task_launcher(launcher.clone()));
+    launcher
+}
+
+async fn append_owner_message(handle: &HostHandle, companion: CompanionId, text: &str) -> RawId {
+    let attribution = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("the attribution must load")
+        .expect("the companion must resolve");
+    match handle
+        .store
+        .append_message(AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: HistoryRole::Owner,
+            text: text.to_owned(),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: attribution.generation,
+            expected_consent: None,
+            expected_credential_set: None,
+            expected_owner_message: None,
+            local_id: None,
+            command_id: None,
+            round_wire: Some(RawId::new().as_uuid().to_string()),
+            round_intent: None,
+            incarnation: None,
+        })
+        .await
+        .expect("the Owner append must answer")
+    {
+        HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the Owner message must commit, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn conversation_resume_commits_r_plus_one_and_launches() {
+    let (handle, _dir) = open_handle("conversation-resume").await;
+    let launcher = install_recording_launcher(&handle);
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let (task, delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
+    // The old execution ran and its registration is gone; only the durable
+    // facts remain, so the Task is resumable instead of already running.
+    let registration = match handle
+        .task_executions
+        .take_reservation(delegation, task.task)
+    {
+        crate::task_run::TakeReservation::Admitted(registration) => registration,
+        crate::task_run::TakeReservation::AlreadyRunning => {
+            panic!("the seed delegation is not running yet")
+        }
+        crate::task_run::TakeReservation::Unreserved => {
+            panic!("the seed delegation must hold a reservation")
+        }
+    };
+    drop(registration);
+    handle
+        .conversation_tasks
+        .record(companion, task.task, Some(delegation));
+    let origin = append_owner_message(&handle, companion, "keep going").await;
+
+    let reply = HostTaskControl::new(&handle, companion)
+        .apply(DialogueTaskCommand::Resume, origin)
+        .await;
+    let DialogueTaskControlReply::Answered(text) = reply else {
+        panic!("a clean resume answers, got {reply:?}");
+    };
+    assert!(
+        text.contains("revision 2"),
+        "the reply names the new revision: {text}"
+    );
+
+    let record = handle
+        .store
+        .load_task(task.task)
+        .await
+        .unwrap()
+        .expect("the task must load");
+    assert_eq!(record.task.reference.revision.as_u64(), 2);
+    let launched = launcher.launched();
+    assert_eq!(launched.len(), 1, "exactly one new execution launches");
+    let stored = handle
+        .store
+        .load_delegation(launched[0])
+        .await
+        .unwrap()
+        .expect("the launched delegation must load");
+    assert_eq!(stored.task.task, task.task);
+    assert_eq!(stored.task.revision.as_u64(), 2);
+    let projected = handle
+        .conversation_tasks
+        .current(companion)
+        .expect("the conversation points at the new execution");
+    assert_eq!(projected.task, task.task);
+    assert_eq!(projected.delegation, Some(launched[0]));
+}
+
+#[tokio::test]
+async fn conversation_resume_without_a_task_asks_for_a_target() {
+    let (handle, _dir) = open_handle("resume-no-task").await;
+    install_recording_launcher(&handle);
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let origin = append_owner_message(&handle, companion, "keep going").await;
+
+    let reply = HostTaskControl::new(&handle, companion)
+        .apply(DialogueTaskCommand::Resume, origin)
+        .await;
+    let DialogueTaskControlReply::Answered(text) = reply else {
+        panic!("a missing target clarifies, got {reply:?}");
+    };
+    assert!(
+        text.contains("which task"),
+        "the clarification asks for a target: {text}"
+    );
+}
+
+#[tokio::test]
+async fn resume_refuses_while_the_task_holds_a_reservation() {
+    let (handle, _dir) = open_handle("resume-race").await;
+    install_recording_launcher(&handle);
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let (task, _delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
+    // The seed's reservation still holds the Task, so the resume below
+    // observes it as running and refuses with zero writes.
+    assert!(
+        handle
+            .task_executions
+            .task_has_reservation_or_running(task.task)
+    );
+
+    let record = handle
+        .store
+        .load_task(task.task)
+        .await
+        .unwrap()
+        .expect("the task must load");
+    let outcome = handle
+        .resume_task(ResumeTaskCommand {
+            premise: SteeringPremiseRef {
+                expected: record.task.reference,
+                purpose: record.task.purpose,
+            },
+            instruction: ResumeInstructionSource::OwnerHistory {
+                message: RawId::new(),
+                currentness: OwnerMessageCurrentness {
+                    companion: companion.as_raw(),
+                    message: RawId::new(),
+                },
+            },
+        })
+        .await
+        .expect("a held resume is a domain outcome");
+    assert_eq!(
+        outcome,
+        TaskResumeOutcome::AlreadyRunning { task: task.task }
+    );
+    assert_eq!(
+        handle
+            .store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .expect("the task must load")
+            .task
+            .reference,
+        task,
+        "a held resume writes nothing"
+    );
+}
+
+#[tokio::test]
+async fn run_task_agent_requires_a_launch_reservation() {
+    let (handle, _dir) = open_handle("reservation-required").await;
+    let (task, delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
+    // A restart drops every reservation: the delegation rows survive, but
+    // the runner never restores a launch target from them.
+    handle.task_executions.release(delegation);
+
+    let transport = CountingTransport::default();
+    let refused = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("a missing reservation is a domain outcome");
+    assert_eq!(
+        refused,
+        crate::task_run::TaskAgentRunOutcome::Refused(
+            crate::task_run::TaskAgentRunRefusal::ExecutionUnavailable { delegation }
+        )
+    );
+    assert_eq!(transport.calls(), 0);
+
+    // The reserved delegation runs past the gate (and stops at the
+    // unprovisioned admission with no provider call).
+    assert!(handle.task_executions.reserve(delegation, task.task));
+    let run = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("a reserved run is a domain outcome");
+    assert!(
+        matches!(run, crate::task_run::TaskAgentRunOutcome::NotSent(_)),
+        "the reservation is consumed and the turn runs, got {run:?}"
+    );
+    assert_eq!(transport.calls(), 0);
+
+    // The consumed reservation is gone: the same delegation never launches
+    // twice without a new explicit commit.
+    let rerun = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("a consumed reservation is a domain outcome");
+    assert_eq!(
+        rerun,
+        crate::task_run::TaskAgentRunOutcome::Refused(
+            crate::task_run::TaskAgentRunRefusal::ExecutionUnavailable { delegation }
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_running_execution_refuses_a_second_take() {
+    let (handle, _dir) = open_handle("already-running").await;
+    let (task, delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
+    handle.task_executions.release(delegation);
+    let _registration = handle
+        .task_executions
+        .register(delegation, task.task)
+        .expect("the first registration holds");
+
+    let transport = CountingTransport::default();
+    let run = handle
+        .run_task_agent(&transport, delegation)
+        .await
+        .expect("a double take is a domain outcome");
+    assert_eq!(
+        run,
+        crate::task_run::TaskAgentRunOutcome::Refused(
+            crate::task_run::TaskAgentRunRefusal::ExecutionAlreadyRunning { delegation }
+        )
+    );
+    assert_eq!(transport.calls(), 0);
 }

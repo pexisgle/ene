@@ -216,7 +216,7 @@ struct NoInstructions;
 impl TaskInstructionSource for NoInstructions {
     async fn load_owner_instruction(
         &self,
-        _source: RawId,
+        _origin: TaskContextOrigin,
     ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
         Ok(None)
     }
@@ -286,7 +286,9 @@ async fn a_transcript_that_outgrows_the_budget_keeps_the_task_running() {
         r#"{"tool":"read","path":"input.txt"}"#,
         r#"{"final":"read the file twice"}"#,
     ])
-    .with_budget(750);
+    .with_budget(1050);
+    // The budget leaves room for the never-omitted past-facts block: the
+    // trimming under test applies to the execution-local transcript only.
     let scrubber = MarkerScrubber::default();
 
     let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
@@ -300,7 +302,7 @@ async fn a_transcript_that_outgrows_the_budget_keeps_the_task_running() {
     assert_eq!(raw.len(), 3, "one scrub per turn");
     for (index, input) in raw.iter().enumerate() {
         assert!(
-            input.chars().count() <= 750,
+            input.chars().count() <= 1050,
             "turn {} stays within the port budget, got {}",
             index + 1,
             input.chars().count()
@@ -970,4 +972,80 @@ fn protocol_parser_refuses_everything_else() {
     ] {
         assert_eq!(parse_directive(text), Err(expected), "input: {text}");
     }
+}
+
+#[test]
+fn a_fresh_registry_takes_nothing() {
+    // A restart drops every reservation and registration: a delegation the
+    // rows still name never launches without a new explicit commit.
+    use ene_task::{DelegationId, TaskId};
+
+    let registry = TaskExecutionRegistry::default();
+    let delegation = DelegationId::generate();
+    assert!(matches!(
+        registry.take_reservation(delegation, TaskId::generate()),
+        super::TakeReservation::Unreserved
+    ));
+    assert!(!registry.task_has_reservation_or_running(TaskId::generate()));
+}
+
+#[test]
+fn reservation_take_and_release_follow_the_launch_lifecycle() {
+    use ene_task::{DelegationId, TaskId};
+
+    let registry = TaskExecutionRegistry::default();
+    let task = TaskId::generate();
+    let delegation = DelegationId::generate();
+    assert!(registry.reserve(delegation, task));
+    // A new revision's delegation reserves while the old execution is
+    // still registered: steering a running Task must not block on the
+    // Task-wide state. The Task-wide question stays a separate read where
+    // the resume admission orders it.
+    let next = DelegationId::generate();
+    assert!(registry.reserve(next, task));
+    assert!(registry.task_has_reservation_or_running(task));
+    // The same delegation never reserves twice.
+    assert!(!registry.reserve(delegation, task));
+    // The parallel reservation is released without starting anything, so
+    // the rest of the lifecycle reads only the first delegation.
+    registry.release(next);
+
+    let registration = match registry.take_reservation(delegation, task) {
+        super::TakeReservation::Admitted(registration) => registration,
+        super::TakeReservation::AlreadyRunning => panic!("a reserved delegation is not running"),
+        super::TakeReservation::Unreserved => panic!("a reserved delegation must take"),
+    };
+    // The consumed reservation is gone and the execution is running.
+    assert!(matches!(
+        registry.take_reservation(delegation, task),
+        super::TakeReservation::AlreadyRunning
+    ));
+    drop(registration);
+    // After the run ends, the same delegation never launches again without
+    // a new explicit commit.
+    assert!(matches!(
+        registry.take_reservation(delegation, task),
+        super::TakeReservation::Unreserved
+    ));
+    assert!(!registry.task_has_reservation_or_running(task));
+}
+
+#[test]
+fn release_drops_a_reservation_without_starting_anything() {
+    use ene_task::{DelegationId, TaskId};
+
+    let registry = TaskExecutionRegistry::default();
+    let task = TaskId::generate();
+    let delegation = DelegationId::generate();
+    assert!(registry.reserve(delegation, task));
+    // The commit succeeded but the later spawn failed: the delegation stays
+    // durable and unexecuted, and no automatic relaunch follows.
+    registry.release(delegation);
+    assert!(!registry.task_has_reservation_or_running(task));
+    assert!(matches!(
+        registry.take_reservation(delegation, task),
+        super::TakeReservation::Unreserved
+    ));
+    // The freed Task accepts a new explicit reservation.
+    assert!(registry.reserve(DelegationId::generate(), task));
 }

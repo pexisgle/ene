@@ -82,7 +82,9 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
-use ene_companion::CompanionRepository;
+use ene_companion::{
+    ActivityRepository as _, CompanionId, CompanionRepository, RecordResumeActivityCommand,
+};
 use ene_credential::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
     available_credential,
@@ -98,7 +100,10 @@ use ene_permission::{
 };
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
-use ene_task::{CancelTaskCommand, TaskCancelOutcome, TaskId, WorkspaceFolderRef};
+use ene_task::{
+    CancelTaskCommand, ResumeInstructionSource, ResumeTaskCommand, SteeringPremiseRef,
+    TaskCancelOutcome, TaskId, TaskRepository as _, TaskResumeOutcome, WorkspaceFolderRef,
+};
 
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
@@ -150,6 +155,7 @@ impl HostHandle {
                 self.apply_consent_or_setup(frame, intent, live).await
             }
             ManagementIntentKind::CancelTask => self.cancel_task_intent(frame, intent, live).await,
+            ManagementIntentKind::ResumeTask => self.resume_task_intent(frame, intent, live).await,
             ManagementIntentKind::SelectWorkspace => {
                 self.select_workspace_intent(frame, intent, live).await
             }
@@ -178,6 +184,7 @@ impl HostHandle {
             ManagementIntentKind::StopCompanion => "stop-companion",
             ManagementIntentKind::DeleteCompanion => "delete-companion",
             ManagementIntentKind::CancelTask => "cancel-task",
+            ManagementIntentKind::ResumeTask => "resume-task",
             ManagementIntentKind::SelectWorkspace => "select-workspace",
             ManagementIntentKind::ManageSchedule => "manage-schedule",
             ManagementIntentKind::DenyOrRefuse => "deny-or-refuse",
@@ -270,6 +277,166 @@ impl HostHandle {
                     .await,
                 )]
             }
+            // Nothing was decided, so a retry is safe.
+            Err(_) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::HeldByOperation,
+            )],
+        }
+    }
+
+    /// Reaches the Task owner's explicit resume admission from the
+    /// first-party management path (H-A.1 / AU17).
+    ///
+    /// The target is `task:{task-id}` and the rationale quote carries the
+    /// Owner's resume instruction body; both are required, anything else
+    /// clarifies. The Host records the first-party activity (idempotent by
+    /// intent id: a retry observes the same activity, never a second one),
+    /// composes the premise from the Task's durable current revision and
+    /// purpose, and runs the same owner gate as the conversation path
+    /// ([`HostHandle::resume_task`]). No presence check and no provider call
+    /// are involved; an accepted resume answers
+    /// [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime),
+    /// every owner refusal clarifies, and an unreadable store holds. The
+    /// intent never starts a runner itself: the resume commit launches
+    /// through the installed launcher, and an offline opener with no
+    /// launcher observes the owner's `ExecutionUnavailable` hold.
+    async fn resume_task_intent(
+        &self,
+        frame: &WireFrame,
+        intent: &ManagementIntent,
+        live: &LiveInput,
+    ) -> Vec<WireFrame> {
+        if let Some(answer) = self
+            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_RESUME_TASK)
+            .await
+        {
+            return answer;
+        }
+        let Some(task) = parse_task_target(&intent.target)
+            .map(RawId::from_uuid)
+            .map(TaskId::from_raw)
+        else {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_RESUME_TASK,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )];
+        };
+        let Some(body) = intent
+            .rationale
+            .quote
+            .clone()
+            .filter(|quote| !quote.trim().is_empty())
+        else {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_RESUME_TASK,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )];
+        };
+        let record = match self.store.load_task(task).await {
+            Err(_) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+            Ok(None) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    self.record_decided(
+                        intent,
+                        Self::INTENT_KIND_RESUME_TASK,
+                        IntentOutcome::NeedsClarification,
+                    )
+                    .await,
+                )];
+            }
+            Ok(Some(record)) => record,
+        };
+        // The activity is the first-party instruction record the resume
+        // commit resolves: the Task it names is the Task it resumes, so the
+        // command carries the activity's own recorded premise.
+        let activity = match self
+            .store
+            .record_resume_activity(RecordResumeActivityCommand {
+                companion: CompanionId::from_raw(record.task.assignee.companion),
+                task: record.task.reference,
+                purpose: record.task.purpose,
+                body,
+                command: RawId::from_uuid(intent.intent_id.0),
+            })
+            .await
+        {
+            Err(_) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+            Ok(activity) => activity,
+        };
+        match self
+            .resume_task(ResumeTaskCommand {
+                premise: SteeringPremiseRef {
+                    expected: record.task.reference,
+                    purpose: record.task.purpose,
+                },
+                instruction: ResumeInstructionSource::OwnerManagement {
+                    activity: activity.as_raw(),
+                },
+            })
+            .await
+        {
+            // The revision forward and the new delegation committed and the
+            // runner launched; the activity stays as the origin record.
+            Ok(TaskResumeOutcome::Resumed { .. }) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_RESUME_TASK,
+                    IntentOutcome::AppliedAsOneTime,
+                )
+                .await,
+            )],
+            // Every owner refusal (stale, terminal, running, held,
+            // available-result, missing, exhausted) clarifies: the
+            // management vocabulary has no narrower refusal, and nothing
+            // committed.
+            Ok(_) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_RESUME_TASK,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )],
             // Nothing was decided, so a retry is safe.
             Err(_) => vec![outcome_frame(
                 frame,
@@ -436,6 +603,7 @@ impl HostHandle {
     const INTENT_KIND_REGISTER: &str = "register";
     const INTENT_KIND_COMPLETE: &str = "complete";
     const INTENT_KIND_CANCEL_TASK: &str = "cancel-task";
+    const INTENT_KIND_RESUME_TASK: &str = "resume-task";
     const INTENT_KIND_SELECT_WORKSPACE: &str = "select-workspace";
 
     fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {

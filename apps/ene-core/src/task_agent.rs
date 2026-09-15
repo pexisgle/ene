@@ -7,16 +7,20 @@
 //! outcomes without adding behavior. The provider output is handed back as a
 //! Task Agent output, never as Task completion.
 
-use ene_companion::{HistoryMessage, HistoryRepository, HistoryRole};
+use ene_companion::{
+    ActivityId, ActivityRepository, HistoryMessage, HistoryRepository, HistoryRole,
+    ManagementActivity,
+};
 use ene_inference::{
     Admission, DiscardSink, DispatchAbort, InferenceDispatchOutcome, InferenceExecutor,
     InferenceTechnicalError, NotSentReason, TaskAgentAttemptPremise,
 };
-use ene_primitive::{RawId, RevisionInner};
+use ene_primitive::RevisionInner;
 use ene_task::{
     TaskAgentInference, TaskAgentInferenceError, TaskAgentInferenceOutcome,
-    TaskAgentInferencePremise, TaskAgentNotSent, TaskAgentOutput, TaskInstructionRole,
-    TaskInstructionSource, TaskInstructionSourceError, TaskInstructionSourceRecord,
+    TaskAgentInferencePremise, TaskAgentNotSent, TaskAgentOutput, TaskContextOrigin,
+    TaskContextOriginKind, TaskInstructionRole, TaskInstructionSource, TaskInstructionSourceError,
+    TaskInstructionSourceRecord,
 };
 
 /// Adapts one [`InferenceExecutor`] to the Task Agent port.
@@ -81,34 +85,65 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
     }
 }
 
-/// Adapts one `HistoryRepository` to the Task-owned instruction-source port.
+/// Adapts the companion-owned canonical sources to the Task-owned
+/// instruction-source port.
 ///
-/// The adapter maps the canonical single-message read result into the
-/// Task-owned record and adds no behavior: no body is cached or copied into
-/// Task state, and a read failure becomes a fixed-class technical error
-/// without the row or the body.
-pub struct HistoryInstructionSource<'a, H> {
+/// The adapter resolves the origin kind to its table — Owner conversation
+/// messages by History primary key, first-party management activities by
+/// activity primary key — with one bounded single-record read each, and
+/// maps the row into the Task-owned record. It adds no behavior: no body is
+/// cached or copied into Task state, an absent row is `Ok(None)`, and a
+/// malformed row or read failure becomes a fixed-class technical error
+/// without the row or the body. Timeline loads, recent windows, and command
+/// lookups are never a substitute for either read.
+pub struct OwnerInstructionSource<'a, H, A> {
     history: &'a H,
+    activity: &'a A,
 }
 
-impl<'a, H> HistoryInstructionSource<'a, H> {
+impl<'a, H, A> OwnerInstructionSource<'a, H, A> {
     #[must_use]
-    pub fn new(history: &'a H) -> Self {
-        Self { history }
+    pub fn new(history: &'a H, activity: &'a A) -> Self {
+        Self { history, activity }
     }
 }
 
-impl<H: HistoryRepository + Sync> TaskInstructionSource for HistoryInstructionSource<'_, H> {
+impl<H: HistoryRepository + Sync, A: ActivityRepository + Sync> TaskInstructionSource
+    for OwnerInstructionSource<'_, H, A>
+{
     async fn load_owner_instruction(
         &self,
-        source: RawId,
+        origin: TaskContextOrigin,
     ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
-        let message = self.history.load_message(source).await.map_err(|_| {
-            TaskInstructionSourceError::SourceUnavailable {
-                reason: String::from("history message read failed"),
+        match origin.kind {
+            TaskContextOriginKind::OwnerConversation => {
+                let message = self
+                    .history
+                    .load_message(origin.source)
+                    .await
+                    .map_err(|_| TaskInstructionSourceError::SourceUnavailable {
+                        reason: String::from("history message read failed"),
+                    })?;
+                Ok(message.map(map_history_message))
             }
-        })?;
-        Ok(message.map(map_history_message))
+            TaskContextOriginKind::OwnerManagement => {
+                let activity = self
+                    .activity
+                    .load_activity(ActivityId::from_raw(origin.source))
+                    .await
+                    .map_err(|_| TaskInstructionSourceError::SourceUnavailable {
+                        reason: String::from("activity record read failed"),
+                    })?;
+                Ok(activity.map(map_activity_record))
+            }
+            // No body producer exists for these kinds: the turn fails
+            // closed on the origin kind before any read is attempted.
+            TaskContextOriginKind::Spontaneous | TaskContextOriginKind::ScheduleOccurrence => {
+                Err(TaskInstructionSourceError::SourceUnavailable {
+                    reason: String::from("unsupported instruction origin kind"),
+                })
+            }
+        }
     }
 }
 
@@ -116,6 +151,7 @@ impl<H: HistoryRepository + Sync> TaskInstructionSource for HistoryInstructionSo
 /// `ene-task`, and only the fields the turn needs are carried.
 fn map_history_message(message: HistoryMessage) -> TaskInstructionSourceRecord {
     TaskInstructionSourceRecord {
+        kind: TaskContextOriginKind::OwnerConversation,
         source: message.id,
         companion: message.companion.as_raw(),
         role: match message.role {
@@ -123,6 +159,19 @@ fn map_history_message(message: HistoryMessage) -> TaskInstructionSourceRecord {
             HistoryRole::Companion => TaskInstructionRole::Companion,
         },
         text: message.text,
+    }
+}
+
+/// A first-party management activity is an Owner input by construction: it
+/// records an Owner-authored instruction the Host accepted on the trusted
+/// inlet, so it maps to the Owner role with its recorded companion.
+fn map_activity_record(activity: ManagementActivity) -> TaskInstructionSourceRecord {
+    TaskInstructionSourceRecord {
+        kind: TaskContextOriginKind::OwnerManagement,
+        source: activity.id.as_raw(),
+        companion: activity.companion.as_raw(),
+        role: TaskInstructionRole::Owner,
+        text: activity.body,
     }
 }
 

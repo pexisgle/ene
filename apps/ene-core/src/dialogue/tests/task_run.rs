@@ -266,6 +266,9 @@ async fn seed_task(
         .await
         .expect("delegation creation commits");
     assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
+    // The production AU3 path reserves the committed delegation before the
+    // runner starts; the seed reproduces that pairing explicitly.
+    assert!(handle.task_executions.reserve(delegation, task.task));
     (task, delegation, assoc)
 }
 
@@ -539,10 +542,7 @@ async fn stage4_reads_the_workspace_writes_the_report_and_survives_restart() {
         .expect("a terminal task answers a domain outcome");
     assert_eq!(
         replayed,
-        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::TaskTerminal {
-            task: task.task,
-            progress: TaskProgress::Completed,
-        }),
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::ExecutionUnavailable { delegation }),
         "a completed execution is never resumed or replayed"
     );
     assert_eq!(
@@ -697,10 +697,7 @@ async fn stage4_cancel_stops_the_loop_and_a_late_result_stays_original_only() {
         .expect("a cancelled task answers a domain outcome");
     assert_eq!(
         refused,
-        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::TaskTerminal {
-            task: task.task,
-            progress: TaskProgress::Cancelled,
-        }),
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::ExecutionUnavailable { delegation }),
         "a restart never resumes or re-executes a cancelled Task"
     );
     assert!(
@@ -800,8 +797,10 @@ async fn stage4_a_stopped_unsealed_execution_is_not_restarted_after_reopen() {
     );
     drop(handle);
 
-    // A restart drops the in-memory registration, but the durable attempt
-    // facts refuse a fresh run under the same delegation.
+    // A restart drops every launch reservation with the registry: the
+    // runner never restores a launch target from the delegation rows, so
+    // the old delegation is refused before the durable attempt facts are
+    // even consulted.
     let reopened =
         HostHandle::open_with_cred_store(data_dir.path(), CredStore::Memory(memory_store()))
             .await
@@ -813,7 +812,7 @@ async fn stage4_a_stopped_unsealed_execution_is_not_restarted_after_reopen() {
         .expect("the one-shot refusal is a domain outcome");
     assert_eq!(
         refused,
-        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::ExecutionAlreadyStarted { delegation }),
+        TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::ExecutionUnavailable { delegation }),
         "a stopped unsealed execution is never restarted under the same identity"
     );
     assert!(

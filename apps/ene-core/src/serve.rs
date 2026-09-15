@@ -95,7 +95,7 @@ use uuid::Uuid;
 
 use crate::conn::{ConnectionPhase, ConnectionTable};
 use crate::dialogue::{CredentialScrubber, HostInference};
-use crate::task_agent::{HistoryInstructionSource, TaskAgentInferenceAdapter};
+use crate::task_agent::{OwnerInstructionSource, TaskAgentInferenceAdapter};
 use crate::task_run::{TaskAgentRunError, TaskAgentRunOutcome, TaskAgentRunRefusal};
 
 mod frames;
@@ -658,10 +658,14 @@ impl HostHandle {
 
     /// Runs one delegated Task Agent execution through the Host composition.
     ///
-    /// Atomically registers the cooperative stop token under the delegation
-    /// (a second registration of the same execution lifetime is refused), wires
-    /// the Task-owned ports to the concrete History, credential, and inference
-    /// boundaries, and runs the bounded loop
+    /// Atomically consumes the delegation's launch reservation and registers
+    /// the cooperative stop token under it (CCT §7.4): a delegation with no
+    /// reservation in this process — including every pre-restart delegation —
+    /// is refused as [`ExecutionUnavailable`](TaskAgentRunRefusal::ExecutionUnavailable)
+    /// before any provider call or Action, and a second take of the same
+    /// execution lifetime is refused as already running. The rest wires
+    /// the Task-owned ports to the concrete History, activity, credential,
+    /// and inference boundaries, and runs the bounded loop
     /// ([`DEFAULT_MAX_TURNS`](crate::task_run::DEFAULT_MAX_TURNS)). The abort
     /// token reaches the provider wait through the inference adapter, so a
     /// cancel never loses a claimed attempt's usage fact. `transport` is the
@@ -672,7 +676,8 @@ impl HostHandle {
     /// # Errors
     ///
     /// [`TaskAgentRunError`] for storage and inference technical failures;
-    /// stale, terminal, sealed, already-started, already-running, refused, and
+    /// stale, terminal, sealed, already-started, already-running,
+    /// reservation, refused, and
     /// not-sent answers stay domain outcomes inside [`TaskAgentRunOutcome`].
     pub async fn run_task_agent<T: ProviderTransport + Send + Sync>(
         &self,
@@ -689,17 +694,28 @@ impl HostHandle {
                 TaskAgentRunRefusal::MissingDelegation { delegation },
             ));
         };
-        let Some(registration) = self
+        let registration = match self
             .task_executions
-            .register(delegation, correspondence.task.task)
-        else {
-            return Ok(TaskAgentRunOutcome::Refused(
-                TaskAgentRunRefusal::ExecutionAlreadyRunning { delegation },
-            ));
+            .take_reservation(delegation, correspondence.task.task)
+        {
+            crate::task_run::TakeReservation::Admitted(registration) => registration,
+            crate::task_run::TakeReservation::AlreadyRunning => {
+                return Ok(TaskAgentRunOutcome::Refused(
+                    TaskAgentRunRefusal::ExecutionAlreadyRunning { delegation },
+                ));
+            }
+            // No launch reservation in this process: an old delegation, a
+            // delegation whose reservation was released, or a caller that
+            // only knows the delegation id. Never launch from the rows.
+            crate::task_run::TakeReservation::Unreserved => {
+                return Ok(TaskAgentRunOutcome::Refused(
+                    TaskAgentRunRefusal::ExecutionUnavailable { delegation },
+                ));
+            }
         };
         let executor = HostInference::new(&self.store, &self.cred_store, &self.tracker, transport);
         let inference = TaskAgentInferenceAdapter::new(&executor, Some(&registration.cancellation));
-        let instructions = HistoryInstructionSource::new(&self.store);
+        let instructions = OwnerInstructionSource::new(&self.store, &self.store);
         let scrubber = CredentialScrubber {
             refs: &self.store,
             store: &self.cred_store,

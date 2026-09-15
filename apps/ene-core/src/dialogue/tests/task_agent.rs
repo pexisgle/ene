@@ -3,7 +3,7 @@
 
 use super::{LearningAwareTransport, live_input, round_test_handle};
 use crate::dialogue::{CredentialScrubber, HostInference};
-use crate::task_agent::{HistoryInstructionSource, TaskAgentInferenceAdapter};
+use crate::task_agent::{OwnerInstructionSource, TaskAgentInferenceAdapter};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,
@@ -116,7 +116,7 @@ async fn task_agent_turn_dispatches_under_the_inherited_consent() {
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -192,7 +192,7 @@ async fn task_agent_turn_is_data_use_held_when_the_purpose_source_is_covered() {
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -277,7 +277,7 @@ async fn task_agent_turn_is_stale_after_steering_and_never_sends() {
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -333,7 +333,7 @@ async fn task_agent_turn_is_execution_sealed_after_finalization() {
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -397,7 +397,7 @@ async fn task_agent_turn_is_terminal_after_completion() {
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -561,7 +561,7 @@ async fn task_agent_turn_sends_purpose_and_instruction_through_the_real_composit
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -589,10 +589,10 @@ Respond with exactly one JSON object and no other text. One of:\n\
 {\"tool\":\"create\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
 {\"tool\":\"edit\",\"path\":\"<workspace-relative file>\",\"content\":\"<UTF-8 text>\"}\n\
 {\"final\":\"<final answer>\"}\n\
-[PURPOSE]\nwrite the report\n[INSTRUCTION]\nread the notes first";
+[PURPOSE]\nwrite the report\n[INSTRUCTION]\nread the notes first\n[PAST EXECUTED FACTS]\n";
         assert_eq!(
             inputs[0], expected,
-            "the logical input frames the response format, purpose, then the adopted instruction body"
+            "the logical input frames the response format, purpose, the adopted instruction body, then the past-facts block"
         );
     }
     assert_eq!(
@@ -658,7 +658,7 @@ async fn task_agent_turn_is_data_use_held_when_the_instruction_source_is_covered
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -751,7 +751,7 @@ async fn task_agent_turn_with_an_instruction_never_sends_after_steering_wins() {
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -804,7 +804,7 @@ async fn reopened_handle_does_not_replay_a_turn_and_resolves_the_instruction_aga
             refs: &handle.store,
             store: &handle.cred_store,
         };
-        let instructions = HistoryInstructionSource::new(&handle.store);
+        let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
         orchestrate_task_agent_turn(
             &handle.store,
             &instructions,
@@ -853,7 +853,7 @@ async fn reopened_handle_does_not_replay_a_turn_and_resolves_the_instruction_aga
         refs: &reopened.store,
         store: &reopened.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&reopened.store);
+    let instructions = OwnerInstructionSource::new(&reopened.store, &reopened.store);
     let second = orchestrate_task_agent_turn(
         &reopened.store,
         &instructions,
@@ -910,7 +910,7 @@ async fn task_agent_turn_scrubs_a_registered_secret_in_an_instruction_body() {
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
@@ -1011,7 +1011,7 @@ async fn a_consent_move_during_the_provider_wait_is_reported_with_its_sent_fact(
         refs: &handle.store,
         store: &handle.cred_store,
     };
-    let instructions = HistoryInstructionSource::new(&handle.store);
+    let instructions = OwnerInstructionSource::new(&handle.store, &handle.store);
     let outcome = orchestrate_task_agent_turn(
         &handle.store,
         &instructions,
