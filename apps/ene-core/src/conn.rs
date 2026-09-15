@@ -114,7 +114,7 @@ use crate::serve::LiveInput;
 /// are sender-minted UUIDs, so a repeat after roll-off is a true transport
 /// duplicate, never a fresh send (fresh sends, including transport retries,
 /// always mint new ids).
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 const SEEN_MESSAGE_CAP: usize = 128;
 
 /// Separates transport redelivery from terminal violations: a duplicate
@@ -123,7 +123,7 @@ const SEEN_MESSAGE_CAP: usize = 128;
 /// the connection. Collapsing both into `None` would turn legitimate
 /// redelivery into connection loss, a distinct observable effect the §6.2
 /// silent-drop contract forbids.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LiveDecision {
     Ready(LiveInput),
@@ -256,14 +256,14 @@ struct ConnectionTableInner {
 }
 
 impl ConnectionTable {
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn new() -> Self {
         Self {
             inner: StdMutex::new(ConnectionTableInner::default()),
         }
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn note_accept(&self) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
         crate::lock_unpoison(&self.inner).records.insert(
@@ -430,7 +430,7 @@ impl ConnectionTable {
     /// current connection: a superseded connection reports unauthed even
     /// though its record keeps its phase. `phase` is the snapshot the gate
     /// uses to answer typed stale rejections.
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn live_for(
         self: &Arc<Self>,
         id: &ConnectionWireId,
@@ -525,7 +525,7 @@ impl ConnectionTable {
     /// its synchronous presence compare/commit (CCT §10.4) cannot interleave
     /// with a competing authentication install; it must not call back into
     /// this table. Forgetting is idempotent.
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn note_closed(
         &self,
         id: &ConnectionWireId,

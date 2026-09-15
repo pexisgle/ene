@@ -2,9 +2,9 @@
 //!
 //! At process boot the client exclusively advances a per-data-directory
 //! persistent counter and combines it with fresh randomness into a single
-//! [`ClientIncarnationId`](ene_api::v1::refs::ClientIncarnationId) that is
+//! [`ClientIncarnationId`] that is
 //! reused for every connection in the process. A same-process reconnect never
-//! advances the counter; only a new process (after [`reset_for_tests`] in
+//! advances the counter; only a new process (after `reset_for_tests` in
 //! tests, a real restart in production) boots again.
 //!
 //! Layout (alongside [`crate::device::DEVICE_FILE_NAME`]): `counter` holds one

@@ -1189,7 +1189,7 @@ impl HostHandle {
     /// leaves attribution untouched. Target selection for a Host-local
     /// fallback client is a later slice; this keeps the single-step move to
     /// `NoActive`.
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) async fn close_connection(
         &self,
         table: &std::sync::Arc<ConnectionTable>,
@@ -1231,7 +1231,7 @@ impl HostHandle {
 /// Runs while the connection table section is held (CCT §10.4), so every
 /// store call here is the sync form; it must never await and never call back
 /// into the connection table.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 fn note_disconnect_sync(store: &Store, companion: ene_companion::CompanionId, client_ref: &str) {
     let client = device_client(client_ref);
     let Ok(Some(current)) = store.load_attribution_sync(companion.as_raw()) else {
