@@ -34,6 +34,16 @@ use crate::errors::CliError;
 
 pub const DEVICE_FILE_NAME: &str = "client-device.json";
 
+/// Transient pairing-progress file: the opaque pending identity the Host
+/// issued for this client's open request, so the run after Owner approval
+/// polls the same pending instead of opening a new one.
+///
+/// Unlike the device file this is a lookup key, never trust: a missing or
+/// unreadable file simply opens a new request, and an unknown id converges
+/// on a fresh pending Host-side. It is kept after success as the durable poll
+/// key for device-file repair, and dropped only on denial.
+pub const PENDING_FILE_NAME: &str = "client-pending.json";
+
 /// Per-process staging counter: a temp name must never collide with another
 /// write in this process, so concurrent stores each stage their own file.
 static STAGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -95,6 +105,79 @@ pub fn device_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DEVICE_FILE_NAME)
 }
 
+#[must_use]
+pub fn pending_file_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(PENDING_FILE_NAME)
+}
+
+/// Reads the stored pending identity, if any.
+///
+/// A missing, unreadable, or blank file is no pending: the caller opens a
+/// new request. Any other content is returned verbatim as the poll id — an
+/// unknown id simply converges on a fresh pending Host-side, so no
+/// fail-closed degraded state exists for this transient lookup key (unlike
+/// the trust-bearing device file).
+#[must_use]
+pub fn load_pending_id(data_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(pending_file_path(data_dir)).ok()?;
+    let text = core::str::from_utf8(&bytes).ok()?.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Remembers the open pending identity atomically (stage + sync + rename, so
+/// a crash leaves the previous content whole). Failure aborts the connect:
+/// without the remembered id the next run would open a duplicate pending.
+///
+/// # Errors
+///
+/// Returns [`CliError::Transport`] when the staged write cannot be published.
+pub fn store_pending_id(data_dir: &Path, pending_id: &str) -> Result<(), CliError> {
+    let path = pending_file_path(data_dir);
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        Some(_) | None => PathBuf::from("."),
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let seq = STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staged = parent.join(format!(
+        ".{}.{}.{nanos}.{seq}.tmp",
+        PENDING_FILE_NAME,
+        std::process::id()
+    ));
+    let staged_result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .map_err(pending_store_error)?;
+        file.write_all(pending_id.as_bytes())
+            .map_err(pending_store_error)?;
+        file.sync_all().map_err(pending_store_error)?;
+        drop(file);
+        std::fs::rename(&staged, &path).map_err(pending_store_error)
+    })();
+    if staged_result.is_err() && std::fs::remove_file(&staged).is_err() {
+        // Best effort: the temp holds only the pending id, and the reported
+        // store failure stays authoritative.
+    }
+    staged_result
+}
+
+fn pending_store_error(error: std::io::Error) -> CliError {
+    CliError::Transport(format!("client pending store failed: {}", error.kind()))
+}
+
+/// Forgets the open pending identity; best effort, never fails the connect.
+/// Called on denials that invalidate the remembered id, so the next run
+/// opens a new request instead of re-polling a dead one.
+pub fn clear_pending_id(data_dir: &Path) {
+    if std::fs::remove_file(pending_file_path(data_dir)).is_err() {
+        // Absent is the expected case after pairing.
+    }
+}
+
 /// State of the client device file on disk.
 ///
 /// [`Missing`](DeviceFileState::Missing) is a first run; the other failure
@@ -153,7 +236,7 @@ pub fn load_stored_device(data_dir: &Path) -> DeviceFileState {
 /// `Stored` secret only needs a write when the paired device identity
 /// changed (the Host forgot the device and issued a fresh key), so a normal
 /// reconnect never rewrites the file. `Missing` has nothing to persist.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 #[must_use]
 pub(crate) fn must_persist_after_acceptance(
     source: SecretSource,
@@ -289,8 +372,9 @@ mod tests {
     use ene_api::v1::refs::DeviceWireId;
 
     use super::{
-        DeviceFileState, SecretSource, StoredDevice, device_file_path, load_stored_device,
-        must_persist_after_acceptance, resolve_device_secret, store_device,
+        DeviceFileState, SecretSource, StoredDevice, clear_pending_id, device_file_path,
+        load_pending_id, load_stored_device, must_persist_after_acceptance, resolve_device_secret,
+        store_device, store_pending_id,
     };
 
     /// Unique per process and test, so parallel tests never share a device
@@ -552,6 +636,58 @@ mod tests {
             rendered.contains("StoredDevice"),
             "stored Debug must name the type: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn pending_id_roundtrips_and_clears() {
+        let dir = scratch_dir("pending-roundtrip");
+        assert!(
+            load_pending_id(&dir).is_none(),
+            "no pending file means a new request"
+        );
+        let stored = store_pending_id(&dir, "pending-id-1");
+        assert!(stored.is_ok(), "storing must succeed: {stored:?}");
+        assert!(
+            load_pending_id(&dir) == Some(String::from("pending-id-1")),
+            "the poll id must load back for the post-approval run"
+        );
+        let replaced = store_pending_id(&dir, "pending-id-2");
+        assert!(replaced.is_ok(), "re-storing must succeed");
+        assert!(
+            load_pending_id(&dir) == Some(String::from("pending-id-2")),
+            "a stale poll converges on the fresh id"
+        );
+        clear_pending_id(&dir);
+        assert!(
+            load_pending_id(&dir).is_none(),
+            "a denial forgets the dead id so the next run opens a new request"
+        );
+        clear_pending_id(&dir);
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn pending_file_is_transient_never_degraded_state() {
+        let dir = scratch_dir("pending-transient");
+        // Unlike the trust-bearing device file, the pending progress file is
+        // a lookup key: anything unreadable simply opens a new request.
+        assert!(
+            load_pending_id(&dir).is_none(),
+            "a missing file is a new request"
+        );
+        let written = std::fs::write(super::pending_file_path(&dir), b"{not json");
+        assert!(written.is_ok(), "the fixture must write");
+        assert!(
+            load_pending_id(&dir) == Some(String::from("{not json")),
+            "an unknown id converges Host-side instead of failing closed"
+        );
+        let blanked = std::fs::write(super::pending_file_path(&dir), b"  \n");
+        assert!(blanked.is_ok(), "the blank fixture must write");
+        assert!(
+            load_pending_id(&dir).is_none(),
+            "a blank file is a new request"
+        );
+        remove_dir(&dir);
     }
 
     #[test]

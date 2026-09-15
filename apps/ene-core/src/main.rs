@@ -43,10 +43,10 @@ enum CliCommand {
     Serve {
         config: Option<PathBuf>,
     },
-    /// A [`None`] descriptor lists pendings instead of approving.
+    /// A [`None`] pending id lists pendings instead of approving.
     ApproveDevice {
         config: Option<PathBuf>,
-        descriptor: Option<String>,
+        pending: Option<String>,
     },
     ApproveCredential {
         config: Option<PathBuf>,
@@ -77,14 +77,14 @@ fn ene_core_command() -> clap::Command {
         .subcommand(ClapCommand::new("serve").about("Run the Host listener"))
         .subcommand(
             ClapCommand::new("approve-device")
-                .about("Approve one pending device descriptor, or list pendings")
+                .about("Approve one pending pairing by ID, or list pendings")
                 .arg(
-                    Arg::new("descriptor")
-                        .long("descriptor")
-                        .value_name("EXACT")
-                        .overrides_with("descriptor")
+                    Arg::new("pending")
+                        .long("pending")
+                        .value_name("ID")
+                        .overrides_with("pending")
                         .allow_hyphen_values(true)
-                        .help("Exact pending descriptor to approve; omit to list pendings"),
+                        .help("Exact pending ID to approve; omit to list pendings"),
                 ),
         )
         .subcommand(
@@ -121,7 +121,7 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
         "serve" => Ok(CliCommand::Serve { config }),
         "approve-device" => Ok(CliCommand::ApproveDevice {
             config,
-            descriptor: sub.get_one::<String>("descriptor").cloned(),
+            pending: sub.get_one::<String>("pending").cloned(),
         }),
         "approve-credential" => {
             let provider = sub
@@ -198,21 +198,21 @@ fn main() -> Result<(), CliError> {
             run_approve_credential(&data_dir, provider.trim(), label.trim())?;
             Ok(())
         }
-        CliCommand::ApproveDevice { config, descriptor } => {
+        CliCommand::ApproveDevice { config, pending } => {
             let cfg = Config::load(config.as_deref())?;
             let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
                 return Err(CoreError::Store("no data directory resolved".to_string()).into());
             };
-            let Some(descriptor) = descriptor else {
+            let Some(pending) = pending else {
                 list_pending_devices(&data_dir)?;
                 return Ok(());
             };
-            if descriptor.trim().is_empty() {
+            if pending.trim().is_empty() {
                 return Err(CliError::Usage(
-                    "approve-device requires a non-blank --descriptor".to_string(),
+                    "approve-device requires a non-blank --pending ID".to_string(),
                 ));
             }
-            run_approve_device(&data_dir, descriptor.trim())?;
+            run_approve_device(&data_dir, pending.trim())?;
             Ok(())
         }
         CliCommand::Serve { config } => {
@@ -248,8 +248,10 @@ where
         .block_on(task)
 }
 
-/// Prints what `approve-device --descriptor` would accept, one descriptor per
-/// line. Empty output (exit 0) means nothing is pending.
+/// Prints what `approve-device --pending` would accept, one
+/// `<pending-id> <descriptor>` line per pending (the descriptor is display
+/// only; approval names the id). Empty output (exit 0) means nothing is
+/// pending.
 ///
 /// # Errors
 ///
@@ -260,10 +262,10 @@ fn list_pending_devices(data_dir: &Path) -> Result<(), CoreError> {
     block_on(async {
         let handle = HostHandle::open(data_dir).await?;
         let mut pending = handle.pending_devices().await?;
-        pending.sort();
+        pending.sort_by(|first, second| first.pending_id.cmp(&second.pending_id));
         let mut stdout = std::io::stdout().lock();
-        for descriptor in &pending {
-            writeln!(stdout, "{descriptor}").map_err(|error| {
+        for entry in &pending {
+            writeln!(stdout, "{} {}", entry.pending_id, entry.descriptor).map_err(|error| {
                 CoreError::Store(format!("pending list could not be shown: {error}"))
             })?;
         }
@@ -284,7 +286,7 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
     block_on(serve::serve(data_dir))
 }
 
-/// An unknown descriptor fails with the pending descriptor set so the Owner
+/// An unknown pending id fails with the pending id set so the Owner
 /// can retry with the exact value; descriptors are display strings only.
 ///
 /// The one-time pairing secret prints once to this Host-local console, the
@@ -299,9 +301,9 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
 ///
 /// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
 /// directory, [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened, and [`CoreError::Approve`] when the descriptor is
-/// unknown (listing the pending descriptors) or the approval write fails.
-fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError> {
+/// state cannot be opened, and [`CoreError::Approve`] when the pending id is
+/// unknown (listing the pending ids) or the approval write fails.
+fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
 
     use ene_core::host_lock::HostLock;
@@ -309,7 +311,7 @@ fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError
     block_on(async {
         let _lock = HostLock::acquire(data_dir)?;
         let handle = HostHandle::open(data_dir).await?;
-        if let Some((_, secret)) = handle.approve_device(descriptor).await? {
+        if let Some((_, secret)) = handle.approve_device(pending_id).await? {
             let mut stdout = std::io::stdout().lock();
             writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
                 CoreError::Store(format!(
@@ -325,8 +327,12 @@ fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError
         }
         let pending = handle.pending_devices().await?;
         Err(CoreError::Approve(format!(
-            "unknown device descriptor {descriptor:?}; pending: [{pending}]",
-            pending = pending.join(", ")
+            "unknown pending id {pending_id:?}; pending: [{pending}]",
+            pending = pending
+                .iter()
+                .map(|entry| entry.pending_id.as_str())
+                .collect::<Vec<&str>>()
+                .join(", ")
         )))
     })
 }
@@ -506,66 +512,65 @@ mod tests {
 
     #[test]
     fn descriptor_value_named_serve_is_not_a_subcommand() {
-        let parsed =
-            parse(&["approve-device", "--descriptor", "serve"]).expect("the value is data");
+        let parsed = parse(&["approve-device", "--pending", "serve"]).expect("the value is data");
         assert_eq!(
             parsed,
             CliCommand::ApproveDevice {
                 config: None,
-                descriptor: Some(String::from("serve"))
+                pending: Some(String::from("serve"))
             }
         );
     }
 
     #[test]
-    fn descriptor_flag_captures_its_value_verbatim() {
-        let parsed = parse(&["approve-device", "--descriptor", "--odd-value"])
-            .expect("--descriptor with a value must parse");
+    fn pending_flag_captures_its_value_verbatim() {
+        let parsed = parse(&["approve-device", "--pending", "--odd-value"])
+            .expect("--pending with a value must parse");
         assert_eq!(
             parsed,
             CliCommand::ApproveDevice {
                 config: None,
-                descriptor: Some(String::from("--odd-value"))
+                pending: Some(String::from("--odd-value"))
             },
             "the value is consumed verbatim, even with a leading --"
         );
     }
 
     #[test]
-    fn repeated_descriptor_keeps_the_last_value() {
+    fn repeated_pending_keeps_the_last_value() {
         let parsed = parse(&[
             "approve-device",
-            "--descriptor",
+            "--pending",
             "first",
-            "--descriptor",
+            "--pending",
             "second",
         ])
-        .expect("a repeated --descriptor must parse");
+        .expect("a repeated --pending must parse");
         assert_eq!(
             parsed,
             CliCommand::ApproveDevice {
                 config: None,
-                descriptor: Some(String::from("second"))
+                pending: Some(String::from("second"))
             }
         );
     }
 
     #[test]
-    fn missing_descriptor_value_is_a_usage_error() {
+    fn missing_pending_value_is_a_usage_error() {
         assert!(matches!(
-            parse(&["approve-device", "--descriptor"]),
+            parse(&["approve-device", "--pending"]),
             Err(super::CliError::Usage(_))
         ));
     }
 
     #[test]
-    fn approve_device_without_descriptor_lists_pendings() {
+    fn approve_device_without_pending_lists_pendings() {
         let parsed = parse(&["approve-device"]).expect("approve-device must parse");
         assert_eq!(
             parsed,
             CliCommand::ApproveDevice {
                 config: None,
-                descriptor: None
+                pending: None
             }
         );
     }
@@ -622,15 +627,15 @@ mod tests {
             "--config",
             "/tmp/e.json",
             "approve-device",
-            "--descriptor",
-            "laptop",
+            "--pending",
+            "pending-1",
         ])
         .expect("global flags and subcommand options must parse");
         assert_eq!(
             parsed,
             CliCommand::ApproveDevice {
                 config: Some(PathBuf::from("/tmp/e.json")),
-                descriptor: Some(String::from("laptop"))
+                pending: Some(String::from("pending-1"))
             }
         );
     }
@@ -638,7 +643,7 @@ mod tests {
     #[test]
     fn stray_mode_flags_are_rejected() {
         assert!(matches!(
-            parse(&["serve", "--descriptor", "laptop"]),
+            parse(&["serve", "--pending", "pending-1"]),
             Err(super::CliError::Usage(_))
         ));
         assert!(matches!(

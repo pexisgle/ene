@@ -24,7 +24,8 @@
 //!   report composition.
 //! - [`task_run`] runs the bounded autonomous Task Agent ↔ Action loop over
 //!   those boundaries.
-//! - [`conn`] holds the Unix socket listener. The wire close convention is shared:
+//! - [`conn`] holds the OS listener (Unix socket, or the Windows named pipe in
+//!   `conn_pipe` on Windows). The wire close convention is shared:
 //!   a [`ene_api::v1::handshake::DisconnectNotice`] in the response vector is
 //!   terminal and the connection closes after it is written.
 //!
@@ -35,6 +36,8 @@
 
 pub mod action;
 pub mod conn;
+#[cfg(windows)]
+pub mod conn_pipe;
 pub mod dialogue;
 pub mod host_lock;
 pub mod serve;

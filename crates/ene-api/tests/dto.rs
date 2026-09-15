@@ -58,6 +58,7 @@ fn envelope_roundtrip() {
 fn handshake_roundtrip() {
     roundtrip(&PairingRequest {
         device_descriptor: String::from("Owner laptop"),
+        pending_id: None,
     });
     roundtrip(&CapabilityAdvertise {
         supported_protocol: [ProtocolVersion::V1].to_vec(),

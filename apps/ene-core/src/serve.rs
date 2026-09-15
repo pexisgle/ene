@@ -81,7 +81,7 @@ use ene_credential::{
 use ene_inference::ProviderTransport;
 use ene_permission::EvaluationTracker;
 use ene_presence::ClientId;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use ene_presence::{
     LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceState, ThinMoveReason,
 };
@@ -409,7 +409,6 @@ pub struct HostHandle {
     pub(crate) learning_queue: StdMutex<VecDeque<ene_learning::ExperienceCandidate>>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.
-    #[cfg(any(unix, test))]
     pub(crate) learning_worker: AsyncMutex<()>,
     /// Opaque companion projection issued by this handle.
     ///
@@ -515,7 +514,6 @@ impl HostHandle {
             cred_store,
             auth_store,
             learning_queue: StdMutex::new(VecDeque::new()),
-            #[cfg(any(unix, test))]
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: crate::task_run::TaskExecutionRegistry::default(),
@@ -1042,10 +1040,12 @@ impl HostHandle {
     /// Host-local trusted inlet behind the `approve-device` subcommand: it
     /// records the Owner decision through
     /// [`approve_pending`](DevicePairingRepository::approve_pending) and never
-    /// decides whether pairing is allowed itself. An unknown descriptor
-    /// yields `Ok(None)` (the caller lists [`HostHandle::pending_devices`]);
-    /// a blank descriptor can never match because wire ingress denies blank
-    /// descriptors before they reach the store.
+    /// decides whether pairing is allowed itself. The approval names the
+    /// opaque pending id plus the connection that sent the request (read back
+    /// from the stored pending row) and compare-and-swaps that row to Paired;
+    /// an unknown id, an already-consumed row, or a mismatched connection
+    /// yields `Ok(None)` (the caller lists [`HostHandle::pending_devices`]).
+    /// Descriptors are display-only and never the approval key (#1389).
     ///
     /// The returned secret string is for one-time display on this
     /// Host-local trusted surface only: the caller shows it once and forgets
@@ -1058,9 +1058,29 @@ impl HostHandle {
     /// unavailable or the device-auth file cannot be written.
     pub async fn approve_device(
         &self,
-        descriptor: &str,
+        pending_id: &str,
     ) -> Result<Option<(DeviceRecord, String)>, CoreError> {
-        let approved = DevicePairingRepository::approve_pending(&self.store, descriptor)
+        let origin = DevicePairingRepository::list_pending(&self.store)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?
+            .into_iter()
+            .find(|pending| pending.pending_id == pending_id)
+            .map(|pending| pending.origin_connection);
+        let Some(origin) = origin else {
+            // Unknown id here may still be an already-approved id whose
+            // pending row is gone but whose paired record survives (rotation):
+            // let the store decide from its paired table.
+            let approved = DevicePairingRepository::approve_pending(&self.store, pending_id, "")
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            if let Some((record, secret)) = approved.as_ref() {
+                self.auth_store
+                    .save_secret(&record.id, &record.descriptor, secret)
+                    .map_err(|error| CoreError::Store(error.to_string()))?;
+            }
+            return Ok(approved);
+        };
+        let approved = DevicePairingRepository::approve_pending(&self.store, pending_id, &origin)
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
         if let Some((record, secret)) = approved.as_ref() {
@@ -1072,18 +1092,33 @@ impl HostHandle {
     }
 
     /// Host-local trusted inlet surfacing the Owner-visible pending set so an
-    /// unknown `approve-device` descriptor can be retried with the exact
-    /// value. Descriptors are display strings only, never secrets.
+    /// unknown `approve-device` id can be retried with the exact value. Each
+    /// entry carries its opaque approval id plus the display descriptor;
+    /// approval names the id, never the descriptor (#1389).
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::Store`] when the durable pairing tables are
     /// unavailable.
-    pub async fn pending_devices(&self) -> Result<Vec<String>, CoreError> {
-        let pending = DevicePairingRepository::list_pending(&self.store)
+    pub async fn pending_devices(&self) -> Result<Vec<ene_credential::PendingPairing>, CoreError> {
+        DevicePairingRepository::list_pending(&self.store)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(pending.into_iter().map(|entry| entry.descriptor).collect())
+            .map_err(|error| CoreError::Store(error.to_string()))
+    }
+
+    /// Serving startup boundary: drops every still-unapproved pending request
+    /// before the listener binds, so a stale poll after a restart converges
+    /// on a fresh pending instead of authenticating (#1389). Paired records
+    /// are untouched. Read-only opens never call this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Store`] when the durable pairing tables are
+    /// unavailable.
+    pub(crate) async fn clear_unapproved_pendings(&self) -> Result<(), CoreError> {
+        DevicePairingRepository::clear_unapproved_pendings(&self.store)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))
     }
 
     /// Records one Owner credential approval, making the ref usable.
@@ -1154,7 +1189,7 @@ impl HostHandle {
     /// leaves attribution untouched. Target selection for a Host-local
     /// fallback client is a later slice; this keeps the single-step move to
     /// `NoActive`.
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) async fn close_connection(
         &self,
         table: &std::sync::Arc<ConnectionTable>,
@@ -1196,7 +1231,7 @@ impl HostHandle {
 /// Runs while the connection table section is held (CCT §10.4), so every
 /// store call here is the sync form; it must never await and never call back
 /// into the connection table.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 fn note_disconnect_sync(store: &Store, companion: ene_companion::CompanionId, client_ref: &str) {
     let client = device_client(client_ref);
     let Ok(Some(current)) = store.load_attribution_sync(companion.as_raw()) else {

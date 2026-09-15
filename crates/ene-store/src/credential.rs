@@ -25,25 +25,24 @@ pub(crate) const SQL_SELECT_SET_REV: &str = "SELECT rev FROM credential_set WHER
 
 const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_ref ORDER BY id ASC";
 
-const SQL_SELECT_PAIRED_BY_DESCRIPTOR: &str =
-    "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE descriptor = ?1";
+const SQL_SELECT_PAIRED_BY_PENDING: &str =
+    "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE pending_id = ?1";
 
-const SQL_SELECT_PENDING_BY_DESCRIPTOR: &str =
-    "SELECT descriptor, requested_at FROM pairing_pending WHERE descriptor = ?1";
+const SQL_SELECT_PENDING_BY_ID: &str = "SELECT pending_id, descriptor, requested_at, origin_connection FROM pairing_pending WHERE pending_id = ?1";
 
-const SQL_INSERT_PENDING_IGNORE: &str =
-    "INSERT OR IGNORE INTO pairing_pending (descriptor, requested_at) VALUES (?1, ?2)";
+const SQL_INSERT_PENDING: &str = "INSERT INTO pairing_pending (pending_id, descriptor, requested_at, origin_connection) VALUES (?1, ?2, ?3, ?4)";
 
-const SQL_DELETE_PENDING: &str = "DELETE FROM pairing_pending WHERE descriptor = ?1";
+const SQL_DELETE_PENDING: &str =
+    "DELETE FROM pairing_pending WHERE pending_id = ?1 AND origin_connection = ?2";
 
-const SQL_INSERT_PAIRED: &str =
-    "INSERT INTO paired_device (device_id, descriptor, paired_at, wire) VALUES (?1, ?2, ?3, ?4)";
+const SQL_CLEAR_PENDING: &str = "DELETE FROM pairing_pending";
+
+const SQL_INSERT_PAIRED: &str = "INSERT INTO paired_device (device_id, descriptor, paired_at, wire, pending_id) VALUES (?1, ?2, ?3, ?4, ?5)";
 
 const SQL_SELECT_DEVICE_BY_WIRE: &str =
     "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE wire = ?1";
 
-const SQL_LIST_PENDING_PAIRINGS: &str =
-    "SELECT descriptor, requested_at FROM pairing_pending ORDER BY rowid ASC";
+const SQL_LIST_PENDING_PAIRINGS: &str = "SELECT pending_id, descriptor, requested_at, origin_connection FROM pairing_pending ORDER BY rowid ASC";
 
 const SQL_SELECT_CREDENTIAL_PENDING: &str = "SELECT provider, label, requested_at FROM credential_pending WHERE provider = ?1 AND label = ?2";
 
@@ -311,6 +310,8 @@ impl DevicePairingRepository for Store {
     async fn request_pairing(
         &self,
         descriptor: String,
+        origin_connection: String,
+        pending_id: Option<String>,
     ) -> Result<DevicePairingStatus, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
@@ -320,44 +321,93 @@ impl DevicePairingRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            // An already-paired descriptor short-circuits: re-requests leave the
-            // stored record untouched.
-            let paired: Option<(String, String, String, Option<String>)> = tx
-                .query_row(
-                    SQL_SELECT_PAIRED_BY_DESCRIPTOR,
-                    params![descriptor],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            if let Some((device_text, stored_descriptor, paired_text, wire)) = paired {
-                let device =
-                    decode_device_record(&device_text, stored_descriptor, &paired_text, wire)
+            // A poll names the opaque pending identity issued earlier: an
+            // approved id resolves to its unchanged paired record (the client
+            // learns the device key after Owner approval) from any connection,
+            // a waiting id with the same display body returns the stored entry
+            // only on its origin connection, and an unknown id (stale after a
+            // restart clear, or never issued) falls through to a fresh pending
+            // below so the client converges on the new identity. A waiting id
+            // polled from a new connection likewise falls through: the mapping
+            // is kept only until the origin connection ends, so a new
+            // connection always opens a new request (#1389). The descriptor is
+            // display-only in every case: it is equality-checked on poll but
+            // never a lookup key.
+            if let Some(poll) = pending_id {
+                let paired: Option<(String, String, String, Option<String>)> = tx
+                    .query_row(SQL_SELECT_PAIRED_BY_PENDING, params![poll], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })
+                    .optional()
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                if let Some((device_text, stored_descriptor, paired_text, wire)) = paired {
+                    let device =
+                        decode_device_record(&device_text, stored_descriptor, &paired_text, wire)
+                            .map_err(credential_unavailable)?;
+                    return Ok(DevicePairingStatus::Paired { device });
+                }
+                let stored: Option<(String, String, String, String)> = tx
+                    .query_row(SQL_SELECT_PENDING_BY_ID, params![poll], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })
+                    .optional()
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                if let Some((stored_id, stored_descriptor, stored_requested, stored_origin)) =
+                    stored
+                {
+                    if stored_descriptor != descriptor {
+                        return Err(credential_unavailable(String::from(
+                            "pairing poll body mismatch; open a new request",
+                        )));
+                    }
+                    if stored_origin == origin_connection {
+                        let pending = decode_pending_pairing(
+                            stored_id,
+                            stored_descriptor,
+                            &stored_requested,
+                            stored_origin,
+                        )
                         .map_err(credential_unavailable)?;
-                return Ok(DevicePairingStatus::Paired { device });
+                        tx.commit()
+                            .map_err(|error| credential_unavailable(error.to_string()))?;
+                        return Ok(DevicePairingStatus::Pending { pending });
+                    }
+                    // Waiting id polled from a new connection: the origin
+                    // connection ended (or this is another connection's id), so
+                    // this poll opens a new request below. The stored row stays
+                    // for the Owner decision, which names the recorded origin.
+                }
+                // Unknown poll id: stale (or never issued). Fall through and
+                // mint a fresh pending below.
             }
-            // `INSERT OR IGNORE` keeps a previously stored pending entry: the
-            // re-read below returns it unchanged instead of refreshing its time.
+            // Every new request mints its own opaque identity, even for an
+            // identical descriptor: same-descriptor requests never share a
+            // pending or a device (#1389).
+            let fresh = RawId::new().as_uuid().to_string();
             tx.execute(
-                SQL_INSERT_PENDING_IGNORE,
-                params![descriptor, requested_text],
+                SQL_INSERT_PENDING,
+                params![fresh, descriptor, requested_text, origin_connection],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<(String, String)> = tx
-                .query_row(
-                    SQL_SELECT_PENDING_BY_DESCRIPTOR,
-                    params![descriptor],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
+            let stored: Option<(String, String, String, String)> = tx
+                .query_row(SQL_SELECT_PENDING_BY_ID, params![fresh], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
                 .optional()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some((stored_descriptor, stored_requested)) = stored else {
+            let Some((stored_id, stored_descriptor, stored_requested, stored_origin)) = stored
+            else {
                 return Err(credential_unavailable(String::from(
                     "pairing request vanished after insert",
                 )));
             };
-            let pending = decode_pending_pairing(stored_descriptor, &stored_requested)
-                .map_err(credential_unavailable)?;
+            let pending = decode_pending_pairing(
+                stored_id,
+                stored_descriptor,
+                &stored_requested,
+                stored_origin,
+            )
+            .map_err(credential_unavailable)?;
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(DevicePairingStatus::Pending { pending })
@@ -367,10 +417,12 @@ impl DevicePairingRepository for Store {
 
     async fn approve_pending(
         &self,
-        descriptor: &str,
+        pending_id: &str,
+        origin_connection: &str,
     ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        let descriptor = descriptor.to_owned();
+        let pending_id = pending_id.to_owned();
+        let origin_connection = origin_connection.to_owned();
         run_blocking(move || {
             let device_id = RawId::new();
             let device_text = encode_id(device_id);
@@ -380,15 +432,13 @@ impl DevicePairingRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            // Re-approving an already-paired descriptor returns the existing
-            // record unchanged with a freshly minted secret (rotation); no
-            // fresh identity is stored.
+            // An already-approved id returns its unchanged record with a
+            // freshly minted secret (rotation); no second device is minted
+            // for one pending.
             let paired: Option<(String, String, String, Option<String>)> = tx
-                .query_row(
-                    SQL_SELECT_PAIRED_BY_DESCRIPTOR,
-                    params![descriptor],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
+                .query_row(SQL_SELECT_PAIRED_BY_PENDING, params![pending_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
                 .optional()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             if let Some((stored_text, stored_descriptor, stored_paired, wire)) = paired {
@@ -397,28 +447,35 @@ impl DevicePairingRepository for Store {
                         .map_err(credential_unavailable)?;
                 return Ok(Some((device, fresh_pairing_secret())));
             }
-            let pending: Option<(String, String)> = tx
-                .query_row(
-                    SQL_SELECT_PENDING_BY_DESCRIPTOR,
-                    params![descriptor],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
+            let pending: Option<(String, String, String, String)> = tx
+                .query_row(SQL_SELECT_PENDING_BY_ID, params![pending_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
                 .optional()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some((stored_descriptor, _)) = pending else {
+            let Some((stored_id, stored_descriptor, _, stored_origin)) = pending else {
                 return Ok(None);
             };
-            // The pending delete and the paired insert share one transaction so
-            // an approval never strands a descriptor in both tables or neither.
-            // The wire projection is minted fresh here, unrelated to the device
-            // identity bytes: it is the only device string that ever crosses
-            // the wire.
+            if stored_origin != origin_connection {
+                return Ok(None);
+            }
+            // The pending delete and the paired insert share one transaction
+            // keyed on both columns (compare-and-swap), so an approval never
+            // strands a pending in both tables or neither. The wire projection
+            // is minted fresh here, unrelated to the device identity bytes: it
+            // is the only device string that ever crosses the wire. The
+            // originating pending id is recorded on the paired row so a later
+            // poll for the same id resolves to this record.
             let wire = RawId::new().as_uuid().to_string();
-            tx.execute(SQL_DELETE_PENDING, params![descriptor])
+            let deleted = tx
+                .execute(SQL_DELETE_PENDING, params![stored_id, stored_origin])
                 .map_err(|error| credential_unavailable(error.to_string()))?;
+            if deleted != 1 {
+                return Ok(None);
+            }
             tx.execute(
                 SQL_INSERT_PAIRED,
-                params![device_text, stored_descriptor, paired_text, wire],
+                params![device_text, stored_descriptor, paired_text, wire, stored_id],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
             tx.commit()
@@ -463,6 +520,18 @@ impl DevicePairingRepository for Store {
         .await
     }
 
+    async fn clear_unapproved_pendings(&self) -> Result<(), CredentialTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            guard
+                .execute(SQL_CLEAR_PENDING, ())
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
@@ -472,16 +541,26 @@ impl DevicePairingRepository for Store {
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             let rows = query
                 .query_map((), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
                 })
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             let mut pending = Vec::new();
             for row in rows {
-                let (descriptor, requested_text) =
+                let (pending_id, descriptor, requested_text, origin_connection) =
                     row.map_err(|error| credential_unavailable(error.to_string()))?;
                 pending.push(
-                    decode_pending_pairing(descriptor, &requested_text)
-                        .map_err(credential_unavailable)?,
+                    decode_pending_pairing(
+                        pending_id,
+                        descriptor,
+                        &requested_text,
+                        origin_connection,
+                    )
+                    .map_err(credential_unavailable)?,
                 );
             }
             Ok(pending)

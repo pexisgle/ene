@@ -2,48 +2,82 @@
 
 use std::path::Path;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthChallenge;
 use ene_api::v1::payload::WirePayload;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_credential::pairing_proof_hex;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::device;
 use crate::errors::CliError;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::frames::{
-    PreparedRequest, capability_frame, frame_for, missing_secret_guidance, new_incarnation,
-    pairing_frame, pending_guidance, proof_frame, unreadable_device_file_guidance,
+    PreparedRequest, capability_frame, frame_for, missing_secret_guidance, pairing_frame,
+    pending_guidance, proof_frame, unreadable_device_file_guidance,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::session::{
     AuthDecision, FrameDecision, SessionState, decide_auth, decide_frame, stale_generation_of,
 };
 #[cfg(unix)]
 use super::socket_path;
 
-/// Connected, handshaked Host session (Unix): the stream, the sender identity
+/// Connected, handshaked Host session: the stream, the sender identity
 /// pairing and authentication fill in, and the observed [`SessionState`].
-#[cfg(unix)]
+/// Unix dials `ene.sock`; Windows opens the data directory's named pipe
+/// (see `pipe_name`). Everything after the dial — pairing poll, capability,
+/// challenge authentication, request/response correlation — is shared.
+#[cfg(any(unix, windows))]
 pub struct Client {
-    stream: tokio::net::UnixStream,
+    stream: Stream,
     sender: WireSender,
     state: SessionState,
 }
 
 #[cfg(unix)]
+type Stream = tokio::net::UnixStream;
+
+#[cfg(windows)]
+type Stream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+/// Named-pipe name for one Host data directory, matching the Host listener.
+///
+/// Named pipes live in a flat per-machine namespace, so the data directory is
+/// folded into the name: FNV-1a (64-bit, fixed offsets, so the name is stable
+/// across processes) over its string form, rendered as hex. This duplicates
+/// the Host listener's `pipe_name` (`ene-core/src/conn_pipe.rs`) on purpose:
+/// `ene-ctl` must not depend on `ene-core`, and the algorithm is pinned by
+/// the shared test vector below rather than by shared code. Pure (no OS
+/// calls), so the `test` gate keeps it compiled for the Linux-runnable
+/// vector test; only the dial site is Windows-only.
+#[cfg(any(test, windows))]
+fn pipe_name(data_dir: &Path) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut tag = FNV_OFFSET;
+    for byte in data_dir.as_os_str().as_encoded_bytes() {
+        tag ^= u64::from(*byte);
+        tag = tag.wrapping_mul(FNV_PRIME);
+    }
+    format!(r"\\.\pipe\ene-{tag:016x}")
+}
+
+#[cfg(any(unix, windows))]
 impl Client {
     /// Dials `ene.sock` under `data_dir` and runs the full handshake: pairing,
     /// capability advertisement, challenge authentication, and the first
     /// presence fact.
     ///
-    /// Pairing runs on every connect; already-paired descriptors re-pair
-    /// idempotently to the same device key. Secret resolution is
+    /// Pairing runs only without a stored device: a first run opens or polls
+    /// a pending request by its opaque pending id (remembered in the
+    /// `client-pending.json` progress file), while a stored device skips
+    /// pairing and resolves its DeviceWireId at capability time, never by
+    /// descriptor (#1389). Secret resolution is
     /// [`device::resolve_device_secret`]'s. When pairing succeeds while this
     /// process holds a secret, the `{device_id, secret}` pair is persisted to
     /// the `0600` device file before capability runs (fail-closed: a store
@@ -76,17 +110,29 @@ impl Client {
         descriptor: &str,
         platform: &str,
     ) -> Result<Self, CliError> {
-        let path = socket_path(data_dir);
-        let mut stream = tokio::net::UnixStream::connect(&path)
-            .await
-            .map_err(|error| {
-                CliError::Transport(format!(
-                    "connect to {} failed: {}",
-                    path.display(),
-                    error.kind()
-                ))
-            })?;
-        let incarnation = new_incarnation();
+        let incarnation = crate::incarnation::boot_incarnation(data_dir)?;
+        #[cfg(unix)]
+        let mut stream = {
+            let path = socket_path(data_dir);
+            tokio::net::UnixStream::connect(&path)
+                .await
+                .map_err(|error| {
+                    CliError::Transport(format!(
+                        "connect to {} failed: {}",
+                        path.display(),
+                        error.kind()
+                    ))
+                })?
+        };
+        #[cfg(windows)]
+        let mut stream = {
+            let pipe = pipe_name(data_dir);
+            tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(&pipe)
+                .map_err(|error| {
+                    CliError::Transport(format!("connect to {pipe} failed: {}", error.kind()))
+                })?
+        };
         let file_state = device::load_stored_device(data_dir);
         let stored_device = file_state.stored().cloned();
         let (secret, source) = device::resolve_device_secret(
@@ -106,26 +152,47 @@ impl Client {
         {
             return Err(CliError::ServerOutcome(unreadable_device_file_guidance()));
         }
-        let device_id = {
-            write_frame(&mut stream, &pairing_frame(descriptor, incarnation)).await?;
-            match read_frame(&mut stream).await?.payload {
-                WirePayload::PairingResult(result) => match result {
-                    ene_api::v1::handshake::PairingResult::Paired { device_id } => device_id,
-                    ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation => {
-                        return Err(CliError::ServerOutcome(pending_guidance()));
-                    }
-                    ene_api::v1::handshake::PairingResult::Denied { reason } => {
-                        return Err(CliError::ServerOutcome(format!(
-                            "pairing denied: {reason}; approve the device on the \\
-                             Host-local trusted surface, then re-run ene-ctl"
+        // Pairing runs only without a stored device: a first run (or a run
+        // whose device file is gone) opens or polls a pending request by its
+        // opaque id, remembered in the `client-pending.json` progress file,
+        // while a stored device skips pairing and resolves its DeviceWireId
+        // at capability time, never by descriptor (#1389). The remembered id
+        // is kept after success too: it is the durable poll key that lets a
+        // later run with a lost device file re-resolve the same approval
+        // instead of opening a duplicate pending. A stale id (restart clear,
+        // wiped Host) converges on a fresh pending Host-side, so the file is
+        // self-healing and only a denial drops it.
+        let device_id = match (
+            stored_device.as_ref().map(|known| known.device_id),
+            secret.is_some(),
+        ) {
+            (Some(known), true) => known,
+            _ => {
+                let poll = device::load_pending_id(data_dir);
+                write_frame(&mut stream, &pairing_frame(descriptor, incarnation, poll)).await?;
+                match read_frame(&mut stream).await?.payload {
+                    WirePayload::PairingResult(result) => match result {
+                        ene_api::v1::handshake::PairingResult::Paired { device_id } => device_id,
+                        ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation {
+                            pending_id,
+                        } => {
+                            device::store_pending_id(data_dir, &pending_id)?;
+                            return Err(CliError::ServerOutcome(pending_guidance()));
+                        }
+                        ene_api::v1::handshake::PairingResult::Denied { reason } => {
+                            device::clear_pending_id(data_dir);
+                            return Err(CliError::ServerOutcome(format!(
+                                "pairing denied: {reason}; approve the pending ID on the \
+                                 Host-local trusted surface, then re-run ene-ctl"
+                            )));
+                        }
+                    },
+                    unexpected => {
+                        return Err(CliError::ServerRejected(format!(
+                            "unexpected {} during pairing; expected PairingResult",
+                            unexpected.message_type()
                         )));
                     }
-                },
-                unexpected => {
-                    return Err(CliError::ServerRejected(format!(
-                        "unexpected {} during pairing; expected PairingResult",
-                        unexpected.message_type()
-                    )));
                 }
             }
         };
@@ -375,9 +442,9 @@ impl Client {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn write_frame(
-    stream: &mut tokio::net::UnixStream,
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     frame: &WireFrame,
 ) -> Result<(), CliError> {
     use tokio::io::AsyncWriteExt as _;
@@ -392,9 +459,12 @@ async fn write_frame(
 
 /// 4-byte big-endian length prefix, then the body; the cap is checked before
 /// any body-sized allocation, so a hostile prefix cannot drive unbounded
-/// allocation.
-#[cfg(unix)]
-async fn read_frame(stream: &mut tokio::net::UnixStream) -> Result<WireFrame, CliError> {
+/// allocation. Shared by the Unix socket and the Windows named pipe: both
+/// transports carry the same length-prefixed frames.
+#[cfg(any(unix, windows))]
+async fn read_frame(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> Result<WireFrame, CliError> {
     use tokio::io::AsyncReadExt as _;
     let mut prefix = [0_u8; 4];
     stream
@@ -420,38 +490,38 @@ async fn read_frame(stream: &mut tokio::net::UnixStream) -> Result<WireFrame, Cl
         .map_err(|error: CodecError| CliError::Codec(format!("decode failed: {error}")))
 }
 
-/// Non-Unix placeholder: same surface, always unsupported. Every method
-/// returns [`CliError::UnsupportedPlatform`]: transport needs a Unix-domain
-/// socket.
-#[cfg(windows)]
+/// Unsupported-platform placeholder: same surface, always unsupported.
+/// Every method returns [`CliError::UnsupportedPlatform`]: transport needs a
+/// Unix-domain socket or a Windows named pipe.
+#[cfg(not(any(unix, windows)))]
 pub struct Client {
     _sealed: (),
 }
 
-#[cfg(windows)]
+#[cfg(not(any(unix, windows)))]
 impl Client {
     pub async fn connect(
         _data_dir: &Path,
         _descriptor: &str,
         _platform: &str,
     ) -> Result<Self, CliError> {
-        Err(CliError::UnsupportedPlatform("unix socket transport"))
+        Err(CliError::UnsupportedPlatform("no supported transport"))
     }
 
     pub async fn request(&mut self, _payload: WirePayload) -> Result<WirePayload, CliError> {
-        Err(CliError::UnsupportedPlatform("unix socket transport"))
+        Err(CliError::UnsupportedPlatform("no supported transport"))
     }
 
     pub async fn authenticate(&mut self, _challenge: &AuthChallenge) -> Result<(), CliError> {
-        Err(CliError::UnsupportedPlatform("unix socket transport"))
+        Err(CliError::UnsupportedPlatform("no supported transport"))
     }
 
     pub async fn next_frame(&mut self) -> Result<WirePayload, CliError> {
-        Err(CliError::UnsupportedPlatform("unix socket transport"))
+        Err(CliError::UnsupportedPlatform("no supported transport"))
     }
 
     pub async fn notify(&mut self, _payload: WirePayload) -> Result<(), CliError> {
-        Err(CliError::UnsupportedPlatform("unix socket transport"))
+        Err(CliError::UnsupportedPlatform("no supported transport"))
     }
 
     /// No session ever observes presence on this platform, so every request
@@ -459,5 +529,36 @@ impl Client {
     /// attributing through it.
     pub fn companion_ref(&self) -> String {
         String::from(crate::cmds::DEFAULT_COMPANION_REF)
+    }
+}
+
+#[cfg(test)]
+mod pipe_tests {
+    use super::pipe_name;
+
+    /// The client and the Host listener must derive the same pipe name from
+    /// one data directory; the vector pins the FNV-1a algorithm they share
+    /// without sharing code (mirrored in `ene-core`'s `conn_pipe` test, which
+    /// only runs on Windows).
+    #[test]
+    fn pipe_name_is_stable_and_directory_scoped() {
+        assert_eq!(
+            pipe_name(std::path::Path::new("/tmp/ene-data")),
+            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
+            "the pinned vector pins the shared algorithm"
+        );
+        let first = pipe_name(std::path::Path::new("/tmp/ene-data"));
+        assert!(
+            first.starts_with(r"\\.\pipe\ene-"),
+            "the pipe lives in the machine namespace: {first:?}"
+        );
+        assert!(
+            first == pipe_name(std::path::Path::new("/tmp/ene-data")),
+            "the name is stable across processes: {first:?}"
+        );
+        assert!(
+            first != pipe_name(std::path::Path::new("/tmp/other-data")),
+            "distinct directories use distinct pipes"
+        );
     }
 }

@@ -1422,7 +1422,11 @@ async fn device_request_approve_find_and_list() {
         matches!(listed_empty, Ok(ref items) if items.is_empty()),
         "fresh store pends nothing"
     );
-    let first = store.request_pairing(String::from("phone")).await;
+    // Identical descriptors open distinct pendings (#1389): the descriptor is
+    // display-only, never a lookup key.
+    let first = store
+        .request_pairing(String::from("phone"), String::from("conn-1"), None)
+        .await;
     assert!(
         matches!(first, Ok(DevicePairingStatus::Pending { .. })),
         "first request must pend"
@@ -1434,10 +1438,13 @@ async fn device_request_approve_find_and_list() {
         panic!("unexpected variant");
     };
     assert_eq!(first_pending.descriptor.as_str(), "phone");
-    let second = store.request_pairing(String::from("phone")).await;
+    assert_eq!(first_pending.origin_connection.as_str(), "conn-1");
+    let second = store
+        .request_pairing(String::from("phone"), String::from("conn-2"), None)
+        .await;
     assert!(
         matches!(second, Ok(DevicePairingStatus::Pending { .. })),
-        "repeat request must stay pending"
+        "same descriptor on a new connection must pend separately"
     );
     let DevicePairingStatus::Pending {
         pending: second_pending,
@@ -1445,24 +1452,28 @@ async fn device_request_approve_find_and_list() {
     else {
         panic!("unexpected variant");
     };
-    assert_eq!(
-        second_pending.requested_at, first_pending.requested_at,
-        "repeat request must not refresh the stored time"
-    );
-    let tablet = store.request_pairing(String::from("tablet")).await;
-    assert!(
-        matches!(tablet, Ok(DevicePairingStatus::Pending { .. })),
-        "second descriptor must pend"
+    assert_ne!(
+        second_pending.pending_id, first_pending.pending_id,
+        "identical descriptors get distinct pending identities"
     );
     let listed = DevicePairingRepository::list_pending(&store).await;
     let items = listed.unwrap();
-    assert_eq!(items.len(), 2, "both descriptors must list as pending");
-    let unknown = DevicePairingRepository::approve_pending(&store, "unknown").await;
+    assert_eq!(items.len(), 2, "both pendings must list");
+    let unknown = DevicePairingRepository::approve_pending(&store, "unknown", "conn-9").await;
     assert!(
         matches!(unknown, Ok(None)),
-        "approving an unknown descriptor must yield none"
+        "approving an unknown id must yield none"
     );
-    let approved = DevicePairingRepository::approve_pending(&store, "phone").await;
+    // The origin connection binds the approval: a wrong connection approves
+    // nothing.
+    let wrong_conn =
+        DevicePairingRepository::approve_pending(&store, &first_pending.pending_id, "conn-9").await;
+    assert!(
+        matches!(wrong_conn, Ok(None)),
+        "a wrong origin connection must not approve"
+    );
+    let approved =
+        DevicePairingRepository::approve_pending(&store, &first_pending.pending_id, "conn-1").await;
     let (device, secret) = approved.unwrap().unwrap();
     assert_eq!(device.descriptor.as_str(), "phone");
     assert!(
@@ -1472,21 +1483,31 @@ async fn device_request_approve_find_and_list() {
     let pending_after = DevicePairingRepository::list_pending(&store).await;
     let remaining = pending_after.unwrap();
     assert_eq!(remaining.len(), 1, "approval must drain one entry");
-    assert_eq!(remaining[0].descriptor.as_str(), "tablet");
+    assert_eq!(remaining[0].pending_id, second_pending.pending_id);
     let found = store.find_device_by_wire(&device.wire).await;
     assert!(
         matches!(found, Ok(Some(ref stored)) if *stored == device),
         "approved device must be findable by wire"
     );
-    let again = store.request_pairing(String::from("phone")).await;
+    // A poll for the approved id resolves to its unchanged paired record, so
+    // the client learns the device key after Owner approval.
+    let again = store
+        .request_pairing(
+            String::from("phone"),
+            String::from("conn-1"),
+            Some(first_pending.pending_id.clone()),
+        )
+        .await;
     assert!(
         matches!(
             again,
             Ok(DevicePairingStatus::Paired { device: ref existing }) if *existing == device
         ),
-        "re-request after pairing must return the stored record"
+        "poll after approval must return the stored record"
     );
-    let reapproved = DevicePairingRepository::approve_pending(&store, "phone").await;
+    // Re-approving the same pending rotates the secret but keeps the device.
+    let reapproved =
+        DevicePairingRepository::approve_pending(&store, &first_pending.pending_id, "conn-1").await;
     let (same, rotated) = reapproved.unwrap().unwrap();
     assert!(
         same == device,
@@ -1496,14 +1517,163 @@ async fn device_request_approve_find_and_list() {
         rotated.len() == 36 && rotated != secret,
         "re-approval must rotate to a fresh secret"
     );
+    // The second same-descriptor pending still pairs its own distinct device.
+    let approved_second =
+        DevicePairingRepository::approve_pending(&store, &second_pending.pending_id, "conn-2")
+            .await;
+    let (other, _) = approved_second.unwrap().unwrap();
+    assert_ne!(other, device, "identical descriptors pair distinct devices");
+    assert_ne!(other.wire, device.wire);
+}
+
+#[tokio::test]
+async fn pairing_poll_body_mismatch_is_rejected() {
+    let store = open_memory().await.unwrap();
+    let first = store
+        .request_pairing(String::from("phone"), String::from("conn-1"), None)
+        .await;
+    let DevicePairingStatus::Pending { pending } = first.unwrap() else {
+        panic!("first request must pend");
+    };
+    // Same pending id with a different body never resolves to another
+    // request's pending: the caller must open a new request.
+    let mismatched = store
+        .request_pairing(
+            String::from("tablet"),
+            String::from("conn-1"),
+            Some(pending.pending_id.clone()),
+        )
+        .await;
+    assert!(
+        mismatched.is_err(),
+        "a poll with a different body must be rejected, got {mismatched:?}"
+    );
+    // The stored pending is untouched by the rejected poll.
+    let listed = DevicePairingRepository::list_pending(&store).await.unwrap();
+    assert_eq!(listed.len(), 1, "the rejected poll stores nothing");
+    assert_eq!(listed[0].pending_id, pending.pending_id);
+}
+
+#[tokio::test]
+async fn stale_pending_after_restart_clear_is_unusable() {
+    let store = open_memory().await.unwrap();
+    let first = store
+        .request_pairing(String::from("phone"), String::from("conn-1"), None)
+        .await;
+    let DevicePairingStatus::Pending { pending } = first.unwrap() else {
+        panic!("first request must pend");
+    };
+    let stale_id = pending.pending_id.clone();
+    // The serving Host clears unapproved pendings at startup: the stale id
+    // can never authenticate and a poll converges on a fresh pending.
+    store.clear_unapproved_pendings().await.unwrap();
+    let listed = DevicePairingRepository::list_pending(&store).await.unwrap();
+    assert!(
+        listed.is_empty(),
+        "the restart clear must drain unapproved pendings"
+    );
+    let poll = store
+        .request_pairing(
+            String::from("phone"),
+            String::from("conn-2"),
+            Some(stale_id.clone()),
+        )
+        .await;
+    let DevicePairingStatus::Pending { pending: fresh } = poll.unwrap() else {
+        panic!("a stale poll must converge on a fresh pending");
+    };
+    assert_ne!(
+        fresh.pending_id, stale_id,
+        "the stale id must not be re-issued"
+    );
+    // And the stale id approves nothing.
+    let approved = DevicePairingRepository::approve_pending(&store, &stale_id, "conn-1").await;
+    assert!(
+        matches!(approved, Ok(None)),
+        "a stale pending must not approve"
+    );
+}
+
+#[tokio::test]
+async fn waiting_pending_polled_from_a_new_connection_opens_a_new_request() {
+    let store = open_memory().await.unwrap();
+    let first = store
+        .request_pairing(String::from("phone"), String::from("conn-1"), None)
+        .await;
+    let DevicePairingStatus::Pending { pending } = first.unwrap() else {
+        panic!("first request must pend");
+    };
+    let origin_id = pending.pending_id.clone();
+    // The mapping is kept only until the origin connection ends: a poll from
+    // a new connection mints a fresh pending instead of returning the stored
+    // one, so the unapproved pending is unusable for auth elsewhere.
+    let foreign = store
+        .request_pairing(
+            String::from("phone"),
+            String::from("conn-2"),
+            Some(origin_id.clone()),
+        )
+        .await;
+    let DevicePairingStatus::Pending { pending: fresh } = foreign.unwrap() else {
+        panic!("a foreign poll must open a new request");
+    };
+    assert_ne!(
+        fresh.pending_id, origin_id,
+        "a new connection must get its own pending identity"
+    );
+    assert_eq!(
+        fresh.origin_connection.as_str(),
+        "conn-2",
+        "the new pending is bound to the polling connection"
+    );
+    // The stored row stays for the Owner decision, which names the recorded
+    // origin: approval of the original id still pairs.
+    let listed = DevicePairingRepository::list_pending(&store).await.unwrap();
+    assert_eq!(listed.len(), 2, "both pendings must list");
+    let approved = DevicePairingRepository::approve_pending(&store, &origin_id, "conn-1").await;
+    assert!(
+        matches!(approved, Ok(Some(_))),
+        "the recorded origin still approves, got {approved:?}"
+    );
+    // And a same-connection poll still returns the stored entry while it
+    // waits: open a second device to observe the waiting path.
+    let tablet = store
+        .request_pairing(String::from("tablet"), String::from("conn-3"), None)
+        .await;
+    let DevicePairingStatus::Pending { pending: waiting } = tablet.unwrap() else {
+        panic!("second request must pend");
+    };
+    let repoll = store
+        .request_pairing(
+            String::from("tablet"),
+            String::from("conn-3"),
+            Some(waiting.pending_id.clone()),
+        )
+        .await;
+    let DevicePairingStatus::Pending { pending: same } = repoll.unwrap() else {
+        panic!("a same-connection poll must return the stored entry");
+    };
+    assert_eq!(
+        same.pending_id, waiting.pending_id,
+        "the origin connection keeps its pending across polls"
+    );
 }
 
 #[tokio::test]
 async fn device_wire_is_opaque_and_resolvable() {
     let store = open_memory().await.unwrap();
-    let requested = store.request_pairing(String::from("phone")).await;
+    // A reconnect never looks up by descriptor: it polls nothing and proves
+    // its stored wire at capability time. The store-level equivalent is that
+    // only `find_device_by_wire` resolves a paired device.
+    let requested = store
+        .request_pairing(String::from("phone"), String::from("conn-1"), None)
+        .await;
     assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
-    let approved = DevicePairingRepository::approve_pending(&store, "phone").await;
+    let DevicePairingStatus::Pending { pending } = requested.unwrap() else {
+        panic!("request must pend");
+    };
+    let approved =
+        DevicePairingRepository::approve_pending(&store, &pending.pending_id, "conn-1").await;
     let (device, _) = approved.unwrap().unwrap();
     assert_ne!(
         device.wire,

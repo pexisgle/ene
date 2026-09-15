@@ -38,24 +38,31 @@ pub struct DeviceRecord {
 
 /// One requested-but-not-yet-approved pairing.
 ///
-/// `descriptor` is the owner-supplied display string from the request; it
-/// carries no secret material, so derived [`core::fmt::Debug`] is safe.
+/// `pending_id` is the opaque approval key minted at request time; the Owner
+/// approves by this id, never by the display descriptor. `descriptor` is the
+/// owner-supplied display string from the request; it carries no secret
+/// material, so derived [`core::fmt::Debug`] is safe. `origin_connection` is
+/// the Host connection that sent the request, binding the approval to it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingPairing {
+    pub pending_id: String,
     pub descriptor: String,
     pub requested_at: WallClockWithTz,
+    pub origin_connection: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DevicePairingStatus {
-    /// The descriptor is already paired; carries the existing record.
+    /// The polled pending request was already approved; carries the paired
+    /// record, unchanged.
     Paired {
         /// Existing paired-device record, unchanged.
         device: DeviceRecord,
     },
-    /// The descriptor is not yet paired; carries the pending request.
+    /// The request is not yet approved; carries the pending request (newly
+    /// recorded, previously stored, or freshly re-issued after a stale poll).
     Pending {
-        /// Pending request, newly recorded or previously stored.
+        /// Pending request the Owner approves by its opaque id.
         pending: PendingPairing,
     },
 }
@@ -69,13 +76,29 @@ pub enum DevicePairingStatus {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait DevicePairingRepository: Send + Sync {
-    /// Records a pairing request for `descriptor`.
+    /// Records a pairing request for `descriptor` from `origin_connection`.
     ///
-    /// Returns [`DevicePairingStatus::Paired`] only when `descriptor` is
-    /// already paired (idempotent re-request leaves the stored record
-    /// untouched). Otherwise records a pending request — or returns the
-    /// existing pending entry when one is already stored — and returns
-    /// [`DevicePairingStatus::Pending`].
+    /// Every call with `pending_id: None` mints a fresh opaque pending
+    /// identity: same-descriptor requests each get their own pending and
+    /// their own Owner confirmation, and the descriptor is never an identity
+    /// lookup key (#1389). A reconnect of an already-paired device never
+    /// reaches here: it resolves its stored `DeviceWireId` through
+    /// [`find_device_by_wire`](DevicePairingRepository::find_device_by_wire)
+    /// at capability time instead.
+    ///
+    /// With `pending_id: Some(id)` the caller polls that pending after Owner
+    /// approval: an approved id answers [`DevicePairingStatus::Paired`] with
+    /// the unchanged record from any connection, a still-waiting id with a
+    /// matching descriptor answers [`DevicePairingStatus::Pending`] with the
+    /// stored entry only when polled on its origin connection, and an unknown
+    /// id (stale after a restart clear, or never issued) mints a fresh pending
+    /// so the client converges on the new identity. A waiting id polled from a
+    /// new connection likewise mints a fresh pending: the mapping is kept only
+    /// until the origin connection ends, so a new connection always opens a
+    /// new request while the stored row stays for the Owner decision. A poll
+    /// whose descriptor differs from the stored one is rejected: a request id
+    /// reused with a different body never resolves to another request's
+    /// pending.
     ///
     /// Blank-descriptor contract: Host ingress validates that the descriptor
     /// is non-blank before calling. Implementations perform no blank check
@@ -85,20 +108,22 @@ pub trait DevicePairingRepository: Send + Sync {
     async fn request_pairing(
         &self,
         descriptor: String,
+        origin_connection: String,
+        pending_id: Option<String>,
     ) -> Result<DevicePairingStatus, CredentialTechnicalError>;
 
-    /// Approves the pending request for `descriptor`, pairing the device and
-    /// issuing its one-time pairing secret.
+    /// Approves the pending request `pending_id` issued on `origin_connection`,
+    /// pairing the device and issuing its one-time pairing secret.
     ///
-    /// On a known pending descriptor this mints a fresh device identity via
-    /// [`RawId::new`] and a fresh pairing secret (a second [`RawId::new`]
-    /// rendered as UUID text), moves the entry from pending to paired, stores
-    /// the record (id, descriptor, and timestamps only — never the secret),
-    /// and returns the record together with the secret. An unknown descriptor
-    /// yields `Ok(None)` — not an error; the caller maps that outcome to a
-    /// clarification request. Re-approving an already-paired descriptor
-    /// returns the existing record unchanged (no fresh device identity) with
-    /// a freshly minted secret, rotating the previous one.
+    /// The pending delete and the paired insert share one transaction keyed on
+    /// both columns (compare-and-swap): only the row with this exact id and
+    /// origin pairs, so an unknown id, an already-approved id without a paired
+    /// record, or a wrong connection yields `Ok(None)`. An already-approved
+    /// id with a surviving paired record returns that record unchanged with a
+    /// freshly minted secret (rotation), exactly like the first approval's
+    /// secret custody. Re-approval never mints a second device for one
+    /// pending: distinct pendings (even with identical descriptors) pair
+    /// distinct devices (#1389).
     ///
     /// Secret custody flow: the trait is secret-free in storage. The approve
     /// caller (Host composition) holds the returned secret in memory,
@@ -113,7 +138,8 @@ pub trait DevicePairingRepository: Send + Sync {
     /// the decision it was given.
     async fn approve_pending(
         &self,
-        descriptor: &str,
+        pending_id: &str,
+        origin_connection: &str,
     ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError>;
 
     /// The only durable wire-to-domain resolution: callers holding an
@@ -123,6 +149,14 @@ pub trait DevicePairingRepository: Send + Sync {
         &self,
         wire: &str,
     ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
+
+    /// Drops every still-unapproved pending request.
+    ///
+    /// The serving Host runs this once at startup, before the listener binds:
+    /// a pending that outlived a restart can never authenticate, so a new
+    /// connection always opens a new request (#1389). Paired records are
+    /// untouched. Read-only opens never call this.
+    async fn clear_unapproved_pendings(&self) -> Result<(), CredentialTechnicalError>;
 
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError>;
 }

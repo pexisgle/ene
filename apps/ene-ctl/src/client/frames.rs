@@ -1,8 +1,5 @@
 //! Pure outbound frame builders: pairing, capability, auth proof, requests.
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{AuthProof, CapabilityAdvertise, PairingRequest};
 use ene_api::v1::payload::WirePayload;
@@ -12,28 +9,6 @@ use ene_api::v1::refs::{
 use ene_plugin_ipc::WireFrame;
 
 use crate::device;
-
-static INCARNATION_SEQ: AtomicU64 = AtomicU64::new(0);
-
-static INCARNATION_START: OnceLock<u64> = OnceLock::new();
-
-/// Uniqueness needs are modest (disambiguating restarts of one device) and a
-/// collision only risks a duplicate-suppression alias, never a privilege
-/// change: pid plus process-local counter plus start-time nanoseconds from
-/// `std` only, no OS RNG dependency. Distinct envelope dimension from
-/// connection identity and presence generation.
-pub fn new_incarnation() -> ClientIncarnationId {
-    let start = *INCARNATION_START.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos() as u64)
-    });
-    let seq = INCARNATION_SEQ.fetch_add(1, Ordering::Relaxed);
-    ClientIncarnationId {
-        counter: u64::from(std::process::id()),
-        random: start.wrapping_add(seq),
-    }
-}
 
 /// The proof is the pairing-secret HMAC over the single-use challenge nonce;
 /// the sender names the paired device and hides the connection id (still
@@ -58,9 +33,10 @@ pub fn proof_frame(
 #[must_use]
 pub fn pending_guidance() -> String {
     format!(
-        "pairing is pending owner confirmation; approve the device on the \
-         Host-local trusted surface, then re-run ene-ctl once with {} set \
-         to the shown secret (it is stored to the 0600 client device file)",
+        "pairing is pending owner confirmation; approve the pending ID on the \
+         Host-local trusted surface (`approve-device` lists pending IDs), then \
+         re-run ene-ctl once with {} set to the shown secret (the device key \
+         is issued on the next run and stored to the 0600 client device file)",
         device::BOOTSTRAP_SECRET_ENV,
     )
 }
@@ -185,11 +161,17 @@ pub fn frame_for_session(
 }
 
 /// Pre-pairing sender: the Host issues the device ID after Owner
-/// confirmation.
-pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> WireFrame {
+/// confirmation. `pending_id` polls a previously issued pending after
+/// approval; [`None`] opens a new request.
+pub fn pairing_frame(
+    descriptor: &str,
+    incarnation: ClientIncarnationId,
+    pending_id: Option<String>,
+) -> WireFrame {
     frame_for(
         WirePayload::PairingRequest(PairingRequest {
             device_descriptor: String::from(descriptor),
+            pending_id,
         }),
         WireSender {
             device_id: None,

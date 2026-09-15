@@ -64,6 +64,14 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let _lock = crate::host_lock::HostLock::acquire(data_dir)?;
     let handle = HostHandle::open(data_dir).await?;
+    // Pairing startup boundary, before the credential sweep: unapproved
+    // pendings never survive a restart, so a new connection always opens a
+    // new request and a stale poll converges on a fresh pending (#1389).
+    // Paired records are untouched.
+    handle
+        .clear_unapproved_pendings()
+        .await
+        .map_err(|error| CoreError::Store(error.to_string()))?;
     // Serving boundary, before the listener binds: sweep every registered
     // value out of durable content and advance the credential-set revision
     // together. A failed sweep keeps this Host from serving content prepared

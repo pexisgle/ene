@@ -7,3 +7,4 @@ pub mod client;
 pub mod cmds;
 pub mod device;
 pub mod errors;
+pub mod incarnation;

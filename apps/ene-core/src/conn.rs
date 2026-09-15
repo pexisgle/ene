@@ -54,10 +54,14 @@
 //! An oversize response (only reachable through an unbounded timeline today)
 //! likewise ends the connection; paging that path is deferred work.
 //!
-//! Windows has no listener yet: [`run`] returns
-//! [`CoreError::UnsupportedPlatform`] there. The follow-up is a named-pipe
-//! listener behind the same [`HostHandle::handle_frame`] seam, which keeps the
-//! Windows build green by holding no Unix import outside `cfg(unix)`.
+//! Windows serves the same loop over a named pipe: [`run`] creates the
+//! exclusive first server instance for the data directory's pipe name (a
+//! second Host fails to create, like the Unix singleton probe), checks the OS
+//! peer token before any frame is read, and drives the same
+//! [`HostHandle::handle_frame`] seam, so authentication, currentness, and the
+//! connection phase machine are identical on both transports. Other platforms
+//! have no listener and [`run`] returns
+//! [`CoreError::UnsupportedPlatform`] there.
 //!
 //! [`LiveInput::peer_uid_ok`]: crate::serve::LiveInput::peer_uid_ok
 //! [`LiveInput`]: crate::serve::LiveInput
@@ -90,18 +94,18 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SOCKET_NAME)
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::handshake::NegotiatedConnection;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ene_plugin_ipc::{MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use crate::serve::LiveInput;
 
 /// Bound on the per-connection transport duplicate-suppression cache, enough
@@ -110,7 +114,7 @@ use crate::serve::LiveInput;
 /// are sender-minted UUIDs, so a repeat after roll-off is a true transport
 /// duplicate, never a fresh send (fresh sends, including transport retries,
 /// always mint new ids).
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 const SEEN_MESSAGE_CAP: usize = 128;
 
 /// Separates transport redelivery from terminal violations: a duplicate
@@ -119,7 +123,7 @@ const SEEN_MESSAGE_CAP: usize = 128;
 /// the connection. Collapsing both into `None` would turn legitimate
 /// redelivery into connection loss, a distinct observable effect the §6.2
 /// silent-drop contract forbids.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LiveDecision {
     Ready(LiveInput),
@@ -252,14 +256,14 @@ struct ConnectionTableInner {
 }
 
 impl ConnectionTable {
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn new() -> Self {
         Self {
             inner: StdMutex::new(ConnectionTableInner::default()),
         }
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn note_accept(&self) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
         crate::lock_unpoison(&self.inner).records.insert(
@@ -426,7 +430,7 @@ impl ConnectionTable {
     /// current connection: a superseded connection reports unauthed even
     /// though its record keeps its phase. `phase` is the snapshot the gate
     /// uses to answer typed stale rejections.
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn live_for(
         self: &Arc<Self>,
         id: &ConnectionWireId,
@@ -521,7 +525,7 @@ impl ConnectionTable {
     /// its synchronous presence compare/commit (CCT §10.4) cannot interleave
     /// with a competing authentication install; it must not call back into
     /// this table. Forgetting is idempotent.
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn note_closed(
         &self,
         id: &ConnectionWireId,
@@ -696,18 +700,18 @@ where
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::serve::STREAM_BUFFER_FRAMES;
 
-/// Writes one response frame to the socket.
+/// Writes one response frame to the connection.
 ///
 /// The phase and current-slot bookkeeping happens where each answer is
 /// decided, inside the connection-ownership sections (IPC §9.3); this loop
 /// only carries bytes. Returns `false` when the connection can no longer
 /// carry frames (encode or write failure).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn write_response(
-    stream: &mut tokio::net::UnixStream,
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     response: WireFrame,
     terminal: &mut bool,
 ) -> bool {
@@ -722,20 +726,24 @@ async fn write_response(
     stream.write_all(&encoded).await.is_ok()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 /// An incarnation mismatch, a corrupt or oversize frame, or a terminal
 /// [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) in the
 /// responses ends the connection; close always forgets the table entry and
 /// runs the presence fallback through
 /// [`HostHandle::close_connection`](crate::serve::HostHandle::close_connection)
 /// when this was the device's current authenticated connection.
-async fn serve_connection<T>(
-    mut stream: tokio::net::UnixStream,
+///
+/// Transport-generic over the byte stream so the Unix socket and the Windows
+/// named pipe share this loop, the duplicate suppression, and the phase gate.
+async fn serve_connection<S, T>(
+    mut stream: S,
     connection: ConnectionWireId,
     handle: Arc<HostHandle>,
     transport: Arc<T>,
     table: Arc<ConnectionTable>,
 ) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: ProviderTransport + Send + Sync + 'static,
 {
     use tokio::io::AsyncReadExt as _;
@@ -830,22 +838,86 @@ async fn serve_connection<T>(
     handle.close_connection(&table, connection).await;
 }
 
-/// Windows stub: no listener yet.
+/// Serves the Windows named-pipe listener until the process ends.
+///
+/// Creates the exclusive first server instance for the data directory's pipe
+/// name (a live peer fails creation, like the Unix singleton probe — pipe
+/// instances vanish with their process, so there is no stale path to unlink),
+/// proves each peer with the OS token check, and spawns one frame-loop task
+/// per authorized connection over the shared [`HostHandle::handle_frame`]
+/// seam. There is no shutdown signal in `Stage 2`: the future resolves only
+/// on creation failure; otherwise it runs until killed. Behavior beyond
+/// creation is Windows-unverified on this Linux host (see
+/// [`crate::conn_pipe`]).
+///
+/// # Errors
+///
+/// Returns [`CoreError::Bind`] when the first pipe instance cannot be created
+/// (including a live peer) or a follow-up instance cannot be created.
+#[cfg(windows)]
+pub async fn run<T>(
+    data_dir: PathBuf,
+    handle: Arc<HostHandle>,
+    transport: Arc<T>,
+) -> Result<(), CoreError>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    use std::os::windows::io::AsRawHandle as _;
+
+    let pipe = crate::conn_pipe::pipe_name(&data_dir);
+    let mut server = crate::conn_pipe::create_first_server(&pipe)?;
+    // Production Task Agent launcher: same ownership as the Unix path, so an
+    // accepted conversation delegation starts the existing runner in the
+    // background without any test-side runner invocation.
+    let launcher = std::sync::Arc::new(crate::task_run::BackgroundTaskAgent::new(
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    let _ = handle.install_task_launcher(launcher);
+    let table = Arc::new(ConnectionTable::new());
+    loop {
+        if server.connect().await.is_err() {
+            // A failed wait leaves this instance unusable; replace it rather
+            // than serving half-open state.
+            server = crate::conn_pipe::create_next_server(&pipe)?;
+            continue;
+        }
+        // The OS peer token check runs before any frame is read: an
+        // unprovable peer is dropped without a byte, like the Unix
+        // uid-mismatch path.
+        let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
+        let next = crate::conn_pipe::create_next_server(&pipe)?;
+        let current = std::mem::replace(&mut server, next);
+        if !peer_ok {
+            continue;
+        }
+        let connection = table.note_accept();
+        let handle = Arc::clone(&handle);
+        let transport = Arc::clone(&transport);
+        let table = Arc::clone(&table);
+        tokio::spawn(async move {
+            serve_connection(current, connection, handle, transport, table).await;
+        });
+    }
+}
+
+/// Unsupported platforms have no listener.
 ///
 /// # Errors
 ///
 /// Always returns [`CoreError::UnsupportedPlatform`].
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[expect(
     clippy::unused_async,
-    reason = "stub mirrors the async listener signature; the named-pipe follow-up awaits"
+    reason = "stub mirrors the async listener signature; no transport exists here"
 )]
 pub async fn run(
     _data_dir: PathBuf,
     _handle: Arc<HostHandle>,
     _transport: Arc<impl ProviderTransport>,
 ) -> Result<(), CoreError> {
-    Err(CoreError::UnsupportedPlatform("named-pipe listener"))
+    Err(CoreError::UnsupportedPlatform("no supported listener"))
 }
 
 #[cfg(all(test, unix))]
