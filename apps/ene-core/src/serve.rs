@@ -80,8 +80,10 @@ use ene_credential::{
 };
 use ene_inference::ProviderTransport;
 use ene_permission::EvaluationTracker;
+use ene_presence::ClientId;
+#[cfg(any(unix, test))]
 use ene_presence::{
-    ClientId, LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceState, ThinMoveReason,
+    LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceState, ThinMoveReason,
 };
 use ene_presentation::{OpenRound, RoundId};
 use ene_primitive::RawId;
