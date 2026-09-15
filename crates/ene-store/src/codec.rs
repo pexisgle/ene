@@ -257,12 +257,43 @@ pub(crate) fn encode_undelivered_source(source: &UndeliveredSource) -> (String, 
     (kind.to_owned(), id, phase)
 }
 
+/// The owning task of one delegation-owned notification source, read from
+/// the canonical row: the delegation row names its task, an attempt resolves
+/// through its delegation row (the delegation is authoritative, not the
+/// attempt's copied correlation), and a result row names its task.
+const SQL_SOURCE_DELEGATION_TASK: &str = "SELECT task_id FROM delegation WHERE delegation_id = ?1";
+const SQL_SOURCE_ATTEMPT_TASK: &str = "SELECT d.task_id FROM action_attempt a JOIN delegation d ON d.delegation_id = a.delegation_id WHERE a.attempt_id = ?1";
+const SQL_SOURCE_RESULT_TASK: &str = "SELECT task_id FROM task_result WHERE result_id = ?1";
+
+/// Resolves the owning task of one stored source identity. A missing owner
+/// row is an unreadable row and fails closed, never a fabricated task.
+fn resolve_source_task(
+    conn: &Connection,
+    sql: &str,
+    id: &str,
+    what: &str,
+) -> Result<RawId, String> {
+    let found: Option<String> = conn
+        .query_row(sql, params![id], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(task_text) = found else {
+        return Err(format!("{what} source names no owning task"));
+    };
+    decode_id(&task_text)
+}
+
 /// Decodes one stored source key back to its typed form.
 ///
 /// An unknown kind, an undecodable identity, a non-decimal revision phase,
 /// an unknown certainty, and an unknown terminal phase are unreadable rows
-/// and fail closed.
+/// and fail closed. Delegation-, attempt-, and result-owned facts resolve
+/// their owning task from the canonical rows at read time (the delegation
+/// row, the attempt's delegation row, the result row): the `task` field is
+/// the owning task, never the source identity itself, so report composition
+/// finds the task behind every fact.
 pub(crate) fn decode_undelivered_source(
+    conn: &Connection,
     kind: &str,
     id: &str,
     phase: &str,
@@ -281,29 +312,39 @@ pub(crate) fn decode_undelivered_source(
                 },
             })
         }
-        SOURCE_KIND_DELEGATION => Ok(UndeliveredSource::TaskRecord {
-            task: raw,
-            fact: TaskFact::Delegation(raw),
-        }),
+        SOURCE_KIND_DELEGATION => {
+            let task = resolve_source_task(conn, SQL_SOURCE_DELEGATION_TASK, id, "delegation")?;
+            Ok(UndeliveredSource::TaskRecord {
+                task,
+                fact: TaskFact::Delegation(raw),
+            })
+        }
         SOURCE_KIND_ACTION_ATTEMPT => {
             let certainty = ActionCertaintyWire::from_name(phase)
                 .ok_or_else(|| String::from("unknown action certainty source phase"))?;
+            let task = resolve_source_task(conn, SQL_SOURCE_ATTEMPT_TASK, id, "action attempt")?;
             Ok(UndeliveredSource::TaskRecord {
-                task: raw,
+                task,
                 fact: TaskFact::ActionAttempt {
                     attempt: raw,
                     certainty,
                 },
             })
         }
-        SOURCE_KIND_RESULT_RECORDED => Ok(UndeliveredSource::TaskRecord {
-            task: raw,
-            fact: TaskFact::ResultRecorded(raw),
-        }),
-        SOURCE_KIND_RESULT_ADOPTED => Ok(UndeliveredSource::TaskRecord {
-            task: raw,
-            fact: TaskFact::ResultAdopted(raw),
-        }),
+        SOURCE_KIND_RESULT_RECORDED => {
+            let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "recorded result")?;
+            Ok(UndeliveredSource::TaskRecord {
+                task,
+                fact: TaskFact::ResultRecorded(raw),
+            })
+        }
+        SOURCE_KIND_RESULT_ADOPTED => {
+            let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "adopted result")?;
+            Ok(UndeliveredSource::TaskRecord {
+                task,
+                fact: TaskFact::ResultAdopted(raw),
+            })
+        }
         SOURCE_KIND_TERMINAL => {
             let progress = TerminalKindWire::from_name(phase)
                 .ok_or_else(|| String::from("unknown terminal source phase"))?;

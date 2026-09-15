@@ -15,6 +15,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ene_action::{
+    ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, ActionStartOutcome,
+    AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds, OperationKind, RealTargetRef,
+};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
@@ -28,18 +32,20 @@ use ene_api::v1::undelivered::{
 };
 use ene_companion::{
     AppendHistoryCommand, CompanionId, CompanionRepository as _, HistoryRepository as _,
-    HistoryRole, ReportStatus, UndeliveredRef, UndeliveredRepository as _,
+    HistoryRole, ReportStatus, UndeliveredRef, UndeliveredRepository as _, UndeliveredSource,
 };
 use ene_inference::fake::{FakeFailure, FakeProviderTransport};
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
     PresenceAttribution, PresenceGeneration, PresenceRepository as _, PresenceState,
 };
-use ene_primitive::{RawId, WallClockWithTz};
+use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, DelegationId, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
-    TaskCreationPremise, TaskId, TaskPurpose, TaskRef, TaskRepository as _,
-    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
+    AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
+    DelegationScope, TaskAgentEphemeralId, TaskContextEntryId, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskPurpose, TaskRef, TaskRepository as _,
+    TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId, WorkspaceAssociationPremise,
+    WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
 };
 
 use crate::serve::{FrameSink, HostHandle, LiveInput};
@@ -1775,4 +1781,246 @@ async fn frame_too_large_withholds_without_mutation() {
         1,
         "the row presents once the cap allows"
     );
+}
+
+/// Seeds one Task with a caller-known workspace association, returning both,
+/// so delegation and attempt premises can name the association.
+async fn seed_task_with_assoc(handle: &HostHandle) -> (TaskRef, WorkspaceAssocId) {
+    let companion = companion_of(handle).await;
+    let assoc = WorkspaceAssocId::generate();
+    let created = handle
+        .store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: String::from("read the input and write the report"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: WallClockWithTz::now(),
+            assignee: AssigneeRef {
+                companion: companion.as_raw(),
+            },
+            workspace: Some(WorkspaceAssociationPremise {
+                assoc,
+                need: WorkspaceNeedRef {
+                    folder: WorkspaceFolderRef {
+                        path: String::from("/tmp/ene-test-workspace"),
+                    },
+                    save_target: None,
+                },
+            }),
+        })
+        .await
+        .expect("task creation commits");
+    (created, assoc)
+}
+
+/// Delegation, attempt, and result notifications resolve to their owning Task
+/// at read time, so the presented summary attaches the Task report for every
+/// fact kind — never a fabricated identity that misses.
+#[tokio::test]
+async fn task_fact_notifications_attach_their_task_report() {
+    let (handle, _dir) = open_handle("present-report-attach").await;
+    let live_a = live_input(DEVICE_A);
+    let _fresh = attach(&handle, DEVICE_A).await;
+    let (task, assoc) = seed_task_with_assoc(&handle).await;
+    // Present the creation revision first, so the next page carries only the
+    // delegation, attempt, and result notifications.
+    let first = summary_of(fetch(&handle, &live_a, None, None, false).await);
+    assert!(!first.items.is_empty(), "the revision must display");
+    let applied = ack(
+        &handle,
+        &live_a,
+        &first.receipt.0,
+        first.round.clone(),
+        first.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(applied, UndeliveredAckOutcome::Presented { .. }),
+        "got {applied:?}"
+    );
+
+    let delegation = DelegationId::generate();
+    let outcome = handle
+        .store
+        .create_delegation(DelegationCreationPremise {
+            delegation,
+            task,
+            agent: TaskAgentEphemeralId::generate(),
+            scope_copy: DelegationScope {
+                workspace: Some(DelegatedWorkspace {
+                    assoc,
+                    folder: WorkspaceFolderRef {
+                        path: String::from("/tmp/ene-test-workspace"),
+                    },
+                    save_target: None,
+                }),
+            },
+        })
+        .await
+        .expect("the delegation must commit");
+    assert!(
+        matches!(outcome, DelegationOutcome::Delegated(_)),
+        "got {outcome:?}"
+    );
+    let attempt = ActionAttemptId::generate();
+    let started = handle
+        .store
+        .insert_attempt_if_current(AttemptCommitPremise {
+            attempt,
+            delegation: delegation.as_raw(),
+            task: task.task.as_raw(),
+            task_revision: RevisionInner::from_u64(task.revision.as_u64()),
+            workspace: assoc.as_raw(),
+            real_target: RealTargetRef::from_canonical_path(String::from(
+                "/tmp/ene-test-workspace/input.txt",
+            )),
+            operation: OperationKind::Create,
+            relied_evaluation: RawId::new(),
+        })
+        .await
+        .expect("the attempt must start");
+    assert_eq!(started, ActionStartOutcome::Started);
+    let settled = handle
+        .store
+        .compare_and_set_certainty(
+            attempt,
+            ActionCertainty::Unknown,
+            ActionCertainty::ConfirmedSuccess,
+            EffectGrounds::ObservedAtTarget,
+        )
+        .await
+        .expect("the certainty CAS must answer");
+    assert_eq!(settled, CertaintyUpdateOutcome::Updated);
+    let arrival = orchestrate_result_arrival(
+        &handle.store,
+        delegation,
+        ene_task::TaskAgentOutput::new(String::from("done")),
+    )
+    .await
+    .expect("the arrival must record");
+    let acceptance = handle
+        .store
+        .adopt_result(TaskResultAdoptionClaim {
+            result: arrival.result,
+            attempt_refs: vec![attempt.as_raw()],
+        })
+        .await
+        .expect("adoption must answer");
+    assert!(
+        matches!(acceptance, TaskResultAcceptance::AdoptedAsCompletion(_)),
+        "got {acceptance:?}"
+    );
+
+    // Five notifications past the acknowledged revision: the delegation, the
+    // attempt at two certainties, and the recorded plus adopted result. Every
+    // one resolves to the same owning Task, so exactly one headline attaches.
+    let next = summary_of(fetch(&handle, &live_a, None, None, false).await);
+    assert_eq!(
+        next.items.len(),
+        5,
+        "delegation plus two attempt phases plus recorded plus adopted, got {}",
+        next.items.len()
+    );
+    assert_eq!(
+        next.reports.len(),
+        1,
+        "every fact kind attaches the same Task report, got {:?}",
+        next.reports.len()
+    );
+    assert_eq!(next.reports[0].revision, 1);
+    assert_eq!(next.reports[0].progress, "completed");
+}
+
+/// A lost presentation-start compare keeps the row for the next pass and
+/// keeps it out of the receipt selection: the same receipt re-displays only
+/// marked rows, the failed row re-presents on the next pass, and its ACK
+/// never claims a presentation that did not happen.
+#[tokio::test]
+async fn failed_mark_stays_unselected_and_represents() {
+    let (handle, dir) = open_handle("present-failed-mark").await;
+    let live_a = live_input(DEVICE_A);
+    let fresh = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "row one", fresh.generation).await;
+    append_reply(&handle, "row two", fresh.generation).await;
+    let companion = companion_of(&handle).await;
+    let listed = handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read");
+    assert_eq!(listed.entries.len(), 2);
+    let second_message = match listed.entries[1].source {
+        UndeliveredSource::HistoryMessage(message) => message.as_uuid().as_hyphenated().to_string(),
+        ref other => panic!("replies list as history, got {other:?}"),
+    };
+    // Refuse only the second row's presentation-start update: its compare
+    // fails while the first row still marks.
+    rusqlite::Connection::open(dir.path().join("app.db"))
+        .expect("the store file must open")
+        .execute_batch(&format!(
+            "CREATE TRIGGER refuse_second BEFORE UPDATE ON undelivered WHEN NEW.source_id = '{second_message}' BEGIN SELECT RAISE(ABORT, 'test refusal'); END;"
+        ))
+        .expect("the refusal trigger must install");
+    let shown = summary_of(fetch(&handle, &live_a, None, None, false).await);
+    assert_eq!(shown.items.len(), 2, "nothing is lost on a failed mark");
+    // The same receipt re-displays only its selection: the failed row is not
+    // part of it.
+    let again = summary_of(fetch(&handle, &live_a, None, None, false).await);
+    assert_eq!(
+        again.receipt, shown.receipt,
+        "no ACK means the same receipt"
+    );
+    assert_eq!(
+        again.items.len(),
+        1,
+        "only marked rows re-display, got {}",
+        again.items.len()
+    );
+    assert_eq!(again.items[0].excerpt, "row one");
+    rusqlite::Connection::open(dir.path().join("app.db"))
+        .expect("the store file must open")
+        .execute_batch("DROP TRIGGER refuse_second")
+        .expect("the refusal trigger must drop");
+    // The ACK presents exactly the selected row: it never claims the failed
+    // one.
+    let outcome = ack(
+        &handle,
+        &live_a,
+        &shown.receipt.0,
+        shown.round.clone(),
+        shown.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(outcome, UndeliveredAckOutcome::Presented { presented: 1 }),
+        "got {outcome:?}"
+    );
+    // The failed row is still pending, so the next pass re-presents it — and
+    // presenting it then drains the backlog.
+    let live_b = live_input(DEVICE_A);
+    let represented = summary_of(fetch(&handle, &live_b, None, None, false).await);
+    assert_eq!(represented.items.len(), 1);
+    assert_eq!(represented.items[0].excerpt, "row two");
+    let outcome = ack(
+        &handle,
+        &live_b,
+        &represented.receipt.0,
+        represented.round.clone(),
+        represented.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(outcome, UndeliveredAckOutcome::Presented { presented: 1 }),
+        "got {outcome:?}"
+    );
+    assert!(unpresented_statuses(&handle).await.is_empty());
 }

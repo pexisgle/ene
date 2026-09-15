@@ -728,8 +728,8 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
         .expect("reconnect must succeed");
     let page = list_tasks(&mut client).await.expect("list must read");
     assert_eq!(page.tasks.len(), 1, "one task must list");
-    assert!(
-        page.tasks[0].progress.contains("progress"),
+    assert_eq!(
+        page.tasks[0].progress, "in_progress",
         "task must run, got {:?}",
         page.tasks[0].progress
     );
@@ -1052,12 +1052,19 @@ async fn s5_05_old_close_never_clears_new_current_both_orders() {
         .await
         .expect("order-B second auth must succeed");
     drop(c1);
-    // Observation wait only: the order is fixed above (auth before close);
-    // this lets the server-side close land before the end-state check.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let (_round_b2, stream_b2, chat_b) = send_round(&mut c2, "hi again")
-        .await
-        .expect("order-B current must survive the old close");
+    // The order is fixed above (auth before close); the end-state round
+    // itself is the event gate — it retries to a deadline instead of
+    // sleeping a fixed window for the server-side close to land.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let (_round_b2, stream_b2, chat_b) = loop {
+        match send_round(&mut c2, "hi again").await {
+            Ok(done) => break done,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("order-B current must survive the old close: {error}"),
+        }
+    };
     assert_eq!(chat_b, "hi-b2");
     confirm_round(&mut c2, &_round_b2, stream_b2).await;
     server_b.abort();
@@ -1939,7 +1946,6 @@ async fn s5_16_explicit_resume_mints_r_plus_1_once_per_path() {
     let page = wait_task_progress(&mut c2, "completed", 1)
         .await
         .expect("resumed task must complete");
-    assert_eq!(page.tasks[0].revision, 2, "resume mints r+1");
     assert_eq!(page.tasks[0].revision, 2, "resume mints r+1");
     let (identity, revision) = page.tasks[0]
         .purpose
