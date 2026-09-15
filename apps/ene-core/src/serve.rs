@@ -1323,14 +1323,14 @@ impl HostHandle {
     /// Observes a socket close for `client_ref` and clears presence when owned.
     ///
     /// Async fallback path: the serving close admission is
-    /// [`HostHandle::close_connection`], which decides currentness inside the
+    /// `HostHandle::close_connection`, which decides currentness inside the
     /// connection-table section and commits through the synchronous store
     /// primitives. This form is for callers without a table section; it
     /// passes an empty snapshot — the connection layer's cross-device
     /// currentness lives behind [`crate::conn`], not here — so the fallback
     /// deterministically answers `NoActive`, never a guessed client.
     /// Callers holding a table-derived snapshot use
-    /// [`HostHandle::note_disconnect_with`] instead.
+    /// `HostHandle::note_disconnect_with` instead.
     pub async fn note_disconnect(&self, client_ref: &str) {
         self.note_disconnect_with(client_ref, &|| Vec::new()).await;
     }
