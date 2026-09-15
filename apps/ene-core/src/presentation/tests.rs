@@ -116,7 +116,12 @@ async fn attach(handle: &HostHandle, device: &str) -> PresenceAttribution {
         current.state
     );
     match handle
-        .attach_presence(device, true, current.generation)
+        .attach_presence(
+            device,
+            true,
+            ene_presence::PresenceState::NoActive,
+            current.generation,
+        )
         .await
     {
         crate::dialogue::AttachOutcome::Attached(fresh) => fresh,
