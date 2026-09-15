@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 25;
+const CURRENT_VERSION: i64 = 26;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -15,6 +15,17 @@ relied_evaluation TEXT NOT NULL UNIQUE,
 certainty TEXT NOT NULL,
 grounds TEXT NULL,
 started_at TEXT NOT NULL
+);
+CREATE TABLE activity_record (
+activity_id TEXT PRIMARY KEY,
+companion_id TEXT NOT NULL,
+kind TEXT NOT NULL,
+task_id TEXT NULL,
+task_revision INTEGER NULL,
+purpose_adopted_revision INTEGER NULL,
+body TEXT NOT NULL,
+created_at TEXT NOT NULL,
+command_id TEXT NULL UNIQUE
 );
 CREATE TABLE companion (
 companion_id TEXT PRIMARY KEY,
@@ -329,7 +340,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 26] {
+        for version in [-1, 0, 1, 23, 24, 25, 27] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(
