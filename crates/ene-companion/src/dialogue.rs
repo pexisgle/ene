@@ -654,7 +654,7 @@ pub const DIALOGUE_CONTEXT_MESSAGES: u64 = 8;
 /// Memories offered to one dialogue prompt.
 pub const DIALOGUE_RECALL_LIMIT: usize = 6;
 
-const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions. If the owner asks for file work as a task, asks about task progress or results, changes a task's instructions, or cancels a task, reply with exactly one task-control line as the very first non-empty line and nothing else (no other prose): the line starts with [task-control] followed by one JSON object with exactly these fields: {\"kind\":\"propose_task\",\"purpose\":\"<summary of the work>\"} to start a task; {\"kind\":\"report\"} to ask about the current task; {\"kind\":\"steer\",\"instruction\":\"<instruction>\",\"purpose\":null} to change it; or {\"kind\":\"cancel\"} to cancel it. Never emit any other field, and never add a task-control line to ordinary conversation.";
+const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions. If the owner asks for file work as a task, asks about task progress or results, changes a task's instructions, resumes an interrupted task, or cancels a task, reply with exactly one task-control line as the very first non-empty line and nothing else (no other prose): the line starts with [task-control] followed by one JSON object with exactly these fields: {\"kind\":\"propose_task\",\"purpose\":\"<summary of the work>\"} to start a task; {\"kind\":\"report\"} to ask about the current task; {\"kind\":\"steer\",\"instruction\":\"<instruction>\",\"purpose\":null} to change it; {\"kind\":\"resume\"} to resume the current interrupted task; or {\"kind\":\"cancel\"} to cancel it. Never emit any other field, and never add a task-control line to ordinary conversation.";
 
 /// Prompt layout pieces shared by the budget check and the assembly, so the
 /// pre-acceptance check and the built prompt cannot drift apart.
@@ -1090,6 +1090,12 @@ pub enum DialogueTaskCommand {
     },
     /// Request cancel of the current Task.
     Cancel,
+    /// Request an explicit resume of the current Task. The command carries
+    /// no fields: the Host composes the Task, the premise, and the Owner
+    /// instruction reference from its own durable state, so a model output
+    /// can never name a Task, revision, purpose, or body. A missing or
+    /// ambiguous target is answered with a clarification, never executed.
+    Resume,
 }
 
 impl core::fmt::Debug for DialogueTaskCommand {
@@ -1111,6 +1117,7 @@ impl core::fmt::Debug for DialogueTaskCommand {
                 .field("purpose", &purpose.as_ref().map(|_| "[redacted]"))
                 .finish(),
             Self::Cancel => formatter.write_str("Cancel"),
+            Self::Resume => formatter.write_str("Resume"),
         }
     }
 }
@@ -1179,7 +1186,11 @@ fn parse_task_command(body: &str) -> Option<DialogueTaskCommand> {
     let command: DialogueTaskCommand = serde_json::from_value(value).ok()?;
     match &command {
         // Serde accepts extra fields on internally tagged unit variants.
-        DialogueTaskCommand::Report | DialogueTaskCommand::Cancel if fields != 1 => None,
+        DialogueTaskCommand::Report | DialogueTaskCommand::Cancel | DialogueTaskCommand::Resume
+            if fields != 1 =>
+        {
+            None
+        }
         DialogueTaskCommand::ProposeTask { purpose } if purpose.trim().is_empty() => None,
         DialogueTaskCommand::Steer { instruction, .. } if instruction.trim().is_empty() => None,
         _ => Some(command),
@@ -1534,6 +1545,10 @@ mod task_control_tests {
             command("[task-control] {\"kind\":\"cancel\"}"),
             DialogueTaskCommand::Cancel
         );
+        assert_eq!(
+            command("[task-control] {\"kind\":\"resume\"}"),
+            DialogueTaskCommand::Resume
+        );
         // Leading blank lines are allowed; the first non-empty line is the
         // directive.
         assert_eq!(
@@ -1550,6 +1565,7 @@ mod task_control_tests {
             "[task-control] {\"kind\":\"report\",\"extra\":1}",
             "[task-control] {\"kind\":\"steer\",\"instruction\":\"add\",\"purpose\":null,\"workspace\":\"/etc\"}",
             "[task-control] {\"kind\":\"cancel\",\"reason\":\"because\"}",
+            "[task-control] {\"kind\":\"resume\",\"task\":\"other\"}",
         ] {
             assert!(
                 matches!(

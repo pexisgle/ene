@@ -33,6 +33,7 @@ pub mod dialogue;
 use ene_credential::CredentialSetRevision;
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{TaskPurposeRef, TaskRef};
 
 /// Wraps a [`RawId`]; never converted to any other domain newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -822,6 +823,124 @@ pub trait UndeliveredRepository {
         cursor: Option<UndeliveredCursor>,
         limit: u32,
     ) -> Result<UndeliveredPage, UndeliveredTechnicalError>;
+}
+
+/// Durable identity of one first-party management activity record, minted by
+/// the companion owner.
+///
+/// Opaque over [`RawId`]. The store's row order is a storage order only and
+/// is never this identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActivityId(RawId);
+
+impl ActivityId {
+    #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub fn as_raw(self) -> RawId {
+        self.0
+    }
+
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(RawId::new())
+    }
+}
+
+/// One recorded first-party Owner management input (H-A.1 resume source).
+///
+/// The body is the Owner's resume instruction text and stays canonical in
+/// this record: Task state carries only the reference, never a copy. Text
+/// is redacted from [`core::fmt::Debug`]; refs stay visible.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ManagementActivity {
+    pub id: ActivityId,
+    pub companion: CompanionId,
+    /// The explicitly selected Task and revision the instruction continues.
+    pub task: TaskRef,
+    /// The purpose identity in force at selection.
+    pub purpose: TaskPurposeRef,
+    /// The resume instruction body.
+    pub body: String,
+    /// When the record was accepted.
+    pub created_at: WallClockWithTz,
+}
+
+impl core::fmt::Debug for ManagementActivity {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ManagementActivity")
+            .field("id", &self.id)
+            .field("companion", &self.companion)
+            .field("task", &self.task)
+            .field("purpose", &self.purpose)
+            .field("body", &"[redacted]")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+/// Records one resume instruction activity from the first-party management
+/// inlet.
+///
+/// `command` is the idempotency key of the recording epoch (the management
+/// intent id): the same key returns the same activity without recording
+/// again, and a retry never mints a second record.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecordResumeActivityCommand {
+    pub companion: CompanionId,
+    pub task: TaskRef,
+    pub purpose: TaskPurposeRef,
+    /// The Owner's resume instruction body. Redacted from [`core::fmt::Debug`].
+    pub body: String,
+    /// Idempotency key of the recording epoch.
+    pub command: RawId,
+}
+
+impl core::fmt::Debug for RecordResumeActivityCommand {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RecordResumeActivityCommand")
+            .field("companion", &self.companion)
+            .field("task", &self.task)
+            .field("purpose", &self.purpose)
+            .field("body", &"[redacted]")
+            .field("command", &self.command)
+            .finish()
+    }
+}
+
+/// First-party management activity contract (owner: companion).
+///
+/// The single-record bounded read ([`Self::load_activity`]) is what the
+/// Task-owned instruction-source port resolves an `OwnerManagement` origin
+/// against; timeline loads and command lookups are not a substitute.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait ActivityRepository {
+    /// Records one resume instruction activity, idempotent by `command`.
+    ///
+    /// The same command key returns the recorded activity identity without
+    /// writing again; a key that already names different content fails
+    /// closed instead of being reinterpreted.
+    async fn record_resume_activity(
+        &self,
+        cmd: RecordResumeActivityCommand,
+    ) -> Result<ActivityId, CompanionTechnicalError>;
+
+    /// Loads one activity record by its primary key.
+    ///
+    /// [`None`] reports absence; a malformed durable row is a technical
+    /// error, never a composed substitute.
+    async fn load_activity(
+        &self,
+        activity: ActivityId,
+    ) -> Result<Option<ManagementActivity>, CompanionTechnicalError>;
 }
 
 #[cfg(test)]

@@ -151,6 +151,13 @@ pub enum ManagementIntentKind {
     StopCompanion,
     DeleteCompanion,
     CancelTask,
+    /// Resume one interrupted Task explicitly (H-A.1 / AU17). The target is
+    /// `task:{task-id}` and the rationale quote carries the Owner's resume
+    /// instruction body; the Host records the first-party activity, composes
+    /// the premise from durable state, and runs the same owner gate as the
+    /// conversation path. No presence or provider success is required, and
+    /// an offline opener never starts a runner.
+    ResumeTask,
     /// Select the Owner-confirmed Workspace folder for Task work. This is the
     /// trusted first-party premise a Task association may use; provider
     /// output never carries one.
