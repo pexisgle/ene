@@ -221,8 +221,7 @@ pub struct ListTasks {
 }
 
 /// One Task list entry: stored lifecycle plus the current in-memory
-/// execution-registration flag, kept separate. `purpose` is the opaque
-/// purpose identity (`{task}:{revision}`) the premise echo carries.
+/// execution-registration flag, kept separate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskListItem {
     pub task: TaskWireRef,
@@ -231,6 +230,10 @@ pub struct TaskListItem {
     /// Whether this Host process currently holds a launch reservation or a
     /// running registration for the Task. Never durability, never a start.
     pub running: bool,
+    /// Opaque purpose identity (`{task}:{adopted_revision}`): the revision
+    /// that adopted the purpose in force, which is not necessarily
+    /// [`Self::revision`] after a purpose-preserving steering or resume.
+    /// Echo it back in a resume premise as-is.
     pub purpose: String,
 }
 
@@ -278,7 +281,10 @@ pub struct TaskReportPage {
     pub task: TaskWireRef,
     pub revision: u64,
     pub progress: String,
+    /// Opaque purpose identity (`{task}:{adopted_revision}`), as in
+    /// [`TaskListItem::purpose`].
     pub purpose: String,
+    /// Bounded body source of the adopting revision's purpose text.
     pub purpose_source: ReportSourceWireRef,
     pub rows: Vec<TaskReportRowView>,
     pub next_cursor: Option<PageCursorWire>,
@@ -346,6 +352,8 @@ pub struct TaskSelected {
     pub task: TaskWireRef,
     pub revision: u64,
     pub progress: String,
+    /// Opaque purpose identity (`{task}:{adopted_revision}`), as in
+    /// [`TaskListItem::purpose`].
     pub purpose: String,
     pub details_available: bool,
 }
@@ -366,7 +374,9 @@ pub enum SelectTaskResponse {
 pub struct ResumeTask {
     pub task: TaskWireRef,
     pub expected_revision: u64,
-    /// Opaque purpose identity echoed from selection or listing.
+    /// Opaque purpose identity echoed from selection or listing:
+    /// `{task}:{adopted_revision}`, the stored adopting revision, never the
+    /// current Task revision.
     pub expected_purpose: String,
     /// The new Owner instruction body. Redacted from [`core::fmt::Debug`].
     pub instruction: String,
