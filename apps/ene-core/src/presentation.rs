@@ -1050,7 +1050,11 @@ impl HostHandle {
 
     /// Test-only: pin the receipt ACK deadline so expiry-driven advance is
     /// deterministic without waiting the production 30 s.
-    #[cfg(test)]
+    ///
+    /// Unix-gated with the socket-loop subscription tests that use it; the
+    /// Windows lib test build would otherwise see it as dead code under the
+    /// warnings-as-errors configuration.
+    #[cfg(all(test, unix))]
     pub(crate) fn set_receipt_ttl_for_test(&self, ttl: Duration) {
         crate::lock_unpoison(&self.presentations).receipt_ttl = ttl;
     }
