@@ -92,6 +92,6 @@ pub(crate) fn live_input(client_ref: &str) -> LiveInput {
     let id = table.note_accept();
     authenticate(&table, &id, client_ref);
     table
-        .test_live(&id)
+        .snapshot(&id)
         .expect("the authenticated connection must snapshot")
 }

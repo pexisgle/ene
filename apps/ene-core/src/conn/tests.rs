@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
+)]
+
 use std::sync::{Arc, Mutex};
 
 use super::{
@@ -693,4 +700,296 @@ async fn paired_connection_drops_a_frame_without_a_device_claim() {
         "a paired connection must close without answering a claim-less frame, got {closed:?}"
     );
     assert!(worker.await.is_ok(), "the connection task must finish");
+}
+
+/// Builds one authenticated domain frame for the socket-loop tests: the
+/// envelope claims the bound device and echoes the connection id.
+fn domain_frame(
+    incarnation: ClientIncarnationId,
+    device: DeviceWireId,
+    connection: ConnectionWireId,
+    payload: ene_api::v1::payload::WirePayload,
+) -> super::WireFrame {
+    let mut envelope = paired_envelope(incarnation, device);
+    envelope.sender.connection_id = Some(connection);
+    envelope.message_type = WireMessageType(payload.message_type().to_string());
+    super::WireFrame { envelope, payload }
+}
+
+async fn read_domain(
+    stream: &mut tokio::net::UnixStream,
+) -> Option<ene_api::v1::payload::WirePayload> {
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt as _;
+
+    let timed = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut prefix = [0_u8; 4];
+        stream.read_exact(&mut prefix).await.ok()?;
+        let claimed = u32::from_be_bytes(prefix) as usize;
+        if claimed > 256 * 1024 {
+            return None;
+        }
+        let mut body = vec![0_u8; claimed];
+        stream.read_exact(&mut body).await.ok()?;
+        let mut bytes = prefix.to_vec();
+        bytes.extend_from_slice(&body);
+        let (frame, _) = ene_plugin_ipc::decode_frame(&bytes).ok()?;
+        Some(frame.payload)
+    })
+    .await;
+    timed.ok().flatten()
+}
+
+async fn write_domain(stream: &mut tokio::net::UnixStream, frame: &super::WireFrame) -> bool {
+    use tokio::io::AsyncWriteExt as _;
+
+    let Ok(bytes) = ene_plugin_ipc::encode_frame(frame) else {
+        return false;
+    };
+    stream.write_all(&bytes).await.is_ok()
+}
+
+/// Drives the fixture companion to `Present` for `device`.
+async fn attach_present(handle: &crate::serve::HostHandle, device: &str) {
+    use ene_companion::CompanionRepository as _;
+    use ene_presence::PresenceRepository as _;
+
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must ensure");
+    let current = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("the attribution must load")
+        .expect("the attribution must exist");
+    let outcome = handle
+        .attach_presence(device, true, current.generation)
+        .await;
+    assert!(
+        matches!(outcome, crate::dialogue::AttachOutcome::Attached(_)),
+        "the fresh presence must attach"
+    );
+}
+
+/// Commits one reply with its undelivered registration.
+async fn append_registered(
+    handle: &crate::serve::HostHandle,
+    text: &str,
+) -> ene_companion::UndeliveredRef {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_presence::PresenceRepository as _;
+
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must ensure");
+    let current = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("the attribution must load")
+        .expect("the attribution must exist");
+    let (outcome, registered) = handle
+        .store
+        .append_reply_with_undelivered(
+            ene_companion::AppendHistoryCommand {
+                companion,
+                round: ene_primitive::RawId::new(),
+                role: ene_companion::HistoryRole::Companion,
+                text: text.to_string(),
+                lang: String::from("en"),
+                at: ene_primitive::WallClockWithTz::now(),
+                expected_generation: current.generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                expected_owner_message: None,
+                command_id: None,
+                round_wire: Some(uuid::Uuid::new_v4().as_hyphenated().to_string()),
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            },
+            true,
+        )
+        .await
+        .expect("the append must commit");
+    assert!(matches!(
+        outcome,
+        ene_companion::HistoryAppendOutcome::CommittedAs { .. }
+    ));
+    registered.expect("the registration must ride the commit")
+}
+
+/// One subscription drain request under the connection's identity.
+fn undelivered_request(
+    incarnation: ClientIncarnationId,
+    device: DeviceWireId,
+    connection: ConnectionWireId,
+    limit: Option<u32>,
+) -> super::WireFrame {
+    domain_frame(
+        incarnation,
+        device,
+        connection,
+        ene_api::v1::payload::WirePayload::UndeliveredRequest(
+            ene_api::v1::undelivered::UndeliveredRequest {
+                companion: None,
+                cursor: None,
+                limit,
+                redisplay: false,
+            },
+        ),
+    )
+}
+
+fn summary_of(
+    payload: ene_api::v1::payload::WirePayload,
+) -> ene_api::v1::undelivered::UndeliveredSummary {
+    match payload {
+        ene_api::v1::payload::WirePayload::UndeliveredResponse(
+            ene_api::v1::undelivered::UndeliveredResponse::Summary(summary),
+        ) => summary,
+        other => panic!("expected a pushed summary, got {other:?}"),
+    }
+}
+
+/// S5 subscription: a new durable arrival is pushed to an idle connection
+/// without the Client sending another request.
+#[tokio::test]
+async fn subscription_pushes_a_new_arrival_without_a_request() {
+    use crate::test_support::{authenticate, memory_handle_with};
+
+    let (handle, _dir) = memory_handle_with("push-arrival", |_| {}).await.unwrap();
+    let handle = Arc::new(handle);
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
+    attach_present(&handle, &device_wire).await;
+
+    let table = Arc::new(ConnectionTable::new());
+    let id = table.note_accept();
+    authenticate(&table, &id, &device_wire);
+
+    let pair = tokio::net::UnixStream::pair().unwrap();
+    let (mut client, server) = pair;
+    let worker = tokio::spawn(super::serve_connection(
+        server,
+        id,
+        Arc::clone(&handle),
+        Arc::new(ene_inference::fake::FakeProviderTransport::new(
+            String::new(),
+            None,
+        )),
+        Arc::clone(&table),
+    ));
+
+    // Drain the (empty) backlog: this is the only request the Client sends.
+    assert!(
+        write_domain(
+            &mut client,
+            &undelivered_request(incarnation(5, 6), device, id, None)
+        )
+        .await
+    );
+    let _drain = summary_of(
+        read_domain(&mut client)
+            .await
+            .expect("the drain must answer"),
+    );
+
+    // A new durable fact commits after the drain; no request follows.
+    append_registered(&handle, "pushed arrival").await;
+
+    let pushed = summary_of(
+        read_domain(&mut client)
+            .await
+            .expect("the arrival must push"),
+    );
+    assert_eq!(pushed.items.len(), 1, "exactly the new arrival is pushed");
+    assert_eq!(pushed.items[0].excerpt, "pushed arrival");
+    assert!(!pushed.receipt.0.is_empty(), "the push carries its receipt");
+    worker.abort();
+}
+
+/// S5 receipt timeout: without an ACK and without another Client request, the
+/// subscription releases the expired receipt and advances to the next page.
+#[tokio::test]
+async fn subscription_advances_on_receipt_timeout_without_a_request() {
+    use crate::test_support::{authenticate, memory_handle_with};
+    use ene_companion::{CompanionRepository as _, UndeliveredRepository as _};
+
+    let (handle, _dir) = memory_handle_with("push-timeout", |_| {}).await.unwrap();
+    let handle = Arc::new(handle);
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
+    attach_present(&handle, &device_wire).await;
+    append_registered(&handle, "timeout row one").await;
+    append_registered(&handle, "timeout row two").await;
+    handle.set_receipt_ttl_for_test(std::time::Duration::from_millis(150));
+
+    let table = Arc::new(ConnectionTable::new());
+    let id = table.note_accept();
+    authenticate(&table, &id, &device_wire);
+
+    let pair = tokio::net::UnixStream::pair().unwrap();
+    let (mut client, server) = pair;
+    let worker = tokio::spawn(super::serve_connection(
+        server,
+        id,
+        Arc::clone(&handle),
+        Arc::new(ene_inference::fake::FakeProviderTransport::new(
+            String::new(),
+            None,
+        )),
+        Arc::clone(&table),
+    ));
+
+    // One request with a page bound of one: the pass continues with a
+    // cursor, and no ACK will follow.
+    assert!(
+        write_domain(
+            &mut client,
+            &undelivered_request(incarnation(5, 7), device, id, Some(1))
+        )
+        .await
+    );
+    let first = summary_of(
+        read_domain(&mut client)
+            .await
+            .expect("the first page must answer"),
+    );
+    assert_eq!(first.items.len(), 1);
+    assert!(first.next_cursor.is_some(), "the pass has a continuation");
+
+    // The receipt expires; the subscription pushes the next page on its own.
+    let second = summary_of(read_domain(&mut client).await.expect("expiry must advance"));
+    assert_ne!(
+        second.receipt, first.receipt,
+        "a new receipt covers the page"
+    );
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(second.items[0].excerpt, "timeout row two");
+
+    // Nothing was falsely presented: both rows stay unpresented (Unknown).
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must ensure");
+    let page = handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read");
+    assert_eq!(page.entries.len(), 2);
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| { entry.status == ene_companion::ReportStatus::PresentationUnknown })
+    );
+    worker.abort();
 }

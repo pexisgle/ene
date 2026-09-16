@@ -17,8 +17,12 @@ use ene_api::v1::refs::{
 };
 use ene_api::v1::refs::{ClientLocalId, CommandWireId, CompanionWireRef, TextLangWire};
 use ene_api::v1::reject::RejectKind;
-use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
-use ene_companion::CompanionRepository as _;
+use ene_api::v1::round::{HistoryRequest, PresentationStatus, SubmitTextInput, TextBodyWire};
+use ene_api::v1::undelivered::{
+    GetReportSource, GetTaskReport, ListTasks, PresentationReceiptWireRef, ReportSourceWireRef,
+    ResumeTask, SelectTask, TaskWireRef, UndeliveredAck, UndeliveredRequest,
+};
+use ene_companion::{CompanionRepository as _, UndeliveredRepository as _};
 use ene_credential::pairing_proof_hex;
 use ene_inference::fake::FakeProviderTransport;
 use ene_presence::{
@@ -54,7 +58,7 @@ fn fresh_conn() -> (Arc<ConnectionTable>, ConnectionWireId) {
 
 /// The current premises of a table-backed connection.
 fn live_of(table: &Arc<ConnectionTable>, id: &ConnectionWireId) -> LiveInput {
-    table.test_live(id).expect("the connection must exist")
+    table.snapshot(id).expect("the connection must exist")
 }
 
 /// Drives a connection to authenticated-and-current for `device_wire`.
@@ -2423,4 +2427,168 @@ async fn management_cancel_reaches_the_cancel_admission_and_replays() {
         panic!("the completed intent must answer an outcome");
     };
     assert_eq!(outcome, &ManagementOutcome::NeedsClarification);
+}
+
+/// Builds one Stage 5 domain frame under `live`, stamped with the
+/// connection binding the premises carry.
+fn stage5_frame(live: &LiveInput, payload: WirePayload) -> super::WireFrame {
+    let mut frame = super::WireFrame {
+        envelope: new_outgoing_envelope(
+            ProtocolVersion::V1,
+            sender(),
+            WireMessageType(payload.message_type().to_string()),
+        ),
+        payload,
+    };
+    frame.envelope.sender.connection_id = Some(live.connection_id);
+    frame.envelope.correlation.command_id = Some(CommandWireId(uuid::Uuid::new_v4()));
+    frame
+}
+
+fn stage5_payloads() -> Vec<(&'static str, WirePayload)> {
+    vec![
+        (
+            "undelivered request",
+            WirePayload::UndeliveredRequest(UndeliveredRequest {
+                companion: None,
+                cursor: None,
+                limit: None,
+                redisplay: false,
+            }),
+        ),
+        (
+            "undelivered ack",
+            WirePayload::UndeliveredAck(UndeliveredAck {
+                receipt: PresentationReceiptWireRef(String::from("receipt")),
+                status: PresentationStatus::Presented,
+            }),
+        ),
+        (
+            "task list",
+            WirePayload::ListTasks(ListTasks {
+                cursor: None,
+                limit: None,
+            }),
+        ),
+        (
+            "task report",
+            WirePayload::GetTaskReport(GetTaskReport {
+                task: TaskWireRef(String::from("task")),
+                cursor: None,
+                limit: None,
+            }),
+        ),
+        (
+            "report source",
+            WirePayload::GetReportSource(GetReportSource {
+                source: ReportSourceWireRef(String::from("source")),
+                cursor: None,
+                limit_bytes: None,
+            }),
+        ),
+        (
+            "task selection",
+            WirePayload::SelectTask(SelectTask {
+                task: TaskWireRef(String::from("task")),
+            }),
+        ),
+        (
+            "resume",
+            WirePayload::ResumeTask(ResumeTask {
+                task: TaskWireRef(String::from("task")),
+                expected_revision: 1,
+                expected_purpose: String::from("purpose"),
+                instruction: String::from("continue"),
+            }),
+        ),
+    ]
+}
+
+/// Stage 5 handlers keep the existing three-way gate semantics (IPC §11.3):
+/// a superseded connection answers a typed `StaleConnection` with the socket
+/// kept open and zero domain effect, while an unauthenticated connection
+/// still gets the terminal unpaired close.
+#[tokio::test]
+async fn stage5_frames_distinguish_superseded_from_unauthenticated() {
+    let (handle, _dir) = open_handle("stage5-gate").await.unwrap();
+    let transport = fake_transport();
+    let device = uuid::Uuid::from_u128(11);
+    let device_wire = device.as_hyphenated().to_string();
+
+    // C1 authenticates, then C2 supersedes it through the real install.
+    let table = Arc::new(ConnectionTable::new());
+    let c1 = table.note_accept();
+    authenticate_conn(&table, &c1, &device_wire);
+    let c2 = table.note_accept();
+    authenticate_conn(&table, &c2, &device_wire);
+    assert_eq!(table.phase_of(&c1), Some(ConnectionPhase::Superseded));
+
+    let stale_live = live_of(&table, &c1);
+    assert!(stale_live.phase.is_superseded());
+    for (what, payload) in stage5_payloads() {
+        let answers = handle
+            .handle_frame(
+                stage5_frame(&stale_live, payload),
+                stale_live.clone(),
+                &transport,
+            )
+            .await;
+        assert_eq!(answers.len(), 1, "{what} answers exactly one frame");
+        assert!(
+            matches!(
+                &answers[0].payload,
+                WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+            ),
+            "a superseded connection's {what} must be a typed stale rejection, got {:?}",
+            answers[0].payload
+        );
+    }
+    // The stale frames changed nothing: C2 is still current, presence stays
+    // untouched, and no round, task, or undelivered row appeared.
+    assert!(table.current_authenticated(&device_wire));
+    assert_eq!(table.phase_of(&c1), Some(ConnectionPhase::Superseded));
+    let (state, active, _) = presence_state(&handle).await;
+    assert_eq!(state, PresenceState::NoActive);
+    assert_eq!(active, None);
+    assert!(
+        handle
+            .open_round_for(&device_wire, handle.companion_wire())
+            .is_none(),
+        "stage 5 frames create no conversation round"
+    );
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must ensure");
+    assert!(
+        handle
+            .store
+            .list_unpresented(companion, None, 50)
+            .await
+            .expect("the listing must read")
+            .entries
+            .is_empty(),
+        "stale frames register nothing undelivered"
+    );
+
+    // An accepted-but-unauthenticated connection keeps the terminal unpaired
+    // close for the same frames.
+    let (fresh_table, unauthed) = fresh_conn();
+    let unpaired_live = live_of(&fresh_table, &unauthed);
+    for (what, payload) in stage5_payloads() {
+        let answers = handle
+            .handle_frame(
+                stage5_frame(&unpaired_live, payload),
+                unpaired_live.clone(),
+                &transport,
+            )
+            .await;
+        assert_eq!(answers.len(), 1, "{what} answers exactly one frame");
+        assert!(
+            matches!(&answers[0].payload, WirePayload::DisconnectNotice(_)),
+            "an unauthenticated {what} must keep the unpaired close, got {:?}",
+            answers[0].payload
+        );
+    }
 }

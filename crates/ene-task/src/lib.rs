@@ -68,6 +68,7 @@ pub use result::{
 pub use resume::{
     ResumeInstructionSource, ResumeTaskCommand, TaskResumeCommitPremise, TaskResumeHold,
     TaskResumeOutcome, TaskResumeReadiness, orchestrate_resume, orchestrate_resume_current,
+    resume_commit_premise, route_available_result,
 };
 pub use task::{
     AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationOutcome,

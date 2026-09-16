@@ -477,7 +477,7 @@ impl ActionAttemptRepository for Store {
         premise: AttemptCommitPremise,
     ) -> Result<ActionStartOutcome, ActionTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || insert_attempt_sync(&conn, premise)).await
+        self.hint_after_commit(run_blocking(move || insert_attempt_sync(&conn, premise)).await)
     }
 
     async fn compare_and_set_certainty(
@@ -488,7 +488,10 @@ impl ActionAttemptRepository for Store {
         grounds: EffectGrounds,
     ) -> Result<CertaintyUpdateOutcome, ActionTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || compare_and_set_sync(&conn, attempt, expected, new, grounds)).await
+        self.hint_after_commit(
+            run_blocking(move || compare_and_set_sync(&conn, attempt, expected, new, grounds))
+                .await,
+        )
     }
 
     async fn load_attempt(

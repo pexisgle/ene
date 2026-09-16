@@ -893,6 +893,12 @@ impl HostHandle {
         let Ok(companion) = self.store.ensure_running_companion().await else {
             return Vec::new();
         };
+        // Serialize with the receipt and subscription transitions: the
+        // connection-owned push moves the same rows Pending→
+        // PresentationUnknown concurrently, and the read-then-compare below
+        // must not tear (a stale expected status would drop the observation
+        // and leave the row Unknown).
+        let _gate = self.presentation_gate().await;
         // The bounded first page is enough for this observation path; the
         // full reconnect backlog subscription belongs to the presentation
         // slice, which re-pages with a cursor.

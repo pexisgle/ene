@@ -10,7 +10,7 @@
 use ene_primitive::RawId;
 
 use crate::result::TaskResultId;
-use crate::task::{TaskId, TaskProgress, TaskRevision};
+use crate::task::{TaskId, TaskProgress, TaskPurposeRef, TaskRevision};
 
 /// Maximum rows one report page returns (IPC §18: query limits are 1..=50).
 pub const REPORT_PAGE_MAX: u32 = 50;
@@ -56,6 +56,10 @@ pub struct PastExecutedFactsPage {
 pub struct TaskHeadline {
     pub task: TaskId,
     pub revision: TaskRevision,
+    /// The purpose identity in force at the current revision: where the
+    /// adopted purpose was first adopted, not the current revision. A
+    /// purpose-preserving revision forward carries this reference over.
+    pub purpose: TaskPurposeRef,
     pub progress: TaskProgress,
     /// The Task's assignee, the companion the work belongs to.
     pub assignee: RawId,

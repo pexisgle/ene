@@ -37,6 +37,7 @@ use ene_action::{
     CertaintyUpdateOutcome, EffectGrounds,
 };
 use ene_companion::CompanionId;
+use ene_companion::RecordResumeActivityCommand;
 use ene_companion::dialogue::{
     DialogueTaskCommand, DialogueTaskControlPort, DialogueTaskControlReply, ProposeSteeringCommand,
     ProposeTaskCommand, TaskReport, TaskReportAttempt, TaskReportCertainty,
@@ -50,11 +51,11 @@ use ene_task::{
     TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance, TaskResumeOutcome,
     TaskResumeReadiness, TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef,
     orchestrate_delegation, orchestrate_resume, orchestrate_resume_current,
-    reevaluate_result_adoption,
+    reevaluate_result_adoption, resume_commit_premise, route_available_result,
 };
 use thiserror::Error;
 
-use crate::serve::HostHandle;
+use crate::serve::{HostHandle, LiveInput};
 
 /// Technical failure of one conversation / first-party Task control call.
 ///
@@ -228,6 +229,49 @@ impl TestTaskControlGate {
     }
 
     /// Releases one paused command.
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+/// Deterministic race gate for one guarded wire resume (CCT §10.4).
+///
+/// Test-only: it pauses the resume after entry validation and launch-scope
+/// acquisition but before the connection-ownership commit section, so a test
+/// can authenticate a newer connection in between and pin that the stale
+/// resume commits nothing.
+#[cfg(test)]
+pub(crate) struct TestResumeGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl Default for TestResumeGate {
+    fn default() -> Self {
+        Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TestResumeGate {
+    /// Pauses until the test releases the gate, marking entry first.
+    pub(crate) async fn pause(&self) {
+        self.entered.add_permits(1);
+        let permit = self.release.acquire().await.expect("gate stays open");
+        permit.forget();
+    }
+
+    /// Waits until a paused resume has entered the gate.
+    pub(crate) async fn wait_entered(&self) {
+        let permit = self.entered.acquire().await.expect("gate is entered");
+        permit.forget();
+    }
+
+    /// Releases one paused resume.
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
@@ -810,6 +854,99 @@ impl HostHandle {
         }
         self.launch_or_release(delegation.delegation);
         Ok(())
+    }
+
+    /// Resumes one Task explicitly with the commit linearized against the
+    /// issuing connection's currentness (CCT §10.4).
+    ///
+    /// The activity record and the AU17 commit run synchronously inside the
+    /// connection table's ownership section: the section verifies that
+    /// `live`'s connection is still its device's current authenticated
+    /// connection and holds until both commits finish, so a newer
+    /// authentication can never interleave between the check and the
+    /// commit. A connection superseded before the section answers [`None`]
+    /// with zero writes, no revision change, no delegation, and no launch;
+    /// a resume that won the section is accepted even if the connection is
+    /// superseded immediately afterwards, and its execution keeps running.
+    ///
+    /// Lock order (CCT §10.4): the launch commit scope (async) is taken
+    /// before the connection table (sync), which is held across the short
+    /// SQLite commits; no path takes the table lock and then awaits the
+    /// commit scope, so the order cannot cycle.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when the store cannot answer; the owner's
+    /// domain outcomes stay on the `Ok` side.
+    pub(crate) async fn resume_task_guarded_by_connection(
+        &self,
+        live: &LiveInput,
+        premise: SteeringPremiseRef,
+        activity: RecordResumeActivityCommand,
+    ) -> Result<Option<TaskResumeOutcome>, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
+        let launch_possible = self.task_launcher().is_some();
+        // Test-only race gate: pause before the connection-ownership
+        // section so a test can authenticate a newer connection and pin
+        // that the stale resume commits nothing.
+        #[cfg(test)]
+        {
+            let gate = crate::lock_unpoison(&self.resume_gate).clone();
+            if let Some(gate) = gate {
+                gate.pause().await;
+            }
+        }
+        let task = premise.expected.task;
+        let store = self.store.clone();
+        let registry = std::sync::Arc::clone(&self.task_executions);
+        let table = std::sync::Arc::clone(&live.authority);
+        let connection = live.connection_id;
+        let joined = tokio::task::spawn_blocking(move || {
+            table.with_current_connection(&connection, || {
+                let activity = store
+                    .record_resume_activity_sync(activity)
+                    .map_err(|error| TaskTechnicalError::StorageUnavailable {
+                        reason: error.to_string(),
+                    })?;
+                let command = ResumeTaskCommand {
+                    premise,
+                    instruction: ResumeInstructionSource::OwnerManagement {
+                        activity: activity.as_raw(),
+                    },
+                };
+                let readiness = TaskResumeReadiness {
+                    permission_available: true,
+                    execution_free: !registry.task_has_reservation_or_running(task),
+                    launch_possible,
+                };
+                let outcome =
+                    store.commit_task_resume_sync(resume_commit_premise(command, readiness))?;
+                if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome
+                    && !registry.reserve(delegation.delegation, delegation.task.task)
+                {
+                    return Err(TaskTechnicalError::StorageUnavailable {
+                        reason: String::from("resume launch reservation lost its race"),
+                    });
+                }
+                Ok(outcome)
+            })
+        })
+        .await;
+        let outcome = match joined {
+            Ok(Some(Ok(outcome))) => outcome,
+            Ok(Some(Err(error))) => return Err(error),
+            // The connection was superseded before the section: nothing was
+            // written, delegated, or launched.
+            Ok(None) => return Ok(None),
+            Err(join) => std::panic::resume_unwind(join.into_panic()),
+        };
+        if let TaskResumeOutcome::ResultAvailable { task } = &outcome {
+            route_available_result(&self.store, *task).await?;
+        }
+        if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome {
+            self.launch_or_release(delegation.delegation);
+        }
+        Ok(Some(outcome))
     }
 
     /// Resumes one Task explicitly from the first-party management inlet

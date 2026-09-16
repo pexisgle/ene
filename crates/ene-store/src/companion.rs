@@ -505,7 +505,9 @@ impl HistoryRepository for Store {
         register_unpresented: bool,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || append_history(&conn, &cmd, register_unpresented)).await
+        self.hint_after_commit(
+            run_blocking(move || append_history(&conn, &cmd, register_unpresented)).await,
+        )
     }
 
     async fn lookup_command(
@@ -1011,80 +1013,109 @@ fn decode_activity_row(
     })
 }
 
+/// Records one resume-instruction activity inside its own short `Immediate`
+/// transaction, synchronously on the caller's thread.
+///
+/// The async [`ActivityRepository`] method wraps this in `run_blocking`; the
+/// Host's connection-ownership resume section (CCT §10.4) calls it directly
+/// while holding the connection table, so the activity and the AU17 commit it
+/// feeds share one supersession boundary.
+fn record_resume_activity_locked(
+    conn: &Mutex<Connection>,
+    cmd: RecordResumeActivityCommand,
+) -> Result<ActivityId, CompanionTechnicalError> {
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| activity_unavailable(error.to_string()))?;
+    let command_text = encode_id(cmd.command);
+    tx.execute(
+        SQL_INSERT_ACTIVITY,
+        params![
+            encode_id(ActivityId::generate().as_raw()),
+            encode_id(cmd.companion.as_raw()),
+            ACTIVITY_KIND_RESUME_INSTRUCTION,
+            encode_id(cmd.task.task.as_raw()),
+            encode_u64(cmd.task.revision.as_u64()).map_err(activity_unavailable)?,
+            encode_u64(cmd.purpose.adopted_revision.as_u64()).map_err(activity_unavailable)?,
+            cmd.body,
+            WallClockWithTz::now().to_rfc3339(),
+            command_text,
+        ],
+    )
+    .map_err(|error| activity_unavailable(error.to_string()))?;
+    // The same epoch key always names the same activity: a retry
+    // reads the winner back, and different content under one key
+    // fails closed instead of recording a second row.
+    let found: Option<(String, StoredActivityRow)> = tx
+        .query_row(
+            SQL_SELECT_ACTIVITY_BY_COMMAND,
+            params![command_text],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    StoredActivityRow {
+                        companion_text: row.get(1)?,
+                        kind_text: row.get(2)?,
+                        task_text: row.get(3)?,
+                        task_revision: row.get(4)?,
+                        purpose_adopted_revision: row.get(5)?,
+                        body: row.get(6)?,
+                        created_at: row.get(7)?,
+                    },
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| activity_unavailable(error.to_string()))?;
+    let Some((activity_text, stored)) = found else {
+        return Err(activity_unavailable(
+            "resume activity record missing after insert",
+        ));
+    };
+    let activity = ActivityId::from_raw(decode_id(&activity_text).map_err(activity_unavailable)?);
+    let reread = decode_activity_row(activity, stored)?;
+    if reread.companion != cmd.companion
+        || reread.task != cmd.task
+        || reread.purpose != cmd.purpose
+        || reread.body != cmd.body
+    {
+        return Err(activity_unavailable(
+            "resume activity command reuses a key with different content",
+        ));
+    }
+    tx.commit()
+        .map_err(|error| activity_unavailable(error.to_string()))?;
+    Ok(activity)
+}
+
+impl Store {
+    /// Records one resume-instruction activity synchronously.
+    ///
+    /// For callers that hold the connection table across the resume commit
+    /// (CCT §10.4); every ordinary caller uses the async
+    /// [`ActivityRepository::record_resume_activity`]. The row is written in
+    /// its own short transaction exactly as the async path writes it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompanionTechnicalError`] when the activity cannot be recorded or
+    /// the command key is reused with different content.
+    pub fn record_resume_activity_sync(
+        &self,
+        cmd: RecordResumeActivityCommand,
+    ) -> Result<ActivityId, CompanionTechnicalError> {
+        record_resume_activity_locked(&self.conn, cmd)
+    }
+}
+
 impl ActivityRepository for Store {
     async fn record_resume_activity(
         &self,
         cmd: RecordResumeActivityCommand,
     ) -> Result<ActivityId, CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| activity_unavailable(error.to_string()))?;
-            let command_text = encode_id(cmd.command);
-            tx.execute(
-                SQL_INSERT_ACTIVITY,
-                params![
-                    encode_id(ActivityId::generate().as_raw()),
-                    encode_id(cmd.companion.as_raw()),
-                    ACTIVITY_KIND_RESUME_INSTRUCTION,
-                    encode_id(cmd.task.task.as_raw()),
-                    encode_u64(cmd.task.revision.as_u64()).map_err(activity_unavailable)?,
-                    encode_u64(cmd.purpose.adopted_revision.as_u64())
-                        .map_err(activity_unavailable)?,
-                    cmd.body,
-                    WallClockWithTz::now().to_rfc3339(),
-                    command_text,
-                ],
-            )
-            .map_err(|error| activity_unavailable(error.to_string()))?;
-            // The same epoch key always names the same activity: a retry
-            // reads the winner back, and different content under one key
-            // fails closed instead of recording a second row.
-            let found: Option<(String, StoredActivityRow)> = tx
-                .query_row(
-                    SQL_SELECT_ACTIVITY_BY_COMMAND,
-                    params![command_text],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            StoredActivityRow {
-                                companion_text: row.get(1)?,
-                                kind_text: row.get(2)?,
-                                task_text: row.get(3)?,
-                                task_revision: row.get(4)?,
-                                purpose_adopted_revision: row.get(5)?,
-                                body: row.get(6)?,
-                                created_at: row.get(7)?,
-                            },
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(|error| activity_unavailable(error.to_string()))?;
-            let Some((activity_text, stored)) = found else {
-                return Err(activity_unavailable(
-                    "resume activity record missing after insert",
-                ));
-            };
-            let activity =
-                ActivityId::from_raw(decode_id(&activity_text).map_err(activity_unavailable)?);
-            let reread = decode_activity_row(activity, stored)?;
-            if reread.companion != cmd.companion
-                || reread.task != cmd.task
-                || reread.purpose != cmd.purpose
-                || reread.body != cmd.body
-            {
-                return Err(activity_unavailable(
-                    "resume activity command reuses a key with different content",
-                ));
-            }
-            tx.commit()
-                .map_err(|error| activity_unavailable(error.to_string()))?;
-            Ok(activity)
-        })
-        .await
+        run_blocking(move || record_resume_activity_locked(&conn, cmd)).await
     }
 
     async fn load_activity(

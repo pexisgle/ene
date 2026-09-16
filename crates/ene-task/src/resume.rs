@@ -180,6 +180,29 @@ pub struct TaskResumeCommitPremise {
     pub accepted_at: WallClockWithTz,
 }
 
+/// Mints the AU17 commit premise for one resume request.
+///
+/// [`orchestrate_resume`] uses this for the ordinary async commit; a Host
+/// that must run the commit under a connection-ownership section (CCT
+/// §10.4) mints the same premise and calls the repository's synchronous
+/// commit itself. Identity minting is pure and never depends on connection
+/// state, so both paths produce the same shape.
+#[must_use]
+pub fn resume_commit_premise(
+    command: ResumeTaskCommand,
+    readiness: TaskResumeReadiness,
+) -> TaskResumeCommitPremise {
+    TaskResumeCommitPremise {
+        command,
+        readiness,
+        adopted_purpose_entry: TaskContextEntryId::generate(),
+        adopted_instruction_entry: TaskContextEntryId::generate(),
+        delegation: DelegationId::generate(),
+        agent: TaskAgentEphemeralId::generate(),
+        accepted_at: WallClockWithTz::now(),
+    }
+}
+
 /// Orchestrates one explicit resume against the repository (H-A.1 / AU17).
 ///
 /// The orchestration mints the new revision's context entry identities and
@@ -204,16 +227,9 @@ pub async fn orchestrate_resume(
     command: ResumeTaskCommand,
     readiness: TaskResumeReadiness,
 ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
-    let premise = TaskResumeCommitPremise {
-        command,
-        readiness,
-        adopted_purpose_entry: TaskContextEntryId::generate(),
-        adopted_instruction_entry: TaskContextEntryId::generate(),
-        delegation: DelegationId::generate(),
-        agent: TaskAgentEphemeralId::generate(),
-        accepted_at: WallClockWithTz::now(),
-    };
-    let outcome = repository.commit_task_resume(premise).await?;
+    let outcome = repository
+        .commit_task_resume(resume_commit_premise(command, readiness))
+        .await?;
     if let TaskResumeOutcome::ResultAvailable { task } = outcome {
         route_available_result(repository, task).await?;
     }
@@ -232,17 +248,11 @@ pub async fn orchestrate_resume_current(
     readiness: TaskResumeReadiness,
     currentness: OwnerMessageCurrentness,
 ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
-    let premise = TaskResumeCommitPremise {
-        command,
-        readiness,
-        adopted_purpose_entry: TaskContextEntryId::generate(),
-        adopted_instruction_entry: TaskContextEntryId::generate(),
-        delegation: DelegationId::generate(),
-        agent: TaskAgentEphemeralId::generate(),
-        accepted_at: WallClockWithTz::now(),
-    };
     let outcome = repository
-        .commit_task_resume_from_conversation(premise, currentness)
+        .commit_task_resume_from_conversation(
+            resume_commit_premise(command, readiness),
+            currentness,
+        )
         .await?;
     if let TaskResumeOutcome::ResultAvailable { task } = outcome {
         route_available_result(repository, task).await?;
@@ -257,7 +267,11 @@ pub async fn orchestrate_resume_current(
 /// Task still relies on. A result that can only answer
 /// `RecordedToOriginalOnly` is left to its history; a technical failure
 /// fails closed instead of being rounded to availability.
-async fn route_available_result(
+///
+/// Public so a Host that committed a resume through the repository's
+/// synchronous boundary can run the same post-commit routing the async
+/// orchestrators run.
+pub async fn route_available_result(
     repository: &impl TaskRepository,
     task: TaskId,
 ) -> Result<(), TaskTechnicalError> {

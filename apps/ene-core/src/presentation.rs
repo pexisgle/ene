@@ -57,17 +57,17 @@ use ene_api::v1::undelivered::{
     UndeliveredWireRef,
 };
 use ene_companion::{
-    ActivityRepository, CompanionId, CompanionRepository, RecordResumeActivityCommand,
-    ReportStatus, TaskFact, UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredRef,
-    UndeliveredRepository, UndeliveredSource,
+    CompanionId, CompanionRepository, RecordResumeActivityCommand, ReportStatus, TaskFact,
+    UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredRef, UndeliveredRepository,
+    UndeliveredSource,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{ClientId, PresenceAttribution, PresenceRepository, PresenceState};
 use ene_primitive::RawId;
 use ene_task::{
-    ResumeInstructionSource, ResumeTaskCommand, SteeringPremiseRef, TaskHeadline, TaskId,
-    TaskPurposeRef, TaskRef, TaskReportRowCursor, TaskReportRowKind, TaskReportSourceRef,
-    TaskRepository, TaskResultId, TaskResumeHold, TaskResumeOutcome, TaskRevision,
+    SteeringPremiseRef, TaskHeadline, TaskId, TaskPurposeRef, TaskRef, TaskReportRowCursor,
+    TaskReportRowKind, TaskReportSourceRef, TaskRepository, TaskResultId, TaskResumeHold,
+    TaskResumeOutcome, TaskRevision,
 };
 use uuid::Uuid;
 
@@ -87,6 +87,22 @@ fn conn_key(id: &ConnectionWireId) -> String {
 
 /// How long a receipt waits for its ACK (monotonic; IPC §13.3).
 const RECEIPT_TTL: Duration = Duration::from_secs(30);
+
+/// How one pass was triggered.
+///
+/// `Request` is the ordinary cursor-less Client catch-up (continuation, then
+/// arrivals, then an explicit head re-display). `Redisplay` forces the head
+/// re-display (the Client's `redisplay` flag and a fresh presence/connection
+/// auto-present). `Push` is the connection-owned subscription advance: it
+/// serves only a stored continuation or new arrivals and never re-displays
+/// `Unknown` rows, because a push is not a new presence and not an explicit
+/// Client request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassTrigger {
+    Request,
+    Redisplay,
+    Push,
+}
 
 /// Agreed presentation frame cap until capability negotiation carries client
 /// limits: mirrors the memory section budget so one summary can never inflate
@@ -197,6 +213,9 @@ pub(crate) struct PresentationState {
     /// Agreed frame cap override (tests pin small caps to exercise splits;
     /// production keeps the default until negotiation carries limits).
     frame_budget: usize,
+    /// Receipt ACK deadline override (tests pin short TTLs so expiry-driven
+    /// advance is deterministic; production keeps [`RECEIPT_TTL`]).
+    receipt_ttl: Duration,
 }
 
 impl Default for PresentationState {
@@ -213,6 +232,7 @@ impl Default for PresentationState {
             resume: HashMap::new(),
             resume_seq: 0,
             frame_budget: PRESENTATION_FRAME_BUDGET,
+            receipt_ttl: RECEIPT_TTL,
         }
     }
 }
@@ -221,12 +241,16 @@ impl Default for PresentationState {
 /// stale without growing memory with the connection count.
 const RETIRED_RECEIPT_CAP: usize = 64;
 
-/// Opaque purpose identity echoed by the Client: `{task}:{revision}`.
-fn encode_purpose(task: TaskId, revision: TaskRevision) -> String {
+/// Opaque purpose identity echoed by the Client: `{task}:{adopted_revision}`.
+///
+/// Takes the stored [`TaskPurposeRef`] itself, never a bare revision: the
+/// identity names the revision that adopted the purpose, which is not the
+/// Task's current revision after a purpose-preserving steering or resume.
+fn encode_purpose(purpose: TaskPurposeRef) -> String {
     format!(
         "{}:{}",
-        task.as_raw().as_uuid().as_hyphenated(),
-        revision.as_u64()
+        purpose.task.as_raw().as_uuid().as_hyphenated(),
+        purpose.adopted_revision.as_u64()
     )
 }
 
@@ -326,7 +350,7 @@ fn checked_limit(limit: Option<u32>) -> Option<u32> {
 impl HostHandle {
     /// Serializes begin/ack transitions (CCT §10.5). Held only across short
     /// store roundtrips, never across provider I/O.
-    async fn presentation_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(crate) async fn presentation_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.presentation_lock.lock().await
     }
 
@@ -491,11 +515,13 @@ impl HostHandle {
         );
         let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
         // A live receipt on this connection re-displays its own selection:
-        // duplicate display without a new commit or cursor move.
+        // duplicate display without a new commit or cursor move. The
+        // requested limit never shrinks a re-emit: the receipt and the item
+        // set its ACK covers must stay identical (IPC §13.3).
         if cursor.is_none()
             && let Some(receipt) = self.live_receipt(&companion_key, &conn)
         {
-            return self.reemit_receipt(&conn, &receipt, limit).await;
+            return self.reemit_receipt(&conn, &receipt).await;
         }
         // A foreign cursor is StaleBaseView, never a silent restart.
         if let Some(cursor) = cursor
@@ -511,7 +537,11 @@ impl HostHandle {
             &attribution,
             cursor,
             limit,
-            redisplay,
+            if redisplay {
+                PassTrigger::Redisplay
+            } else {
+                PassTrigger::Request
+            },
         )
         .await
     }
@@ -538,14 +568,12 @@ impl HostHandle {
     }
 
     /// Re-emits a live receipt's own selection: no new receipt, no commit,
-    /// no cursor move. Over budget now (excerpts only shrink) answers
-    /// `FrameTooLarge` with the receipt standing.
-    async fn reemit_receipt(
-        &self,
-        conn: &str,
-        receipt: &Receipt,
-        limit: u32,
-    ) -> UndeliveredResponse {
+    /// no cursor move. The re-emitted item set is exactly the receipt's
+    /// stored selection — a smaller `limit` never shrinks it, because an
+    /// ACK for the receipt covers every id it selected. Over budget now
+    /// (excerpts only shrink) answers `FrameTooLarge` with the receipt
+    /// standing.
+    async fn reemit_receipt(&self, conn: &str, receipt: &Receipt) -> UndeliveredResponse {
         let page = match self
             .store
             .list_unpresented(
@@ -566,7 +594,6 @@ impl HostHandle {
             .entries
             .into_iter()
             .filter(|entry| wanted.contains(&entry.id))
-            .take(limit as usize)
             .collect();
         let items = self.carry_items(conn, &entries).await;
         if items.is_empty() && !entries.is_empty() {
@@ -592,7 +619,7 @@ impl HostHandle {
         attribution: &PresenceAttribution,
         cursor: Option<&PageCursorWire>,
         limit: u32,
-        redisplay: bool,
+        trigger: PassTrigger,
     ) -> UndeliveredResponse {
         let from_cursor = cursor.map(|cursor| cursor.0.as_str());
         // Resolve the fetch window: continue a stored pass, catch up on new
@@ -639,27 +666,32 @@ impl HostHandle {
             // A cursor-less request is the next logical page: an undrained
             // pass continues first (its rows are bounded to the captured
             // upper, so mid-pass arrivals wait), then new arrivals, then an
-            // explicit head re-display. `redisplay` forces the head pass.
-            // The resume binding is checked before the subscription is
-            // re-pointed at this companion.
-            let plan = if !redisplay
-                && let Some((cursor, pending_only, saved)) = sub.resume
-                && sub.companion == companion.as_raw()
-            {
+            // explicit head re-display. `Redisplay` forces the head pass;
+            // `Push` serves only a continuation or new arrivals and stays
+            // silent otherwise (a push is never a new presence). The resume
+            // binding is checked before the subscription is re-pointed at
+            // this companion.
+            let continuation = (trigger != PassTrigger::Redisplay)
+                .then_some(sub.resume)
+                .flatten()
+                .filter(|_| sub.companion == companion.as_raw());
+            let arrivals = trigger != PassTrigger::Redisplay
+                && sub.drained_once
+                && sub.scan_floor < bound
+                && sub.companion == companion.as_raw();
+            let plan = if let Some((cursor, pending_only, saved)) = continuation {
                 PlanStart::Continued {
                     cursor,
                     pending_only,
                     limit: saved,
                 }
-            } else if !redisplay
-                && sub.drained_once
-                && sub.scan_floor < bound
-                && sub.companion == companion.as_raw()
-            {
+            } else if arrivals {
                 PlanStart::Arrivals {
                     after: sub.scan_floor,
                     upper: bound,
                 }
+            } else if trigger == PassTrigger::Push {
+                return UndeliveredResponse::Summary(self.empty_attributed(attribution));
             } else {
                 PlanStart::Explicit { upper: bound }
             };
@@ -723,8 +755,10 @@ impl HostHandle {
         if entries.is_empty() {
             // A drained continued pass falls through to an explicit head
             // re-display in the same response instead of stranding failed
-            // rows behind an empty arrival check.
-            if matches!(start, PlanStart::Continued { .. }) {
+            // rows behind an empty arrival check. A push never does: it
+            // must not re-display Unknown rows without an explicit request
+            // or a new presence.
+            if matches!(start, PlanStart::Continued { .. }) && trigger != PassTrigger::Push {
                 return Box::pin(self.begin_pass(
                     conn,
                     incarnation,
@@ -733,7 +767,7 @@ impl HostHandle {
                     attribution,
                     None,
                     limit,
-                    true,
+                    PassTrigger::Redisplay,
                 ))
                 .await;
             }
@@ -805,16 +839,28 @@ impl HostHandle {
             round: round.as_raw(),
             presented: false,
         };
-        for entry in &entries {
+        let mut selected = Vec::with_capacity(entries.len());
+        let mut carried = Vec::with_capacity(items.len());
+        let mut dropped = Vec::new();
+        for (entry, item) in entries.into_iter().zip(items) {
             if entry.status == ReportStatus::Pending
-                && let Err(_) = self
+                && self
                     .store
                     .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
                     .await
+                    .is_err()
             {
-                // A lost compare leaves the row for the next pass; the
-                // receipt still covers the carried set.
+                // A lost compare leaves the row for the next pass; it is
+                // dropped from both the selection and the frame so the
+                // receipt and the items it covers stay identical.
+                dropped.push(item);
+                continue;
             }
+            selected.push(entry.id);
+            carried.push(item);
+        }
+        if !dropped.is_empty() {
+            self.forget_carried(conn, &dropped).await;
         }
         let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
         let receipt = Receipt {
@@ -826,8 +872,8 @@ impl HostHandle {
             round,
             round_wire: round_wire.0.clone(),
             generation,
-            selected: entries.iter().map(|entry| entry.id).collect(),
-            expires_at: Instant::now() + RECEIPT_TTL,
+            selected,
+            expires_at: Instant::now() + self.receipt_ttl(),
         };
         // The carried prefix IS the fetched prefix (the fetch bound shrank
         // instead), so the store cursor resumes exactly: a fetched
@@ -881,7 +927,7 @@ impl HostHandle {
             receipt: PresentationReceiptWireRef(receipt_id),
             round: round_wire,
             presence_generation: generation,
-            items,
+            items: carried,
             reports: Vec::new(),
             has_more,
             next_cursor,
@@ -994,6 +1040,19 @@ impl HostHandle {
     /// default until negotiation carries client limits).
     fn frame_budget(&self) -> usize {
         crate::lock_unpoison(&self.presentations).frame_budget
+    }
+
+    /// Receipt ACK deadline in force (tests pin short TTLs; production keeps
+    /// [`RECEIPT_TTL`]).
+    fn receipt_ttl(&self) -> Duration {
+        crate::lock_unpoison(&self.presentations).receipt_ttl
+    }
+
+    /// Test-only: pin the receipt ACK deadline so expiry-driven advance is
+    /// deterministic without waiting the production 30 s.
+    #[cfg(test)]
+    pub(crate) fn set_receipt_ttl_for_test(&self, ttl: Duration) {
+        crate::lock_unpoison(&self.presentations).receipt_ttl = ttl;
     }
 
     /// Test-only: pin the frame cap so paging splits stay deterministic
@@ -1238,7 +1297,7 @@ impl HostHandle {
                 running: self
                     .task_executions
                     .task_has_reservation_or_running(headline.task),
-                purpose: encode_purpose(headline.task, headline.revision),
+                purpose: encode_purpose(headline.purpose),
             });
         }
         let next_cursor = if headlines.len() as u32 == limit
@@ -1360,7 +1419,7 @@ impl HostHandle {
             &conn,
             TaskReportSourceRef::RevisionPurpose {
                 task,
-                revision: record.task.reference.revision,
+                revision: record.task.purpose.adopted_revision,
             },
         );
         let mut views = Vec::with_capacity(rows.len());
@@ -1408,7 +1467,7 @@ impl HostHandle {
                 task: query.task.clone(),
                 revision: record.task.reference.revision.as_u64(),
                 progress: record.task.progress.as_str().to_string(),
-                purpose: encode_purpose(task, record.task.reference.revision),
+                purpose: encode_purpose(record.task.purpose),
                 purpose_source,
                 rows: views,
                 next_cursor,
@@ -1550,7 +1609,7 @@ impl HostHandle {
                 task: query.task.clone(),
                 revision: record.task.reference.revision.as_u64(),
                 progress: record.task.progress.as_str().to_string(),
-                purpose: encode_purpose(task, record.task.reference.revision),
+                purpose: encode_purpose(record.task.purpose),
                 details_available: details,
             })),
         )]
@@ -1712,45 +1771,39 @@ impl HostHandle {
             Ok(None) => return ResumeTaskOutcomeWire::MissingTask,
             Err(_) => return ResumeTaskOutcomeWire::Unavailable,
         };
-        // The activity is the first-party instruction record the resume
-        // commit resolves (same shape as the management inlet; idempotent by
-        // command id: a retry observes the same activity).
+        // The activity record and the AU17 commit run inside the guarded
+        // connection section, so a connection superseded before the section
+        // leaves no activity row, revision change, delegation, or launch.
         let command_raw = frame
             .envelope
             .correlation
             .command_id
             .map(|id| id.0)
             .unwrap_or_else(Uuid::new_v4);
-        let activity = match self
-            .store
-            .record_resume_activity(RecordResumeActivityCommand {
-                companion: CompanionId::from_raw(record.task.assignee.companion),
-                task: record.task.reference,
-                purpose: record.task.purpose,
-                body: command.instruction.clone(),
-                command: RawId::from_uuid(command_raw),
-            })
-            .await
-        {
-            Ok(activity) => activity,
-            Err(_) => return ResumeTaskOutcomeWire::Unavailable,
-        };
         let outcome = match self
-            .resume_task(ResumeTaskCommand {
-                premise: SteeringPremiseRef {
+            .resume_task_guarded_by_connection(
+                live,
+                SteeringPremiseRef {
                     expected: TaskRef {
                         task,
                         revision: TaskRevision::from_u64(command.expected_revision),
                     },
                     purpose,
                 },
-                instruction: ResumeInstructionSource::OwnerManagement {
-                    activity: activity.as_raw(),
+                RecordResumeActivityCommand {
+                    companion: CompanionId::from_raw(record.task.assignee.companion),
+                    task: record.task.reference,
+                    purpose: record.task.purpose,
+                    body: command.instruction.clone(),
+                    command: RawId::from_uuid(command_raw),
                 },
-            })
+            )
             .await
         {
-            Ok(outcome) => outcome,
+            Ok(Some(outcome)) => outcome,
+            // The connection was superseded before the commit section: the
+            // typed stale outcome, with nothing written anywhere.
+            Ok(None) => return ResumeTaskOutcomeWire::StaleConnection,
             Err(_) => return ResumeTaskOutcomeWire::Unavailable,
         };
         map_resume_outcome(&command.task, outcome)
@@ -1758,7 +1811,10 @@ impl HostHandle {
 
     /// Best-effort auto-present after presence establishment (recovery or
     /// summon): no Owner query, one bounded summary, silence when empty.
-    /// At most one summary frame; the caller emits it non-blocking.
+    /// At most one summary frame; the caller emits it non-blocking. The
+    /// pass runs through the subscription's ordinary explicit head
+    /// re-display, so continuations, scan floors, and receipts stay
+    /// consistent with the connection-owned push loop.
     pub(crate) async fn auto_present_for(
         &self,
         frame: &WireFrame,
@@ -1782,7 +1838,6 @@ impl HostHandle {
             frame.envelope.sender.incarnation_id.counter,
             frame.envelope.sender.incarnation_id.random,
         );
-        let bound = self.store.undelivered_pass_bound().await.unwrap_or(0);
         {
             let mut state = crate::lock_unpoison(&self.presentations);
             let sub = state.subs.entry(conn.clone()).or_insert(Subscription {
@@ -1791,135 +1846,156 @@ impl HostHandle {
                 drained_once: false,
                 resume: None,
             });
-            sub.companion = companion.as_raw();
             // A fresh presence starts a new pass: rewind to the head so the
-            // absence backlog presents without an Owner query.
+            // absence backlog (Unknown rows included) presents without an
+            // Owner query.
+            sub.companion = companion.as_raw();
             sub.scan_floor = 0;
+            sub.drained_once = false;
             sub.resume = None;
         }
-        match self
-            .begin_auto(&conn, incarnation, client, companion, attribution, bound)
-            .await
-        {
-            Some(summary) if !summary.items.is_empty() => vec![outgoing_fact(
-                frame,
-                live,
-                WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)),
-            )],
+        let response = self
+            .begin_pass(
+                &conn,
+                incarnation,
+                client,
+                companion,
+                attribution,
+                None,
+                DEFAULT_PAGE_LIMIT,
+                PassTrigger::Redisplay,
+            )
+            .await;
+        match response {
+            UndeliveredResponse::Summary(summary) if !summary.items.is_empty() => {
+                vec![outgoing_fact(
+                    frame,
+                    live,
+                    WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)),
+                )]
+            }
             _ => Vec::new(),
         }
     }
 
-    /// Auto-present begin: explicit head pass, best-effort; silence on any
-    /// refusal or oversize (the explicit request path stays authoritative).
-    async fn begin_auto(
+    /// One connection-owned subscription advance, driven without an inbound
+    /// request (CCT §10.5, IPC §13.3).
+    ///
+    /// The connection loop calls this after a registration hint or a
+    /// receipt deadline. It serves only a stored continuation or new
+    /// arrivals — never an explicit head re-display, so `Unknown` rows are
+    /// not auto-resent within one subscription. A live receipt waits for
+    /// its ACK or deadline; an expired one is released first (even when
+    /// presence no longer holds) so the deadline cannot spin immediately.
+    /// Every decision re-reads durable state; the wakeup is only a hint.
+    ///
+    /// Returns at most one unsolicited summary frame, and only when it
+    /// carried items.
+    pub(crate) async fn push_undelivered(
         &self,
-        conn: &str,
-        incarnation: (u64, u64),
-        client: ClientId,
-        companion: CompanionId,
-        attribution: &PresenceAttribution,
-        upper: u64,
-    ) -> Option<UndeliveredSummary> {
-        let page = self
-            .store
-            .list_unpresented(companion, None, UNDELIVERED_PAGE_MAX)
-            .await
-            .ok()?;
-        if page.entries.is_empty() {
-            self.mark_drained(conn, companion, upper);
-            return None;
-        }
-        let generation = attribution.generation.as_u64();
-        Self::sweep_carried(&mut crate::lock_unpoison(&self.presentations), conn);
-        let all = self.carry_items(conn, &page.entries).await;
-        // Fit the frame cap on the prefix: the slimmed-off tail keeps no
-        // refs (a later pass re-registers it), so refs never outlive their
-        // receipt.
-        let mut keep = all.len();
-        let budget = self.frame_budget();
-        while keep > 0 && estimate_summary_bytes(&all[..keep]) > budget {
-            keep -= 1;
-        }
-        if keep == 0 {
-            self.forget_carried(conn, &all).await;
-            return None;
-        }
-        self.forget_carried(conn, &all[keep..]).await;
-        let slim = all[..keep].to_vec();
-        let round = ene_presentation::RoundId::from_raw(RawId::new());
-        let round_wire = self.round_wire_or_mint(&round);
-        let mark = ene_companion::PresentationMark {
-            round: round.as_raw(),
-            presented: false,
-        };
-        let mut selected = Vec::new();
-        let wanted: HashSet<UndeliveredId> = {
-            let state = crate::lock_unpoison(&self.presentations);
-            slim.iter()
-                .filter_map(|item| {
-                    state
-                        .carried
-                        .get(&(conn.to_string(), item.reference.0.clone()))
-                        .map(|(id, _)| *id)
-                })
-                .collect()
-        };
-        for entry in &page.entries {
-            if wanted.contains(&entry.id) {
-                if entry.status == ReportStatus::Pending
-                    && self
-                        .store
-                        .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
-                        .await
-                        .is_err()
-                {
-                    continue;
-                }
-                selected.push(entry.id);
-            }
-        }
-        if selected.is_empty() {
-            return None;
-        }
-        let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
-        let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
-        let receipt = Receipt {
-            id: receipt_id.clone(),
-            connection: conn.to_string(),
-            incarnation,
-            companion: companion.as_raw(),
-            client,
-            round,
-            round_wire: round_wire.0.clone(),
-            generation,
-            selected,
-            expires_at: Instant::now() + RECEIPT_TTL,
-        };
+        template: &WireFrame,
+        live: &LiveInput,
+    ) -> Option<WireFrame> {
+        let _gate = self.presentation_gate().await;
+        let conn = conn_key(&live.connection_id);
+        // Release this connection's expired receipts up front: the caller's
+        // deadline already elapsed, and a lingering expired row would wake
+        // the loop again immediately.
         {
             let mut state = crate::lock_unpoison(&self.presentations);
-            if let Some(old) = state.receipts.insert(companion_key.clone(), receipt) {
-                state.receipt_ids.remove(&old.id);
-                Self::retire(&mut state, &old.id, &old.connection);
-            }
-            state.receipt_ids.insert(receipt_id.clone(), companion_key);
-            if page.next.is_none()
-                && let Some(sub) = state.subs.get_mut(conn)
-            {
-                sub.scan_floor = sub.scan_floor.max(upper);
+            let expired: Vec<String> = state
+                .receipts
+                .iter()
+                .filter(|(_, receipt)| receipt.connection == conn && receipt.expired())
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in expired {
+                Self::remove_receipt(&mut state, &key);
             }
         }
-        let mut summary = UndeliveredSummary {
-            receipt: PresentationReceiptWireRef(receipt_id),
-            round: round_wire,
-            presence_generation: generation,
-            items: slim,
-            reports: Vec::new(),
-            has_more: page.next.is_some() || keep < page.entries.len(),
-            next_cursor: None,
+        if !live.authed || live.phase.is_superseded() || !live.connection_live {
+            return None;
+        }
+        let companion = self.store.ensure_running_companion().await.ok()?;
+        let attribution = match self.store.load_attribution(companion.as_raw()).await {
+            Ok(Some(attribution)) => attribution,
+            _ => return None,
         };
-        self.attach_reports(conn, &mut summary).await;
-        Some(summary)
+        let device_wire = live.paired_device.clone()?;
+        let client = device_client(&device_wire);
+        if attribution.state != PresenceState::Present || attribution.active_client != Some(client)
+        {
+            return None;
+        }
+        let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
+        // A live receipt is the page in flight: its ACK or expiry drives the
+        // next step, and pushing it again would only duplicate display.
+        if self.live_receipt(&companion_key, &conn).is_some() {
+            return None;
+        }
+        let bound = self.store.undelivered_pass_bound().await.unwrap_or(0);
+        let has_plan = {
+            let state = crate::lock_unpoison(&self.presentations);
+            state.subs.get(&conn).is_some_and(|sub| {
+                sub.companion == companion.as_raw()
+                    && (sub.resume.is_some() || (sub.drained_once && sub.scan_floor < bound))
+            })
+        };
+        if !has_plan {
+            return None;
+        }
+        let incarnation = (
+            template.envelope.sender.incarnation_id.counter,
+            template.envelope.sender.incarnation_id.random,
+        );
+        let response = self
+            .begin_pass(
+                &conn,
+                incarnation,
+                client,
+                companion,
+                &attribution,
+                None,
+                DEFAULT_PAGE_LIMIT,
+                PassTrigger::Push,
+            )
+            .await;
+        match response {
+            UndeliveredResponse::Summary(summary) if !summary.items.is_empty() => {
+                Some(outgoing_fact(
+                    template,
+                    live,
+                    WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Earliest receipt deadline on this connection, expired or not.
+    ///
+    /// The connection loop arms its timer on this value; an already-elapsed
+    /// deadline fires immediately and [`Self::push_undelivered`] releases
+    /// the expired receipt. [`None`] means no receipt is outstanding, so
+    /// only a wakeup or inbound frame can advance the subscription.
+    pub(crate) fn receipt_deadline_for(&self, connection: &ConnectionWireId) -> Option<Instant> {
+        let conn = conn_key(connection);
+        let state = crate::lock_unpoison(&self.presentations);
+        state
+            .receipts
+            .values()
+            .filter(|receipt| receipt.connection == conn)
+            .map(|receipt| receipt.expires_at)
+            .min()
+    }
+
+    /// Coalesced undelivered-registration hint subscription (CCT §10.5).
+    ///
+    /// The connection loop subscribes before it starts reading so a
+    /// registration committing during the first pass still wakes it.
+    #[must_use]
+    pub(crate) fn undelivered_wakeup(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.store.undelivered_wakeup()
     }
 
     /// Test-only: force-expire one receipt so ACK-loss advance is

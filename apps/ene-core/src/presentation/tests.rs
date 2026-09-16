@@ -23,8 +23,8 @@ use ene_api::v1::refs::{
 use ene_api::v1::round::PresentationStatus;
 use ene_api::v1::undelivered::{
     GetReportSource, GetTaskReport, ListTasks, ResumeTask, ResumeTaskOutcomeWire, SelectTask,
-    TaskListResponse, TaskReportResponse, UndeliveredAck, UndeliveredAckOutcome,
-    UndeliveredRequest, UndeliveredResponse,
+    SelectTaskResponse, TaskListResponse, TaskReportResponse, UndeliveredAck,
+    UndeliveredAckOutcome, UndeliveredRequest, UndeliveredResponse,
 };
 use ene_companion::{
     AppendHistoryCommand, CompanionId, CompanionRepository as _, HistoryRepository as _,
@@ -1769,5 +1769,482 @@ async fn frame_too_large_withholds_without_mutation() {
         summary.items.len(),
         1,
         "the row presents once the cap allows"
+    );
+}
+
+/// Drives one purpose-preserving revision forward through the real steering
+/// commit: the revision advances, the adopted-purpose identity does not.
+async fn steer_carrying_purpose(handle: &HostHandle, expected: TaskRef) -> TaskRef {
+    match handle
+        .store
+        .forward_steering(ene_task::TaskCommitPremise {
+            expected,
+            new_purpose: None,
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .expect("the steering must commit")
+    {
+        ene_task::TaskCommitOutcome::CommittedAs(current) => current,
+        other => panic!("expected a committed revision forward, got {other:?}"),
+    }
+}
+
+/// Fetches the first Task-list page through the wire query.
+async fn list_page(
+    handle: &HostHandle,
+    live: &LiveInput,
+) -> ene_api::v1::undelivered::TaskListPage {
+    let frame = frame_for(
+        WirePayload::ListTasks(ListTasks {
+            cursor: None,
+            limit: None,
+        }),
+        live,
+        None,
+        None,
+        None,
+    );
+    let query = match &frame.payload {
+        WirePayload::ListTasks(query) => query.clone(),
+        _ => unreachable!(),
+    };
+    let frames = handle.list_tasks_wire(&frame, live, &query).await;
+    match frames.into_iter().next().unwrap().payload {
+        WirePayload::TaskListResponse(TaskListResponse::Page(page)) => page,
+        other => panic!("expected a task list page, got {other:?}"),
+    }
+}
+
+/// S5 wire identity: the purpose identity returned by ListTasks / SelectTask
+/// names the revision that adopted the purpose, not the current Task
+/// revision, and a Client echoing the returned value resumes successfully
+/// after a purpose-preserving steering.
+#[tokio::test]
+async fn purpose_identity_survives_a_purpose_preserving_forward_and_resumes() {
+    let (handle, _dir) = open_handle("present-purpose").await;
+    handle.install_task_launcher(Arc::new(NoopLauncher {
+        launches: AtomicUsize::new(0),
+    }));
+    let live = live_input(DEVICE_A);
+    let task_r1 = seed_task(&handle).await;
+    let task_r2 = steer_carrying_purpose(&handle, task_r1).await;
+    assert_eq!(
+        task_r2.revision.as_u64(),
+        2,
+        "the steering advances r1 to r2"
+    );
+    let record = handle
+        .store
+        .load_task(task_r2.task)
+        .await
+        .expect("the task must read")
+        .expect("the task must exist");
+    assert_eq!(
+        record.task.purpose.adopted_revision.as_u64(),
+        1,
+        "the purpose is still adopted at r1"
+    );
+
+    let page = list_page(&handle, &live).await;
+    assert_eq!(page.tasks.len(), 1, "one Task is listed");
+    let item = &page.tasks[0];
+    assert_eq!(item.revision, 2, "the list reports the current revision");
+    assert_eq!(
+        item.purpose,
+        format!("{}:1", task_r2.task.as_raw().as_uuid().as_hyphenated()),
+        "the purpose identity names its adopting revision, not the current one"
+    );
+
+    // SelectTask projects the same identity from the stored purpose.
+    let select_frame = frame_for(
+        WirePayload::SelectTask(SelectTask {
+            task: item.task.clone(),
+        }),
+        &live,
+        None,
+        None,
+        None,
+    );
+    let select_query = match &select_frame.payload {
+        WirePayload::SelectTask(query) => query.clone(),
+        _ => unreachable!(),
+    };
+    let selected = match handle
+        .select_task_wire(&select_frame, &live, &select_query)
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+        .payload
+    {
+        WirePayload::SelectTaskResponse(SelectTaskResponse::Selected(selected)) => selected,
+        other => panic!("expected a selection, got {other:?}"),
+    };
+    assert_eq!(selected.purpose, item.purpose);
+
+    // The Client echoes exactly the wire-returned identity and resumes.
+    let resume_frame = frame_for(
+        WirePayload::ResumeTask(ResumeTask {
+            task: item.task.clone(),
+            expected_revision: item.revision,
+            expected_purpose: item.purpose.clone(),
+            instruction: String::from("continue the report"),
+        }),
+        &live,
+        None,
+        None,
+        Some(CommandWireId(uuid::Uuid::new_v4())),
+    );
+    let resume = match &resume_frame.payload {
+        WirePayload::ResumeTask(resume) => resume.clone(),
+        _ => unreachable!(),
+    };
+    let outcome = match handle
+        .resume_task_wire(&resume_frame, &live, &resume)
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+        .payload
+    {
+        WirePayload::ResumeTaskOutcome(outcome) => outcome,
+        other => panic!("expected a resume outcome, got {other:?}"),
+    };
+    assert!(
+        matches!(outcome, ResumeTaskOutcomeWire::Resumed { revision: 3, .. }),
+        "the echoed identity must resume, got {outcome:?}"
+    );
+}
+
+/// The same identity keeps working across a Host restart: after the first
+/// resume, a reopen re-derives the purpose identity from durable state, and a
+/// second resume succeeds with what the wire returned.
+#[tokio::test]
+async fn purpose_identity_survives_resume_and_host_restart() {
+    let dir = tempfile::Builder::new()
+        .prefix("ene-core-present-purpose-restart-")
+        .tempdir()
+        .expect("scratch directory must be creatable");
+    let first = HostHandle::open_with_cred_store(
+        dir.path(),
+        crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+    )
+    .await
+    .expect("the handle must open");
+    first.install_task_launcher(Arc::new(NoopLauncher {
+        launches: AtomicUsize::new(0),
+    }));
+    let live = live_input(DEVICE_A);
+    let task_r1 = seed_task(&first).await;
+    let task_r2 = steer_carrying_purpose(&first, task_r1).await;
+
+    // First resume through the wire identity.
+    let page = list_page(&first, &live).await;
+    let item = page.tasks.into_iter().next().expect("the Task must list");
+    let resume_frame = frame_for(
+        WirePayload::ResumeTask(ResumeTask {
+            task: item.task.clone(),
+            expected_revision: item.revision,
+            expected_purpose: item.purpose.clone(),
+            instruction: String::from("continue after the interruption"),
+        }),
+        &live,
+        None,
+        None,
+        Some(CommandWireId(uuid::Uuid::new_v4())),
+    );
+    let resume = match &resume_frame.payload {
+        WirePayload::ResumeTask(resume) => resume.clone(),
+        _ => unreachable!(),
+    };
+    let first_outcome = match first
+        .resume_task_wire(&resume_frame, &live, &resume)
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+        .payload
+    {
+        WirePayload::ResumeTaskOutcome(outcome) => outcome,
+        other => panic!("expected a resume outcome, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            first_outcome,
+            ResumeTaskOutcomeWire::Resumed { revision: 3, .. }
+        ),
+        "the first resume must succeed, got {first_outcome:?}"
+    );
+    drop(first);
+
+    // Host restart; the identity is re-derived from durable state.
+    let second = HostHandle::open_with_cred_store(
+        dir.path(),
+        crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+    )
+    .await
+    .expect("the handle must reopen");
+    second.install_task_launcher(Arc::new(NoopLauncher {
+        launches: AtomicUsize::new(0),
+    }));
+    let live_b = live_input(DEVICE_A);
+    let page = list_page(&second, &live_b).await;
+    let item = page.tasks.into_iter().next().expect("the Task must list");
+    assert_eq!(item.revision, 3);
+    assert_eq!(
+        item.purpose,
+        format!("{}:1", task_r2.task.as_raw().as_uuid().as_hyphenated()),
+        "the purpose identity survives the restart unchanged"
+    );
+    let resume_frame = frame_for(
+        WirePayload::ResumeTask(ResumeTask {
+            task: item.task.clone(),
+            expected_revision: item.revision,
+            expected_purpose: item.purpose.clone(),
+            instruction: String::from("continue once more"),
+        }),
+        &live_b,
+        None,
+        None,
+        Some(CommandWireId(uuid::Uuid::new_v4())),
+    );
+    let resume = match &resume_frame.payload {
+        WirePayload::ResumeTask(resume) => resume.clone(),
+        _ => unreachable!(),
+    };
+    let second_outcome = match second
+        .resume_task_wire(&resume_frame, &live_b, &resume)
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+        .payload
+    {
+        WirePayload::ResumeTaskOutcome(outcome) => outcome,
+        other => panic!("expected a resume outcome, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            second_outcome,
+            ResumeTaskOutcomeWire::Resumed { revision: 4, .. }
+        ),
+        "the restarted Host must resume from the wire identity, got {second_outcome:?}"
+    );
+}
+
+/// S5 receipt semantics: re-emitting a live receipt returns exactly the
+/// selection it covers, regardless of the request's smaller limit, so an ACK
+/// can never present an item the Client did not receive.
+#[tokio::test]
+async fn receipt_reemit_keeps_the_selected_set_whole() {
+    let (handle, _dir) = open_handle("present-reemit").await;
+    let live = live_input(DEVICE_A);
+    let fresh = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "row A", fresh.generation).await;
+    append_reply(&handle, "row B", fresh.generation).await;
+    // No ACK: the receipt covers both rows.
+    let first = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(first.items.len(), 2);
+    assert_eq!(first.receipt.0.len(), 36, "a receipt id is issued");
+
+    // A re-fetch with a smaller limit must not shrink the receipt's set: the
+    // same receipt comes back with both items.
+    let again = summary_of(fetch(&handle, &live, None, Some(1), false).await);
+    assert_eq!(
+        again.receipt, first.receipt,
+        "the same receipt is re-emitted"
+    );
+    assert_eq!(
+        again.items.len(),
+        2,
+        "the re-emitted set equals the receipt's selection, not the limit"
+    );
+    let mut excerpts: Vec<&str> = again
+        .items
+        .iter()
+        .map(|item| item.excerpt.as_str())
+        .collect();
+    excerpts.sort_unstable();
+    assert_eq!(excerpts, vec!["row A", "row B"]);
+
+    // The ACK presents exactly the two delivered rows and nothing lingers.
+    let outcome = ack(
+        &handle,
+        &live,
+        &again.receipt.0,
+        again.round.clone(),
+        again.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(outcome, UndeliveredAckOutcome::Presented { presented: 2 }),
+        "got {outcome:?}"
+    );
+    assert!(unpresented_statuses(&handle).await.is_empty());
+}
+
+/// Counts durable delegation rows for the fixture's single Task.
+fn delegation_rows(dir: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the database must open");
+    conn.query_row("SELECT COUNT(*) FROM delegation", [], |row| row.get(0))
+        .expect("the delegation count must read")
+}
+
+/// Builds a resume frame + DTO from a Task-list item, echoing exactly what
+/// the wire returned.
+fn resume_for(
+    live: &LiveInput,
+    item: &ene_api::v1::undelivered::TaskListItem,
+    instruction: &str,
+) -> (WireFrame, ResumeTask) {
+    let frame = frame_for(
+        WirePayload::ResumeTask(ResumeTask {
+            task: item.task.clone(),
+            expected_revision: item.revision,
+            expected_purpose: item.purpose.clone(),
+            instruction: instruction.to_string(),
+        }),
+        live,
+        None,
+        None,
+        Some(CommandWireId(uuid::Uuid::new_v4())),
+    );
+    let resume = match &frame.payload {
+        WirePayload::ResumeTask(resume) => resume.clone(),
+        _ => unreachable!(),
+    };
+    (frame, resume)
+}
+
+fn resume_outcome_of(frames: Vec<WireFrame>) -> ResumeTaskOutcomeWire {
+    match frames.into_iter().next().unwrap().payload {
+        WirePayload::ResumeTaskOutcome(outcome) => outcome,
+        other => panic!("expected a resume outcome, got {other:?}"),
+    }
+}
+
+/// CCT §10.4 case A: a resume whose connection is superseded before the
+/// ownership commit section answers `StaleConnection` and commits nothing —
+/// no revision, no delegation, no launch.
+#[tokio::test]
+async fn resume_superseded_before_the_commit_section_commits_nothing() {
+    let (handle, dir) = open_handle("present-resume-stale").await;
+    let launcher = Arc::new(NoopLauncher {
+        launches: AtomicUsize::new(0),
+    });
+    handle.install_task_launcher(launcher.clone());
+    let task_r1 = seed_task(&handle).await;
+    let task_r2 = steer_carrying_purpose(&handle, task_r1).await;
+
+    // C1 is a real authenticated connection; C2 will supersede it mid-resume.
+    let table = Arc::new(crate::conn::ConnectionTable::new());
+    let c1 = table.note_accept();
+    crate::test_support::authenticate(&table, &c1, DEVICE_A);
+    let live = table.snapshot(&c1).expect("C1 must snapshot");
+    let page = list_page(&handle, &live).await;
+    let item = page.tasks.into_iter().next().expect("the Task must list");
+    let (frame, resume) = resume_for(&live, &item, "continue after the race");
+
+    let gate = handle.arm_resume_gate();
+    let resume_fut = handle.resume_task_wire(&frame, &live, &resume);
+    tokio::pin!(resume_fut);
+    tokio::select! {
+        () = gate.wait_entered() => {}
+        outcome = &mut resume_fut => panic!("the resume escaped the gate: {outcome:?}"),
+    }
+    // C2 authenticates on the same device and supersedes C1 before the
+    // commit section runs.
+    let c2 = table.note_accept();
+    crate::test_support::authenticate(&table, &c2, DEVICE_A);
+    assert_eq!(
+        table.phase_of(&c1),
+        Some(crate::conn::ConnectionPhase::Superseded),
+        "C2 must supersede C1"
+    );
+    gate.release();
+    let outcome = resume_outcome_of(resume_fut.await);
+    assert!(
+        matches!(outcome, ResumeTaskOutcomeWire::StaleConnection),
+        "a superseded resume must be stale, got {outcome:?}"
+    );
+
+    let record = handle
+        .store
+        .load_task(task_r2.task)
+        .await
+        .expect("the task must read")
+        .expect("the task must exist");
+    assert_eq!(
+        record.task.reference.revision.as_u64(),
+        2,
+        "the stale resume did not advance the revision"
+    );
+    assert_eq!(delegation_rows(dir.path()), 0, "no delegation was created");
+    assert_eq!(
+        launcher.launches.load(Ordering::SeqCst),
+        0,
+        "no execution was launched"
+    );
+    assert!(
+        !handle
+            .task_executions
+            .task_has_reservation_or_running(task_r2.task),
+        "no launch reservation was recorded"
+    );
+}
+
+/// CCT §10.4 case B: a resume that committed before the supersession is
+/// accepted and keeps its execution; the later connection loss neither rolls
+/// back the revision nor cancels the committed work.
+#[tokio::test]
+async fn resume_committed_before_supersession_keeps_its_execution() {
+    let (handle, dir) = open_handle("present-resume-won").await;
+    let launcher = Arc::new(NoopLauncher {
+        launches: AtomicUsize::new(0),
+    });
+    handle.install_task_launcher(launcher.clone());
+    let task_r1 = seed_task(&handle).await;
+    let task_r2 = steer_carrying_purpose(&handle, task_r1).await;
+
+    let table = Arc::new(crate::conn::ConnectionTable::new());
+    let c1 = table.note_accept();
+    crate::test_support::authenticate(&table, &c1, DEVICE_A);
+    let live = table.snapshot(&c1).expect("C1 must snapshot");
+    let page = list_page(&handle, &live).await;
+    let item = page.tasks.into_iter().next().expect("the Task must list");
+    let (frame, resume) = resume_for(&live, &item, "continue before the race");
+    let outcome = resume_outcome_of(handle.resume_task_wire(&frame, &live, &resume).await);
+    assert!(
+        matches!(outcome, ResumeTaskOutcomeWire::Resumed { revision: 3, .. }),
+        "the resume commits first, got {outcome:?}"
+    );
+    assert_eq!(delegation_rows(dir.path()), 1, "one delegation committed");
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 1, "launched once");
+
+    // C2 supersedes C1, then C1's socket closes: the committed resume is
+    // untouched.
+    let c2 = table.note_accept();
+    crate::test_support::authenticate(&table, &c2, DEVICE_A);
+    handle.close_connection(&table, c1).await;
+    let record = handle
+        .store
+        .load_task(task_r2.task)
+        .await
+        .expect("the task must read")
+        .expect("the task must exist");
+    assert_eq!(
+        record.task.reference.revision.as_u64(),
+        3,
+        "the committed revision stands after the connection loss"
+    );
+    assert_eq!(delegation_rows(dir.path()), 1, "the delegation stands");
+    assert!(
+        handle
+            .task_executions
+            .task_has_reservation_or_running(task_r2.task),
+        "the committed execution is not cancelled by the disconnect"
     );
 }

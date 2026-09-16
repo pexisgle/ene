@@ -446,7 +446,7 @@ pub struct HostHandle {
     /// delegation). In-memory only: a restart drops every token, and a lost
     /// token never means the durable work or an external effect stopped. The
     /// durable attempt facts carry the one-shot start marker across restarts.
-    pub(crate) task_executions: crate::task_run::TaskExecutionRegistry,
+    pub(crate) task_executions: std::sync::Arc<crate::task_run::TaskExecutionRegistry>,
     /// Transient conversation projection of the Task each dialogue is working
     /// on, keyed by Companion.
     ///
@@ -485,6 +485,9 @@ pub struct HostHandle {
     /// Test-only deterministic gate for the close-admission section.
     #[cfg(test)]
     pub(crate) close_gate: StdMutex<Option<std::sync::Arc<TestCloseGate>>>,
+    /// Test-only deterministic gate for one guarded wire resume.
+    #[cfg(test)]
+    pub(crate) resume_gate: StdMutex<Option<std::sync::Arc<crate::task_control::TestResumeGate>>>,
 }
 
 impl HostHandle {
@@ -547,7 +550,7 @@ impl HostHandle {
             learning_queue: StdMutex::new(VecDeque::new()),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
-            task_executions: crate::task_run::TaskExecutionRegistry::default(),
+            task_executions: std::sync::Arc::new(crate::task_run::TaskExecutionRegistry::default()),
             conversation_tasks: crate::task_control::ConversationTaskProjection::default(),
             presentations: StdMutex::new(crate::presentation::PresentationState::default()),
             presentation_lock: AsyncMutex::new(()),
@@ -557,6 +560,8 @@ impl HostHandle {
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]
             close_gate: StdMutex::new(None),
+            #[cfg(test)]
+            resume_gate: StdMutex::new(None),
         })
     }
 
@@ -895,33 +900,19 @@ impl HostHandle {
             // auth direction stays explicit.
             WirePayload::AuthChallenge(_) | WirePayload::AuthResult(_) => {}
             WirePayload::SubmitTextInput(submit) => {
-                match Self::gate(&frame, &live) {
-                    GateDecision::Pass => {}
-                    GateDecision::Stale => {
-                        return emit_end(
-                            sink,
-                            stale_reject(&frame, &live, "input on a superseded connection"),
-                        );
-                    }
-                    GateDecision::Unpaired => {
-                        return emit_end(sink, unpaired_close(&frame, &live));
-                    }
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "input on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 self.submit_text(&frame, submit, &live, transport, sink, stream_tx)
                     .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
-                match Self::gate(&frame, &live) {
-                    GateDecision::Pass => {}
-                    GateDecision::Stale => {
-                        return emit_end(
-                            sink,
-                            stale_reject(&frame, &live, "presentation on a superseded connection"),
-                        );
-                    }
-                    GateDecision::Unpaired => {
-                        return emit_end(sink, unpaired_close(&frame, &live));
-                    }
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "presentation on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.confirm_presentation(&frame, confirm).await {
                     if sink.emit(response).is_err() {
@@ -930,17 +921,10 @@ impl HostHandle {
                 }
             }
             WirePayload::HistoryRequest(request) => {
-                match Self::gate(&frame, &live) {
-                    GateDecision::Pass => {}
-                    GateDecision::Stale => {
-                        return emit_end(
-                            sink,
-                            stale_reject(&frame, &live, "history on a superseded connection"),
-                        );
-                    }
-                    GateDecision::Unpaired => {
-                        return emit_end(sink, unpaired_close(&frame, &live));
-                    }
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "history on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.answer_history(&frame, request, &live).await {
                     if sink.emit(response).is_err() {
@@ -949,17 +933,10 @@ impl HostHandle {
                 }
             }
             WirePayload::ManagementIntent(intent) => {
-                match Self::gate(&frame, &live) {
-                    GateDecision::Pass => {}
-                    GateDecision::Stale => {
-                        return emit_end(
-                            sink,
-                            stale_reject(&frame, &live, "intent on a superseded connection"),
-                        );
-                    }
-                    GateDecision::Unpaired => {
-                        return emit_end(sink, unpaired_close(&frame, &live));
-                    }
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "intent on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.apply_intent(&frame, intent, &live).await {
                     if sink.emit(response).is_err() {
@@ -968,17 +945,10 @@ impl HostHandle {
                 }
             }
             WirePayload::ManagementViewRequest(request) => {
-                match Self::gate(&frame, &live) {
-                    GateDecision::Pass => {}
-                    GateDecision::Stale => {
-                        return emit_end(
-                            sink,
-                            stale_reject(&frame, &live, "view on a superseded connection"),
-                        );
-                    }
-                    GateDecision::Unpaired => {
-                        return emit_end(sink, unpaired_close(&frame, &live));
-                    }
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "view on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.answer_view(&frame, request, &live).await {
                     if sink.emit(response).is_err() {
@@ -987,8 +957,12 @@ impl HostHandle {
                 }
             }
             WirePayload::UndeliveredRequest(request) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                if let Some(refusal) = Self::gate_refusal(
+                    &frame,
+                    &live,
+                    "undelivered request on a superseded connection",
+                ) {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.request_undelivered(&frame, &live, request).await {
                     if sink.emit(response).is_err() {
@@ -997,8 +971,10 @@ impl HostHandle {
                 }
             }
             WirePayload::UndeliveredAck(ack) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "undelivered ack on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.ack_undelivered(&frame, &live, ack).await {
                     if sink.emit(response).is_err() {
@@ -1007,8 +983,10 @@ impl HostHandle {
                 }
             }
             WirePayload::ListTasks(query) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "task list on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.list_tasks_wire(&frame, &live, query).await {
                     if sink.emit(response).is_err() {
@@ -1017,8 +995,10 @@ impl HostHandle {
                 }
             }
             WirePayload::GetTaskReport(query) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "task report on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.report_wire(&frame, &live, query).await {
                     if sink.emit(response).is_err() {
@@ -1027,8 +1007,10 @@ impl HostHandle {
                 }
             }
             WirePayload::GetReportSource(query) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "report source on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.report_source_wire(&frame, &live, query).await {
                     if sink.emit(response).is_err() {
@@ -1037,8 +1019,10 @@ impl HostHandle {
                 }
             }
             WirePayload::SelectTask(query) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "task selection on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.select_task_wire(&frame, &live, query).await {
                     if sink.emit(response).is_err() {
@@ -1047,8 +1031,10 @@ impl HostHandle {
                 }
             }
             WirePayload::ResumeTask(command) => {
-                if Self::gate_trips(&frame, &live) {
-                    return emit_end(sink, unpaired_close(&frame, &live));
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "resume on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
                 }
                 for response in self.resume_task_wire(&frame, &live, command).await {
                     if sink.emit(response).is_err() {
@@ -1096,13 +1082,18 @@ impl HostHandle {
         GateDecision::Pass
     }
 
-    /// Presentation-slice admission: trips exactly when [`Self::gate`]
-    /// would not pass, so the premises stay single-sourced in the
-    /// connection table. The answer stays the terminal unpaired close —
-    /// the stale-vs-close distinction of the other arms is a later-slice
-    /// concern for these handlers, never a guessed pass.
-    fn gate_trips(frame: &WireFrame, live: &LiveInput) -> bool {
-        !matches!(Self::gate(frame, live), GateDecision::Pass)
+    /// Applies the domain gate to one frame: [`None`] when the frame may
+    /// proceed, otherwise the typed refusal to emit. A superseded connection
+    /// answers `StaleConnection` with the socket kept (IPC §11.3); every
+    /// other non-serviceable frame answers the terminal unpaired close. One
+    /// helper for every domain handler keeps the three-way gate decision
+    /// single-sourced.
+    fn gate_refusal(frame: &WireFrame, live: &LiveInput, detail: &str) -> Option<WireFrame> {
+        match Self::gate(frame, live) {
+            GateDecision::Pass => None,
+            GateDecision::Stale => Some(stale_reject(frame, live, detail)),
+            GateDecision::Unpaired => Some(unpaired_close(frame, live)),
+        }
     }
 
     pub(crate) fn round_for(&self, wire: &str) -> Option<RoundId> {
@@ -1350,6 +1341,14 @@ impl HostHandle {
     pub(crate) fn arm_close_gate(&self) -> std::sync::Arc<TestCloseGate> {
         let gate = std::sync::Arc::new(TestCloseGate::default());
         *crate::lock_unpoison(&self.close_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// Arms the test-only guarded-resume race gate and returns it.
+    #[cfg(test)]
+    pub(crate) fn arm_resume_gate(&self) -> std::sync::Arc<crate::task_control::TestResumeGate> {
+        let gate = std::sync::Arc::new(crate::task_control::TestResumeGate::default());
+        *crate::lock_unpoison(&self.resume_gate) = Some(std::sync::Arc::clone(&gate));
         gate
     }
 }

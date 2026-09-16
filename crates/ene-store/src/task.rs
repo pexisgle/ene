@@ -246,9 +246,9 @@ const SQL_PAST_RESULT_FACT: &str =
 /// probe (`adopted_revision` equals the current revision), never a cached
 /// flag; the two variants share one column list and decoder so a page boundary
 /// cannot change meaning.
-const SQL_LIST_TASKS_FIRST: &str = "SELECT task_id, revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task ORDER BY task_id LIMIT ?1";
+const SQL_LIST_TASKS_FIRST: &str = "SELECT task_id, revision, purpose_adopted_revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task ORDER BY task_id LIMIT ?1";
 
-const SQL_LIST_TASKS_AFTER: &str = "SELECT task_id, revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task WHERE task_id > ?1 ORDER BY task_id LIMIT ?2";
+const SQL_LIST_TASKS_AFTER: &str = "SELECT task_id, revision, purpose_adopted_revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task WHERE task_id > ?1 ORDER BY task_id LIMIT ?2";
 
 /// The bounded report-detail page: Action attempts (rank 0) before Task
 /// results (rank 1), each in canonical ID byte order. Bodies are not read.
@@ -2017,7 +2017,7 @@ fn list_tasks_after_sync(
 ) -> Result<Vec<TaskHeadline>, TaskTechnicalError> {
     let cap = i64::from(limit.clamp(1, REPORT_PAGE_MAX));
     let guard = lock_shared(conn);
-    let rows: Vec<(String, i64, Option<String>, String, bool)> = match after {
+    let rows: Vec<RawHeadline> = match after {
         None => {
             let mut statement = guard
                 .prepare(SQL_LIST_TASKS_FIRST)
@@ -2042,7 +2042,7 @@ fn list_tasks_after_sync(
     rows.into_iter().map(decode_headline).collect()
 }
 
-type RawHeadline = (String, i64, Option<String>, String, bool);
+type RawHeadline = (String, i64, Option<i64>, Option<String>, String, bool);
 
 fn raw_headline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHeadline> {
     Ok((
@@ -2051,14 +2051,23 @@ fn raw_headline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHeadline> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
 fn decode_headline(raw: RawHeadline) -> Result<TaskHeadline, TaskTechnicalError> {
-    let (task, revision, progress, assignee, adopted_result) = raw;
+    let (task, revision, purpose_revision, progress, assignee, adopted_result) = raw;
+    let task = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
     Ok(TaskHeadline {
-        task: TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?),
+        task,
         revision: decode_revision(revision)?,
+        purpose: TaskPurposeRef {
+            task,
+            adopted_revision: decode_revision(
+                purpose_revision
+                    .ok_or_else(|| task_unavailable("task purpose revision is missing"))?,
+            )?,
+        },
         progress: decode_progress(progress.as_deref())?,
         assignee: decode_id(&assignee).map_err(task_unavailable)?,
         adopted_result,
@@ -3193,13 +3202,38 @@ fn load_past_executed_facts_sync(
     Ok(PastExecutedFactsPage { facts, has_more })
 }
 
+impl Store {
+    /// Runs one AU17 resume commit synchronously on the caller's thread.
+    ///
+    /// For the Host's connection-ownership resume section only (CCT §10.4):
+    /// the caller holds the connection table and has already verified that
+    /// the issuing connection is still its device's current authenticated
+    /// connection, so supersession cannot interleave between that check and
+    /// this commit. Ordinary callers use the async
+    /// [`TaskRepository::commit_task_resume`], which wraps the same
+    /// transaction in `run_blocking`.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when the transaction cannot be read or
+    /// committed; the owner's domain outcomes stay on the `Ok` side.
+    pub fn commit_task_resume_sync(
+        &self,
+        premise: TaskResumeCommitPremise,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        self.hint_after_commit(commit_task_resume_sync(&self.conn, premise, None))
+    }
+}
+
 impl TaskRepository for Store {
     async fn create_task(
         &self,
         premise: TaskCreationPremise,
     ) -> Result<TaskRef, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        match run_blocking(move || create_task_sync(&conn, premise, None)).await? {
+        match self
+            .hint_after_commit(run_blocking(move || create_task_sync(&conn, premise, None)).await)?
+        {
             TaskCreationOutcome::Created(reference) => Ok(reference),
             // The unguarded creation has no currentness premise, so it can
             // never answer supersession.
@@ -3214,7 +3248,9 @@ impl TaskRepository for Store {
         premise: TaskCommitPremise,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || forward_steering_sync(&conn, premise, None)).await
+        self.hint_after_commit(
+            run_blocking(move || forward_steering_sync(&conn, premise, None)).await,
+        )
     }
 
     async fn load_task(&self, task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError> {
@@ -3224,7 +3260,7 @@ impl TaskRepository for Store {
 
     async fn cancel_task(&self, task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || cancel_task_sync(&conn, task, None)).await
+        self.hint_after_commit(run_blocking(move || cancel_task_sync(&conn, task, None)).await)
     }
 
     async fn fail_task(
@@ -3232,7 +3268,7 @@ impl TaskRepository for Store {
         premise: TaskFailurePremise,
     ) -> Result<TaskFailureOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || fail_task_sync(&conn, premise)).await
+        self.hint_after_commit(run_blocking(move || fail_task_sync(&conn, premise)).await)
     }
 
     async fn create_delegation(
@@ -3240,7 +3276,7 @@ impl TaskRepository for Store {
         premise: DelegationCreationPremise,
     ) -> Result<DelegationOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || create_delegation_sync(&conn, premise)).await
+        self.hint_after_commit(run_blocking(move || create_delegation_sync(&conn, premise)).await)
     }
 
     async fn load_delegation(
@@ -3256,7 +3292,9 @@ impl TaskRepository for Store {
         arrival: TaskAgentResultArrival,
     ) -> Result<TaskResultRecord, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || record_task_result_arrival_sync(&conn, arrival)).await
+        self.hint_after_commit(
+            run_blocking(move || record_task_result_arrival_sync(&conn, arrival)).await,
+        )
     }
 
     async fn load_task_result(
@@ -3288,7 +3326,7 @@ impl TaskRepository for Store {
         claim: TaskResultAdoptionClaim,
     ) -> Result<TaskResultAcceptance, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || adopt_result_sync(&conn, claim)).await
+        self.hint_after_commit(run_blocking(move || adopt_result_sync(&conn, claim)).await)
     }
 
     async fn load_result_adoption_claim(
@@ -3353,7 +3391,9 @@ impl TaskRepository for Store {
         premise: TaskResumeCommitPremise,
     ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || commit_task_resume_sync(&conn, premise, None)).await
+        self.hint_after_commit(
+            run_blocking(move || commit_task_resume_sync(&conn, premise, None)).await,
+        )
     }
 
     async fn load_past_executed_facts(
@@ -3372,7 +3412,9 @@ impl ConversationTaskRepository for Store {
         currentness: OwnerMessageCurrentness,
     ) -> Result<TaskCreationOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || create_task_sync(&conn, premise, Some(currentness))).await
+        self.hint_after_commit(
+            run_blocking(move || create_task_sync(&conn, premise, Some(currentness))).await,
+        )
     }
 
     async fn forward_steering_from_conversation(
@@ -3381,7 +3423,9 @@ impl ConversationTaskRepository for Store {
         currentness: OwnerMessageCurrentness,
     ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || forward_steering_sync(&conn, premise, Some(currentness))).await
+        self.hint_after_commit(
+            run_blocking(move || forward_steering_sync(&conn, premise, Some(currentness))).await,
+        )
     }
 
     async fn cancel_task_from_conversation(
@@ -3390,7 +3434,9 @@ impl ConversationTaskRepository for Store {
         currentness: OwnerMessageCurrentness,
     ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || cancel_task_sync(&conn, task, Some(currentness))).await
+        self.hint_after_commit(
+            run_blocking(move || cancel_task_sync(&conn, task, Some(currentness))).await,
+        )
     }
 
     async fn commit_task_resume_from_conversation(
@@ -3399,6 +3445,8 @@ impl ConversationTaskRepository for Store {
         currentness: OwnerMessageCurrentness,
     ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || commit_task_resume_sync(&conn, premise, Some(currentness))).await
+        self.hint_after_commit(
+            run_blocking(move || commit_task_resume_sync(&conn, premise, Some(currentness))).await,
+        )
     }
 }

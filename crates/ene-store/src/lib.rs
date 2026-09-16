@@ -54,6 +54,41 @@ async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stat
     }
 }
 
+/// Coalesced wakeup hint for the presentation subscription (CCT §10.5).
+///
+/// The store bumps the epoch after any commit that may have inserted an
+/// `undelivered` row. The hint carries no state and is never authority:
+/// subscribers re-read durable rows after every change, so a duplicated,
+/// early, or rolled-back hint is harmless and a lost one only delays
+/// delivery until the next hint or connection event. Reads of the
+/// `undelivered` table serialize on the store's connection mutex, so a
+/// durable query started after a bump always observes the committed row.
+#[derive(Clone)]
+pub struct UndeliveredSignal {
+    epoch: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl UndeliveredSignal {
+    fn new() -> Self {
+        Self {
+            epoch: Arc::new(tokio::sync::watch::channel(0).0),
+        }
+    }
+
+    fn bump(&self) {
+        self.epoch
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+
+    /// Subscribes to the coalesced hint. A receiver observes only changes
+    /// after it was created; callers that must not lose a registration
+    /// subscribe before reading the durable backlog.
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.epoch.subscribe()
+    }
+}
+
 /// SQLite-backed host for every repository contract.
 ///
 /// Cloning is a cheap handle copy over the same connection: the connection
@@ -62,6 +97,9 @@ async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stat
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
+    /// Bumped after any commit that may have registered an undelivered row;
+    /// see [`UndeliveredSignal`].
+    undelivered: UndeliveredSignal,
 }
 
 impl Store {
@@ -78,6 +116,7 @@ impl Store {
         migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            undelivered: UndeliveredSignal::new(),
         })
     }
 
@@ -120,6 +159,30 @@ impl Store {
         migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            undelivered: UndeliveredSignal::new(),
         })
+    }
+
+    /// Subscribes to the coalesced undelivered-registration hint (CCT §10.5).
+    ///
+    /// Subscribe before reading the durable backlog: a registration that
+    /// commits between the read and the wait then changes the epoch, so the
+    /// waiter wakes instead of missing the row.
+    #[must_use]
+    pub fn undelivered_wakeup(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.undelivered.subscribe()
+    }
+
+    /// Bumps the undelivered hint after `result`, and only when it succeeded.
+    ///
+    /// Call with the result of a commit that may have inserted an
+    /// `undelivered` row. A failed commit rolled back, so there is nothing
+    /// new to deliver; a successful one may have, and a spurious bump is
+    /// harmless because the hint is never authority.
+    fn hint_after_commit<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
+        if result.is_ok() {
+            self.undelivered.bump();
+        }
+        result
     }
 }

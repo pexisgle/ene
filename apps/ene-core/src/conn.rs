@@ -549,6 +549,34 @@ impl ConnectionTable {
             .map(|record| record.phase)
     }
 
+    /// Runs one short synchronous commit under the connection-ownership
+    /// section (CCT §10.4).
+    ///
+    /// The section verifies that `id` is still its device's current
+    /// authenticated connection and holds the table for the whole closure,
+    /// so a competing authentication install, supersede, or close cannot
+    /// interleave between the currentness check and `commit`. Returns
+    /// [`None`] — running nothing — when the connection was superseded,
+    /// closed, unauthenticated, unknown, or replaced. The closure runs on
+    /// the caller's blocking thread; it must not call back into this table
+    /// and must not await (it returns a plain value).
+    pub(crate) fn with_current_connection<R>(
+        &self,
+        id: &ConnectionWireId,
+        commit: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let table = crate::lock_unpoison(&self.inner);
+        let record = table.records.get(id)?;
+        if record.phase != ConnectionPhase::Authenticated {
+            return None;
+        }
+        let device = record.paired_device.as_ref()?;
+        if table.device_current.get(device) != Some(id) {
+            return None;
+        }
+        Some(commit())
+    }
+
     /// Test-only pending-challenge snapshot.
     #[cfg(test)]
     pub(crate) fn challenge_nonce_of(&self, id: &ConnectionWireId) -> Option<String> {
@@ -567,12 +595,13 @@ impl ConnectionTable {
             .and_then(|record| record.negotiated.clone())
     }
 
-    /// Test-only [`LiveInput`] snapshot for a connection, without an envelope.
+    /// [`LiveInput`] snapshot for a connection, without an envelope.
     ///
-    /// Mirrors [`ConnectionTable::live_for`]'s premise derivation so direct
-    /// handle tests can drive the real table.
-    #[cfg(test)]
-    pub(crate) fn test_live(self: &Arc<Self>, id: &ConnectionWireId) -> Option<LiveInput> {
+    /// Mirrors [`ConnectionTable::live_for`]'s premise derivation so the
+    /// connection-owned subscription loop and direct handle tests can read
+    /// the current premises without fabricating an inbound frame.
+    #[cfg(any(unix, windows, test))]
+    pub(crate) fn snapshot(self: &Arc<Self>, id: &ConnectionWireId) -> Option<LiveInput> {
         let table = crate::lock_unpoison(&self.inner);
         let record = table.records.get(id)?;
         let device = record.paired_device.clone();
@@ -727,6 +756,77 @@ async fn write_response(
 }
 
 #[cfg(any(unix, windows))]
+/// Reads and decodes frames until the stream ends or a frame is invalid.
+///
+/// The reader runs as its own task so the connection loop can wait on the
+/// inbound frames, the undelivered wakeup hint, and the receipt deadline at
+/// the same time: `read_exact` is not cancellation-safe, so the read cannot
+/// sit directly in a `select!`. A full channel backpressures the reader (and
+/// with it the socket), never the Task runner.
+#[cfg(any(unix, windows))]
+async fn read_frames<R>(mut read: R, frames: tokio::sync::mpsc::Sender<WireFrame>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt as _;
+
+    let mut prefix = [0_u8; 4];
+    loop {
+        if read.read_exact(&mut prefix).await.is_err() {
+            break;
+        }
+        let claimed = u32::from_be_bytes(prefix) as usize;
+        if claimed > MAX_FRAME_BYTES {
+            break;
+        }
+        let mut body = vec![0_u8; claimed];
+        if read.read_exact(&mut body).await.is_err() {
+            break;
+        }
+        let mut bytes = Vec::with_capacity(prefix.len() + body.len());
+        bytes.extend_from_slice(&prefix);
+        bytes.extend_from_slice(&body);
+        let Ok((frame, _)) = decode_frame(&bytes) else {
+            break;
+        };
+        if frames.send(frame).await.is_err() {
+            // The connection loop is gone; stop reading.
+            break;
+        }
+    }
+}
+
+/// Emits one subscription push for a connection with a captured template.
+///
+/// Returns `false` when the write failed: further pushes stop, but the
+/// connection loop keeps draining inbound frames, because a frame the peer
+/// sent before closing (for example a stream's `ConfirmPresentation`) still
+/// carries a durable observation that must be applied. The reader's EOF ends
+/// the connection.
+#[cfg(any(unix, windows))]
+async fn emit_push<W>(
+    write_half: &mut W,
+    handle: &HostHandle,
+    table: &Arc<ConnectionTable>,
+    connection: &ConnectionWireId,
+    template: &Option<(WireFrame, LiveInput)>,
+    terminal: &mut bool,
+) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let Some((frame, _)) = template else {
+        return true;
+    };
+    let Some(live) = table.snapshot(connection) else {
+        return true;
+    };
+    let Some(pushed) = handle.push_undelivered(frame, &live).await else {
+        return true;
+    };
+    write_response(write_half, pushed, terminal).await
+}
+
 /// An incarnation mismatch, a corrupt or oversize frame, or a terminal
 /// [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) in the
 /// responses ends the connection; close always forgets the table entry and
@@ -736,8 +836,15 @@ async fn write_response(
 ///
 /// Transport-generic over the byte stream so the Unix socket and the Windows
 /// named pipe share this loop, the duplicate suppression, and the phase gate.
+///
+/// The loop owns the connection lifetime: it processes inbound requests and,
+/// on the same lifetime, advances the undelivered subscription on a coalesced
+/// registration hint or on the nearest receipt deadline (CCT §10.5). Pushes
+/// run the same durable pass machinery as explicit requests, are bounded to
+/// one frame each, and cannot park the Task runner; a disconnect or
+/// supersession ends the loop and drops the connection-owned state.
 async fn serve_connection<S, T>(
-    mut stream: S,
+    stream: S,
     connection: ConnectionWireId,
     handle: Arc<HostHandle>,
     transport: Arc<T>,
@@ -746,95 +853,164 @@ async fn serve_connection<S, T>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: ProviderTransport + Send + Sync + 'static,
 {
-    use tokio::io::AsyncReadExt as _;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
+    let reader = tokio::spawn(read_frames(read_half, frames_tx));
+    // Subscribe before the first read: a registration that commits while the
+    // loop starts still changes the epoch, so the waiter cannot miss it.
+    let mut wake = handle.undelivered_wakeup();
+    // The most recent admitted inbound frame and its premises: pushes carry
+    // no reply correlation, so they reuse the connection's incarnation and
+    // device binding from the last real frame. No frame yet means the
+    // connection is still pre-auth, where nothing may be presented.
+    let mut template: Option<(WireFrame, LiveInput)> = None;
+    let mut terminal = false;
+    // A failed push write stops further pushes but never discards inbound
+    // frames the peer already sent; the reader's EOF ends the connection.
+    let mut push_blocked = false;
 
-    let mut prefix = [0_u8; 4];
-    loop {
-        if stream.read_exact(&mut prefix).await.is_err() {
-            break;
-        }
-        let claimed = u32::from_be_bytes(prefix) as usize;
-        if claimed > MAX_FRAME_BYTES {
-            break;
-        }
-        let mut body = vec![0_u8; claimed];
-        if stream.read_exact(&mut body).await.is_err() {
-            break;
-        }
-        let mut bytes = Vec::with_capacity(prefix.len() + body.len());
-        bytes.extend_from_slice(&prefix);
-        bytes.extend_from_slice(&body);
-        let Ok((frame, _)) = decode_frame(&bytes) else {
-            break;
-        };
-        let live = match table.live_for(&connection, &frame.envelope) {
-            LiveDecision::Ready(live) => live,
-            LiveDecision::Duplicate => continue,
-            LiveDecision::Invalid => break,
-        };
-        // The handle emits each response as it is decided; this loop writes
-        // them while the host future is still running, so an early accept and
-        // provider deltas reach the socket before provider completion. The
-        // channel is bounded: stream deltas backpressure the provider when
-        // the client falls behind instead of queueing without limit.
-        let (frame_tx, mut frame_rx) =
-            tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
-        let mut sink = frame_tx.clone();
-        let mut host = std::pin::pin!(handle.handle_frame_to(
-            frame,
-            live,
-            transport.as_ref(),
-            &mut sink,
-            &frame_tx,
-        ));
-        let mut failed = false;
-        let mut terminal = false;
-        let mut host_done = false;
-        loop {
-            if host_done {
-                while let Ok(response) = frame_rx.try_recv() {
-                    if !write_response(&mut stream, response, &mut terminal).await {
-                        failed = true;
-                        break;
-                    }
-                }
-                break;
+    'connection: loop {
+        let deadline = handle.receipt_deadline_for(&connection);
+        let timer = async {
+            match deadline {
+                Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                None => std::future::pending::<()>().await,
             }
-            tokio::select! {
-                biased;
-                () = &mut host => {
-                    host_done = true;
-                }
-                maybe = frame_rx.recv() => {
-                    match maybe {
-                        Some(response) => {
-                            if !write_response(&mut stream, response, &mut terminal).await {
+        };
+        tokio::select! {
+            biased;
+            maybe = frames_rx.recv() => {
+                let Some(frame) = maybe else {
+                    // Reader ended (EOF, invalid frame, or oversize): the
+                    // connection is over.
+                    break 'connection;
+                };
+                let live = match table.live_for(&connection, &frame.envelope) {
+                    LiveDecision::Ready(live) => live,
+                    LiveDecision::Duplicate => continue,
+                    LiveDecision::Invalid => break 'connection,
+                };
+                let frame_template = frame.clone();
+                let live_template = live.clone();
+                // The handle emits each response as it is decided; this loop
+                // writes them while the host future is still running, so an
+                // early accept and provider deltas reach the socket before
+                // provider completion. The channel is bounded: stream deltas
+                // backpressure the provider when the client falls behind
+                // instead of queueing without limit.
+                let (frame_tx, mut frame_rx) =
+                    tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
+                let mut sink = frame_tx.clone();
+                let mut host = std::pin::pin!(handle.handle_frame_to(
+                    frame,
+                    live,
+                    transport.as_ref(),
+                    &mut sink,
+                    &frame_tx,
+                ));
+                let mut failed = false;
+                let mut host_done = false;
+                loop {
+                    if host_done {
+                        while let Ok(response) = frame_rx.try_recv() {
+                            if !write_response(&mut write_half, response, &mut terminal).await {
                                 failed = true;
                                 break;
                             }
                         }
-                        None => host_done = true,
+                        break;
                     }
+                    tokio::select! {
+                        biased;
+                        () = &mut host => {
+                            host_done = true;
+                        }
+                        maybe = frame_rx.recv() => {
+                            match maybe {
+                                Some(response) => {
+                                    if !write_response(&mut write_half, response, &mut terminal).await {
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                                None => host_done = true,
+                            }
+                        }
+                    }
+                }
+                // The response above is already on the wire: post-response
+                // Learning formation runs in its own task, never as part of
+                // the request's completion. `run_pending_learning`
+                // serializes and drains, so a second spawn that finds an
+                // emptied queue is a cheap no-op.
+                if handle.has_pending_learning() {
+                    let worker_handle = Arc::clone(&handle);
+                    let worker_transport = Arc::clone(&transport);
+                    tokio::spawn(async move {
+                        worker_handle
+                            .run_pending_learning(worker_transport.as_ref())
+                            .await;
+                    });
+                }
+                template = Some((frame_template, live_template));
+                // A registration hint that fired before this first admitted
+                // frame was not lost: advance the subscription now that the
+                // connection has an envelope to push under. A push write
+                // failure disables pushes but does not end the connection.
+                if !push_blocked
+                    && !emit_push(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
+                if failed || terminal {
+                    break 'connection;
+                }
+            }
+            changed = wake.changed() => {
+                if changed.is_err() {
+                    // The store is gone with the handle; the connection ends.
+                    break 'connection;
+                }
+                if !push_blocked
+                    && !emit_push(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
+            }
+            () = timer => {
+                if !push_blocked
+                    && !emit_push(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                    )
+                    .await
+                {
+                    push_blocked = true;
                 }
             }
         }
-        // The response above is already on the wire: post-response Learning
-        // formation runs in its own task, never as part of the request's
-        // completion. `run_pending_learning` serializes and drains, so a
-        // second spawn that finds an emptied queue is a cheap no-op.
-        if handle.has_pending_learning() {
-            let worker_handle = Arc::clone(&handle);
-            let worker_transport = Arc::clone(&transport);
-            tokio::spawn(async move {
-                worker_handle
-                    .run_pending_learning(worker_transport.as_ref())
-                    .await;
-            });
-        }
-        if failed || terminal {
-            break;
-        }
     }
+    reader.abort();
     handle.close_connection(&table, connection).await;
 }
 
