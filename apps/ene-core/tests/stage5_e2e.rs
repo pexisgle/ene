@@ -483,37 +483,6 @@ fn take_summaries(client: &mut Client) -> Vec<UndeliveredSummary> {
     summaries
 }
 
-/// Re-syncs a session that just summoned: exactly one sacrificial submit is
-/// intake-stale (it sends nothing), and its StaleRound answer carries the
-/// current generation. Call exactly once after a submit that attached
-/// presence (NoActive/RecoveryWait -> Present); calling it while current
-/// would burn a real round. See the KNOWN GAP note in the S5-01 test.
-async fn resync_after_attach(client: &mut Client) -> Result<u64, String> {
-    let companion = client.companion_ref();
-    let stale = ask(
-        client,
-        WirePayload::SubmitTextInput(cmds::submit_input(
-            &companion,
-            None,
-            false,
-            String::from("sync probe"),
-            String::from("en"),
-        )),
-        "sync probe",
-    )
-    .await?;
-    let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound {
-        current_generation,
-        ..
-    }) = stale
-    else {
-        return Err(format!(
-            "the post-attach session must lag by one generation, got {stale:?}"
-        ));
-    };
-    Ok(current_generation)
-}
-
 async fn fetch_summary(client: &mut Client, what: &str) -> Result<UndeliveredSummary, String> {
     let answer = ask(
         client,
@@ -768,64 +737,20 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
     assert_eq!(done_chat, "All done here.");
     confirm_round(&mut client, &_round3, stream3).await;
     assert_eq!(transport.sends(), 6, "only the summon turn sent");
-    let mut pushed = Vec::new();
-    for frame in client.take_undelivered() {
-        if let WirePayload::UndeliveredResponse(
-            ene_api::v1::undelivered::UndeliveredResponse::Summary(summary),
-        ) = frame.payload
-        {
-            pushed.push(summary);
-        }
-    }
+    let pushed = take_summaries(&mut client);
     assert!(
         !pushed.is_empty(),
         "the summon must auto-present the absence backlog"
     );
-    // KNOWN GAP, see the slice-F report: the summon-attach above moved
-    // presence without pushing the fact, so this session still echoes the
-    // pre-summon generation and its first ACK would go StalePresentation
-    // (and "re-query and retry" cannot heal it: fetches are unstamped, so
-    // the session never catches up that way). The protocol-native heal is
-    // one intake-stale round: it sends nothing, and its StaleRound answer
-    // re-syncs the session to the current generation.
-    let pushed_gen = pushed
-        .iter()
-        .find(|candidate| !candidate.items.is_empty())
-        .expect("a pushed batch must carry rows")
-        .presence_generation;
-    let companion = client.companion_ref();
-    let stale = ask(
-        &mut client,
-        WirePayload::SubmitTextInput(cmds::submit_input(
-            &companion,
-            None,
-            false,
-            String::from("sync probe"),
-            String::from("en"),
-        )),
-        "sync probe",
-    )
-    .await
-    .expect("stale probe must answer");
-    let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound {
-        current_generation,
-        ..
-    }) = stale
-    else {
-        panic!("the post-summon session must lag by one generation, got {stale:?}");
-    };
-    assert_eq!(
-        current_generation, pushed_gen,
-        "the stale answer names the pushed generation"
-    );
-    assert_eq!(transport.sends(), 6, "intake-stale sends nothing");
-    // ACK the pushed receipt the way the first-party client does: echo the
-    // round the pushed summary showed. This presents exactly the carried
-    // batch; the Host facts stay.
     let pushed_summary = pushed
         .iter()
         .find(|candidate| !candidate.items.is_empty())
         .expect("a pushed batch must carry rows");
+    // The summon published the authoritative presence fact ahead of this
+    // summary, so the session already echoes the pushed generation: the
+    // first ACK presents the carried batch with no probe round and no
+    // second submit. A summary ahead of its fact could only be refused
+    // stale, so this leg is the regression the fact ordering fixes.
     let acked = client
         .request_observed(
             WirePayload::UndeliveredAck(cmds::undelivered_ack(
@@ -843,6 +768,11 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
             ))
         ),
         "ACK must present, got {acked:?}"
+    );
+    assert_eq!(
+        transport.sends(),
+        6,
+        "the first ACK presents without an extra round"
     );
     // After the ACK the backlog drains: a fresh fetch shows no rows.
     let answer = ask(
@@ -1353,13 +1283,13 @@ async fn s5_08_pre_ack_crash_represents_without_rerunning() {
         pushed.iter().any(|summary| !summary.items.is_empty()),
         "the crash must re-present under a new receipt"
     );
-    resync_after_attach(&mut c2)
-        .await
-        .expect("post-summon session must re-sync");
     let pushed_summary = pushed
         .iter()
         .find(|candidate| !candidate.items.is_empty())
         .expect("a pushed batch must carry rows");
+    // The summon published the fact ahead of the push, so this session
+    // already echoes the fresh generation: the first ACK presents the
+    // re-presented rows with no probe round.
     let acked = ack_summary(&mut c2, pushed_summary)
         .await
         .expect("re-presented ACK must answer");
@@ -1401,13 +1331,12 @@ async fn s5_08_pre_ack_crash_represents_without_rerunning() {
         pushed.iter().any(|summary| !summary.items.is_empty()),
         "host-crash rows must re-present under a new receipt"
     );
-    resync_after_attach(&mut c3)
-        .await
-        .expect("post-recovery session must re-sync");
     let pushed_summary = pushed
         .iter()
         .find(|candidate| !candidate.items.is_empty())
         .expect("a pushed batch must carry rows");
+    // Same leg after a Host restart: the recovery summon published the new
+    // generation ahead of the push, so the first ACK presents with no probe.
     let acked = ack_summary(&mut c3, pushed_summary)
         .await
         .expect("post-crash ACK must answer");
@@ -1458,14 +1387,12 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
     select_workspace(&mut c1, workspace.path())
         .await
         .expect("workspace must select");
-    // The propose submit summons, so the session lags one generation; heal
-    // it before any ACK leg (see the KNOWN GAP note in the S5-01 test).
     let (_round1, _stream1, _) = send_round(&mut c1, "please read input.txt and write report.md")
         .await
         .expect("propose round must complete");
-    resync_after_attach(&mut c1)
-        .await
-        .expect("post-summon session must re-sync");
+    // The propose submit summons and publishes the presence fact, so this
+    // session already echoes the generation the receipts below are stamped
+    // with: every ACK leg answers its own outcome with no probe round.
     transport.wait_sends(4).await;
 
     // Display the progress batch while the completion is still gated.
@@ -1554,9 +1481,6 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
         .expect("summon round must complete");
     assert_eq!(chat, "Later, then.");
     confirm_round(&mut c2, &_round2, stream2).await;
-    resync_after_attach(&mut c2)
-        .await
-        .expect("post-summon session must re-sync");
     let foreign = ack_summary(&mut c2, &completion)
         .await
         .expect("foreign ACK must answer");
@@ -1620,8 +1544,8 @@ async fn s5_13_presence_states_across_restart() {
 
     // Present restarts into RecoveryWait with a new generation. The client
     // stays connected across the restart (that is what keeps it Present);
-    // the old world's later disconnect write loses against the new
-    // generation, so the drop after the probe is safe.
+    // a later disconnect write from the old world loses against the new
+    // generation, so dropping this connection is safe.
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport)).await;
     let (state, recovery_generation) = presence_row(&dir);
     assert_eq!(state, "recovery_wait", "present must wait recovery");
