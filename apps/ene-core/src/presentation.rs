@@ -805,6 +805,7 @@ impl HostHandle {
             round: round.as_raw(),
             presented: false,
         };
+        let mut selected = Vec::new();
         for entry in &entries {
             if entry.status == ReportStatus::Pending
                 && let Err(_) = self
@@ -812,9 +813,11 @@ impl HostHandle {
                     .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
                     .await
             {
-                // A lost compare leaves the row for the next pass; the
-                // receipt still covers the carried set.
+                // A lost compare leaves the row for the next pass; only
+                // successfully-marked entries enter the receipt selection.
+                continue;
             }
+            selected.push(entry.id);
         }
         let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
         let receipt = Receipt {
@@ -826,7 +829,7 @@ impl HostHandle {
             round,
             round_wire: round_wire.0.clone(),
             generation,
-            selected: entries.iter().map(|entry| entry.id).collect(),
+            selected,
             expires_at: Instant::now() + RECEIPT_TTL,
         };
         // The carried prefix IS the fetched prefix (the fetch bound shrank

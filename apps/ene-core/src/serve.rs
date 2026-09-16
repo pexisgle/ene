@@ -510,6 +510,36 @@ impl HostHandle {
         Self::open_with_cred_store(data_dir, CredStore::Env(EnvCredentialStore::new())).await
     }
 
+    /// Runs the serving startup mutations in production order (PR §6.4):
+    /// presence normalization, unapproved-pairing cleanup, credential sweep,
+    /// and sealed-result reconciliation. Normalization goes first because
+    /// every client-dependent admission depends on it, while the sweep and
+    /// reconciliation do not; unapproved pendings never survive a restart
+    /// (paired records are untouched); the sweep keeps the Host from serving
+    /// content prepared under an unknown credential set; reconciliation
+    /// neither resumes an execution nor replays a provider call or Action,
+    /// and a still-blocked result stays withheld. The
+    /// [`crate::serve::lifecycle::serve`] entry point runs this
+    /// between the store open and the listener bind; Host-integration tests
+    /// run it to restart faithfully without a second listener. Like
+    /// [`crate::serve::lifecycle::serve`], any refusal fails startup:
+    /// the Host must not serve with an unknown presence state or unreadable
+    /// result state.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when normalization, the pairing cleanup, the
+    /// sweep, or the reconciliation cannot complete.
+    pub async fn run_startup_mutations(&self) -> Result<(), CoreError> {
+        self.normalize_presence_on_startup().await?;
+        self.clear_unapproved_pendings().await?;
+        self.sweep_registered_values().await?;
+        self.reconcile_sealed_results()
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        Ok(())
+    }
+
     /// Opens (or creates) the Host state under `data_dir` with an explicit
     /// credential store.
     ///

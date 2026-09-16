@@ -2835,25 +2835,11 @@ fn commit_task_resume_sync(
     {
         return Ok(TaskResumeOutcome::Superseded);
     }
-    if !premise.readiness.execution_free {
-        return Ok(TaskResumeOutcome::AlreadyRunning { task });
-    }
-    // The Task-wide completion barrier input, reused: any `Unknown` attempt
-    // under the Task, across every revision and delegation, holds the
-    // resume until objective evidence settles it.
-    if enumerate_task_attempts(&tx, task)?
-        .iter()
-        .any(|(_, certainty)| *certainty == ActionCertainty::Unknown)
-    {
-        return Ok(TaskResumeOutcome::HeldByUnknownEffects { task });
-    }
-    if has_adoptable_sealed_result(&tx, task, current_revision)? {
-        return Ok(TaskResumeOutcome::ResultAvailable { task });
-    }
     let assignee = decode_assignee(&current.assignee)?;
-    // The re-checkable holds, in variant order. The instruction source is
-    // validated now but its hold waits behind the barrier and availability
-    // checks above; only a guarded freshness loss short-circuits earlier.
+    // The instruction source is validated now so a guarded freshness loss
+    // answers `Superseded` before the execution, unknown-effects, and
+    // availability gates below; any other unusable source waits behind them
+    // as `InstructionUnavailable`. Reads only, so refusals stay zero-write.
     let source = validate_resume_source(
         &tx,
         &premise.command.instruction,
@@ -2868,6 +2854,21 @@ fn commit_task_resume_sync(
     )?;
     if matches!(source, ResumeSourceVerdict::Superseded) {
         return Ok(TaskResumeOutcome::Superseded);
+    }
+    if !premise.readiness.execution_free {
+        return Ok(TaskResumeOutcome::AlreadyRunning { task });
+    }
+    // The Task-wide completion barrier input, reused: any `Unknown` attempt
+    // under the Task, across every revision and delegation, holds the
+    // resume until objective evidence settles it.
+    if enumerate_task_attempts(&tx, task)?
+        .iter()
+        .any(|(_, certainty)| *certainty == ActionCertainty::Unknown)
+    {
+        return Ok(TaskResumeOutcome::HeldByUnknownEffects { task });
+    }
+    if has_adoptable_sealed_result(&tx, task, current_revision)? {
+        return Ok(TaskResumeOutcome::ResultAvailable { task });
     }
     let lifecycle: Option<String> = tx
         .query_row(

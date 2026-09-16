@@ -1206,3 +1206,61 @@ async fn past_facts_page_carries_attribution_without_bodies() {
         assert!(!fact.line.contains('\n'), "one fact is one line");
     }
 }
+
+#[tokio::test]
+async fn superseded_instruction_source_wins_over_execution_and_availability_gates() {
+    // One guarded turn per blocker: the instruction relies on a superseded
+    // Owner message while the commit is also blocked behind `AlreadyRunning`,
+    // `HeldByUnknownEffects`, or `ResultAvailable`. The documented priority
+    // (`Superseded` before all three) answers `Superseded` every time, with
+    // zero writes anywhere.
+    for blocker in ["already_running", "unknown_effects", "result_available"] {
+        let store = open_store().await;
+        let (companion, generation) = running_companion(&store).await.unwrap();
+        let (created, assoc) = seed_task(&store, companion).await;
+        let delegation = seed_delegation(&store, created, assoc).await;
+        let first = append_owner(&store, companion, generation, "first").await;
+        let second = append_owner(&store, companion, generation, "second").await;
+        let mut readiness = ready();
+        match blocker {
+            "already_running" => readiness.execution_free = false,
+            "unknown_effects" => {
+                start_attempt(&store, delegation, created, assoc, "pending.txt").await;
+            }
+            _ => {
+                orchestrate_result_arrival(
+                    &store,
+                    delegation,
+                    TaskAgentOutput::new(String::from("the sealed answer")),
+                )
+                .await
+                .expect("the arrival must record");
+            }
+        }
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        let before = table_counts(&store);
+        // The turn's own currentness is fresh (the second message), so the
+        // outer turn check passes; the instruction still relies on the first
+        // message, which the source check reports as supersession.
+        let outcome = commit_guarded(
+            &store,
+            resume_premise(&record, history_instruction(first, companion), readiness),
+            OwnerMessageCurrentness {
+                companion: companion.as_raw(),
+                message: second,
+            },
+        )
+        .await
+        .expect("resume must answer");
+        assert_eq!(
+            outcome,
+            TaskResumeOutcome::Superseded,
+            "blocker {blocker} must wait behind supersession"
+        );
+        assert_eq!(
+            table_counts(&store),
+            before,
+            "blocker {blocker} writes nothing"
+        );
+    }
+}
