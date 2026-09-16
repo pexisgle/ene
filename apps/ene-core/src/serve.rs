@@ -108,6 +108,7 @@ pub(crate) use frames::{
     invalid_phase_reject, outgoing_envelope, outgoing_fact, outgoing_frame, reject_frame,
     stale_reject, unpaired_close,
 };
+pub(crate) use handshake::attribution_to_wire;
 pub use lifecycle::serve;
 
 /// Binary-local Host failure.
