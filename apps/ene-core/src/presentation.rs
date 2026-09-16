@@ -2012,7 +2012,7 @@ impl HostHandle {
     /// deadline would keep firing forever. Durable rows are untouched:
     /// released rows keep their status and re-present on the next pass.
     pub(crate) fn expire_due_receipts(&self, connection: &ConnectionWireId) {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         self.receipt_expiry_runs
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let conn = conn_key(connection);

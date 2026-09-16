@@ -494,8 +494,10 @@ pub struct HostHandle {
         StdMutex<Option<std::sync::Arc<crate::presentation::TestPresentationCommitGate>>>,
     /// Test-only count of receipt-expiry housekeeping runs, so a test can
     /// pin that an expired receipt is released (and the deadline stops
-    /// re-firing) without measuring CPU or sleeping for ordering.
-    #[cfg(test)]
+    /// re-firing) without measuring CPU or sleeping for ordering. Unix-gated
+    /// with the socket-loop tests that read it; the Windows lib test build
+    /// would otherwise flag it as dead code under warnings-as-errors.
+    #[cfg(all(test, unix))]
     pub(crate) receipt_expiry_runs: std::sync::atomic::AtomicUsize,
 }
 
@@ -573,7 +575,7 @@ impl HostHandle {
             resume_gate: StdMutex::new(None),
             #[cfg(test)]
             presentation_commit_gate: StdMutex::new(None),
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             receipt_expiry_runs: std::sync::atomic::AtomicUsize::new(0),
         })
     }
@@ -1370,7 +1372,7 @@ impl HostHandle {
     }
 
     /// Test-only: how many receipt-expiry housekeeping runs happened.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn receipt_expiry_runs_for_test(&self) -> usize {
         self.receipt_expiry_runs
             .load(std::sync::atomic::Ordering::SeqCst)
