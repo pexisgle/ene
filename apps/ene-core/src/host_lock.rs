@@ -90,20 +90,17 @@ mod tests {
         handle.expect("the winning handle must open")
     }
 
-    /// The serving startup sequence through its explicit mutations: lock,
-    /// store open (migrations), credential sweep, sealed-result
-    /// reconciliation (PR §6.4). The listener bind is excluded, so the test
-    /// never serves.
+    /// The serving startup sequence through the production mutation entry
+    /// point: lock, store open (migrations), then
+    /// [`HostHandle::run_startup_mutations`]. Composing the steps here
+    /// instead would let this fixture drift from what serving actually runs.
+    /// The listener bind is excluded, so the test never serves.
     async fn serve_startup(dir: &Path) -> Result<(HostLock, HostHandle), CoreError> {
         let lock = HostLock::acquire(dir)?;
         let handle =
             HostHandle::open_with_cred_store(dir, CredStore::Memory(MemoryCredentialStore::new()))
                 .await?;
-        handle.sweep_registered_values().await?;
-        handle
-            .reconcile_sealed_results()
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
+        handle.run_startup_mutations().await?;
         Ok((lock, handle))
     }
 
