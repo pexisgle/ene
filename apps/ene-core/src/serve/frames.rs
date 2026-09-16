@@ -121,6 +121,20 @@ pub(crate) fn invalid_phase_reject(frame: &WireFrame, live: &LiveInput, detail: 
     )
 }
 
+/// Builds one unsolicited fact frame (auto-present summaries, presence
+/// facts): it names no `reply_to`, so a Client waiting on a request/response
+/// pair defers it instead of mistaking it for the answer. The connection id
+/// still travels: facts only flow on authenticated connections.
+pub(crate) fn outgoing_fact(
+    frame: &WireFrame,
+    live: &LiveInput,
+    payload: WirePayload,
+) -> WireFrame {
+    let mut envelope = outgoing_envelope(frame, live, &payload, None);
+    envelope.correlation.reply_to = None;
+    WireFrame { envelope, payload }
+}
+
 /// Builds one typed wire rejection answering `frame`.
 ///
 /// Per IPC §5, a rejection on an authenticated connection (`live.authed`)

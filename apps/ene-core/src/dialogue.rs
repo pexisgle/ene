@@ -97,8 +97,8 @@ use ene_store::Store;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
-    CredStore, FrameSink, HostHandle, LiveInput, device_client, emit_end, outgoing_frame,
-    reject_frame, unpaired_close,
+    CredStore, FrameSink, HostHandle, LiveInput, attribution_to_wire, device_client, emit_end,
+    outgoing_fact, outgoing_frame, reject_frame, unpaired_close,
 };
 
 /// Garbage maps to [`None`] (no replay key) rather than rejection: a
@@ -345,6 +345,16 @@ impl HostHandle {
     /// current `NoActive` generation answers stale with the current values,
     /// and only then does the compare-and-commit run.
     ///
+    /// A committed attach publishes the resulting attribution fact to this
+    /// connection (IPC §12.2): the fact is unsolicited — it names no
+    /// `reply_to`, so a Client awaiting this submit's answer absorbs it
+    /// instead of mistaking it for one — and it precedes the
+    /// auto-presented absence summary as well as this submit's own accept,
+    /// open, and stream frames. The order is load-bearing: the summary's
+    /// receipt carries the fresh generation and the Client's first ACK for
+    /// it echoes the generation it observed, so a summary delivered ahead
+    /// of its fact could only be answered `StalePresentation`.
+    ///
     /// Idempotency is durable over the envelope `command_id`, looked up
     /// through [`lookup_command`](HistoryRepository::lookup_command) and
     /// judged by the same [`RequestFingerprint`] the store compares
@@ -535,6 +545,48 @@ impl HostHandle {
                 AttachOutcome::Attached(fresh) => {
                     attached_generation = Some(fresh.generation);
                     attribution = fresh;
+                    // Presence transition distribution (IPC §12.1 M-6,
+                    // V-3): the compare-and-commit above made this
+                    // companion's attribution authoritative at a new
+                    // generation, so the resulting fact goes to this
+                    // subscriber before anything that depends on it.
+                    // Unsolicited by construction (outgoing_fact sets no
+                    // reply_to), so the Client absorbs it while its request
+                    // is in flight and never reads it as the answer to this
+                    // submit; the accept/open/stream frames below keep their
+                    // own correlation.
+                    //
+                    // Ordering is the invariant, not decoration: the
+                    // auto-presented summary that follows carries the fresh
+                    // generation on its receipt, and the first ACK for it
+                    // echoes the generation the Client observed. Ahead of the
+                    // fact that echo is the stale pre-summon view, and the
+                    // ACK is refused as StalePresentation, leaving the backlog
+                    // it carried unpresented.
+                    let fact = outgoing_fact(
+                        frame,
+                        live,
+                        WirePayload::PresenceAttribution(attribution_to_wire(self, &attribution)),
+                    );
+                    // Summon auto-present: this submit just established
+                    // formal presence, so the absence backlog presents
+                    // without an Owner query. Best-effort and bounded: a
+                    // full buffer drops the push (the explicit request
+                    // path re-presents), and the new turn's own reply
+                    // still streams normally afterwards. An undelivered
+                    // fact skips the push: an ACK for a summary whose fact
+                    // never arrived could only be refused stale, so that
+                    // recovery belongs to the explicit request path.
+                    if sink.emit(fact).is_ok() {
+                        for summary in self
+                            .auto_present_for(frame, live, companion, &attribution)
+                            .await
+                        {
+                            if sink.emit(summary).is_err() {
+                                break;
+                            }
+                        }
+                    }
                 }
                 AttachOutcome::Raced => {
                     let Ok(Some(current)) = self.store.load_attribution(companion.as_raw()).await

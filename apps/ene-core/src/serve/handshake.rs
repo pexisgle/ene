@@ -10,7 +10,7 @@
 use super::frames::{
     invalid_phase_reject, outgoing_frame, outgoing_frame_pre_auth, stale_reject, unpaired_close,
 };
-use super::{HostHandle, LiveInput};
+use super::{HostHandle, LiveInput, device_client};
 use crate::conn::{ChallengeOutcome, ConnectionPhase, InstallOutcome, NonceAdmission};
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::{
@@ -299,6 +299,22 @@ impl HostHandle {
                                 &attribution,
                             )),
                         ));
+                        // Recovery auto-present: a reconnected still-present
+                        // client gets its absence backlog without an Owner
+                        // query. Unsolicited (no reply_to), silence when empty,
+                        // one bounded frame at most. Auth alone never restores
+                        // presence, so anything but Present-for-this-device
+                        // presents nothing.
+                        if let Some(device) = live.paired_device.clone()
+                            && attribution.active_client == Some(device_client(&device))
+                        {
+                            for summary in self
+                                .auto_present_for(frame, live, companion, &attribution)
+                                .await
+                            {
+                                out.push(summary);
+                            }
+                        }
                     }
                     out
                 }
@@ -344,13 +360,19 @@ fn phase_rejection(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     }
 }
 
-/// Maps a durable attribution to its wire fact: the companion ref renders
-/// the handle-issued projection (resolvable back through
-/// [`HostHandle::resolve_companion`]), the client ref is a one-way opaque
-/// projection, and generation travels as a value copy. Reporting only,
-/// never authority: no Host path parses these strings into domain ids —
-/// companion refs resolve through the mapping, and Clients must treat both
-/// as opaque.
+/// Maps a durable attribution to its wire fact, the one projection every
+/// `PresenceAttribution` publisher uses: the handshake acceptance below
+/// distributes it on an auth/recovery, and the summon attach in the submit
+/// path distributes it on a formal-presence transition (IPC §12.2). Both
+/// read the durable fact, so a Client observes the same mapping whichever
+/// path taught it the current generation.
+///
+/// The companion ref renders the handle-issued projection (resolvable
+/// back through [`HostHandle::resolve_companion`]), the client ref is a
+/// one-way opaque projection, and generation travels as a value copy.
+/// Reporting only, never authority: no Host path parses these strings into
+/// domain ids — companion refs resolve through the mapping, and Clients
+/// must treat both as opaque.
 ///
 /// The client projection reuses the `device_client` recipe — `UUIDv5` over
 /// a kind-separated label — so it is stable across restarts without any
@@ -359,7 +381,7 @@ fn phase_rejection(frame: &WireFrame, live: &LiveInput) -> WireFrame {
 /// a `ClientWireRef`, so a mapping would be write-only. The Client's
 /// operative wire identity remains the device projection plus incarnation,
 /// resolved table-side.
-fn attribution_to_wire(
+pub(crate) fn attribution_to_wire(
     handle: &HostHandle,
     attribution: &ene_presence::PresenceAttribution,
 ) -> ene_api::v1::presence::PresenceAttributionWire {

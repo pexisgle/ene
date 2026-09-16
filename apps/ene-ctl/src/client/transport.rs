@@ -7,6 +7,7 @@ use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthChallenge;
 use ene_api::v1::payload::WirePayload;
 #[cfg(any(unix, windows))]
+use ene_api::v1::refs::WireMessageId;
 use ene_credential::pairing_proof_hex;
 #[cfg(any(unix, windows))]
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
@@ -319,6 +320,13 @@ impl Client {
         self.state.companion_ref()
     }
 
+    /// Drains deferred auto-presented summaries the Host pushed without
+    /// `reply_to`. The caller paints each and ACKs the receipts it fully
+    /// painted.
+    pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
+        self.state.take_undelivered()
+    }
+
     /// Prepares one logical send before I/O: the returned handle carries the
     /// payload and the command identity a transport retry must reuse.
     ///
@@ -389,8 +397,38 @@ impl Client {
         self.execute(&prepared).await
     }
 
+    /// Request/response carrying presentation observed marks: the caller
+    /// echoes the round and generation a summary showed so the Host can
+    /// compare them against the receipt. Used for `UndeliveredAck`, which
+    /// answers its typed outcome.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Client::execute`].
+    pub async fn request_observed(
+        &mut self,
+        payload: WirePayload,
+        round: Option<ene_api::v1::refs::RoundWireId>,
+    ) -> Result<WirePayload, CliError> {
+        use super::frames::observed_frame;
+        use ene_api::v1::refs::RequestWireId;
+
+        let mut frame = observed_frame(payload, self.sender, self.state.generation(), round);
+        let own_message_id = frame.envelope.message_id;
+        frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+        self.pump(frame, own_message_id).await
+    }
+
     async fn roundtrip(&mut self, frame: WireFrame) -> Result<WirePayload, CliError> {
         let own_message_id = frame.envelope.message_id;
+        self.pump(frame, own_message_id).await
+    }
+
+    async fn pump(
+        &mut self,
+        frame: WireFrame,
+        own_message_id: WireMessageId,
+    ) -> Result<WirePayload, CliError> {
         write_frame(&mut self.stream, &frame).await?;
         if let Some(queued) = self.state.take_deferred_reply(own_message_id) {
             if let Some(current) = stale_generation_of(&queued) {

@@ -7,6 +7,7 @@ use ene_api::v1::management::{
     ManagementViewRequest, RationaleOrigin,
 };
 use ene_api::v1::payload::WirePayload;
+use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
 use ene_api::v1::refs::{
     BaseViewMark, ClientIncarnationId, ClientLocalId, CommandWireId, CompanionWireRef,
     ConnectionWireId, ManagementTargetWire, RoundWireId, TextLangWire, WireMessageType,
@@ -16,6 +17,8 @@ use ene_api::v1::round::{
     ConfirmPresentationWire, HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire,
     StreamClose, SubmitTextInput, TextBodyWire,
 };
+use ene_api::v1::undelivered::PresentationReceiptWireRef;
+use ene_api::v1::undelivered::UndeliveredAck;
 use ene_credential::{CredentialRef, MemoryCredentialStore};
 use ene_inference::ProviderTransport;
 use ene_inference::fake::{FakeFailure, FakeProviderTransport};
@@ -271,8 +274,39 @@ async fn round_test_handle<T: ProviderTransport>(
     Ok((handle, dir))
 }
 
+/// Splits the presence fact a committed summon-attach publishes (IPC §12.2)
+/// off a submit's response batch.
+///
+/// The round tests below all start from `NoActive` and summon with their
+/// first submit, so those batches open with the one fact that teaches the
+/// Client the fresh generation — ahead of the summary it must ACK against.
+/// The assertion here is only that a leading fact is unsolicited (no
+/// `reply_to`), so a Client awaiting its answer never reads it as one; the
+/// fact's count, position relative to the summary, and absence on the
+/// non-attaching paths are pinned by the dedicated presence-publication
+/// tests. Dropping it keeps the round assertions reading the domain answer.
+fn split_presence_fact(
+    responses: &[ene_plugin_ipc::WireFrame],
+) -> (
+    Option<PresenceAttributionWire>,
+    &[ene_plugin_ipc::WireFrame],
+) {
+    let Some(head) = responses.first() else {
+        return (None, responses);
+    };
+    let WirePayload::PresenceAttribution(fact) = &head.payload else {
+        return (None, responses);
+    };
+    assert_eq!(
+        head.envelope.correlation.reply_to, None,
+        "the presence fact is unsolicited"
+    );
+    (Some(fact.clone()), &responses[1..])
+}
+
 fn accepted_round(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWireId, String> {
-    let Some(first) = responses.first() else {
+    let (_, answers) = split_presence_fact(responses);
+    let Some(first) = answers.first() else {
         return Err(String::from("the submit must answer"));
     };
     match &first.payload {
@@ -284,7 +318,8 @@ fn accepted_round(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWireId
 }
 
 fn reject_kind(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RejectKind, String> {
-    let Some(first) = responses.first() else {
+    let (_, answers) = split_presence_fact(responses);
+    let Some(first) = answers.first() else {
         return Err(String::from("the submit must answer"));
     };
     match &first.payload {
@@ -300,7 +335,8 @@ fn reject_on(
     connection: ConnectionWireId,
 ) -> Result<RejectKind, String> {
     let kind = reject_kind(responses)?;
-    let Some(first) = responses.first() else {
+    let (_, answers) = split_presence_fact(responses);
+    let Some(first) = answers.first() else {
         return Err(String::from("the submit must answer"));
     };
     if first.envelope.sender.connection_id != Some(connection) {
@@ -348,6 +384,125 @@ async fn current_generation(handle: &HostHandle) -> Result<u64, String> {
     };
     Ok(current.generation.as_u64())
 }
+
+/// The durable attribution of the running companion, as the Host reads it
+/// when it decides a submit.
+async fn current_attribution(handle: &HostHandle) -> ene_presence::PresenceAttribution {
+    use ene_companion::CompanionRepository as _;
+    use ene_presence::PresenceRepository as _;
+
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution must read")
+        .expect("attribution must exist")
+}
+
+/// Commits one Companion reply while nobody is present, so the next summon
+/// has an absence backlog to auto-present.
+async fn append_absent_reply(
+    handle: &HostHandle,
+    text: &str,
+    generation: ene_presence::PresenceGeneration,
+) {
+    use ene_companion::CompanionRepository as _;
+    use ene_companion::{AppendHistoryCommand, HistoryRepository as _, HistoryRole};
+    use ene_primitive::WallClockWithTz;
+
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let (outcome, registered) = handle
+        .store
+        .append_reply_with_undelivered(
+            AppendHistoryCommand {
+                companion,
+                round: RawId::new(),
+                role: HistoryRole::Companion,
+                text: text.to_string(),
+                lang: String::from("en"),
+                at: WallClockWithTz::now(),
+                expected_generation: generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                expected_owner_message: None,
+                command_id: None,
+                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            },
+            true,
+        )
+        .await
+        .expect("the absent reply must commit");
+    assert!(
+        matches!(
+            outcome,
+            ene_companion::HistoryAppendOutcome::CommittedAs { .. }
+        ),
+        "the absent reply must commit, got {outcome:?}"
+    );
+    assert!(
+        registered.is_some(),
+        "the absent reply registers its undelivered correlation"
+    );
+}
+
+/// Counts the rows still waiting for a presentation ACK.
+async fn unpresented_rows(handle: &HostHandle) -> usize {
+    use ene_companion::CompanionRepository as _;
+    use ene_companion::UndeliveredRepository as _;
+
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read")
+        .entries
+        .len()
+}
+
+/// Builds the ACK a Client sends after painting a summary: the observed
+/// marks echo the generation the summary taught and the round it showed,
+/// exactly as the Client's own stamped frames do — the Host compares them,
+/// and a self-claim of currentness proves nothing.
+fn summary_ack_frame(
+    receipt: &str,
+    round: RoundWireId,
+    generation: u64,
+    connection: ConnectionWireId,
+) -> ene_plugin_ipc::WireFrame {
+    let mut envelope = new_outgoing_envelope(
+        ProtocolVersion::V1,
+        sender(),
+        WireMessageType(String::from("UndeliveredAck")),
+    );
+    envelope.observed.presence_generation_view = Some(generation);
+    envelope.observed.round_view = Some(round);
+    let frame = ene_plugin_ipc::WireFrame {
+        envelope,
+        payload: WirePayload::UndeliveredAck(UndeliveredAck {
+            receipt: PresentationReceiptWireRef(receipt.to_string()),
+            status: PresentationStatus::Presented,
+        }),
+    };
+    stamped(frame, connection)
+}
+
 async fn setup_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
     memory_handle_with(tag, |store| {
         store.insert(
@@ -504,8 +659,16 @@ async fn submit_without_setup_needs_revalidation() {
             &transport,
         )
         .await;
-    assert_eq!(denied.len(), 1, "denial answers once");
-    let only = denied.first().unwrap();
+    let (fact, denials) = split_presence_fact(&denied);
+    // The summon attaches before admission judges the input, so the fact
+    // for that committed transition goes out even though this submit is
+    // then denied: the Client still learns the generation it now holds.
+    assert!(
+        fact.is_some_and(|fact| fact.generation == 1),
+        "the summon attach publishes its fact before the denial, got {denied:?}"
+    );
+    assert_eq!(denials.len(), 1, "denial answers once");
+    let only = denials.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -712,6 +875,427 @@ async fn attach_compare_loser_reports_raced() {
     );
 }
 
+/// Sink that refuses its first frame and accepts every later one: models a
+/// control allowance that broke exactly as the presence fact went out.
+struct RefuseFirstSink {
+    refused: bool,
+    accepted: Vec<ene_plugin_ipc::WireFrame>,
+}
+
+impl crate::serve::FrameSink for RefuseFirstSink {
+    fn emit(
+        &mut self,
+        frame: ene_plugin_ipc::WireFrame,
+    ) -> Result<(), crate::serve::FrameDeliveryError> {
+        if !self.refused {
+            self.refused = true;
+            return Err(crate::serve::FrameDeliveryError::Full);
+        }
+        self.accepted.push(frame);
+        Ok(())
+    }
+}
+
+/// A fact that never reached the wire takes its dependent push with it: the
+/// auto-presented summary is skipped, because an ACK for a summary whose
+/// fact the Client never saw could only be refused stale. The turn itself
+/// still answers, and the backlog waits for the explicit request path.
+#[tokio::test]
+async fn undelivered_presence_fact_skips_the_auto_presented_summary() {
+    let (handle, _dir) = setup_handle("dlg-fact-undelivered").await.unwrap();
+    let transport = ok_transport();
+    let live = live_input("client-a");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    let absent = current_attribution(&handle).await;
+    append_absent_reply(&handle, "completion while absent", absent.generation).await;
+    let mut sink = RefuseFirstSink {
+        refused: false,
+        accepted: Vec::new(),
+    };
+    let (control_tx, _control_rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    handle
+        .handle_frame_to(
+            submit_frame(
+                handle.companion_wire(),
+                Some(absent.generation.as_u64()),
+                None,
+                "local-summon",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+            &mut sink,
+            &control_tx,
+        )
+        .await;
+    assert!(
+        !sink
+            .accepted
+            .iter()
+            .any(|frame| matches!(frame.payload, WirePayload::UndeliveredResponse(_))),
+        "no summary without its fact, got {:?}",
+        sink.accepted
+    );
+    assert!(
+        accepted_round(&sink.accepted).is_ok(),
+        "the turn still answers, got {:?}",
+        sink.accepted
+    );
+    assert!(
+        unpresented_rows(&handle).await >= 1,
+        "the skipped push leaves the backlog unpresented"
+    );
+}
+
+/// The summon attach publishes the authoritative presence fact before the
+/// absence summary it enables: one attach, one unsolicited fact, and a
+/// summary stamped with the generation that fact taught. The Client can
+/// only ACK the summary against what it observed, so the order decides
+/// between a presented backlog and a stale refusal.
+#[tokio::test]
+async fn summon_attach_publishes_one_unsolicited_fact_ahead_of_the_summary() {
+    use ene_api::v1::undelivered::UndeliveredResponse;
+
+    let (handle, _dir) = setup_handle("dlg-summon-fact").await.unwrap();
+    let transport = ok_transport();
+    let live = live_input("client-a");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    // Nobody is present: one completion lands as an absence row, so the
+    // summon below has a backlog to auto-present without an Owner query.
+    let absent = current_attribution(&handle).await;
+    assert_eq!(
+        absent.state,
+        ene_presence::PresenceState::NoActive,
+        "a fresh handle starts with no active client"
+    );
+    append_absent_reply(&handle, "completion while absent", absent.generation).await;
+
+    let submitted = submit_frame(
+        handle.companion_wire(),
+        Some(absent.generation.as_u64()),
+        None,
+        "local-summon",
+        "hello",
+        live.connection_id,
+    );
+    let submit_message = submitted.envelope.message_id;
+    let responses = handle
+        .handle_frame(submitted, live.clone(), &transport)
+        .await;
+
+    // One attach commits one transition, so exactly one fact is published,
+    // and it opens the batch: everything carrying the fresh generation is
+    // built on a fact the Client has not seen yet.
+    let facts: Vec<&ene_plugin_ipc::WireFrame> = responses
+        .iter()
+        .filter(|frame| matches!(frame.payload, WirePayload::PresenceAttribution(_)))
+        .collect();
+    assert_eq!(
+        facts.len(),
+        1,
+        "one attach publishes one fact, got {responses:?}"
+    );
+    let fact_frame = facts.first().unwrap();
+    assert_eq!(
+        fact_frame.envelope.correlation.reply_to, None,
+        "the fact is unsolicited: it never answers the submit"
+    );
+    assert_eq!(
+        fact_frame.envelope.sender.connection_id,
+        Some(live.connection_id),
+        "facts only flow on the authenticated connection"
+    );
+    let Some(WirePayload::PresenceAttribution(fact)) =
+        responses.first().map(|frame| &frame.payload)
+    else {
+        panic!("the fact leads the batch, got {responses:?}");
+    };
+    assert_eq!(
+        fact.generation,
+        absent.generation.as_u64() + 1,
+        "the fact carries the generation the attach just committed"
+    );
+    assert!(
+        matches!(fact.state, PresenceStateWire::Present),
+        "the summon moved the companion to present"
+    );
+    assert_eq!(fact.companion.0, handle.companion_wire());
+    assert!(
+        fact.active_client.is_some(),
+        "the fact names this device as the active client"
+    );
+    let current = current_attribution(&handle).await;
+    assert_eq!(
+        current.active_client,
+        Some(device_client("client-a")),
+        "the durable attribution names the summoning device"
+    );
+
+    // The auto-presented summary follows the fact and carries the fresh
+    // generation on its receipt: the Client echoes that generation, not the
+    // pre-summon one, once it has absorbed the fact.
+    let Some(WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary))) =
+        responses.get(1).map(|frame| &frame.payload)
+    else {
+        panic!("the summary follows the fact, got {responses:?}");
+    };
+    assert_eq!(
+        summary.presence_generation, fact.generation,
+        "the receipt is stamped with the generation the fact just taught"
+    );
+    assert_eq!(summary.items.len(), 1, "the absence row auto-presents");
+    assert!(
+        responses[1].envelope.correlation.reply_to.is_none(),
+        "the auto-presented summary is unsolicited too"
+    );
+
+    // The submit has its own answer, correlated to it: the facts were
+    // absorbed while the Client waited, never mistaken for that answer.
+    let accepted = responses
+        .iter()
+        .find(|frame| matches!(frame.payload, WirePayload::RoundIntakeOutcome(_)))
+        .expect("the submit answers");
+    assert_eq!(
+        accepted.envelope.correlation.reply_to,
+        Some(submit_message),
+        "the round answer correlates to the submit"
+    );
+    assert_eq!(
+        accepted.envelope.sender.connection_id,
+        Some(live.connection_id),
+        "the answer echoes the connection"
+    );
+}
+
+/// The published fact is what makes the first ACK answerable: an echo of
+/// the pre-summon view is refused stale and leaves the row waiting, while
+/// the echo of the generation the fact carried presents it on the first
+/// answerable ACK, with no extra submit and no second round.
+#[tokio::test]
+async fn summon_fact_taught_generation_is_what_the_first_ack_echoes() {
+    use ene_api::v1::undelivered::{UndeliveredAckOutcome, UndeliveredResponse};
+
+    let (handle, _dir) = setup_handle("dlg-summon-ack").await.unwrap();
+    let transport = ok_transport();
+    let live = live_input("client-a");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    let absent = current_attribution(&handle).await;
+    append_absent_reply(&handle, "completion while absent", absent.generation).await;
+    let responses = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(absent.generation.as_u64()),
+                None,
+                "local-summon",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let Some(WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary))) =
+        responses.get(1).map(|frame| &frame.payload)
+    else {
+        panic!("the summon auto-presents the backlog after its fact, got {responses:?}");
+    };
+    // The summary carried the absence row; this turn's own reply registers
+    // its own row afterwards, so the count is what the ACK below must
+    // reduce by exactly one.
+    let waiting = unpresented_rows(&handle).await;
+    assert!(waiting >= 1, "nothing is presented by painting alone");
+
+    // The echo a Client still holding the pre-summon view sends: refused
+    // stale, with nothing consumed (a refusal is not a presentation).
+    let refused = handle
+        .handle_frame(
+            summary_ack_frame(
+                &summary.receipt.0,
+                summary.round.clone(),
+                absent.generation.as_u64(),
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        matches!(
+            refused.first().map(|frame| &frame.payload),
+            Some(WirePayload::UndeliveredAckOutcome(
+                UndeliveredAckOutcome::StalePresentation
+            ))
+        ),
+        "the pre-summon echo is refused stale, got {refused:?}"
+    );
+    assert_eq!(
+        unpresented_rows(&handle).await,
+        waiting,
+        "a refusal consumes nothing"
+    );
+
+    // The echo the same Client sends once it absorbed the published fact:
+    // the first answerable ACK, with no extra submit and no second round.
+    let answered = handle
+        .handle_frame(
+            summary_ack_frame(
+                &summary.receipt.0,
+                summary.round.clone(),
+                summary.presence_generation,
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        matches!(
+            answered.first().map(|frame| &frame.payload),
+            Some(WirePayload::UndeliveredAckOutcome(
+                UndeliveredAckOutcome::Presented { presented: 1 }
+            ))
+        ),
+        "the fact-taught echo presents the backlog, got {answered:?}"
+    );
+    assert_eq!(
+        unpresented_rows(&handle).await,
+        waiting - 1,
+        "the ACK presents exactly the row the summary carried"
+    );
+}
+
+/// Only a committed transition distributes a fact: a submit from an
+/// already-present device attaches nothing, so its batch carries no fact
+/// and the round still answers normally.
+#[tokio::test]
+async fn already_present_submit_publishes_no_fact() {
+    let (handle, _dir) = setup_handle("dlg-present-nofact").await.unwrap();
+    let transport = ok_transport();
+    let live = live_input("client-a");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    let first = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-1",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        split_presence_fact(&first).0.is_some(),
+        "the first submit summons and publishes the fact, got {first:?}"
+    );
+    let generation = current_generation(&handle).await.unwrap();
+    let second = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(generation),
+                None,
+                "local-2",
+                "again",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        split_presence_fact(&second).0.is_none(),
+        "an already-present submit publishes no fact, got {second:?}"
+    );
+    assert!(
+        accepted_round(&second).is_ok(),
+        "the already-present submit still accepts, got {second:?}"
+    );
+}
+
+/// A summon that loses the compare publishes nothing and reclaims nothing:
+/// the loser learns the current values, the generation stays where the
+/// winner moved it, and the active client is still the winner device.
+#[tokio::test]
+async fn losing_summon_publishes_no_fact_and_never_reclaims_presence() {
+    let (handle, _dir) = setup_handle("dlg-race-nofact").await.unwrap();
+    let transport = ok_transport();
+    let live = live_input("client-a");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    let absent = current_attribution(&handle).await;
+    let winner = handle
+        .attach_presence("client-b", true, absent.generation)
+        .await;
+    assert!(
+        matches!(
+            winner,
+            AttachOutcome::Attached(fresh) if fresh.generation.as_u64() == 1
+        ),
+        "another device summons first, got {winner:?}"
+    );
+    let responses = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(absent.generation.as_u64()),
+                None,
+                "local-1",
+                "hello",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        split_presence_fact(&responses).0.is_none(),
+        "nothing attached, so no fact is published, got {responses:?}"
+    );
+    assert!(
+        matches!(
+            responses.first().map(|frame| &frame.payload),
+            Some(WirePayload::RoundIntakeOutcome(
+                RoundIntakeOutcomeWire::StaleRound {
+                    current_generation: 1,
+                    ..
+                }
+            ))
+        ),
+        "the loser learns the current generation, got {responses:?}"
+    );
+    let current = current_attribution(&handle).await;
+    assert_eq!(
+        current.generation.as_u64(),
+        1,
+        "the loser never advances the generation"
+    );
+    assert_eq!(
+        current.active_client,
+        Some(device_client("client-b")),
+        "the loser never reclaims presence"
+    );
+}
+
 #[tokio::test]
 async fn full_dialogue_round_streams_and_restores() {
     use ene_companion::CompanionRepository as _;
@@ -743,8 +1327,14 @@ async fn full_dialogue_round_streams_and_restores() {
     let responses = handle
         .handle_frame(frame.clone(), live.clone(), &transport)
         .await;
+    let (fact, answers) = split_presence_fact(&responses);
     assert_eq!(
-        responses.len(),
+        fact.map(|fact| (fact.state, fact.generation)),
+        Some((PresenceStateWire::Present, 1)),
+        "the attach publishes the fresh attribution ahead of its answers, got {responses:?}"
+    );
+    assert_eq!(
+        answers.len(),
         5,
         "the winning attach emits accept, open, one delta, the final marker, close, got {responses:?}"
     );
@@ -755,14 +1345,14 @@ async fn full_dialogue_round_streams_and_restores() {
             "every response echoes the connection"
         );
     }
-    let accepted = responses.first().unwrap();
+    let accepted = answers.first().unwrap();
     let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) =
         &accepted.payload
     else {
         return;
     };
     let round = round.clone();
-    let opened = responses.get(1).unwrap();
+    let opened = answers.get(1).unwrap();
     assert!(
         matches!(
             &opened.payload,
@@ -771,7 +1361,7 @@ async fn full_dialogue_round_streams_and_restores() {
         "the stream opens at the freshly attached generation, got {:?}",
         opened.payload
     );
-    let stream_frame = responses.get(2).unwrap();
+    let stream_frame = answers.get(2).unwrap();
     assert!(
         matches!(
             &stream_frame.payload,
@@ -779,7 +1369,7 @@ async fn full_dialogue_round_streams_and_restores() {
         ),
         "the fallback delta arrives at seq zero"
     );
-    let final_frame = responses.get(3).unwrap();
+    let final_frame = answers.get(3).unwrap();
     assert!(
         matches!(
             &final_frame.payload,
@@ -787,7 +1377,7 @@ async fn full_dialogue_round_streams_and_restores() {
         ),
         "the final marker closes the delta sequence"
     );
-    let closed = responses.get(4).unwrap();
+    let closed = answers.get(4).unwrap();
     assert!(
         matches!(
             &closed.payload,
@@ -1578,8 +2168,13 @@ async fn disconnect_clears_an_attached_device() {
             &transport,
         )
         .await;
+    let (fact, answers) = split_presence_fact(&accepted);
     assert!(
-        accepted.first().is_some_and(|first| matches!(
+        fact.is_some_and(|fact| fact.generation == 1),
+        "the summon attach publishes the fresh generation, got {accepted:?}"
+    );
+    assert!(
+        answers.first().is_some_and(|first| matches!(
             &first.payload,
             WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
         )),
@@ -1626,8 +2221,13 @@ async fn replay_after_disconnect_neither_stales_nor_reattaches() {
     let accepted = handle
         .handle_frame(frame.clone(), live.clone(), &transport)
         .await;
+    let (fact, answers) = split_presence_fact(&accepted);
     assert!(
-        accepted.first().is_some_and(|first| matches!(
+        fact.is_some_and(|fact| fact.generation == 1),
+        "the summon attach publishes the fresh generation, got {accepted:?}"
+    );
+    assert!(
+        answers.first().is_some_and(|first| matches!(
             &first.payload,
             WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
         )),
@@ -1641,6 +2241,10 @@ async fn replay_after_disconnect_neither_stales_nor_reattaches() {
     // NoActive again, and presence stays untouched (no re-attach, no
     // generation advance for a send that changes nothing).
     let replayed = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert!(
+        split_presence_fact(&replayed).0.is_none(),
+        "the replay attaches nothing, so it publishes no fact, got {replayed:?}"
+    );
     assert!(
         replayed.first().is_some_and(|first| matches!(
             &first.payload,
@@ -1680,8 +2284,13 @@ async fn provider_failure_interrupts_after_accept() {
             &transport,
         )
         .await;
+    let (fact, answers) = split_presence_fact(&accepted);
     assert!(
-        accepted.first().is_some_and(|first| matches!(
+        fact.is_some_and(|fact| fact.generation == 1),
+        "the first send attaches and publishes the fresh generation, got {accepted:?}"
+    );
+    assert!(
+        answers.first().is_some_and(|first| matches!(
             &first.payload,
             WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
         )),
@@ -1702,6 +2311,8 @@ async fn provider_failure_interrupts_after_accept() {
             &failing,
         )
         .await;
+    // Nothing to attach: the client is already present, so this batch
+    // carries no presence fact, only the answer and its interrupted stream.
     assert_eq!(responses.len(), 3, "accept plus an interrupted stream");
     let closed = responses.get(2).unwrap();
     assert!(
@@ -2257,10 +2868,13 @@ async fn submit_with_reused_command_and_new_text_is_declined() {
         .handle_frame(frame.clone(), live.clone(), &transport)
         .await;
     assert!(
-        first.first().is_some_and(|answer| matches!(
-            &answer.payload,
-            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
-        )),
+        split_presence_fact(&first)
+            .1
+            .first()
+            .is_some_and(|answer| matches!(
+                &answer.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+            )),
         "the first send must accept"
     );
     let mut forged = frame;
@@ -2268,6 +2882,10 @@ async fn submit_with_reused_command_and_new_text_is_declined() {
         input.body.text = String::from("different words, same command");
     }
     let declined = handle.handle_frame(forged, live.clone(), &transport).await;
+    assert!(
+        split_presence_fact(&declined).0.is_none(),
+        "the conflict judge runs before attach, so it publishes no fact, got {declined:?}"
+    );
     let only = declined.first().unwrap();
     assert!(
         matches!(
@@ -4499,7 +5117,7 @@ async fn streaming_emits_accept_and_first_delta_before_provider_completion() {
         Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink, &stream_tx));
 
     let mut early = Vec::new();
-    while early.len() < 3 {
+    while early.len() < 4 {
         tokio::select! {
             biased;
             () = &mut host => panic!("the provider completed before the early frames"),
@@ -4509,16 +5127,23 @@ async fn streaming_emits_accept_and_first_delta_before_provider_completion() {
     assert!(
         matches!(
             &early[0].payload,
-            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+            WirePayload::PresenceAttribution(fact) if fact.generation == 1
         ),
-        "the first frame is the durable acceptance"
+        "the attach fact leads the batch"
     );
     assert!(
-        matches!(&early[1].payload, WirePayload::TextStreamOpen(_)),
+        matches!(
+            &early[1].payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        ),
+        "the durable acceptance follows the presence fact"
+    );
+    assert!(
+        matches!(&early[2].payload, WirePayload::TextStreamOpen(_)),
         "the stream opens before deltas"
     );
-    let WirePayload::TextStreamFrame(first) = &early[2].payload else {
-        panic!("the third frame is the first delta");
+    let WirePayload::TextStreamFrame(first) = &early[3].payload else {
+        panic!("the fourth frame is the first delta");
     };
     assert_eq!(first.delta, "Hel");
     assert_eq!(first.seq, 0);
@@ -4587,7 +5212,13 @@ async fn streaming_error_after_a_delta_closes_interrupted_without_adoption() {
         live.connection_id,
     );
     let frames = handle.handle_frame(frame, live.clone(), &transport).await;
-    let payloads: Vec<&WirePayload> = frames.iter().map(|frame| &frame.payload).collect();
+    let (fact, answers) = split_presence_fact(&frames);
+    assert_eq!(
+        fact.map(|fact| fact.generation),
+        Some(1),
+        "the attach fact leads the failed batch"
+    );
+    let payloads: Vec<&WirePayload> = answers.iter().map(|frame| &frame.payload).collect();
     assert!(
         matches!(
             payloads.first(),
@@ -4686,15 +5317,19 @@ async fn streaming_stops_presenting_once_a_newer_submit_replaces_the_round() -> 
     let mut first_host =
         Box::pin(handle.handle_frame_to(first, live.clone(), &gated, &mut sink, &stream_tx));
     let mut early = Vec::new();
-    while early.len() < 3 {
+    while early.len() < 4 {
         tokio::select! {
             biased;
             () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
             maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
         }
     }
-    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
-        return Err(String::from("the third frame is the first delta"));
+    if !matches!(&early[0].payload, WirePayload::PresenceAttribution(fact) if fact.generation == 1)
+    {
+        return Err(String::from("the attach fact leads the batch"));
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[3].payload else {
+        return Err(String::from("the fourth frame is the first delta"));
     };
     if shown.delta != "Hel" {
         return Err(format!(
@@ -5288,20 +5923,24 @@ async fn completion_after_round_replacement_adopts_nothing() -> Result<(), Strin
     let mut first_host =
         Box::pin(handle.handle_frame_to(first, live.clone(), &stalled, &mut sink, &stream_tx));
     let mut early = Vec::new();
-    while early.len() < 3 {
+    while early.len() < 4 {
         tokio::select! {
             biased;
             () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
             maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
         }
     }
-    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
-        return Err(String::from("the third frame is the first delta"));
+    if !matches!(&early[0].payload, WirePayload::PresenceAttribution(fact) if fact.generation == 1)
+    {
+        return Err(String::from("the attach fact leads the batch"));
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[3].payload else {
+        return Err(String::from("the fourth frame is the first delta"));
     };
     if shown.delta != "Hel" || shown.seq != 0 {
         return Err(format!(
             "only the pre-stale delta shows, got {:?}",
-            early[2].payload
+            early[3].payload
         ));
     }
     // The overtaking submit mints a new round and completes while the old
@@ -5531,15 +6170,19 @@ async fn append_racing_a_newer_owner_commit_adopts_nothing() -> Result<(), Strin
     let mut first_host =
         Box::pin(handle.handle_frame_to(first, live.clone(), &racing, &mut sink, &stream_tx));
     let mut early = Vec::new();
-    while early.len() < 3 {
+    while early.len() < 4 {
         tokio::select! {
             biased;
             () = &mut first_host => return Err(String::from("the provider completed before the early frames")),
             maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
         }
     }
-    let WirePayload::TextStreamFrame(shown) = &early[2].payload else {
-        return Err(String::from("the third frame is the first delta"));
+    if !matches!(&early[0].payload, WirePayload::PresenceAttribution(fact) if fact.generation == 1)
+    {
+        return Err(String::from("the attach fact leads the batch"));
+    }
+    let WirePayload::TextStreamFrame(shown) = &early[3].payload else {
+        return Err(String::from("the fourth frame is the first delta"));
     };
     if shown.delta != "Hel" {
         return Err(format!(

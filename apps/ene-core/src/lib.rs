@@ -40,6 +40,7 @@ pub mod conn;
 pub mod conn_pipe;
 pub mod dialogue;
 pub mod host_lock;
+pub mod presentation;
 pub mod serve;
 pub mod setup;
 pub mod task_agent;

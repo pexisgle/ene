@@ -155,6 +155,17 @@ impl ConversationTaskProjection {
             .insert(companion, ConversationTask { task, delegation });
     }
 
+    /// Records a first-party wire selection (`SelectTask`): the Task the
+    /// Owner chose to talk about, with no execution attached.
+    ///
+    /// In-memory display selection only, exactly like a delegation-less
+    /// record: every later operation still goes through the Task owner's
+    /// durable compare, and a restart drops it back to unselected. Never
+    /// called from model output, only from the first-party wire inlet.
+    pub(crate) fn select(&self, companion: CompanionId, task: TaskId) {
+        self.record(companion, task, None);
+    }
+
     fn current(&self, companion: CompanionId) -> Option<ConversationTask> {
         crate::lock_unpoison(&self.current).get(&companion).copied()
     }
