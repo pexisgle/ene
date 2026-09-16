@@ -10,8 +10,9 @@
 //!
 //! Unix-only: like `vertical_slice.rs`, these tests drive the Unix socket
 //! listener. The Windows named-pipe listener shares the same handshake and
-//! phase path and is compile-checked for its target; Windows E2E stays
-//! pending Windows CI (see the slice-F report).
+//! phase path; its transport subset runs in
+//! [`stage5_windows_pipe_e2e.rs`](stage5_windows_pipe_e2e.rs) on the Windows
+//! CI runner.
 
 #![cfg(unix)]
 #![allow(
