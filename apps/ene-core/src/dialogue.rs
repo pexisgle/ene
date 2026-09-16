@@ -292,14 +292,19 @@ impl HostHandle {
         stale_frame_with(frame, live, current_round, generation)
     }
 
-    /// Attaches presence for the paired device when none is active.
+    /// Attaches presence for the paired device when none is active, or
+    /// restores it for a summoning client while recovery waits.
     ///
-    /// Called only from the submit path with the `NoActive` generation it
-    /// just read; only an [`AttachOutcome::Attached`] fact carries the fresh
-    /// generation the caller may proceed with, and [`AttachOutcome::Raced`]
-    /// means the caller reloads rather than proceeding. The [`ClientId`] comes
-    /// from the deterministic device mapping, so a re-attaching device
-    /// re-derives the same id. No reply is produced here.
+    /// Called only from the submit path with the generation it just read,
+    /// under `NoActive` or `RecoveryWait`: only an [`AttachOutcome::Attached`]
+    /// fact carries the fresh generation the caller may proceed with, and
+    /// [`AttachOutcome::Raced`] means the caller reloads rather than
+    /// proceeding. The [`ClientId`] comes from the deterministic device
+    /// mapping, so a re-attaching device re-derives the same id. A summon on
+    /// the current generation wins for any client and cancels the recovery
+    /// intent (S5-14); a stale premise loses at the store compare, so the
+    /// original client arriving late never auto-restores over a decided
+    /// present. No reply is produced here.
     ///
     /// The compare/begin and confirm run synchronously inside the
     /// connection-ownership section (CCT §10.4), so a same-device replacement
@@ -309,6 +314,8 @@ impl HostHandle {
         &self,
         live: &LiveInput,
         device_wire: &str,
+        connection_live: bool,
+        expected_state: PresenceState,
         expected_generation: PresenceGeneration,
     ) -> AttachOutcome {
         let client = device_client(device_wire);
@@ -316,11 +323,10 @@ impl HostHandle {
             Ok(companion) => companion,
             Err(_) => return AttachOutcome::Raced,
         };
-        let connection_live = live.connection_live;
         let store = self.store.clone();
         let expected = PresenceCheckRef {
             expected_generation,
-            expected_state: PresenceState::NoActive,
+            expected_state,
             expected_active: None,
         };
         let attached = self
@@ -370,11 +376,11 @@ impl HostHandle {
     /// adopting either side; a present-but-unresolvable round is stale, never
     /// rebound.
     ///
-    /// Presence attach runs only when the loaded attribution is `NoActive`,
-    /// and only on the envelope's observed generation premise: a missing
-    /// `presence_generation_view` revalidates, a view that does not equal the
-    /// current `NoActive` generation answers stale with the current values,
-    /// and only then does the compare-and-commit run.
+    /// Presence attach runs when the loaded attribution is `NoActive` or
+    /// `RecoveryWait`, and only on the envelope's observed generation
+    /// premise: a missing `presence_generation_view` revalidates, a view
+    /// that does not equal the current generation answers stale with the
+    /// current values, and only then does the compare-and-commit run.
     ///
     /// A committed attach publishes the resulting attribution fact to this
     /// connection (IPC §12.2): the fact is unsolicited — it names no
@@ -544,7 +550,10 @@ impl HostHandle {
         // the committed fact. Any other path carries the envelope view
         // untouched: intake reports a missing or mismatched view honestly.
         let mut attached_generation: Option<PresenceGeneration> = None;
-        if attribution.state == PresenceState::NoActive {
+        if matches!(
+            attribution.state,
+            PresenceState::NoActive | PresenceState::RecoveryWait
+        ) {
             let Some(viewed) = frame.envelope.observed.presence_generation_view else {
                 return emit_end(
                     sink,
@@ -558,7 +567,13 @@ impl HostHandle {
                 );
             }
             match self
-                .attach_presence(live, &device_wire, attribution.generation)
+                .attach_presence(
+                    live,
+                    &device_wire,
+                    live.connection_live,
+                    attribution.state,
+                    attribution.generation,
+                )
                 .await
             {
                 AttachOutcome::Attached(fresh) => {

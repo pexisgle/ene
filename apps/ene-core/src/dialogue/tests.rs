@@ -855,7 +855,13 @@ async fn attach_compare_loser_reports_raced() {
         "the race starts from generation zero"
     );
     let first = handle
-        .attach_presence(&live_input("client-race"), "client-race", seen.generation)
+        .attach_presence(
+            &live_input("client-race"),
+            "client-race",
+            true,
+            ene_presence::PresenceState::NoActive,
+            seen.generation,
+        )
         .await;
     assert!(
         matches!(
@@ -867,7 +873,13 @@ async fn attach_compare_loser_reports_raced() {
         "the first compare with the observed premise wins generation one, got {first:?}"
     );
     let second = handle
-        .attach_presence(&live_input("client-race"), "client-race", seen.generation)
+        .attach_presence(
+            &live_input("client-race"),
+            "client-race",
+            true,
+            ene_presence::PresenceState::NoActive,
+            seen.generation,
+        )
         .await;
     assert!(
         matches!(second, AttachOutcome::Raced),
@@ -1244,7 +1256,13 @@ async fn losing_summon_publishes_no_fact_and_never_reclaims_presence() {
     );
     let absent = current_attribution(&handle).await;
     let winner = handle
-        .attach_presence(&live_input("client-b"), "client-b", absent.generation)
+        .attach_presence(
+            &live_input("client-b"),
+            "client-b",
+            true,
+            ene_presence::PresenceState::NoActive,
+            absent.generation,
+        )
         .await;
     assert!(
         matches!(
@@ -6419,6 +6437,8 @@ async fn replacement_before_acceptance_commits_no_owner_input() -> Result<(), St
             .attach_presence(
                 &live1,
                 "client-accept-replace",
+                true,
+                ene_presence::PresenceState::NoActive,
                 ene_presence::PresenceGeneration::from_u64(0)
             )
             .await,

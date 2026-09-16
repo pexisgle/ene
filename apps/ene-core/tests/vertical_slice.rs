@@ -8,8 +8,9 @@
 //! tampering, and untrusted-peer denial.
 //!
 //! Unix-only: these production-path tests drive the Unix socket listener.
-//! The Windows named-pipe listener shares the same handshake and phase path
-//! and is compile-checked for its target, but has no Windows runner here.
+//! The Windows named-pipe listener shares the same handshake and phase path;
+//! its transport subset runs in
+//! [`stage5_windows_pipe_e2e.rs`](stage5_windows_pipe_e2e.rs) on Windows.
 
 #![cfg(unix)]
 #![allow(

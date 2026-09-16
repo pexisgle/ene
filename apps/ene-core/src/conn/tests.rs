@@ -777,6 +777,8 @@ async fn attach_present(handle: &crate::serve::HostHandle, device: &str) {
         .attach_presence(
             &crate::test_support::live_input(device),
             device,
+            true,
+            ene_presence::PresenceState::NoActive,
             current.generation,
         )
         .await;

@@ -65,40 +65,10 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let _lock = crate::host_lock::HostLock::acquire(data_dir)?;
     let handle = HostHandle::open(data_dir).await?;
-    // Startup presence normalization (PR §6.4 step 2), after the state open
-    // and before the pairing cleanup, the credential sweep, and the
-    // sealed-result reconciliation: the sweep and reconciliation contracts do
-    // not depend on presence, while every client-dependent admission does, so
-    // the normalized state is established first. A refusal (generation
-    // exhaustion, malformed recovery intent, missing attribution) fails
-    // startup: the Host must not serve with an unknown presence state.
-    handle.normalize_presence_on_startup().await?;
-    // Pairing startup boundary, before the credential sweep: unapproved
-    // pendings never survive a restart, so a new connection always opens a
-    // new request and a stale poll converges on a fresh pending (#1389).
-    // Paired records are untouched.
-    handle
-        .clear_unapproved_pendings()
-        .await
-        .map_err(|error| CoreError::Store(error.to_string()))?;
-    // Serving boundary, before the listener binds: sweep every registered
-    // value out of durable content and advance the credential-set revision
-    // together. A failed sweep keeps this Host from serving content prepared
-    // under an unknown credential set.
-    handle.sweep_registered_values().await?;
-    // Explicit recovery boundary, still before the listener binds:
-    // re-evaluate every sealed-but-unadopted result that AU15a recorded but
-    // AU15b did not adopt before the previous stop (or whose blockers settled
-    // while no producer listened), one bounded keyset page at a time so older
-    // permanently-unadopted candidates cannot starve later ones. This neither
-    // resumes an execution nor replays a provider call or filesystem Action,
-    // and a still-blocked result stays withheld. A page-read failure keeps the
-    // Host from serving because the durable result state itself is unreadable;
-    // per-candidate answers stay data and never wedge startup.
-    handle
-        .reconcile_sealed_results()
-        .await
-        .map_err(|error| CoreError::Store(error.to_string()))?;
+    // The serving startup mutations (PR §6.4 steps 2-5) run after the state
+    // open and before the listener binds; see
+    // [`HostHandle::run_startup_mutations`] for the order contract.
+    handle.run_startup_mutations().await?;
     // Base URL override for self-hosted endpoints and tests: production
     // keeps [`DEFAULT_BASE_URL`]. The test harness points a real `serve`
     // binary at a local fake Responses server through this variable (child

@@ -755,12 +755,13 @@ impl RawUndelivered {
     }
 
     /// Decodes every part or fails closed: an unknown source kind / status, a
-    /// malformed identity, and a malformed timestamp are unreadable rows.
-    fn decode(self) -> Result<UndeliveredRef, UndeliveredTechnicalError> {
+    /// malformed identity, a source whose owning task does not resolve, and
+    /// a malformed timestamp are unreadable rows.
+    fn decode(self, conn: &Connection) -> Result<UndeliveredRef, UndeliveredTechnicalError> {
         let companion =
             CompanionId::from_raw(decode_id(&self.companion_id).map_err(undelivered_unavailable)?);
         let source =
-            decode_undelivered_source(&self.source_kind, &self.source_id, &self.source_phase)
+            decode_undelivered_source(conn, &self.source_kind, &self.source_id, &self.source_phase)
                 .map_err(undelivered_unavailable)?;
         let round = self
             .round_id
@@ -942,7 +943,7 @@ impl UndeliveredRepository for Store {
             for row in rows {
                 let row = row.map_err(|error| undelivered_unavailable(error.to_string()))?;
                 last_seq = decode_u64(row.row_seq).map_err(undelivered_unavailable)?;
-                entries.push(row.decode()?);
+                entries.push(row.decode(&guard)?);
             }
             let next = (entries.len() == usize::try_from(cap).unwrap_or(usize::MAX)
                 && last_seq < upper)
@@ -991,7 +992,7 @@ impl UndeliveredRepository for Store {
                 std::collections::HashMap::with_capacity(requested.len());
             for row in rows {
                 let row = row.map_err(|error| undelivered_unavailable(error.to_string()))?;
-                let entry = row.decode()?;
+                let entry = row.decode(&guard)?;
                 found.insert(entry.id, entry);
             }
             // Requested order, unresolved ids omitted: the caller compares
