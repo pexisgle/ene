@@ -629,7 +629,7 @@ pub fn describe_fetch(response: &UndeliveredResponse) -> FetchAction {
             message: String::from("unknown companion; re-sync presence and retry"),
         },
         UndeliveredResponse::StaleBaseView { .. } => FetchAction::Retryable {
-            message: String::from("stale cursor; re-query from the head"),
+            message: String::from("stale base view; re-query from the head"),
         },
     }
 }

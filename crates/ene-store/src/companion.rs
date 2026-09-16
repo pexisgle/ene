@@ -83,10 +83,30 @@ const SQL_SELECT_UNDELIVERED_STATUS: &str =
 const SQL_UPDATE_UNDELIVERED_STATUS: &str =
     "UPDATE undelivered SET status = ?1 WHERE undelivered_id = ?2";
 
+/// The unpresented row projection shared by the paged and exact-identity
+/// reads, so both decode through [`RawUndelivered`] without drift.
+const SQL_UNPRESENTED_COLUMNS: &str = "row_seq, undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at";
+
 /// The bounded unpresented page: `Pending` and `PresentationUnknown` only,
 /// keyset over the non-reused insertion sequence, with the pass upper bound
 /// keeping rows registered while the pass runs out of it.
-const SQL_SELECT_UNPRESENTED: &str = "SELECT row_seq, undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at FROM undelivered WHERE companion_id = ?1 AND status IN (?2, ?3) AND row_seq > ?4 AND row_seq <= ?5 ORDER BY row_seq ASC LIMIT ?6";
+fn sql_select_unpresented() -> String {
+    format!(
+        "SELECT {SQL_UNPRESENTED_COLUMNS} FROM undelivered WHERE companion_id = ?1 AND status IN (?2, ?3) AND row_seq > ?4 AND row_seq <= ?5 ORDER BY row_seq ASC LIMIT ?6"
+    )
+}
+
+/// Exact-identity read: one `IN` lookup over the requested ids, reordered to
+/// the requested identity order. The requested count is already page-bounded,
+/// so the placeholder list stays bounded. Every report status is returned;
+/// the caller decides how to treat resolved-but-presented rows.
+fn sql_select_undelivered_by_ids(count: usize) -> String {
+    let placeholders: Vec<String> = (0..count).map(|index| format!("?{}", index + 2)).collect();
+    format!(
+        "SELECT {SQL_UNPRESENTED_COLUMNS} FROM undelivered WHERE companion_id = ?1 AND undelivered_id IN ({})",
+        placeholders.join(", ")
+    )
+}
 
 /// The insertion sequence in force, for the next pass. A read: it writes no
 /// marker and advances no generation.
@@ -820,7 +840,7 @@ impl UndeliveredRepository for Store {
             let after_raw = encode_u64(after).map_err(undelivered_unavailable)?;
             let upper_raw = encode_u64(upper).map_err(undelivered_unavailable)?;
             let mut statement = guard
-                .prepare(SQL_SELECT_UNPRESENTED)
+                .prepare(&sql_select_unpresented())
                 .map_err(|error| undelivered_unavailable(error.to_string()))?;
             let rows = statement
                 .query_map(
@@ -850,6 +870,54 @@ impl UndeliveredRepository for Store {
                 next,
                 pass_upper_bound: upper,
             })
+        })
+        .await
+    }
+
+    async fn load_undelivered_by_ids(
+        &self,
+        companion: CompanionId,
+        ids: &[UndeliveredId],
+    ) -> Result<Vec<UndeliveredRef>, UndeliveredTechnicalError> {
+        let requested: Vec<UndeliveredId> = ids
+            .iter()
+            .take(UNDELIVERED_PAGE_MAX as usize)
+            .copied()
+            .collect();
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion.as_raw());
+            let guard = lock_shared(&conn);
+            let mut statement = guard
+                .prepare(&sql_select_undelivered_by_ids(requested.len()))
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            let mut values: Vec<String> = Vec::with_capacity(requested.len() + 1);
+            values.push(key);
+            for id in &requested {
+                values.push(encode_id(id.as_raw()));
+            }
+            let rows = statement
+                .query_map(
+                    rusqlite::params_from_iter(values.iter()),
+                    RawUndelivered::from_row,
+                )
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            let mut found: std::collections::HashMap<UndeliveredId, UndeliveredRef> =
+                std::collections::HashMap::with_capacity(requested.len());
+            for row in rows {
+                let row = row.map_err(|error| undelivered_unavailable(error.to_string()))?;
+                let entry = row.decode()?;
+                found.insert(entry.id, entry);
+            }
+            // Requested order, unresolved ids omitted: the caller compares
+            // the length to detect a selection it cannot rehydrate.
+            Ok(requested
+                .iter()
+                .filter_map(|id| found.get(id).cloned())
+                .collect())
         })
         .await
     }

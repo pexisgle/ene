@@ -28,7 +28,8 @@ use ene_api::v1::undelivered::{
 };
 use ene_companion::{
     AppendHistoryCommand, CompanionId, CompanionRepository as _, HistoryRepository as _,
-    HistoryRole, ReportStatus, UndeliveredRef, UndeliveredRepository as _,
+    HistoryRole, PresentationMark, ReportStatus, ReportStatusTransition, UndeliveredRef,
+    UndeliveredRepository as _,
 };
 use ene_inference::fake::{FakeFailure, FakeProviderTransport};
 use ene_plugin_ipc::WireFrame;
@@ -2247,4 +2248,595 @@ async fn resume_committed_before_supersession_keeps_its_execution() {
             .task_has_reservation_or_running(task_r2.task),
         "the committed execution is not cancelled by the disconnect"
     );
+}
+
+/// S5 receipt rehydration: a live receipt whose selection sits behind a full
+/// head page is re-emitted from its exact selected identities, not from an
+/// unpresented-head scan; the same receipt id and the same item set come
+/// back, and its ACK presents exactly those rows.
+#[tokio::test]
+async fn receipt_reemit_rehydrates_selected_ids_behind_the_head_page() {
+    let (handle, _dir) = open_handle("present-reemit-exact").await;
+    let live = live_input(DEVICE_A);
+    let fresh = attach(&handle, DEVICE_A).await;
+    for index in 0..51 {
+        append_reply(&handle, &format!("row {index:02}"), fresh.generation).await;
+    }
+    // The head page carries the first fifty rows; its continuation carries
+    // the fifty-first.
+    let head = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(head.items.len(), 50);
+    let cursor = head.next_cursor.clone().expect("the pass continues");
+    // The head batch fails: its rows return to Pending and the pass advances.
+    let failed = ack(
+        &handle,
+        &live,
+        &head.receipt.0,
+        head.round.clone(),
+        head.presence_generation,
+        PresentationStatus::Failed,
+    )
+    .await;
+    assert!(
+        matches!(
+            failed,
+            UndeliveredAckOutcome::ReturnedToPending { count: 50 }
+        ),
+        "got {failed:?}"
+    );
+    let tail = summary_of(fetch(&handle, &live, Some(cursor.0), None, false).await);
+    assert_eq!(tail.items.len(), 1);
+    assert_eq!(tail.items[0].excerpt, "row 50");
+    // No ACK: re-fetching must rehydrate the tail exactly, even though the
+    // unpresented head page is now full of the failed Pending rows again.
+    let again = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(
+        again.receipt, tail.receipt,
+        "the same receipt is re-emitted"
+    );
+    assert_eq!(
+        again.items.len(),
+        1,
+        "the exact selected id rehydrates behind the head page"
+    );
+    assert_eq!(again.items[0].excerpt, "row 50");
+    // The ACK presents exactly what was re-sent; the failed head rows stay
+    // Pending for their own pass.
+    let outcome = ack(
+        &handle,
+        &live,
+        &again.receipt.0,
+        again.round.clone(),
+        again.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(outcome, UndeliveredAckOutcome::Presented { presented: 1 }),
+        "got {outcome:?}"
+    );
+    let statuses = {
+        let companion = companion_of(&handle).await;
+        handle
+            .store
+            .list_unpresented(companion, None, 50)
+            .await
+            .expect("the listing must read")
+            .entries
+    };
+    assert_eq!(statuses.len(), 50, "the failed rows stay unpresented");
+    assert!(
+        statuses
+            .iter()
+            .all(|entry| entry.status == ReportStatus::Pending),
+        "the failed rows return to Pending"
+    );
+}
+
+/// S5 receipt rehydration fail-closed: a selected identity that no longer
+/// resolves at all retires the receipt and answers `StaleBaseView` instead
+/// of an ACKable frame under the same receipt id.
+#[tokio::test]
+async fn receipt_reemit_fails_closed_when_a_selected_id_cannot_resolve() {
+    let (handle, dir) = open_handle("present-reemit-failclosed").await;
+    let live = live_input(DEVICE_A);
+    let fresh = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "resolvable row", fresh.generation).await;
+    let shown = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(shown.items.len(), 1);
+    let companion = companion_of(&handle).await;
+    let listed = handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read");
+    assert_eq!(listed.entries.len(), 1);
+    // The selected row disappears from durable state (an erasure/deletion
+    // path): the receipt can no longer cover the set its ACK names.
+    let raw = rusqlite::Connection::open(dir.path().join("app.db")).expect("the store file opens");
+    raw.execute(
+        "DELETE FROM undelivered WHERE undelivered_id = ?1",
+        [listed.entries[0]
+            .id
+            .as_raw()
+            .as_uuid()
+            .as_hyphenated()
+            .to_string()],
+    )
+    .expect("the selected row is deleted");
+
+    let response = fetch(&handle, &live, None, None, false).await;
+    assert!(
+        matches!(response, UndeliveredResponse::StaleBaseView { .. }),
+        "an unrehydratable receipt must fail closed, got {response:?}"
+    );
+    // The retired receipt answers stale; its ACK cannot mark anything.
+    let late = ack(
+        &handle,
+        &live,
+        &shown.receipt.0,
+        shown.round.clone(),
+        shown.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(late, UndeliveredAckOutcome::StalePresentation),
+        "got {late:?}"
+    );
+}
+
+/// S5 receipt rehydration: a selected row already presented by another path
+/// (for example a stream confirmation) is omitted from the frame and pruned
+/// from the receipt, so the ACK acts on exactly the re-sent rows.
+#[tokio::test]
+async fn receipt_reemit_prunes_already_presented_selected_ids() {
+    let (handle, _dir) = open_handle("present-reemit-prune").await;
+    let live = live_input(DEVICE_A);
+    let fresh = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "first row", fresh.generation).await;
+    append_reply(&handle, "second row", fresh.generation).await;
+    let shown = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(shown.items.len(), 2);
+    let companion = companion_of(&handle).await;
+    let listed = handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read");
+    assert_eq!(listed.entries.len(), 2);
+    // A concurrent presentation owner presents the first selected row.
+    let first_id = listed.entries[0].id;
+    let transition = handle
+        .store
+        .compare_and_mark_reported(
+            first_id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round: RawId::new(),
+                presented: true,
+            },
+        )
+        .await
+        .expect("the competing presentation must answer");
+    assert_eq!(transition, ReportStatusTransition::PendingToPresented);
+
+    let again = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(
+        again.receipt, shown.receipt,
+        "the same receipt is re-emitted"
+    );
+    assert_eq!(
+        again.items.len(),
+        1,
+        "only the still-unpresented selected row is re-sent"
+    );
+    assert_eq!(again.items[0].excerpt, "second row");
+    // The ACK presents exactly the re-sent row; the already-presented one is
+    // untouched.
+    let outcome = ack(
+        &handle,
+        &live,
+        &again.receipt.0,
+        again.round.clone(),
+        again.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(outcome, UndeliveredAckOutcome::Presented { presented: 1 }),
+        "got {outcome:?}"
+    );
+    assert!(unpresented_statuses(&handle).await.is_empty());
+    let record = handle
+        .store
+        .compare_and_mark_reported(
+            first_id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round: RawId::new(),
+                presented: true,
+            },
+        )
+        .await
+        .expect("the status probe must answer");
+    assert_eq!(
+        record,
+        ReportStatusTransition::AlreadyPresented,
+        "the pruned row stays presented"
+    );
+}
+
+/// S5 CAS: a presentation-start compare that loses as a domain
+/// `StaleSource` (not an infrastructure error) drops the row from the frame
+/// and the receipt selection; the pass's ACK never presents a row it did not
+/// claim.
+#[tokio::test]
+async fn stale_source_cas_loss_drops_the_row_from_frame_and_selection() {
+    let (handle, _dir) = open_handle("present-stale-cas").await;
+    let live = live_input(DEVICE_A);
+    let fresh = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "cas row", fresh.generation).await;
+    let companion = companion_of(&handle).await;
+    let listed = handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read");
+    assert_eq!(listed.entries.len(), 1);
+    let row = listed.entries[0];
+
+    let gate = handle.arm_presentation_commit_gate();
+    let fetch_fut = fetch(&handle, &live, None, None, false);
+    tokio::pin!(fetch_fut);
+    tokio::select! {
+        () = gate.wait_entered() => {}
+        response = &mut fetch_fut => panic!("the pass escaped the gate: {response:?}"),
+    }
+    // Another presentation owner commits the row's presentation start while
+    // this pass is paused between its page plan and its compare: the
+    // compare below must observe `StaleSource`, not claim the row.
+    let competing = handle
+        .store
+        .compare_and_mark_reported(
+            row.id,
+            ReportStatus::Pending,
+            PresentationMark {
+                round: RawId::new(),
+                presented: false,
+            },
+        )
+        .await
+        .expect("the competing mark must answer");
+    assert_eq!(competing, ReportStatusTransition::MarkedPresentationUnknown);
+    gate.release();
+    let summary = summary_of(fetch_fut.await);
+    assert!(
+        summary.items.is_empty(),
+        "a lost CAS claims no item, got {}",
+        summary.items.len()
+    );
+    assert_eq!(
+        summary.receipt.0.len(),
+        36,
+        "the pass still mints its receipt"
+    );
+    let outcome = ack(
+        &handle,
+        &live,
+        &summary.receipt.0,
+        summary.round.clone(),
+        summary.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(outcome, UndeliveredAckOutcome::AlreadyPresented),
+        "got {outcome:?}"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].1,
+        ReportStatus::PresentationUnknown,
+        "the competing presentation start is untouched by this pass"
+    );
+}
+
+/// S5 connection lifecycle: a closed connection's presentation entries
+/// (subscription, Task/source refs, cursors, receipt) are dropped; durable
+/// rows stay and a new connection re-derives fresh refs and a fresh receipt.
+#[tokio::test]
+async fn connection_close_drops_its_presentation_state() {
+    let (handle, _dir) = open_handle("present-close-cleanup").await;
+    let table = Arc::new(crate::conn::ConnectionTable::new());
+    let c1 = table.note_accept();
+    crate::test_support::authenticate(&table, &c1, DEVICE_A);
+    let live = table.snapshot(&c1).expect("C1 must snapshot");
+    let fresh = attach(&handle, DEVICE_A).await;
+    // Two Tasks so the bounded list mints a cursor; two replies so the
+    // undelivered page mints a continuation cursor.
+    let _one = seed_task(&handle).await;
+    let _two = seed_task(&handle).await;
+    append_reply(&handle, "close row one", fresh.generation).await;
+    append_reply(&handle, "close row two", fresh.generation).await;
+
+    let list_frame = frame_for(
+        WirePayload::ListTasks(ListTasks {
+            cursor: None,
+            limit: Some(1),
+        }),
+        &live,
+        None,
+        None,
+        None,
+    );
+    let list_query = match &list_frame.payload {
+        WirePayload::ListTasks(query) => query.clone(),
+        _ => unreachable!(),
+    };
+    let listed = match handle
+        .list_tasks_wire(&list_frame, &live, &list_query)
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+        .payload
+    {
+        WirePayload::TaskListResponse(TaskListResponse::Page(page)) => page,
+        other => panic!("expected a task list page, got {other:?}"),
+    };
+    assert!(listed.next_cursor.is_some(), "the list mints a cursor");
+    let report_frame = frame_for(
+        WirePayload::GetTaskReport(GetTaskReport {
+            task: listed.tasks[0].task.clone(),
+            cursor: None,
+            limit: None,
+        }),
+        &live,
+        None,
+        None,
+        None,
+    );
+    let report_query = match &report_frame.payload {
+        WirePayload::GetTaskReport(query) => query.clone(),
+        _ => unreachable!(),
+    };
+    let reports = handle
+        .report_wire(&report_frame, &live, &report_query)
+        .await;
+    assert!(
+        matches!(
+            reports.first().map(|frame| &frame.payload),
+            Some(WirePayload::TaskReportResponse(TaskReportResponse::Page(_)))
+        ),
+        "the report mints its source ref"
+    );
+    // A wire resume that needs revalidation still installs its retry slot;
+    // the slot belongs to the issuing connection lifetime.
+    let resume_frame = frame_for(
+        WirePayload::ResumeTask(ResumeTask {
+            task: listed.tasks[0].task.clone(),
+            expected_revision: 1,
+            expected_purpose: String::from("purpose"),
+            instruction: String::from("   "),
+        }),
+        &live,
+        None,
+        None,
+        Some(CommandWireId(uuid::Uuid::new_v4())),
+    );
+    let resume = match &resume_frame.payload {
+        WirePayload::ResumeTask(resume) => resume.clone(),
+        _ => unreachable!(),
+    };
+    let resume_outcome = match handle
+        .resume_task_wire(&resume_frame, &live, &resume)
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+        .payload
+    {
+        WirePayload::ResumeTaskOutcome(outcome) => outcome,
+        other => panic!("expected a resume outcome, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            resume_outcome,
+            ResumeTaskOutcomeWire::NeedsRevalidation { .. }
+        ),
+        "got {resume_outcome:?}"
+    );
+    let shown = summary_of(fetch(&handle, &live, None, Some(1), false).await);
+    assert_eq!(shown.items.len(), 1);
+    assert!(shown.next_cursor.is_some(), "the pass mints a cursor");
+
+    let conn = c1.0.as_hyphenated().to_string();
+    {
+        let state = crate::lock_unpoison(&handle.presentations);
+        assert!(state.subs.contains_key(&conn));
+        assert!(state.task_refs.keys().any(|(owner, _)| owner == &conn));
+        assert!(state.source_refs.keys().any(|(owner, _)| owner == &conn));
+        assert!(state.carried.keys().any(|(owner, _)| owner == &conn));
+        assert!(state.cursors.keys().any(|(owner, _)| owner == &conn));
+        assert!(
+            state
+                .receipts
+                .values()
+                .any(|receipt| receipt.connection == conn)
+        );
+        assert!(
+            state.resume.values().any(|slot| slot.connection == conn),
+            "the resume retry slot belongs to this connection"
+        );
+    }
+
+    handle.close_connection(&table, c1).await;
+    {
+        let state = crate::lock_unpoison(&handle.presentations);
+        assert!(!state.subs.contains_key(&conn));
+        assert!(state.task_refs.keys().all(|(owner, _)| owner != &conn));
+        assert!(state.source_refs.keys().all(|(owner, _)| owner != &conn));
+        assert!(state.carried.keys().all(|(owner, _)| owner != &conn));
+        assert!(state.cursors.keys().all(|(owner, _)| owner != &conn));
+        assert!(
+            state
+                .receipts
+                .values()
+                .all(|receipt| receipt.connection != conn)
+        );
+        assert!(
+            state.resume.values().all(|slot| slot.connection != conn),
+            "the resume retry slot dies with its connection"
+        );
+    }
+
+    // Durable state is untouched: both Tasks and the carried rows survive as
+    // unpresented, so a new connection re-presents them.
+    assert!(
+        !handle
+            .store
+            .list_tasks_after(None, 10)
+            .await
+            .expect("the task listing must read")
+            .is_empty()
+    );
+    let companion = companion_of(&handle).await;
+    assert!(
+        handle
+            .store
+            .list_unpresented(companion, None, 50)
+            .await
+            .expect("the listing must read")
+            .entries
+            .len()
+            >= 2
+    );
+    let table_b = Arc::new(crate::conn::ConnectionTable::new());
+    let c2 = table_b.note_accept();
+    crate::test_support::authenticate(&table_b, &c2, DEVICE_A);
+    let live_b = table_b.snapshot(&c2).expect("C2 must snapshot");
+    let _ = attach(&handle, DEVICE_A).await;
+    let page_b = list_page(&handle, &live_b).await;
+    assert_eq!(page_b.tasks.len(), 2, "the new connection re-lists");
+    let again = summary_of(fetch(&handle, &live_b, None, None, false).await);
+    assert!(!again.items.is_empty(), "the new receipt carries the rows");
+    assert_ne!(again.receipt, shown.receipt, "a fresh receipt id");
+}
+
+/// S5 connection lifecycle: repeated connect/use/close cycles do not grow the
+/// connection-keyed presentation maps, while durable rows stay readable.
+#[tokio::test]
+async fn repeated_reconnects_do_not_grow_presentation_state() {
+    let (handle, _dir) = open_handle("present-reconnect-growth").await;
+    let fresh = attach(&handle, DEVICE_A).await;
+    let _task = seed_task(&handle).await;
+    append_reply(&handle, "growth row", fresh.generation).await;
+    for _ in 0..40 {
+        let table = Arc::new(crate::conn::ConnectionTable::new());
+        let c = table.note_accept();
+        crate::test_support::authenticate(&table, &c, DEVICE_A);
+        let live = table.snapshot(&c).expect("the connection must snapshot");
+        let _ = list_page(&handle, &live).await;
+        let _ = fetch(&handle, &live, None, None, false).await;
+        handle.close_connection(&table, c).await;
+        let _ = attach(&handle, DEVICE_A).await;
+    }
+    {
+        let state = crate::lock_unpoison(&handle.presentations);
+        assert!(
+            state.subs.is_empty(),
+            "no subscription outlives its connection"
+        );
+        assert!(
+            state.task_refs.is_empty(),
+            "no Task ref outlives its connection"
+        );
+        assert!(
+            state.carried.is_empty(),
+            "no carried ref outlives its connection"
+        );
+        assert!(
+            state.source_refs.is_empty(),
+            "no source ref outlives its connection"
+        );
+        assert!(
+            state.cursors.is_empty(),
+            "no cursor outlives its connection"
+        );
+        assert!(
+            state.receipts.is_empty(),
+            "no receipt outlives its connection"
+        );
+        assert!(
+            state.retired.len() <= 64,
+            "the retired receipt window stays bounded"
+        );
+    }
+    // Durable state stays readable after every close.
+    assert!(
+        !handle
+            .store
+            .list_tasks_after(None, 10)
+            .await
+            .expect("the task listing must read")
+            .is_empty()
+    );
+    let companion = companion_of(&handle).await;
+    assert!(
+        !handle
+            .store
+            .list_unpresented(companion, None, 50)
+            .await
+            .expect("the listing must read")
+            .entries
+            .is_empty()
+    );
+}
+
+/// S5 receipt rehydration fail-closed on a store read failure: no summary
+/// under the same receipt id is returned, and the retired receipt's ACK
+/// cannot present anything.
+#[tokio::test]
+async fn receipt_reemit_fails_closed_on_a_store_read_failure() {
+    let (handle, dir) = open_handle("present-reemit-store-error").await;
+    let live = live_input(DEVICE_A);
+    let fresh = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "durable row", fresh.generation).await;
+    let shown = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(shown.items.len(), 1);
+    // Infrastructure failure injection: make the exact-identity table
+    // unreadable from under the store while its row stays durable.
+    let raw = rusqlite::Connection::open(dir.path().join("app.db")).expect("the store file opens");
+    raw.execute_batch("ALTER TABLE undelivered RENAME TO undelivered_hidden")
+        .expect("the test may hide the table");
+
+    let response = fetch(&handle, &live, None, None, false).await;
+    assert!(
+        matches!(response, UndeliveredResponse::StaleBaseView { .. }),
+        "a store failure must fail closed, got {response:?}"
+    );
+    let late = ack(
+        &handle,
+        &live,
+        &shown.receipt.0,
+        shown.round.clone(),
+        shown.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(late, UndeliveredAckOutcome::StalePresentation),
+        "got {late:?}"
+    );
+    // The durable row was never presented by the failed path.
+    let status: String = raw
+        .query_row("SELECT status FROM undelivered_hidden", [], |row| {
+            row.get(0)
+        })
+        .expect("the durable status must read");
+    assert_eq!(status, "presentation_unknown");
+    raw.execute_batch("ALTER TABLE undelivered_hidden RENAME TO undelivered")
+        .expect("the test may restore the table");
 }

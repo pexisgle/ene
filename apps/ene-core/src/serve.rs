@@ -488,6 +488,15 @@ pub struct HostHandle {
     /// Test-only deterministic gate for one guarded wire resume.
     #[cfg(test)]
     pub(crate) resume_gate: StdMutex<Option<std::sync::Arc<crate::task_control::TestResumeGate>>>,
+    /// Test-only deterministic gate for one presentation-start commit.
+    #[cfg(test)]
+    pub(crate) presentation_commit_gate:
+        StdMutex<Option<std::sync::Arc<crate::presentation::TestPresentationCommitGate>>>,
+    /// Test-only count of receipt-expiry housekeeping runs, so a test can
+    /// pin that an expired receipt is released (and the deadline stops
+    /// re-firing) without measuring CPU or sleeping for ordering.
+    #[cfg(test)]
+    pub(crate) receipt_expiry_runs: std::sync::atomic::AtomicUsize,
 }
 
 impl HostHandle {
@@ -562,6 +571,10 @@ impl HostHandle {
             close_gate: StdMutex::new(None),
             #[cfg(test)]
             resume_gate: StdMutex::new(None),
+            #[cfg(test)]
+            presentation_commit_gate: StdMutex::new(None),
+            #[cfg(test)]
+            receipt_expiry_runs: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -1320,6 +1333,10 @@ impl HostHandle {
         if let Some(gate) = close_gate {
             gate.pause().await;
         }
+        // Connection-owned presentation state dies with this connection:
+        // the receipt, subscription, refs, and cursors are meaningless
+        // afterwards, and durable rows stay re-presentable.
+        self.drop_presentation_connection_state(&connection);
         let companion = self.store.ensure_running_companion().await.ok();
         let store = self.store.clone();
         let table = std::sync::Arc::clone(table);
@@ -1349,6 +1366,23 @@ impl HostHandle {
     pub(crate) fn arm_resume_gate(&self) -> std::sync::Arc<crate::task_control::TestResumeGate> {
         let gate = std::sync::Arc::new(crate::task_control::TestResumeGate::default());
         *crate::lock_unpoison(&self.resume_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// Test-only: how many receipt-expiry housekeeping runs happened.
+    #[cfg(test)]
+    pub(crate) fn receipt_expiry_runs_for_test(&self) -> usize {
+        self.receipt_expiry_runs
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Arms the test-only presentation-start commit gate and returns it.
+    #[cfg(test)]
+    pub(crate) fn arm_presentation_commit_gate(
+        &self,
+    ) -> std::sync::Arc<crate::presentation::TestPresentationCommitGate> {
+        let gate = std::sync::Arc::new(crate::presentation::TestPresentationCommitGate::default());
+        *crate::lock_unpoison(&self.presentation_commit_gate) = Some(std::sync::Arc::clone(&gate));
         gate
     }
 }

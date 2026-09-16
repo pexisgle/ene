@@ -823,6 +823,22 @@ pub trait UndeliveredRepository {
         cursor: Option<UndeliveredCursor>,
         limit: u32,
     ) -> Result<UndeliveredPage, UndeliveredTechnicalError>;
+
+    /// Resolves exact undelivered identities for `companion`, in the
+    /// requested order, with the stored report status on each row.
+    ///
+    /// This is the exact-identity read a presentation receipt uses to
+    /// rehydrate its own selection: head position, later arrivals, and the
+    /// number of other rows never affect which ids resolve. An id that is
+    /// missing or belongs to another companion is omitted, so the caller
+    /// compares lengths to detect an unrehydratable selection. `ids` is
+    /// bounded by the page bound ([`UNDELIVERED_PAGE_MAX`]; extra ids are
+    /// ignored). The read changes nothing.
+    async fn load_undelivered_by_ids(
+        &self,
+        companion: CompanionId,
+        ids: &[UndeliveredId],
+    ) -> Result<Vec<UndeliveredRef>, UndeliveredTechnicalError>;
 }
 
 /// Durable identity of one first-party management activity record, minted by

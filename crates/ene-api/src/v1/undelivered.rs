@@ -173,7 +173,9 @@ pub enum UndeliveredResponse {
     NoCurrentPresence,
     /// The companion projection is unknown or rotated.
     UnknownCompanion,
-    /// The cursor belongs to another query, Task, or connection.
+    /// The base view is stale: the cursor belongs to another query, Task,
+    /// or connection, or a live receipt's selection can no longer be exactly
+    /// rehydrated. Re-query from the head for a fresh page and receipt.
     StaleBaseView {
         current: Option<PageCursorWire>,
     },

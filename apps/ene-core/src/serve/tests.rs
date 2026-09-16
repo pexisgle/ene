@@ -2592,3 +2592,262 @@ async fn stage5_frames_distinguish_superseded_from_unauthenticated() {
         );
     }
 }
+
+/// S5 connection lifecycle: a superseding install drops the replaced
+/// connection's presentation state at the install point, and the superseded
+/// socket's stale frames cannot rebuild or extend it.
+#[tokio::test]
+async fn supersession_drops_the_replaced_connections_presentation_state() {
+    use ene_api::v1::undelivered::{
+        GetTaskReport, ListTasks, TaskListResponse, TaskReportResponse,
+    };
+    use ene_primitive::{RawId, WallClockWithTz};
+    use ene_task::{
+        AssigneeRef, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
+        TaskCreationPremise, TaskId, TaskPurpose, TaskRepository as _,
+    };
+
+    let (handle, _dir) = open_handle("stale-purge").await.unwrap();
+    let transport = fake_transport();
+    // Pair a device through the real approval flow.
+    let (probe_table, probe_id) = fresh_conn();
+    let pending = dispatch(
+        &handle,
+        &probe_table,
+        &probe_id,
+        pairing_frame("laptop"),
+        &transport,
+    )
+    .await;
+    let probe_pending = pending_id_of(pending.first().expect("the probe must pend"));
+    let approved = handle.approve_device(&probe_pending).await;
+    let Ok(Some((record, secret))) = approved else {
+        panic!("owner approval must pair, got {approved:?}");
+    };
+    let device_wire = record.wire.clone();
+    let device = DeviceWireId(uuid::Uuid::parse_str(&device_wire).unwrap());
+    let paired = dispatch(
+        &handle,
+        &probe_table,
+        &probe_id,
+        pairing_poll("laptop", Some(probe_pending)),
+        &transport,
+    )
+    .await;
+    assert!(
+        paired.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::PairingResult(PairingResult::Paired { .. })
+        )),
+        "the approved pending must pair on poll"
+    );
+
+    // Seed one Task so the list/report queries mint connection-scoped refs.
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must ensure");
+    let _task = handle
+        .store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: String::from("look at the input"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: WallClockWithTz::now(),
+            assignee: AssigneeRef {
+                companion: companion.as_raw(),
+            },
+            workspace: None,
+        })
+        .await
+        .expect("the task must seed");
+
+    let stage5 = |payload: WirePayload, live: &LiveInput, device: DeviceWireId| {
+        let mut frame = super::WireFrame {
+            envelope: new_outgoing_envelope(
+                ProtocolVersion::V1,
+                sender(),
+                WireMessageType(payload.message_type().to_string()),
+            ),
+            payload,
+        };
+        frame.envelope.sender.device_id = Some(device);
+        frame.envelope.sender.connection_id = Some(live.connection_id);
+        frame
+    };
+    let list_query_of = |frame: &super::WireFrame| match &frame.payload {
+        WirePayload::ListTasks(query) => query.clone(),
+        other => panic!("expected a list frame, got {other:?}"),
+    };
+    let list_page_of =
+        |frames: Vec<super::WireFrame>| match frames.into_iter().next().unwrap().payload {
+            WirePayload::TaskListResponse(TaskListResponse::Page(page)) => page,
+            other => panic!("expected a list page, got {other:?}"),
+        };
+
+    // C1 authenticates through the real challenge/proof exchange.
+    let (table, c1) = fresh_conn();
+    let challenged = dispatch(
+        &handle,
+        &table,
+        &c1,
+        advertise_frame(Some(device.0), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    let Some(WirePayload::AuthChallenge(challenge)) = challenged.get(1).map(|f| &f.payload) else {
+        panic!("C1 must challenge, got {challenged:?}");
+    };
+    let accepted = dispatch(
+        &handle,
+        &table,
+        &c1,
+        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        &transport,
+    )
+    .await;
+    assert!(
+        accepted.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::AuthResult(AuthResult::Accepted { .. })
+        )),
+        "C1 must authenticate, got {accepted:?}"
+    );
+
+    // C1's connection-owned presentation state: a Task ref, its report
+    // source ref, and the list cursor.
+    let c1_live = live_of(&table, &c1);
+    let list = stage5(
+        WirePayload::ListTasks(ListTasks {
+            cursor: None,
+            limit: Some(1),
+        }),
+        &c1_live,
+        device,
+    );
+    let listed = list_page_of(
+        handle
+            .list_tasks_wire(&list, &c1_live, &list_query_of(&list))
+            .await,
+    );
+    assert_eq!(listed.tasks.len(), 1);
+    let report = stage5(
+        WirePayload::GetTaskReport(GetTaskReport {
+            task: listed.tasks[0].task.clone(),
+            cursor: None,
+            limit: None,
+        }),
+        &c1_live,
+        device,
+    );
+    let report_query = match &report.payload {
+        WirePayload::GetTaskReport(query) => query.clone(),
+        other => panic!("expected a report frame, got {other:?}"),
+    };
+    let reports = handle.report_wire(&report, &c1_live, &report_query).await;
+    assert!(
+        matches!(
+            reports.first().map(|frame| &frame.payload),
+            Some(WirePayload::TaskReportResponse(TaskReportResponse::Page(_)))
+        ),
+        "the report must mint its source ref"
+    );
+    {
+        let counts = handle.presentation_counts_for_test(&c1);
+        assert!(counts.task_refs > 0, "C1 owns a Task ref");
+        assert!(counts.source_refs > 0, "C1 owns a source ref");
+        assert!(counts.cursors > 0, "C1 owns a page cursor");
+    }
+
+    // C2 authenticates on a fresh connection: C1 is superseded and its
+    // presentation state dies at the install point.
+    let c2 = table.note_accept();
+    let challenged = dispatch(
+        &handle,
+        &table,
+        &c2,
+        advertise_frame(Some(device.0), ProtocolVersion::V1),
+        &transport,
+    )
+    .await;
+    let Some(WirePayload::AuthChallenge(challenge)) = challenged.get(1).map(|f| &f.payload) else {
+        panic!("C2 must challenge, got {challenged:?}");
+    };
+    let accepted = dispatch(
+        &handle,
+        &table,
+        &c2,
+        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        &transport,
+    )
+    .await;
+    assert!(
+        accepted.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::AuthResult(AuthResult::Accepted { .. })
+        )),
+        "C2 must authenticate, got {accepted:?}"
+    );
+    assert_eq!(table.phase_of(&c1), Some(ConnectionPhase::Superseded));
+    assert!(
+        handle.presentation_counts_for_test(&c1).is_empty(),
+        "supersession drops every replaced-connection entry"
+    );
+
+    // C2's own state is never touched by C1's stale traffic.
+    let c2_live = live_of(&table, &c2);
+    let list_c2 = stage5(
+        WirePayload::ListTasks(ListTasks {
+            cursor: None,
+            limit: Some(1),
+        }),
+        &c2_live,
+        device,
+    );
+    let _ = list_page_of(
+        handle
+            .list_tasks_wire(&list_c2, &c2_live, &list_query_of(&list_c2))
+            .await,
+    );
+    let c2_before = handle.presentation_counts_for_test(&c2);
+    assert!(c2_before.task_refs > 0);
+
+    let stale = dispatch(
+        &handle,
+        &table,
+        &c1,
+        stage5(
+            WirePayload::ListTasks(ListTasks {
+                cursor: None,
+                limit: Some(1),
+            }),
+            &c1_live,
+            device,
+        ),
+        &transport,
+    )
+    .await;
+    assert!(
+        stale.first().is_some_and(|first| matches!(
+            &first.payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+        )),
+        "C1's list must be stale, got {stale:?}"
+    );
+    assert!(
+        handle.presentation_counts_for_test(&c1).is_empty(),
+        "a stale frame cannot rebuild purged state"
+    );
+    assert_eq!(
+        handle.presentation_counts_for_test(&c2),
+        c2_before,
+        "C2's state is untouched"
+    );
+}

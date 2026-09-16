@@ -9,8 +9,8 @@ use ene_action::{
     ActionAttemptRepository as _, ActionCertainty, CertaintyUpdateOutcome, EffectGrounds,
 };
 use ene_companion::{
-    ReportStatus, ReportStatusTransition, TaskFact, TerminalKindWire, UNDELIVERED_PAGE_MAX,
-    UndeliveredCursor, UndeliveredSource,
+    PresentationMark, ReportStatus, ReportStatusTransition, TaskFact, TerminalKindWire,
+    UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredSource,
 };
 use ene_task::{
     TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskFailureKind,
@@ -669,4 +669,79 @@ async fn undelivered_unknown_is_relisted_and_receipts_never_downgrade_presented(
         Ok(ReportStatusTransition::AlreadyPresented),
         "a presented row absorbs every later mark, stale premise included"
     );
+}
+
+/// The exact-identity read resolves requested ids in their requested order
+/// with stored statuses, and omits unknown or foreign identities so a
+/// receipt can detect an unrehydratable selection.
+#[tokio::test]
+async fn exact_identity_reads_preserve_order_and_resolve_statuses() {
+    let store = open_memory().await.unwrap();
+    let assignee = RawId::new();
+    let task = create_task_for_assignee(&store, assignee).await;
+    let TaskCommitOutcome::CommittedAs(_) = steer(&store, task).await else {
+        panic!("steering must commit");
+    };
+    let companion = CompanionId::from_raw(assignee);
+    let page = store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read");
+    assert_eq!(page.entries.len(), 2, "revision 1 and revision 2");
+    let first = page.entries[0].id;
+    let second = page.entries[1].id;
+
+    // Requested order wins, never insertion order.
+    let loaded = store
+        .load_undelivered_by_ids(companion, &[second, first])
+        .await
+        .expect("the exact read must answer");
+    assert_eq!(
+        loaded.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        vec![second, first]
+    );
+
+    // A presented row still resolves, with its stored status; an unknown
+    // identity is omitted, so the caller sees the shorter vector and can
+    // fail closed.
+    let transition = store
+        .compare_and_mark_reported(
+            second,
+            ReportStatus::Pending,
+            PresentationMark {
+                round: RawId::new(),
+                presented: true,
+            },
+        )
+        .await
+        .expect("the presentation compare must answer");
+    assert_eq!(transition, ReportStatusTransition::PendingToPresented);
+    let unknown = UndeliveredId::from_raw(RawId::new());
+    let loaded = store
+        .load_undelivered_by_ids(companion, &[first, second, unknown])
+        .await
+        .expect("the exact read must answer");
+    assert_eq!(
+        loaded.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        vec![first, second],
+        "presented and pending identities both resolve"
+    );
+    assert_eq!(loaded[0].status, ReportStatus::Pending);
+    assert_eq!(loaded[1].status, ReportStatus::Presented);
+
+    // A foreign companion never resolves another companion's identity, even
+    // with the exact id.
+    let other = store
+        .load_undelivered_by_ids(CompanionId::from_raw(RawId::new()), &[first])
+        .await
+        .expect("the exact read must answer");
+    assert!(other.is_empty());
+
+    // The read changes nothing.
+    let after = store
+        .list_unpresented(companion, None, 50)
+        .await
+        .expect("the listing must read");
+    assert_eq!(after.entries.len(), 1);
+    assert_eq!(after.entries[0].id, first);
 }

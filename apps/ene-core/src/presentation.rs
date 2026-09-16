@@ -39,7 +39,7 @@
 //! revision, or report status, and never start, repair, re-evaluate, or
 //! register a runner (S5-12).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use ene_api::v1::payload::WirePayload;
@@ -58,8 +58,7 @@ use ene_api::v1::undelivered::{
 };
 use ene_companion::{
     CompanionId, CompanionRepository, RecordResumeActivityCommand, ReportStatus, TaskFact,
-    UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredRef, UndeliveredRepository,
-    UndeliveredSource,
+    UndeliveredCursor, UndeliveredId, UndeliveredRef, UndeliveredRepository, UndeliveredSource,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{ClientId, PresenceAttribution, PresenceRepository, PresenceState};
@@ -179,6 +178,9 @@ enum StoredCursor {
 #[derive(Debug, Clone)]
 struct ResumeSlot {
     epoch: String,
+    /// Issuing connection key (the epoch's connection component), so the
+    /// slot can be dropped with that connection lifetime.
+    connection: String,
     fingerprint: String,
     state: ResumeSlotState,
     seq: u64,
@@ -568,35 +570,67 @@ impl HostHandle {
     }
 
     /// Re-emits a live receipt's own selection: no new receipt, no commit,
-    /// no cursor move. The re-emitted item set is exactly the receipt's
-    /// stored selection — a smaller `limit` never shrinks it, because an
-    /// ACK for the receipt covers every id it selected. Over budget now
+    /// no cursor move. The item set is rehydrated from the receipt's exact
+    /// selected identities in their original order — never by re-scanning
+    /// the unpresented head, so rows before the selection, later backlog,
+    /// and continuation position cannot shrink or empty it. Over budget now
     /// (excerpts only shrink) answers `FrameTooLarge` with the receipt
     /// standing.
+    ///
+    /// A selected id that no longer resolves at all (deleted or foreign)
+    /// means the receipt can no longer cover the set its ACK names: the
+    /// receipt is retired and the request answers `StaleBaseView` so the
+    /// Client re-queries for a fresh page. A store failure fails closed the
+    /// same way. A selected row that is already `Presented` cannot be
+    /// re-painted and its ACK is already satisfied, so it is pruned from the
+    /// receipt's selection as it is omitted from the frame: the receipt then
+    /// covers exactly the delivered items.
     async fn reemit_receipt(&self, conn: &str, receipt: &Receipt) -> UndeliveredResponse {
-        let page = match self
+        let selected = receipt.selected.clone();
+        let loaded = match self
             .store
-            .list_unpresented(
-                CompanionId::from_raw(receipt.companion),
-                None,
-                UNDELIVERED_PAGE_MAX,
-            )
+            .load_undelivered_by_ids(CompanionId::from_raw(receipt.companion), &selected)
             .await
         {
-            Ok(page) => page,
-            Err(_) => {
-                return UndeliveredResponse::Summary(self.receipt_shell(receipt, Vec::new(), true));
-            }
+            Ok(loaded) => loaded,
+            Err(_) => return self.retire_unrehydratable_receipt(receipt),
         };
+        // Exact one-to-one resolution: every selected identity must resolve,
+        // in the original selection order. Anything else is a receipt whose
+        // ACK would claim rows that no longer exist.
+        if loaded.len() != selected.len()
+            || loaded
+                .iter()
+                .zip(&selected)
+                .any(|(entry, id)| entry.id != *id)
+        {
+            return self.retire_unrehydratable_receipt(receipt);
+        }
+        // Already-presented ids are omitted from the frame and pruned from
+        // the live receipt, so its selection stays exactly what the ACK acts
+        // on. The presentation gate is held across this rehydration, so the
+        // receipt cannot be replaced underneath the prune.
+        let mut carried = Vec::with_capacity(loaded.len());
+        let mut satisfied: Vec<UndeliveredId> = Vec::new();
+        for entry in loaded {
+            if entry.status == ReportStatus::Presented {
+                satisfied.push(entry.id);
+            } else {
+                carried.push(entry);
+            }
+        }
+        if !satisfied.is_empty() {
+            let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
+            let mut state = crate::lock_unpoison(&self.presentations);
+            if let Some(live) = state.receipts.get_mut(&companion_key)
+                && live.id == receipt.id
+            {
+                live.selected.retain(|id| !satisfied.contains(id));
+            }
+        }
         Self::sweep_carried(&mut crate::lock_unpoison(&self.presentations), conn);
-        let wanted: HashSet<UndeliveredId> = receipt.selected.iter().copied().collect();
-        let entries: Vec<UndeliveredRef> = page
-            .entries
-            .into_iter()
-            .filter(|entry| wanted.contains(&entry.id))
-            .collect();
-        let items = self.carry_items(conn, &entries).await;
-        if items.is_empty() && !entries.is_empty() {
+        let items = self.carry_items(conn, &carried).await;
+        if items.is_empty() && !carried.is_empty() {
             return UndeliveredResponse::FrameTooLarge;
         }
         if estimate_summary_bytes(&items) > self.frame_budget() {
@@ -605,6 +639,25 @@ impl HostHandle {
         let mut summary = self.receipt_shell(receipt, items, true);
         self.attach_reports(conn, &mut summary).await;
         UndeliveredResponse::Summary(summary)
+    }
+
+    /// Retires a receipt whose selection cannot be exactly rehydrated and
+    /// answers the stale base view.
+    ///
+    /// The durable rows are untouched: whatever is still unpresented keeps
+    /// its status and re-presents on the Client's next head pass. Retiring
+    /// the id keeps a late ACK answerable as stale instead of unknown.
+    fn retire_unrehydratable_receipt(&self, receipt: &Receipt) -> UndeliveredResponse {
+        let mut state = crate::lock_unpoison(&self.presentations);
+        let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
+        if state
+            .receipts
+            .get(&companion_key)
+            .is_some_and(|live| live.id == receipt.id)
+        {
+            Self::remove_receipt(&mut state, &companion_key);
+        }
+        UndeliveredResponse::StaleBaseView { current: None }
     }
 
     /// Begins or continues one pass: fetches the longest fitting prefix of
@@ -839,25 +892,60 @@ impl HostHandle {
             round: round.as_raw(),
             presented: false,
         };
+        // Test-only: pause after the page plan and before the per-row
+        // presentation-start compares so a test can move a row's durable
+        // status and pin the domain CAS-loss handling.
+        #[cfg(test)]
+        {
+            let gate = crate::lock_unpoison(&self.presentation_commit_gate).clone();
+            if let Some(gate) = gate {
+                gate.pause().await;
+            }
+        }
         let mut selected = Vec::with_capacity(entries.len());
         let mut carried = Vec::with_capacity(items.len());
         let mut dropped = Vec::new();
         for (entry, item) in entries.into_iter().zip(items) {
-            if entry.status == ReportStatus::Pending
-                && self
-                    .store
-                    .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
-                    .await
-                    .is_err()
-            {
-                // A lost compare leaves the row for the next pass; it is
-                // dropped from both the selection and the frame so the
-                // receipt and the items it covers stay identical.
-                dropped.push(item);
+            // Only a committed presentation start claims the row. A domain
+            // `StaleSource` is not an infrastructure error: the row's status
+            // moved between the page plan and this compare (another
+            // receipt/pass owns it, it was presented, or it is gone), so the
+            // row must stay out of the receipt and the frame and be left to
+            // the next pass. An `Err` is a rolled-back compare (the row was
+            // not marked) and takes the same drop; any other transition is
+            // not this call's success either.
+            if entry.status != ReportStatus::Pending {
+                // Already `PresentationUnknown`: re-displayed under this
+                // receipt without a status write, so it is claimed.
+                selected.push(entry.id);
+                carried.push(item);
                 continue;
             }
-            selected.push(entry.id);
-            carried.push(item);
+            match self
+                .store
+                .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
+                .await
+            {
+                Ok(ene_companion::ReportStatusTransition::MarkedPresentationUnknown) => {
+                    selected.push(entry.id);
+                    carried.push(item);
+                }
+                Ok(ene_companion::ReportStatusTransition::StaleSource) => {
+                    dropped.push(item);
+                }
+                Ok(_) => {
+                    // expected=Pending + presented=false can only commit
+                    // `MarkedPresentationUnknown`; anything else (for
+                    // example an already-presented row) is not a
+                    // presentation start and is never claimed.
+                    dropped.push(item);
+                }
+                Err(_) => {
+                    // One atomic per-row compare: the failure rolled back,
+                    // so the row was not marked and stays for the next pass.
+                    dropped.push(item);
+                }
+            }
         }
         if !dropped.is_empty() {
             self.forget_carried(conn, &dropped).await;
@@ -1663,6 +1751,7 @@ impl HostHandle {
         command: &ResumeTask,
     ) -> ResumeApply {
         let epoch = Self::epoch_key(live, frame);
+        let connection = conn_key(&live.connection_id);
         let fingerprint = format!(
             "{}:{}:{}:{}",
             command.task.0,
@@ -1695,6 +1784,7 @@ impl HostHandle {
                 command_id,
                 ResumeSlot {
                     epoch,
+                    connection,
                     fingerprint,
                     state: ResumeSlotState::InFlight,
                     seq,
@@ -1882,6 +1972,62 @@ impl HostHandle {
         }
     }
 
+    /// Drops every memory-only presentation entry owned by one ended
+    /// connection.
+    ///
+    /// Called when the transport closes a connection and when a newer
+    /// authentication supersedes it: subscriptions, query-scoped Task /
+    /// source refs, page cursors, live receipts, carried item refs, and the
+    /// connection's resume retry slots all exist only for that connection
+    /// lifetime. Durable state is untouched: a released receipt leaves its
+    /// rows `Pending` / `PresentationUnknown`, so a new connection
+    /// re-presents them under a fresh receipt, and a retired id keeps a late
+    /// ACK answerable as stale instead of unknown.
+    pub(crate) fn drop_presentation_connection_state(&self, connection: &ConnectionWireId) {
+        let conn = conn_key(connection);
+        let mut state = crate::lock_unpoison(&self.presentations);
+        state.subs.remove(&conn);
+        state.task_refs.retain(|(owner, _), _| owner != &conn);
+        state.carried.retain(|(owner, _), _| owner != &conn);
+        state.source_refs.retain(|(owner, _), _| owner != &conn);
+        state.cursors.retain(|(owner, _), _| owner != &conn);
+        state.resume.retain(|_, slot| slot.connection != conn);
+        let receipts: Vec<String> = state
+            .receipts
+            .iter()
+            .filter(|(_, receipt)| receipt.connection == conn)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in receipts {
+            Self::remove_receipt(&mut state, &key);
+        }
+    }
+
+    /// Releases this connection's expired receipts (memory-only state
+    /// progression).
+    ///
+    /// The connection loop runs this on every receipt deadline before it
+    /// decides whether an unsolicited write is still possible: a failed push
+    /// write must not leave an expired receipt behind, or the same elapsed
+    /// deadline would keep firing forever. Durable rows are untouched:
+    /// released rows keep their status and re-present on the next pass.
+    pub(crate) fn expire_due_receipts(&self, connection: &ConnectionWireId) {
+        #[cfg(test)]
+        self.receipt_expiry_runs
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let conn = conn_key(connection);
+        let mut state = crate::lock_unpoison(&self.presentations);
+        let expired: Vec<String> = state
+            .receipts
+            .iter()
+            .filter(|(_, receipt)| receipt.connection == conn && receipt.expired())
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            Self::remove_receipt(&mut state, &key);
+        }
+    }
+
     /// One connection-owned subscription advance, driven without an inbound
     /// request (CCT §10.5, IPC §13.3).
     ///
@@ -1905,18 +2051,7 @@ impl HostHandle {
         // Release this connection's expired receipts up front: the caller's
         // deadline already elapsed, and a lingering expired row would wake
         // the loop again immediately.
-        {
-            let mut state = crate::lock_unpoison(&self.presentations);
-            let expired: Vec<String> = state
-                .receipts
-                .iter()
-                .filter(|(_, receipt)| receipt.connection == conn && receipt.expired())
-                .map(|(key, _)| key.clone())
-                .collect();
-            for key in expired {
-                Self::remove_receipt(&mut state, &key);
-            }
-        }
+        self.expire_due_receipts(&live.connection_id);
         if !live.authed || live.phase.is_superseded() || !live.connection_live {
             return None;
         }
@@ -1979,7 +2114,7 @@ impl HostHandle {
     /// Earliest receipt deadline on this connection, expired or not.
     ///
     /// The connection loop arms its timer on this value; an already-elapsed
-    /// deadline fires immediately and [`Self::push_undelivered`] releases
+    /// deadline fires immediately and [`Self::expire_due_receipts`] releases
     /// the expired receipt. [`None`] means no receipt is outstanding, so
     /// only a wakeup or inbound frame can advance the subscription.
     pub(crate) fn receipt_deadline_for(&self, connection: &ConnectionWireId) -> Option<Instant> {
@@ -2016,6 +2151,123 @@ impl HostHandle {
                 true
             }
             None => false,
+        }
+    }
+}
+
+/// Deterministic race gate for one presentation-start commit (test-only).
+///
+/// Pauses `commit_install` after the page plan and before the per-row
+/// presentation-start compares, so a test can change a row's durable status
+/// in between and pin that a domain `StaleSource` (not only an
+/// infrastructure error) drops the row from the frame and the receipt.
+#[cfg(test)]
+pub(crate) struct TestPresentationCommitGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl Default for TestPresentationCommitGate {
+    fn default() -> Self {
+        Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TestPresentationCommitGate {
+    /// Pauses until the test releases the gate, marking entry first.
+    pub(crate) async fn pause(&self) {
+        self.entered.add_permits(1);
+        let permit = self.release.acquire().await.expect("gate stays open");
+        permit.forget();
+    }
+
+    /// Waits until a paused commit has entered the gate.
+    pub(crate) async fn wait_entered(&self) {
+        let permit = self.entered.acquire().await.expect("gate is entered");
+        permit.forget();
+    }
+
+    /// Releases one paused commit.
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+/// Test-only per-connection view of the memory-only presentation state.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PresentationConnectionCounts {
+    /// Whether a subscription entry exists for this connection.
+    pub subscription: bool,
+    pub task_refs: usize,
+    pub carried: usize,
+    pub source_refs: usize,
+    pub cursors: usize,
+    pub receipts: usize,
+    pub resume_slots: usize,
+}
+
+#[cfg(test)]
+impl PresentationConnectionCounts {
+    /// Whether the connection owns no presentation entry at all.
+    #[must_use]
+    pub(crate) fn is_empty(self) -> bool {
+        !self.subscription
+            && self.task_refs == 0
+            && self.carried == 0
+            && self.source_refs == 0
+            && self.cursors == 0
+            && self.receipts == 0
+            && self.resume_slots == 0
+    }
+}
+
+#[cfg(test)]
+impl HostHandle {
+    /// Test-only: counts of one connection's presentation-owned entries.
+    pub(crate) fn presentation_counts_for_test(
+        &self,
+        connection: &ConnectionWireId,
+    ) -> PresentationConnectionCounts {
+        let conn = conn_key(connection);
+        let state = crate::lock_unpoison(&self.presentations);
+        PresentationConnectionCounts {
+            subscription: state.subs.contains_key(&conn),
+            task_refs: state
+                .task_refs
+                .keys()
+                .filter(|(owner, _)| owner == &conn)
+                .count(),
+            carried: state
+                .carried
+                .keys()
+                .filter(|(owner, _)| owner == &conn)
+                .count(),
+            source_refs: state
+                .source_refs
+                .keys()
+                .filter(|(owner, _)| owner == &conn)
+                .count(),
+            cursors: state
+                .cursors
+                .keys()
+                .filter(|(owner, _)| owner == &conn)
+                .count(),
+            receipts: state
+                .receipts
+                .values()
+                .filter(|receipt| receipt.connection == conn)
+                .count(),
+            resume_slots: state
+                .resume
+                .values()
+                .filter(|slot| slot.connection == conn)
+                .count(),
         }
     }
 }

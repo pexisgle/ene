@@ -67,9 +67,11 @@ pub(crate) fn authenticate(table: &Arc<ConnectionTable>, id: &ConnectionWireId, 
         ),
         "the challenge nonce must be pending"
     );
-    assert_eq!(
-        table.install_authenticated(id),
-        InstallOutcome::Installed,
+    assert!(
+        matches!(
+            table.install_authenticated(id),
+            InstallOutcome::Installed { .. }
+        ),
         "the verified proof installs the connection"
     );
     assert_eq!(

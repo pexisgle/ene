@@ -5,7 +5,11 @@
     reason = "test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
 )]
 
+use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use super::{
     ChallengeOutcome, ConnectionPhase, ConnectionTable, InstallOutcome, LiveDecision,
@@ -296,10 +300,10 @@ fn authenticated_install_supersedes_and_is_irreversible() {
     challenge(&table, &second, &device_wire);
     assert_eq!(table.take_nonce(&first), NonceAdmission::Nonce(first_nonce));
 
-    assert_eq!(
+    assert!(matches!(
         table.install_authenticated(&first),
-        InstallOutcome::Installed
-    );
+        InstallOutcome::Installed { .. }
+    ));
     assert!(table.current_authenticated(&device_wire));
     let current = table.live_for(&first, &paired_envelope(incarnation(9, 9), device));
     assert!(
@@ -307,10 +311,10 @@ fn authenticated_install_supersedes_and_is_irreversible() {
         "the freshly authenticated connection reports authed"
     );
 
-    assert_eq!(
+    assert!(matches!(
         table.install_authenticated(&second),
-        InstallOutcome::Installed
-    );
+        InstallOutcome::Installed { superseded: Some(previous) } if previous == first
+    ));
     let stale = table.live_for(&first, &paired_envelope(incarnation(9, 9), device));
     assert!(
         matches!(stale, LiveDecision::Ready(live) if !live.authed && live.phase == ConnectionPhase::Superseded),
@@ -391,7 +395,10 @@ fn lingering_superseded_close_never_triggers_the_fallback() {
     for id in [first, second] {
         challenge(&table, &id, device);
         let _ = table.take_nonce(&id);
-        assert_eq!(table.install_authenticated(&id), InstallOutcome::Installed);
+        assert!(matches!(
+            table.install_authenticated(&id),
+            InstallOutcome::Installed { .. }
+        ));
     }
     let fallbacks = Mutex::new(Vec::new());
     let closed = table.note_closed(&first, |device| {
@@ -428,10 +435,10 @@ fn lingering_superseded_close_never_triggers_the_fallback() {
     let third = table.note_accept();
     challenge(&table, &third, device);
     let _ = table.take_nonce(&third);
-    assert_eq!(
+    assert!(matches!(
         table.install_authenticated(&third),
-        InstallOutcome::Installed
-    );
+        InstallOutcome::Installed { .. }
+    ));
     assert!(
         table.current_authenticated(device),
         "a fresh authentication installs after the current close"
@@ -447,10 +454,10 @@ fn closing_the_current_connection_leaves_survivors_unauthed() {
     let device_wire = device.0.as_hyphenated().to_string();
     challenge(&table, &first, &device_wire);
     let _ = table.take_nonce(&first);
-    assert_eq!(
+    assert!(matches!(
         table.install_authenticated(&first),
-        InstallOutcome::Installed
-    );
+        InstallOutcome::Installed { .. }
+    ));
     challenge(&table, &second, &device_wire);
 
     let closed = table.note_closed(&first, |_| {});
@@ -991,5 +998,175 @@ async fn subscription_advances_on_receipt_timeout_without_a_request() {
             .iter()
             .all(|entry| { entry.status == ene_companion::ReportStatus::PresentationUnknown })
     );
+    worker.abort();
+}
+
+/// A byte stream whose read side stays open while writes fail on demand.
+///
+/// The connection loop must keep draining inbound frames after a failed
+/// push write; only real transport EOF ends it.
+struct FlakyWrite<S> {
+    inner: S,
+    fail_writes: Arc<AtomicBool>,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for FlakyWrite<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for FlakyWrite<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test write failure",
+            )));
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test write failure",
+            )));
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test write failure",
+            )));
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// S5 subscription: after a push write failure the connection keeps its
+/// reader, and the receipt deadline still releases the expired receipt. A
+/// released deadline never keeps firing (no timer busy-loop), and inbound
+/// frames stay processable.
+#[tokio::test]
+async fn receipt_expiry_advances_after_a_push_write_failure() {
+    use std::time::Duration;
+
+    use crate::test_support::{authenticate, memory_handle_with};
+
+    let (handle, _dir) = memory_handle_with("push-expiry-blocked", |_| {})
+        .await
+        .unwrap();
+    let handle = Arc::new(handle);
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
+    attach_present(&handle, &device_wire).await;
+    // Short TTL: deterministic expiry without the production 30 s.
+    handle.set_receipt_ttl_for_test(Duration::from_millis(120));
+
+    let table = Arc::new(ConnectionTable::new());
+    let id = table.note_accept();
+    authenticate(&table, &id, &device_wire);
+
+    let fail_writes = Arc::new(AtomicBool::new(false));
+    let pair = tokio::net::UnixStream::pair().unwrap();
+    let (mut client, server) = pair;
+    let worker = tokio::spawn(super::serve_connection(
+        FlakyWrite {
+            inner: server,
+            fail_writes: Arc::clone(&fail_writes),
+        },
+        id,
+        Arc::clone(&handle),
+        Arc::new(ene_inference::fake::FakeProviderTransport::new(
+            String::new(),
+            None,
+        )),
+        Arc::clone(&table),
+    ));
+
+    // Drain the empty backlog over a healthy write side.
+    assert!(
+        write_domain(
+            &mut client,
+            &undelivered_request(incarnation(5, 9), device, id, Some(1))
+        )
+        .await
+    );
+    let drained = summary_of(
+        read_domain(&mut client)
+            .await
+            .expect("the drain must answer"),
+    );
+    assert!(drained.items.is_empty());
+
+    // A new fact commits while writes fail: the unsolicited push installs
+    // its receipt durably, then its write fails and disables further pushes.
+    fail_writes.store(true, Ordering::SeqCst);
+    append_registered(&handle, "expiry row").await;
+    // No unsolicited frame reaches the client: the push write failed.
+    let pushed = tokio::time::timeout(Duration::from_millis(250), read_domain(&mut client)).await;
+    assert!(
+        pushed.is_err(),
+        "the push write must fail, got {:?}",
+        pushed.ok().flatten()
+    );
+    // The push carried its item (the receipt was installed durably) before
+    // the failed write; nothing else removes the receipt while pushes are
+    // blocked.
+    assert!(
+        handle.presentation_counts_for_test(&id).carried > 0,
+        "the push must have carried its item"
+    );
+
+    // The deadline releases the expired receipt even though pushes are
+    // blocked: the observable state transition is the release itself.
+    let release_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.receipt_deadline_for(&id).is_some() {
+        assert!(
+            tokio::time::Instant::now() < release_deadline,
+            "the expired receipt must be released"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // No spin: once released, the deadline does not keep firing.
+    let released = handle.receipt_expiry_runs_for_test();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        handle.receipt_expiry_runs_for_test(),
+        released,
+        "a released receipt must not keep the timer firing"
+    );
+
+    // The reader is alive and writes recover: an explicit request still
+    // answers and re-presents the durable row.
+    fail_writes.store(false, Ordering::SeqCst);
+    assert!(
+        write_domain(
+            &mut client,
+            &undelivered_request(incarnation(5, 9), device, id, None)
+        )
+        .await
+    );
+    let recovered = summary_of(
+        read_domain(&mut client)
+            .await
+            .expect("the request must answer"),
+    );
+    assert_eq!(recovered.items.len(), 1);
+    assert_eq!(recovered.items[0].excerpt, "expiry row");
+    let _ = &handle.store;
     worker.abort();
 }

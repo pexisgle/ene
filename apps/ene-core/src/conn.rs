@@ -202,9 +202,12 @@ pub(crate) enum NonceAdmission {
 /// How installing an authenticated connection ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallOutcome {
-    /// This connection is now authenticated and current; the previous current
-    /// connection, if any, is superseded.
-    Installed,
+    /// This connection is now authenticated and current; the previous
+    /// current connection, if any, is superseded and named here so the
+    /// caller can drop its connection-owned presentation state.
+    Installed {
+        superseded: Option<ConnectionWireId>,
+    },
     /// The connection was superseded before this install: the proof no longer
     /// counts and the newer current is untouched.
     Superseded,
@@ -389,14 +392,16 @@ impl ConnectionTable {
             record.phase = ConnectionPhase::Authenticated;
             table.device_current.insert(device, *id)
         };
+        let mut superseded = None;
         if let Some(previous) = previous
             && previous != *id
             && let Some(record) = table.records.get_mut(&previous)
             && record.phase == ConnectionPhase::Authenticated
         {
             record.phase = ConnectionPhase::Superseded;
+            superseded = Some(previous);
         }
-        InstallOutcome::Installed
+        InstallOutcome::Installed { superseded }
     }
 
     /// Ends a failed authentication: `Challenged → Closed`.
@@ -994,6 +999,12 @@ async fn serve_connection<S, T>(
                 }
             }
             () = timer => {
+                // Expiry is durable-state progression, not a socket write:
+                // release due receipts even after a push write failure, or
+                // the same elapsed deadline would stay readable and the loop
+                // would spin. A blocked push only skips the unsolicited
+                // write; inbound frames keep their own path below.
+                handle.expire_due_receipts(&connection);
                 if !push_blocked
                     && !emit_push(
                         &mut write_half,

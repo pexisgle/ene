@@ -279,7 +279,13 @@ impl HostHandle {
         };
         match reason {
             None => match live.authority.install_authenticated(&live.connection_id) {
-                InstallOutcome::Installed => {
+                InstallOutcome::Installed { superseded } => {
+                    // Supersession is terminal for the replaced connection's
+                    // connection-owned presentation state: drop it now, so
+                    // the still-open old socket cannot reach or extend it.
+                    if let Some(previous) = superseded {
+                        self.drop_presentation_connection_state(&previous);
+                    }
                     let mut out = vec![outgoing_frame(
                         frame,
                         live,
