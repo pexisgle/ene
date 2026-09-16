@@ -35,8 +35,12 @@
 //! auth install) and the close admission that runs the presence
 //! compare/commit (CCT §10.4) are short connection-ownership sections: the
 //! table section is never held across an `.await`, and the SQLite work runs
-//! synchronously inside `spawn_blocking`. Lock order: connection table → Task
-//! execution registry → SQLite.
+//! synchronously inside `spawn_blocking`. `ConnectionTable::is_current_authenticated`
+//! is the synchronous currentness predicate for observation-only callers
+//! (notably the stream gate's final pre-publication check), while
+//! `ConnectionTable::with_current_connection` is the commit primitive every
+//! Client-dependent mutation uses. Lock order: connection table →
+//! presentation memory → Task execution registry → SQLite.
 //!
 //! Same-user proof without new dependencies: after binding, the listener reads
 //! the socket file owner through [`MetadataExt::uid`](std::os::unix::fs::MetadataExt)
@@ -521,6 +525,28 @@ impl ConnectionTable {
         })
     }
 
+    /// Whether `id` is still its device's current authenticated connection.
+    ///
+    /// The synchronous currentness predicate for operations that only need
+    /// to observe the connection lifecycle at the point of a publication or
+    /// a guarded install: a superseded, closed, unauthenticated, unknown, or
+    /// replaced connection is `false`. Also a stream gate's final
+    /// pre-publication check (the caller pairs it with the ownership section
+    /// for actual mutations; this predicate is observation only).
+    pub(crate) fn is_current_authenticated(&self, id: &ConnectionWireId) -> bool {
+        let table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get(id) else {
+            return false;
+        };
+        if record.phase != ConnectionPhase::Authenticated {
+            return false;
+        }
+        let Some(device) = record.paired_device.as_ref() else {
+            return false;
+        };
+        table.device_current.get(device) == Some(id)
+    }
+
     /// Forgets a closed connection and runs the presence fallback in the same
     /// section when it was the device's current authenticated connection.
     ///
@@ -826,6 +852,13 @@ where
     let Some(live) = table.snapshot(connection) else {
         return true;
     };
+    // A replacement may have landed between the caller's snapshot and this
+    // push: never write transient presentation onto a connection that is no
+    // longer the current authenticated one. Suppression is safe — the new
+    // connection's own subscription serves the row.
+    if !table.is_current_authenticated(connection) {
+        return true;
+    }
     let Some(pushed) = handle.push_undelivered(frame, &live).await else {
         return true;
     };

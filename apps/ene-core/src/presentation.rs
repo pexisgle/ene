@@ -38,6 +38,16 @@
 //! Reads are pure: list/report/source/select touch no lifecycle, generation,
 //! revision, or report status, and never start, repair, re-evaluate, or
 //! register a runner (S5-12).
+//!
+//! Replacement lifecycle (CCT §10.4, IPC §9.3): every connection-scoped
+//! entry here — subscription, receipt, Task/source/item ref, cursor, resume
+//! retry slot — is installed under the connection-ownership section
+//! (`HostHandle::with_current_connection` via `with_presentation_state`),
+//! and the Host's single lifecycle boundary sweeps the whole world on
+//! supersession and close. A stale operation therefore either commits before
+//! the sweep (and is swept with its connection) or is refused with a typed
+//! stale rejection; it can never recreate state for a superseded connection
+//! or disturb the replacement's own entries.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -71,7 +81,8 @@ use ene_task::{
 use uuid::Uuid;
 
 use crate::serve::{
-    HostHandle, LiveInput, device_client, outgoing_fact, outgoing_frame, reject_frame,
+    HostHandle, LiveInput, connection_key, device_client, outgoing_fact, outgoing_frame,
+    reject_frame, stale_reject,
 };
 
 #[cfg(test)]
@@ -81,7 +92,13 @@ mod tests;
 /// id: the same string form the connection layer uses, so keys match across
 /// the Host/connection boundary by construction.
 fn conn_key(id: &ConnectionWireId) -> String {
-    id.0.as_hyphenated().to_string()
+    connection_key(id)
+}
+
+/// Stale refusal for a Client-dependent operation whose ownership section
+/// found the connection superseded, closed, or replaced (IPC §11.3).
+fn stale_operation(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+    stale_reject(frame, live, detail)
 }
 
 /// How long a receipt waits for its ACK (monotonic; IPC §13.3).
@@ -356,6 +373,26 @@ impl HostHandle {
         self.presentation_lock.lock().await
     }
 
+    /// Runs one short presentation-state mutation under the connection
+    /// ownership section (CCT §10.4).
+    ///
+    /// The lock order is connection table → presentation memory lock; the
+    /// closure is synchronous (no await while either lock is held) and returns
+    /// [`None`] — mutating nothing — when the connection is no longer current.
+    /// Every connection-scoped ref, cursor, carried item, subscription,
+    /// receipt, and retry-slot install goes through here, so a superseded or
+    /// closed connection cannot recreate state after the lifecycle sweep.
+    fn with_presentation_state<R>(
+        &self,
+        live: &LiveInput,
+        install: impl FnOnce(&mut PresentationState) -> R,
+    ) -> Option<R> {
+        self.with_current_connection(live, || {
+            let mut state = crate::lock_unpoison(&self.presentations);
+            install(&mut state)
+        })
+    }
+
     /// Sender epoch binding one retry namespace (IPC §6.2): device,
     /// incarnation, and connection. A new connection or process is a new
     /// epoch; old commands never auto-resend into it.
@@ -462,11 +499,21 @@ impl HostHandle {
                 request.redisplay,
             )
             .await;
-        vec![outgoing_frame(
-            frame,
-            live,
-            WirePayload::UndeliveredResponse(response),
-        )]
+        match response {
+            Some(response) => vec![outgoing_frame(
+                frame,
+                live,
+                WirePayload::UndeliveredResponse(response),
+            )],
+            // The ownership section refused the install: this connection was
+            // superseded or closed while the page was prepared, so no
+            // receipt, ref, cursor, or subscription may be created for it.
+            None => vec![stale_operation(
+                frame,
+                live,
+                "undelivered request on a superseded connection",
+            )],
+        }
     }
 
     /// Presents one page: presence-checked, receipt-backed, frame-capped.
@@ -480,15 +527,15 @@ impl HostHandle {
         cursor: Option<&PageCursorWire>,
         limit: u32,
         redisplay: bool,
-    ) -> UndeliveredResponse {
+    ) -> Option<UndeliveredResponse> {
         let companion = match companion {
             Some(wire) => match self.resolve_companion(&wire.0).await {
-                Err(_) => return UndeliveredResponse::Summary(self.empty_shell()),
-                Ok(None) => return UndeliveredResponse::UnknownCompanion,
+                Err(_) => return Some(UndeliveredResponse::Summary(self.empty_shell())),
+                Ok(None) => return Some(UndeliveredResponse::UnknownCompanion),
                 Ok(Some(companion)) => companion,
             },
             None => match self.store.ensure_running_companion().await {
-                Err(_) => return UndeliveredResponse::Summary(self.empty_shell()),
+                Err(_) => return Some(UndeliveredResponse::Summary(self.empty_shell())),
                 Ok(companion) => companion,
             },
         };
@@ -497,17 +544,23 @@ impl HostHandle {
         // reads; talk needs a fresh summon.
         let attribution = match self.store.load_attribution(companion.as_raw()).await {
             Ok(Some(attribution)) => attribution,
-            _ => return UndeliveredResponse::NoCurrentPresence,
+            _ => return Some(UndeliveredResponse::NoCurrentPresence),
         };
         let Some(device_wire) = live.paired_device.clone() else {
-            return UndeliveredResponse::NoCurrentPresence;
+            return Some(UndeliveredResponse::NoCurrentPresence);
         };
         let client = device_client(&device_wire);
         if attribution.state != PresenceState::Present
             || attribution.active_client != Some(client)
             || !live.connection_live
         {
-            return UndeliveredResponse::NoCurrentPresence;
+            return Some(UndeliveredResponse::NoCurrentPresence);
+        }
+        // Test-only race gate: pause before the transition lock so a test can
+        // replace the connection and let the replacement run a full pass.
+        #[cfg(test)]
+        if let Some(gate) = self.fetch_gate() {
+            gate.pause().await;
         }
         let _gate = self.presentation_gate().await;
         let conn = conn_key(&live.connection_id);
@@ -523,15 +576,16 @@ impl HostHandle {
         if cursor.is_none()
             && let Some(receipt) = self.live_receipt(&companion_key, &conn)
         {
-            return self.reemit_receipt(&conn, &receipt).await;
+            return self.reemit_receipt(live, &conn, &receipt).await;
         }
         // A foreign cursor is StaleBaseView, never a silent restart.
         if let Some(cursor) = cursor
             && !self.valid_undelivered_cursor(&conn, companion, cursor)
         {
-            return UndeliveredResponse::StaleBaseView { current: None };
+            return Some(UndeliveredResponse::StaleBaseView { current: None });
         }
         self.begin_pass(
+            live,
             &conn,
             incarnation,
             client,
@@ -585,7 +639,12 @@ impl HostHandle {
     /// re-painted and its ACK is already satisfied, so it is pruned from the
     /// receipt's selection as it is omitted from the frame: the receipt then
     /// covers exactly the delivered items.
-    async fn reemit_receipt(&self, conn: &str, receipt: &Receipt) -> UndeliveredResponse {
+    async fn reemit_receipt(
+        &self,
+        live: &LiveInput,
+        conn: &str,
+        receipt: &Receipt,
+    ) -> Option<UndeliveredResponse> {
         let selected = receipt.selected.clone();
         let loaded = match self
             .store
@@ -593,7 +652,7 @@ impl HostHandle {
             .await
         {
             Ok(loaded) => loaded,
-            Err(_) => return self.retire_unrehydratable_receipt(receipt),
+            Err(_) => return Some(self.retire_unrehydratable_receipt(receipt)),
         };
         // Exact one-to-one resolution: every selected identity must resolve,
         // in the original selection order. Anything else is a receipt whose
@@ -604,7 +663,7 @@ impl HostHandle {
                 .zip(&selected)
                 .any(|(entry, id)| entry.id != *id)
         {
-            return self.retire_unrehydratable_receipt(receipt);
+            return Some(self.retire_unrehydratable_receipt(receipt));
         }
         // Already-presented ids are omitted from the frame and pruned from
         // the live receipt, so its selection stays exactly what the ACK acts
@@ -619,26 +678,38 @@ impl HostHandle {
                 carried.push(entry);
             }
         }
-        if !satisfied.is_empty() {
-            let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
-            let mut state = crate::lock_unpoison(&self.presentations);
-            if let Some(live) = state.receipts.get_mut(&companion_key)
-                && live.id == receipt.id
-            {
-                live.selected.retain(|id| !satisfied.contains(id));
-            }
-        }
+        // Drop the previous attempt's refs, then install this re-emit's refs
+        // under the ownership section: a supersession that wins the section
+        // installs nothing, and a sweep that already ran cannot be undone by
+        // a late re-registration.
         Self::sweep_carried(&mut crate::lock_unpoison(&self.presentations), conn);
-        let items = self.carry_items(conn, &carried).await;
+        let items = self.carry_items(live, conn, &carried).await?;
+        let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
+        let pruned = self
+            .with_presentation_state(live, |state| {
+                if !satisfied.is_empty()
+                    && let Some(live_receipt) = state.receipts.get_mut(&companion_key)
+                    && live_receipt.id == receipt.id
+                {
+                    live_receipt.selected.retain(|id| !satisfied.contains(id));
+                }
+            })
+            .is_some();
+        if !pruned {
+            self.forget_carried(conn, &items).await;
+            return None;
+        }
         if items.is_empty() && !carried.is_empty() {
-            return UndeliveredResponse::FrameTooLarge;
+            return Some(UndeliveredResponse::FrameTooLarge);
         }
         if estimate_summary_bytes(&items) > self.frame_budget() {
-            return UndeliveredResponse::FrameTooLarge;
+            return Some(UndeliveredResponse::FrameTooLarge);
         }
         let mut summary = self.receipt_shell(receipt, items, true);
-        self.attach_reports(conn, &mut summary).await;
-        UndeliveredResponse::Summary(summary)
+        if !self.attach_reports(live, conn, &mut summary).await {
+            return None;
+        }
+        Some(UndeliveredResponse::Summary(summary))
     }
 
     /// Retires a receipt whose selection cannot be exactly rehydrated and
@@ -662,9 +733,14 @@ impl HostHandle {
 
     /// Begins or continues one pass: fetches the longest fitting prefix of
     /// one bounded fetch, commits it, installs the receipt.
+    ///
+    /// Returns `None` when the connection-ownership section refused the
+    /// install: the connection was superseded or closed while the page was
+    /// prepared, so nothing is created for it.
     #[allow(clippy::too_many_arguments)]
     async fn begin_pass(
         &self,
+        live: &LiveInput,
         conn: &str,
         incarnation: (u64, u64),
         client: ClientId,
@@ -673,10 +749,12 @@ impl HostHandle {
         cursor: Option<&PageCursorWire>,
         limit: u32,
         trigger: PassTrigger,
-    ) -> UndeliveredResponse {
+    ) -> Option<UndeliveredResponse> {
         let from_cursor = cursor.map(|cursor| cursor.0.as_str());
         // Resolve the fetch window: continue a stored pass, catch up on new
-        // arrivals, or rewind to the head for an explicit pass.
+        // arrivals, or rewind to the head for an explicit pass. The plan
+        // installs this connection's subscription, so it runs under the
+        // ownership section; a superseded connection plans nothing.
         let start: PlanStart = if let Some(cursor) = cursor {
             let state = crate::lock_unpoison(&self.presentations);
             match state.cursors.get(&(conn.to_string(), cursor.0.clone())) {
@@ -690,65 +768,72 @@ impl HostHandle {
                     pending_only: *pending_only,
                     limit: *limit,
                 },
-                _ => return UndeliveredResponse::StaleBaseView { current: None },
+                _ => return Some(UndeliveredResponse::StaleBaseView { current: None }),
             }
         } else {
             // A newer connection supersedes a live receipt from a dead one:
             // old rows stay Unknown and re-present under the new receipt.
             let bound = self.store.undelivered_pass_bound().await.unwrap_or(0);
-            let mut state = crate::lock_unpoison(&self.presentations);
-            let ckey = companion.as_raw().as_uuid().as_hyphenated().to_string();
-            if let Some(receipt) = state.receipts.get(&ckey).cloned()
-                && (receipt.connection != conn || receipt.expired())
-            {
-                Self::remove_receipt(&mut state, &ckey);
-            }
-            let sub = state.subs.entry(conn.to_string()).or_insert(Subscription {
-                companion: companion.as_raw(),
-                scan_floor: 0,
-                drained_once: false,
-                resume: None,
-            });
-            // A connection retargeted at another companion restarts its
-            // scan: floors and continuations never cross companions.
-            if sub.companion != companion.as_raw() {
-                sub.scan_floor = 0;
-                sub.drained_once = false;
-                sub.resume = None;
-            }
-            // A cursor-less request is the next logical page: an undrained
-            // pass continues first (its rows are bounded to the captured
-            // upper, so mid-pass arrivals wait), then new arrivals, then an
-            // explicit head re-display. `Redisplay` forces the head pass;
-            // `Push` serves only a continuation or new arrivals and stays
-            // silent otherwise (a push is never a new presence). The resume
-            // binding is checked before the subscription is re-pointed at
-            // this companion.
-            let continuation = (trigger != PassTrigger::Redisplay)
-                .then_some(sub.resume)
-                .flatten()
-                .filter(|_| sub.companion == companion.as_raw());
-            let arrivals = trigger != PassTrigger::Redisplay
-                && sub.drained_once
-                && sub.scan_floor < bound
-                && sub.companion == companion.as_raw();
-            let plan = if let Some((cursor, pending_only, saved)) = continuation {
-                PlanStart::Continued {
-                    cursor,
-                    pending_only,
-                    limit: saved,
+            let planned = self.with_presentation_state(live, |state| {
+                let ckey = companion.as_raw().as_uuid().as_hyphenated().to_string();
+                if let Some(receipt) = state.receipts.get(&ckey).cloned()
+                    && (receipt.connection != conn || receipt.expired())
+                {
+                    Self::remove_receipt(state, &ckey);
                 }
-            } else if arrivals {
-                PlanStart::Arrivals {
-                    after: sub.scan_floor,
-                    upper: bound,
+                let sub = state.subs.entry(conn.to_string()).or_insert(Subscription {
+                    companion: companion.as_raw(),
+                    scan_floor: 0,
+                    drained_once: false,
+                    resume: None,
+                });
+                // A connection retargeted at another companion restarts its
+                // scan: floors and continuations never cross companions.
+                if sub.companion != companion.as_raw() {
+                    sub.scan_floor = 0;
+                    sub.drained_once = false;
+                    sub.resume = None;
                 }
-            } else if trigger == PassTrigger::Push {
-                return UndeliveredResponse::Summary(self.empty_attributed(attribution));
-            } else {
-                PlanStart::Explicit { upper: bound }
+                // A cursor-less request is the next logical page: an undrained
+                // pass continues first (its rows are bounded to the captured
+                // upper, so mid-pass arrivals wait), then new arrivals, then an
+                // explicit head re-display. `Redisplay` forces the head pass;
+                // `Push` serves only a continuation or new arrivals and stays
+                // silent otherwise (a push is never a new presence). The resume
+                // binding is checked before the subscription is re-pointed at
+                // this companion.
+                let continuation = (trigger != PassTrigger::Redisplay)
+                    .then_some(sub.resume)
+                    .flatten()
+                    .filter(|_| sub.companion == companion.as_raw());
+                let arrivals = trigger != PassTrigger::Redisplay
+                    && sub.drained_once
+                    && sub.scan_floor < bound
+                    && sub.companion == companion.as_raw();
+                let plan = if let Some((cursor, pending_only, saved)) = continuation {
+                    Some(PlanStart::Continued {
+                        cursor,
+                        pending_only,
+                        limit: saved,
+                    })
+                } else if arrivals {
+                    Some(PlanStart::Arrivals {
+                        after: sub.scan_floor,
+                        upper: bound,
+                    })
+                } else if trigger == PassTrigger::Push {
+                    None
+                } else {
+                    Some(PlanStart::Explicit { upper: bound })
+                };
+                sub.companion = companion.as_raw();
+                plan
+            })?;
+            let Some(plan) = planned else {
+                return Some(UndeliveredResponse::Summary(
+                    self.empty_attributed(attribution),
+                ));
             };
-            sub.companion = companion.as_raw();
             plan
         };
         // Fetch the longest fitting prefix: shrink the fetch bound itself so
@@ -780,7 +865,9 @@ impl HostHandle {
             {
                 Ok(page) => page,
                 Err(_) => {
-                    return UndeliveredResponse::Summary(self.empty_attributed(attribution));
+                    return Some(UndeliveredResponse::Summary(
+                        self.empty_attributed(attribution),
+                    ));
                 }
             };
             let entries: Vec<UndeliveredRef> = if pending_only {
@@ -791,7 +878,7 @@ impl HostHandle {
             } else {
                 page.entries
             };
-            let items = self.carry_items(conn, &entries).await;
+            let items = self.carry_items(live, conn, &entries).await?;
             if estimate_summary_bytes(&items) <= budget {
                 break (entries, items, page.next, upper, pending_only);
             }
@@ -799,7 +886,7 @@ impl HostHandle {
                 // Even one item overflows the cap: withhold without mutating
                 // any row, cursor, subscription, or receipt.
                 self.forget_carried(conn, &items).await;
-                return UndeliveredResponse::FrameTooLarge;
+                return Some(UndeliveredResponse::FrameTooLarge);
             }
             fetch_limit /= 2;
             self.forget_carried(conn, &items).await;
@@ -813,6 +900,7 @@ impl HostHandle {
             // or a new presence.
             if matches!(start, PlanStart::Continued { .. }) && trigger != PassTrigger::Push {
                 return Box::pin(self.begin_pass(
+                    live,
                     conn,
                     incarnation,
                     client,
@@ -824,32 +912,39 @@ impl HostHandle {
                 ))
                 .await;
             }
-            if fetched_next.is_none() {
-                self.mark_drained(conn, companion, upper);
+            if fetched_next.is_none() && !self.mark_drained(live, conn, companion, upper) {
+                return None;
             }
             let mut summary = self.empty_attributed(attribution);
             // A filtered-empty page with more waiting still pages next.
             if let Some(next) = fetched_next {
-                let mut state = crate::lock_unpoison(&self.presentations);
-                Self::take_cursor(&mut state, conn, from_cursor);
-                summary.has_more = true;
-                if let Some(sub) = state.subs.get_mut(conn) {
-                    sub.resume = Some((next, pending_only, pass_limit));
+                let installed = self
+                    .with_presentation_state(live, |state| {
+                        Self::take_cursor(state, conn, from_cursor);
+                        summary.has_more = true;
+                        if let Some(sub) = state.subs.get_mut(conn) {
+                            sub.resume = Some((next, pending_only, pass_limit));
+                        }
+                        summary.next_cursor = Some(Self::mint_cursor(
+                            state,
+                            conn,
+                            StoredCursor::Undelivered {
+                                companion: companion.as_raw(),
+                                cursor: next,
+                                pending_only,
+                                limit: pass_limit,
+                            },
+                        ));
+                    })
+                    .is_some();
+                if !installed {
+                    return None;
                 }
-                summary.next_cursor = Some(Self::mint_cursor(
-                    &mut state,
-                    conn,
-                    StoredCursor::Undelivered {
-                        companion: companion.as_raw(),
-                        cursor: next,
-                        pending_only,
-                        limit: pass_limit,
-                    },
-                ));
             }
-            return UndeliveredResponse::Summary(summary);
+            return Some(UndeliveredResponse::Summary(summary));
         }
         self.commit_install(
+            live,
             conn,
             incarnation,
             client,
@@ -868,9 +963,14 @@ impl HostHandle {
 
     /// Commits the carried prefix (Pending→PresentationUnknown), installs
     /// the receipt, advances the cursor past the carried prefix only.
+    ///
+    /// Returns `None` when the ownership section refused the receipt install:
+    /// no receipt, cursor, or subscription entry is created for a superseded
+    /// connection, and the attempt's carried refs are dropped.
     #[allow(clippy::too_many_arguments)]
     async fn commit_install(
         &self,
+        live: &LiveInput,
         conn: &str,
         incarnation: (u64, u64),
         client: ClientId,
@@ -883,15 +983,9 @@ impl HostHandle {
         pending_only: bool,
         limit: u32,
         from_cursor: Option<&str>,
-    ) -> UndeliveredResponse {
+    ) -> Option<UndeliveredResponse> {
         let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
         let generation = attribution.generation.as_u64();
-        let round = ene_presentation::RoundId::from_raw(RawId::new());
-        let round_wire = self.round_wire_or_mint(&round);
-        let mark = ene_companion::PresentationMark {
-            round: round.as_raw(),
-            presented: false,
-        };
         // Test-only: pause after the page plan and before the per-row
         // presentation-start compares so a test can move a row's durable
         // status and pin the domain CAS-loss handling.
@@ -902,6 +996,19 @@ impl HostHandle {
                 gate.pause().await;
             }
         }
+        // Ownership check before any durable mark or fresh ref mint: a
+        // connection superseded while the page was prepared creates nothing
+        // (no rows move, no round wire, no receipt). The final install below
+        // re-verifies inside the section that performs the memory commit.
+        if self.with_current_connection(live, || ()).is_none() {
+            self.forget_carried(conn, &items).await;
+            return None;
+        }
+        let round = ene_presentation::RoundId::from_raw(RawId::new());
+        let mark = ene_companion::PresentationMark {
+            round: round.as_raw(),
+            presented: false,
+        };
         let mut selected = Vec::with_capacity(entries.len());
         let mut carried = Vec::with_capacity(items.len());
         let mut dropped = Vec::new();
@@ -951,33 +1058,35 @@ impl HostHandle {
             self.forget_carried(conn, &dropped).await;
         }
         let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
-        let receipt = Receipt {
-            id: receipt_id.clone(),
-            connection: conn.to_string(),
-            incarnation,
-            companion: companion.as_raw(),
-            client,
-            round,
-            round_wire: round_wire.0.clone(),
-            generation,
-            selected,
-            expires_at: Instant::now() + self.receipt_ttl(),
-        };
+        let ttl = self.receipt_ttl();
         // The carried prefix IS the fetched prefix (the fetch bound shrank
         // instead), so the store cursor resumes exactly: a fetched
         // continuation pages next, a bound-reaching fetch drains the floor.
-        // The guard's scope ends before the bound check below awaits.
-        let (next_cursor, drained) = {
-            let mut state = crate::lock_unpoison(&self.presentations);
+        let installed = self.with_presentation_state(live, |state| {
+            // The round projection is minted inside the section: a stale
+            // attempt leaves no round wire behind either.
+            let round_wire = self.round_wire_or_mint(&round);
+            let receipt = Receipt {
+                id: receipt_id.clone(),
+                connection: conn.to_string(),
+                incarnation,
+                companion: companion.as_raw(),
+                client,
+                round,
+                round_wire: round_wire.0.clone(),
+                generation,
+                selected,
+                expires_at: Instant::now() + ttl,
+            };
             // Forward-only paging consumes the cursor it continued from.
-            Self::take_cursor(&mut state, conn, from_cursor);
+            Self::take_cursor(state, conn, from_cursor);
             // One receipt per Companion: installing supersedes any leftover.
             if let Some(old) = state.receipts.insert(companion_key.clone(), receipt) {
                 state.receipt_ids.remove(&old.id);
-                Self::retire(&mut state, &old.id, &old.connection);
+                Self::retire(state, &old.id, &old.connection);
             }
             state.receipt_ids.insert(receipt_id.clone(), companion_key);
-            match fetched_next {
+            let (next_cursor, drained) = match fetched_next {
                 Some(next) => {
                     let resume = (next, pending_only, limit);
                     if let Some(sub) = state.subs.get_mut(conn) {
@@ -985,7 +1094,7 @@ impl HostHandle {
                     }
                     (
                         Some(Self::mint_cursor(
-                            &mut state,
+                            state,
                             conn,
                             StoredCursor::Undelivered {
                                 companion: companion.as_raw(),
@@ -1007,7 +1116,12 @@ impl HostHandle {
                     }
                     (None, true)
                 }
-            }
+            };
+            (round_wire, next_cursor, drained)
+        });
+        let Some((round_wire, next_cursor, drained)) = installed else {
+            self.forget_carried(conn, &carried).await;
+            return None;
         };
         let has_more =
             !drained || self.store.undelivered_pass_bound().await.unwrap_or(upper) > upper;
@@ -1020,20 +1134,28 @@ impl HostHandle {
             has_more,
             next_cursor,
         };
-        self.attach_reports(conn, &mut summary).await;
-        UndeliveredResponse::Summary(summary)
+        if !self.attach_reports(live, conn, &mut summary).await {
+            return None;
+        }
+        Some(UndeliveredResponse::Summary(summary))
     }
 
     /// Builds carried items (with bounded excerpts) for entries in order,
-    /// registering per-connection item refs. Unreadable excerpts keep their
-    /// correlation with an empty excerpt; the body stays pageable and nothing
-    /// is marked presented.
+    /// registering per-connection item refs under the ownership section.
+    /// Unreadable excerpts keep their correlation with an empty excerpt; the
+    /// body stays pageable and nothing is marked presented.
+    ///
+    /// Returns `None` when the connection was superseded before the refs
+    /// were installed: no ref is registered for it.
     async fn carry_items(
         &self,
+        live: &LiveInput,
         conn: &str,
         entries: &[UndeliveredRef],
-    ) -> Vec<UndeliveredItemView> {
-        let mut items = Vec::with_capacity(entries.len());
+    ) -> Option<Vec<UndeliveredItemView>> {
+        // Load the excerpts first (no state touched), then install every ref
+        // in one ownership section.
+        let mut loaded = Vec::with_capacity(entries.len());
         for entry in entries {
             let (excerpt, truncated) = match self
                 .store
@@ -1046,19 +1168,31 @@ impl HostHandle {
                 }
                 Ok(None) | Err(_) => (String::new(), false),
             };
-            let wire = Uuid::new_v4().as_hyphenated().to_string();
-            crate::lock_unpoison(&self.presentations).carried.insert(
-                (conn.to_string(), wire.clone()),
-                (entry.id, task_behind_source(&entry.source)),
-            );
-            items.push(UndeliveredItemView {
-                reference: UndeliveredWireRef(wire),
-                source: source_view(&entry.source),
+            loaded.push((
+                entry.id,
+                task_behind_source(&entry.source),
+                source_view(&entry.source),
                 excerpt,
                 truncated,
-            });
+            ));
         }
-        items
+        self.with_presentation_state(live, |state| {
+            loaded
+                .into_iter()
+                .map(|(id, task, source, excerpt, truncated)| {
+                    let wire = Uuid::new_v4().as_hyphenated().to_string();
+                    state
+                        .carried
+                        .insert((conn.to_string(), wire.clone()), (id, task));
+                    UndeliveredItemView {
+                        reference: UndeliveredWireRef(wire),
+                        source,
+                        excerpt,
+                        truncated,
+                    }
+                })
+                .collect()
+        })
     }
 
     /// Drops carried registrations for items that will not be committed
@@ -1073,7 +1207,16 @@ impl HostHandle {
     }
 
     /// Attaches one headline per distinct Task behind the carried items.
-    async fn attach_reports(&self, conn: &str, summary: &mut UndeliveredSummary) {
+    ///
+    /// Returns `false` when the connection was superseded before the Task
+    /// refs were installed: the caller abandons the pass instead of handing
+    /// out refs that no longer exist.
+    async fn attach_reports(
+        &self,
+        live: &LiveInput,
+        conn: &str,
+        summary: &mut UndeliveredSummary,
+    ) -> bool {
         let tasks: Vec<Option<TaskId>> = {
             let state = crate::lock_unpoison(&self.presentations);
             summary
@@ -1088,6 +1231,7 @@ impl HostHandle {
                 .collect()
         };
         let mut seen: Vec<TaskId> = Vec::new();
+        let mut loaded = Vec::new();
         for task in tasks.into_iter().flatten() {
             if seen.contains(&task) {
                 continue;
@@ -1102,26 +1246,55 @@ impl HostHandle {
                     .list_task_report_rows_after(task, None, 1)
                     .await
                     .is_ok_and(|rows| !rows.is_empty());
-            let task_ref =
-                Self::mint_task_ref(&mut crate::lock_unpoison(&self.presentations), conn, task);
-            summary.reports.push(TaskReportView {
-                task: task_ref,
-                revision: record.task.reference.revision.as_u64(),
-                progress: record.task.progress.as_str().to_string(),
-                details_available: details,
-            });
+            loaded.push((
+                task,
+                record.task.reference.revision.as_u64(),
+                record.task.progress.as_str().to_string(),
+                details,
+            ));
+        }
+        let installed = self.with_presentation_state(live, |state| {
+            loaded
+                .into_iter()
+                .map(|(task, revision, progress, details_available)| {
+                    let task_ref = Self::mint_task_ref(state, conn, task);
+                    TaskReportView {
+                        task: task_ref,
+                        revision,
+                        progress,
+                        details_available,
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        match installed {
+            Some(views) => {
+                summary.reports = views;
+                true
+            }
+            None => false,
         }
     }
 
-    fn mark_drained(&self, conn: &str, companion: CompanionId, upper: u64) {
-        let mut state = crate::lock_unpoison(&self.presentations);
-        if let Some(sub) = state.subs.get_mut(conn)
-            && sub.companion == companion.as_raw()
-        {
-            sub.scan_floor = sub.scan_floor.max(upper);
-            sub.drained_once = true;
-            sub.resume = None;
-        }
+    /// Records one drained scan floor under the ownership section. Returns
+    /// `false` when the connection is no longer current.
+    fn mark_drained(
+        &self,
+        live: &LiveInput,
+        conn: &str,
+        companion: CompanionId,
+        upper: u64,
+    ) -> bool {
+        self.with_presentation_state(live, |state| {
+            if let Some(sub) = state.subs.get_mut(conn)
+                && sub.companion == companion.as_raw()
+            {
+                sub.scan_floor = sub.scan_floor.max(upper);
+                sub.drained_once = true;
+                sub.resume = None;
+            }
+        })
+        .is_some()
     }
 
     /// Agreed frame cap in force (tests pin small caps; production keeps the
@@ -1247,27 +1420,31 @@ impl HostHandle {
             Refuse(UndeliveredAckOutcome),
             Proceed(Receipt),
         }
-        let verdict = {
+        // The whole validation/consumption runs under the ownership section
+        // (CCT §10.4): a connection superseded before the section refuses with
+        // the typed stale outcome and consumes nothing, so an in-flight ACK
+        // cannot release or move rows after the lifecycle sweep.
+        let verdict = self.with_current_connection(live, || {
             let mut state = crate::lock_unpoison(&self.presentations);
             let Some(companion_key) = state.receipt_ids.get(&ack.receipt.0).cloned() else {
                 // Consumed or superseded receipts stay stale (never silently
                 // unknown); never-issued ids are unknown. A foreign
                 // connection still hears StaleConnection first: ACKs never
                 // migrate.
-                match state
+                return match state
                     .retired
                     .iter()
                     .find(|(known, _)| known == &ack.receipt.0)
                 {
                     Some((_, issued)) if *issued != conn => {
-                        return UndeliveredAckOutcome::StaleConnection;
+                        Verdict::Refuse(UndeliveredAckOutcome::StaleConnection)
                     }
-                    Some(_) => return UndeliveredAckOutcome::StalePresentation,
-                    None => return UndeliveredAckOutcome::UnknownRef,
-                }
+                    Some(_) => Verdict::Refuse(UndeliveredAckOutcome::StalePresentation),
+                    None => Verdict::Refuse(UndeliveredAckOutcome::UnknownRef),
+                };
             };
             let Some(receipt) = state.receipts.get(&companion_key).cloned() else {
-                return UndeliveredAckOutcome::UnknownRef;
+                return Verdict::Refuse(UndeliveredAckOutcome::UnknownRef);
             };
             if receipt.expired() {
                 Self::remove_receipt(&mut state, &companion_key);
@@ -1291,6 +1468,9 @@ impl HostHandle {
                 Self::remove_receipt(&mut state, &companion_key);
                 Verdict::Proceed(receipt)
             }
+        });
+        let Some(verdict) = verdict else {
+            return UndeliveredAckOutcome::StaleConnection;
         };
         let receipt = match verdict {
             Verdict::Refuse(outcome) => return outcome,
@@ -1374,38 +1554,54 @@ impl HostHandle {
             .list_tasks_after(after, limit)
             .await
             .unwrap_or_default();
-        let mut state = crate::lock_unpoison(&self.presentations);
-        Self::take_cursor(
-            &mut state,
-            &conn,
-            query.cursor.as_ref().map(|cursor| cursor.0.as_str()),
-        );
-        let mut tasks = Vec::with_capacity(headlines.len());
-        for headline in &headlines {
-            tasks.push(TaskListItem {
-                task: Self::mint_task_ref(&mut state, &conn, headline.task),
-                revision: headline.revision.as_u64(),
-                progress: headline.progress.as_str().to_string(),
-                running: self
-                    .task_executions
-                    .task_has_reservation_or_running(headline.task),
-                purpose: encode_purpose(headline.purpose),
-            });
+        // Test-only race gate: pause after the durable read and before the
+        // guarded mint.
+        #[cfg(test)]
+        if let Some(gate) = self.ref_mint_gate() {
+            gate.pause().await;
         }
-        let next_cursor = if headlines.len() as u32 == limit
-            && let Some(last) = headlines.last()
-        {
-            Some(Self::mint_cursor(
-                &mut state,
+        // Ref and cursor mint run under the ownership section: a connection
+        // superseded while the page was read creates no refs (IPC §11.3).
+        let minted = self.with_presentation_state(live, |state| {
+            Self::take_cursor(
+                state,
                 &conn,
-                StoredCursor::TaskList {
-                    after: Some(last.task),
-                },
-            ))
-        } else {
-            None
+                query.cursor.as_ref().map(|cursor| cursor.0.as_str()),
+            );
+            let mut tasks = Vec::with_capacity(headlines.len());
+            for headline in &headlines {
+                tasks.push(TaskListItem {
+                    task: Self::mint_task_ref(state, &conn, headline.task),
+                    revision: headline.revision.as_u64(),
+                    progress: headline.progress.as_str().to_string(),
+                    running: self
+                        .task_executions
+                        .task_has_reservation_or_running(headline.task),
+                    purpose: encode_purpose(headline.purpose),
+                });
+            }
+            let next_cursor = if headlines.len() as u32 == limit
+                && let Some(last) = headlines.last()
+            {
+                Some(Self::mint_cursor(
+                    state,
+                    &conn,
+                    StoredCursor::TaskList {
+                        after: Some(last.task),
+                    },
+                ))
+            } else {
+                None
+            };
+            (tasks, next_cursor)
+        });
+        let Some((tasks, next_cursor)) = minted else {
+            return vec![stale_operation(
+                frame,
+                live,
+                "task list on a superseded connection",
+            )];
         };
-        drop(state);
         vec![outgoing_frame(
             frame,
             live,
@@ -1500,58 +1696,74 @@ impl HostHandle {
                 )];
             }
         };
-        let mut state = crate::lock_unpoison(&self.presentations);
-        Self::take_cursor(
-            &mut state,
-            &conn,
-            query.cursor.as_ref().map(|cursor| cursor.0.as_str()),
-        );
-        let purpose_source = Self::mint_source_ref(
-            &mut state,
-            &conn,
-            TaskReportSourceRef::RevisionPurpose {
-                task,
-                revision: record.task.purpose.adopted_revision,
-            },
-        );
-        let mut views = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let source = match row.kind {
-                TaskReportRowKind::TaskResult => Some(Self::mint_source_ref(
-                    &mut state,
-                    &conn,
-                    TaskReportSourceRef::ResultBody(TaskResultId::from_raw(row.id)),
-                )),
-                TaskReportRowKind::ActionAttempt => None,
-            };
-            views.push(TaskReportRowView {
-                kind: match row.kind {
-                    TaskReportRowKind::ActionAttempt => String::from("action_attempt"),
-                    TaskReportRowKind::TaskResult => String::from("task_result"),
-                },
-                id: row.id.as_uuid().as_hyphenated().to_string(),
-                adopted_revision: row.adopted_revision.map(|revision| revision.as_u64()),
-                source,
-            });
+        // Test-only race gate: pause after the durable read and before the
+        // guarded mint.
+        #[cfg(test)]
+        if let Some(gate) = self.ref_mint_gate() {
+            gate.pause().await;
         }
-        let next_cursor = if rows.len() as u32 == limit
-            && let Some(last) = rows.last()
-        {
-            Some(Self::mint_cursor(
-                &mut state,
+        // Ref and cursor mint run under the ownership section: a connection
+        // superseded while the report was read creates no refs.
+        let minted = self.with_presentation_state(live, |state| {
+            Self::take_cursor(
+                state,
                 &conn,
-                StoredCursor::ReportRows {
+                query.cursor.as_ref().map(|cursor| cursor.0.as_str()),
+            );
+            let purpose_source = Self::mint_source_ref(
+                state,
+                &conn,
+                TaskReportSourceRef::RevisionPurpose {
                     task,
-                    after: Some(TaskReportRowCursor {
-                        kind: last.kind,
-                        id: last.id,
-                    }),
+                    revision: record.task.purpose.adopted_revision,
                 },
-            ))
-        } else {
-            None
+            );
+            let mut views = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let source = match row.kind {
+                    TaskReportRowKind::TaskResult => Some(Self::mint_source_ref(
+                        state,
+                        &conn,
+                        TaskReportSourceRef::ResultBody(TaskResultId::from_raw(row.id)),
+                    )),
+                    TaskReportRowKind::ActionAttempt => None,
+                };
+                views.push(TaskReportRowView {
+                    kind: match row.kind {
+                        TaskReportRowKind::ActionAttempt => String::from("action_attempt"),
+                        TaskReportRowKind::TaskResult => String::from("task_result"),
+                    },
+                    id: row.id.as_uuid().as_hyphenated().to_string(),
+                    adopted_revision: row.adopted_revision.map(|revision| revision.as_u64()),
+                    source,
+                });
+            }
+            let next_cursor = if rows.len() as u32 == limit
+                && let Some(last) = rows.last()
+            {
+                Some(Self::mint_cursor(
+                    state,
+                    &conn,
+                    StoredCursor::ReportRows {
+                        task,
+                        after: Some(TaskReportRowCursor {
+                            kind: last.kind,
+                            id: last.id,
+                        }),
+                    },
+                ))
+            } else {
+                None
+            };
+            (purpose_source, views, next_cursor)
+        });
+        let Some((purpose_source, views, next_cursor)) = minted else {
+            return vec![stale_operation(
+                frame,
+                live,
+                "task report on a superseded connection",
+            )];
         };
-        drop(state);
         vec![outgoing_frame(
             frame,
             live,
@@ -1687,7 +1899,27 @@ impl HostHandle {
                 WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef),
             )];
         }
-        self.conversation_tasks.select(running, task);
+        // Test-only race gate: pause before the guarded selection commit.
+        #[cfg(test)]
+        if let Some(gate) = self.ref_mint_gate() {
+            gate.pause().await;
+        }
+        // The selection commit runs under the ownership section: a
+        // connection superseded while the Task was read selects nothing, and
+        // the new connection must select again (IPC §9.3 replacement).
+        let selected = self
+            .with_current_connection(live, || {
+                self.conversation_tasks
+                    .select(running, task, live.connection_id);
+            })
+            .is_some();
+        if !selected {
+            return vec![stale_operation(
+                frame,
+                live,
+                "task selection on a superseded connection",
+            )];
+        }
         let details = record.task.adopted_result.is_some()
             || self
                 .store
@@ -1760,7 +1992,7 @@ impl HostHandle {
             command.instruction
         );
         {
-            let mut state = crate::lock_unpoison(&self.presentations);
+            let state = crate::lock_unpoison(&self.presentations);
             if let Some(slot) = state.resume.get(&command_id) {
                 if slot.epoch != epoch {
                     // An old command never auto-resends into a new epoch.
@@ -1778,6 +2010,11 @@ impl HostHandle {
                     }
                 }
             }
+        }
+        // Claim the retry slot under the ownership section: a connection
+        // superseded while the command was validated claims nothing, so the
+        // lifecycle sweep cannot be undone by a late slot re-creation.
+        let claimed = self.with_presentation_state(live, |state| {
             state.resume_seq += 1;
             let seq = state.resume_seq;
             state.resume.insert(
@@ -1791,7 +2028,7 @@ impl HostHandle {
                 },
             );
             if state.resume.len() > RESUME_COMMAND_CAP {
-                // ponytail: bounded epoch memory; decided slots drop first,
+                // Bounded epoch memory; decided slots drop first,
                 // in-flight slots are never evicted under a live command.
                 let mut decided: Vec<(u64, Uuid)> = state
                     .resume
@@ -1805,6 +2042,9 @@ impl HostHandle {
                     state.resume.remove(&id);
                 }
             }
+        });
+        if claimed.is_none() {
+            return ResumeApply::Outcome(ResumeTaskOutcomeWire::StaleConnection);
         }
         let outcome = self.commit_resume(frame, live, command).await;
         // Technical failures free the slot so the same command retries
@@ -1932,24 +2172,31 @@ impl HostHandle {
             frame.envelope.sender.incarnation_id.counter,
             frame.envelope.sender.incarnation_id.random,
         );
-        {
-            let mut state = crate::lock_unpoison(&self.presentations);
-            let sub = state.subs.entry(conn.clone()).or_insert(Subscription {
-                companion: companion.as_raw(),
-                scan_floor: 0,
-                drained_once: false,
-                resume: None,
-            });
-            // A fresh presence starts a new pass: rewind to the head so the
-            // absence backlog (Unknown rows included) presents without an
-            // Owner query.
-            sub.companion = companion.as_raw();
-            sub.scan_floor = 0;
-            sub.drained_once = false;
-            sub.resume = None;
+        // The reset installs this connection's subscription under the
+        // ownership section: a superseded connection starts no pass.
+        let prepared = self
+            .with_presentation_state(live, |state| {
+                let sub = state.subs.entry(conn.clone()).or_insert(Subscription {
+                    companion: companion.as_raw(),
+                    scan_floor: 0,
+                    drained_once: false,
+                    resume: None,
+                });
+                // A fresh presence starts a new pass: rewind to the head so the
+                // absence backlog (Unknown rows included) presents without an
+                // Owner query.
+                sub.companion = companion.as_raw();
+                sub.scan_floor = 0;
+                sub.drained_once = false;
+                sub.resume = None;
+            })
+            .is_some();
+        if !prepared {
+            return Vec::new();
         }
         let response = self
             .begin_pass(
+                live,
                 &conn,
                 incarnation,
                 client,
@@ -1961,7 +2208,7 @@ impl HostHandle {
             )
             .await;
         match response {
-            UndeliveredResponse::Summary(summary) if !summary.items.is_empty() => {
+            Some(UndeliveredResponse::Summary(summary)) if !summary.items.is_empty() => {
                 vec![outgoing_fact(
                     frame,
                     live,
@@ -2089,6 +2336,7 @@ impl HostHandle {
         );
         let response = self
             .begin_pass(
+                live,
                 &conn,
                 incarnation,
                 client,
@@ -2100,7 +2348,7 @@ impl HostHandle {
             )
             .await;
         match response {
-            UndeliveredResponse::Summary(summary) if !summary.items.is_empty() => {
+            Some(UndeliveredResponse::Summary(summary)) if !summary.items.is_empty() => {
                 Some(outgoing_fact(
                     template,
                     live,

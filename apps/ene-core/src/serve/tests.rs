@@ -1612,9 +1612,7 @@ async fn superseded_connection_replays_are_stale_and_have_no_effect() {
         "C1 never reclaims the current slot"
     );
     assert!(
-        handle
-            .open_round_for(&device_wire, handle.companion_wire())
-            .is_none(),
+        !handle.has_open_round_for_test(),
         "a stale input creates no conversation round"
     );
     let (state, active, _) = presence_state(&handle).await;
@@ -2551,9 +2549,7 @@ async fn stage5_frames_distinguish_superseded_from_unauthenticated() {
     assert_eq!(state, PresenceState::NoActive);
     assert_eq!(active, None);
     assert!(
-        handle
-            .open_round_for(&device_wire, handle.companion_wire())
-            .is_none(),
+        !handle.has_open_round_for_test(),
         "stage 5 frames create no conversation round"
     );
     let companion = handle

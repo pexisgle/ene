@@ -12,6 +12,14 @@
 //!   mode `0700` on Unix (`Stage 2` owns directory creation). The same-machine
 //!   trust premise rests on that directory plus the per-connection same-user
 //!   check in [`crate::conn`], never on a Client self-report.
+//! - One connection lifecycle boundary owns every Host-memory entry tied to a
+//!   connection lifetime (`on_connection_superseded` / `on_connection_closed`
+//!   → presentation state, open rounds, first-party Task selection): a newer
+//!   authentication for the same device supersedes the old connection
+//!   irreversibly, the old socket stays only for typed stale rejections, and
+//!   the replacement inherits none of the old connection's transient world.
+//!   Streams re-check the connection table before every publication, so no
+//!   registry exists for them.
 //! - Pairing is Owner-confirmed through the durable
 //!   [`DevicePairingRepository`]: a request records a pending entry, the
 //!   Host-local `approve-device` inlet records the Owner decision, and a later
@@ -307,21 +315,21 @@ enum GateDecision {
     Unpaired,
 }
 
-/// Test-only gate that pauses the close-admission section (S5-05).
+/// Test-only gate that pauses an operation's ownership section (S5-05).
 ///
 /// The gate is entered before the connection-table section, so a test can let
-/// a competing authentication install complete while the close is paused and
-/// observe that the close then re-reads currentness instead of acting on a
-/// stale snapshot.
+/// a competing authentication install complete while the operation is paused
+/// and observe that the operation then re-reads currentness instead of acting
+/// on a stale snapshot.
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct TestCloseGate {
+pub(crate) struct TestGate {
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
 }
 
 #[cfg(test)]
-impl Default for TestCloseGate {
+impl Default for TestGate {
     fn default() -> Self {
         Self {
             entered: tokio::sync::Semaphore::new(0),
@@ -331,7 +339,7 @@ impl Default for TestCloseGate {
 }
 
 #[cfg(test)]
-impl TestCloseGate {
+impl TestGate {
     /// Pauses until the test releases the gate, marking entry first.
     pub(crate) async fn pause(&self) {
         self.entered.add_permits(1);
@@ -339,16 +347,28 @@ impl TestCloseGate {
         permit.forget();
     }
 
-    /// Waits until a paused close has entered the gate.
+    /// Waits until a paused operation has entered the gate.
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
-    /// Releases one paused close.
+    /// Releases one paused operation.
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
+}
+
+/// The close-admission gate keeps its historical name and shape.
+#[cfg(test)]
+pub(crate) type TestCloseGate = TestGate;
+
+/// Wire-string key for one connection id, shared by every per-connection
+/// Host-memory map (presentation state, open rounds, resume epochs): the same
+/// string form the connection layer uses, so keys match across the
+/// Host/connection boundary by construction.
+pub(crate) fn connection_key(id: &ConnectionWireId) -> String {
+    id.0.as_hyphenated().to_string()
 }
 
 /// Maps a paired device wire string to its per-process [`ClientId`].
@@ -400,10 +420,12 @@ pub(crate) struct CurrentConnection {
 /// history `local_id` column are durable in [`Store`], and pairing secrets in
 /// `device-auth.json` through the `auth_store` field.
 ///
-/// Map keys: `open_rounds` is keyed by `(client ref, companion key)`; round
-/// refs issued on the wire resolve back through `rounds` (wire string to
-/// domain round). Challenge nonces and currentness live in the connection
-/// layer's `ConnectionTable`, not here.
+/// Map keys: `open_rounds` is keyed by `(connection key, companion key)`, so an
+/// open round belongs to exactly one connection lifetime and a same-device
+/// replacement can never join it (IPC §9.3 replacement rule); round refs
+/// issued on the wire resolve back through `rounds` (wire string to domain
+/// round). Challenge nonces and currentness live in the connection layer's
+/// `ConnectionTable`, not here.
 pub struct HostHandle {
     pub(crate) store: Store,
     pub(crate) tracker: AsyncMutex<EvaluationTracker>,
@@ -485,6 +507,18 @@ pub struct HostHandle {
     /// Test-only deterministic gate for the close-admission section.
     #[cfg(test)]
     pub(crate) close_gate: StdMutex<Option<std::sync::Arc<TestCloseGate>>>,
+    /// Test-only deterministic gate before a Client-dependent submit's
+    /// acceptance (owner append) section.
+    #[cfg(test)]
+    pub(crate) submit_accept_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
+    /// Test-only deterministic gate before a read query's connection-scoped
+    /// ref/cursor mint.
+    #[cfg(test)]
+    pub(crate) ref_mint_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
+    /// Test-only deterministic gate before a presentation pass takes the
+    /// begin/ack transition lock.
+    #[cfg(test)]
+    pub(crate) fetch_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
     /// Test-only deterministic gate for one guarded wire resume.
     #[cfg(test)]
     pub(crate) resume_gate: StdMutex<Option<std::sync::Arc<crate::task_control::TestResumeGate>>>,
@@ -571,6 +605,12 @@ impl HostHandle {
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]
             close_gate: StdMutex::new(None),
+            #[cfg(test)]
+            submit_accept_gate: StdMutex::new(None),
+            #[cfg(test)]
+            ref_mint_gate: StdMutex::new(None),
+            #[cfg(test)]
+            fetch_gate: StdMutex::new(None),
             #[cfg(test)]
             resume_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -929,7 +969,7 @@ impl HostHandle {
                 {
                     return emit_end(sink, refusal);
                 }
-                for response in self.confirm_presentation(&frame, confirm).await {
+                for response in self.confirm_presentation(&frame, &live, confirm).await {
                     if sink.emit(response).is_err() {
                         break;
                     }
@@ -1115,19 +1155,103 @@ impl HostHandle {
         crate::lock_unpoison(&self.rounds).get(wire).copied()
     }
 
+    /// The open round this connection currently owns for one companion.
+    ///
+    /// Keyed by connection lifetime, so a same-device replacement's new
+    /// connection finds no inherited round: the old round binding is
+    /// connection-transient by construction (IPC §9.3 replacement).
     pub(crate) fn open_round_for(
         &self,
-        client_ref: &str,
+        connection: &ConnectionWireId,
         companion_key: &str,
     ) -> Option<OpenRound> {
         crate::lock_unpoison(&self.open_rounds)
-            .get(&(client_ref.to_string(), companion_key.to_string()))
+            .get(&(connection_key(connection), companion_key.to_string()))
             .copied()
     }
 
-    pub(crate) fn record_open_round(&self, client_ref: &str, companion_key: &str, open: OpenRound) {
-        crate::lock_unpoison(&self.open_rounds)
-            .insert((client_ref.to_string(), companion_key.to_string()), open);
+    /// Installs an open round for `live`'s connection under the ownership
+    /// section (CCT §10.4).
+    ///
+    /// Returns `false` — installing nothing — when the connection was
+    /// superseded or closed before the section: an operation cannot resurrect
+    /// an open-round binding after the replacement cleanup removed it.
+    /// `client_ref` is carried for diagnostics only.
+    pub(crate) fn record_open_round(
+        &self,
+        live: &LiveInput,
+        client_ref: &str,
+        companion_key: &str,
+        open: OpenRound,
+    ) -> bool {
+        let _ = client_ref;
+        self.with_current_connection(live, || {
+            crate::lock_unpoison(&self.open_rounds).insert(
+                (
+                    connection_key(&live.connection_id),
+                    companion_key.to_string(),
+                ),
+                open,
+            );
+        })
+        .is_some()
+    }
+
+    /// Drops one connection's open-round bindings (memory-only; durable
+    /// History rows are untouched, so `HistoryRequest` still reads the past
+    /// round after a replacement).
+    pub(crate) fn drop_open_rounds_for(&self, connection: &ConnectionWireId) {
+        let key = connection_key(connection);
+        crate::lock_unpoison(&self.open_rounds).retain(|(owner, _), _| owner != &key);
+    }
+
+    /// Test-only: whether any conversation open round exists at all.
+    #[cfg(test)]
+    pub(crate) fn has_open_round_for_test(&self) -> bool {
+        !crate::lock_unpoison(&self.open_rounds).is_empty()
+    }
+
+    /// Runs one short synchronous commit under the connection-ownership
+    /// section (CCT §10.4).
+    ///
+    /// The one ownership primitive every Client-dependent operation uses:
+    /// [`ConnectionTable::with_current_connection`] verifies `live`'s
+    /// connection is still its device's current authenticated connection and
+    /// holds that section for the whole closure, so a supersession, close, or
+    /// replacement cannot interleave between the check and the commit.
+    /// Returns [`None`] — running nothing — when the connection is no longer
+    /// current. The closure must not await and must not call back into the
+    /// connection table.
+    pub(crate) fn with_current_connection<R>(
+        &self,
+        live: &LiveInput,
+        commit: impl FnOnce() -> R,
+    ) -> Option<R> {
+        live.authority
+            .with_current_connection(&live.connection_id, commit)
+    }
+
+    /// [`HostHandle::with_current_connection`] on the blocking pool.
+    ///
+    /// Use when the commit needs a synchronous SQLite primitive: the whole
+    /// section runs inside `spawn_blocking`, so no `.await` happens while
+    /// the connection table is held (CCT §10.4). The lock order is
+    /// connection table → Task execution registry → SQLite; a closure that
+    /// takes another async lock must take it before entering here.
+    pub(crate) async fn with_current_connection_blocking<R: Send + 'static>(
+        &self,
+        live: &LiveInput,
+        commit: impl FnOnce() -> R + Send + 'static,
+    ) -> Option<R> {
+        let table = std::sync::Arc::clone(&live.authority);
+        let connection = live.connection_id;
+        let joined =
+            tokio::task::spawn_blocking(move || table.with_current_connection(&connection, commit))
+                .await;
+        match joined {
+            Ok(value) => value,
+            Err(join) => std::panic::resume_unwind(join.into_panic()),
+        }
     }
 
     /// Resolves a domain round back to its issued wire string.
@@ -1335,10 +1459,11 @@ impl HostHandle {
         if let Some(gate) = close_gate {
             gate.pause().await;
         }
-        // Connection-owned presentation state dies with this connection:
-        // the receipt, subscription, refs, and cursors are meaningless
-        // afterwards, and durable rows stay re-presentable.
-        self.drop_presentation_connection_state(&connection);
+        // Connection-owned presentation state dies with this connection: a
+        // close that loses the race to a newer authentication removes no new
+        // current (note_closed compares identity), and the cleanup below runs
+        // only after the record is gone, so no guarded install can recreate
+        // state for this connection afterwards (CCT §10.4).
         let companion = self.store.ensure_running_companion().await.ok();
         let store = self.store.clone();
         let table = std::sync::Arc::clone(table);
@@ -1353,6 +1478,50 @@ impl HostHandle {
         if let Err(join) = joined {
             std::panic::resume_unwind(join.into_panic());
         }
+        // The record is gone: every guarded install for this connection is
+        // already refused, so the lifecycle cleanup below cannot race a
+        // resurrection (CCT §10.4).
+        self.on_connection_closed(&connection);
+    }
+
+    /// The single Host-memory lifecycle boundary for a superseded connection
+    /// (IPC §9.3 replacement).
+    ///
+    /// Supersession and close differ in meaning — supersession keeps the old
+    /// socket for typed stale rejections and never touches presence, while
+    /// close ends the transport and may run the presence fallback — but both
+    /// invalidate exactly the same connection-transient world. Routing both
+    /// through this one boundary keeps a new connection from inheriting any
+    /// of the old one's transient state by construction instead of by
+    /// per-handler cleanup.
+    pub(crate) fn on_connection_superseded(&self, connection: &ConnectionWireId) {
+        self.drop_connection_transient_state(connection);
+    }
+
+    /// The single Host-memory lifecycle boundary for a closed connection.
+    ///
+    /// Called after the close admission removed the connection record, so
+    /// no guarded install can recreate state for this connection after the
+    /// sweep.
+    pub(crate) fn on_connection_closed(&self, connection: &ConnectionWireId) {
+        self.drop_connection_transient_state(connection);
+    }
+
+    /// Invalidates every Host-memory entry owned by one ended connection
+    /// lifetime.
+    ///
+    /// Owners: presentation subscriptions, receipts, query-scoped refs,
+    /// cursors, carried item refs, resume retry-epoch slots; conversation
+    /// open rounds; the first-party Task selection. Streams need no registry:
+    /// every publication re-checks the connection table (CCT §10.4). Durable
+    /// rows are never touched — a released receipt leaves its rows
+    /// re-presentable, and a dropped open round leaves its History rows
+    /// readable through `HistoryRequest`.
+    fn drop_connection_transient_state(&self, connection: &ConnectionWireId) {
+        self.drop_presentation_connection_state(connection);
+        self.drop_open_rounds_for(connection);
+        self.conversation_tasks
+            .drop_first_party_selection_for(connection);
     }
 
     /// Arms the test-only close-admission gate and returns it.
@@ -1361,6 +1530,79 @@ impl HostHandle {
         let gate = std::sync::Arc::new(TestCloseGate::default());
         *crate::lock_unpoison(&self.close_gate) = Some(std::sync::Arc::clone(&gate));
         gate
+    }
+
+    /// Arms the test-only submit-acceptance gate and returns it.
+    ///
+    /// The gate pauses a [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput)
+    /// after admission and before the guarded owner append, so a test can
+    /// supersede the connection in between and pin that nothing commits.
+    #[cfg(test)]
+    pub(crate) fn arm_submit_accept_gate(&self) -> std::sync::Arc<TestGate> {
+        let gate = std::sync::Arc::new(TestGate::default());
+        *crate::lock_unpoison(&self.submit_accept_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// The armed submit-acceptance gate, when a test installed one.
+    #[cfg(test)]
+    pub(crate) fn submit_accept_gate(&self) -> Option<std::sync::Arc<TestGate>> {
+        crate::lock_unpoison(&self.submit_accept_gate).clone()
+    }
+
+    /// Arms the test-only read-ref mint gate and returns it.
+    ///
+    /// The gate pauses a read query after its durable read and before the
+    /// connection-scoped ref/cursor mint, so a test can supersede the
+    /// connection in between and pin that no ref is minted.
+    #[cfg(test)]
+    pub(crate) fn arm_ref_mint_gate(&self) -> std::sync::Arc<TestGate> {
+        let gate = std::sync::Arc::new(TestGate::default());
+        *crate::lock_unpoison(&self.ref_mint_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// The armed read-ref mint gate, when a test installed one.
+    #[cfg(test)]
+    pub(crate) fn ref_mint_gate(&self) -> Option<std::sync::Arc<TestGate>> {
+        crate::lock_unpoison(&self.ref_mint_gate).clone()
+    }
+
+    /// Disarms the test-only submit-acceptance gate.
+    #[cfg(test)]
+    pub(crate) fn disarm_submit_accept_gate(&self) {
+        *crate::lock_unpoison(&self.submit_accept_gate) = None;
+    }
+
+    /// Disarms the test-only read-ref mint gate.
+    #[cfg(test)]
+    pub(crate) fn disarm_ref_mint_gate(&self) {
+        *crate::lock_unpoison(&self.ref_mint_gate) = None;
+    }
+
+    /// Arms the test-only fetch gate and returns it.
+    ///
+    /// The gate pauses a presentation pass after its presence checks and
+    /// before it takes the begin/ack transition lock, so a test can replace
+    /// the connection and let the replacement run its own full pass before
+    /// the paused one resumes.
+    #[cfg(test)]
+    pub(crate) fn arm_fetch_gate(&self) -> std::sync::Arc<TestGate> {
+        let gate = std::sync::Arc::new(TestGate::default());
+        *crate::lock_unpoison(&self.fetch_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// The armed fetch gate, when a test installed one.
+    #[cfg(test)]
+    pub(crate) fn fetch_gate(&self) -> Option<std::sync::Arc<TestGate>> {
+        crate::lock_unpoison(&self.fetch_gate).clone()
+    }
+
+    /// Disarms the test-only fetch gate.
+    #[cfg(test)]
+    pub(crate) fn disarm_fetch_gate(&self) {
+        *crate::lock_unpoison(&self.fetch_gate) = None;
     }
 
     /// Arms the test-only guarded-resume race gate and returns it.

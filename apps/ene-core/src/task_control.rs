@@ -36,6 +36,7 @@ use ene_action::{
     ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, ActionTechnicalError,
     CertaintyUpdateOutcome, EffectGrounds,
 };
+use ene_api::v1::refs::ConnectionWireId;
 use ene_companion::CompanionId;
 use ene_companion::RecordResumeActivityCommand;
 use ene_companion::dialogue::{
@@ -143,32 +144,114 @@ pub(crate) struct ConversationTaskProjection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ConversationTask {
-    task: TaskId,
+pub(crate) struct ConversationTask {
+    pub(crate) task: TaskId,
     /// `None` when the creation committed but the delegation was refused; the
     /// report then shows no execution-local result.
-    delegation: Option<DelegationId>,
+    pub(crate) delegation: Option<DelegationId>,
+    /// What put this Task in the projection: conversation-owned work or a
+    /// first-party wire selection bound to one connection lifetime.
+    source: ConversationTaskSource,
+}
+
+/// Why one Task is the conversation's current projection.
+///
+/// The distinction is load-bearing: a dialogue-created/steered/resumed Task
+/// is Host-only accepted work that a reconnect must not erase, while a
+/// first-party `SelectTask` is a memory-only wire selection whose lifecycle
+/// ends with the connection that made it (IPC §9.3 replacement; the
+/// projection resets to unselected on reconnect/restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationTaskSource {
+    /// Created, steered, or resumed by an accepted dialogue turn.
+    Dialogue,
+    /// First-party wire `SelectTask` on one connection lifetime.
+    FirstPartySelection { connection: ConnectionWireId },
 }
 
 impl ConversationTaskProjection {
     fn record(&self, companion: CompanionId, task: TaskId, delegation: Option<DelegationId>) {
-        crate::lock_unpoison(&self.current)
-            .insert(companion, ConversationTask { task, delegation });
+        crate::lock_unpoison(&self.current).insert(
+            companion,
+            ConversationTask {
+                task,
+                delegation,
+                source: ConversationTaskSource::Dialogue,
+            },
+        );
     }
 
     /// Records a first-party wire selection (`SelectTask`): the Task the
     /// Owner chose to talk about, with no execution attached.
     ///
-    /// In-memory display selection only, exactly like a delegation-less
-    /// record: every later operation still goes through the Task owner's
-    /// durable compare, and a restart drops it back to unselected. Never
-    /// called from model output, only from the first-party wire inlet.
-    pub(crate) fn select(&self, companion: CompanionId, task: TaskId) {
-        self.record(companion, task, None);
+    /// In-memory display selection bound to the selecting connection: every
+    /// later operation still goes through the Task owner's durable compare, a
+    /// reconnect/supersession drops the selection, and a restart drops it
+    /// back to unselected. Never called from model output, only from the
+    /// first-party wire inlet under its ownership section.
+    pub(crate) fn select(
+        &self,
+        companion: CompanionId,
+        task: TaskId,
+        connection: ConnectionWireId,
+    ) {
+        crate::lock_unpoison(&self.current).insert(
+            companion,
+            ConversationTask {
+                task,
+                delegation: None,
+                source: ConversationTaskSource::FirstPartySelection { connection },
+            },
+        );
     }
 
-    fn current(&self, companion: CompanionId) -> Option<ConversationTask> {
-        crate::lock_unpoison(&self.current).get(&companion).copied()
+    /// The conversation's current Task for `connection`.
+    ///
+    /// A dialogue-owned projection is always current; a first-party wire
+    /// selection is visible only on the connection that made it, so a
+    /// replacement answers "unselected" until it selects again.
+    pub(crate) fn current(
+        &self,
+        companion: CompanionId,
+        connection: &ConnectionWireId,
+    ) -> Option<ConversationTask> {
+        let entry = crate::lock_unpoison(&self.current)
+            .get(&companion)
+            .copied()?;
+        match entry.source {
+            ConversationTaskSource::Dialogue => Some(entry),
+            ConversationTaskSource::FirstPartySelection { connection: owner }
+                if owner == *connection =>
+            {
+                Some(entry)
+            }
+            ConversationTaskSource::FirstPartySelection { .. } => None,
+        }
+    }
+
+    /// Drops one connection lifetime's first-party selection, leaving
+    /// dialogue-owned projections untouched.
+    pub(crate) fn drop_first_party_selection_for(&self, connection: &ConnectionWireId) {
+        crate::lock_unpoison(&self.current).retain(|_, entry| {
+            !matches!(
+                entry.source,
+                ConversationTaskSource::FirstPartySelection { connection: owner } if owner == *connection
+            )
+        });
+    }
+
+    /// Test-only: how many first-party selections are remembered at all.
+    #[cfg(test)]
+    pub(crate) fn first_party_selection_count(&self) -> usize {
+        crate::lock_unpoison(&self.current)
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.source,
+                    ConversationTaskSource::FirstPartySelection { .. }
+                )
+            })
+            .count()
     }
 }
 
@@ -289,11 +372,30 @@ impl TestResumeGate {
 pub(crate) struct HostTaskControl<'a> {
     handle: &'a HostHandle,
     companion: CompanionId,
+    /// The connection whose dialogue turn is interpreting the directive: a
+    /// first-party selection made on another connection is never visible to
+    /// it (IPC §9.3 replacement).
+    connection: ene_api::v1::refs::ConnectionWireId,
 }
 
 impl<'a> HostTaskControl<'a> {
-    pub(crate) fn new(handle: &'a HostHandle, companion: CompanionId) -> Self {
-        Self { handle, companion }
+    pub(crate) fn new(
+        handle: &'a HostHandle,
+        companion: CompanionId,
+        connection: ene_api::v1::refs::ConnectionWireId,
+    ) -> Self {
+        Self {
+            handle,
+            companion,
+            connection,
+        }
+    }
+
+    /// The conversation's current Task as this connection may see it.
+    fn current_task(&self) -> Option<ConversationTask> {
+        self.handle
+            .conversation_tasks
+            .current(self.companion, &self.connection)
     }
 
     fn no_active_task() -> DialogueTaskControlReply {
@@ -370,7 +472,7 @@ impl<'a> HostTaskControl<'a> {
     }
 
     async fn report(&self) -> DialogueTaskControlReply {
-        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+        let Some(current) = self.current_task() else {
             return Self::no_active_task();
         };
         match self
@@ -390,7 +492,7 @@ impl<'a> HostTaskControl<'a> {
         purpose: Option<String>,
         origin: RawId,
     ) -> DialogueTaskControlReply {
-        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+        let Some(current) = self.current_task() else {
             return Self::no_active_task();
         };
         let record = match self.handle.store.load_task(current.task).await {
@@ -461,7 +563,7 @@ impl<'a> HostTaskControl<'a> {
     }
 
     async fn cancel(&self, origin: RawId) -> DialogueTaskControlReply {
-        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+        let Some(current) = self.current_task() else {
             return Self::no_active_task();
         };
         let currentness = OwnerMessageCurrentness {
@@ -505,7 +607,7 @@ impl<'a> HostTaskControl<'a> {
         // purpose, or body: the Host composes the premise from durable
         // state and references the turn's own Owner message as the resume
         // instruction source.
-        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+        let Some(current) = self.current_task() else {
             return DialogueTaskControlReply::Answered(String::from(
                 "There is no active task in this conversation. Tell me which task to resume.",
             ));

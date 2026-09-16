@@ -68,6 +68,13 @@ impl ProviderTransport for CountingTransport {
     }
 }
 
+/// A fresh connection identity for direct-composition tests: the projection
+/// tests exercise dialogue-owned records, which are visible from any
+/// connection, and first-party binding is covered by the wire tests.
+fn test_connection() -> ene_api::v1::refs::ConnectionWireId {
+    ene_api::v1::refs::ConnectionWireId(uuid::Uuid::new_v4())
+}
+
 async fn open_handle(tag: &str) -> (HostHandle, tempfile::TempDir) {
     memory_handle_with(tag, |_| {})
         .await
@@ -851,7 +858,7 @@ async fn conversation_resume_commits_r_plus_one_and_launches() {
         .record(companion, task.task, Some(delegation));
     let origin = append_owner_message(&handle, companion, "keep going").await;
 
-    let reply = HostTaskControl::new(&handle, companion)
+    let reply = HostTaskControl::new(&handle, companion, test_connection())
         .apply(DialogueTaskCommand::Resume, origin)
         .await;
     let DialogueTaskControlReply::Answered(text) = reply else {
@@ -881,7 +888,7 @@ async fn conversation_resume_commits_r_plus_one_and_launches() {
     assert_eq!(stored.task.revision.as_u64(), 2);
     let projected = handle
         .conversation_tasks
-        .current(companion)
+        .current(companion, &test_connection())
         .expect("the conversation points at the new execution");
     assert_eq!(projected.task, task.task);
     assert_eq!(projected.delegation, Some(launched[0]));
@@ -898,7 +905,7 @@ async fn conversation_resume_without_a_task_asks_for_a_target() {
         .expect("the companion must resolve");
     let origin = append_owner_message(&handle, companion, "keep going").await;
 
-    let reply = HostTaskControl::new(&handle, companion)
+    let reply = HostTaskControl::new(&handle, companion, test_connection())
         .apply(DialogueTaskCommand::Resume, origin)
         .await;
     let DialogueTaskControlReply::Answered(text) = reply else {
@@ -1038,4 +1045,40 @@ async fn a_running_execution_refuses_a_second_take() {
         )
     );
     assert_eq!(transport.calls(), 0);
+}
+
+/// A dialogue-owned Task projection is not connection-bound, while a
+/// first-party `SelectTask` is: a same-device replacement drops only the
+/// selection (IPC §9.3 replacement).
+#[tokio::test]
+async fn replacement_drops_only_the_first_party_selection_not_the_dialogue_projection() {
+    let (handle, _dir) = open_handle("projection-replacement").await;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let c1 = test_connection();
+    let c2 = test_connection();
+    let task = ene_task::TaskId::from_raw(RawId::new());
+
+    // A dialogue-created projection survives the lifecycle sweep.
+    handle.conversation_tasks.record(companion, task, None);
+    handle.on_connection_superseded(&c1);
+    assert!(
+        handle.conversation_tasks.current(companion, &c2).is_some(),
+        "dialogue work is Host-only accepted work, not a wire selection"
+    );
+
+    // A first-party selection replaces the slot and dies with its connection.
+    handle.conversation_tasks.select(companion, task, c1);
+    assert_eq!(handle.conversation_tasks.first_party_selection_count(), 1);
+    assert!(handle.conversation_tasks.current(companion, &c1).is_some());
+    assert!(handle.conversation_tasks.current(companion, &c2).is_none());
+    handle.on_connection_superseded(&c1);
+    assert_eq!(handle.conversation_tasks.first_party_selection_count(), 0);
+    assert!(
+        handle.conversation_tasks.current(companion, &c2).is_none(),
+        "the replacement starts unselected"
+    );
 }

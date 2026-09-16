@@ -474,6 +474,63 @@ impl CompanionRepository for Store {
 }
 
 impl Store {
+    /// Synchronous [`HistoryRepository::append_message`] for the
+    /// connection-ownership section (CCT §10.4).
+    ///
+    /// The Host's Client-dependent admission runs this inside
+    /// `spawn_blocking` while the connection table verifies currentness, so a
+    /// supersession that wins the section leaves no Owner row behind. The
+    /// async repository wraps the same `append_history` body, so the two
+    /// forms agree by construction.
+    ///
+    /// # Errors
+    ///
+    /// [`CompanionTechnicalError`] when the append transaction cannot
+    /// commit.
+    pub fn append_message_sync(
+        &self,
+        cmd: AppendHistoryCommand,
+    ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
+        let (outcome, _) = append_history(&self.conn, &cmd, false)?;
+        Ok(outcome)
+    }
+
+    /// Synchronous [`HistoryRepository::lookup_command`] for the
+    /// connection-ownership section (CCT §10.4).
+    ///
+    /// A read-only point lookup on `(companion, command_id)`; the guarded
+    /// append uses it to resolve a concurrent same-command commit without
+    /// leaving the section.
+    ///
+    /// # Errors
+    ///
+    /// [`CompanionTechnicalError`] when the row cannot be read.
+    pub fn lookup_command_sync(
+        &self,
+        companion: CompanionId,
+        command: &CommandId,
+    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
+        let key = encode_id(companion.as_raw());
+        let command_key = encode_id(command.0);
+        let guard = lock_shared(&self.conn);
+        let found: Option<HistoryRow> = guard
+            .query_row(
+                SQL_SELECT_HISTORY_BY_COMMAND,
+                params![key, command_key],
+                HistoryRow::from_row,
+            )
+            .optional()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
+        match found {
+            Some(row) => {
+                let message =
+                    decode_history_message(companion, row).map_err(companion_unavailable)?;
+                Ok(Some(message))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Resolves one stored round wire projection to its domain round.
     ///
     /// The round wire is Host-minted and stored with every appended message

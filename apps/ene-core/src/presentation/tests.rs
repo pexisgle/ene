@@ -18,8 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
-    ClientIncarnationId, CommandWireId, RequestWireId, RoundWireId, WireMessageType,
+    ClientIncarnationId, CommandWireId, ConnectionWireId, RequestWireId, RoundWireId,
+    WireMessageType,
 };
+use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::PresentationStatus;
 use ene_api::v1::undelivered::{
     GetReportSource, GetTaskReport, ListTasks, ResumeTask, ResumeTaskOutcomeWire, SelectTask,
@@ -43,9 +45,10 @@ use ene_task::{
     WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
 };
 
+use crate::conn::{ConnectionPhase, ConnectionTable};
 use crate::serve::{FrameSink, HostHandle, LiveInput};
 use crate::task_run::TaskAgentLauncher;
-use crate::test_support::{live_input, memory_handle};
+use crate::test_support::{authenticate, live_input, memory_handle};
 
 const DEVICE_A: &str = "test-device-a";
 const DEVICE_B: &str = "test-device-b";
@@ -116,12 +119,13 @@ async fn attach(handle: &HostHandle, device: &str) -> PresenceAttribution {
         "attach starts from NoActive, got {:?}",
         current.state
     );
+    let live = crate::test_support::live_input(device);
     match handle
-        .attach_presence(device, true, current.generation)
+        .attach_presence(&live, device, current.generation)
         .await
     {
         crate::dialogue::AttachOutcome::Attached(fresh) => fresh,
-        crate::dialogue::AttachOutcome::Raced => panic!("attach must win on a fresh handle"),
+        other => panic!("attach must win on a fresh handle, got {other:?}"),
     }
 }
 
@@ -959,10 +963,9 @@ async fn s5_10_concurrent_subscribes_share_one_receipt() {
     append_reply(&handle, "shared row", fresh.generation).await;
     let handle = Arc::new(handle);
     let live_a = live_input(DEVICE_A);
-    let live_b = LiveInput {
-        connection_id: live_a.connection_id,
-        ..live_input(DEVICE_A)
-    };
+    // The two subscribes race on the same connection lifetime, so they share
+    // the connection table authority as well as the id.
+    let live_b = live_a.clone();
     // Two subscribes race on one connection: the gate serializes them and
     // the second re-displays the live receipt instead of minting another.
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
@@ -2839,4 +2842,434 @@ async fn receipt_reemit_fails_closed_on_a_store_read_failure() {
     assert_eq!(status, "presentation_unknown");
     raw.execute_batch("ALTER TABLE undelivered_hidden RENAME TO undelivered")
         .expect("the test may restore the table");
+}
+
+// --- Stage 5 connection replacement lifecycle (CCT §10.4) ----------------
+//
+// Every regression below is deterministic: a barrier/gate or an explicit
+// synchronization point orders the replacement against the operation, and no
+// test sleeps for a race to occur.
+
+/// Supersedes `c1` with a fresh authenticated connection for the same device
+/// and runs the real lifecycle sweep, returning the replacement's premises.
+fn replace_connection(
+    handle: &HostHandle,
+    table: &Arc<ConnectionTable>,
+    c1: &ConnectionWireId,
+    device: &str,
+) -> (ConnectionWireId, LiveInput) {
+    let c2 = table.note_accept();
+    authenticate(table, &c2, device);
+    assert_eq!(
+        table.phase_of(c1),
+        Some(ConnectionPhase::Superseded),
+        "the newer install must supersede C1"
+    );
+    handle.on_connection_superseded(c1);
+    let live = table.snapshot(&c2).expect("the replacement must snapshot");
+    (c2, live)
+}
+
+/// The wire ref of the single seeded Task, listed on `live`.
+async fn listed_task_ref(
+    handle: &HostHandle,
+    live: &LiveInput,
+) -> ene_api::v1::undelivered::TaskWireRef {
+    let frame = frame_for(
+        WirePayload::ListTasks(ListTasks {
+            cursor: None,
+            limit: Some(10),
+        }),
+        live,
+        None,
+        None,
+        None,
+    );
+    let query = match &frame.payload {
+        WirePayload::ListTasks(query) => query.clone(),
+        _ => unreachable!(),
+    };
+    let frames = handle.list_tasks_wire(&frame, live, &query).await;
+    match frames.into_iter().next().unwrap().payload {
+        WirePayload::TaskListResponse(TaskListResponse::Page(page)) => {
+            assert_eq!(page.tasks.len(), 1, "the fixture seeds one Task");
+            page.tasks[0].task.clone()
+        }
+        other => panic!("expected a list page, got {other:?}"),
+    }
+}
+
+/// One `SelectTask` through the wire inlet, returning its answer frames.
+async fn select_once(
+    handle: &HostHandle,
+    live: &LiveInput,
+    task: ene_api::v1::undelivered::TaskWireRef,
+) -> Vec<WireFrame> {
+    let frame = frame_for(
+        WirePayload::SelectTask(SelectTask { task }),
+        live,
+        None,
+        None,
+        None,
+    );
+    let query = match &frame.payload {
+        WirePayload::SelectTask(query) => query.clone(),
+        _ => unreachable!(),
+    };
+    handle.select_task_wire(&frame, live, &query).await
+}
+
+fn assert_stale_reject(frames: &[WireFrame], what: &str) {
+    assert_eq!(frames.len(), 1, "{what} answers exactly one frame");
+    assert!(
+        matches!(
+            &frames[0].payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+        ),
+        "{what} must answer a typed stale rejection, got {:?}",
+        frames[0].payload
+    );
+}
+
+/// Replacement case A: an `UndeliveredRequest` admitted on C1 that prepares
+/// its receipt after C2 replaced it installs nothing, answers typed stale,
+/// and leaves C2's own receipt standing.
+#[tokio::test]
+async fn replacement_rejects_a_stale_undelivered_request_without_resurrecting_state() {
+    let (handle, _dir) = open_handle("replace-stale-fetch").await;
+    let handle = Arc::new(handle);
+    let table = Arc::new(ConnectionTable::new());
+    let c1 = table.note_accept();
+    authenticate(&table, &c1, DEVICE_A);
+    let live1 = table.snapshot(&c1).expect("C1 must snapshot");
+    let fact = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "replacement row", fact.generation).await;
+
+    // Pause C1's request before it takes the presentation transition lock.
+    let gate = handle.arm_fetch_gate();
+    let request = {
+        let handle = Arc::clone(&handle);
+        let live1 = live1.clone();
+        tokio::spawn(async move {
+            let frame = frame_for(
+                WirePayload::UndeliveredRequest(UndeliveredRequest {
+                    companion: None,
+                    cursor: None,
+                    limit: None,
+                    redisplay: false,
+                }),
+                &live1,
+                None,
+                None,
+                None,
+            );
+            let query = match &frame.payload {
+                WirePayload::UndeliveredRequest(query) => query.clone(),
+                _ => unreachable!(),
+            };
+            handle.request_undelivered(&frame, &live1, &query).await
+        })
+    };
+    gate.wait_entered().await;
+    handle.disarm_fetch_gate();
+    let (c2, live2) = replace_connection(&handle, &table, &c1, DEVICE_A);
+    assert!(
+        handle.presentation_counts_for_test(&c1).is_empty(),
+        "the replacement sweep purges C1 before the request resumes"
+    );
+    // C2 mints its own receipt for the same row.
+    let r2 = summary_of(fetch(&handle, &live2, None, None, false).await);
+    assert!(!r2.receipt.0.is_empty(), "C2 mints its own receipt");
+    let c2_before = handle.presentation_counts_for_test(&c2);
+    assert_eq!(c2_before.receipts, 1);
+
+    gate.release();
+    let stale = request.await.expect("the paused request must finish");
+    assert_stale_reject(&stale, "the stale undelivered request");
+    assert!(
+        handle.presentation_counts_for_test(&c1).is_empty(),
+        "C1's state must not resurrect after the sweep"
+    );
+    assert_eq!(
+        handle.presentation_counts_for_test(&c2),
+        c2_before,
+        "C2's receipt and refs stay untouched"
+    );
+    // R2 still owns the row its ACK names.
+    let outcome = ack(
+        &handle,
+        &live2,
+        &r2.receipt.0,
+        r2.round.clone(),
+        r2.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(outcome, UndeliveredAckOutcome::Presented { presented: 1 }),
+        "C2's receipt must still cover the row, got {outcome:?}"
+    );
+}
+
+/// Replacement case B: a `SelectTask` admitted on C1 that pauses before its
+/// guarded selection commit selects nothing after C2 replaced it.
+#[tokio::test]
+async fn replacement_rejects_a_stale_select_task_without_committing() {
+    let (handle, _dir) = open_handle("replace-stale-select").await;
+    let handle = Arc::new(handle);
+    let table = Arc::new(ConnectionTable::new());
+    let c1 = table.note_accept();
+    authenticate(&table, &c1, DEVICE_A);
+    let live1 = table.snapshot(&c1).expect("C1 must snapshot");
+    attach(&handle, DEVICE_A).await;
+    seed_task(&handle).await;
+    let task_ref = listed_task_ref(&handle, &live1).await;
+
+    let gate = handle.arm_ref_mint_gate();
+    let select = {
+        let handle = Arc::clone(&handle);
+        let live1 = live1.clone();
+        tokio::spawn(async move { select_once(&handle, &live1, task_ref).await })
+    };
+    gate.wait_entered().await;
+    let (c2, live2) = replace_connection(&handle, &table, &c1, DEVICE_A);
+    gate.release();
+    handle.disarm_ref_mint_gate();
+
+    let frames = select.await.expect("the paused selection must finish");
+    assert_stale_reject(&frames, "the stale selection");
+    assert!(
+        handle
+            .conversation_tasks
+            .current(task_companion(&handle).await, &c2)
+            .is_none(),
+        "C2 must be unselected"
+    );
+    assert_eq!(
+        handle.conversation_tasks.first_party_selection_count(),
+        0,
+        "no stale first-party selection may survive"
+    );
+
+    // C2 selects for itself after its own listing.
+    let task_ref = listed_task_ref(&handle, &live2).await;
+    let frames = select_once(&handle, &live2, task_ref).await;
+    assert!(
+        matches!(
+            frames.first().map(|frame| &frame.payload),
+            Some(WirePayload::SelectTaskResponse(
+                SelectTaskResponse::Selected(_)
+            ))
+        ),
+        "C2's own selection works, got {frames:?}"
+    );
+    assert!(
+        handle
+            .conversation_tasks
+            .current(task_companion(&handle).await, &c2)
+            .is_some(),
+        "C2's selection is visible on C2"
+    );
+}
+
+async fn task_companion(handle: &HostHandle) -> CompanionId {
+    companion_of(handle).await
+}
+
+/// Replacement case F: a first-party selection lives only on the selecting
+/// connection; a same-device replacement starts unselected and reselects.
+#[tokio::test]
+async fn replacement_resets_the_first_party_selection_until_reselected() {
+    let (handle, _dir) = open_handle("replace-selection-reset").await;
+    let table = Arc::new(ConnectionTable::new());
+    let c1 = table.note_accept();
+    authenticate(&table, &c1, DEVICE_A);
+    let live1 = table.snapshot(&c1).expect("C1 must snapshot");
+    attach(&handle, DEVICE_A).await;
+    let task = seed_task(&handle).await;
+    let task_ref = listed_task_ref(&handle, &live1).await;
+    let frames = select_once(&handle, &live1, task_ref).await;
+    assert!(matches!(
+        frames.first().map(|frame| &frame.payload),
+        Some(WirePayload::SelectTaskResponse(
+            SelectTaskResponse::Selected(_)
+        ))
+    ));
+    let companion = companion_of(&handle).await;
+    assert_eq!(
+        handle
+            .conversation_tasks
+            .current(companion, &c1)
+            .map(|task| task.task),
+        Some(task.task),
+        "C1's selection is visible on C1"
+    );
+
+    let (c2, live2) = replace_connection(&handle, &table, &c1, DEVICE_A);
+    assert!(
+        handle.conversation_tasks.current(companion, &c1).is_none(),
+        "C1's selection is gone with its connection"
+    );
+    assert!(
+        handle.conversation_tasks.current(companion, &c2).is_none(),
+        "C2 starts unselected: a directive cannot act on C1's Task"
+    );
+    assert_eq!(handle.conversation_tasks.first_party_selection_count(), 0);
+
+    // C2 lists and selects again: the wire selection is usable.
+    let task_ref = listed_task_ref(&handle, &live2).await;
+    let frames = select_once(&handle, &live2, task_ref).await;
+    assert!(matches!(
+        frames.first().map(|frame| &frame.payload),
+        Some(WirePayload::SelectTaskResponse(
+            SelectTaskResponse::Selected(_)
+        ))
+    ));
+    assert_eq!(
+        handle
+            .conversation_tasks
+            .current(companion, &c2)
+            .map(|task| task.task),
+        Some(task.task)
+    );
+}
+
+/// Replacement case G: a read query that pauses between its durable read and
+/// its connection-scoped ref mint mints nothing after the replacement.
+#[tokio::test]
+async fn replacement_read_query_mints_no_ref_after_cleanup() {
+    let (handle, _dir) = open_handle("replace-stale-read").await;
+    let handle = Arc::new(handle);
+    let table = Arc::new(ConnectionTable::new());
+    let c1 = table.note_accept();
+    authenticate(&table, &c1, DEVICE_A);
+    let live1 = table.snapshot(&c1).expect("C1 must snapshot");
+    attach(&handle, DEVICE_A).await;
+    seed_task(&handle).await;
+
+    let gate = handle.arm_ref_mint_gate();
+    let list = {
+        let handle = Arc::clone(&handle);
+        let live1 = live1.clone();
+        tokio::spawn(async move {
+            let frame = frame_for(
+                WirePayload::ListTasks(ListTasks {
+                    cursor: None,
+                    limit: Some(10),
+                }),
+                &live1,
+                None,
+                None,
+                None,
+            );
+            let query = match &frame.payload {
+                WirePayload::ListTasks(query) => query.clone(),
+                _ => unreachable!(),
+            };
+            handle.list_tasks_wire(&frame, &live1, &query).await
+        })
+    };
+    gate.wait_entered().await;
+    let (c2, live2) = replace_connection(&handle, &table, &c1, DEVICE_A);
+    gate.release();
+    handle.disarm_ref_mint_gate();
+
+    let frames = list.await.expect("the paused read must finish");
+    assert_stale_reject(&frames, "the stale task list");
+    assert!(
+        handle.presentation_counts_for_test(&c1).is_empty(),
+        "the stale read mints no task ref or cursor"
+    );
+
+    let task_ref = listed_task_ref(&handle, &live2).await;
+    assert!(!task_ref.0.is_empty());
+    assert_eq!(
+        handle.presentation_counts_for_test(&c2).task_refs,
+        1,
+        "C2's own listing mints exactly its ref"
+    );
+}
+
+/// Replacement case H: repeated same-device replacement keeps
+/// connection-bound memory bounded; each retired connection's transient
+/// world is empty and the survivors' bookkeeping is one connection's worth.
+#[tokio::test]
+async fn repeated_replacement_keeps_connection_bound_memory_bounded() {
+    let (handle, _dir) = open_handle("replace-memory-stability").await;
+    let handle = Arc::new(handle);
+    let table = Arc::new(ConnectionTable::new());
+    let mut current = table.note_accept();
+    authenticate(&table, &current, DEVICE_A);
+    let fact = attach(&handle, DEVICE_A).await;
+    seed_task(&handle).await;
+
+    let mut retired = Vec::new();
+    for index in 0..24 {
+        let live = table
+            .snapshot(&current)
+            .expect("the connection must snapshot");
+        // Exercise every connection-bound owner: receipt + carried refs,
+        // task refs + cursor, the first-party selection, and a resume retry
+        // slot.
+        let _ = fetch(&handle, &live, None, None, false).await;
+        let task_ref = listed_task_ref(&handle, &live).await;
+        let _ = select_once(&handle, &live, task_ref.clone()).await;
+        let frame = frame_for(
+            WirePayload::ResumeTask(ResumeTask {
+                task: task_ref,
+                expected_revision: 9_999,
+                expected_purpose: String::from("stale-purpose"),
+                instruction: String::from("continue"),
+            }),
+            &live,
+            None,
+            None,
+            Some(CommandWireId(uuid::Uuid::new_v4())),
+        );
+        let query = match &frame.payload {
+            WirePayload::ResumeTask(query) => query.clone(),
+            _ => unreachable!(),
+        };
+        let _ = handle.resume_task_wire(&frame, &live, &query).await;
+        assert!(handle.presentation_counts_for_test(&current).receipts <= 1);
+        assert!(handle.presentation_counts_for_test(&current).resume_slots <= 1);
+        assert_eq!(
+            handle.conversation_tasks.first_party_selection_count(),
+            1,
+            "iteration {index} holds exactly one first-party selection"
+        );
+
+        let next = table.note_accept();
+        authenticate(&table, &next, DEVICE_A);
+        handle.on_connection_superseded(&current);
+        assert!(
+            handle.presentation_counts_for_test(&current).is_empty(),
+            "iteration {index} leaves no presentation state"
+        );
+        assert_eq!(
+            handle.conversation_tasks.first_party_selection_count(),
+            0,
+            "iteration {index} leaves no first-party selection"
+        );
+        retired.push(current);
+        current = next;
+    }
+
+    // The survivor's world is exactly one connection's worth.
+    let live = table
+        .snapshot(&current)
+        .expect("the survivor must snapshot");
+    let _ = fetch(&handle, &live, None, None, false).await;
+    let counts = handle.presentation_counts_for_test(&current);
+    assert_eq!(counts.receipts, 1, "one live receipt");
+    assert!(counts.task_refs <= 1, "one task ref");
+    assert_eq!(handle.conversation_tasks.first_party_selection_count(), 0);
+    assert!(!handle.has_open_round_for_test());
+    for old in &retired {
+        assert!(
+            handle.presentation_counts_for_test(old).is_empty(),
+            "every retired connection stays purged"
+        );
+    }
+    assert!(fact.generation.as_u64() >= 1);
 }

@@ -774,7 +774,11 @@ async fn attach_present(handle: &crate::serve::HostHandle, device: &str) {
         .expect("the attribution must load")
         .expect("the attribution must exist");
     let outcome = handle
-        .attach_presence(device, true, current.generation)
+        .attach_presence(
+            &crate::test_support::live_input(device),
+            device,
+            current.generation,
+        )
         .await;
     assert!(
         matches!(outcome, crate::dialogue::AttachOutcome::Attached(_)),

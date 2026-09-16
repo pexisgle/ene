@@ -50,8 +50,9 @@ use ene_task::{
 };
 
 use crate::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, HistoryAppendOutcome,
-    HistoryRepository, HistoryRole, RequestFingerprint, RoundIntentMark,
+    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
+    HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole, RequestFingerprint,
+    RoundIntentMark,
 };
 
 /// One presentation-accepted client input, ready for the companion turn.
@@ -269,6 +270,82 @@ pub async fn begin_turn(
                 .lookup_command(input.companion, &input.command)
                 .await
             {
+                Ok(Some(found)) => DialogueBegin::Replayed {
+                    round: found.round,
+                    round_wire: found.round_wire,
+                },
+                _ => DialogueBegin::Held,
+            }
+        }
+        Ok(HistoryAppendOutcome::StaleExpected { current }) => {
+            DialogueBegin::StaleExpected { current }
+        }
+        Ok(HistoryAppendOutcome::StaleConsent) => DialogueBegin::StaleConsent,
+        Ok(HistoryAppendOutcome::StaleCredentialSet) => DialogueBegin::StaleCredentialSet,
+        // Owner appends carry no Owner-message premise, so the check is
+        // skipped and this arm is unreachable; Held is the safe mapping —
+        // retry-safe, with no side effects either way.
+        Ok(HistoryAppendOutcome::StaleOwnerInput) => DialogueBegin::Held,
+        Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
+        Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
+            DialogueBegin::HeldByLifecycle(lifecycle)
+        }
+        Err(_) => DialogueBegin::Held,
+    }
+}
+
+/// [`begin_turn`] with the durable Owner append supplied by the caller.
+///
+/// The Host runs the Client-dependent admission (CCT §10.4) as a guarded
+/// synchronous section: `commit` executes inside the connection-ownership
+/// section through the store's sync append, so a supersession that wins the
+/// section cannot leave an Owner row behind, and `lookup` resolves a
+/// concurrent same-command commit without leaving the section. This function
+/// is synchronous by construction — it never awaits — so the caller can run
+/// it on the blocking pool while holding the connection table. Every
+/// outcome maps exactly like [`begin_turn`].
+pub fn begin_turn_committed<C, L>(
+    input: AcceptedDialogueInput,
+    authorized: AuthorizedInference,
+    commit: C,
+    lookup: L,
+) -> DialogueBegin
+where
+    C: FnOnce(AppendHistoryCommand) -> Result<HistoryAppendOutcome, CompanionTechnicalError>,
+    L: FnOnce(CompanionId, &CommandId) -> Result<Option<HistoryMessage>, CompanionTechnicalError>,
+{
+    let (consent_id, consent_rev) = {
+        let (id, rev) = authorized.consent_premise();
+        (id.to_owned(), rev)
+    };
+    let owner = AppendHistoryCommand {
+        companion: input.companion,
+        round: input.round,
+        role: HistoryRole::Owner,
+        text: input.text.clone(),
+        lang: input.lang.clone(),
+        at: WallClockWithTz::now(),
+        expected_generation: input.generation,
+        expected_consent: Some((consent_id, consent_rev)),
+        expected_credential_set: Some(input.credential_set),
+        // Owner appends establish recency; only replies answer it.
+        expected_owner_message: None,
+        local_id: input.local_id.clone(),
+        command_id: Some(input.command),
+        round_wire: Some(input.round_wire.clone()),
+        round_intent: Some(input.round_intent.clone()),
+        incarnation: input.incarnation,
+    };
+    match commit(owner) {
+        Ok(HistoryAppendOutcome::CommittedAs { message }) => {
+            DialogueBegin::Ready(Box::new(DialogueTurn {
+                input,
+                message,
+                authorized,
+            }))
+        }
+        Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. }) => {
+            match lookup(input.companion, &input.command) {
                 Ok(Some(found)) => DialogueBegin::Replayed {
                     round: found.round,
                     round_wire: found.round_wire,

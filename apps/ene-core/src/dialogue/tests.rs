@@ -855,7 +855,7 @@ async fn attach_compare_loser_reports_raced() {
         "the race starts from generation zero"
     );
     let first = handle
-        .attach_presence("client-race", true, seen.generation)
+        .attach_presence(&live_input("client-race"), "client-race", seen.generation)
         .await;
     assert!(
         matches!(
@@ -867,7 +867,7 @@ async fn attach_compare_loser_reports_raced() {
         "the first compare with the observed premise wins generation one, got {first:?}"
     );
     let second = handle
-        .attach_presence("client-race", true, seen.generation)
+        .attach_presence(&live_input("client-race"), "client-race", seen.generation)
         .await;
     assert!(
         matches!(second, AttachOutcome::Raced),
@@ -1244,7 +1244,7 @@ async fn losing_summon_publishes_no_fact_and_never_reclaims_presence() {
     );
     let absent = current_attribution(&handle).await;
     let winner = handle
-        .attach_presence("client-b", true, absent.generation)
+        .attach_presence(&live_input("client-b"), "client-b", absent.generation)
         .await;
     assert!(
         matches!(
@@ -5443,6 +5443,7 @@ async fn gate_premises(tag: &str, client: &str) -> Result<GatePremises, String> 
     let generation = current_generation(&handle).await?;
     let companion_key = companion.as_raw().as_uuid().to_string();
     handle.record_open_round(
+        &live,
         &live.client_ref,
         &companion_key,
         OpenRound {
@@ -5493,7 +5494,7 @@ fn gate_for(
         handle: &premises.handle,
         frame: &premises.probe,
         live: &premises.live,
-        client_ref: premises.live.client_ref.clone(),
+        connection: premises.live.connection_id,
         companion_key: premises.companion_key.clone(),
         companion: premises.companion,
         stream: ene_api::v1::refs::StreamWireId(RawId::new().as_uuid()),
@@ -5618,6 +5619,7 @@ async fn stale_while_waiting_for_capacity_never_publishes() -> Result<(), String
     }
     // A newer submit replaces the open round while the delta waits.
     premises.handle.record_open_round(
+        &premises.live,
         &premises.live.client_ref,
         &premises.companion_key,
         OpenRound {
@@ -5659,6 +5661,61 @@ async fn stale_while_waiting_for_capacity_never_publishes() -> Result<(), String
     if rx.recv().await.is_some() {
         return Err(String::from("the stale delta must never publish"));
     }
+    Ok(())
+}
+
+/// The connection table, not the `LiveInput` snapshot, decides stream
+/// currentness: a same-device replacement keeps the client, generation, and
+/// open-round key looking current, so only the table check aborts the next
+/// publication. The open-round cleanup is deliberately not run here, so this
+/// pins the StreamGate's connection check in isolation.
+#[tokio::test]
+async fn replaced_connection_aborts_a_stream_even_before_cleanup() -> Result<(), String> {
+    use ene_inference::{DeltaFlow, DeltaSink as _};
+
+    let premises = gate_premises("dlg-conn-check", "client-conn-check").await?;
+    let (gate_tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut gate = gate_for(&premises, gate_tx);
+    // C2 installs as current for the same device; the Host lifecycle sweep
+    // has not run, so C1's open round still looks current.
+    let c2 = premises.live.authority.note_accept();
+    crate::test_support::authenticate(&premises.live.authority, &c2, "client-conn-check");
+    assert!(
+        premises
+            .handle
+            .open_round_for(&premises.live.connection_id, &premises.companion_key)
+            .is_some(),
+        "the open round must still exist for this unit test to isolate the check"
+    );
+    match gate.push_delta("after-replacement").await {
+        DeltaFlow::Abort(_) => {}
+        DeltaFlow::Continue => {
+            return Err(String::from(
+                "a replaced connection must abort the next publication",
+            ));
+        }
+    }
+    // The completion path likewise never fakes Completed on the old socket.
+    gate.finish().await;
+    drop(gate);
+    let mut frames = Vec::new();
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+    assert!(
+        !frames.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamFrame(delta) if delta.is_final
+        )),
+        "the replaced stream emits no final frame, got {frames:?}"
+    );
+    assert!(
+        matches!(
+            frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the replaced stream closes interrupted, got {frames:?}"
+    );
     Ok(())
 }
 
@@ -6225,8 +6282,10 @@ async fn append_racing_a_newer_owner_commit_adopts_nothing() -> Result<(), Strin
         .ensure_running_companion()
         .await
         .map_err(|error| format!("the companion must resolve: {error:?}"))?;
-    let retained =
-        handle.open_round_for(&live.client_ref, &companion.as_raw().as_uuid().to_string());
+    let retained = handle.open_round_for(
+        &live.connection_id,
+        &companion.as_raw().as_uuid().to_string(),
+    );
     assert!(
         retained.is_none_or(|open| open.round == expected),
         "no newer submit moved the open round in this race"
@@ -6323,6 +6382,330 @@ async fn same_round_newer_owner_input_supersedes_the_running_reply() -> Result<(
         timeline_count(&handle).await?,
         3,
         "both owner inputs plus the joined reply are durable, never the stale one"
+    );
+    Ok(())
+}
+
+/// The accepted round wire from a submit's response batch.
+fn accepted_round_wire(frames: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWireId, String> {
+    frames
+        .iter()
+        .find_map(|frame| match &frame.payload {
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) => {
+                Some(round.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("no accept frame in {frames:?}"))
+}
+
+/// Replacement case C: a submit superseded before durable acceptance commits
+/// no Owner row, opens no round, dispatches no provider call, and streams
+/// nothing.
+#[tokio::test]
+async fn replacement_before_acceptance_commits_no_owner_input() -> Result<(), String> {
+    use ene_companion::{CompanionRepository as _, UndeliveredRepository as _};
+
+    let live1 = live_input("client-accept-replace");
+    let (handle, _dir) = round_test_handle("dlg-accept-replace", &live1, &ok_transport()).await?;
+    let handle = std::sync::Arc::new(handle);
+    let before = timeline_count(&handle).await?;
+    assert_eq!(before, 0, "the fixture starts with no Owner input");
+    // Presence is established before the raced submit, so the only state the
+    // stale submit could touch is the acceptance commit itself.
+    assert!(matches!(
+        handle
+            .attach_presence(
+                &live1,
+                "client-accept-replace",
+                ene_presence::PresenceGeneration::from_u64(0)
+            )
+            .await,
+        AttachOutcome::Attached(_)
+    ));
+
+    let gate = handle.arm_submit_accept_gate();
+    let submit = {
+        let handle = std::sync::Arc::clone(&handle);
+        let live = live1.clone();
+        tokio::spawn(async move {
+            let transport = ok_transport();
+            handle
+                .handle_frame(
+                    submit_frame(
+                        handle.companion_wire(),
+                        Some(1),
+                        None,
+                        "local-accept-1",
+                        "hello",
+                        live.connection_id,
+                    ),
+                    live,
+                    &transport,
+                )
+                .await
+        })
+    };
+    gate.wait_entered().await;
+    handle.disarm_submit_accept_gate();
+    // C2 authenticates on the same table: C1 is superseded and swept.
+    let table = std::sync::Arc::clone(&live1.authority);
+    let c2 = table.note_accept();
+    crate::test_support::authenticate(&table, &c2, "client-accept-replace");
+    handle.on_connection_superseded(&live1.connection_id);
+    gate.release();
+
+    let frames = submit.await.map_err(|error| format!("join: {error}"))?;
+    assert_eq!(frames.len(), 1, "the stale submit answers one frame");
+    assert!(
+        matches!(
+            &frames[0].payload,
+            WirePayload::Reject(notice) if notice.kind == RejectKind::StaleConnection
+        ),
+        "the stale submit must be rejected, got {:?}",
+        frames[0].payload
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        before,
+        "no Owner row commits"
+    );
+    assert!(!handle.has_open_round_for_test(), "no round opens");
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("companion: {error:?}"))?;
+    assert!(
+        handle
+            .store
+            .list_unpresented(companion, None, 50)
+            .await
+            .map_err(|error| format!("rows: {error:?}"))?
+            .entries
+            .is_empty(),
+        "no provider dispatch registers a reply"
+    );
+    Ok(())
+}
+
+/// Replacement case D: the old open round is not joinable by the same-device
+/// replacement — an Auto submit mints a new round — while History still
+/// reads the old round's durable content.
+#[tokio::test]
+async fn replacement_invalidates_the_open_round_and_never_joins_it() -> Result<(), String> {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+
+    let live1 = live_input("client-round-replace");
+    let (handle, _dir) = round_test_handle("dlg-round-replace", &live1, &ok_transport()).await?;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("companion: {error:?}"))?;
+    let companion_key = companion.as_raw().as_uuid().to_string();
+
+    // C1 opens round R with an Auto submit.
+    let first = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-round-1",
+                "first input",
+                live1.connection_id,
+            ),
+            live1.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let r1 = accepted_round_wire(&first)?;
+    let open1 = handle
+        .open_round_for(&live1.connection_id, &companion_key)
+        .expect("C1 owns an open round");
+
+    // C2 replaces C1 on the same device.
+    let table = std::sync::Arc::clone(&live1.authority);
+    let c2 = table.note_accept();
+    crate::test_support::authenticate(&table, &c2, "client-round-replace");
+    handle.on_connection_superseded(&live1.connection_id);
+    let live2 = table
+        .snapshot(&c2)
+        .ok_or(String::from("C2 must snapshot"))?;
+    assert!(
+        handle
+            .open_round_for(&live1.connection_id, &companion_key)
+            .is_none(),
+        "the replacement drops C1's open-round binding"
+    );
+
+    // C2's Auto submit joins nothing and mints a fresh round.
+    let generation = current_generation(&handle).await?;
+    let second = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(generation),
+                None,
+                "local-round-2",
+                "second input",
+                live2.connection_id,
+            ),
+            live2.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let r2 = accepted_round_wire(&second)?;
+    assert_ne!(r1, r2, "the replacement never joins the old round");
+    let open2 = handle
+        .open_round_for(&live2.connection_id, &companion_key)
+        .expect("C2 owns the new round");
+    assert_ne!(open2.round, open1.round);
+
+    // History still reads R's durable content: the Owner input and its reply.
+    let items = handle
+        .store
+        .load_timeline(companion, None, Some(open1.round.as_raw()), 10)
+        .await
+        .map_err(|error| format!("timeline: {error:?}"))?;
+    assert_eq!(items.len(), 2, "the old round stays readable");
+    assert_eq!(items[0].text, "first input");
+    assert_eq!(items[1].text, "hi there");
+    Ok(())
+}
+
+/// Replacement case E: a replacement aborts the old stream's publications
+/// instead of faking completion; the durable reply is still adopted and
+/// re-presents to the replacement connection.
+#[tokio::test]
+async fn replacement_aborts_the_old_stream_and_redelivers_the_reply() -> Result<(), String> {
+    use ene_api::v1::undelivered::{UndeliveredRequest, UndeliveredResponse};
+
+    let stalled = CompletionGatedTransport::new("Hel", "Hello");
+    let live1 = live_input("client-stream-replace");
+    let (handle, _dir) = round_test_handle("dlg-stream-replace", &live1, &stalled).await?;
+    let handle = std::sync::Arc::new(handle);
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream-1",
+        "first input",
+        live1.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut first_host =
+        Box::pin(handle.handle_frame_to(first, live1.clone(), &stalled, &mut sink, &stream_tx));
+    // Drain the early batch up to the first delta.
+    let mut early = Vec::new();
+    while early.len() < 4 {
+        tokio::select! {
+            biased;
+            () = &mut first_host => {
+                return Err(String::from("the provider completed before the early frames"));
+            }
+            maybe = rx.recv() => early.push(maybe.ok_or(String::from("frames must arrive"))?),
+        }
+    }
+    assert!(
+        matches!(
+            &early[3].payload,
+            WirePayload::TextStreamFrame(delta) if delta.delta == "Hel" && delta.seq == 0
+        ),
+        "the pre-replacement delta shows, got {:?}",
+        early[3].payload
+    );
+
+    // Replace C1 while the provider is parked before completion.
+    let table = std::sync::Arc::clone(&live1.authority);
+    let c2 = table.note_accept();
+    crate::test_support::authenticate(&table, &c2, "client-stream-replace");
+    handle.on_connection_superseded(&live1.connection_id);
+    let live2 = table
+        .snapshot(&c2)
+        .ok_or(String::from("C2 must snapshot"))?;
+
+    stalled.release().await;
+    first_host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut first_frames = early;
+    while let Some(frame) = rx.recv().await {
+        first_frames.push(frame);
+    }
+    let shown: Vec<&str> = first_frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        vec!["Hel"],
+        "no delta follows the replacement, got {shown:?}"
+    );
+    assert!(
+        !first_frames.iter().any(|frame| matches!(
+            &frame.payload,
+            WirePayload::TextStreamFrame(delta) if delta.is_final
+        )),
+        "the replaced stream never fakes completion, got {first_frames:?}"
+    );
+    assert!(
+        matches!(
+            first_frames.last().map(|frame| &frame.payload),
+            Some(WirePayload::TextStreamClose(close)) if close.status == StreamClose::Interrupted
+        ),
+        "the replaced stream closes interrupted, got {first_frames:?}"
+    );
+    // The durable reply was adopted: the existing dialogue contract keeps
+    // accepted work, and only the connection-bound stream dies.
+    assert_eq!(
+        timeline_count(&handle).await?,
+        2,
+        "owner input plus the adopted reply are durable"
+    );
+
+    // The replacement connection re-presents the reply.
+    let request_frame = stamped(
+        ene_plugin_ipc::WireFrame {
+            envelope: new_outgoing_envelope(
+                ProtocolVersion::V1,
+                sender(),
+                WireMessageType(String::from("UndeliveredRequest")),
+            ),
+            payload: WirePayload::UndeliveredRequest(UndeliveredRequest {
+                companion: None,
+                cursor: None,
+                limit: None,
+                redisplay: false,
+            }),
+        },
+        live2.connection_id,
+    );
+    let query = match &request_frame.payload {
+        WirePayload::UndeliveredRequest(query) => query.clone(),
+        _ => unreachable!(),
+    };
+    let summary = match handle
+        .request_undelivered(&request_frame, &live2, &query)
+        .await
+        .into_iter()
+        .next()
+        .map(|frame| frame.payload)
+    {
+        Some(WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary))) => summary,
+        other => return Err(format!("expected C2's summary, got {other:?}")),
+    };
+    assert!(
+        summary
+            .items
+            .iter()
+            .any(|item| item.excerpt.contains("Hello")),
+        "the reply re-presents to C2, got {summary:?}"
     );
     Ok(())
 }
