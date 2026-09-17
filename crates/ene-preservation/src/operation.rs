@@ -217,6 +217,15 @@ pub enum PreservationTechnicalError {
 /// Canonical persistence boundary. Admission publishes operation, protected
 /// material, initial condition and known source correlations atomically before
 /// returning Started. No participant effects occur within these methods.
+///
+/// Source-correlation invariant for the erasure-currentness hot path: an
+/// unfinished operation keeps `erasure_condition_source` rows only in its
+/// current sweep, and a completed operation keeps zero source rows. The
+/// completion boundary (A5; A1 exposes no completion authority) must close
+/// the current condition and delete the operation's material, hints, and all
+/// source rows atomically — historical `erasure_condition` rows may remain,
+/// but no source copy is kept for audit/history. Any remaining source row for
+/// a completed operation is canonical corruption and fails closed.
 pub trait PreservationRepository: Send + Sync {
     fn start_targeted_deletion(
         &self,

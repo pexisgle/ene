@@ -55,6 +55,14 @@ fn candidate_page(
 /// operation a query actually touches: an inner join must never silently hide
 /// an orphan correlation, an unfinished operation whose condition was closed
 /// early, or a completed operation that still holds protected material.
+///
+/// Source-correlation invariant (current-sweep canonical): an unfinished
+/// operation keeps `erasure_condition_source` rows only in its current sweep
+/// (`NextSweep` copies forward then deletes the old sweep atomically);
+/// historical `erasure_condition` rows remain but carry no source rows; a
+/// completed operation keeps zero source rows (the A5 completion boundary
+/// must delete them — A1 exposes no completion authority — and any remaining
+/// row fails closed). No second copy exists for audit/history.
 /// Bounded by the touching query's page, never a whole-store scan.
 fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechnicalError> {
     let broken: bool = conn
@@ -78,7 +86,13 @@ fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechni
              WHERE c.operation_id=?1 AND (o.operation_id IS NULL OR c.sweep<=0 OR c.sweep>o.sweep))
          OR EXISTS(SELECT 1 FROM erasure_condition_source s LEFT JOIN erasure_condition c
              ON c.operation_id=s.operation_id AND c.sweep=s.sweep
-             WHERE s.operation_id=?1 AND c.operation_id IS NULL)",
+             WHERE s.operation_id=?1 AND (c.operation_id IS NULL OR s.sweep<=0))
+         OR EXISTS(SELECT 1 FROM erasure_condition_source s JOIN deletion_operation o
+             ON o.operation_id=s.operation_id
+             WHERE s.operation_id=?1 AND o.phase!='completed' AND s.sweep!=o.sweep)
+         OR EXISTS(SELECT 1 FROM erasure_condition_source s JOIN deletion_operation o
+             ON o.operation_id=s.operation_id
+             WHERE s.operation_id=?1 AND o.phase='completed')",
             [operation],
             |row| row.get(0),
         )
@@ -92,10 +106,13 @@ fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechni
 /// Bounded covering-candidate read for [`covering_condition`]: the single
 /// current-sweep source correlation reachable through the existing
 /// `idx_erasure_condition_source_source` index on `(source)`. Only an open
-/// current condition of an unfinished operation qualifies, so completed
-/// historical operations that name the same source never match this join.
-/// Exposed so tests can `EXPLAIN QUERY PLAN` the exact production statement
-/// and pin that no full scan of `erasure_condition_source` creeps back in.
+/// current condition of an unfinished operation qualifies, and unfinished
+/// source rows exist only in the current sweep (old sweeps are deleted by
+/// `NextSweep`, completed operations keep zero source rows), so completed
+/// historical operations never match this join and the row count for one
+/// source never grows with history. Exposed so tests can `EXPLAIN QUERY PLAN`
+/// the exact production statement; boundedness itself is pinned by the
+/// durable row invariant (source-row counts), not by the plan alone.
 pub(crate) const COVERING_CANDIDATE_SQL: &str = "SELECT s.operation_id,c.sweep,c.opened_at
      FROM erasure_condition_source s
      JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
@@ -106,33 +123,33 @@ pub(crate) const COVERING_CANDIDATE_SQL: &str = "SELECT s.operation_id,c.sweep,c
 /// source (`WHERE s.source=?1` in every branch, served by the same source
 /// index). Each branch mirrors one way `validate` refuses torn current state
 /// that the candidate join above would otherwise read as "not covering":
-/// an orphan source row with no parent condition, a current condition with
-/// no operation row, an unfinished operation whose current condition was
-/// closed early, a completed operation whose current condition is still
-/// open, a source row pointing past the operation's current sweep, and an
-/// unfinished operation missing its current condition row. Completed
-/// operations that follow the lifecycle rules (closed current condition,
-/// protected material and hints removed) match no branch.
+/// a source row with no parent condition, a source row with no operation row,
+/// an unfinished operation whose current condition was closed early, a
+/// completed operation with any source row still present, an unfinished
+/// source row outside the operation's current sweep (old-sweep leftover that
+/// was not inherited, or a future sweep), and an unfinished operation missing
+/// its current condition row. Completed operations that follow the lifecycle
+/// rules (closed current condition, protected material, hints, and all source
+/// rows removed) match no branch. Every branch starts from the source index,
+/// so the probe input is the source rows naming this source — never a scan
+/// of historical operations.
 pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
      EXISTS(SELECT 1 FROM erasure_condition_source s
          LEFT JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
          WHERE s.source=?1 AND c.operation_id IS NULL)
      OR EXISTS(SELECT 1 FROM erasure_condition_source s
-         JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
-         LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+         LEFT JOIN deletion_operation o ON o.operation_id=s.operation_id
          WHERE s.source=?1 AND o.operation_id IS NULL)
      OR EXISTS(SELECT 1 FROM erasure_condition_source s
          JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
          JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
          WHERE s.source=?1 AND o.phase!='completed' AND c.closed_at IS NOT NULL)
      OR EXISTS(SELECT 1 FROM erasure_condition_source s
-         JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
-         JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
-         WHERE s.source=?1 AND o.phase='completed' AND c.closed_at IS NULL)
+         JOIN deletion_operation o ON o.operation_id=s.operation_id
+         WHERE s.source=?1 AND o.phase='completed')
      OR EXISTS(SELECT 1 FROM erasure_condition_source s
-         JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
-         JOIN deletion_operation o ON o.operation_id=c.operation_id
-         WHERE s.source=?1 AND o.phase!='completed' AND c.sweep>o.sweep)
+         JOIN deletion_operation o ON o.operation_id=s.operation_id
+         WHERE s.source=?1 AND o.phase!='completed' AND s.sweep!=o.sweep)
      OR EXISTS(SELECT 1 FROM erasure_condition_source s
          JOIN deletion_operation o ON o.operation_id=s.operation_id
          WHERE s.source=?1 AND o.phase!='completed'
@@ -140,15 +157,18 @@ pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
              WHERE c.operation_id=o.operation_id AND c.sweep=o.sweep))";
 
 /// One shared closure-aware coverage read for inference and Task resume.
-/// Historical sweeps stay inside the operation interval, but only the current
-/// sweep participates in current coverage; a generation advance copies its
-/// cumulative sources and never closes the interval.
+/// Historical `erasure_condition` rows stay inside the operation interval as
+/// lifecycle/history, but only the current sweep carries source rows and
+/// participates in current coverage; a generation advance copies the current
+/// sweep's cumulative sources forward and then deletes the old sweep's source
+/// rows in the same transaction, never closing the interval.
 ///
 /// Bounded by construction: SQL narrows to the single current-sweep
 /// candidate through the source index before any Rust-side validation, so
-/// completed historical operations that name the same source are never
+/// completed historical operations (zero source rows by invariant) are never
 /// enumerated or validated — validation runs only on the one candidate, if
-/// any. When there is no candidate, the torn-state probe above still fails
+/// any, and the per-operation check never walks other operations' history.
+/// When there is no candidate, the torn-state probe above still fails
 /// closed on torn current state relevant to this source instead of reading
 /// it as "not covering". A genuine absence of coverage is the authoritative
 /// empty set (`Ok(None)`): there is no second registry and no cached
@@ -459,9 +479,22 @@ impl PreservationRepository for Store {
                         params![id, next, WallClockWithTz::now().to_rfc3339()],
                     )
                     .map_err(storage)?;
+                    // Cumulative source coverage is inherited by copying the
+                    // current sweep forward; the old sweep's source rows are
+                    // then deleted in the same transaction so an unfinished
+                    // operation keeps source correlations only in its current
+                    // sweep. Historical erasure_condition rows remain as
+                    // lifecycle/history. The copy-then-delete order with a
+                    // single commit keeps a crash from publishing a current
+                    // sweep that silently drops coverage.
                     tx.execute(
                         "INSERT INTO erasure_condition_source (operation_id,sweep,source) SELECT operation_id,?2,source FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?3",
                         params![id, next, sweep],
+                    )
+                    .map_err(storage)?;
+                    tx.execute(
+                        "DELETE FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?2",
+                        params![id, sweep],
                     )
                     .map_err(storage)?;
                     tx.execute(

@@ -92,9 +92,17 @@ opened_at TEXT NOT NULL,
 closed_at TEXT NULL,
 PRIMARY KEY (operation_id, sweep)
 );
+-- Current-sweep canonical source correlation for the erasure-currentness hot
+-- path (AU14 / Task resume). Unfinished operations keep source rows only in
+-- their current sweep: NextSweep copies the current sweep forward and then
+-- deletes the old sweep in the same transaction. Historical erasure_condition
+-- rows remain as lifecycle/history but carry no source rows. Completed
+-- operations keep zero source rows: the completion boundary (A5; A1 has no
+-- completion authority) must delete them, and any remaining row fails closed.
+-- No second copy is kept for audit/history.
 CREATE TABLE erasure_condition_source (
 operation_id TEXT NOT NULL,
-sweep INTEGER NOT NULL,
+sweep INTEGER NOT NULL CHECK (sweep > 0),
 source TEXT NOT NULL,
 PRIMARY KEY (operation_id, sweep, source)
 );
