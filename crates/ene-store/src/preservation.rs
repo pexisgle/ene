@@ -89,37 +89,90 @@ fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechni
     Ok(())
 }
 
+/// Bounded covering-candidate read for [`covering_condition`]: the single
+/// current-sweep source correlation reachable through the existing
+/// `idx_erasure_condition_source_source` index on `(source)`. Only an open
+/// current condition of an unfinished operation qualifies, so completed
+/// historical operations that name the same source never match this join.
+/// Exposed so tests can `EXPLAIN QUERY PLAN` the exact production statement
+/// and pin that no full scan of `erasure_condition_source` creeps back in.
+pub(crate) const COVERING_CANDIDATE_SQL: &str = "SELECT s.operation_id,c.sweep,c.opened_at
+     FROM erasure_condition_source s
+     JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
+     JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
+     WHERE s.source=?1 AND c.closed_at IS NULL AND o.phase!='completed' LIMIT 1";
+
+/// Bounded torn-state probe for [`covering_condition`], scoped to the queried
+/// source (`WHERE s.source=?1` in every branch, served by the same source
+/// index). Each branch mirrors one way `validate` refuses torn current state
+/// that the candidate join above would otherwise read as "not covering":
+/// an orphan source row with no parent condition, a current condition with
+/// no operation row, an unfinished operation whose current condition was
+/// closed early, a completed operation whose current condition is still
+/// open, a source row pointing past the operation's current sweep, and an
+/// unfinished operation missing its current condition row. Completed
+/// operations that follow the lifecycle rules (closed current condition,
+/// protected material and hints removed) match no branch.
+pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
+     EXISTS(SELECT 1 FROM erasure_condition_source s
+         LEFT JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
+         WHERE s.source=?1 AND c.operation_id IS NULL)
+     OR EXISTS(SELECT 1 FROM erasure_condition_source s
+         JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
+         LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+         WHERE s.source=?1 AND o.operation_id IS NULL)
+     OR EXISTS(SELECT 1 FROM erasure_condition_source s
+         JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
+         JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
+         WHERE s.source=?1 AND o.phase!='completed' AND c.closed_at IS NOT NULL)
+     OR EXISTS(SELECT 1 FROM erasure_condition_source s
+         JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
+         JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
+         WHERE s.source=?1 AND o.phase='completed' AND c.closed_at IS NULL)
+     OR EXISTS(SELECT 1 FROM erasure_condition_source s
+         JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
+         JOIN deletion_operation o ON o.operation_id=c.operation_id
+         WHERE s.source=?1 AND o.phase!='completed' AND c.sweep>o.sweep)
+     OR EXISTS(SELECT 1 FROM erasure_condition_source s
+         JOIN deletion_operation o ON o.operation_id=s.operation_id
+         WHERE s.source=?1 AND o.phase!='completed'
+         AND NOT EXISTS(SELECT 1 FROM erasure_condition c
+             WHERE c.operation_id=o.operation_id AND c.sweep=o.sweep))";
+
 /// One shared closure-aware coverage read for inference and Task resume.
 /// Historical sweeps stay inside the operation interval, but only the current
 /// sweep participates in current coverage; a generation advance copies its
-/// cumulative sources and never closes the interval. Every operation a source
-/// row points at is validated before its condition is interpreted, so
-/// corruption fails closed instead of reading as "not covering".
+/// cumulative sources and never closes the interval.
+///
+/// Bounded by construction: SQL narrows to the single current-sweep
+/// candidate through the source index before any Rust-side validation, so
+/// completed historical operations that name the same source are never
+/// enumerated or validated — validation runs only on the one candidate, if
+/// any. When there is no candidate, the torn-state probe above still fails
+/// closed on torn current state relevant to this source instead of reading
+/// it as "not covering". A genuine absence of coverage is the authoritative
+/// empty set (`Ok(None)`): there is no second registry and no cached
+/// NoDeletion sentinel.
 pub(crate) fn covering_condition(
     conn: &Connection,
     source: &str,
 ) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
-    let mut statement = conn
-        .prepare("SELECT DISTINCT operation_id FROM erasure_condition_source WHERE source=?1 ORDER BY operation_id")
+    let candidate: Option<(String, i64, String)> = conn
+        .query_row(COVERING_CANDIDATE_SQL, [source], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
         .map_err(storage)?;
-    let mut rows = statement.query([source]).map_err(storage)?;
-    while let Some(row) = rows.next().map_err(storage)? {
-        let id: String = row.get(0).map_err(storage)?;
+    if let Some((id, sweep, opened)) = candidate {
         validate(conn, &id)?;
-        let current: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT c.sweep,c.opened_at FROM erasure_condition c
-                 JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
-                 WHERE c.operation_id=?1 AND c.closed_at IS NULL AND o.phase!='completed'",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(storage)?;
-        if let Some((sweep, opened)) = current {
-            parse_time(&opened)?;
-            return Ok(Some(decode_ref(&id, sweep)?.condition()));
-        }
+        parse_time(&opened)?;
+        return Ok(Some(decode_ref(&id, sweep)?.condition()));
+    }
+    let torn: bool = conn
+        .query_row(COVERING_TORN_PROBE_SQL, [source], |row| row.get(0))
+        .map_err(storage)?;
+    if torn {
+        return Err(corrupt());
     }
     Ok(None)
 }
@@ -361,6 +414,21 @@ impl PreservationRepository for Store {
                     .map_err(storage)?;
                 }
                 DeletionLifecycleChange::NextSweep => {
+                    // A Held(Unavailable) operation keeps its current condition
+                    // active (§5.1) until an explicit Resume decides recovery:
+                    // advancing the generation underneath the hold would publish
+                    // a new current condition without a recovery decision and
+                    // silently flip the phase that A4/A5 participant sweep
+                    // tracking observes. Reject like the GenerationExhausted
+                    // hold below — no writes, no generation advance — so an
+                    // explicit Resume stays the only path back to Active.
+                    if record.phase == DeletionOperationPhase::Held
+                        && record.hold == Some(DeletionHoldReason::Unavailable)
+                    {
+                        return Ok(DeletionLifecycleOutcome::Held(
+                            DeletionHoldReason::Unavailable,
+                        ));
+                    }
                     let sweep =
                         i64::try_from(expected.sweep.as_u64()).map_err(|_| corrupt())?;
                     let Some(next) = sweep.checked_add(1) else {

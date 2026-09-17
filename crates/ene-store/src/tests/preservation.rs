@@ -426,3 +426,264 @@ async fn concurrent_duplicate_admissions_serialize_on_sqlite_master() {
         1
     );
 }
+
+fn complete_operation_fixture(store: &Store, current: DeletionOperationRef) {
+    let id = crate::codec::encode_id(current.operation.as_raw());
+    let conn = store.conn.lock().unwrap();
+    conn.execute(
+        "DELETE FROM deletion_search_material WHERE operation_id=?1",
+        [&id],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM deletion_semantic_hint WHERE operation_id=?1",
+        [&id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
+        params![id, current.sweep.as_u64() as i64],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
+        [&id],
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn covering_condition_ignores_completed_history_and_uses_the_source_index() {
+    let store = open_memory().await.unwrap();
+    let source = RawId::new();
+    let probe = crate::codec::encode_id(source);
+    // Seed many completed historical operations naming the probed source,
+    // each consistent with the validate rules (closed current condition,
+    // protected material and hints removed): they must never be enumerated
+    // or validated by the covering read.
+    {
+        let conn = store.conn.lock().unwrap();
+        for _ in 0..250 {
+            let id = crate::codec::encode_id(RawId::new());
+            conn.execute(
+                "INSERT INTO deletion_operation (operation_id,sweep,phase,purpose,started_at) VALUES (?1,1,'completed','privacy','2026-01-01T00:00:00Z')",
+                [&id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO erasure_condition (operation_id,sweep,opened_at,closed_at) VALUES (?1,1,'2026-01-01T00:00:00Z','2026-09-17T01:00:00Z')",
+                [&id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
+                params![id, probe],
+            )
+            .unwrap();
+        }
+    }
+    // With only completed history naming the source, the authoritative
+    // answer is the empty set — not corruption, not coverage.
+    assert_eq!(
+        crate::preservation::covering_condition(&store.conn.lock().unwrap(), &probe).unwrap(),
+        None
+    );
+    // An unfinished operation covering the same source still wins, no
+    // matter how much completed history names it.
+    let active = admit(&store, "current-target", vec![source]).await;
+    assert_eq!(
+        crate::preservation::covering_condition(&store.conn.lock().unwrap(), &probe).unwrap(),
+        Some(active.condition())
+    );
+    // Completing the current operation returns the answer to empty again.
+    complete_operation_fixture(&store, active);
+    assert_eq!(
+        crate::preservation::covering_condition(&store.conn.lock().unwrap(), &probe).unwrap(),
+        None
+    );
+    // Structurally pin boundedness: the exact production statements must
+    // reach erasure_condition_source through the source index, never a full
+    // scan, so future edits cannot silently reintroduce the historical walk.
+    for statement in [
+        crate::preservation::COVERING_CANDIDATE_SQL,
+        crate::preservation::COVERING_TORN_PROBE_SQL,
+    ] {
+        let plan: Vec<String> = {
+            let conn = store.conn.lock().unwrap();
+            let mut explained = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {statement}"))
+                .unwrap();
+            explained
+                .query_map([probe.as_str()], |row| row.get(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert!(!plan.is_empty(), "missing plan for {statement}");
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_erasure_condition_source_source")),
+            "covering lookup must use the source index, plan: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| {
+                // "SCAN CONSTANT ROW" is the single constant output row of the
+                // OR-combined EXISTS probe, not a table scan.
+                line.contains("SCAN") && !line.contains("SCAN CONSTANT ROW")
+            }),
+            "covering lookup must not scan, plan: {plan:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn covering_condition_still_fails_closed_on_torn_current_state_for_the_source() {
+    // The bounded rewrite must preserve the fail-closed contract: torn
+    // current state relevant to the probed source never reads as Clear.
+    let store = open_memory().await.unwrap();
+    let source = RawId::new();
+    let probe = crate::codec::encode_id(source);
+    let current = admit(&store, "torn-target", vec![source]).await;
+    let id = crate::codec::encode_id(current.operation.as_raw());
+    // An unfinished operation whose current condition was closed early is
+    // torn, even though no open current condition covers the source.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+    assert_eq!(
+        crate::preservation::covering_condition(&store.conn.lock().unwrap(), &probe),
+        Err(PreservationTechnicalError::CorruptState)
+    );
+    // An orphan source row with no parent condition is torn on its own.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,99,?2)",
+            params![crate::codec::encode_id(RawId::new()), probe],
+        )
+        .unwrap();
+    assert_eq!(
+        crate::preservation::covering_condition(&store.conn.lock().unwrap(), &probe),
+        Err(PreservationTechnicalError::CorruptState)
+    );
+}
+
+#[tokio::test]
+async fn held_unavailable_next_sweep_is_rejected_and_only_resume_releases_the_hold() {
+    // The hold signals an unrecovered impediment: advancing the generation
+    // underneath it would publish a new current condition without a recovery
+    // decision and silently flip the phase that A4/A5 participant sweep
+    // tracking observes. NextSweep is therefore rejected with no writes and
+    // no generation advance — symmetric with the GenerationExhausted
+    // rejection — and an explicit Resume stays the only path back to Active.
+    let store = open_memory().await.unwrap();
+    let current = admit(&store, "held-target", vec![]).await;
+    let DeletionLifecycleOutcome::Applied(held) = store
+        .change_deletion_lifecycle(current, DeletionLifecycleChange::Hold)
+        .await
+        .unwrap()
+    else {
+        panic!("hold must apply");
+    };
+    assert_eq!(held, current);
+    assert_eq!(
+        store
+            .change_deletion_lifecycle(held, DeletionLifecycleChange::NextSweep)
+            .await
+            .unwrap(),
+        DeletionLifecycleOutcome::Held(DeletionHoldReason::Unavailable)
+    );
+    let rows = store.unfinished_deletions(None, 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].current, held);
+    assert_eq!(rows[0].phase, DeletionOperationPhase::Held);
+    assert_eq!(rows[0].hold, Some(DeletionHoldReason::Unavailable));
+    let DeletionLifecycleOutcome::Applied(resumed) = store
+        .change_deletion_lifecycle(held, DeletionLifecycleChange::Resume)
+        .await
+        .unwrap()
+    else {
+        panic!("resume must apply");
+    };
+    assert_eq!(resumed, current);
+    let DeletionLifecycleOutcome::Applied(next) = store
+        .change_deletion_lifecycle(resumed, DeletionLifecycleChange::NextSweep)
+        .await
+        .unwrap()
+    else {
+        panic!("the generation must advance after resume");
+    };
+    assert_eq!(next.sweep.as_u64(), 2);
+    let rows = store.unfinished_deletions(None, 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].current, next);
+    assert_eq!(rows[0].phase, DeletionOperationPhase::Active);
+    assert_eq!(rows[0].hold, None);
+}
+
+#[tokio::test]
+async fn finalizing_next_sweep_returns_to_active_on_remainder_and_stays_finalizing_without_material()
+ {
+    // Designed remainder path (§5: Finalizing--remainder-->Active): with
+    // search material present a new sweep generation issues and the operation
+    // returns to Active; once the material is destroyed the operation can no
+    // longer restart and stays Finalizing.
+    let store = open_memory().await.unwrap();
+    let current = admit(&store, "remainder-target", vec![]).await;
+    let id = crate::codec::encode_id(current.operation.as_raw());
+    // Only fixture SQL can enter finalizing: no A1 production completion authority.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE deletion_operation SET phase='finalizing' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+    let DeletionLifecycleOutcome::Applied(next) = store
+        .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
+        .await
+        .unwrap()
+    else {
+        panic!("remainder must reopen a new sweep");
+    };
+    assert_eq!(next.sweep.as_u64(), 2);
+    let rows = store.unfinished_deletions(None, 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].current, next);
+    assert_eq!(rows[0].phase, DeletionOperationPhase::Active);
+    assert_eq!(rows[0].hold, None);
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE deletion_operation SET phase='finalizing' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM deletion_search_material WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store
+            .change_deletion_lifecycle(next, DeletionLifecycleChange::NextSweep)
+            .await
+            .unwrap(),
+        DeletionLifecycleOutcome::Finalizing
+    );
+    let rows = store.unfinished_deletions(None, 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].current, next);
+    assert_eq!(rows[0].phase, DeletionOperationPhase::Finalizing);
+}
