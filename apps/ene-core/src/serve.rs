@@ -145,7 +145,9 @@ pub enum CoreError {
     Approve(String),
     /// Targeted Deletion composition failure: an invalid fan-out pass, a
     /// duplicate participant registration, or a canonical preservation
-    /// refusal. Never a global-completion claim and never a participant fact.
+    /// refusal. Also carries Host-local inlet failures (malformed status
+    /// cursor or limit, unreadable status). Never a global-completion claim
+    /// and never a participant fact; messages carry no target body.
     #[error("targeted deletion failed: {0}")]
     Deletion(String),
     #[error("unsupported platform: {0}")]
@@ -1135,6 +1137,18 @@ impl HostHandle {
                     return emit_end(sink, refusal);
                 }
                 for response in self.answer_view(&frame, request, &live).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::DeletionStatusRequest(query) => {
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "deletion status on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
+                }
+                for response in self.deletion_status_wire(&frame, &live, query).await {
                     if sink.emit(response).is_err() {
                         break;
                     }

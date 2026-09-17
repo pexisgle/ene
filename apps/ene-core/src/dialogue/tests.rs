@@ -7032,3 +7032,67 @@ async fn stale_confirmation(status: PresentationStatus) -> Result<(), String> {
 mod task_agent;
 mod task_control;
 mod task_run;
+
+/// Provider output can never start a Targeted Deletion (lifecycle §15): a
+/// model answer that talks about deleting the Owner's data is ordinary text,
+/// and the deletion inlet stays untouched. This pins that the dialogue path
+/// has no deletion producer at all, not merely that its text is filtered.
+#[tokio::test]
+async fn provider_output_never_starts_a_targeted_deletion() {
+    use ene_preservation::PreservationRepository as _;
+
+    let (handle, _dir) = setup_handle("dlg-deletion-output").await.unwrap();
+    let transport = FakeProviderTransport::new(
+        String::from("I will permanently delete the leaked key sk-live-fixture now."),
+        None,
+    );
+    let live = live_input("client-a");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    let responses = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-1",
+                "the provider mentions the leaked key sk-live-fixture",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        accepted_round(&responses).is_ok(),
+        "the turn itself must complete, got {responses:?}"
+    );
+    assert!(
+        handle
+            .store
+            .deletion_status(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no operation exists after a provider turn"
+    );
+    assert!(
+        handle
+            .pending_targeted_deletions(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no staged deletion request exists after a provider turn"
+    );
+    assert!(
+        handle
+            .store
+            .current_erasure_conditions(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no erasure condition is published by a provider turn"
+    );
+}

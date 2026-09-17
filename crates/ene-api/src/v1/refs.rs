@@ -102,6 +102,14 @@ string_wire_ref!(
     "Opaque management target reference: wire refs only, never control state."
 );
 string_wire_ref!(
+    DeletionOperationWireRef,
+    "Opaque Targeted Deletion operation reference, rendered for display. Echo only; it names no mutation."
+);
+string_wire_ref!(
+    DeletionStatusCursorWire,
+    "Opaque Targeted Deletion status page cursor, Host-issued and bound to the deletion-status query. Echo only."
+);
+string_wire_ref!(
     BaseViewMark,
     "Opaque display-revision mark an intent was built on. Comparison material, never authority."
 );

@@ -53,6 +53,25 @@ enum CliCommand {
         provider: String,
         label: String,
     },
+    /// Targeted Deletion requests awaiting the Host-local trusted
+    /// confirmation; the exact target is shown here only (IPC §18.1 preview).
+    PendingDeletions {
+        config: Option<PathBuf>,
+        after: Option<String>,
+        limit: u32,
+    },
+    /// The Owner's final confirmation for one staged Targeted Deletion
+    /// request: it starts the canonical operation (IPC §18.1).
+    ConfirmDeletion {
+        config: Option<PathBuf>,
+        request: String,
+    },
+    /// The same bounded deletion status page the wire view renders.
+    DeletionStatus {
+        config: Option<PathBuf>,
+        cursor: Option<String>,
+        limit: u32,
+    },
 }
 
 /// The declarative Host command line: subcommands, flags, help, and version
@@ -107,6 +126,54 @@ fn ene_core_command() -> clap::Command {
                         .allow_hyphen_values(true),
                 ),
         )
+        .subcommand(
+            ClapCommand::new("pending-deletions")
+                .about("List Targeted Deletion requests awaiting Host-local confirmation")
+                .arg(
+                    Arg::new("after")
+                        .long("after")
+                        .value_name("ID")
+                        .overrides_with("after")
+                        .allow_hyphen_values(true),
+                )
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32))
+                        .default_value("50"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("confirm-deletion")
+                .about("Confirm one staged Targeted Deletion request and start it")
+                .arg(
+                    Arg::new("request")
+                        .long("request")
+                        .value_name("ID")
+                        .required(true)
+                        .overrides_with("request")
+                        .allow_hyphen_values(true),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("deletion-status")
+                .about("Show the bounded Targeted Deletion operation status")
+                .arg(
+                    Arg::new("cursor")
+                        .long("cursor")
+                        .value_name("CURSOR")
+                        .overrides_with("cursor")
+                        .allow_hyphen_values(true),
+                )
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32))
+                        .default_value("50"),
+                ),
+        )
 }
 
 fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
@@ -140,6 +207,22 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
                 label,
             })
         }
+        "pending-deletions" => Ok(CliCommand::PendingDeletions {
+            config,
+            after: sub.get_one::<String>("after").cloned(),
+            limit: sub.get_one::<u32>("limit").copied().unwrap_or(50),
+        }),
+        "confirm-deletion" => Ok(CliCommand::ConfirmDeletion {
+            config,
+            request: sub.get_one::<String>("request").cloned().ok_or_else(|| {
+                CliError::Usage(String::from("confirm-deletion requires --request ID"))
+            })?,
+        }),
+        "deletion-status" => Ok(CliCommand::DeletionStatus {
+            config,
+            cursor: sub.get_one::<String>("cursor").cloned(),
+            limit: sub.get_one::<u32>("limit").copied().unwrap_or(50),
+        }),
         other => Err(CliError::Usage(format!("unknown command: {other}"))),
     }
 }
@@ -221,6 +304,44 @@ fn main() -> Result<(), CliError> {
                 return Err(CoreError::Store("no data directory resolved".to_string()).into());
             };
             run_serve(&data_dir)?;
+            Ok(())
+        }
+        CliCommand::PendingDeletions {
+            config,
+            after,
+            limit,
+        } => {
+            let cfg = Config::load(config.as_deref())?;
+            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+                return Err(CoreError::Store("no data directory resolved".to_string()).into());
+            };
+            run_pending_deletions(&data_dir, after.as_deref(), limit)?;
+            Ok(())
+        }
+        CliCommand::ConfirmDeletion { config, request } => {
+            let cfg = Config::load(config.as_deref())?;
+            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+                return Err(CoreError::Store("no data directory resolved".to_string()).into());
+            };
+            let request = request.trim();
+            if request.is_empty() {
+                return Err(CliError::Usage(
+                    "confirm-deletion requires a non-blank --request ID".to_string(),
+                ));
+            }
+            run_confirm_deletion(&data_dir, request)?;
+            Ok(())
+        }
+        CliCommand::DeletionStatus {
+            config,
+            cursor,
+            limit,
+        } => {
+            let cfg = Config::load(config.as_deref())?;
+            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+                return Err(CoreError::Store("no data directory resolved".to_string()).into());
+            };
+            run_deletion_status(&data_dir, cursor.as_deref(), limit)?;
             Ok(())
         }
         CliCommand::ShowConfig { config } => {
@@ -363,6 +484,218 @@ fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Resul
             pending = pending.join(", ")
         )))
     })
+}
+
+/// Prints the Targeted Deletion requests awaiting the Owner's confirmation,
+/// one `<request-id> <purpose> <exact-text>` line each.
+///
+/// This is the Host-local trusted preview (IPC §18.1): the exact target text is
+/// shown here, on the Owner's own console, and nowhere else. The request
+/// identity is Host-minted and never travels the wire, so no Client can name —
+/// let alone confirm — one.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
+/// cannot be opened, and [`CoreError::Deletion`] for a malformed `--after`
+/// identity.
+fn run_pending_deletions(
+    data_dir: &Path,
+    after: Option<&str>,
+    limit: u32,
+) -> Result<(), CoreError> {
+    use std::io::Write as _;
+
+    let after = match after {
+        None => None,
+        Some(raw) => Some(parse_deletion_request_id(raw)?),
+    };
+    block_on(async move {
+        let handle = HostHandle::open(data_dir).await?;
+        let pending = handle.pending_targeted_deletions(after, limit).await?;
+        let mut stdout = std::io::stdout().lock();
+        for request in &pending {
+            writeln!(
+                stdout,
+                "{} {} {}",
+                deletion_request_id_text(request),
+                request.purpose().as_str(),
+                request.owner_review_text()
+            )
+            .map_err(|error| {
+                CoreError::Store(format!("pending deletions could not be shown: {error}"))
+            })?;
+        }
+        stdout.flush().map_err(|error| {
+            CoreError::Store(format!("pending deletions could not be shown: {error}"))
+        })?;
+        Ok(())
+    })
+}
+
+/// Records one Owner confirmation and starts the canonical Targeted Deletion
+/// operation (IPC §18.1), then prints the operation identity the status view
+/// reports.
+///
+/// An unknown request id fails with the pending id set (never their target
+/// text, which stays on the `pending-deletions` preview). Like every other
+/// offline mutation this takes the single-writer
+/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store.
+///
+/// # Errors
+///
+/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
+/// directory, [`CoreError::Store`] when the runtime cannot be built or the
+/// state cannot be opened, and [`CoreError::Deletion`] for an unknown or
+/// inadmissible request.
+fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError> {
+    use std::io::Write as _;
+
+    use ene_core::host_lock::HostLock;
+    use ene_preservation::ConfirmTargetedDeletionOutcome;
+
+    let request_id = parse_deletion_request_id(request)?;
+    block_on(async move {
+        let _lock = HostLock::acquire(data_dir)?;
+        let handle = HostHandle::open(data_dir).await?;
+        let outcome = handle
+            .confirm_targeted_deletion(&deletion_request_id_text_of(request_id))
+            .await?;
+        let mut stdout = std::io::stdout().lock();
+        let line = match outcome {
+            ConfirmTargetedDeletionOutcome::Started(operation) => format!(
+                "started {} sweep {}",
+                deletion_operation_text(operation),
+                operation.sweep.as_u64()
+            ),
+            ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(operation) => format!(
+                "already covered by {} sweep {}",
+                deletion_operation_text(operation),
+                operation.sweep.as_u64()
+            ),
+            ConfirmTargetedDeletionOutcome::HeldByOperation(operation) => format!(
+                "held by {} sweep {}",
+                deletion_operation_text(operation),
+                operation.sweep.as_u64()
+            ),
+            ConfirmTargetedDeletionOutcome::NeedsClarification => {
+                return Err(CoreError::Deletion(String::from(
+                    "the staged target is not admissible",
+                )));
+            }
+            ConfirmTargetedDeletionOutcome::Missing => {
+                let pending = handle.pending_targeted_deletions(None, 100).await?;
+                return Err(CoreError::Deletion(format!(
+                    "unknown deletion request {request:?}; pending: [{}]",
+                    pending
+                        .iter()
+                        .map(deletion_request_id_text)
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                )));
+            }
+        };
+        writeln!(stdout, "{line}").map_err(|error| {
+            CoreError::Store(format!("the confirmation could not be shown: {error}"))
+        })?;
+        stdout.flush().map_err(|error| {
+            CoreError::Store(format!("the confirmation could not be shown: {error}"))
+        })?;
+        Ok(())
+    })
+}
+
+/// Prints the same bounded deletion status page the wire view renders: the
+/// surface mark, then one line per operation, then the next cursor while a
+/// later page exists. No target body, search material, or credential appears
+/// here.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
+/// cannot be opened, and [`CoreError::Deletion`] for a malformed cursor or an
+/// unreadable surface.
+fn run_deletion_status(data_dir: &Path, cursor: Option<&str>, limit: u32) -> Result<(), CoreError> {
+    use std::io::Write as _;
+
+    use ene_api::v1::deletion::{DeletionParticipantReportWire, DeletionStatusResponse};
+
+    block_on(async move {
+        let handle = HostHandle::open(data_dir).await?;
+        let response = handle.deletion_status_page(cursor, limit).await?;
+        let DeletionStatusResponse::Page(page) = response else {
+            return Err(CoreError::Deletion(String::from(
+                "deletion status is unavailable",
+            )));
+        };
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "mark {}", page.mark.0).map_err(|error| {
+            CoreError::Store(format!("deletion status could not be shown: {error}"))
+        })?;
+        for operation in &page.operations {
+            let hold = operation
+                .hold
+                .map_or_else(|| String::from("-"), |hold| hold.as_str().to_string());
+            let participants = match &operation.participants {
+                DeletionParticipantReportWire::NotReported => String::from("not-reported"),
+                DeletionParticipantReportWire::Reported(entries) => entries.len().to_string(),
+            };
+            writeln!(
+                stdout,
+                "{} {} {} sweep={} started={} hold={} participants={}",
+                operation.operation.0,
+                operation.phase.as_str(),
+                operation.purpose.as_str(),
+                operation.sweep,
+                operation.started_at,
+                hold,
+                participants
+            )
+            .map_err(|error| {
+                CoreError::Store(format!("deletion status could not be shown: {error}"))
+            })?;
+        }
+        if let Some(next) = &page.next_cursor {
+            writeln!(stdout, "next {}", next.0).map_err(|error| {
+                CoreError::Store(format!("deletion status could not be shown: {error}"))
+            })?;
+        }
+        stdout.flush().map_err(|error| {
+            CoreError::Store(format!("deletion status could not be shown: {error}"))
+        })?;
+        Ok(())
+    })
+}
+
+/// Parses one Host-minted deletion request identity from its rendered form.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for anything that is not a canonical UUID
+/// rendering; a request id is never guessed or defaulted.
+fn parse_deletion_request_id(raw: &str) -> Result<ene_preservation::DeletionRequestId, CoreError> {
+    uuid::Uuid::parse_str(raw.trim())
+        .map(|id| {
+            ene_preservation::DeletionRequestId::from_raw(ene_primitive::RawId::from_uuid(id))
+        })
+        .map_err(|_| CoreError::Deletion(String::from("request ID is not a canonical UUID")))
+}
+
+fn deletion_request_id_text(request: &ene_preservation::TargetedDeletionRequest) -> String {
+    deletion_request_id_text_of(request.request())
+}
+
+fn deletion_request_id_text_of(request: ene_preservation::DeletionRequestId) -> String {
+    request.as_raw().as_uuid().as_hyphenated().to_string()
+}
+
+fn deletion_operation_text(operation: ene_preservation::DeletionOperationRef) -> String {
+    operation
+        .operation
+        .as_raw()
+        .as_uuid()
+        .as_hyphenated()
+        .to_string()
 }
 
 #[cfg(test)]

@@ -34,22 +34,31 @@ fn corrupt() -> PreservationTechnicalError {
 /// operation the caller already has (and their operation-side integrity is
 /// enforced by `validate` on that operation), so an orphan participant row is
 /// inert for the current-condition set rather than a silently missing
-/// participant.
+/// participant. `include_completed` widens the same union to terminal
+/// operations for the status view; the orphan-condition half is unchanged, so
+/// a torn condition still fails closed instead of dropping out of the page.
 fn candidate_page(
     tx: &rusqlite::Transaction<'_>,
     after: &str,
     limit: u32,
+    include_completed: bool,
 ) -> Result<Vec<String>, PreservationTechnicalError> {
-    let mut statement = tx
-        .prepare(
-            "SELECT operation_id FROM deletion_operation WHERE phase!='completed' AND operation_id>?1
+    let sql = if include_completed {
+        "SELECT operation_id FROM deletion_operation WHERE operation_id>?1
          UNION
          SELECT c.operation_id FROM erasure_condition c
              LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
              WHERE o.operation_id IS NULL AND c.operation_id>?1
-         ORDER BY operation_id LIMIT ?2",
-        )
-        .map_err(storage)?;
+         ORDER BY operation_id LIMIT ?2"
+    } else {
+        "SELECT operation_id FROM deletion_operation WHERE phase!='completed' AND operation_id>?1
+         UNION
+         SELECT c.operation_id FROM erasure_condition c
+             LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+             WHERE o.operation_id IS NULL AND c.operation_id>?1
+         ORDER BY operation_id LIMIT ?2"
+    };
+    let mut statement = tx.prepare(sql).map_err(storage)?;
     statement
         .query_map(params![after, limit], |r| r.get(0))
         .map_err(storage)?
@@ -76,6 +85,11 @@ fn candidate_page(
 /// completed operation has every row `verified` for that sweep. A participant
 /// row for an unknown owner, a foreign sweep, or a missing snapshot is torn
 /// canonical state and fails closed, never a silently incomplete set.
+///
+/// Request provenance (A1b): an operation admitted from a staged request keeps
+/// that request's purpose for its whole life, and — while its protected
+/// material exists — the same exact mechanical text. A completed operation's
+/// material is gone by design, so only the purpose link is checked there.
 /// Bounded by the touching query's page, never a whole-store scan.
 fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechnicalError> {
     let broken: bool = conn
@@ -89,6 +103,13 @@ fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechni
          OR c.operation_id IS NULL
          OR (o.phase != 'completed' AND c.closed_at IS NOT NULL)
          OR (o.phase = 'completed' AND c.closed_at IS NULL)
+         OR (o.request_id IS NOT NULL AND NOT EXISTS
+             (SELECT 1 FROM deletion_request r
+              WHERE r.request_id=o.request_id AND r.purpose=o.purpose))
+         OR (o.request_id IS NOT NULL AND o.phase != 'completed' AND NOT EXISTS
+             (SELECT 1 FROM deletion_request r JOIN deletion_search_material m
+                 ON m.operation_id=o.operation_id
+              WHERE r.request_id=o.request_id AND r.exact_text=m.exact_text))
          OR (o.phase IN ('active','held') AND NOT EXISTS
              (SELECT 1 FROM deletion_search_material m WHERE m.operation_id=o.operation_id AND length(m.exact_text)>0))
          OR (o.phase='completed' AND (EXISTS
@@ -251,11 +272,7 @@ fn decode_operation(
         "completed" => DeletionOperationPhase::Completed,
         _ => return Err(corrupt()),
     };
-    let purpose = match raw.3.as_str() {
-        "privacy" => DeletionPurpose::Privacy,
-        "security" => DeletionPurpose::Security,
-        _ => return Err(corrupt()),
-    };
+    let purpose = decode_purpose(&raw.3)?;
     let hold = match raw.5.as_deref() {
         None => None,
         Some("unavailable") => Some(DeletionHoldReason::Unavailable),
@@ -330,6 +347,222 @@ fn decode_participant(
     })
 }
 
+/// Storage vocabulary for one deletion purpose; unknown stored text fails
+/// closed on decode.
+fn decode_purpose(raw: &str) -> Result<DeletionPurpose, PreservationTechnicalError> {
+    DeletionPurpose::from_name(raw).ok_or_else(corrupt)
+}
+
+type RawRequest = (String, String, String, String);
+
+fn raw_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRequest> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+/// The staged journal holds the mechanical target only: semantic exploration
+/// hints have no wire grammar in this slice, so a decoded request never
+/// carries them and no Client can widen the confirmed search through staging.
+fn decode_request(raw: RawRequest) -> Result<TargetedDeletionRequest, PreservationTechnicalError> {
+    if raw.2.is_empty() {
+        return Err(corrupt());
+    }
+    Ok(TargetedDeletionRequest::from_durable(
+        DeletionRequestId::from_raw(decode_id(&raw.0).map_err(|_| corrupt())?),
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(raw.2)),
+            semantic_hints: Vec::new(),
+        },
+        decode_purpose(&raw.1)?,
+        parse_time(&raw.3)?,
+    ))
+}
+
+fn decode_request_id(raw: &str) -> Result<DeletionRequestId, PreservationTechnicalError> {
+    Ok(DeletionRequestId::from_raw(
+        decode_id(raw).map_err(|_| corrupt())?,
+    ))
+}
+
+/// One unfinished operation already holding the exact mechanical text, if
+/// any. Completed operations never match: lifecycle §7 forbids treating a
+/// finished deletion as a permanent keyword ban.
+fn unfinished_by_exact_text(
+    tx: &rusqlite::Transaction<'_>,
+    text: &str,
+) -> Result<Option<DeletionOperationRecord>, PreservationTechnicalError> {
+    let existing: Option<(RawOperation, String)> = tx
+        .query_row(
+            "SELECT o.operation_id,o.sweep,o.phase,o.purpose,o.started_at,o.hold_reason
+             FROM deletion_operation o JOIN deletion_search_material m ON m.operation_id=o.operation_id
+             WHERE o.phase!='completed' AND m.exact_text=?1 ORDER BY o.operation_id LIMIT 1",
+            [text],
+            |row| {
+                let id: String = row.get(0)?;
+                Ok((raw_operation(row)?, id))
+            },
+        )
+        .optional()
+        .map_err(storage)?;
+    match existing {
+        None => Ok(None),
+        Some((raw, id)) => {
+            validate(tx, &id)?;
+            Ok(Some(decode_operation(raw)?))
+        }
+    }
+}
+
+/// Whether one unfinished operation already covers the whole scope of a
+/// duplicate request: every known source correlation, every semantic hint, and
+/// every required participant owner must already belong to it. Same mechanical
+/// target is an idempotent request only if its scope is covered; a duplicate
+/// never silently widens a confirmed operation. The participant snapshot is
+/// part of the operation's scope, so a duplicate whose set needs an owner
+/// outside the snapshot is a live-operation conflict, not a silent widening.
+fn scope_covered(
+    tx: &rusqlite::Transaction<'_>,
+    current: DeletionOperationRef,
+    sources: &[RawId],
+    hints: &[DeletionSearchMaterial],
+    participants: &[ParticipantOwnerRef],
+) -> Result<bool, PreservationTechnicalError> {
+    let mut covered = true;
+    for source in sources {
+        let found: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?2 AND source=?3)",
+                params![
+                    encode_id(current.operation.as_raw()),
+                    current.sweep.as_u64() as i64,
+                    encode_id(*source)
+                ],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        covered &= found;
+    }
+    for hint in hints {
+        let found: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM deletion_semantic_hint WHERE operation_id=?1 AND material=?2)",
+                params![
+                    encode_id(current.operation.as_raw()),
+                    hint.expose_for_erasure()
+                ],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        covered &= found;
+    }
+    for owner in participants {
+        let found: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM deletion_participant WHERE operation_id=?1 AND participant_owner=?2)",
+                params![
+                    encode_id(current.operation.as_raw()),
+                    owner.storage_name()
+                ],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        covered &= found;
+    }
+    Ok(covered)
+}
+
+/// The canonical admission body: duplicate detection plus the
+/// durable-before-enforce insert of operation, protected material, initial
+/// condition, and source correlations (lifecycle §4.1).
+///
+/// `request` records Host-local request provenance. It is [`None`] for the
+/// sealed-confirmation path and `Some` for a durably confirmed staged request;
+/// `deletion_operation.request_id` is `UNIQUE`, so one request can never start
+/// two operations. Both public admission entries share this body: there is one
+/// set of insert, duplicate, and validation rules, never a second producer.
+fn admit_deletion(
+    tx: &rusqlite::Transaction<'_>,
+    command: &StartTargetedDeletionCommand,
+    request: Option<DeletionRequestId>,
+) -> Result<StartTargetedDeletionOutcome, PreservationTechnicalError> {
+    if command.required_participants().is_empty()
+        || command
+            .required_participants()
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != command.required_participants().len()
+    {
+        return Err(PreservationTechnicalError::InvalidParticipantSet);
+    }
+    let MechanicalDeletionTarget::ExactText(material) = &command.target().mechanical;
+    if let Some(record) = unfinished_by_exact_text(tx, material.expose_for_erasure())? {
+        let covered = scope_covered(
+            tx,
+            record.current,
+            command.known_sources(),
+            &command.target().semantic_hints,
+            command.required_participants(),
+        )?;
+        return Ok(if covered {
+            StartTargetedDeletionOutcome::AlreadyCoveredBy(record.current)
+        } else {
+            StartTargetedDeletionOutcome::HeldByOperation(record.current)
+        });
+    }
+    let current = DeletionOperationRef {
+        operation: DeletionOperationId::from_raw(RawId::new()),
+        sweep: DeletionSweepGeneration::from_u64(1),
+    };
+    let id = encode_id(current.operation.as_raw());
+    let at = command.requested_at().to_rfc3339();
+    let request_text = request.map(|request| encode_id(request.as_raw()));
+    tx.execute(
+        "INSERT INTO deletion_operation (operation_id,request_id,sweep,phase,purpose,started_at) VALUES (?1,?2,1,'active',?3,?4)",
+        params![id, request_text, command.purpose().as_str(), at],
+    )
+    .map_err(storage)?;
+    tx.execute(
+        "INSERT INTO deletion_search_material (operation_id,exact_text) VALUES (?1,?2)",
+        params![id, material.expose_for_erasure()],
+    )
+    .map_err(storage)?;
+    for (ordinal, hint) in command.target().semantic_hints.iter().enumerate() {
+        let ordinal = i64::try_from(ordinal).map_err(|_| corrupt())?;
+        tx.execute(
+            "INSERT INTO deletion_semantic_hint (operation_id,ordinal,material) VALUES (?1,?2,?3)",
+            params![id, ordinal, hint.expose_for_erasure()],
+        )
+        .map_err(storage)?;
+    }
+    tx.execute(
+        "INSERT INTO erasure_condition (operation_id,sweep,opened_at) VALUES (?1,1,?2)",
+        params![id, at],
+    )
+    .map_err(storage)?;
+    for source in command.known_sources() {
+        tx.execute(
+            "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
+            params![id, encode_id(*source)],
+        )
+        .map_err(storage)?;
+    }
+    // The required participant snapshot commits with the operation and the
+    // condition: no participant effect can start before the operation that
+    // needs it is durable (durable-before-enforce §4.1).
+    for owner in command.required_participants() {
+        tx.execute(
+            "INSERT INTO deletion_participant (operation_id,participant_owner,state,sweep,erased_count,remainder_count) VALUES (?1,?2,'pending',1,0,0)",
+            params![id, owner.storage_name()],
+        )
+        .map_err(storage)?;
+    }
+    // The admission commit may not publish a structurally impossible
+    // operation; the post-insert check keeps the producer honest even against
+    // future code that assembles rows differently.
+    validate(tx, &id)?;
+    Ok(StartTargetedDeletionOutcome::Started(current))
+}
+
 impl PreservationRepository for Store {
     async fn start_targeted_deletion(
         &self,
@@ -342,19 +575,28 @@ impl PreservationRepository for Store {
         if !command.is_confirmed() {
             return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
         }
-        // The snapshot is part of the admitted operation identity: an empty
-        // set would let the operation be finalized without any erasure, and a
-        // repeated owner would make the durable progress ambiguous. Both are
-        // caller contract violations, not storage failures.
-        if command.required_participants().is_empty()
-            || command
-                .required_participants()
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                != command.required_participants().len()
-        {
-            return Err(PreservationTechnicalError::InvalidParticipantSet);
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let outcome = admit_deletion(&tx, &command, None)?;
+            if matches!(outcome, StartTargetedDeletionOutcome::Started(_)) {
+                tx.commit().map_err(storage)?;
+            }
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn stage_targeted_deletion(
+        &self,
+        command: StageTargetedDeletionRequestCommand,
+    ) -> Result<StageTargetedDeletionRequestOutcome, PreservationTechnicalError> {
+        let MechanicalDeletionTarget::ExactText(material) = &command.target().mechanical;
+        if material.expose_for_erasure().trim().is_empty() {
+            return Ok(StageTargetedDeletionRequestOutcome::NeedsClarification);
         }
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
@@ -363,133 +605,296 @@ impl PreservationRepository for Store {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage)?;
             let MechanicalDeletionTarget::ExactText(material) = &command.target().mechanical;
-            let existing: Option<(RawOperation, String)> = tx
+            let text = material.expose_for_erasure();
+            if let Some(record) = unfinished_by_exact_text(&tx, text)? {
+                let covered = scope_covered(
+                    &tx,
+                    record.current,
+                    &[],
+                    &command.target().semantic_hints,
+                    &[],
+                )?;
+                return Ok(if covered {
+                    StageTargetedDeletionRequestOutcome::AlreadyCoveredBy(record.current)
+                } else {
+                    StageTargetedDeletionRequestOutcome::HeldByOperation(record.current)
+                });
+            }
+            // The same scope (mechanical text plus declared purpose) reuses its
+            // staged row: a duplicate intent never mints a second request, and
+            // a confirmed one reports that the canonical admission is owed.
+            let existing: Option<(String, Option<String>)> = tx
                 .query_row(
-                    "SELECT o.operation_id,o.sweep,o.phase,o.purpose,o.started_at,o.hold_reason
-                 FROM deletion_operation o JOIN deletion_search_material m ON m.operation_id=o.operation_id
-                 WHERE o.phase!='completed' AND m.exact_text=?1 ORDER BY o.operation_id LIMIT 1",
-                    [material.expose_for_erasure()],
-                    |row| {
-                        let id: String = row.get(0)?;
-                        Ok((raw_operation(row)?, id))
-                    },
+                    "SELECT r.request_id,(SELECT c.confirmed_at FROM deletion_confirmation c
+                         WHERE c.request_id=r.request_id)
+                     FROM deletion_request r WHERE r.exact_text=?1 AND r.purpose=?2
+                     ORDER BY r.rowid LIMIT 1",
+                    params![text, command.purpose().as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(storage)?;
-            if let Some((raw, existing_id)) = existing {
-                validate(&tx, &existing_id)?;
-                let record = decode_operation(raw)?;
-                // Same mechanical target is an idempotent request only if its
-                // known scope and exploration aids are already covered. Do not
-                // silently widen a confirmed operation on a duplicate command.
-                let mut covered = true;
-                for source in command.known_sources() {
-                    let found: bool = tx
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?2 AND source=?3)",
-                            params![
-                                encode_id(record.current.operation.as_raw()),
-                                record.current.sweep.as_u64() as i64,
-                                encode_id(*source)
-                            ],
-                            |r| r.get(0),
-                        )
-                        .map_err(storage)?;
-                    covered &= found;
-                }
-                for hint in &command.target().semantic_hints {
-                    let found: bool = tx
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM deletion_semantic_hint WHERE operation_id=?1 AND material=?2)",
-                            params![
-                                encode_id(record.current.operation.as_raw()),
-                                hint.expose_for_erasure()
-                            ],
-                            |r| r.get(0),
-                        )
-                        .map_err(storage)?;
-                    covered &= found;
-                }
-                // The participant snapshot is part of the operation's scope: a
-                // duplicate request is already covered only when the durable
-                // snapshot covers its required owners too. A request needing an
-                // owner outside the snapshot is a live-operation conflict, not
-                // a silent widening of a confirmed operation.
-                for owner in command.required_participants() {
-                    let found: bool = tx
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM deletion_participant WHERE operation_id=?1 AND participant_owner=?2)",
-                            params![
-                                encode_id(record.current.operation.as_raw()),
-                                owner.storage_name()
-                            ],
-                            |r| r.get(0),
-                        )
-                        .map_err(storage)?;
-                    covered &= found;
-                }
-                return Ok(if covered {
-                    StartTargetedDeletionOutcome::AlreadyCoveredBy(record.current)
+            if let Some((request, confirmed)) = existing {
+                let request = decode_request_id(&request)?;
+                return Ok(if confirmed.is_some() {
+                    StageTargetedDeletionRequestOutcome::Confirmed(request)
                 } else {
-                    StartTargetedDeletionOutcome::HeldByOperation(record.current)
+                    StageTargetedDeletionRequestOutcome::AlreadyStaged(request)
                 });
             }
-            let current = DeletionOperationRef {
-                operation: DeletionOperationId::from_raw(RawId::new()),
-                sweep: DeletionSweepGeneration::from_u64(1),
-            };
-            let id = encode_id(current.operation.as_raw());
-            let at = command.requested_at().to_rfc3339();
-            let purpose = match command.purpose() {
-                DeletionPurpose::Privacy => "privacy",
-                DeletionPurpose::Security => "security",
-            };
+            let request = DeletionRequestId::from_raw(RawId::new());
             tx.execute(
-                "INSERT INTO deletion_operation (operation_id,sweep,phase,purpose,started_at) VALUES (?1,1,'active',?2,?3)",
-                params![id, purpose, at],
+                "INSERT INTO deletion_request (request_id,purpose,exact_text,requested_at) VALUES (?1,?2,?3,?4)",
+                params![
+                    encode_id(request.as_raw()),
+                    command.purpose().as_str(),
+                    text,
+                    command.requested_at().to_rfc3339()
+                ],
             )
             .map_err(storage)?;
-            tx.execute(
-                "INSERT INTO deletion_search_material (operation_id,exact_text) VALUES (?1,?2)",
-                params![id, material.expose_for_erasure()],
-            )
-            .map_err(storage)?;
-            for (ordinal, hint) in command.target().semantic_hints.iter().enumerate() {
-                let ordinal = i64::try_from(ordinal).map_err(|_| corrupt())?;
-                tx.execute(
-                    "INSERT INTO deletion_semantic_hint (operation_id,ordinal,material) VALUES (?1,?2,?3)",
-                    params![id, ordinal, hint.expose_for_erasure()],
-                )
-                .map_err(storage)?;
-            }
-            tx.execute(
-                "INSERT INTO erasure_condition (operation_id,sweep,opened_at) VALUES (?1,1,?2)",
-                params![id, at],
-            )
-            .map_err(storage)?;
-            for source in command.known_sources() {
-                tx.execute(
-                    "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
-                    params![id, encode_id(*source)],
-                )
-                .map_err(storage)?;
-            }
-            // The required participant snapshot commits with the operation and
-            // the condition: no participant effect can start before the
-            // operation that needs it is durable (durable-before-enforce §4.1).
-            for owner in command.required_participants() {
-                tx.execute(
-                    "INSERT INTO deletion_participant (operation_id,participant_owner,state,sweep,erased_count,remainder_count) VALUES (?1,?2,'pending',1,0,0)",
-                    params![id, owner.storage_name()],
-                )
-                .map_err(storage)?;
-            }
-            // The admission commit may not publish a structurally impossible
-            // operation; the post-insert check keeps the producer honest even
-            // against future code that assembles rows differently.
-            validate(&tx, &id)?;
             tx.commit().map_err(storage)?;
-            Ok(StartTargetedDeletionOutcome::Started(current))
+            Ok(StageTargetedDeletionRequestOutcome::Staged(request))
+        })
+        .await
+    }
+
+    async fn confirm_targeted_deletion(
+        &self,
+        request: DeletionRequestId,
+        required_participants: Vec<ParticipantOwnerRef>,
+    ) -> Result<ConfirmTargetedDeletionOutcome, PreservationTechnicalError> {
+        let id = encode_id(request.as_raw());
+        let conn = Arc::clone(&self.conn);
+        // One durable determination: the confirmation row is written (or
+        // observed) under the single-writer boundary before any admission runs.
+        let request_exists = run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let staged: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM deletion_request WHERE request_id=?1)",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            if !staged {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO deletion_confirmation (request_id,confirmed_at) VALUES (?1,?2)",
+                params![id, WallClockWithTz::now().to_rfc3339()],
+            )
+            .map_err(storage)?;
+            tx.commit().map_err(storage)?;
+            Ok(true)
+        })
+        .await?;
+        if !request_exists {
+            return Ok(ConfirmTargetedDeletionOutcome::Missing);
+        }
+        match self
+            .start_confirmed_targeted_deletion(request, required_participants)
+            .await?
+        {
+            StartTargetedDeletionOutcome::Started(current) => {
+                Ok(ConfirmTargetedDeletionOutcome::Started(current))
+            }
+            StartTargetedDeletionOutcome::AlreadyCoveredBy(current) => {
+                Ok(ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current))
+            }
+            StartTargetedDeletionOutcome::HeldByOperation(current) => {
+                Ok(ConfirmTargetedDeletionOutcome::HeldByOperation(current))
+            }
+            StartTargetedDeletionOutcome::NeedsClarification => {
+                Ok(ConfirmTargetedDeletionOutcome::NeedsClarification)
+            }
+            // The confirmation row was just written (or observed) for this
+            // request, so its absence in the admission transaction is canonical
+            // corruption, never a retryable state.
+            StartTargetedDeletionOutcome::ConfirmationRequired => Err(corrupt()),
+        }
+    }
+
+    async fn start_confirmed_targeted_deletion(
+        &self,
+        request: DeletionRequestId,
+        required_participants: Vec<ParticipantOwnerRef>,
+    ) -> Result<StartTargetedDeletionOutcome, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let id = encode_id(request.as_raw());
+            // Single use: a request that already produced an operation never
+            // produces a second one, whatever the operation's phase.
+            let started: Option<RawOperation> = tx
+                .query_row(
+                    "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason
+                     FROM deletion_operation WHERE request_id=?1",
+                    [&id],
+                    raw_operation,
+                )
+                .optional()
+                .map_err(storage)?;
+            if let Some(raw) = started {
+                let record = decode_operation(raw)?;
+                validate(&tx, &encode_id(record.current.operation.as_raw()))?;
+                return Ok(StartTargetedDeletionOutcome::AlreadyCoveredBy(record.current));
+            }
+            // Durable premises, re-read in the admission transaction: the
+            // Owner confirmation row and the staged scope row. Neither is a
+            // caller input, so no wire payload can start an operation.
+            let confirmed_at: Option<String> = tx
+                .query_row(
+                    "SELECT confirmed_at FROM deletion_confirmation WHERE request_id=?1",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            let staged: Option<RawRequest> = tx
+                .query_row(
+                    "SELECT request_id,purpose,exact_text,requested_at FROM deletion_request WHERE request_id=?1",
+                    [&id],
+                    raw_request,
+                )
+                .optional()
+                .map_err(storage)?;
+            let (Some(confirmed_at), Some(staged)) = (confirmed_at, staged) else {
+                return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
+            };
+            let staged = decode_request(staged)?;
+            let fact =
+                OwnerConfirmationFact::from_durable(request, parse_time(&confirmed_at)?);
+            let Some(command) =
+                staged.into_command(fact, WallClockWithTz::now(), required_participants)
+            else {
+                return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
+            };
+            let outcome = admit_deletion(&tx, &command, Some(request))?;
+            if matches!(outcome, StartTargetedDeletionOutcome::Started(_)) {
+                tx.commit().map_err(storage)?;
+            }
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn pending_targeted_deletions(
+        &self,
+        after: Option<DeletionRequestId>,
+        limit: u32,
+    ) -> Result<Vec<TargetedDeletionRequest>, PreservationTechnicalError> {
+        if !(1..=100).contains(&limit) {
+            return Err(PreservationTechnicalError::InvalidLimit);
+        }
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let tx = guard.unchecked_transaction().map_err(storage)?;
+            let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
+            let mut statement = tx
+                .prepare(
+                    "SELECT r.request_id,r.purpose,r.exact_text,r.requested_at
+                     FROM deletion_request r
+                     WHERE r.request_id>?1 AND NOT EXISTS
+                         (SELECT 1 FROM deletion_confirmation c WHERE c.request_id=r.request_id)
+                     ORDER BY r.request_id LIMIT ?2",
+                )
+                .map_err(storage)?;
+            statement
+                .query_map(params![after, limit], raw_request)
+                .map_err(storage)?
+                .map(|row| decode_request(row.map_err(storage)?))
+                .collect()
+        })
+        .await
+    }
+
+    async fn deletion_status(
+        &self,
+        after: Option<DeletionOperationId>,
+        limit: u32,
+    ) -> Result<Vec<DeletionOperationRecord>, PreservationTechnicalError> {
+        if !(1..=100).contains(&limit) {
+            return Err(PreservationTechnicalError::InvalidLimit);
+        }
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let tx = guard.unchecked_transaction().map_err(storage)?;
+            let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
+            let ids = candidate_page(&tx, &after, limit, true)?;
+            ids.into_iter()
+                .map(|id| {
+                    validate(&tx, &id)?;
+                    let raw = tx
+                        .query_row(
+                            "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason FROM deletion_operation WHERE operation_id=?1",
+                            [&id],
+                            raw_operation,
+                        )
+                        .optional()
+                        .map_err(storage)?
+                        .ok_or_else(corrupt)?;
+                    decode_operation(raw)
+                })
+                .collect()
+        })
+        .await
+    }
+
+    async fn deletion_surface_mark(
+        &self,
+    ) -> Result<DeletionSurfaceMark, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let tx = guard.unchecked_transaction().map_err(storage)?;
+            // A confirmation row without its request is torn canonical state:
+            // fail closed instead of publishing a surface mark over it.
+            let torn: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM deletion_confirmation c
+                         LEFT JOIN deletion_request r ON r.request_id=c.request_id
+                         WHERE r.request_id IS NULL)",
+                    (),
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            if torn {
+                return Err(corrupt());
+            }
+            // Durable row ids use random UUIDs, so "newest" is insertion order
+            // (`rowid`), never a lexical maximum. The newest operation carries
+            // its phase and sweep so a lifecycle advance moves the mark.
+            let (requests, newest_request): (i64, Option<String>) = tx
+                .query_row(
+                    "SELECT COUNT(*), (SELECT request_id FROM deletion_request ORDER BY rowid DESC LIMIT 1)
+                     FROM deletion_request",
+                    (),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(storage)?;
+            let (operations, newest_operation): (i64, Option<String>) = tx
+                .query_row(
+                    "SELECT COUNT(*), (SELECT operation_id||'/'||phase||'/'||sweep
+                         FROM deletion_operation ORDER BY rowid DESC LIMIT 1)
+                     FROM deletion_operation",
+                    (),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(storage)?;
+            Ok(DeletionSurfaceMark::new(format!(
+                "deletion-view/{requests}/{}/{operations}/{}",
+                newest_request.as_deref().unwrap_or("-"),
+                newest_operation.as_deref().unwrap_or("-")
+            )))
         })
         .await
     }
@@ -655,7 +1060,7 @@ impl PreservationRepository for Store {
             // A read transaction gives validation and the bounded page the same snapshot.
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
-            let ids = candidate_page(&tx, &after, limit)?;
+            let ids = candidate_page(&tx, &after, limit, false)?;
             ids.into_iter()
                 .map(|id| {
                     validate(&tx, &id)?;
@@ -690,7 +1095,7 @@ impl PreservationRepository for Store {
             let guard = lock_shared(&conn);
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
-            let ids = candidate_page(&tx, &after, limit)?;
+            let ids = candidate_page(&tx, &after, limit, false)?;
             // Paging over unfinished operations (not over open conditions)
             // keeps validation total for the page: an unfinished operation
             // whose current condition was closed early never silently drops

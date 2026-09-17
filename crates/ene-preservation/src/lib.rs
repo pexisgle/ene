@@ -1,12 +1,16 @@
 //! Preservation owner boundary: canonical erasure-condition state.
 //!
-//! Owns deletion admission, unfinished lifecycle, the erasure identities
-//! consumed by the canonical Group J store in `ene-store`, and the required
-//! participant snapshot with its completion vocabulary. Active, held and
-//! finalizing operations keep their current condition effective across restart.
-//! An empty current set is a database result, never a sentinel or cached gate.
+//! Owns deletion admission, unfinished lifecycle, the first-party request /
+//! confirmation surface, the erasure identities consumed by the canonical
+//! Group J store in `ene-store`, and the required participant snapshot with
+//! its completion vocabulary. Active, held and finalizing operations keep
+//! their current condition effective across restart. An empty current set is
+//! a database result, never a sentinel or cached gate.
 //!
-//! Trusted first-party confirmation issuance, participant-local erasure
+//! The wire intent stages a request only; the trusted Host-local confirmation
+//! (IPC §18.1) is the sole production mint site of
+//! [`TrustedOwnerConfirmationRef`], and it needs the durable staged request
+//! plus its durable confirmation fact. Participant-local erasure
 //! implementations, delayed-arrival collection, and verified global completion
 //! belong to other slices and crates. This boundary cannot close a condition
 //! or declare global completion, and it never depends on a concrete
@@ -14,7 +18,9 @@
 //! implementations and performs the fan-out.
 
 mod operation;
+mod request;
 pub use operation::*;
+pub use request::*;
 
 mod participant;
 pub use participant::*;

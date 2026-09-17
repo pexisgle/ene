@@ -20,6 +20,9 @@
 //!   a live `send` in the same process because streams cannot resume, so that
 //!   follow mode is deferred (see [`Command::Watch`]).
 
+use ene_api::v1::deletion::{
+    DeletionParticipantReportWire, DeletionPurposeWire, DeletionStatusResponse, deletion_target,
+};
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
     ManagementViewRequest, RationaleOrigin, consent_target, credential_target,
@@ -128,6 +131,20 @@ pub enum Command {
         cursor: Option<String>,
         limit: Option<u32>,
         redisplay: bool,
+    },
+    /// Request one Targeted Deletion (`Stage 6` A1b, lifecycle §15). Advisory:
+    /// the Host re-validates the typed target against its live deletion
+    /// surface, stages the request, and the Owner confirms it on the Host PC
+    /// (IPC §18.1).
+    Deletion {
+        text: String,
+        purpose: DeletionPurposeWire,
+    },
+    /// Read the bounded Targeted Deletion operation status page (no target
+    /// body, no search material).
+    DeletionStatus {
+        cursor: Option<String>,
+        limit: Option<u32>,
     },
 }
 
@@ -445,6 +462,72 @@ pub fn assignment_intent(
             quote: None,
         },
     }
+}
+
+/// One Targeted Deletion request intent (`Stage 6` A1b, lifecycle §15).
+///
+/// Advisory by construction: the target grammar is the shared one from
+/// `ene-api`, the rationale is provenance-only (the exact text travels in the
+/// target, never in the quote, so the Host's intent journal can redact it),
+/// and nothing here can confirm the destructive operation. `base` must be the
+/// current deletion surface mark the status page returned.
+#[must_use]
+pub fn deletion_intent(
+    intent_id: CommandWireId,
+    base: &str,
+    purpose: DeletionPurposeWire,
+    exact_text: &str,
+) -> ManagementIntent {
+    ManagementIntent {
+        intent_id,
+        kind: ManagementIntentKind::RequestDeletionBackupRestoreReset,
+        target: deletion_target(purpose, exact_text),
+        base_view: BaseViewMark(base.to_string()),
+        rationale: IntentRationaleWire {
+            origin: RationaleOrigin::ManagementSurface,
+            quote: None,
+        },
+    }
+}
+
+/// Parses one `--purpose` token from the closed wire set.
+#[must_use]
+pub fn deletion_purpose(token: &str) -> Option<DeletionPurposeWire> {
+    DeletionPurposeWire::from_name(token)
+}
+
+/// Renders the bounded deletion status page: the surface mark an intent builds
+/// on, one line per operation, and the `next:` cursor while a later page
+/// exists. No target body, search material, or credential is in this page.
+#[must_use]
+pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
+    let DeletionStatusResponse::Page(page) = response else {
+        return String::from("deletion status is unavailable; retry later");
+    };
+    let mut lines = vec![format!("mark {}", page.mark.0)];
+    for operation in &page.operations {
+        let hold = operation
+            .hold
+            .map_or_else(|| String::from("-"), |hold| hold.as_str().to_string());
+        let participants = match &operation.participants {
+            DeletionParticipantReportWire::NotReported => String::from("not-reported"),
+            DeletionParticipantReportWire::Reported(entries) => entries.len().to_string(),
+        };
+        lines.push(format!(
+            "{} {} {} sweep={} started={} hold={} participants={}",
+            operation.operation.0,
+            operation.phase.as_str(),
+            operation.purpose.as_str(),
+            operation.sweep,
+            operation.started_at,
+            hold,
+            participants
+        ));
+    }
+    if let Some(next) = &page.next_cursor {
+        lines.push(format!("next {}", next.0));
+    }
+    lines.join("\n")
 }
 
 /// Renders one `kind: title – body` line per section, in Host order.
@@ -1273,5 +1356,66 @@ mod tests {
             super::describe_report(&TaskReportResponse::UnknownRef),
             super::ReportAction::Retryable { .. }
         ));
+    }
+
+    #[test]
+    fn deletion_intent_spells_the_shared_grammar_without_the_quote() {
+        use ene_api::v1::deletion::{DeletionPurposeWire, parse_deletion_target};
+
+        let intent = super::deletion_intent(
+            CommandWireId(uuid::Uuid::new_v4()),
+            "deletion-view/0/-/0/-",
+            DeletionPurposeWire::Security,
+            "leaked key",
+        );
+        assert_eq!(
+            intent.kind,
+            ene_api::v1::management::ManagementIntentKind::RequestDeletionBackupRestoreReset
+        );
+        assert_eq!(intent.base_view.0, "deletion-view/0/-/0/-");
+        assert!(
+            intent.rationale.quote.is_none(),
+            "the exact text travels in the target, never the rationale"
+        );
+        let parsed = parse_deletion_target(&intent.target).expect("the target must parse");
+        assert_eq!(parsed.purpose(), DeletionPurposeWire::Security);
+        assert_eq!(parsed.exact_text(), "leaked key");
+        assert!(super::deletion_purpose("privacy").is_some());
+        assert!(super::deletion_purpose("everything").is_none());
+    }
+
+    #[test]
+    fn render_deletion_status_is_body_free_and_names_the_mark() {
+        use ene_api::v1::deletion::{
+            DeletionOperationStatusView, DeletionParticipantReportWire, DeletionPhaseWire,
+            DeletionPurposeWire, DeletionStatusPage, DeletionStatusResponse,
+        };
+        use ene_api::v1::refs::{DeletionOperationWireRef, ViewMarkWire};
+
+        let page = DeletionStatusResponse::Page(DeletionStatusPage {
+            mark: ViewMarkWire(String::from("deletion-view/1/-/1/op-1")),
+            operations: vec![DeletionOperationStatusView {
+                operation: DeletionOperationWireRef(String::from("op-1")),
+                phase: DeletionPhaseWire::Finalizing,
+                purpose: DeletionPurposeWire::Privacy,
+                started_at: String::from("2026-09-17T00:00:00+00:00"),
+                sweep: 2,
+                hold: None,
+                participants: DeletionParticipantReportWire::NotReported,
+            }],
+            next_cursor: Some(ene_api::v1::refs::DeletionStatusCursorWire(String::from(
+                "deletion-status:op-1",
+            ))),
+        });
+        let rendered = super::render_deletion_status(&page);
+        assert!(rendered.contains("mark deletion-view/1/-/1/op-1"));
+        assert!(rendered.contains("op-1 finalizing privacy sweep=2"));
+        assert!(rendered.contains("participants=not-reported"));
+        assert!(rendered.contains("next deletion-status:op-1"));
+        assert!(!rendered.contains("Debug"));
+        assert_eq!(
+            super::render_deletion_status(&DeletionStatusResponse::Unavailable),
+            "deletion status is unavailable; retry later"
+        );
     }
 }

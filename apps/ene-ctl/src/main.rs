@@ -219,6 +219,34 @@ fn ene_ctl_command() -> clap::Command {
                         .action(ArgAction::SetTrue),
                 ),
         )
+        .subcommand(
+            clap::Command::new("deletion")
+                .about("Request a Targeted Deletion (the Host PC still confirms it)")
+                .arg(
+                    Arg::new("text")
+                        .long("text")
+                        .value_name("TEXT")
+                        .required(true)
+                        .allow_hyphen_values(true),
+                )
+                .arg(
+                    Arg::new("purpose")
+                        .long("purpose")
+                        .value_name("privacy|security")
+                        .default_value("privacy"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("deletion-status")
+                .about("Show the bounded Targeted Deletion operation status")
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32)),
+                ),
+        )
 }
 
 struct Cli {
@@ -323,6 +351,26 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             cursor: sub.get_one::<String>("cursor").cloned(),
             limit: sub.get_one::<u32>("limit").copied(),
             redisplay: sub.get_flag("redisplay"),
+        },
+        "deletion" => {
+            let purpose = sub
+                .get_one::<String>("purpose")
+                .cloned()
+                .unwrap_or_else(|| String::from("privacy"));
+            let Some(purpose) = cmds::deletion_purpose(&purpose) else {
+                return Err(usage_error("--purpose must be privacy or security"));
+            };
+            cmds::Command::Deletion {
+                text: sub
+                    .get_one::<String>("text")
+                    .cloned()
+                    .ok_or_else(|| usage_error("deletion requires --text TEXT"))?,
+                purpose,
+            }
+        }
+        "deletion-status" => cmds::Command::DeletionStatus {
+            cursor: sub.get_one::<String>("cursor").cloned(),
+            limit: sub.get_one::<u32>("limit").copied(),
         },
         other => return Err(usage_error(format!("unknown command: {other}"))),
     };
@@ -509,6 +557,92 @@ async fn run_command(
             limit,
             redisplay,
         } => run_undelivered(&mut session, cursor.as_deref(), limit, redisplay).await,
+        cmds::Command::Deletion { text, purpose } => {
+            run_deletion(&mut session, &text, purpose).await
+        }
+        cmds::Command::DeletionStatus { cursor, limit } => {
+            let response = request_deletion_status(&mut session, cursor.as_deref(), limit).await?;
+            emit(&cmds::render_deletion_status(&response))
+        }
+    }
+}
+
+/// Sends one advisory Targeted Deletion request.
+///
+/// The Client first reads the live deletion surface (a pure read) so the
+/// intent carries the current mark; the Host re-checks it and stages at most
+/// one durable request. The exact text travels in the typed target, never in
+/// the rationale quote, and the answer is printed through the shared
+/// management description — the command itself never claims a deletion
+/// happened: only the Host PC confirmation and the status page can say that.
+async fn run_deletion(
+    session: &mut client::Client,
+    text: &str,
+    purpose: ene_api::v1::deletion::DeletionPurposeWire,
+) -> Result<(), CliError> {
+    if text.trim().is_empty() {
+        return Err(CliError::Usage(String::from(
+            "deletion requires a non-blank --text",
+        )));
+    }
+    let status = request_deletion_status(session, None, Some(1)).await?;
+    let ene_api::v1::deletion::DeletionStatusResponse::Page(page) = status else {
+        return Err(CliError::ServerOutcome(String::from(
+            "deletion status is unavailable; retry later",
+        )));
+    };
+    let intent = cmds::deletion_intent(
+        CommandWireId(uuid::Uuid::new_v4()),
+        &page.mark.0,
+        purpose,
+        text,
+    );
+    let outcome = session
+        .request(WirePayload::ManagementIntent(intent))
+        .await
+        .and_then(|payload| match payload {
+            WirePayload::ManagementOutcome(outcome) => Ok(outcome),
+            unexpected => Err(CliError::ServerRejected(format!(
+                "unexpected {} while applying an intent; expected ManagementOutcome",
+                unexpected.message_type()
+            ))),
+        })?;
+    match cmds::describe_management(&outcome) {
+        cmds::ManagementAction::Applied { detail } => emit(&format!(
+            "{detail}; confirm it on the Host PC (`ene-core pending-deletions`)"
+        )),
+        cmds::ManagementAction::Retryable { message } => Err(CliError::ServerOutcome(format!(
+            "{message}; confirm it on the Host PC (`ene-core pending-deletions`)"
+        ))),
+        cmds::ManagementAction::Terminal { message } => Err(CliError::ServerRejected(message)),
+    }
+}
+
+/// One bounded Targeted Deletion status read; no body crosses this path.
+async fn request_deletion_status(
+    session: &mut client::Client,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<ene_api::v1::deletion::DeletionStatusResponse, CliError> {
+    use ene_api::v1::deletion::DeletionStatusRequest;
+    use ene_api::v1::refs::DeletionStatusCursorWire;
+
+    match session
+        .request(WirePayload::DeletionStatusRequest(DeletionStatusRequest {
+            cursor: cursor.map(|cursor| DeletionStatusCursorWire(cursor.to_string())),
+            limit,
+        }))
+        .await?
+    {
+        WirePayload::DeletionStatusResponse(response) => Ok(response),
+        WirePayload::Reject(notice) => Err(CliError::ServerRejected(format!(
+            "deletion status rejected: {}",
+            notice.detail
+        ))),
+        unexpected => Err(CliError::ServerRejected(format!(
+            "unexpected {} while reading the deletion status; expected DeletionStatusResponse",
+            unexpected.message_type()
+        ))),
     }
 }
 
@@ -1259,6 +1393,51 @@ mod tests {
             &["memory", "--after", "a", "--revisions", "b"][..],
             &["memory", "--after-revision", "3"][..],
             &["memory", "--after"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn deletion_forms_parse() {
+        let request = parse(&["deletion", "--text", "leaked key"]).expect("deletion default");
+        assert!(
+            request.command
+                == super::cmds::Command::Deletion {
+                    text: String::from("leaked key"),
+                    purpose: ene_api::v1::deletion::DeletionPurposeWire::Privacy,
+                }
+        );
+        let security = parse(&["deletion", "--text", "-secret-", "--purpose", "security"])
+            .expect("deletion security");
+        assert!(
+            security.command
+                == super::cmds::Command::Deletion {
+                    text: String::from("-secret-"),
+                    purpose: ene_api::v1::deletion::DeletionPurposeWire::Security,
+                }
+        );
+        let status = parse(&[
+            "deletion-status",
+            "--cursor",
+            "deletion-status:x",
+            "--limit",
+            "7",
+        ])
+        .expect("deletion status");
+        assert!(
+            status.command
+                == super::cmds::Command::DeletionStatus {
+                    cursor: Some(String::from("deletion-status:x")),
+                    limit: Some(7),
+                }
+        );
+        for words in [
+            &["deletion"][..],
+            &["deletion", "--text", "x", "--purpose", "everything"][..],
         ] {
             assert!(
                 matches!(parse(words), Err(CliError::Usage(_))),

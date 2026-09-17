@@ -68,12 +68,33 @@ scope_save_target TEXT NULL
 );
 CREATE TABLE deletion_operation (
 operation_id TEXT PRIMARY KEY,
+request_id TEXT NULL UNIQUE,
 sweep INTEGER NOT NULL CHECK (sweep > 0),
 phase TEXT NOT NULL CHECK (phase IN ('active', 'held', 'finalizing', 'completed')),
 purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
 started_at TEXT NOT NULL,
 hold_reason TEXT NULL CHECK (hold_reason IN ('unavailable', 'generation_exhausted')),
 CHECK ((phase = 'held') = (hold_reason IS NOT NULL))
+);
+-- Staged Targeted Deletion requests awaiting the Host-local trusted
+-- confirmation (IPC §18.1). Staging publishes no erasure condition and no
+-- operation: the row is inert until the confirmation inlet records the
+-- matching deletion_confirmation row and the canonical admission commits.
+-- `exact_text` is protected operation-lifetime material and is destroyed with
+-- the operation's material, never copied into audit rows or views.
+CREATE TABLE deletion_request (
+request_id TEXT PRIMARY KEY,
+purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
+exact_text TEXT NOT NULL CHECK (length(exact_text) > 0),
+requested_at TEXT NOT NULL
+);
+-- Durable Owner confirmation facts, written only by the Host-local trusted
+-- first-party inlet. A confirmation names its request identity: it can never
+-- be replayed onto another target or purpose, and a request starts at most
+-- one operation (deletion_operation.request_id is UNIQUE).
+CREATE TABLE deletion_confirmation (
+request_id TEXT PRIMARY KEY,
+confirmed_at TEXT NOT NULL
 );
 CREATE TABLE deletion_search_material (
 operation_id TEXT PRIMARY KEY,

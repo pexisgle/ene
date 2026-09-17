@@ -1,16 +1,20 @@
 //! Targeted Deletion admission and unfinished-operation contracts.
 //!
 //! A1 deliberately provides no public confirmation mint and no transition to
-//! finalizing/completed. The trusted first-party issuer (A1b) and verified
-//! completion boundary (A5) must supply those authorities, not caller booleans.
+//! finalizing/completed. A1b supplies the trusted first-party issuer
+//! ([`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command));
+//! the verified completion boundary (A5) must supply completion, not caller
+//! booleans.
 
 use ene_primitive::{RawId, WallClockWithTz};
 use zeroize::Zeroizing;
 
 use crate::{
-    DeletionMaterialOutcome, DeletionOperationId, DeletionParticipantRecord,
-    DeletionSweepGeneration, ErasureConditionRef, ParticipantCompletionFact,
-    ParticipantCompletionOutcome, ParticipantDemandOutcome, ParticipantOwnerRef,
+    ConfirmTargetedDeletionOutcome, DeletionMaterialOutcome, DeletionOperationId,
+    DeletionParticipantRecord, DeletionRequestId, DeletionSurfaceMark, DeletionSweepGeneration,
+    ErasureConditionRef, ParticipantCompletionFact, ParticipantCompletionOutcome,
+    ParticipantDemandOutcome, ParticipantOwnerRef, StageTargetedDeletionRequestCommand,
+    StageTargetedDeletionRequestOutcome, TargetedDeletionRequest,
 };
 
 /// Operation-lifetime material; never an audit field or management payload.
@@ -34,6 +38,14 @@ impl DeletionSearchMaterial {
     pub fn expose_for_erasure(&self) -> &str {
         &self.0
     }
+
+    /// Host-local Owner review only (IPC §18.1 preview): the trusted console
+    /// may show the exact text before the Owner confirms. Never a log,
+    /// `Debug`, wire, or management-view representation.
+    #[must_use]
+    pub fn expose_for_owner_review(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,13 +66,54 @@ pub enum DeletionPurpose {
     Security,
 }
 
+impl DeletionPurpose {
+    /// Storage and display token of the closed purpose set. Unknown stored or
+    /// incoming tokens are outside the set and fail closed at their parse
+    /// boundary, never defaulted.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Privacy => "privacy",
+            Self::Security => "security",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(token: &str) -> Option<Self> {
+        match token {
+            "privacy" => Some(Self::Privacy),
+            "security" => Some(Self::Security),
+            _ => None,
+        }
+    }
+}
+
 /// Sealed, request-bound evidence. No Deserialize, raw-ID constructor, or
 /// public fields: Client/LLM output cannot manufacture final confirmation.
-/// The first-party issuer is deliberately not part of the A1 store slice.
+/// The only production mint site is
+/// [`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command),
+/// which requires the store-read staged request *and* its durable Host-local
+/// confirmation fact.
 ///
 /// ```compile_fail
 /// use ene_preservation::TrustedOwnerConfirmationRef;
 /// let confirmation = TrustedOwnerConfirmationRef {};
+/// ```
+///
+/// ```compile_fail
+/// use ene_preservation::{DeletionPurpose, StartTargetedDeletionCommand, TargetedDeletionTarget,
+///     MechanicalDeletionTarget, DeletionSearchMaterial};
+/// let forged = StartTargetedDeletionCommand::confirmed(
+///     ene_primitive::RawId::new(),
+///     TargetedDeletionTarget {
+///         mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+///             String::from("target"),
+///         )),
+///         semantic_hints: Vec::new(),
+///     },
+///     DeletionPurpose::Privacy,
+///     ene_primitive::WallClockWithTz::now(),
+/// );
 /// ```
 #[derive(Debug, Clone)]
 pub struct TrustedOwnerConfirmationRef {
@@ -134,8 +187,35 @@ impl StartTargetedDeletionCommand {
             .is_some_and(|fact| fact.request == self.request)
     }
 
-    /// Test-only evidence, absent from production builds. A1b must implement
-    /// the actual Host-local trusted issuer before user-facing admission.
+    /// Crate-internal mint for the durable-confirmed path (A1b).
+    ///
+    /// Only [`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command)
+    /// calls this, and only with both a store-read staged request and a
+    /// store-read durable confirmation fact. No public constructor,
+    /// `Deserialize`, or caller boolean exists on this path.
+    #[must_use]
+    pub(crate) fn confirmed(
+        request: RawId,
+        target: TargetedDeletionTarget,
+        purpose: DeletionPurpose,
+        requested_at: WallClockWithTz,
+        required_participants: Vec<ParticipantOwnerRef>,
+    ) -> Self {
+        Self {
+            request,
+            target,
+            purpose,
+            requested_at,
+            known_sources: Vec::new(),
+            required_participants,
+            confirmation: Some(TrustedOwnerConfirmationRef { request }),
+        }
+    }
+
+    /// Test-only evidence, absent from production builds. Production reaches
+    /// confirmation only through
+    /// [`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command)
+    /// with a durable Host-local request and its durable confirmation fact.
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     #[must_use]
@@ -289,7 +369,6 @@ pub trait PreservationRepository: Send + Sync {
     ) -> impl std::future::Future<
         Output = Result<Vec<CurrentErasureCondition>, PreservationTechnicalError>,
     > + Send;
-
     /// SELECT-only, keyset-paged at the database boundary; limit is 1..=100.
     /// The page is ordered by stored owner name, and the operation's rows are
     /// validated before they are returned, so torn participant state fails
@@ -335,4 +414,71 @@ pub trait PreservationRepository: Send + Sync {
     ) -> impl std::future::Future<
         Output = Result<ParticipantCompletionOutcome, PreservationTechnicalError>,
     > + Send;
+
+    /// Stages one advisory Targeted Deletion request (lifecycle §15).
+    ///
+    /// Nothing is enforced by staging: no condition is published and no
+    /// operation exists until the Owner's trusted Host-local confirmation
+    /// runs [`Self::start_confirmed_targeted_deletion`]. An identical staged
+    /// request is returned as-is instead of minting a second one.
+    fn stage_targeted_deletion(
+        &self,
+        command: StageTargetedDeletionRequestCommand,
+    ) -> impl std::future::Future<
+        Output = Result<StageTargetedDeletionRequestOutcome, PreservationTechnicalError>,
+    > + Send;
+    /// Host-local trusted confirmation inlet (IPC §18.1): records the Owner's
+    /// final confirmation for one staged request and then runs the canonical
+    /// admission for it.
+    ///
+    /// Idempotent by request identity: a duplicate confirmation observes the
+    /// same single operation and never creates a second one. A missing
+    /// request answers [`ConfirmTargetedDeletionOutcome::Missing`] and writes
+    /// nothing. `required_participants` is the Host composition's current
+    /// product-surface owner set (lifecycle §8); the admission transaction
+    /// snapshots it durably with the operation.
+    fn confirm_targeted_deletion(
+        &self,
+        request: DeletionRequestId,
+        required_participants: Vec<ParticipantOwnerRef>,
+    ) -> impl std::future::Future<
+        Output = Result<ConfirmTargetedDeletionOutcome, PreservationTechnicalError>,
+    > + Send;
+    /// Canonical admission for a request whose Owner confirmation is already
+    /// durable (crash recovery, and the intent path observing a confirmed
+    /// request). Adds no authority: without the durable confirmation row this
+    /// answers [`StartTargetedDeletionOutcome::ConfirmationRequired`].
+    fn start_confirmed_targeted_deletion(
+        &self,
+        request: DeletionRequestId,
+        required_participants: Vec<ParticipantOwnerRef>,
+    ) -> impl std::future::Future<
+        Output = Result<StartTargetedDeletionOutcome, PreservationTechnicalError>,
+    > + Send;
+    /// SELECT-only, keyset-paged staged requests still awaiting the Host-local
+    /// confirmation; limit is 1..=100. Confirmed requests are excluded: their
+    /// operation is read through [`Self::deletion_status`].
+    fn pending_targeted_deletions(
+        &self,
+        after: Option<DeletionRequestId>,
+        limit: u32,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<TargetedDeletionRequest>, PreservationTechnicalError>,
+    > + Send;
+    /// SELECT-only, keyset-paged operation status *including terminal phases*;
+    /// limit is 1..=100. This is the status view's read: it never returns
+    /// protected material, and a torn page fails closed instead of dropping
+    /// rows.
+    fn deletion_status(
+        &self,
+        after: Option<DeletionOperationId>,
+        limit: u32,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<DeletionOperationRecord>, PreservationTechnicalError>,
+    > + Send;
+    /// Current display-revision mark of the deletion surface, derived from the
+    /// canonical request and operation rows. Comparison material only.
+    fn deletion_surface_mark(
+        &self,
+    ) -> impl std::future::Future<Output = Result<DeletionSurfaceMark, PreservationTechnicalError>> + Send;
 }
