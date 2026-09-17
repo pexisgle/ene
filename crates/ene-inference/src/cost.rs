@@ -90,8 +90,13 @@ impl UsageEstimate {
     /// The input side charges every input token at the more expensive of the
     /// snapshot's input and cached-input rates: a cache hit cannot be promised
     /// before the call, so reserving at the cached rate alone could understate
-    /// the bill. Both components round up exactly like [`project_cost`], so
-    /// the bound never falls below the settled amount through rounding.
+    /// the bill. Both components round up exactly like [`project_cost`], and
+    /// the input side carries one extra micro-unit: the settlement rounds the
+    /// non-cached and cached parts up *separately*, so their sum can exceed
+    /// the single rounded input bound by one micro-unit
+    /// (`ceil(a) + ceil(b) <= ceil(a + b) + 1`). Without that allowance the
+    /// reservation could fall one micro-unit below the settled amount for some
+    /// cache split, which `usage-cost-cap` §8 forbids.
     #[must_use]
     pub fn upper_bound_cost(self, snapshot: &PricingSnapshot) -> Option<Money> {
         let input_rate = if snapshot.input_rate.micros_per_million()
@@ -102,6 +107,7 @@ impl UsageEstimate {
             snapshot.cached_input_rate
         };
         let input = input_rate.checked_cost(snapshot.currency, self.input_tokens_upper_bound)?;
+        let input = input.checked_add(Money::from_micros(snapshot.currency, 1))?;
         let output = snapshot
             .output_rate
             .checked_cost(snapshot.currency, self.output_tokens_upper_bound)?;
@@ -509,11 +515,61 @@ mod tests {
             input_tokens_upper_bound: 10,
             output_tokens_upper_bound: 4,
         };
-        // max(input, cached) = 3.0 per token: 10 * 3 = 30; output 4 * 2 = 8.
+        // max(input, cached) = 3.0 per token: 10 * 3 = 30, plus the one
+        // micro-unit that keeps the separately rounded settlement components
+        // below the bound; output 4 * 2 = 8.
         assert_eq!(
             estimate.upper_bound_cost(&pricing),
-            Some(Money::from_micros(CurrencyCode::Usd, 38))
+            Some(Money::from_micros(CurrencyCode::Usd, 39))
         );
+    }
+
+    #[test]
+    fn estimate_upper_bound_never_falls_below_the_settled_total() {
+        // Regression: the settlement rounds the non-cached and cached input
+        // parts up separately, so `ceil(a) + ceil(b)` can exceed
+        // `ceil(a + b)` by one micro-unit. The estimate must still dominate
+        // every cache split inside its bounds (`usage-cost-cap` §8).
+        let pricing = snapshot(
+            "openai",
+            "gpt-4o-mini",
+            1,
+            TokenRate::from_micros_per_million(150_000),
+            TokenRate::from_micros_per_million(75_000),
+            TokenRate::from_micros_per_million(600_000),
+        );
+        let estimate = super::UsageEstimate {
+            input_tokens_upper_bound: 1_000,
+            output_tokens_upper_bound: 4_096,
+        };
+        let bound = estimate
+            .upper_bound_cost(&pricing)
+            .expect("the bound is representable");
+        // Every cache split within the input bound settles at or below it.
+        for cached in [0, 1, 2, 999, 1_000] {
+            let fact = usage("openai", "gpt-4o-mini", Some((1_000, cached, 4_096)));
+            let UsageCostFact::Reported(cost) =
+                project_cost(&fact, Some(&pricing)).expect("the projection must succeed")
+            else {
+                panic!("a Reported usage with a rate must project Reported");
+            };
+            assert!(
+                cost.total.micros() <= bound.micros(),
+                "cached {cached}: settled {} must not exceed the reserved {}",
+                cost.total.micros(),
+                bound.micros()
+            );
+        }
+        // The exact split the per-component ceiling used to understate: the
+        // settled total is one micro-unit above the naive bound.
+        let split = usage("openai", "gpt-4o-mini", Some((1_000, 1, 4_096)));
+        let UsageCostFact::Reported(cost) =
+            project_cost(&split, Some(&pricing)).expect("the projection must succeed")
+        else {
+            panic!("a Reported usage with a rate must project Reported");
+        };
+        assert_eq!(cost.total.micros(), 2_609);
+        assert_eq!(bound.micros(), 2_609);
     }
 
     #[test]
@@ -530,10 +586,10 @@ mod tests {
             input_tokens_upper_bound: 2,
             output_tokens_upper_bound: 2,
         };
-        // Each component rounds up: 5 + 5 = 10.
+        // Each component rounds up: 5 + 1 + 5 = 11.
         assert_eq!(
             estimate.upper_bound_cost(&pricing),
-            Some(Money::from_micros(CurrencyCode::Usd, 10))
+            Some(Money::from_micros(CurrencyCode::Usd, 11))
         );
         let maxed = super::UsageEstimate {
             input_tokens_upper_bound: u64::MAX,

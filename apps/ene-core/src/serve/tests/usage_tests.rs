@@ -440,7 +440,7 @@ async fn usage_summary_reads_attribution_states_costs_and_caps() {
     assert!(task_row.cost.is_none());
     assert_eq!(
         task_row.reserved.as_ref().map(|money| money.micros),
-        Some(200),
+        Some(201),
         "the reserved upper bound stays visible"
     );
 
@@ -465,10 +465,10 @@ async fn usage_summary_reads_attribution_states_costs_and_caps() {
     else {
         panic!("the fixture consumption is comparable");
     };
-    assert_eq!(reserved.micros, 200, "the reserved upper bound is counted");
+    assert_eq!(reserved.micros, 201, "the reserved upper bound is counted");
     assert_eq!(committed_reported.micros, 1_820);
-    assert_eq!(committed_unknown.micros, 200);
-    assert_eq!(consumed.micros, 2_220);
+    assert_eq!(committed_unknown.micros, 201);
+    assert_eq!(consumed.micros, 2_222);
     assert_eq!(remaining.micros, 0);
     assert!(*held, "consumption above the limit is held");
 

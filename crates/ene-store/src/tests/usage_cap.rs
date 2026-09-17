@@ -35,9 +35,10 @@ fn pricing() -> PricingSnapshot {
     }
 }
 
-/// A safe upper bound of exactly 200 micros under [`pricing`]: 100 input
-/// tokens at 1 micro plus 50 output tokens at 2 micros.
-const UPPER_BOUND_MICROS: u64 = 200;
+/// A safe upper bound of exactly 201 micros under [`pricing`]: 100 input
+/// tokens at 1 micro plus one micro-unit for the separately rounded input
+/// components, plus 50 output tokens at 2 micros.
+const UPPER_BOUND_MICROS: u64 = 201;
 
 fn estimate() -> UsageEstimate {
     UsageEstimate {

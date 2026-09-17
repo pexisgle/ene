@@ -455,7 +455,7 @@ async fn reported_unknown_and_reserved_are_distinct_states() {
     assert_eq!(reserved_row.cost, None, "no cost is invented");
     assert_eq!(
         reserved_row.reserved,
-        Some(Money::from_micros(CurrencyCode::Usd, 200)),
+        Some(Money::from_micros(CurrencyCode::Usd, 201)),
         "the reserved upper bound stays visible while unsettled"
     );
     let unknown_row = rows.iter().find(|row| row.ticket == unknown).unwrap();
@@ -468,7 +468,7 @@ async fn reported_unknown_and_reserved_are_distinct_states() {
     );
     assert_eq!(
         unknown_row.reserved,
-        Some(Money::from_micros(CurrencyCode::Usd, 200)),
+        Some(Money::from_micros(CurrencyCode::Usd, 201)),
         "unknown keeps the upper bound counted against the cap"
     );
     let reported_row = rows.iter().find(|row| row.ticket == reported).unwrap();
@@ -643,7 +643,7 @@ async fn read_settles_nothing_and_mutates_no_cap_or_pricing() {
         reservation_before,
         Some((
             String::from("reserved"),
-            crate::codec::encode_u64(200).unwrap(),
+            crate::codec::encode_u64(201).unwrap(),
             None
         )),
         "the fixture leaves the reservation non-terminal"
@@ -764,21 +764,21 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
     else {
         panic!("the fixture consumption is comparable");
     };
-    assert_eq!(*reserved, Money::from_micros(CurrencyCode::Usd, 200));
+    assert_eq!(*reserved, Money::from_micros(CurrencyCode::Usd, 201));
     assert_eq!(
         *committed_reported,
         Money::from_micros(CurrencyCode::Usd, 100)
     );
     assert_eq!(
         *committed_unknown,
-        Money::from_micros(CurrencyCode::Usd, 200)
+        Money::from_micros(CurrencyCode::Usd, 201)
     );
-    assert_eq!(*consumed, Money::from_micros(CurrencyCode::Usd, 500));
-    assert_eq!(*remaining, Money::from_micros(CurrencyCode::Usd, 500));
-    assert!(!held, "500 of 1000 is not held");
+    assert_eq!(*consumed, Money::from_micros(CurrencyCode::Usd, 502));
+    assert_eq!(*remaining, Money::from_micros(CurrencyCode::Usd, 498));
+    assert!(!held, "502 of 1000 is not held");
 
     // The status and the admission agree: under this consumption a new
-    // 200-micro reservation fits (700 <= 1000) ...
+    // 201-micro reservation fits (703 <= 1000) ...
     let fitting = claim(
         &store,
         ClaimSpec {
@@ -834,7 +834,7 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
     else {
         panic!("the fixture consumption is comparable");
     };
-    assert_eq!(*consumed, Money::from_micros(CurrencyCode::Usd, 700));
+    assert_eq!(*consumed, Money::from_micros(CurrencyCode::Usd, 703));
     assert_eq!(*remaining, Money::zero(CurrencyCode::Usd));
     assert!(held, "consumption above the lowered limit is held");
     let refused = store
