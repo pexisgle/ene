@@ -73,7 +73,7 @@ fn count_occurrences(text: &str, target: &str) -> u64 {
     text.matches(target).count() as u64
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use companion_learning::exact_remainder_probe;
 #[cfg(test)]
 pub(crate) use task_action_inference::{ERASED_LOCATOR, ROWS_PER_DEMAND};
