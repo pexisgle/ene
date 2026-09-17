@@ -2434,4 +2434,64 @@ impl Store {
         })
         .await
     }
+
+    /// Test-support only: forces one unfinished operation into the durable
+    /// `Held(GenerationExhausted)` shape.
+    ///
+    /// Production reaches this shape exactly when the sweep counter cannot
+    /// advance (`sweep.checked_add(1)` overflows), so the fixture moves the
+    /// operation, its current condition, its source correlations, and its
+    /// participant rows to the maximum sweep together and records the hold
+    /// class. The canonical store then refuses every lifecycle change for it
+    /// (`Resume` included), which is what fail-closed recovery must observe.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError`] when the operation is unknown or torn.
+    #[doc(hidden)]
+    pub async fn hold_generation_exhausted_for_tests(
+        &self,
+        operation: DeletionOperationId,
+    ) -> Result<(), PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let id = encode_id(operation.as_raw());
+            validate(&tx, &id)?;
+            let sweep: i64 = tx
+                .query_row(
+                    "SELECT sweep FROM deletion_operation WHERE operation_id=?1",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            tx.execute(
+                "UPDATE erasure_condition SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
+                params![id, i64::MAX, sweep],
+            )
+            .map_err(storage)?;
+            tx.execute(
+                "UPDATE erasure_condition_source SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
+                params![id, i64::MAX, sweep],
+            )
+            .map_err(storage)?;
+            tx.execute(
+                "UPDATE deletion_participant SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
+                params![id, i64::MAX, sweep],
+            )
+            .map_err(storage)?;
+            tx.execute(
+                "UPDATE deletion_operation SET sweep=?2,phase='held',hold_reason='generation_exhausted' WHERE operation_id=?1",
+                params![id, i64::MAX],
+            )
+            .map_err(storage)?;
+            validate(&tx, &id)?;
+            tx.commit().map_err(storage)?;
+            Ok(())
+        })
+        .await
+    }
 }

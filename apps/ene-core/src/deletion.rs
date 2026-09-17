@@ -293,13 +293,21 @@ impl HostHandle {
                     )
                     .await
                 {
-                    Ok(StartTargetedDeletionOutcome::Started(_)) => vec![outcome_frame(
-                        frame,
-                        live,
-                        intent,
-                        self.record_decided(fingerprint, IntentOutcome::AppliedAsOneTime)
-                            .await,
-                    )],
+                    Ok(StartTargetedDeletionOutcome::Started(_)) => {
+                        // The durable Owner confirmation already admitted this
+                        // operation (a crash between confirmation and
+                        // admission): the bounded kick starts the fan-out now
+                        // instead of waiting for the next serving tick. It is
+                        // best-effort and never a completion claim.
+                        self.kick_targeted_deletion().await;
+                        vec![outcome_frame(
+                            frame,
+                            live,
+                            intent,
+                            self.record_decided(fingerprint, IntentOutcome::AppliedAsOneTime)
+                                .await,
+                        )]
+                    }
                     Ok(StartTargetedDeletionOutcome::NeedsClarification) => vec![outcome_frame(
                         frame,
                         live,
@@ -538,6 +546,10 @@ impl HostHandle {
     /// unknown or malformed identity answers
     /// [`Missing`](ConfirmTargetedDeletionOutcome::Missing) and changes
     /// nothing; a duplicate confirmation observes the same single operation.
+    /// When the admission starts the operation, a bounded fan-out drive runs
+    /// immediately, so erasure begins at the confirmation instead of waiting
+    /// for the next serving tick; the drive is best-effort and never turns the
+    /// confirmation into a completion claim.
     ///
     /// # Errors
     ///
@@ -549,10 +561,15 @@ impl HostHandle {
         let Some(request) = parse_request_id(request) else {
             return Ok(ConfirmTargetedDeletionOutcome::Missing);
         };
-        self.store
+        let outcome = self
+            .store
             .confirm_targeted_deletion(request, self.required_deletion_participants())
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        if matches!(outcome, ConfirmTargetedDeletionOutcome::Started(_)) {
+            self.kick_targeted_deletion().await;
+        }
+        Ok(outcome)
     }
 }
 

@@ -89,6 +89,16 @@ const SOCKET_NAME: &str = "ene.sock";
 #[cfg(unix)]
 const SINGLETON_PROBE_MILLIS: u64 = 200;
 
+/// Period between serving-time Targeted Deletion ticks (lifecycle §14).
+///
+/// One tick runs at most one bounded fan-out pass plus at most one backed-off
+/// resume of a retryable hold, so the period bounds the retry rate of a held
+/// operation. A confirmation kicks its operation immediately; this driver
+/// continues whatever remains — multi-pass sweeps, a hold whose holder became
+/// reachable, or a kick that failed technically.
+#[cfg(any(unix, windows))]
+const DELETION_DRIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Resolves the listener socket path for a data directory.
 ///
 /// Public so the sibling Client dialer and integration tests derive the same
@@ -757,6 +767,37 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
     UnixListener::bind(socket).map_err(|error| CoreError::Bind(format!("bind: {error}")))
 }
 
+/// Starts the process-lifetime Targeted Deletion driver for the serving
+/// composition (lifecycle §14).
+///
+/// The driver is the production caller of the bounded fan-out tick
+/// ([`HostHandle::run_targeted_deletion_tick`]): each period it runs at most
+/// one pass plus at most one backed-off resume of a retryable hold. It is a
+/// task rather than `select!` arm of the accept loop because a bounded pass
+/// can wait on a Client local-erasure bound
+/// ([`crate::transient_erasure`]): accepting a connection must never stall
+/// behind erasure work. A failed tick stops nothing and infers no outcome —
+/// there is no logging subsystem, the durable operation state stays
+/// authoritative, and the next period re-derives it.
+#[cfg(any(unix, windows))]
+fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) {
+    tokio::spawn(async move {
+        let mut period = tokio::time::interval_at(
+            tokio::time::Instant::now() + DELETION_DRIVE_PERIOD,
+            DELETION_DRIVE_PERIOD,
+        );
+        period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            period.tick().await;
+            // The result is deliberately discarded: a failed tick is a
+            // technical condition whose only honest response is to keep the
+            // durable operation for the next tick (never a completion, never a
+            // fabricated success, and serving keeps running).
+            drop(handle.run_targeted_deletion_tick().await);
+        }
+    });
+}
+
 /// Serves the Unix socket listener until the process ends.
 ///
 /// Binds [`socket_path`] through the singleton check, proves each peer
@@ -799,6 +840,9 @@ where
     // The serving composition owns the reachability authority for Client
     // incarnations: without it a Client demand would be an unreachable hold.
     handle.install_client_connection_table(Arc::clone(&table));
+    // The single serving driver continues unfinished Targeted Deletion
+    // operations across the process lifetime (lifecycle §14).
+    spawn_targeted_deletion_driver(Arc::clone(&handle));
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
@@ -1246,6 +1290,8 @@ where
     let _ = handle.install_task_launcher(launcher);
     let table = Arc::new(ConnectionTable::new());
     handle.install_client_connection_table(Arc::clone(&table));
+    // Same process-lifetime Targeted Deletion driver as the Unix listener.
+    spawn_targeted_deletion_driver(Arc::clone(&handle));
     loop {
         if server.connect().await.is_err() {
             // A failed wait leaves this instance unusable; replace it rather

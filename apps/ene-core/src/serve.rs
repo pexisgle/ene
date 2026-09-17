@@ -521,6 +521,15 @@ pub struct HostHandle {
     /// reopening composition re-registers its implementations before driving,
     /// so a restart can never turn a missing implementation into completion.
     pub(crate) targeted_deletion: StdMutex<crate::targeted_deletion::ErasureParticipantRegistry>,
+    /// Serving-time retry pacing for retryable Targeted Deletion holds.
+    ///
+    /// Owned only by the serving tick: one bounded tick holds the async mutex
+    /// for its duration so two concurrent ticks cannot double-drive the same
+    /// hold. In-memory and never authority: it decides no phase, converts no
+    /// hold into a completion, and a restart drops it (startup recovery
+    /// resumes independently). See
+    /// [`HeldRetrySchedule`](crate::targeted_deletion::HeldRetrySchedule).
+    pub(crate) deletion_hold_retry: AsyncMutex<crate::targeted_deletion::HeldRetrySchedule>,
     /// Invalidation fence for in-flight Host transient payloads (A3c).
     ///
     /// Bumped by the Host-transient erasure demand; a dialogue stream or
@@ -603,8 +612,9 @@ impl HostHandle {
 
     /// Runs the serving startup mutations in production order (PR §6.4):
     /// presence normalization, unapproved-pairing cleanup, credential sweep,
-    /// sealed-result reconciliation, and orphaned usage-reservation
-    /// reconciliation. Normalization goes first because
+    /// sealed-result reconciliation, orphaned usage-reservation
+    /// reconciliation, and Targeted Deletion recovery. Normalization goes
+    /// first because
     /// every client-dependent admission depends on it, while the sweep and
     /// reconciliation do not; unapproved pendings never survive a restart
     /// (paired records are untouched); the sweep keeps the Host from serving
@@ -612,7 +622,13 @@ impl HostHandle {
     /// neither resumes an execution nor replays a provider call or Action,
     /// and a still-blocked result stays withheld. Orphaned reservations
     /// settle `CommittedUnknown` (`usage-cost-cap` §15): a crash never
-    /// releases a usage slot and never resets consumption to zero. The
+    /// releases a usage slot and never resets consumption to zero. Targeted
+    /// Deletion recovery runs last: it reads the durable unfinished
+    /// operations, resumes a retryable hold (recovery, lifecycle §5.1/§14),
+    /// leaves `GenerationExhausted` held (fail closed), and drives bounded
+    /// fan-out passes so an operation admitted by an earlier process is
+    /// advanced before the listener admits work — a restart is never taken
+    /// as completion evidence. The
     /// [`crate::serve::lifecycle::serve`] entry point runs this
     /// between the store open and the listener bind; Host-integration tests
     /// run it to restart faithfully without a second listener. Like
@@ -624,7 +640,8 @@ impl HostHandle {
     ///
     /// [`CoreError::Store`] when normalization, the pairing cleanup, the
     /// sweep, the sealed-result reconciliation, or the usage-reservation
-    /// reconciliation cannot complete.
+    /// reconciliation cannot complete, and [`CoreError::Deletion`] when
+    /// Targeted Deletion recovery cannot drive the durable operations.
     pub async fn run_startup_mutations(&self) -> Result<(), CoreError> {
         self.normalize_presence_on_startup().await?;
         self.clear_unapproved_pendings().await?;
@@ -636,6 +653,7 @@ impl HostHandle {
             .reconcile_orphaned_usage_reservations()
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
+        self.recover_targeted_deletion_on_startup().await?;
         Ok(())
     }
 
@@ -691,6 +709,7 @@ impl HostHandle {
             targeted_deletion: StdMutex::new(
                 crate::targeted_deletion::ErasureParticipantRegistry::new(),
             ),
+            deletion_hold_retry: AsyncMutex::new(crate::targeted_deletion::HeldRetrySchedule::new()),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
             #[cfg(test)]
@@ -963,6 +982,83 @@ impl HostHandle {
     ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
         let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
         crate::targeted_deletion::drive_targeted_deletion(&self.store, &registry, pass).await
+    }
+
+    /// Runs one bounded serving-time Targeted Deletion tick (lifecycle §14).
+    ///
+    /// The serving composition calls this periodically from a single driver
+    /// task. One tick issues at most one backed-off resume of a retryable
+    /// `Held(Unavailable)` operation and then exactly one bounded fan-out pass
+    /// ([`TargetedDeletionPass::default`](crate::targeted_deletion::TargetedDeletionPass::default));
+    /// a hold therefore cannot be
+    /// retried in a tight loop, and `Held(GenerationExhausted)` is never
+    /// resumed. Concurrent callers serialize on the retry schedule, so two
+    /// ticks cannot double-drive one hold; the durable store still owns every
+    /// idempotency and completion premise.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Deletion`] when the canonical store refuses. A failed tick
+    /// must not stop serving and must not infer any outcome: the durable
+    /// operation state stays authoritative and a later tick re-derives it.
+    pub async fn run_targeted_deletion_tick(
+        &self,
+    ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
+        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
+        let mut schedule = self.deletion_hold_retry.lock().await;
+        crate::targeted_deletion::tick_targeted_deletion(
+            &self.store,
+            &registry,
+            crate::targeted_deletion::TargetedDeletionPass::default(),
+            &mut schedule,
+        )
+        .await
+    }
+
+    /// Restores unfinished Targeted Deletion operations at startup (lifecycle
+    /// §14).
+    ///
+    /// Runs inside [`HostHandle::run_startup_mutations`], after the state open
+    /// and before the listener binds: a retryable `Held(Unavailable)`
+    /// operation is resumed as the restart's recovery decision, every
+    /// `Active` / `Finalizing` operation is driven through bounded fan-out
+    /// passes, and `Held(GenerationExhausted)` stays held. Failures are
+    /// technical and fail startup; a still-held or unfinished operation is a
+    /// domain state, not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Deletion`] when the canonical store refuses the recovery
+    /// drive.
+    pub(crate) async fn recover_targeted_deletion_on_startup(&self) -> Result<(), CoreError> {
+        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
+        crate::targeted_deletion::recover_targeted_deletions(
+            &self.store,
+            &registry,
+            crate::targeted_deletion::TargetedDeletionPass::default(),
+            crate::targeted_deletion::BOUNDED_DRIVE_PASS_BUDGET,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Best-effort bounded drive right after a destructive admission.
+    ///
+    /// The Owner's confirmation is already durable and the canonical operation
+    /// exists; this kick is not part of the admission decision. A failed kick
+    /// must not make the caller report the confirmation as failed — the
+    /// durable operation stays for the serving tick or the next startup
+    /// recovery — and it never estimates completion, because every pass
+    /// re-derives its premises inside the sealed store boundary.
+    pub(crate) async fn kick_targeted_deletion(&self) {
+        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
+        let _drive = crate::targeted_deletion::drive_targeted_deletion_until_settled(
+            &self.store,
+            &registry,
+            crate::targeted_deletion::TargetedDeletionPass::default(),
+            crate::targeted_deletion::BOUNDED_DRIVE_PASS_BUDGET,
+        )
+        .await;
     }
 
     pub(crate) fn task_launcher(

@@ -12,16 +12,23 @@
 //! Local erasure inside a participant is a later slice: until an owner's
 //! implementation is registered, the fan-out drives it as an explicit
 //! unsupported participant whose durable hold keeps the operation unfinished.
+//!
+//! The production entry points over this module are bounded: Host startup
+//! restores unfinished operations (resuming a retryable hold once, lifecycle
+//! §14), the serving composition runs a periodic tick (one pass plus a
+//! backed-off retry of a retryable hold), and a first-party confirmation kicks
+//! a bounded drive immediately after admission. None of them decides
+//! completion: only the sealed store boundary does.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ene_preservation::{
-    DeletionFinalizationOutcome, DeletionLifecycleChange, DeletionMaterialOutcome,
-    DeletionOperationMaterial, DeletionOperationPhase, DeletionOperationRef,
-    DemandLocalErasureCommand, ErasureParticipant, ParticipantCompletionFact,
-    ParticipantCompletionOutcome, ParticipantCompletionStatus, ParticipantDemandOutcome,
-    ParticipantErasureScope, ParticipantHoldClass, ParticipantOwnerRef,
+    DeletionFinalizationOutcome, DeletionLifecycleChange, DeletionLifecycleOutcome,
+    DeletionMaterialOutcome, DeletionOperationId, DeletionOperationMaterial,
+    DeletionOperationPhase, DeletionOperationRef, DemandLocalErasureCommand, ErasureParticipant,
+    ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantCompletionStatus,
+    ParticipantDemandOutcome, ParticipantErasureScope, ParticipantHoldClass, ParticipantOwnerRef,
     PreservationRepository as _,
 };
 use ene_primitive::WallClockWithTz;
@@ -180,6 +187,55 @@ pub struct TargetedDeletionPassOutcome {
     pub remainder_sweeps: u32,
 }
 
+impl TargetedDeletionPassOutcome {
+    /// Whether one pass advanced durable work: it demanded a participant,
+    /// verified one, moved an operation into `Finalizing`, committed a
+    /// completion, or opened a remainder sweep.
+    ///
+    /// Counters only, and deliberately never a completion decision. A recorded
+    /// hold is not progress: the operation waits for a resume and the same
+    /// bounded driver must not keep hammering it (lifecycle §5.1).
+    #[must_use]
+    pub(crate) fn progressed(self) -> bool {
+        self.demands > 0
+            || self.verified > 0
+            || self.finalizing > 0
+            || self.finalized > 0
+            || self.remainder_sweeps > 0
+    }
+
+    /// Folds another pass's counters into this one.
+    pub(crate) fn accumulate(&mut self, other: Self) {
+        self.operations = self.operations.saturating_add(other.operations);
+        self.demands = self.demands.saturating_add(other.demands);
+        self.verified = self.verified.saturating_add(other.verified);
+        self.unfinished = self.unfinished.saturating_add(other.unfinished);
+        self.held = self.held.saturating_add(other.held);
+        self.stale_reports = self.stale_reports.saturating_add(other.stale_reports);
+        self.finalizing = self.finalizing.saturating_add(other.finalizing);
+        self.finalized = self.finalized.saturating_add(other.finalized);
+        self.remainder_sweeps = self.remainder_sweeps.saturating_add(other.remainder_sweeps);
+    }
+}
+
+/// Bounded passes one startup/confirmation drive runs before it stops and
+/// leaves the rest to the serving tick.
+///
+/// Each pass is itself bounded by [`TargetedDeletionPass`]; this budget caps
+/// how many continuation passes a single caller runs, so a participant that
+/// always reports more work can never make startup or a confirmation
+/// unbounded.
+pub(crate) const BOUNDED_DRIVE_PASS_BUDGET: u32 = 8;
+
+/// Upper bound on the held-retry skip shift: the skip doubles per consecutive
+/// unanswered retry up to `2^3` ticks and then stays there.
+const HELD_RETRY_MAX_SKIP_SHIFT: u32 = 3;
+
+/// Whether the bounded pass parameters are inside their contract.
+fn valid_pass(pass: TargetedDeletionPass) -> bool {
+    (1..=100).contains(&pass.operation_limit) && pass.demands_per_participant > 0
+}
+
 fn deletion_error(error: ene_preservation::PreservationTechnicalError) -> CoreError {
     CoreError::Deletion(error.to_string())
 }
@@ -223,7 +279,7 @@ pub async fn drive_targeted_deletion(
     registry: &ErasureParticipantRegistry,
     pass: TargetedDeletionPass,
 ) -> Result<TargetedDeletionPassOutcome, CoreError> {
-    if !(1..=100).contains(&pass.operation_limit) || pass.demands_per_participant == 0 {
+    if !valid_pass(pass) {
         return Err(CoreError::Deletion(String::from(
             "invalid targeted deletion pass parameters",
         )));
@@ -473,6 +529,234 @@ async fn drive_operation(
     Ok(true)
 }
 
+/// Drives bounded passes until a pass advances no durable work or the budget
+/// is exhausted.
+///
+/// This is the continuation driver behind startup recovery and the post-
+/// confirmation kick: each iteration is one [`drive_targeted_deletion`] pass
+/// with its own bounded operation/demand limits, and the loop stops as soon as
+/// a pass reports no demand, verification, finalizing step, completion, or
+/// remainder sweep. It never decides completion itself — the sealed store
+/// boundary re-derives every premise on each pass.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for an invalid pass or budget and when the
+/// canonical store refuses.
+pub(crate) async fn drive_targeted_deletion_until_settled(
+    store: &Store,
+    registry: &ErasureParticipantRegistry,
+    pass: TargetedDeletionPass,
+    pass_budget: u32,
+) -> Result<TargetedDeletionPassOutcome, CoreError> {
+    if !valid_pass(pass) || pass_budget == 0 {
+        return Err(CoreError::Deletion(String::from(
+            "invalid targeted deletion drive parameters",
+        )));
+    }
+    let mut total = TargetedDeletionPassOutcome::default();
+    for _ in 0..pass_budget {
+        let outcome = drive_targeted_deletion(store, registry, pass).await?;
+        let progressed = outcome.progressed();
+        total.accumulate(outcome);
+        if !progressed {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Restores unfinished Targeted Deletion operations at startup (lifecycle
+/// §14).
+///
+/// A `Held(Unavailable)` operation is retryable and a Host restart is a
+/// recovery decision: the hold is resumed so the reopened composition can
+/// re-drive the stored participant snapshot. This only reads the durable
+/// phase and applies the canonical [`DeletionLifecycleChange::Resume`]; a
+/// `Held(GenerationExhausted)` operation is left untouched (fail closed — no
+/// generation can be reused or invented) and an `Active` / `Finalizing`
+/// operation is left for the bounded drive below. Every operation identity,
+/// sweep, and participant row comes from durable state; nothing is reset to a
+/// memory default, and a restart is never taken as completion evidence.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for an invalid pass or budget and when the
+/// canonical store refuses.
+pub(crate) async fn recover_targeted_deletions(
+    store: &Store,
+    registry: &ErasureParticipantRegistry,
+    pass: TargetedDeletionPass,
+    pass_budget: u32,
+) -> Result<TargetedDeletionPassOutcome, CoreError> {
+    if !valid_pass(pass) || pass_budget == 0 {
+        return Err(CoreError::Deletion(String::from(
+            "invalid targeted deletion recovery parameters",
+        )));
+    }
+    resume_retryable_holds(store, pass.operation_limit).await?;
+    drive_targeted_deletion_until_settled(store, registry, pass, pass_budget).await
+}
+
+/// Resumes the retryable holds inside one bounded operation page.
+///
+/// Only `Held(Unavailable)` is a resume candidate. `GenerationExhausted`
+/// cannot be resumed by construction, every other phase is not a hold, and
+/// the canonical store re-checks all of that inside its own write
+/// transaction; this read only decides which candidates to offer.
+async fn resume_retryable_holds(store: &Store, limit: u32) -> Result<(), CoreError> {
+    let page = store
+        .unfinished_deletions(None, limit)
+        .await
+        .map_err(deletion_error)?;
+    for record in page {
+        if record.phase == DeletionOperationPhase::Held
+            && record.hold == Some(ene_preservation::DeletionHoldReason::Unavailable)
+        {
+            // The store re-checks the phase, sweep, and hold class inside its
+            // write transaction; a refusal (another writer moved the
+            // operation, or the durable state cannot resume) leaves it for the
+            // bounded drive below without inventing an outcome here.
+            store
+                .change_deletion_lifecycle(record.current, DeletionLifecycleChange::Resume)
+                .await
+                .map_err(deletion_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// In-memory pacing for retrying `Held(Unavailable)` operations from the
+/// serving tick.
+///
+/// The driver retries a retryable hold by resuming it and driving the reopened
+/// operation; each consecutive unanswered retry doubles the number of ticks
+/// before the next attempt, up to `2^`[`HELD_RETRY_MAX_SKIP_SHIFT`] ticks. The
+/// schedule is pacing only and never authority: it decides no phase, stores no
+/// deletion condition, converts no hold into a completion, and a restart drops
+/// it (startup recovery resumes independently of it). Pruning entries that are
+/// no longer held keeps the map bounded by the unfinished-hold page.
+#[derive(Debug, Default)]
+pub(crate) struct HeldRetrySchedule {
+    tick: u64,
+    retries: HashMap<DeletionOperationId, HoldRetry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HoldRetry {
+    /// Consecutive resume attempts that have not answered.
+    attempts: u32,
+    /// First tick at which the next resume is allowed.
+    next_eligible_tick: u64,
+}
+
+impl HeldRetrySchedule {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Advances the schedule by one tick.
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.saturating_add(1);
+        self.tick
+    }
+
+    fn eligible(&self, operation: DeletionOperationId, tick: u64) -> bool {
+        self.retries
+            .get(&operation)
+            .is_none_or(|retry| tick >= retry.next_eligible_tick)
+    }
+
+    fn record_resume(&mut self, operation: DeletionOperationId, tick: u64) {
+        let attempts = self
+            .retries
+            .get(&operation)
+            .map_or(0, |retry| retry.attempts)
+            .saturating_add(1);
+        let shift = attempts.saturating_sub(1).min(HELD_RETRY_MAX_SKIP_SHIFT);
+        let skip = 1_u64 << shift;
+        self.retries.insert(
+            operation,
+            HoldRetry {
+                attempts,
+                next_eligible_tick: tick.saturating_add(skip),
+            },
+        );
+    }
+
+    /// Drops scheduling state for operations that are no longer retryable
+    /// holds.
+    fn retain_only(&mut self, held: &HashSet<DeletionOperationId>) {
+        self.retries.retain(|operation, _| held.contains(operation));
+    }
+}
+
+/// One bounded serving tick: at most one backed-off resume per retryable hold
+/// plus exactly one fan-out pass.
+///
+/// Holds are read from the durable phase; the schedule bounds how often a hold
+/// is retried, and a resume is offered only to `Held(Unavailable)` operations.
+/// `GenerationExhausted` is never retried (fail closed). The pass itself is
+/// [`drive_targeted_deletion`], so a tick can never run unbounded participant
+/// work and can never complete an operation without the sealed store
+/// boundary re-deriving every premise.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for an invalid pass and when the canonical
+/// store refuses.
+pub(crate) async fn tick_targeted_deletion(
+    store: &Store,
+    registry: &ErasureParticipantRegistry,
+    pass: TargetedDeletionPass,
+    schedule: &mut HeldRetrySchedule,
+) -> Result<TargetedDeletionPassOutcome, CoreError> {
+    if !valid_pass(pass) {
+        return Err(CoreError::Deletion(String::from(
+            "invalid targeted deletion pass parameters",
+        )));
+    }
+    let tick = schedule.next_tick();
+    let page = store
+        .unfinished_deletions(None, pass.operation_limit)
+        .await
+        .map_err(deletion_error)?;
+    let retryable: HashSet<DeletionOperationId> = page
+        .iter()
+        .filter(|record| {
+            record.phase == DeletionOperationPhase::Held
+                && record.hold == Some(ene_preservation::DeletionHoldReason::Unavailable)
+        })
+        .map(|record| record.current.operation)
+        .collect();
+    schedule.retain_only(&retryable);
+    for record in &page {
+        if !retryable.contains(&record.current.operation)
+            || !schedule.eligible(record.current.operation, tick)
+        {
+            continue;
+        }
+        match store
+            .change_deletion_lifecycle(record.current, DeletionLifecycleChange::Resume)
+            .await
+            .map_err(deletion_error)?
+        {
+            DeletionLifecycleOutcome::Applied(_) => {
+                schedule.record_resume(record.current.operation, tick);
+            }
+            // The durable state moved or refuses the resume; the next tick
+            // re-reads the phase instead of guessing.
+            DeletionLifecycleOutcome::Missing
+            | DeletionLifecycleOutcome::StaleSweep
+            | DeletionLifecycleOutcome::Completed
+            | DeletionLifecycleOutcome::Held(_)
+            | DeletionLifecycleOutcome::Finalizing => {}
+        }
+    }
+    drive_targeted_deletion(store, registry, pass).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
@@ -497,9 +781,12 @@ mod tests {
         IntentFingerprint, IntentOutcomeRepository as _, IntentResolution, PurposeKind,
     };
     use ene_preservation::{
+        ConfirmTargetedDeletionOutcome, DeletionFinalizationOutcome, DeletionHoldReason,
+        DeletionOperationId, DeletionOperationPhase, DeletionOperationRecord, DeletionOperationRef,
         DeletionPurpose, DeletionSearchMaterial, DeletionSweepGeneration, ErasureParticipant,
         MechanicalDeletionTarget, ParticipantCompletionFact, ParticipantCompletionStatus,
         ParticipantHoldClass, ParticipantOwnerRef, ParticipantProgress,
+        StageTargetedDeletionRequestCommand, StageTargetedDeletionRequestOutcome,
         StartTargetedDeletionCommand, StartTargetedDeletionOutcome, TargetedDeletionTarget,
     };
     use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
@@ -2659,5 +2946,548 @@ mod tests {
             "the prompt is assembled from the erased rows, got {prompt}"
         );
         assert!(prompt.contains("[erased]"));
+    }
+
+    // --- Stage 6 F1: production driver and startup recovery ----------------
+
+    /// The operation record as the durable status surface reports it.
+    async fn operation_record(
+        handle: &HostHandle,
+        operation: DeletionOperationId,
+    ) -> DeletionOperationRecord {
+        handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == operation)
+            .expect("the operation must stay readable")
+    }
+
+    /// Establishes the durable finalizing premise through the canonical
+    /// participant API: every required participant verified for the current
+    /// sweep.
+    async fn mark_all_participants_verified(handle: &HostHandle, current: DeletionOperationRef) {
+        let mut after = None;
+        loop {
+            let page = handle
+                .store
+                .deletion_participants(current.operation, after, 100)
+                .await
+                .expect("the participants must read");
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for record in page {
+                after = Some(record.participant.owner);
+                handle
+                    .store
+                    .record_participant_completion(ParticipantCompletionFact::verified(
+                        current.condition(),
+                        record.participant.owner,
+                        0,
+                        WallClockWithTz::now(),
+                    ))
+                    .await
+                    .expect("the verification fact must record");
+            }
+            if page_len < 100 {
+                break;
+            }
+        }
+    }
+
+    /// F1: the Host-local confirmation alone drives the operation. This test
+    /// never calls `drive_targeted_deletion`, a tick, or startup recovery: the
+    /// production confirm path must run the bounded fan-out and reach the
+    /// sealed completion boundary on its own.
+    #[tokio::test]
+    async fn confirming_a_staged_request_drives_the_operation_to_completion() {
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-driver-confirm").await else {
+            panic!("the host must open");
+        };
+        let target = "driver-confirm-body";
+        let command = StageTargetedDeletionRequestCommand::new(
+            TargetedDeletionTarget {
+                mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                    target.into(),
+                )),
+                semantic_hints: vec![],
+            },
+            DeletionPurpose::Privacy,
+            WallClockWithTz::now(),
+        );
+        let StageTargetedDeletionRequestOutcome::Staged(request) =
+            handle.store.stage_targeted_deletion(command).await.unwrap()
+        else {
+            panic!("a fresh request must stage");
+        };
+        let request_text = request.as_raw().as_uuid().as_hyphenated().to_string();
+        let outcome = handle
+            .confirm_targeted_deletion(&request_text)
+            .await
+            .expect("the confirmation must answer");
+        assert!(
+            !format!("{outcome:?}").contains(target),
+            "the confirmation outcome never carries the target"
+        );
+        let ConfirmTargetedDeletionOutcome::Started(current) = outcome else {
+            panic!("the Owner confirmation must start the operation");
+        };
+        let record = operation_record(&handle, current.operation).await;
+        assert_eq!(
+            record.phase,
+            DeletionOperationPhase::Completed,
+            "the confirmation kick must drive the operation through the sealed boundary"
+        );
+        assert!(
+            handle
+                .store
+                .deletion_completion_audit(current.operation)
+                .await
+                .unwrap()
+                .is_some(),
+            "the completion audit is durable"
+        );
+        assert!(
+            handle
+                .store
+                .unfinished_deletions(None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            handle
+                .store
+                .current_erasure_conditions(None, 100)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the completion boundary closes the current condition"
+        );
+    }
+
+    /// F1 startup recovery: an `Active` operation left by a crashed process is
+    /// driven to completion by the restart, with the target mechanically gone.
+    #[tokio::test]
+    async fn startup_recovery_drives_an_active_operation_to_completion() {
+        use ene_companion::{CompanionRepository as _, HistoryRole};
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, dir)) = memory_handle("targeted-deletion-startup-active").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "startup-active-target";
+        append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("my private note is {target}"),
+        )
+        .await;
+        let current = admit(
+            &handle,
+            target,
+            vec![
+                ParticipantOwnerRef::Companion,
+                ParticipantOwnerRef::Learning,
+            ],
+        )
+        .await;
+        // Crash before any drive: the durable operation stays Active.
+        drop(handle);
+
+        let reopened = reopen(dir.path()).await;
+        assert_eq!(
+            operation_record(&reopened, current.operation).await.phase,
+            DeletionOperationPhase::Active,
+            "the crash must leave the operation Active"
+        );
+        reopened
+            .run_startup_mutations()
+            .await
+            .expect("startup recovery must run");
+        assert_eq!(
+            operation_record(&reopened, current.operation).await.phase,
+            DeletionOperationPhase::Completed,
+            "startup must drive an Active operation through the sealed boundary"
+        );
+        assert_eq!(
+            reopened
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0,
+            "the startup drive erases the stored target"
+        );
+    }
+
+    /// F1 startup recovery: a durable `Held(Unavailable)` operation is a
+    /// retryable hold, so the restart resumes it and the composition re-drives
+    /// the stored participant snapshot instead of leaving it stopped.
+    #[tokio::test]
+    async fn startup_recovery_resumes_a_held_unavailable_operation() {
+        let Some((handle, dir)) = memory_handle("targeted-deletion-startup-held").await else {
+            panic!("the host must open");
+        };
+        // Scripted holders create the durable hold; the reopened production
+        // composition is what has to advance it after the resume.
+        handle.reset_deletion_participants_for_tests();
+        let required = vec![
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+        ];
+        let current = admit(&handle, "startup-held-target", required.clone()).await;
+        for owner in &required {
+            handle
+                .register_deletion_participant(Arc::new(TestParticipant::new(
+                    *owner,
+                    ParticipantCompletionStatus::Held(ParticipantHoldClass::Unavailable),
+                )))
+                .unwrap();
+        }
+        let held = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(held.held as usize, required.len());
+        drop(handle);
+
+        let reopened = reopen(dir.path()).await;
+        let before = operation_record(&reopened, current.operation).await;
+        assert_eq!(before.phase, DeletionOperationPhase::Held);
+        assert_eq!(before.hold, Some(DeletionHoldReason::Unavailable));
+        reopened
+            .run_startup_mutations()
+            .await
+            .expect("startup recovery must run");
+        let after = operation_record(&reopened, current.operation).await;
+        assert_eq!(
+            after.current, current,
+            "the recovery never regenerates the operation identity or sweep"
+        );
+        assert_eq!(
+            after.phase,
+            DeletionOperationPhase::Completed,
+            "the resumed operation is re-driven by the reopened composition"
+        );
+        assert!(
+            reopened
+                .store
+                .deletion_participants(current.operation, None, 100)
+                .await
+                .unwrap()
+                .iter()
+                .all(|record| record.progress.is_verified()),
+            "every required participant verified for the current sweep"
+        );
+    }
+
+    /// F1 startup recovery: a `Finalizing` operation resumes only the
+    /// remaining completion steps from its durable marker; no participant is
+    /// demanded again.
+    #[tokio::test]
+    async fn startup_recovery_resumes_a_finalizing_operation() {
+        let Some((handle, dir)) = memory_handle("targeted-deletion-startup-finalizing").await
+        else {
+            panic!("the host must open");
+        };
+        let current = admit(
+            &handle,
+            "startup-finalizing-target",
+            vec![
+                ParticipantOwnerRef::Companion,
+                ParticipantOwnerRef::Learning,
+            ],
+        )
+        .await;
+        mark_all_participants_verified(&handle, current).await;
+        assert_eq!(
+            handle
+                .store
+                .begin_deletion_finalizing(current)
+                .await
+                .unwrap(),
+            DeletionFinalizationOutcome::Finalizing
+        );
+        drop(handle);
+
+        let reopened = reopen(dir.path()).await;
+        assert_eq!(
+            operation_record(&reopened, current.operation).await.phase,
+            DeletionOperationPhase::Finalizing,
+            "the durable marker survives the crash"
+        );
+        reopened
+            .run_startup_mutations()
+            .await
+            .expect("startup recovery must run");
+        assert_eq!(
+            operation_record(&reopened, current.operation).await.phase,
+            DeletionOperationPhase::Completed,
+            "the restart finishes the remaining completion steps"
+        );
+        assert!(
+            reopened
+                .store
+                .deletion_completion_audit(current.operation)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            reopened
+                .store
+                .current_erasure_conditions(None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// F1 fail closed: `Held(GenerationExhausted)` can never resume, so
+    /// startup recovery and a serving tick must both leave it held with its
+    /// condition active and no participant progress fabricated.
+    #[tokio::test]
+    async fn startup_recovery_leaves_a_generation_exhausted_hold_untouched() {
+        let Some((handle, dir)) = memory_handle("targeted-deletion-startup-exhausted").await else {
+            panic!("the host must open");
+        };
+        let current = admit(
+            &handle,
+            "exhausted-target",
+            vec![
+                ParticipantOwnerRef::Companion,
+                ParticipantOwnerRef::Learning,
+            ],
+        )
+        .await;
+        handle
+            .store
+            .hold_generation_exhausted_for_tests(current.operation)
+            .await
+            .expect("the fixture must enter the exhaustion hold");
+        drop(handle);
+
+        let reopened = reopen(dir.path()).await;
+        reopened
+            .run_startup_mutations()
+            .await
+            .expect("startup recovery must run");
+        let after = operation_record(&reopened, current.operation).await;
+        assert_eq!(after.phase, DeletionOperationPhase::Held);
+        assert_eq!(after.hold, Some(DeletionHoldReason::GenerationExhausted));
+        assert!(
+            reopened
+                .store
+                .deletion_participants(current.operation, None, 100)
+                .await
+                .unwrap()
+                .iter()
+                .all(|record| !record.progress.is_verified()),
+            "no verification is fabricated for an exhausted generation"
+        );
+        assert!(
+            reopened
+                .store
+                .deletion_completion_audit(current.operation)
+                .await
+                .unwrap()
+                .is_none(),
+            "an exhausted hold is never a completion"
+        );
+        assert!(
+            reopened
+                .store
+                .current_erasure_conditions(None, 100)
+                .await
+                .unwrap()
+                .iter()
+                .any(|condition| condition.condition == after.current.condition()),
+            "the current condition stays active while the operation is held"
+        );
+
+        // A serving tick does not move it either, and never demands work for it.
+        let tick = reopened.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(tick.demands, 0);
+        assert_eq!(
+            operation_record(&reopened, current.operation).await.phase,
+            DeletionOperationPhase::Held
+        );
+    }
+
+    /// F1 serving tick: a retryable hold is retried, but with a bounded
+    /// backoff (the skip doubles per consecutive attempt) and never as an
+    /// inferred completion.
+    #[tokio::test]
+    async fn serving_ticks_retry_a_held_operation_with_bounded_backoff() {
+        let target = "backoff-target";
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-tick-backoff").await else {
+            panic!("the host must open");
+        };
+        handle.reset_deletion_participants_for_tests();
+        let owner = ParticipantOwnerRef::Companion;
+        let current = admit(&handle, target, vec![owner]).await;
+        let participant = Arc::new(TestParticipant::new(
+            owner,
+            ParticipantCompletionStatus::Held(ParticipantHoldClass::Unavailable),
+        ));
+        handle
+            .register_deletion_participant(participant.clone())
+            .unwrap();
+
+        // Tick 1 drives the Active operation into the durable hold.
+        let first = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(first.held, 1);
+        assert_eq!(participant.calls(), 1);
+        // Ticks 2 and 3 retry immediately after the first retry (skip 1 then
+        // 2), then tick 4 must be skipped by the doubled backoff.
+        let second = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(second.held, 1);
+        assert_eq!(participant.calls(), 2);
+        let third = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(third.held, 1);
+        assert_eq!(participant.calls(), 3);
+        let fourth = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(
+            fourth.operations, 1,
+            "the held operation is still examined every tick"
+        );
+        assert_eq!(fourth.demands, 0, "the backoff skips this retry");
+        assert_eq!(participant.calls(), 3);
+        // Tick 5 retries once more; ticks 6-8 are then inside the doubled
+        // skip, and tick 9 retries again.
+        let fifth = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(fifth.held, 1);
+        assert_eq!(participant.calls(), 4);
+        for _ in 0..3 {
+            handle.run_targeted_deletion_tick().await.unwrap();
+        }
+        assert_eq!(
+            participant.calls(),
+            4,
+            "the skip doubles between consecutive retry attempts"
+        );
+        let ninth = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!(ninth.held, 1);
+        assert_eq!(participant.calls(), 5);
+        assert!(
+            !format!("{ninth:?}").contains(target),
+            "the tick outcome never carries the target"
+        );
+
+        // Not a completion: the durable phase stays held with its condition
+        // open and no audit, no matter how often the tick retried.
+        let after = operation_record(&handle, current.operation).await;
+        assert_eq!(after.phase, DeletionOperationPhase::Held);
+        assert_eq!(after.hold, Some(DeletionHoldReason::Unavailable));
+        assert!(
+            handle
+                .store
+                .deletion_completion_audit(current.operation)
+                .await
+                .unwrap()
+                .is_none(),
+            "a held operation is never completed by estimation"
+        );
+        assert!(
+            handle
+                .store
+                .current_erasure_conditions(None, 100)
+                .await
+                .unwrap()
+                .iter()
+                .any(|condition| condition.condition == current.condition()),
+            "the condition stays active while the operation is held"
+        );
+    }
+
+    /// F1 concurrent ticks: two overlapping ticks must be idempotent. The
+    /// retry schedule serializes them and the canonical store re-derives every
+    /// premise, so the operation completes exactly once with one audit.
+    #[tokio::test]
+    async fn concurrent_serving_ticks_complete_once_and_stay_idempotent() {
+        use ene_companion::{CompanionRepository as _, HistoryRole};
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-tick-concurrent").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "concurrent-tick-target";
+        append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("the concurrent note is {target}"),
+        )
+        .await;
+        let current = admit(
+            &handle,
+            target,
+            vec![
+                ParticipantOwnerRef::Companion,
+                ParticipantOwnerRef::Learning,
+            ],
+        )
+        .await;
+        let (first, second) = tokio::join!(
+            handle.run_targeted_deletion_tick(),
+            handle.run_targeted_deletion_tick()
+        );
+        first.expect("the first concurrent tick must run");
+        second.expect("the second concurrent tick must run");
+        let after = operation_record(&handle, current.operation).await;
+        assert_eq!(after.phase, DeletionOperationPhase::Completed);
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0
+        );
+        let audit = handle
+            .store
+            .deletion_completion_audit(current.operation)
+            .await
+            .unwrap()
+            .expect("completion writes one audit");
+        assert_eq!(audit.sweep_count, 1);
+        assert_eq!(audit.verified_count(), 2);
+        // A later tick over the completed operation demands nothing and can
+        // never reopen it.
+        let idle = handle.run_targeted_deletion_tick().await.unwrap();
+        assert_eq!((idle.demands, idle.finalized), (0, 0));
+        assert_eq!(
+            operation_record(&handle, current.operation).await.phase,
+            DeletionOperationPhase::Completed
+        );
     }
 }
