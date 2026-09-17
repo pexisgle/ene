@@ -323,6 +323,7 @@ dependencies = [
 name = "ene-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "ene-action",
  "ene-api",
@@ -386,6 +387,7 @@ dependencies = [
 name = "ene-inference"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ene-credential",
  "ene-permission",
  "ene-primitive",

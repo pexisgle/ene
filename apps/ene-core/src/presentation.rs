@@ -100,7 +100,7 @@ fn conn_key(id: &ConnectionWireId) -> String {
 
 /// Stale refusal for a Client-dependent operation whose ownership section
 /// found the connection superseded, closed, or replaced (IPC §11.3).
-fn stale_operation(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+pub(crate) fn stale_operation(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     stale_reject(frame, live, detail)
 }
 
@@ -178,7 +178,7 @@ impl Receipt {
 
 /// A stored page cursor: its kind binds it to one query (and Task).
 #[derive(Debug, Clone)]
-enum StoredCursor {
+pub(crate) enum StoredCursor {
     TaskList {
         after: Option<TaskId>,
     },
@@ -191,6 +191,17 @@ enum StoredCursor {
         cursor: UndeliveredCursor,
         pending_only: bool,
         limit: u32,
+    },
+    /// One usage summary page position, bound to this connection, to the
+    /// exact filter premise that produced it, and to the effective period
+    /// bounds that walk keeps ([`crate::usage`]): changing any filter makes a
+    /// reused cursor stale instead of silently reading a different result
+    /// set, and a cursor page covers the same window as its first page.
+    UsageSummary {
+        premise: crate::usage::UsageQueryPremise,
+        from: ene_primitive::WallClockWithTz,
+        to: ene_primitive::WallClockWithTz,
+        after: Option<ene_inference::UsageSummaryCursor>,
     },
 }
 
@@ -319,6 +330,34 @@ impl PresentationState {
         self.resume.clear();
         dropped
     }
+
+    /// The stored page of one usage-summary cursor issued on this connection
+    /// for exactly `premise`: the effective period bounds that walk keeps and
+    /// the keyset position, if any.
+    ///
+    /// `None` means the cursor is unknown, was issued on another connection,
+    /// or was issued for a different filter premise: the caller answers
+    /// `StaleBaseView` and the Client restarts from the head.
+    pub(crate) fn usage_cursor_page(
+        &self,
+        conn: &str,
+        wire: &str,
+        premise: &crate::usage::UsageQueryPremise,
+    ) -> Option<crate::usage::UsageCursorPage> {
+        match self.cursors.get(&(conn.to_string(), wire.to_string())) {
+            Some(StoredCursor::UsageSummary {
+                premise: bound,
+                from,
+                to,
+                after,
+            }) if bound == premise => Some(crate::usage::UsageCursorPage {
+                from: *from,
+                to: *to,
+                after: *after,
+            }),
+            _ => None,
+        }
+    }
 }
 /// Opaque purpose identity echoed by the Client: `{task}:{adopted_revision}`.
 ///
@@ -409,7 +448,7 @@ fn hold_name(hold: TaskResumeHold) -> &'static str {
     }
 }
 
-pub(crate) fn limit_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+pub(crate) fn field_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(
         frame,
         live,
@@ -526,7 +565,7 @@ impl HostHandle {
     /// Every connection-scoped ref, cursor, carried item, subscription,
     /// receipt, and retry-slot install goes through here, so a superseded or
     /// closed connection cannot recreate state after the lifecycle sweep.
-    fn with_presentation_state<R>(
+    pub(crate) fn with_presentation_state<R>(
         &self,
         live: &LiveInput,
         install: impl FnOnce(&mut PresentationState) -> R,
@@ -550,7 +589,7 @@ impl HostHandle {
         )
     }
 
-    fn mint_cursor(
+    pub(crate) fn mint_cursor(
         state: &mut PresentationState,
         conn: &str,
         cursor: StoredCursor,
@@ -593,7 +632,7 @@ impl HostHandle {
     /// Consumes one single-use page cursor: forward-only paging never
     /// rewinds through an old cursor, and the map cannot grow with the page
     /// count.
-    fn take_cursor(state: &mut PresentationState, conn: &str, cursor: Option<&str>) {
+    pub(crate) fn take_cursor(state: &mut PresentationState, conn: &str, cursor: Option<&str>) {
         if let Some(wire) = cursor {
             state.cursors.remove(&(conn.to_string(), wire.to_string()));
         }
@@ -607,7 +646,7 @@ impl HostHandle {
         request: &UndeliveredRequest,
     ) -> Vec<WireFrame> {
         let Some(limit) = checked_limit(request.limit) else {
-            return vec![limit_reject(frame, live, "query limit must be 1..=50")];
+            return vec![field_reject(frame, live, "query limit must be 1..=50")];
         };
         let response = self
             .present_page(
@@ -1686,7 +1725,7 @@ impl HostHandle {
         query: &ListTasks,
     ) -> Vec<WireFrame> {
         let Some(limit) = checked_limit(query.limit) else {
-            return vec![limit_reject(frame, live, "query limit must be 1..=50")];
+            return vec![field_reject(frame, live, "query limit must be 1..=50")];
         };
         let conn = conn_key(&live.connection_id);
         let after = match &query.cursor {
@@ -1779,7 +1818,7 @@ impl HostHandle {
         query: &GetTaskReport,
     ) -> Vec<WireFrame> {
         let Some(limit) = checked_limit(query.limit) else {
-            return vec![limit_reject(frame, live, "query limit must be 1..=50")];
+            return vec![field_reject(frame, live, "query limit must be 1..=50")];
         };
         let conn = conn_key(&live.connection_id);
         let task = {
@@ -1951,7 +1990,7 @@ impl HostHandle {
                 value
             }
             Some(_) => {
-                return vec![limit_reject(
+                return vec![field_reject(
                     frame,
                     live,
                     "source limit must be 4..=16384 bytes",

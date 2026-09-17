@@ -3604,3 +3604,5 @@ async fn startup_reconciliation_settles_orphaned_usage_reservations() {
         .expect("the reservation stays durable");
     assert_eq!(again.state, UsageReservationState::CommittedUnknown);
 }
+
+mod usage_tests;

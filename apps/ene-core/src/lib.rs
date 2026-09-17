@@ -55,6 +55,7 @@ pub mod task_agent;
 pub mod task_control;
 pub mod task_run;
 pub mod transient_erasure;
+pub mod usage;
 
 #[cfg(test)]
 pub(crate) mod test_support;

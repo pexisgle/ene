@@ -27,6 +27,7 @@ use super::undelivered::{
     ResumeTaskOutcomeWire, SelectTask, SelectTaskResponse, TaskListResponse, TaskReportResponse,
     UndeliveredAck, UndeliveredAckOutcome, UndeliveredRequest, UndeliveredResponse,
 };
+use super::usage::{UsageSummaryRequest, UsageSummaryResponse};
 
 /// Externally tagged; unknown variants are rejected at deserialization,
 /// never defaulted.
@@ -71,6 +72,8 @@ pub enum WirePayload {
     SelectTaskResponse(SelectTaskResponse),
     ResumeTask(ResumeTask),
     ResumeTaskOutcome(ResumeTaskOutcomeWire),
+    UsageSummaryRequest(UsageSummaryRequest),
+    UsageSummaryResponse(UsageSummaryResponse),
     Reject(RejectNotice),
 }
 
@@ -120,6 +123,8 @@ impl WirePayload {
             Self::SelectTaskResponse(_) => "SelectTaskResponse",
             Self::ResumeTask(_) => "ResumeTask",
             Self::ResumeTaskOutcome(_) => "ResumeTaskOutcome",
+            Self::UsageSummaryRequest(_) => "UsageSummaryRequest",
+            Self::UsageSummaryResponse(_) => "UsageSummaryResponse",
             Self::Reject(_) => "Reject",
         }
     }

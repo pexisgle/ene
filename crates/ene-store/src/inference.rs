@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use ene_inference::cost::{TokenRate, UsageCostFact, project_cost};
+use ene_inference::cost::{Money, TokenRate, UsageCostFact, project_cost};
 use ene_inference::pricing::{PricingCatalogRevision, PricingSnapshot};
 use ene_inference::{
     AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
-    InferenceTechnicalError, TaskAgentAttemptPremise, UsageCostRecord, UsageFact, UsageRepository,
-    UsageSource,
+    InferenceTechnicalError, InferenceTicketId, ReportedTokenUsage, TaskAgentAttemptPremise,
+    UsageCostRecord, UsageFact, UsageRepository, UsageSource, UsageSummaryQuery,
+    UsageSummaryRepository, UsageSummaryRow, UsageSummaryStatus,
 };
-use ene_permission::{CapabilityKind, ConsumerKind};
+use ene_permission::{CapabilityKind, ConsumerKind, PurposeKind, UsageReservationState};
 use ene_preservation::ErasureConditionRef;
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -50,6 +51,18 @@ const SQL_SELECT_ATTEMPT_ROUTE: &str =
     "SELECT provider, model, pricing_snapshot FROM inference_attempt WHERE ticket = ?1";
 
 const SQL_SELECT_USAGE_COST: &str = "SELECT provider, model, input_tokens, cached_input_tokens, output_tokens, source, pricing_snapshot FROM usage_fact WHERE ticket = ?1";
+
+/// One bounded page of the first-party usage summary (`usage-cost-cap` §16).
+///
+/// The status expression repeats the decode rule so the SQL `LIMIT` counts
+/// matching rows instead of being applied after an in-memory filter: a
+/// reported/unknown usage fact decides the settled status, an attempt without
+/// a fact is the still-reserved row, and a released reservation is excluded
+/// (no provider I/O ran, so it is no usage at all). The keyset comparison
+/// uses the canonical UTC `started_at` text, so lexical order is instant
+/// order; the index on `(started_at, ticket)` serves both the range and the
+/// order.
+pub(crate) const SQL_SELECT_USAGE_SUMMARY: &str = "SELECT a.ticket, a.provider, a.model, a.consumer, a.purpose, a.started_at, f.source, f.input_tokens, f.cached_input_tokens, f.output_tokens, f.pricing_snapshot, r.state, r.currency, r.upper_bound_micros, p.id, p.provider, p.model, p.currency, p.input_rate, p.cached_input_rate, p.output_rate, p.effective_at, p.source_revision, a.pricing_snapshot, r.committed_currency, r.committed_micros FROM inference_attempt a LEFT JOIN usage_fact f ON f.ticket = a.ticket LEFT JOIN usage_reservation r ON r.ticket = a.ticket LEFT JOIN pricing_snapshot p ON p.id = f.pricing_snapshot WHERE a.started_at >= ?1 AND a.started_at < ?2 AND (?3 IS NULL OR a.provider = ?3) AND (?4 IS NULL OR a.model = ?4) AND (?5 IS NULL OR a.consumer = ?5) AND (?6 IS NULL OR a.purpose = ?6) AND (r.state IS NULL OR r.state != 'released') AND (?7 IS NULL OR (CASE WHEN f.source = 'reported' THEN 'reported' WHEN f.source = 'unknown' THEN 'unknown' ELSE 'reserved' END) = ?7) AND (?8 IS NULL OR a.started_at < ?8 OR (a.started_at = ?8 AND a.ticket < ?9)) ORDER BY a.started_at DESC, a.ticket DESC LIMIT ?10";
 
 /// One reviewed revision is one immutable row per `(provider, model)`; both
 /// the publish path and the read path select the same full shape.
@@ -199,7 +212,12 @@ impl InferenceAttemptRepository for Store {
                     return Ok(AttemptBeginOutcome::CapIndeterminate);
                 }
             }
-            let started_text = now.to_rfc3339();
+            // Canonical UTC text (`YYYY-MM-DDTHH:MM:SS.NNNNNNNNNZ`): the
+            // bounded usage read filters and keysets on this column with
+            // lexical comparison, which is exact only for the canonical
+            // rendering. The creation offset stays in the offset-preserving
+            // rendering used for display elsewhere.
+            let started_text = encode_wall_clock(now);
             match tx.execute(
                 SQL_INSERT_ATTEMPT,
                 params![
@@ -423,6 +441,7 @@ fn check_task_agent_premise(
 }
 
 /// One stored reviewed rate, exactly as `pricing_snapshot` holds it.
+#[derive(Clone)]
 struct RawPricing {
     id: String,
     provider: String,
@@ -436,16 +455,22 @@ struct RawPricing {
 }
 
 fn raw_pricing_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawPricing> {
+    raw_pricing_fields(row, 0)
+}
+
+/// Reads the 9 pricing columns starting at `base`, so a joined query can
+/// reuse the same shape as the dedicated pricing reads.
+fn raw_pricing_fields(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<RawPricing> {
     Ok(RawPricing {
-        id: row.get(0)?,
-        provider: row.get(1)?,
-        model: row.get(2)?,
-        currency: row.get(3)?,
-        input_rate: row.get(4)?,
-        cached_input_rate: row.get(5)?,
-        output_rate: row.get(6)?,
-        effective_at: row.get(7)?,
-        source_revision: row.get(8)?,
+        id: row.get(base)?,
+        provider: row.get(base + 1)?,
+        model: row.get(base + 2)?,
+        currency: row.get(base + 3)?,
+        input_rate: row.get(base + 4)?,
+        cached_input_rate: row.get(base + 5)?,
+        output_rate: row.get(base + 6)?,
+        effective_at: row.get(base + 7)?,
+        source_revision: row.get(base + 8)?,
     })
 }
 
@@ -1126,6 +1151,337 @@ impl UsageRepository for Store {
             tx.commit()
                 .map_err(|error| inference_unavailable(error.to_string()))?;
             Ok(settled)
+        })
+        .await
+    }
+}
+
+/// One joined usage summary row, exactly as [`SQL_SELECT_USAGE_SUMMARY`]
+/// selects it.
+struct RawUsageSummaryRow {
+    ticket: String,
+    provider: String,
+    model: String,
+    consumer: Option<String>,
+    purpose: Option<String>,
+    started_at: String,
+    usage_source: Option<String>,
+    input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    usage_pricing: Option<String>,
+    reservation_state: Option<String>,
+    reserved_currency: Option<String>,
+    reserved_upper_bound: Option<i64>,
+    pricing: Option<RawPricing>,
+    attempt_pricing: Option<String>,
+    committed_currency: Option<String>,
+    committed_micros: Option<i64>,
+}
+
+fn raw_usage_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawUsageSummaryRow> {
+    let pricing_join = row.get::<_, Option<String>>(14)?;
+    let pricing = if pricing_join.is_some() {
+        Some(raw_pricing_fields(row, 14)?)
+    } else {
+        None
+    };
+    Ok(RawUsageSummaryRow {
+        ticket: row.get(0)?,
+        provider: row.get(1)?,
+        model: row.get(2)?,
+        consumer: row.get(3)?,
+        purpose: row.get(4)?,
+        started_at: row.get(5)?,
+        usage_source: row.get(6)?,
+        input_tokens: row.get(7)?,
+        cached_input_tokens: row.get(8)?,
+        output_tokens: row.get(9)?,
+        usage_pricing: row.get(10)?,
+        reservation_state: row.get(11)?,
+        reserved_currency: row.get(12)?,
+        reserved_upper_bound: row.get(13)?,
+        pricing,
+        attempt_pricing: row.get(23)?,
+        committed_currency: row.get(24)?,
+        committed_micros: row.get(25)?,
+    })
+}
+
+/// Decodes one joined row into the owner-level usage summary.
+///
+/// The shapes that agree are the three legal combinations of fact and
+/// reservation state; anything else (a reported fact beside a
+/// non-reported reservation, counts on an unknown fact, a settled
+/// reservation without a fact, a dangling pricing reference, or a committed
+/// amount that disagrees with the projected cost) is unreadable and fails
+/// closed, never a guessed status or amount.
+fn decode_usage_summary(
+    raw: &RawUsageSummaryRow,
+) -> Result<UsageSummaryRow, InferenceTechnicalError> {
+    let ticket = InferenceTicketId(decode_id(&raw.ticket).map_err(inference_unavailable)?);
+    let consumer = decode_consumer(raw.consumer.as_deref().ok_or_else(|| {
+        inference_unavailable(String::from("usage summary row missing consumer"))
+    })?)
+    .map_err(inference_unavailable)?;
+    let purpose =
+        decode_purpose(raw.purpose.as_deref().ok_or_else(|| {
+            inference_unavailable(String::from("usage summary row missing purpose"))
+        })?)
+        .map_err(inference_unavailable)?;
+    let started_at = decode_wall_clock(&raw.started_at).map_err(inference_unavailable)?;
+    let state = match raw.reservation_state.as_deref() {
+        None => None,
+        Some(name) => Some(UsageReservationState::from_name(name).ok_or_else(|| {
+            inference_unavailable(String::from("unknown usage reservation state"))
+        })?),
+    };
+    let source = match raw.usage_source.as_deref() {
+        None => None,
+        Some("reported") => Some(UsageSource::Reported),
+        Some("unknown") => Some(UsageSource::Unknown),
+        Some(_) => {
+            return Err(inference_unavailable(String::from(
+                "unknown usage source in usage summary",
+            )));
+        }
+    };
+    let upper_bound = match (raw.reserved_currency.as_deref(), raw.reserved_upper_bound) {
+        (None, None) => None,
+        (Some(currency), Some(micros)) => Some(Money::from_micros(
+            decode_currency(currency).map_err(inference_unavailable)?,
+            decode_u64(micros).map_err(inference_unavailable)?,
+        )),
+        _ => {
+            return Err(inference_unavailable(String::from(
+                "usage summary reservation amount is incomplete",
+            )));
+        }
+    };
+    // A settled fact copies the admission binding; a disagreement means the
+    // row is not the one the attempt was admitted under.
+    if source.is_some() && raw.usage_pricing != raw.attempt_pricing {
+        return Err(inference_unavailable(String::from(
+            "usage fact pricing binding disagrees with its attempt",
+        )));
+    }
+    // The committed amount exists exactly for a reported settlement; any
+    // other combination is unreadable, never an ignored amount.
+    if raw.committed_micros.is_some() != (state == Some(UsageReservationState::CommittedReported)) {
+        return Err(inference_unavailable(String::from(
+            "usage summary committed amount disagrees with its reservation state",
+        )));
+    }
+    match source {
+        Some(UsageSource::Reported) => {
+            if !matches!(state, None | Some(UsageReservationState::CommittedReported)) {
+                return Err(inference_unavailable(String::from(
+                    "reported usage carries a non-reported reservation",
+                )));
+            }
+            let counts = (
+                raw.input_tokens.map(decode_u64).transpose(),
+                raw.cached_input_tokens.map(decode_u64).transpose(),
+                raw.output_tokens.map(decode_u64).transpose(),
+            );
+            let (Ok(input_tokens), Ok(cached_input_tokens), Ok(output_tokens)) = counts else {
+                return Err(inference_unavailable(String::from(
+                    "reported usage is missing a token count",
+                )));
+            };
+            let (Some(input_tokens), Some(cached_input_tokens), Some(output_tokens)) =
+                (input_tokens, cached_input_tokens, output_tokens)
+            else {
+                return Err(inference_unavailable(String::from(
+                    "reported usage is missing a token count",
+                )));
+            };
+            if cached_input_tokens > input_tokens {
+                return Err(inference_unavailable(String::from(
+                    "cached tokens are not an input subset",
+                )));
+            }
+            let snapshot = match raw.usage_pricing.as_deref() {
+                None => None,
+                Some(reference_text) => {
+                    let reference =
+                        decode_pricing_reference(reference_text).map_err(inference_unavailable)?;
+                    let pricing = raw.pricing.clone().ok_or_else(|| {
+                        inference_unavailable(String::from(
+                            "usage fact references a missing pricing snapshot",
+                        ))
+                    })?;
+                    let snapshot = decode_pricing(pricing)?;
+                    if snapshot.reference() != reference {
+                        return Err(inference_unavailable(String::from(
+                            "stored pricing snapshot does not match its reference",
+                        )));
+                    }
+                    Some(snapshot)
+                }
+            };
+            let fact = UsageFact {
+                ticket,
+                provider: raw.provider.clone(),
+                model: raw.model.clone(),
+                input_tokens: Some(input_tokens),
+                cached_input_tokens: Some(cached_input_tokens),
+                output_tokens: Some(output_tokens),
+                source: UsageSource::Reported,
+            };
+            let cost = project_cost(&fact, snapshot.as_ref()).map_err(|error| {
+                InferenceTechnicalError::CostProjectionFailed {
+                    reason: error.to_string(),
+                }
+            })?;
+            // The cap accounting of a reported settlement is the committed
+            // total; a row whose committed amount disagrees with the
+            // projected cost cannot be displayed as both.
+            if let (UsageCostFact::Reported(projected), Some(currency), Some(micros)) = (
+                &cost,
+                raw.committed_currency.as_deref(),
+                raw.committed_micros,
+            ) {
+                let committed = Money::from_micros(
+                    decode_currency(currency).map_err(inference_unavailable)?,
+                    decode_u64(micros).map_err(inference_unavailable)?,
+                );
+                if committed != projected.total {
+                    return Err(inference_unavailable(String::from(
+                        "committed reservation disagrees with the projected cost",
+                    )));
+                }
+            }
+            Ok(UsageSummaryRow {
+                ticket,
+                provider: raw.provider.clone(),
+                model: raw.model.clone(),
+                consumer,
+                purpose,
+                status: UsageSummaryStatus::Reported,
+                tokens: Some(ReportedTokenUsage {
+                    input_tokens,
+                    cached_input_tokens,
+                    output_tokens,
+                }),
+                cost: Some(cost),
+                reserved: None,
+                started_at,
+            })
+        }
+        Some(UsageSource::Unknown) => {
+            if !matches!(state, None | Some(UsageReservationState::CommittedUnknown)) {
+                return Err(inference_unavailable(String::from(
+                    "unknown usage carries a non-unknown reservation",
+                )));
+            }
+            if raw.input_tokens.is_some()
+                || raw.cached_input_tokens.is_some()
+                || raw.output_tokens.is_some()
+            {
+                return Err(inference_unavailable(String::from(
+                    "unknown usage carries token counts",
+                )));
+            }
+            let pricing = match raw.usage_pricing.as_deref() {
+                None => None,
+                Some(reference_text) => {
+                    Some(decode_pricing_reference(reference_text).map_err(inference_unavailable)?)
+                }
+            };
+            Ok(UsageSummaryRow {
+                ticket,
+                provider: raw.provider.clone(),
+                model: raw.model.clone(),
+                consumer,
+                purpose,
+                status: UsageSummaryStatus::Unknown,
+                tokens: None,
+                cost: Some(UsageCostFact::Unknown { pricing }),
+                reserved: upper_bound,
+                started_at,
+            })
+        }
+        None => {
+            if !matches!(state, None | Some(UsageReservationState::Reserved)) {
+                return Err(inference_unavailable(String::from(
+                    "reserved usage carries a settled reservation",
+                )));
+            }
+            if raw.input_tokens.is_some()
+                || raw.cached_input_tokens.is_some()
+                || raw.output_tokens.is_some()
+            {
+                return Err(inference_unavailable(String::from(
+                    "reserved usage carries token counts",
+                )));
+            }
+            Ok(UsageSummaryRow {
+                ticket,
+                provider: raw.provider.clone(),
+                model: raw.model.clone(),
+                consumer,
+                purpose,
+                status: UsageSummaryStatus::Reserved,
+                tokens: None,
+                cost: None,
+                reserved: upper_bound,
+                started_at,
+            })
+        }
+    }
+}
+
+impl UsageSummaryRepository for Store {
+    async fn query_usage_summary(
+        &self,
+        query: UsageSummaryQuery,
+    ) -> Result<Vec<UsageSummaryRow>, InferenceTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            if query.effective_range_is_empty() {
+                return Ok(Vec::new());
+            }
+            let limit =
+                encode_u64(u64::from(query.effective_limit())).map_err(inference_unavailable)?;
+            let from = encode_wall_clock(query.effective_from());
+            let to = encode_wall_clock(query.to);
+            let provider = query.provider.as_deref();
+            let model = query.model.as_deref();
+            let consumer = query.consumer.map(ConsumerKind::as_str);
+            let purpose = query.purpose.map(PurposeKind::as_str);
+            let status = query.status.map(UsageSummaryStatus::as_str);
+            let (after_at, after_ticket) = match &query.after {
+                None => (None, None),
+                Some(cursor) => (
+                    Some(encode_wall_clock(cursor.started_at)),
+                    Some(encode_id(cursor.ticket.0)),
+                ),
+            };
+            let guard = lock_shared(&conn);
+            let mut statement = guard
+                .prepare(SQL_SELECT_USAGE_SUMMARY)
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            let rows: Vec<RawUsageSummaryRow> = statement
+                .query_map(
+                    params![
+                        from,
+                        to,
+                        provider,
+                        model,
+                        consumer,
+                        purpose,
+                        status,
+                        after_at,
+                        after_ticket,
+                        limit
+                    ],
+                    raw_usage_summary_row,
+                )
+                .map_err(|error| inference_unavailable(error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            rows.iter().map(decode_usage_summary).collect()
         })
         .await
     }

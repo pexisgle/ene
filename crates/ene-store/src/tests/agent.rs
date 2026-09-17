@@ -576,7 +576,7 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_databases() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("delegation-index.db");
     let store = Store::open(&path).await.expect("a fresh store must open");
-    assert_eq!(read_schema_version(&path), Some(31));
+    assert_eq!(read_schema_version(&path), Some(32));
     drop(store);
     let index = |path: &std::path::Path| -> Option<String> {
         let conn = rusqlite::Connection::open(path).expect("the store file must open");
@@ -592,5 +592,20 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_databases() {
         index(&path).as_deref(),
         Some("idx_inference_attempt_delegation"),
         "a fresh schema carries the probe index"
+    );
+    let usage_index = |path: &std::path::Path| -> Option<String> {
+        let conn = rusqlite::Connection::open(path).expect("the store file must open");
+        conn.query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inference_attempt_started'",
+            (),
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("the index probe must run")
+    };
+    assert_eq!(
+        usage_index(&path).as_deref(),
+        Some("idx_inference_attempt_started"),
+        "a fresh schema carries the bounded usage read index"
     );
 }

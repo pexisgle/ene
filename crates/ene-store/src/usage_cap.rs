@@ -17,9 +17,10 @@ use ene_inference::cost::{Money, UsageEstimate};
 use ene_inference::pricing::PricingSnapshot;
 use ene_inference::{InferenceTicketId, UsageReservation};
 use ene_permission::{
-    PermissionTechnicalError, SetUsageCapCommand, SetUsageCapOutcome, UsageCap, UsageCapId,
-    UsageCapRef, UsageCapRepository, UsageCapRevision, UsageCapScope, UsageCapWindow,
-    UsageReservationRef, UsageReservationState,
+    PermissionTechnicalError, SetUsageCapCommand, SetUsageCapOutcome, UsageCap,
+    UsageCapConsumption, UsageCapId, UsageCapRef, UsageCapRepository, UsageCapRevision,
+    UsageCapScope, UsageCapStatus, UsageCapStatusQuery, UsageCapWindow, UsageReservationRef,
+    UsageReservationState,
 };
 use ene_primitive::{CurrencyCode, RawId, WallClockWithTz};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -40,6 +41,13 @@ const SQL_UPDATE_CAP: &str = "UPDATE usage_cap SET revision = ?4, currency = ?5,
 /// Every current cap that applies to one route: the system scope and the
 /// route's provider scope, in both windows.
 const SQL_SELECT_APPLICABLE_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1)";
+
+/// Every stored cap, deterministically ordered for the status read.
+const SQL_SELECT_ALL_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap ORDER BY scope, provider, window";
+
+/// The caps a provider-filtered status read reports: the system scope (it
+/// budgets every provider) plus that provider's own scopes.
+const SQL_SELECT_CAPS_FOR_PROVIDER: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1) ORDER BY scope, provider, window";
 
 /// Non-released reservations opened inside `[?1, ?2)`; the provider-scoped
 /// sum additionally filters `provider = ?3`.
@@ -208,21 +216,36 @@ fn consumption_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsumptionRow> 
     })
 }
 
-/// Sums one scope's consumption over the UTC period containing `at`.
+/// One cap window's consumption split by the reservation state that counts
+/// it, in exact micro-currency units of one currency.
+pub(crate) struct WindowConsumption {
+    /// Upper bounds of still-non-terminal reservations.
+    pub(crate) reserved: u64,
+    /// Actual committed cost of reported settlements.
+    pub(crate) committed_reported: u64,
+    /// Upper bounds kept counted for unknown settlements.
+    pub(crate) committed_unknown: u64,
+}
+
+/// Sums one scope's consumption breakdown over the UTC period containing
+/// `at`.
 ///
 /// Only rows whose state is not `released` count. `committed_reported`
 /// contributes the actual committed cost (the reserved upper bound is
 /// released); `reserved` and `committed_unknown` contribute the reserved
 /// upper bound, so an unknown external consumption can never free a cap slot.
-pub(crate) fn consumed_in_window(
+/// `Ok(None)` is indeterminate: an unrepresentable period, a currency the cap
+/// cannot be compared in, or an unreadable state. A malformed stored amount
+/// stays a technical error, never a guessed number.
+pub(crate) fn consumption_breakdown(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,
     window: UsageCapWindow,
     currency: CurrencyCode,
     at: WallClockWithTz,
-) -> Result<CapWindowConsumption, String> {
+) -> Result<Option<WindowConsumption>, String> {
     let Some(period) = window.period_containing(at) else {
-        return Ok(CapWindowConsumption::Indeterminate);
+        return Ok(None);
     };
     let start = period.start().to_rfc3339_utc();
     let end = period.end().to_rfc3339_utc();
@@ -246,27 +269,61 @@ pub(crate) fn consumed_in_window(
     .map_err(|error| error.to_string())?;
     // Accumulate in u128: an overflowing u64 sum is an indeterminate cap
     // state, never a wrapped or saturated amount.
-    let mut total: u128 = 0;
+    let mut reserved: u128 = 0;
+    let mut committed_reported: u128 = 0;
+    let mut committed_unknown: u128 = 0;
     for row in rows {
         let state = UsageReservationState::from_name(&row.state)
             .ok_or_else(|| String::from("unknown usage reservation state"))?;
-        let (amount_currency, amount) = match state {
+        let (amount_currency, amount, bucket) = match state {
             UsageReservationState::CommittedReported => (
                 row.committed_currency
                     .ok_or_else(|| String::from("committed reservation missing currency"))?,
                 row.committed_micros
                     .ok_or_else(|| String::from("committed reservation missing amount"))?,
+                &mut committed_reported,
             ),
-            UsageReservationState::Reserved | UsageReservationState::CommittedUnknown => {
-                (row.currency, row.upper_bound_micros)
+            UsageReservationState::Reserved => {
+                (row.currency, row.upper_bound_micros, &mut reserved)
+            }
+            UsageReservationState::CommittedUnknown => {
+                (row.currency, row.upper_bound_micros, &mut committed_unknown)
             }
             UsageReservationState::Released => continue,
         };
         if decode_currency(&amount_currency)? != currency {
-            return Ok(CapWindowConsumption::Indeterminate);
+            return Ok(None);
         }
-        total += u128::from(decode_u64(amount)?);
+        *bucket += u128::from(decode_u64(amount)?);
     }
+    let (Ok(reserved), Ok(committed_reported), Ok(committed_unknown)) = (
+        u64::try_from(reserved),
+        u64::try_from(committed_reported),
+        u64::try_from(committed_unknown),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(WindowConsumption {
+        reserved,
+        committed_reported,
+        committed_unknown,
+    }))
+}
+
+/// Sums one scope's consumption over the UTC period containing `at`.
+pub(crate) fn consumed_in_window(
+    conn: &rusqlite::Connection,
+    scope: &UsageCapScope,
+    window: UsageCapWindow,
+    currency: CurrencyCode,
+    at: WallClockWithTz,
+) -> Result<CapWindowConsumption, String> {
+    let Some(breakdown) = consumption_breakdown(conn, scope, window, currency, at)? else {
+        return Ok(CapWindowConsumption::Indeterminate);
+    };
+    let total = u128::from(breakdown.reserved)
+        + u128::from(breakdown.committed_reported)
+        + u128::from(breakdown.committed_unknown);
     let Ok(micros) = u64::try_from(total) else {
         return Ok(CapWindowConsumption::Indeterminate);
     };
@@ -514,4 +571,103 @@ impl UsageCapRepository for Store {
         })
         .await
     }
+
+    async fn load_usage_cap_status(
+        &self,
+        query: UsageCapStatusQuery,
+    ) -> Result<Vec<UsageCapStatus>, PermissionTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            // One read transaction is not needed: each cap's consumption is
+            // computed from the durable rows under the shared connection
+            // lock, and the read writes nothing (SELECT-only).
+            let mut statement = guard
+                .prepare(match query.provider {
+                    None => SQL_SELECT_ALL_CAPS,
+                    Some(_) => SQL_SELECT_CAPS_FOR_PROVIDER,
+                })
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            let rows: Vec<(String, String, String, i64, String, i64)> = match &query.provider {
+                None => statement
+                    .query_map((), |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })
+                    .map_err(|error| permission_unavailable(error.to_string()))?
+                    .collect::<Result<Vec<_>, _>>(),
+                Some(provider) => statement
+                    .query_map(params![provider], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })
+                    .map_err(|error| permission_unavailable(error.to_string()))?
+                    .collect::<Result<Vec<_>, _>>(),
+            }
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+            let mut statuses = Vec::with_capacity(rows.len());
+            for (scope, provider, window, revision, currency, limit_micros) in &rows {
+                let cap = decode_cap(scope, provider, window, *revision, currency, *limit_micros)
+                    .map_err(permission_unavailable)?;
+                let consumption =
+                    cap_consumption(&guard, &cap, query.at).map_err(permission_unavailable)?;
+                statuses.push(UsageCapStatus {
+                    cap: UsageCap::new(cap.id.clone(), cap.revision(), cap.limit()),
+                    consumption,
+                });
+            }
+            Ok(statuses)
+        })
+        .await
+    }
+}
+
+/// Builds one cap's window consumption from the same durable reservation rows
+/// the send admission compares.
+///
+/// Indeterminate stays distinct from a zero total: a read must never display
+/// "nothing consumed" for a row it cannot compare.
+fn cap_consumption(
+    conn: &rusqlite::Connection,
+    cap: &CapRow,
+    at: WallClockWithTz,
+) -> Result<UsageCapConsumption, String> {
+    let currency = cap.limit().currency();
+    let Some(breakdown) = consumption_breakdown(conn, cap.scope(), cap.window(), currency, at)?
+    else {
+        return Ok(UsageCapConsumption::Indeterminate);
+    };
+    let total = u128::from(breakdown.reserved)
+        + u128::from(breakdown.committed_reported)
+        + u128::from(breakdown.committed_unknown);
+    let Some(total) = u64::try_from(total).ok() else {
+        return Ok(UsageCapConsumption::Indeterminate);
+    };
+    let consumed = Money::from_micros(currency, total);
+    let held = consumed.micros() >= cap.limit().micros();
+    let remaining = if held {
+        Money::zero(currency)
+    } else {
+        Money::from_micros(currency, cap.limit().micros() - consumed.micros())
+    };
+    Ok(UsageCapConsumption::Known {
+        reserved: Money::from_micros(currency, breakdown.reserved),
+        committed_reported: Money::from_micros(currency, breakdown.committed_reported),
+        committed_unknown: Money::from_micros(currency, breakdown.committed_unknown),
+        consumed,
+        remaining,
+        held,
+    })
 }

@@ -47,6 +47,15 @@
 //!   existing directory; a valid path becomes the trusted first-party premise
 //!   (never provider output) that a conversation Task proposal may use, and
 //!   an invalid path clarifies with zero premise change.
+//! - `(ManageRuleConsentCap, "cap:{scope}:{window}:{currency}:{limit}")` sets
+//!   one provider/system daily/monthly usage cap through the permission-owned
+//!   command (`usage-cost-cap` §13/§17). The intent `base_view` is the opaque
+//!   mark a usage read issued for exactly that cap slot; a stale or
+//!   face-stale mark answers
+//!   [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView)
+//!   with the rebuilt current mark and stores nothing, an invalid limit
+//!   clarifies, and only the authenticated first-party connection reaches the
+//!   handler. See [`crate::usage`].
 //! - `(RequestDeletionBackupRestoreReset, "deletion:{purpose}:{exact-text}")`
 //!   is the Targeted Deletion request inlet (`Stage 6` A1b; see
 //!   [`crate::deletion`]): it can only stage a durable request awaiting the
@@ -733,6 +742,12 @@ impl HostHandle {
         }
         if target == SETUP_COMPLETE_TARGET {
             return self.complete_setup(frame, intent, live).await;
+        }
+        // The usage-cap grammar shares this kind (rule/consent/cap) but not
+        // the consent grammar: a `cap:` target reaches the permission-owned
+        // cap command with its revision compare (`usage-cost-cap` §13/§17).
+        if crate::usage::is_usage_cap_target(target) {
+            return self.set_usage_cap_intent(frame, intent, live).await;
         }
         let Some((capability, provider, model, credential_id)) =
             parse_consent_target(&intent.target)

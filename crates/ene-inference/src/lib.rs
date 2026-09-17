@@ -48,6 +48,7 @@
 pub mod cost;
 pub mod pricing;
 pub mod provider;
+pub mod usage_query;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -65,6 +66,12 @@ use ene_permission::{
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use pricing::{PricingCatalog, PricingResolution, PricingSnapshot, PricingSnapshotRef};
 use thiserror::Error;
+
+pub use usage_query::{
+    ReportedTokenUsage, USAGE_SUMMARY_PAGE_MAX, USAGE_SUMMARY_RANGE_DEFAULT_DAYS,
+    USAGE_SUMMARY_RANGE_MAX_DAYS, UsageSummaryCursor, UsageSummaryQuery, UsageSummaryRepository,
+    UsageSummaryRow, UsageSummaryStatus,
+};
 
 /// Maximum accepted input length in Unicode scalar values.
 pub const MAX_INPUT_CHARS: usize = 8_000;

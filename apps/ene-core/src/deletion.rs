@@ -53,7 +53,7 @@ use ene_preservation::{
 };
 use ene_primitive::{RawId, WallClockWithTz};
 
-use crate::presentation::{checked_limit, limit_reject};
+use crate::presentation::{checked_limit, field_reject};
 use crate::serve::{CoreError, HostHandle, LiveInput, outgoing_frame, reject_frame};
 use crate::setup::outcome_frame;
 
@@ -377,7 +377,7 @@ impl HostHandle {
                 WirePayload::DeletionStatusResponse(response),
             )],
             Err(DeletionStatusQueryError::InvalidLimit) => {
-                vec![limit_reject(frame, live, "query limit must be 1..=50")]
+                vec![field_reject(frame, live, "query limit must be 1..=50")]
             }
             Err(DeletionStatusQueryError::InvalidCursor) => vec![reject_frame(
                 frame,

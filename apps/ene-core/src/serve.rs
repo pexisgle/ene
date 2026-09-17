@@ -1366,6 +1366,18 @@ impl HostHandle {
                     }
                 }
             }
+            WirePayload::UsageSummaryRequest(query) => {
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "usage summary on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
+                }
+                for response in self.usage_summary_wire(&frame, &live, query).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
             WirePayload::LocalErasureResult(result) => {
                 if let Some(refusal) =
                     Self::gate_refusal(&frame, &live, "erasure result on a superseded connection")

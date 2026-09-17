@@ -37,9 +37,10 @@ pub use erasure::{
 };
 pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
 pub use usage_cap::{
-    SetUsageCapCommand, SetUsageCapOutcome, UsageCap, UsageCapId, UsageCapRef, UsageCapRepository,
-    UsageCapRevision, UsageCapScope, UsageCapWindow, UsageReservationRef, UsageReservationState,
-    UtcPeriod,
+    SetUsageCapCommand, SetUsageCapOutcome, UsageCap, UsageCapConsumption, UsageCapId, UsageCapRef,
+    UsageCapRepository, UsageCapRevision, UsageCapScope, UsageCapStatus, UsageCapStatusQuery,
+    UsageCapWindow, UsageReservationRef, UsageReservationState, UtcPeriod, parse_usage_cap_mark,
+    usage_cap_mark,
 };
 
 /// Single-use authorization token for one inference use.

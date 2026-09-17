@@ -257,7 +257,6 @@ pub struct UsageCap {
     revision: UsageCapRevision,
     limit: Money,
 }
-
 impl UsageCap {
     /// Composes one stored cap.
     #[must_use]
@@ -343,6 +342,117 @@ pub enum SetUsageCapOutcome {
     InvalidLimit,
 }
 
+/// One current cap's consumption premise (`usage-cost-cap` §16): the window
+/// sums an admission would compare against.
+///
+/// The three state sums are the durable reservation breakdown; `consumed` is
+/// their exact sum and is what a new reservation is compared against.
+/// `remaining` is the unspent limit (`0` once the limit is reached or
+/// exceeded), and `held` says whether an admission would already refuse a
+/// new send. Nothing here is estimated: a row whose currency disagrees with
+/// the cap, whose period is unrepresentable, or whose sum overflows answers
+/// [`Self::Indeterminate`], never a guessed total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsageCapConsumption {
+    Known {
+        /// Reserved upper bounds of non-terminal reservations.
+        reserved: Money,
+        /// Actual committed cost of reported settlements.
+        committed_reported: Money,
+        /// Reserved upper bounds kept counted for unknown settlements.
+        committed_unknown: Money,
+        /// Exact sum of the three components.
+        consumed: Money,
+        /// Unspent limit: `limit - consumed`, or zero once held.
+        remaining: Money,
+        /// Whether the consumed amount already reaches the limit, i.e. the
+        /// next admission cannot fit a positive reservation.
+        held: bool,
+    },
+    /// The durable rows cannot answer a comparable amount (a mismatched
+    /// currency, an unrepresentable period, or an overflowing sum). The
+    /// caller must not render this as zero consumption, and no send is
+    /// admitted under an indeterminate cap.
+    Indeterminate,
+}
+
+/// One current cap plus its window consumption at one instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageCapStatus {
+    /// The stored cap definition and its currentness revision.
+    pub cap: UsageCap,
+    /// Current window consumption of exactly this cap's scope and window.
+    pub consumption: UsageCapConsumption,
+}
+
+/// Bounded cap status query (`usage-cost-cap` §16).
+///
+/// `provider` narrows the provider-scoped rows (the system scope is always
+/// included because it budgets every provider); `None` reports every stored
+/// cap. The number of caps is bounded by the scope model (system plus one
+/// pair of windows per provider), so this read has no pagination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageCapStatusQuery {
+    /// Provider whose scoped caps are reported, or every stored cap.
+    pub provider: Option<String>,
+    /// The instant the containing UTC day/month is computed from. The caller
+    /// supplies it; a client clock never decides a cap window.
+    pub at: WallClockWithTz,
+}
+
+/// Renders one cap's currentness mark:
+/// `usage-cap-system-{window}-rev-N` / `...-none`, or
+/// `usage-cap-provider-{provider}-{window}-rev-N` / `...-none`.
+///
+/// Single grammar owner: the Host renders the display mark from this
+/// function and parses an intent's base view with
+/// [`parse_usage_cap_mark`], so the two can never disagree on what a mark
+/// names. The mark is opaque to the Client, which only echoes it.
+#[must_use]
+pub fn usage_cap_mark(
+    scope: &UsageCapScope,
+    window: UsageCapWindow,
+    revision: Option<UsageCapRevision>,
+) -> String {
+    let scope = match scope {
+        UsageCapScope::System => String::from("system"),
+        UsageCapScope::Provider(provider) => format!("provider-{provider}"),
+    };
+    match revision {
+        Some(revision) => format!(
+            "usage-cap-{scope}-{}-rev-{}",
+            window.as_str(),
+            revision.as_u64()
+        ),
+        None => format!("usage-cap-{scope}-{}-none", window.as_str()),
+    }
+}
+
+/// Parses the state one base-view mark names for exactly
+/// `(scope, window)`: `Some(None)` expects no stored cap, `Some(Some(n))`
+/// expects the cap at revision `n`, and `None` means the mark is stale on
+/// its face (another cap, another shape, or unparseable). A stale face is
+/// never treated as "expects nothing": only the exact `none` mark says that.
+#[must_use]
+pub fn parse_usage_cap_mark(
+    mark: &str,
+    scope: &UsageCapScope,
+    window: UsageCapWindow,
+) -> Option<Option<u64>> {
+    let prefix = match scope {
+        UsageCapScope::System => format!("usage-cap-system-{}-", window.as_str()),
+        UsageCapScope::Provider(provider) => {
+            format!("usage-cap-provider-{provider}-{}-", window.as_str())
+        }
+    };
+    let state = mark.strip_prefix(&prefix)?;
+    if state == "none" {
+        return Some(None);
+    }
+    let revision = state.strip_prefix("rev-")?.parse::<u64>().ok()?;
+    Some(Some(revision))
+}
+
 /// Cap definition owner boundary.
 ///
 /// The command is the only mutation path; LLM output, Task Agent turns, and
@@ -365,6 +475,20 @@ pub trait UsageCapRepository: Send + Sync {
         &self,
         command: SetUsageCapCommand,
     ) -> Result<SetUsageCapOutcome, PermissionTechnicalError>;
+
+    /// Reads the current cap status rows (`usage-cost-cap` §16).
+    ///
+    /// Every returned row carries the stored definition (identity, limit,
+    /// current revision) and the consumption of its own UTC window at
+    /// `query.at`, computed from the same durable reservation rows the send
+    /// admission compares, so the displayed state and the admission can never
+    /// disagree. SELECT-only: the read settles no reservation, creates no
+    /// reservation, and mutates no cap. A row that cannot be compared answers
+    /// [`UsageCapConsumption::Indeterminate`] rather than a guessed amount.
+    async fn load_usage_cap_status(
+        &self,
+        query: UsageCapStatusQuery,
+    ) -> Result<Vec<UsageCapStatus>, PermissionTechnicalError>;
 }
 
 /// Opaque durable identity of one usage reservation.
@@ -506,5 +630,95 @@ mod tests {
             Some(UsageCapWindow::MonthlyUtc)
         );
         assert_eq!(UsageCapWindow::from_name("weekly_utc"), None);
+    }
+
+    #[test]
+    fn cap_marks_roundtrip_per_slot_and_face_stale_otherwise() {
+        use super::{UsageCapRevision, parse_usage_cap_mark, usage_cap_mark};
+        let system = UsageCapScope::System;
+        let openai = UsageCapScope::Provider(String::from("openai"));
+        assert_eq!(
+            usage_cap_mark(&system, UsageCapWindow::DailyUtc, None),
+            "usage-cap-system-daily_utc-none"
+        );
+        assert_eq!(
+            usage_cap_mark(
+                &system,
+                UsageCapWindow::MonthlyUtc,
+                Some(UsageCapRevision::from_u64(3))
+            ),
+            "usage-cap-system-monthly_utc-rev-3"
+        );
+        assert_eq!(
+            usage_cap_mark(
+                &openai,
+                UsageCapWindow::DailyUtc,
+                Some(UsageCapRevision::from_u64(12))
+            ),
+            "usage-cap-provider-openai-daily_utc-rev-12"
+        );
+        assert_eq!(
+            usage_cap_mark(&openai, UsageCapWindow::DailyUtc, None),
+            "usage-cap-provider-openai-daily_utc-none"
+        );
+        for (mark, scope, window, expected) in [
+            (
+                "usage-cap-system-daily_utc-none",
+                &system,
+                UsageCapWindow::DailyUtc,
+                Some(None),
+            ),
+            (
+                "usage-cap-system-daily_utc-rev-3",
+                &system,
+                UsageCapWindow::DailyUtc,
+                Some(Some(3)),
+            ),
+            (
+                "usage-cap-provider-openai-daily_utc-rev-12",
+                &openai,
+                UsageCapWindow::DailyUtc,
+                Some(Some(12)),
+            ),
+            (
+                "usage-cap-provider-openai-daily_utc-none",
+                &openai,
+                UsageCapWindow::DailyUtc,
+                Some(None),
+            ),
+        ] {
+            assert_eq!(
+                parse_usage_cap_mark(mark, scope, window),
+                expected,
+                "the mark roundtrips: {mark}"
+            );
+        }
+        // Face-stale: another slot, another shape, a bad revision, or empty.
+        for mark in [
+            "usage-cap-system-monthly_utc-rev-3",
+            "usage-cap-provider-other-daily_utc-rev-1",
+            "usage-cap-system-daily_utc",
+            "usage-cap-system-daily_utc-rev-x",
+            "usage-cap-system-daily_utc-none-extra",
+            "consent-dialogue-rev-1",
+            "",
+        ] {
+            assert_eq!(
+                parse_usage_cap_mark(mark, &system, UsageCapWindow::DailyUtc),
+                None,
+                "a foreign mark must be face-stale, not a guess: {mark}"
+            );
+        }
+        // A provider name containing `-` still parses: the prefix is built
+        // from the exact provider the reader asked about.
+        let hyphenated = UsageCapScope::Provider(String::from("open-ai"));
+        assert_eq!(
+            parse_usage_cap_mark(
+                "usage-cap-provider-open-ai-daily_utc-rev-1",
+                &hyphenated,
+                UsageCapWindow::DailyUtc
+            ),
+            Some(Some(1))
+        );
     }
 }

@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 31;
+const CURRENT_VERSION: i64 = 32;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -411,6 +411,10 @@ CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (co
 CREATE INDEX idx_history_message_companion_role ON history_message (companion_id, role);
 CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_inference_attempt_delegation ON inference_attempt (delegation_id);
+-- Bounded first-party usage summary (usage-cost-cap §16): the newest-first
+-- keyset page reads this index, so the SQL LIMIT bounds the rows read and no
+-- full scan or sort is needed for an unfiltered range.
+CREATE INDEX idx_inference_attempt_started ON inference_attempt (started_at, ticket);
 CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
 CREATE INDEX idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
@@ -479,7 +483,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(
