@@ -542,6 +542,10 @@ pub struct HostHandle {
     ///
     /// Host-memory only: restart drops the tracking and every connection, so
     /// an incarnation the Host cannot name is never claimed as required.
+    /// Admission therefore runs inside the serving process (the Owner
+    /// confirmation through [`crate::host_control`], intent recovery through
+    /// [`HostHandle::targeted_deletion_intent`]); an offline confirmation
+    /// would see empty evidence and is refused by construction.
     pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
     /// Test-only deterministic gate for conversation task-control commands.
     #[cfg(test)]
@@ -919,6 +923,13 @@ impl HostHandle {
     /// snapshotted as required at admission and later driven (or held when
     /// unreachable) — an incarnation the Host cannot name is never invented
     /// (lifecycle §8.1).
+    ///
+    /// The Client list is Host-memory delivery evidence, so this snapshot is
+    /// only sound inside the serving process that did the handing. Admission
+    /// runs through that process (the intent recovery path and
+    /// [`crate::host_control`]); an offline composition must not admit a
+    /// confirmation from this method, because it cannot name the Clients that
+    /// may hold a copy (PR §6.4).
     #[must_use]
     pub fn required_deletion_participants(&self) -> Vec<ene_preservation::ParticipantOwnerRef> {
         let mut owners = crate::targeted_deletion::current_product_surface_owners();

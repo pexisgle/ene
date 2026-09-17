@@ -12,7 +12,11 @@
 //! orchestration pipeline. With the `approve-device` subcommand it resolves
 //! the data directory and records one Owner pairing approval through
 //! [`HostHandle::approve_device`](ene_core::serve::HostHandle::approve_device):
-//! the Host-local trusted inlet for pending device requests.
+//! the Host-local trusted inlet for pending device requests. With the
+//! `confirm-deletion` subcommand it dials the serving Host's Host-local
+//! control inlet ([`ene_core::host_control`]) instead of opening the state
+//! offline: the confirmation must execute where the Client delivery tracking
+//! lives (lifecycle §8.1).
 
 use std::path::{Path, PathBuf};
 
@@ -61,7 +65,10 @@ enum CliCommand {
         limit: u32,
     },
     /// The Owner's final confirmation for one staged Targeted Deletion
-    /// request: it starts the canonical operation (IPC §18.1).
+    /// request: it runs inside the serving Host via the Host-local control
+    /// inlet and starts the canonical operation (IPC §18.1, lifecycle
+    /// §8.1). A stopped Host cannot confirm: an offline handle cannot name
+    /// the Clients that may hold a target-bearing copy.
     ConfirmDeletion {
         config: Option<PathBuf>,
         request: String,
@@ -146,7 +153,9 @@ fn ene_core_command() -> clap::Command {
         )
         .subcommand(
             ClapCommand::new("confirm-deletion")
-                .about("Confirm one staged Targeted Deletion request and start it")
+                .about(
+                    "Confirm one staged Targeted Deletion request through the running serving Host",
+                )
                 .arg(
                     Arg::new("request")
                         .long("request")
@@ -534,33 +543,39 @@ fn run_pending_deletions(
 }
 
 /// Records one Owner confirmation and starts the canonical Targeted Deletion
-/// operation (IPC §18.1), then prints the operation identity the status view
-/// reports.
+/// operation (IPC §18.1) through the serving Host's Host-local first-party
+/// control inlet, then prints the operation identity the status view reports.
+///
+/// The confirmation must run in the serving process. The required
+/// participant snapshot includes every Client incarnation the Host actually
+/// handed body-bearing material to, and that delivery evidence is
+/// Host-memory (lifecycle §8.1); an offline state open cannot name those
+/// incarnations, so this command never admits from an offline handle. It
+/// dials [`ene_core::host_control`] and reports the serving Host's typed
+/// outcome; when no Host is serving it fails with recovery guidance instead
+/// of confirming.
 ///
 /// An unknown request id fails with the pending id set (never their target
-/// text, which stays on the `pending-deletions` preview). Like every other
-/// offline mutation this takes the single-writer
-/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store.
+/// text, which stays on the `pending-deletions` preview).
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
-/// directory, [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened, and [`CoreError::Deletion`] for an unknown or
-/// inadmissible request.
+/// Returns [`CoreError::Deletion`] when the serving Host is not reachable on
+/// the control inlet (or refuses technically), for an unknown or
+/// inadmissible request, and [`CoreError::Store`] when the pending-id
+/// fallback cannot be read.
 fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
 
-    use ene_core::host_lock::HostLock;
     use ene_preservation::ConfirmTargetedDeletionOutcome;
 
     let request_id = parse_deletion_request_id(request)?;
     block_on(async move {
-        let _lock = HostLock::acquire(data_dir)?;
-        let handle = HostHandle::open(data_dir).await?;
-        let outcome = handle
-            .confirm_targeted_deletion(&deletion_request_id_text_of(request_id))
-            .await?;
+        let outcome = ene_core::host_control::confirm_targeted_deletion(
+            data_dir,
+            &deletion_request_id_text_of(request_id),
+        )
+        .await?;
         let mut stdout = std::io::stdout().lock();
         let line = match outcome {
             ConfirmTargetedDeletionOutcome::Started(operation) => format!(
@@ -584,6 +599,9 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
                 )));
             }
             ConfirmTargetedDeletionOutcome::Missing => {
+                // A read-only state open is safe while serving; the pending
+                // preview never admits anything.
+                let handle = HostHandle::open(data_dir).await?;
                 let pending = handle.pending_targeted_deletions(None, 100).await?;
                 return Err(CoreError::Deletion(format!(
                     "unknown deletion request {request:?}; pending: [{}]",

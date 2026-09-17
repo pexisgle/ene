@@ -18,6 +18,9 @@
 //! - [`deletion`] holds the Stage 6 Targeted Deletion management surface:
 //!   advisory wire requests, the Host-local trusted confirmation inlet, and
 //!   the bounded body-free status view.
+//! - [`host_control`] holds the Host-local first-party control inlet: the
+//!   serving process executes the Owner confirmation with its live Client
+//!   delivery tracking (lifecycle §8.1, PR §6.4).
 //! - [`transient_erasure`] holds the Stage 6 A3c Host-transient and
 //!   first-party-Client erasure participants: Host transient payload
 //!   invalidation and the bounded Client local-erasure demand round trip.
@@ -46,6 +49,7 @@ pub mod conn;
 pub mod conn_pipe;
 pub mod deletion;
 pub mod dialogue;
+pub mod host_control;
 pub mod host_lock;
 pub mod presentation;
 pub mod serve;

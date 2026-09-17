@@ -27,6 +27,13 @@
 //!   journal, the workspace path copies, and an undelivered presentation
 //!   transient; completed-state scans, search-material destruction, and the
 //!   fresh-origin acceptance are asserted after the operation.
+//! - E2E 1 Client participant: a Client that received a target-bearing copy
+//!   is snapshotted as a required `ClientIncarnation` by the serving Host's
+//!   first-party confirmation inlet; its local-erasure answer verifies the
+//!   participant, an unreachable Client keeps the operation `Held`, a
+//!   disconnect or replacement connection alone completes nothing, and an
+//!   already-snapshotted participant survives a Host restart until the
+//!   Client's own local erasure (lifecycle §8.1).
 //! - E2E 1 races: provider wait and deletion condition in both orders;
 //!   Learning formation and deletion condition in both orders; presentation
 //!   ACK after the condition is a domain hold, not a Presented write.
@@ -58,8 +65,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ene_api::v1::deletion::{
-    DeletionParticipantReportWire, DeletionPhaseWire, DeletionPurposeWire, DeletionStatusPage,
-    DeletionStatusRequest, DeletionStatusResponse,
+    DeletionParticipantReportWire, DeletionParticipantStatusWire, DeletionPhaseWire,
+    DeletionPurposeWire, DeletionStatusPage, DeletionStatusRequest, DeletionStatusResponse,
 };
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
@@ -1876,6 +1883,283 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
         before,
         "the resume demands no new provider call"
     );
+    served.server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// E2E 1: the Client-incarnation required participant (lifecycle §8.1)
+// ---------------------------------------------------------------------------
+
+/// The Client-incarnation participant row of the first operation in one
+/// status page, when the durable snapshot named one (lifecycle §8.1).
+fn client_incarnation_participant(
+    page: &DeletionStatusPage,
+) -> Option<&DeletionParticipantStatusWire> {
+    let view = page.operations.first()?;
+    let DeletionParticipantReportWire::Reported(participants) = &view.participants else {
+        return None;
+    };
+    participants
+        .iter()
+        .find(|participant| participant.owner.starts_with("client_incarnation:"))
+}
+
+/// Renders the single staged request identity, exactly as the Host-local
+/// preview does.
+async fn render_single_pending_request(handle: &HostHandle) -> String {
+    let pending = handle
+        .pending_targeted_deletions(None, 10)
+        .await
+        .expect("pending requests must read");
+    assert_eq!(pending.len(), 1, "exactly one staged request");
+    pending[0]
+        .request()
+        .as_raw()
+        .as_uuid()
+        .as_hyphenated()
+        .to_string()
+}
+
+/// Records the Owner confirmation through the serving Host's Host-local
+/// first-party control inlet: the same production path `ene-core
+/// confirm-deletion` dials, never an offline state open.
+///
+/// While a Client is attached it keeps reading frames, so the Host's bounded
+/// local-erasure demand is answered inline exactly as an interactive Client
+/// would. With no attached Client the demand resolves to an explicit hold.
+async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOperationRef {
+    let request = render_single_pending_request(&served.handle).await;
+    let dir = served.dir.clone();
+    let outcome = match served.client.as_mut() {
+        Some(client) => {
+            let mut confirmation = Box::pin(ene_core::host_control::confirm_targeted_deletion(
+                &dir, &request,
+            ));
+            loop {
+                tokio::select! {
+                    outcome = &mut confirmation => break outcome,
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {
+                        // A read drives the frame pump, which answers the
+                        // Host's demand inline; a failed read means the
+                        // connection ended and the participant must hold.
+                        drop(deletion_page(client).await);
+                    }
+                }
+            }
+        }
+        None => ene_core::host_control::confirm_targeted_deletion(&dir, &request).await,
+    };
+    match outcome.expect("the serving Host control inlet must answer") {
+        ConfirmTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("the Owner confirmation must start the operation, got {other:?}"),
+    }
+}
+
+/// One bounded status page read through the Host handle. Used by legs whose
+/// Client connection must stay absent: a reconnect would make the incarnation
+/// reachable again and change the premise under test.
+async fn local_deletion_page(handle: &HostHandle) -> DeletionStatusPage {
+    match handle
+        .deletion_status_page(None, 20)
+        .await
+        .expect("the local status must answer")
+    {
+        DeletionStatusResponse::Page(page) => page,
+        other => panic!("the local status must answer a page: {other:?}"),
+    }
+}
+
+/// Drives production serving ticks while reading status through the handle
+/// until the operation reaches `wanted`.
+async fn drive_until_local(handle: &HostHandle, wanted: DeletionPhaseWire) -> DeletionStatusPage {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    loop {
+        let page = local_deletion_page(handle).await;
+        if page.operations.first().map(|view| view.phase) == Some(wanted) {
+            return page;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the deletion operation did not reach {}: {page:?}",
+            wanted.as_str()
+        );
+        handle
+            .run_targeted_deletion_tick()
+            .await
+            .expect("the serving tick must run");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Delivers one target-bearing transient copy to the live Client: the
+/// companion reply quotes the target on the text stream and the carried
+/// presentation excerpt quotes it again, left un-ACKed. The Host therefore
+/// observed a real body delivery to this incarnation.
+async fn deliver_target_copy(served: &mut Served) {
+    let first = format!("please remember {TARGET} for me");
+    let (_round, _stream, reply) = send_round(served.client(), &first)
+        .await
+        .expect("the target-bearing round must complete");
+    assert!(
+        reply.contains(TARGET),
+        "the streamed reply must carry the target: {reply}"
+    );
+    let carried = wait_for_summary_with(served.client(), TARGET).await;
+    assert!(
+        carried
+            .items
+            .iter()
+            .any(|item| item.excerpt.contains(TARGET)),
+        "the Client must receive a target-bearing transient copy: {carried:?}"
+    );
+}
+
+/// Stage 6 Blocker 1: the Owner confirmation runs in the serving Host, so the
+/// Client that received a target-bearing copy is snapshotted as a required
+/// participant; its own local-erasure confirmation is what verifies the
+/// participant and lets global completion commit.
+#[tokio::test]
+async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    // 1: a target-bearing copy actually reaches the Client.
+    deliver_target_copy(&mut served).await;
+
+    // 2: the first-party request only stages.
+    let outcome = request_deletion(served.client(), TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(
+        outcome,
+        ManagementOutcome::NeedsClarification,
+        "the Client intent only stages"
+    );
+
+    // 3: the production trusted first-party confirmation through the serving
+    // Host control inlet; the Client answers the bounded demand inline.
+    let current = confirm_deletion_via_serving_control(&mut served).await;
+
+    // 4: the durable participant snapshot names the Client incarnation.
+    let page = local_deletion_page(&served.handle).await;
+    let participant = client_incarnation_participant(&page)
+        .expect("the durable snapshot must name the delivered Client incarnation");
+    assert!(
+        participant.sweep >= current.sweep.as_u64(),
+        "the Client participant belongs to the current sweep: {participant:?}"
+    );
+
+    // 6: the Client's local erasure confirmation verifies the participant and
+    // the operation reaches the sealed global completion.
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    let participant = client_incarnation_participant(&page)
+        .expect("the completed operation still reports the Client participant");
+    assert_eq!(
+        participant.progress, "verified",
+        "the Client's own local erasure pass is the verification premise"
+    );
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    served.server.abort();
+}
+
+/// Stage 6 Blocker 1: an unreachable Client that received a target-bearing
+/// copy keeps the operation `Held`; a disconnect, a replacement connection,
+/// and a Host restart alone never verify it or complete the operation. The
+/// snapshotted Client participant survives the restart, and only its own
+/// local-erasure confirmation lets completion commit.
+#[tokio::test]
+async fn stage6_client_incarnation_unreachable_holds_across_restart() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    deliver_target_copy(&mut served).await;
+    let outcome = request_deletion(served.client(), TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+
+    // The Client disconnects before the Owner confirmation. The delivery
+    // evidence is not a connection fact, so the incarnation stays in the
+    // snapshot, but its local erasure can no longer be confirmed.
+    served.client = None;
+    let _current = confirm_deletion_via_serving_control(&mut served).await;
+
+    // 5: the unreachable Client is an explicit hold, never a completion.
+    let page = drive_until_local(&served.handle, DeletionPhaseWire::Held).await;
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "an unreachable Client must never be presumed erased"
+    );
+    let participant =
+        client_incarnation_participant(&page).expect("the snapshotted Client stays required");
+    assert_eq!(participant.progress, "held:unavailable");
+
+    // 7a: a replacement connection alone (same incarnation, new connection
+    // lifetime) changes no durable fact and confirms nothing.
+    let replacement = connect(&served.dir).await;
+    let page = local_deletion_page(&served.handle).await;
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Held);
+    assert_eq!(
+        client_incarnation_participant(&page)
+            .expect("the Client participant stays")
+            .progress,
+        "held:unavailable",
+        "a replacement connection never verifies the participant by itself"
+    );
+    drop(replacement);
+
+    // 8: a Host restart keeps the durable snapshot; the restart itself
+    // completes nothing and the same Client participant survives.
+    let mut client = served.restart().await;
+    let page = local_deletion_page(&served.handle).await;
+    assert_ne!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    let participant = client_incarnation_participant(&page)
+        .expect("the Client participant must survive the restart");
+    assert_eq!(participant.progress, "held:unavailable");
+
+    // 6: the reconnected Client reads frames, answers the bounded demand, and
+    // only then does the durable participant verify and completion commit.
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the reconnected Client must let the operation complete");
+    let participant = client_incarnation_participant(&page)
+        .expect("the completed operation still reports the Client participant");
+    assert_eq!(participant.progress, "verified");
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
     served.server.abort();
 }
 

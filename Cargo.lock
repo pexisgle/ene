@@ -342,6 +342,7 @@ dependencies = [
  "ene-store",
  "ene-task",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

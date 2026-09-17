@@ -24,7 +24,11 @@
 //!   path to a destructive admission, it writes the durable Owner
 //!   confirmation, and it runs the canonical preservation producer. The Client
 //!   never learns a request identity, so it cannot name — let alone confirm —
-//!   one.
+//!   one. The confirmation must execute in the serving process: the required
+//!   participant snapshot includes the Client incarnations the Host handed
+//!   body-bearing material to, and that tracking is Host-memory (lifecycle
+//!   §8.1). The serving composition exposes it through
+//!   [`crate::host_control`], and no offline path admits a confirmation.
 //!
 //! The management intent journal never stores the Owner's exact text: the
 //! deletion fingerprint names the family and purpose only, and the staged
@@ -542,8 +546,13 @@ impl HostHandle {
     /// Host-local trusted inlet (IPC §18.1): record the Owner's final
     /// confirmation for one staged request and run the canonical admission.
     ///
-    /// This is the only path from a request to a destructive operation. An
-    /// unknown or malformed identity answers
+    /// This is the only path from a request to a destructive operation, and
+    /// it must run in the serving composition: `required_deletion_participants`
+    /// snapshots the Client incarnations whose body-bearing delivery this
+    /// process observed, and an offline handle has no such evidence (lifecycle
+    /// §8.1). The Owner reaches it through [`crate::host_control`]; an offline
+    /// CLI refusal is deliberate, never a fallback. An unknown or malformed
+    /// identity answers
     /// [`Missing`](ConfirmTargetedDeletionOutcome::Missing) and changes
     /// nothing; a duplicate confirmation observes the same single operation.
     /// When the admission starts the operation, a bounded fan-out drive runs

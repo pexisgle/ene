@@ -9,7 +9,12 @@
 //!
 //! Single instance: [`run`] binds through `bind_singleton`, which treats
 //! `AddrInUse` as a possible live peer and probes before deciding to unlink a
-//! stale path; a probe timeout fails safe toward live.
+//! stale path; a probe timeout fails safe toward live. The same process also
+//! binds the Host-local first-party control endpoint
+//! ([`crate::host_control`]) in its accept loop: the Owner's Targeted
+//! Deletion confirmation must execute against the live connection table and
+//! Client delivery tracking, so it is served from this process and never
+//! from an offline state open (lifecycle §8.1, PR §6.4).
 //!
 //! Per-connection state lives in `ConnectionTable`, owned by this module:
 //! [`run`] mints one [`ConnectionWireId`] per accepted connection, and every
@@ -724,12 +729,16 @@ impl ConnectionTable {
 /// Binds the singleton listener for `socket`, treating `AddrInUse` as a
 /// possible live peer and probing via [`probe_and_rebind`].
 ///
+/// Shared by the device socket and the Host-local control socket: both are
+/// single-instance per data directory (the `host.lock` owns that premise) and
+/// both must clear a stale path left by a crashed process.
+///
 /// # Errors
 ///
 /// Returns [`CoreError::Bind`] when a live Host already serves the path, when
 /// a stale path cannot be cleared, or when the (re)bind fails.
 #[cfg(unix)]
-async fn bind_singleton(socket: &Path) -> Result<UnixListener, CoreError> {
+pub(crate) async fn bind_singleton(socket: &Path) -> Result<UnixListener, CoreError> {
     match UnixListener::bind(socket) {
         Ok(listener) => Ok(listener),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
@@ -803,9 +812,12 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) {
 /// Binds [`socket_path`] through the singleton check, proves each peer
 /// against the socket owner, and spawns one frame-loop task per authorized
 /// connection, driving the fake-friendly [`HostHandle::handle_frame`] seam.
-/// There is no shutdown signal in `Stage 2`: the future resolves only on bind
-/// failure; otherwise it runs until killed. The handle is shared by reference
-/// (`Arc` with `&self` methods), so no handle-wide lock spans provider I/O.
+/// The Host-local first-party control endpoint is bound in the same task and
+/// served by the same accept loop, so it lives and dies with this listener
+/// (one abort releases both). There is no shutdown signal in `Stage 2`: the
+/// future resolves only on bind failure; otherwise it runs until killed. The
+/// handle is shared by reference (`Arc` with `&self` methods), so no
+/// handle-wide lock spans provider I/O.
 ///
 /// # Errors
 ///
@@ -840,27 +852,38 @@ where
     // The serving composition owns the reachability authority for Client
     // incarnations: without it a Client demand would be an unreachable hold.
     handle.install_client_connection_table(Arc::clone(&table));
+    // The Host-local first-party control inlet is bound before the device
+    // listener accepts: the Owner's Targeted Deletion confirmation must run
+    // in this serving process, where the Client delivery tracking and the
+    // connection table are alive (lifecycle §8.1, PR §6.4).
+    let control =
+        crate::host_control::ControlListener::bind(&data_dir, Arc::clone(&handle)).await?;
     // The single serving driver continues unfinished Targeted Deletion
     // operations across the process lifetime (lifecycle §14).
     spawn_targeted_deletion_driver(Arc::clone(&handle));
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
-        };
-        let peer_ok = match stream.peer_cred() {
-            Ok(cred) => cred.uid() == owner,
-            Err(_) => false,
-        };
-        if !peer_ok {
-            continue;
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else {
+                    continue;
+                };
+                let peer_ok = match stream.peer_cred() {
+                    Ok(cred) => cred.uid() == owner,
+                    Err(_) => false,
+                };
+                if !peer_ok {
+                    continue;
+                }
+                let connection = table.note_accept();
+                let handle = Arc::clone(&handle);
+                let transport = Arc::clone(&transport);
+                let table = Arc::clone(&table);
+                tokio::spawn(async move {
+                    serve_connection(stream, connection, handle, transport, table).await;
+                });
+            }
+            () = control.accept() => {}
         }
-        let connection = table.note_accept();
-        let handle = Arc::clone(&handle);
-        let transport = Arc::clone(&transport);
-        let table = Arc::clone(&table);
-        tokio::spawn(async move {
-            serve_connection(stream, connection, handle, transport, table).await;
-        });
     }
 }
 
@@ -1290,31 +1313,42 @@ where
     let _ = handle.install_task_launcher(launcher);
     let table = Arc::new(ConnectionTable::new());
     handle.install_client_connection_table(Arc::clone(&table));
+    // The Host-local first-party control inlet: same ownership and peer
+    // check as the Unix path; the Owner's Targeted Deletion confirmation
+    // must run in this serving process (lifecycle §8.1, PR §6.4).
+    let mut control = crate::host_control::ControlListener::bind(&data_dir, Arc::clone(&handle))?;
     // Same process-lifetime Targeted Deletion driver as the Unix listener.
     spawn_targeted_deletion_driver(Arc::clone(&handle));
     loop {
-        if server.connect().await.is_err() {
-            // A failed wait leaves this instance unusable; replace it rather
-            // than serving half-open state.
-            server = crate::conn_pipe::create_next_server(&pipe)?;
-            continue;
+        tokio::select! {
+            connected = server.connect() => {
+                if connected.is_err() {
+                    // A failed wait leaves this instance unusable; replace it
+                    // rather than serving half-open state.
+                    server = crate::conn_pipe::create_next_server(&pipe)?;
+                    continue;
+                }
+                // The OS peer token check runs before any frame is read: an
+                // unprovable peer is dropped without a byte, like the Unix
+                // uid-mismatch path.
+                let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
+                let next = crate::conn_pipe::create_next_server(&pipe)?;
+                let current = std::mem::replace(&mut server, next);
+                if !peer_ok {
+                    continue;
+                }
+                let connection = table.note_accept();
+                let handle = Arc::clone(&handle);
+                let transport = Arc::clone(&transport);
+                let table = Arc::clone(&table);
+                tokio::spawn(async move {
+                    serve_connection(current, connection, handle, transport, table).await;
+                });
+            }
+            accepted = control.accept() => {
+                accepted?;
+            }
         }
-        // The OS peer token check runs before any frame is read: an
-        // unprovable peer is dropped without a byte, like the Unix
-        // uid-mismatch path.
-        let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
-        let next = crate::conn_pipe::create_next_server(&pipe)?;
-        let current = std::mem::replace(&mut server, next);
-        if !peer_ok {
-            continue;
-        }
-        let connection = table.note_accept();
-        let handle = Arc::clone(&handle);
-        let transport = Arc::clone(&transport);
-        let table = Arc::clone(&table);
-        tokio::spawn(async move {
-            serve_connection(current, connection, handle, transport, table).await;
-        });
     }
 }
 
