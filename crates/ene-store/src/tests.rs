@@ -1020,66 +1020,6 @@ async fn credential_register_and_list() {
 }
 
 #[tokio::test]
-async fn usage_insert_preserves_null_tokens() {
-    let store = open_memory().await.unwrap();
-    let ticket = RawId::new();
-    let fact = UsageFact {
-        ticket: InferenceTicketId(ticket),
-        provider: String::from("acme"),
-        model: String::from("dialogue-1"),
-        input_tokens: None,
-        output_tokens: None,
-        source: UsageSource::Unknown,
-    };
-    let recorded = store.record_usage(fact).await;
-    assert!(recorded.is_ok(), "usage record must succeed");
-    {
-        let guard = match store.conn.lock() {
-            Ok(locked) => locked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let checked = guard.query_row(
-            "SELECT input_tokens, output_tokens, source FROM usage_fact WHERE ticket = ?1",
-            params![crate::codec::encode_id(ticket)],
-            |row| {
-                Ok((
-                    row.get::<_, Option<i64>>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        );
-        let (input, output, source) = checked.unwrap();
-        assert_eq!(input, None, "unknown input stays NULL, never zero");
-        assert_eq!(output, None, "unknown output stays NULL, never zero");
-        assert_eq!(source.as_str(), "unknown");
-    }
-    let counted = UsageFact {
-        ticket: InferenceTicketId(RawId::new()),
-        provider: String::from("acme"),
-        model: String::from("dialogue-1"),
-        input_tokens: Some(4),
-        output_tokens: Some(2),
-        source: UsageSource::Reported,
-    };
-    let recorded_counted = store.record_usage(counted).await;
-    assert!(recorded_counted.is_ok(), "counted usage must succeed");
-    let duplicate = UsageFact {
-        ticket: InferenceTicketId(ticket),
-        provider: String::from("acme"),
-        model: String::from("dialogue-1"),
-        input_tokens: Some(1),
-        output_tokens: Some(1),
-        source: UsageSource::Reported,
-    };
-    let repeated = store.record_usage(duplicate).await;
-    assert!(
-        repeated.is_err(),
-        "duplicate ticket must fail without panicking"
-    );
-}
-
-#[tokio::test]
 async fn local_id_is_correspondence_metadata_not_a_replay_key() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
@@ -7058,3 +6998,4 @@ mod resume;
 mod task_failure;
 mod task_result;
 mod undelivered;
+mod usage;

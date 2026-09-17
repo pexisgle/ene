@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ene_inference::{
     AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
-    InferenceTechnicalError, TaskAgentAttemptPremise, UsageFact, UsageRepository,
+    InferenceTechnicalError, TaskAgentAttemptPremise, UsageFact, UsageRepository, UsageSource,
 };
 use ene_permission::{CapabilityKind, ConsumerKind};
 use ene_preservation::ErasureConditionRef;
@@ -40,7 +40,7 @@ const SQL_SELECT_TASK_STATE: &str = "SELECT revision, progress FROM task WHERE t
 const SQL_SELECT_DELEGATION_RESULT: &str =
     "SELECT result_id FROM task_result WHERE delegation_id = ?1";
 
-const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model, input_tokens, output_tokens, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model, input_tokens, cached_input_tokens, output_tokens, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(ticket) DO NOTHING";
 
 impl InferenceAttemptRepository for Store {
     async fn begin_inference_attempt(
@@ -496,25 +496,68 @@ impl UsageRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let ticket_text = encode_id(fact.ticket.0);
+            // The fact must be internally consistent before it touches the
+            // database: Reported carries all three counts with cached input a
+            // subset of input, Unknown carries none. Zero-as-unknown cannot
+            // survive this boundary.
+            let reported = fact.source == UsageSource::Reported;
+            if reported != (fact.input_tokens.is_some() && fact.output_tokens.is_some()) {
+                return Err(inference_unavailable(String::from(
+                    "usage source and counts disagree",
+                )));
+            }
             let input_column =
                 encode_optional_count(fact.input_tokens).map_err(inference_unavailable)?;
             let output_column =
                 encode_optional_count(fact.output_tokens).map_err(inference_unavailable)?;
-            let guard = lock_shared(&conn);
-            // A duplicate ticket violates the primary key and maps to
-            // `StorageUnavailable`, never a panic.
-            guard
-                .execute(
-                    SQL_INSERT_USAGE,
-                    params![
-                        ticket_text,
-                        fact.provider,
-                        fact.model,
-                        input_column,
-                        output_column,
-                        encode_usage_source(fact.source)
-                    ],
+            let cached_column = match (fact.cached_input_tokens, fact.input_tokens) {
+                (Some(cached), Some(input)) if cached <= input => {
+                    encode_optional_count(Some(cached)).map_err(inference_unavailable)?
+                }
+                (None, _) if !reported => {
+                    encode_optional_count(None).map_err(inference_unavailable)?
+                }
+                _ => {
+                    return Err(inference_unavailable(String::from(
+                        "cached tokens are not an input subset",
+                    )));
+                }
+            };
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            // Attribution belongs to the claimed attempt. Refuse orphan facts
+            // and route substitutions rather than manufacturing correspondence.
+            let route: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT provider, model FROM inference_attempt WHERE ticket = ?1",
+                    [&ticket_text],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
+                .optional()
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            if route.as_ref() != Some(&(fact.provider.clone(), fact.model.clone())) {
+                return Err(inference_unavailable(String::from(
+                    "usage attempt route mismatch",
+                )));
+            }
+            // The first settlement is terminal, including Unknown. Serialize
+            // writers in SQLite; duplicates cannot replace it with later counts.
+            tx.execute(
+                SQL_INSERT_USAGE,
+                params![
+                    ticket_text,
+                    fact.provider,
+                    fact.model,
+                    input_column,
+                    cached_column,
+                    output_column,
+                    encode_usage_source(fact.source)
+                ],
+            )
+            .map_err(|error| inference_unavailable(error.to_string()))?;
+            tx.commit()
                 .map_err(|error| inference_unavailable(error.to_string()))?;
             Ok(())
         })

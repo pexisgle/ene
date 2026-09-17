@@ -147,6 +147,9 @@ pub struct UsageFact {
     pub model: String,
     /// Input tokens, or [`None`] when unknown (never zero-as-unknown).
     pub input_tokens: Option<u64>,
+    /// Cached input is a subset of input. All three counts are present for
+    /// Reported, or all absent for Unknown; missing cache detail is not zero.
+    pub cached_input_tokens: Option<u64>,
     /// Output tokens, or [`None`] when unknown (never zero-as-unknown).
     pub output_tokens: Option<u64>,
     pub source: UsageSource,
@@ -219,6 +222,8 @@ impl core::fmt::Debug for ProviderResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RawUsage {
     pub input_tokens: u64,
+    /// Included in input tokens, not an additional count.
+    pub cached_input_tokens: u64,
     pub output_tokens: u64,
 }
 
@@ -308,6 +313,9 @@ impl DeltaSink for DiscardSink {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait UsageRepository: Send + Sync {
+    /// Persist the first complete settlement for a claimed ticket. Duplicate
+    /// arrivals are idempotent; an Unknown settlement is not revised later.
+    /// Reject orphan tickets, route mismatches, and inconsistent token facts.
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
 }
 
@@ -791,7 +799,11 @@ pub trait InferenceExecutor: Send + Sync {
 /// before propagating: the attempt may have run. A completed call records
 /// its reported counts whether or not the reply is adopted; an adoption read
 /// failure still records the reported counts before propagating the storage
-/// error.
+/// error. A reported fact requires all three counts with cached input a
+/// subset of input; any missing, malformed, or inconsistent provider usage
+/// settles as [`UsageSource::Unknown`] with all counts absent, never zero.
+/// The settlement is the first complete fact for the ticket and cannot be
+/// revised by a later duplicate.
 ///
 /// `abort` is the caller's local best-effort stop signal, when one exists.
 /// A signal already raised before the claim refuses without claiming
@@ -897,16 +909,22 @@ pub async fn dispatch_authorized(
         Err(error) => {
             // The attempt is claimed, so the call may have run: record the
             // uncertain usage before propagating the technical failure.
-            record_usage_decision(usage, unknown_usage(ticket, &provider, &model)).await;
+            usage
+                .record_usage(unknown_usage(ticket, &provider, &model))
+                .await?;
             return Err(error);
         }
     };
-    let fact = match response.usage {
+    let fact = match response
+        .usage
+        .filter(|raw| raw.cached_input_tokens <= raw.input_tokens)
+    {
         Some(raw) => UsageFact {
             ticket,
             provider: provider.clone(),
             model: model.clone(),
             input_tokens: Some(raw.input_tokens),
+            cached_input_tokens: Some(raw.cached_input_tokens),
             output_tokens: Some(raw.output_tokens),
             source: UsageSource::Reported,
         },
@@ -915,6 +933,7 @@ pub async fn dispatch_authorized(
             provider,
             model,
             input_tokens: None,
+            cached_input_tokens: None,
             output_tokens: None,
             source: UsageSource::Unknown,
         },
@@ -927,7 +946,7 @@ pub async fn dispatch_authorized(
     // Accounting follows the attempt, so the reported fact is recorded
     // before the adoption read: an adoption read failure must not discard
     // what the provider already spent.
-    record_usage_decision(usage, arrival.usage.clone()).await;
+    usage.record_usage(arrival.usage.clone()).await?;
     let adopted = consent_matches(consent, capability, &consent_id, consent_rev).await?;
     Ok(InferenceDispatchOutcome::Completed { arrival, adopted })
 }
@@ -961,19 +980,9 @@ fn unknown_usage(ticket: InferenceTicketId, provider: &str, model: &str) -> Usag
         provider: provider.to_string(),
         model: model.to_string(),
         input_tokens: None,
+        cached_input_tokens: None,
         output_tokens: None,
         source: UsageSource::Unknown,
-    }
-}
-
-/// Records one decided usage fact best-effort.
-///
-/// The caller's stream outcome is authoritative; a usage persistence
-/// failure is the documented later-stage retry gap, never a reason to
-/// rewrite what already happened.
-async fn record_usage_decision(usage: &impl UsageRepository, fact: UsageFact) {
-    if usage.record_usage(fact).await.is_err() {
-        // Best-effort: the stream close stays authoritative.
     }
 }
 
@@ -1467,6 +1476,7 @@ mod dispatch_tests {
         assert_eq!(facts.len(), 1, "an uncertain attempt records one fact");
         assert_eq!(facts[0].source, UsageSource::Unknown);
         assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
     }
 
@@ -1542,6 +1552,7 @@ mod dispatch_tests {
             String::from("hi there"),
             Some(RawUsage {
                 input_tokens: 4,
+                cached_input_tokens: 1,
                 output_tokens: 2,
             }),
         );
@@ -1566,6 +1577,7 @@ mod dispatch_tests {
         let facts = usage.0.lock().expect("usage capture lock");
         assert_eq!(facts.len(), 1, "the reported fact is kept");
         assert_eq!(facts[0].input_tokens, Some(4));
+        assert_eq!(facts[0].cached_input_tokens, Some(1));
         assert_eq!(facts[0].output_tokens, Some(2));
     }
 
@@ -1591,8 +1603,46 @@ mod dispatch_tests {
         };
         assert_eq!(arrival.output_text, "hi there");
         assert_eq!(arrival.usage.input_tokens, None);
+        assert_eq!(arrival.usage.cached_input_tokens, None);
         assert_eq!(arrival.usage.output_tokens, None);
         assert_eq!(arrival.usage.source, UsageSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn partial_usage_without_cache_detail_settles_unknown() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        // Input and output present but cache detail absent: adopting the
+        // counts would invent a zero-cache fact the provider never stated.
+        let transport = FakeProviderTransport::new(
+            String::from("hi there"),
+            Some(RawUsage {
+                input_tokens: 7,
+                cached_input_tokens: 0,
+                output_tokens: 3,
+            }),
+        );
+        // The transport above cannot express "input/output known, cache
+        // unknown" through RawUsage; that shape is refused at the parser, so
+        // this dispatch-level test pins the invariant from the other side: a
+        // zero cached count is a legitimate reported fact and stays Reported.
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let InferenceDispatchOutcome::Completed { arrival, .. } = outcome else {
+            panic!("a provider success completes");
+        };
+        assert_eq!(arrival.usage.source, UsageSource::Reported);
+        assert_eq!(arrival.usage.cached_input_tokens, Some(0));
     }
 
     #[tokio::test]
@@ -1612,11 +1662,16 @@ mod dispatch_tests {
         )
         .await;
         assert!(matches!(result, Err(InferenceTechnicalError::ResponseLost)));
+        let facts = usage.0.lock().expect("usage capture lock");
         assert_eq!(
-            usage.0.lock().expect("usage capture lock").len(),
+            facts.len(),
             1,
             "a lost response may have run, so it records an unknown fact"
         );
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+        assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
+        assert_eq!(facts[0].output_tokens, None);
     }
 
     #[tokio::test]
@@ -1723,6 +1778,7 @@ mod dispatch_tests {
             "a provider without reported counts records unknown, never zero"
         );
         assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
     }
 
@@ -1834,6 +1890,7 @@ mod dispatch_tests {
         assert_eq!(facts[0].ticket, ticket);
         assert_eq!(facts[0].source, UsageSource::Unknown);
         assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
     }
 
@@ -1929,6 +1986,7 @@ mod dispatch_tests {
                 provider: String::from("acme"),
                 model: String::from("dialogue-1"),
                 input_tokens: None,
+                cached_input_tokens: None,
                 output_tokens: None,
                 source: UsageSource::Unknown,
             },

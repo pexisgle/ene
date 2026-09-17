@@ -975,7 +975,11 @@ impl ene_inference::ProviderTransport for ConsentMovingTransport {
             }
             Ok(ene_inference::ProviderResponse {
                 text: String::from("agent report"),
-                usage: None,
+                usage: Some(ene_inference::RawUsage {
+                    input_tokens: 9,
+                    cached_input_tokens: 2,
+                    output_tokens: 4,
+                }),
             })
         })
     }
@@ -1045,4 +1049,25 @@ async fn a_consent_move_during_the_provider_wait_is_reported_with_its_sent_fact(
         1,
         "the answered call keeps its usage accounting"
     );
+    // The stale answer still settles its reported token shape: adoption and
+    // usage settlement are separate decisions, and cached input travels with
+    // the durable fact rather than being folded into input.
+    let conn = rusqlite::Connection::open(dir.path().join("app.db"))
+        .expect("the store file must open for the probe");
+    let (source, input, cached, output): (String, Option<i64>, Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT source, input_tokens, cached_input_tokens, output_tokens FROM usage_fact LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
+            },
+        )
+        .expect("the usage row must read");
+    assert_eq!(source, "reported");
+    assert_eq!((input, cached, output), (Some(9), Some(2), Some(4)));
 }

@@ -353,7 +353,7 @@ struct ResponsesBody {
     #[serde(default)]
     output: Vec<OutputItem>,
     #[serde(default)]
-    usage: Option<UsageObj>,
+    usage: Option<serde_json::Value>,
     #[serde(default)]
     incomplete_details: Option<IncompleteDetails>,
 }
@@ -384,19 +384,28 @@ struct UsageObj {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct InputTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 impl UsageObj {
-    /// Both counts or none: partial usage is [`None`] (unknown), never a
-    /// zero-as-unknown fact.
+    /// Only a complete, valid report is known. Absent cache detail is not
+    /// evidence of zero cache hits, even when input and output are present.
     fn into_raw(self) -> Option<RawUsage> {
-        match (self.input_tokens, self.output_tokens) {
-            (Some(input_tokens), Some(output_tokens)) => Some(RawUsage {
-                input_tokens,
-                output_tokens,
-            }),
-            _ => None,
-        }
+        let input_tokens = self.input_tokens?;
+        let output_tokens = self.output_tokens?;
+        let cached_input_tokens = self.input_tokens_details?.cached_tokens?;
+        (cached_input_tokens <= input_tokens).then_some(RawUsage {
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+        })
     }
 }
 
@@ -481,7 +490,10 @@ fn parse_response(
             }
         }
     }
-    let usage = decoded.usage.and_then(UsageObj::into_raw);
+    let usage = decoded
+        .usage
+        .and_then(|usage| serde_json::from_value::<UsageObj>(usage).ok())
+        .and_then(UsageObj::into_raw);
     Ok(ProviderResponse { text, usage })
 }
 
@@ -527,7 +539,7 @@ mod tests {
                     "content": [{"type": "output_text", "text": " Again."}],
                 },
             ],
-            "usage": {"input_tokens": 12, "output_tokens": 5},
+            "usage": {"input_tokens": 12, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 1}},
         });
         let result = parse_response(200, body);
         let response = result.unwrap();
@@ -536,6 +548,7 @@ mod tests {
             response.usage,
             Some(RawUsage {
                 input_tokens: 12,
+                cached_input_tokens: 1,
                 output_tokens: 5,
             })
         );
@@ -677,6 +690,78 @@ mod tests {
     }
 
     #[test]
+    fn missing_cache_detail_is_unknown_not_zero() {
+        let body = serde_json::json!({
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 7, "output_tokens": 3},
+        });
+        let result = parse_response(200, body);
+        let response = result.unwrap();
+        assert_eq!(response.text, "");
+        assert_eq!(
+            response.usage, None,
+            "cache detail absence is not evidence of zero cache hits"
+        );
+    }
+
+    #[test]
+    fn cache_detail_absent_and_empty_both_stay_unknown() {
+        // Explicit null and an empty details object carry no cached count.
+        for usage in [
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3, "input_tokens_details": null}),
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3, "input_tokens_details": {}}),
+        ] {
+            let body = serde_json::json!({
+                "status": "completed",
+                "output": [],
+                "usage": usage,
+            });
+            let result = parse_response(200, body);
+            let response = result.unwrap();
+            assert_eq!(
+                response.usage, None,
+                "a cache detail without cached_tokens is not a zero cache"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_count_above_input_is_rejected_as_unknown() {
+        let body = serde_json::json!({
+            "status": "completed",
+            "output": [],
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 6},
+            },
+        });
+        let result = parse_response(200, body);
+        let response = result.unwrap();
+        assert_eq!(
+            response.usage, None,
+            "cached subset larger than input is not a correct usage report"
+        );
+    }
+
+    #[test]
+    fn malformed_usage_json_keeps_the_valid_response_unknown() {
+        let body = serde_json::json!({
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+            "usage": {"input_tokens": "lots"},
+        });
+        let result = parse_response(200, body);
+        let response = result.expect("the response envelope itself is valid");
+        assert_eq!(response.text, "hi");
+        assert_eq!(
+            response.usage, None,
+            "an undecodable usage report settles Unknown, not a failed call"
+        );
+    }
+
+    #[test]
     fn unauthorized_maps_to_transport_failure() {
         let result = parse_response(401, error_shape());
         assert!(matches!(
@@ -748,6 +833,23 @@ mod tests {
     }
 
     #[test]
+    fn stream_assembler_missing_cache_detail_reports_unknown_usage() {
+        let mut assembler = super::StreamAssembler::default();
+        for line in [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
+        ] {
+            assembler.feed_line(line).expect("a known event must parse");
+        }
+        let response = assembler.finish().expect("a completed stream answers");
+        assert_eq!(response.text, "hi");
+        assert_eq!(
+            response.usage, None,
+            "SSE completion without cache detail settles Unknown, never zero"
+        );
+    }
+
+    #[test]
     fn streaming_body_requests_incremental_output() {
         let body = super::responses_body("gpt-test", "hello", true);
         assert_eq!(
@@ -766,7 +868,7 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}",
             "event: response.output_text.delta",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":1}}}}",
         ] {
             let fed = assembler.feed_line(line).expect("a known event must parse");
             deltas.extend(fed);
@@ -778,6 +880,7 @@ mod tests {
             response.usage,
             Some(crate::RawUsage {
                 input_tokens: 7,
+                cached_input_tokens: 1,
                 output_tokens: 3,
             })
         );

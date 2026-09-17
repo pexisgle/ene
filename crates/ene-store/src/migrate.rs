@@ -282,12 +282,20 @@ created_at TEXT NOT NULL,
 UNIQUE (companion_id, source_kind, source_id, source_phase)
 );
 CREATE TABLE usage_fact (
-ticket TEXT PRIMARY KEY,
+ticket TEXT PRIMARY KEY REFERENCES inference_attempt(ticket),
 provider TEXT NOT NULL,
 model TEXT NOT NULL,
 input_tokens INTEGER,
+cached_input_tokens INTEGER,
 output_tokens INTEGER,
-source TEXT NOT NULL
+source TEXT NOT NULL,
+CHECK (
+    (source = 'unknown' AND input_tokens IS NULL AND cached_input_tokens IS NULL AND output_tokens IS NULL)
+    OR
+    (source = 'reported' AND input_tokens IS NOT NULL AND cached_input_tokens IS NOT NULL AND output_tokens IS NOT NULL
+        AND input_tokens >= 0 AND cached_input_tokens >= 0 AND output_tokens >= 0
+        AND cached_input_tokens <= input_tokens)
+)
 );
 CREATE TABLE workspace_assoc (
 assoc_id TEXT PRIMARY KEY,

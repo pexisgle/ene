@@ -120,6 +120,7 @@ async fn task_agent_claim_records_the_durable_correlation() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             input_tokens: Some(7),
+            cached_input_tokens: Some(1),
             output_tokens: Some(3),
             source: UsageSource::Reported,
         })
@@ -471,6 +472,7 @@ async fn multiple_delegations_keep_distinct_attempt_correlations() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             input_tokens: Some(1),
+            cached_input_tokens: Some(1),
             output_tokens: Some(1),
             source: UsageSource::Reported,
         })
@@ -482,6 +484,7 @@ async fn multiple_delegations_keep_distinct_attempt_correlations() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             input_tokens: Some(2),
+            cached_input_tokens: Some(1),
             output_tokens: Some(2),
             source: UsageSource::Reported,
         })
