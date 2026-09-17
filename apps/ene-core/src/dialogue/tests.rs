@@ -6768,6 +6768,8 @@ async fn accepted_replacement(after_install: bool) -> Result<(), String> {
             .attach_presence(
                 &live,
                 "accepted-replacement",
+                true,
+                ene_presence::PresenceState::NoActive,
                 ene_presence::PresenceGeneration::from_u64(0)
             )
             .await,
@@ -6863,6 +6865,8 @@ async fn stale_confirmation(status: PresentationStatus) -> Result<(), String> {
         .attach_presence(
             &live1,
             "client-confirm-replace",
+            true,
+            ene_presence::PresenceState::NoActive,
             ene_presence::PresenceGeneration::from_u64(0),
         )
         .await;

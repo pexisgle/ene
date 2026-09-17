@@ -21,12 +21,13 @@
   - 会話から Task の作成・steering・進捗確認・cancel・結果報告まで行え、Task Agent は Host 上でバックグラウンド実行される。
   - Task lifecycle、Action certainty、結果の採用・再評価を durable facts に基づいて管理し、`Unknown` な作用を自動再実行しない。
   - `docs/requirements/acceptance.md` の Stage 4 受け入れシナリオと Linux / Windows CI を通過済み。
-- ✅ **Stage 5**: クライアントのライフサイクルとホストでの作業継続
+- ⏳ **Stage 5（最終検証中）**: クライアントのライフサイクルとホストでの作業継続
   - Client を閉じても Host-only Task は継続し、再接続と正式な presence 成立の時点で、未伝達の進捗・結果を自動表示する。
   - Host 再起動では実行を自動再開せず、保存済みの進捗・結果を示して明示 resume を待つ（同じ Task の r+1・新しい delegation として続け、旧 attempt の結果は元の実行に残す）。
   - 同一 device の replacement は旧 connection の transient world（presentation receipt / Round / stream / 再試行 epoch / first-party Task selection）を無効化し、新 connection へ何も暗黙継承しない（CCT §10.4 / IPC §9.3 の connection currentness linearization）。
   - connection phase、client incarnation、pairing identity、単一 Host lock、presence の遷移と復旧表を、Linux の socket と Windows の named pipe の実 transport で検証する。
-  - `docs/requirements/acceptance.md` の Stage 5 受け入れシナリオ (S5-01〜24) と Linux / Windows CI を通過済み。
+  - 受理後の Accepted/Open publication、ConfirmPresentation、presentation-start/ACK の durable CAS を connection ownership と直列化。deterministic replacement tests と mutation checks で退行を検出する。
+  - `docs/requirements/acceptance.md` の Stage 5 受け入れシナリオ (S5-01〜24) と既存の全 review finding を再照合し、今回の最終 HEAD の Linux / Windows CI 確認後に完了を確定する。
 
 ## 未解決のブロッカー (Blockers)
 
