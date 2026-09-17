@@ -323,7 +323,10 @@ pub enum PreservationTechnicalError {
 /// Canonical persistence boundary. Admission publishes operation, protected
 /// material, initial condition, known source correlations, and the required
 /// participant snapshot atomically before returning Started. No participant
-/// effects occur within these methods.
+/// effects occur within these methods. On the first-party request path the
+/// known source correlations are enumerated from the owner's durable identity
+/// rows whose text carries the confirmed exact target (lifecycle §4.1 point
+/// 4); the direct command path publishes exactly its caller-provided set.
 ///
 /// Source-correlation invariant for the erasure-currentness hot path: an
 /// unfinished operation keeps `erasure_condition_source` rows only in its
@@ -448,6 +451,16 @@ pub trait PreservationRepository: Send + Sync {
     /// durable (crash recovery, and the intent path observing a confirmed
     /// request). Adds no authority: without the durable confirmation row this
     /// answers [`StartTargetedDeletionOutcome::ConfirmationRequired`].
+    ///
+    /// The admission transaction publishes the source correlations already
+    /// known at admission (lifecycle §4.1 point 4): the implementation
+    /// enumerates the owner's durable identity rows whose stored text carries
+    /// the confirmed exact target, bounded per identity table, and writes them
+    /// with the operation, its protected material, the initial condition, and
+    /// the required participant snapshot. A Client, model output, or caller
+    /// never names a source on this path. An identity beyond the per-table
+    /// bound is not published, so it is erased only by the mechanical sweep
+    /// and carries no durable correlation coverage.
     fn start_confirmed_targeted_deletion(
         &self,
         request: DeletionRequestId,

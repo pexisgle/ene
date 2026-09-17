@@ -719,6 +719,144 @@ fn scope_covered(
     Ok(covered)
 }
 
+/// Per-identity-table bound on the covered-source enumeration a first-party
+/// admission publishes (lifecycle §4.1 point 4).
+///
+/// The enumeration is the publication of the source correlations already
+/// known at admission, not the erase itself. It reads at most this many
+/// covered identities per identity table, ordered by canonical identity, so
+/// one admission publishes at most
+/// `KNOWN_SOURCE_IDENTITIES.len() * KNOWN_SOURCE_ENUMERATION_LIMIT` durable
+/// source rows inside its transaction.
+///
+/// When a table holds more covered identities than the bound, the remainder is
+/// deliberately not enumerated: the A3 owner sweeps still erase every
+/// target-bearing body mechanically (the enumeration never decides erasure),
+/// but an un-enumerated identity is not published as a durable source
+/// correlation, so a provider send or adoption boundary cannot hold on it by
+/// correlation once its body was redacted.
+///
+/// The bound caps the identities the statement returns, and therefore the
+/// decoded identities and durable rows. It cannot cap the walk itself: a
+/// substring predicate has no index, so the statement scans the table in
+/// identity order (never a temp sort) and stops at the bound once it has found
+/// that many matches; fewer matches than the bound means the walk reaches the
+/// table's end, the same traversal the A3 sweep performs in bounded pages. No
+/// body is decoded into the process beyond the returned identities.
+pub(crate) const KNOWN_SOURCE_ENUMERATION_LIMIT: u32 = 64;
+
+/// One durable identity table whose primary key can be named as a canonical
+/// source correlation, with the column that can carry the exact target text.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KnownSourceIdentity {
+    table: &'static str,
+    key: &'static str,
+    body: &'static str,
+}
+
+/// The exact statement the enumeration runs for one identity table.
+///
+/// Exposed so tests can `EXPLAIN QUERY PLAN` the production SQL. Table, key,
+/// and body names are compile-time constants and never caller input; the
+/// target text only ever travels as a bound parameter.
+pub(crate) fn known_source_enumeration_sql(identity: KnownSourceIdentity) -> String {
+    format!(
+        "SELECT {} FROM {} WHERE instr({}, ?1) > 0 ORDER BY {} LIMIT ?2",
+        identity.key, identity.table, identity.body, identity.key
+    )
+}
+
+/// The identity tables a first-party admission enumerates (lifecycle §4.1
+/// point 4), each paired with the body column that can carry the exact target:
+///
+/// - `history_message.message_id`: the Owner-conversation origin of a
+///   `task_context_entry` (a Task Agent `data_use` source), the accepted input
+///   a dialogue reply derives from, the resume purpose source, an undelivered
+///   source, and the History pin a `learning_summary` records.
+/// - `activity_record.activity_id`: the Owner-management origin of a
+///   `task_context_entry` and a resume instruction source.
+/// - `learning_summary.summary_id` / `learning_memory.memory_id`: the derived
+///   Learning identities (critical-areas §3.3). No inference producer claims
+///   them in `data_use` yet (dialogue / learning sends carry no correlation in
+///   this slice), but they are the canonical identities of derived rows whose
+///   stored text carries the target, and the design keeps a known covered
+///   source correlation durable from admission for the sends and writes that
+///   derive from them.
+/// - `action_attempt.attempt_id` / `task_result.result_id`: the Task Agent's
+///   past-executed fact sources.
+///
+/// `task` / `task_revision` purpose bodies and `learning_memory_revision`
+/// bodies are not identity tables here: no source correlation names them (a
+/// Memory correlation names the Memory identity, not one revision), and their
+/// redaction is the mechanical sweep's job.
+pub(crate) const KNOWN_SOURCE_IDENTITIES: &[KnownSourceIdentity] = &[
+    KnownSourceIdentity {
+        table: "history_message",
+        key: "message_id",
+        body: "body",
+    },
+    KnownSourceIdentity {
+        table: "activity_record",
+        key: "activity_id",
+        body: "body",
+    },
+    KnownSourceIdentity {
+        table: "learning_summary",
+        key: "summary_id",
+        body: "content",
+    },
+    KnownSourceIdentity {
+        table: "learning_memory",
+        key: "memory_id",
+        body: "content",
+    },
+    KnownSourceIdentity {
+        table: "action_attempt",
+        key: "attempt_id",
+        body: "real_target",
+    },
+    KnownSourceIdentity {
+        table: "task_result",
+        key: "result_id",
+        body: "body",
+    },
+];
+
+/// Enumerates the durable source correlations already covered by `target` at
+/// admission time (lifecycle §4.1 point 4).
+///
+/// The enumeration is purely mechanical and owner-side: each identity table is
+/// queried for rows whose body column carries the exact target text (SQLite
+/// `instr`, the same exact-substring predicate the A3 owner sweeps and the A4
+/// acceptance boundaries use), ordered by canonical identity and bounded by
+/// [`KNOWN_SOURCE_ENUMERATION_LIMIT`] per table. No caller, wire payload, or
+/// model output names a source; the durable rows themselves are the evidence,
+/// and a staged Client target can only widen the search through the Host's
+/// confirmed exact text.
+///
+/// A malformed stored identity fails closed as corrupt state instead of being
+/// silently dropped from the correlation set.
+fn enumerate_known_sources(
+    tx: &rusqlite::Transaction<'_>,
+    target: &str,
+) -> Result<Vec<RawId>, PreservationTechnicalError> {
+    let limit = i64::from(KNOWN_SOURCE_ENUMERATION_LIMIT);
+    let mut sources = Vec::new();
+    for identity in KNOWN_SOURCE_IDENTITIES {
+        let sql = known_source_enumeration_sql(*identity);
+        let mut statement = tx.prepare(&sql).map_err(storage)?;
+        let keys = statement
+            .query_map(params![target, limit], |row| row.get::<_, String>(0))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        for key in keys {
+            sources.push(decode_id(&key).map_err(|_| corrupt())?);
+        }
+    }
+    Ok(sources)
+}
+
 /// The canonical admission body: duplicate detection plus the
 /// durable-before-enforce insert of operation, protected material, initial
 /// condition, and source correlations (lifecycle §4.1).
@@ -728,6 +866,12 @@ fn scope_covered(
 /// `deletion_operation.request_id` is `UNIQUE`, so one request can never start
 /// two operations. Both public admission entries share this body: there is one
 /// set of insert, duplicate, and validation rules, never a second producer.
+///
+/// The first-party path (`request` is `Some`) additionally enumerates the
+/// covered source correlations already durable in this store and publishes
+/// them with the operation (§4.1 point 4). The sealed direct path keeps its
+/// caller-provided `known_sources` unchanged, so a test seam that names its
+/// sources explicitly is never widened behind its back.
 fn admit_deletion(
     tx: &rusqlite::Transaction<'_>,
     command: &StartTargetedDeletionCommand,
@@ -758,6 +902,16 @@ fn admit_deletion(
             StartTargetedDeletionOutcome::HeldByOperation(record.current)
         });
     }
+    // §4.1 point 4: the first-party path publishes the covered source
+    // correlations already known in this store, enumerated mechanically in
+    // this same transaction. The sealed direct path keeps its caller-provided
+    // list only, so a test seam that names its sources explicitly is never
+    // widened behind its back.
+    let enumerated = if request.is_some() {
+        enumerate_known_sources(tx, material.expose_for_erasure())?
+    } else {
+        Vec::new()
+    };
     let current = DeletionOperationRef {
         operation: DeletionOperationId::from_raw(RawId::new()),
         sweep: DeletionSweepGeneration::from_u64(1),
@@ -788,7 +942,10 @@ fn admit_deletion(
         params![id, at],
     )
     .map_err(storage)?;
-    for source in command.known_sources() {
+    // §4.1 point 4: the enumerated first-party correlations are published in
+    // this same transaction as the operation, the protected material, and the
+    // initial condition.
+    for source in command.known_sources().iter().chain(enumerated.iter()) {
         tx.execute(
             "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
             params![id, encode_id(*source)],
