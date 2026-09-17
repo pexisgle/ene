@@ -3841,6 +3841,166 @@ async fn approval_sweep_redacts_history_and_learning_content() {
     assert_eq!(stored.content, "evidence mentions [credential]");
 }
 
+/// The approval sweep also covers the Task and activity bodies that the Task
+/// report, management view, and undelivered excerpts read back: a value
+/// recorded as ordinary text before it became a registered credential must
+/// be redacted in the current Task revision, the revision history, the
+/// recorded final result, and the first-party resume instruction, or those
+/// readers would keep serving the raw value out of the owner row.
+#[tokio::test]
+async fn approval_sweep_redacts_task_and_activity_bodies() {
+    use ene_companion::{
+        ActivityRepository as _, RecordResumeActivityCommand, TaskFact, UndeliveredSource,
+    };
+    use ene_task::{TaskAgentOutput, TaskReportSourceRef, orchestrate_result_arrival};
+
+    let secret = "sk-sweep-task-body";
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let created = store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: format!("the old key is {secret}"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: fixture_clock(),
+            assignee: AssigneeRef { companion },
+            workspace: None,
+        })
+        .await
+        .expect("the task must commit");
+    let advanced = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(ene_task::TaskPurposeAdoptionPremise {
+                purpose: TaskPurpose {
+                    text: format!("now the key is {secret}"),
+                },
+                origin: TaskContextOrigin {
+                    kind: TaskContextOriginKind::OwnerConversation,
+                    source: RawId::new(),
+                },
+                acquired_at: fixture_clock(),
+            }),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .expect("the steering must answer");
+    let TaskCommitOutcome::CommittedAs(current) = advanced else {
+        panic!("the purpose update must commit, got {advanced:?}");
+    };
+    let delegation = DelegationId::generate();
+    assert!(matches!(
+        store
+            .create_delegation(DelegationCreationPremise {
+                delegation,
+                task: current,
+                agent: TaskAgentEphemeralId::generate(),
+                scope_copy: DelegationScope { workspace: None },
+            })
+            .await
+            .expect("the delegation must commit"),
+        DelegationOutcome::Delegated(_)
+    ));
+    let arrival = orchestrate_result_arrival(
+        &store,
+        delegation,
+        TaskAgentOutput::new(format!("final report mentions {secret}")),
+    )
+    .await
+    .expect("the result must record");
+    let activity = store
+        .record_resume_activity(RecordResumeActivityCommand {
+            companion: CompanionId::from_raw(companion),
+            task: current,
+            purpose: TaskPurposeRef {
+                task: current.task,
+                adopted_revision: TaskRevision::initial(),
+            },
+            body: format!("continue from the key {secret}"),
+            command: RawId::new(),
+        })
+        .await
+        .expect("the activity must record");
+
+    approve_pair(&store, "openai", "main", secret, "reg-sweep-task-body").await;
+
+    let record = store
+        .load_task(current.task)
+        .await
+        .expect("the task must load")
+        .expect("the task still exists");
+    assert!(
+        !record.revision.purpose_text.text.contains(secret),
+        "the current revision purpose is swept: {}",
+        record.revision.purpose_text.text
+    );
+    assert!(
+        record.revision.purpose_text.text.contains("[credential]"),
+        "the swept position stays visible: {}",
+        record.revision.purpose_text.text
+    );
+    let original = store
+        .load_report_source_bounded(
+            TaskReportSourceRef::RevisionPurpose {
+                task: current.task,
+                revision: TaskRevision::initial(),
+            },
+            0,
+            4096,
+        )
+        .await
+        .expect("the revision history must read")
+        .expect("the original revision is retained");
+    assert!(
+        !original.text.contains(secret),
+        "the previous revision purpose is swept: {}",
+        original.text
+    );
+    let result = store
+        .load_report_source_bounded(TaskReportSourceRef::ResultBody(arrival.result), 0, 4096)
+        .await
+        .expect("the result body must read")
+        .expect("the result row exists");
+    assert!(
+        !result.text.contains(secret),
+        "the recorded result body is swept: {}",
+        result.text
+    );
+    let stored_activity = store
+        .load_activity(activity)
+        .await
+        .expect("the activity must load")
+        .expect("the activity still exists");
+    assert!(
+        !stored_activity.body.contains(secret),
+        "the resume instruction body is swept: {}",
+        stored_activity.body
+    );
+    let excerpt = store
+        .load_undelivered_excerpt(
+            UndeliveredSource::TaskRecord {
+                task: current.task.as_raw(),
+                fact: TaskFact::ResultRecorded(arrival.result.as_raw()),
+            },
+            4096,
+        )
+        .await
+        .expect("the excerpt must read")
+        .expect("the result source carries a bounded body");
+    assert!(
+        !excerpt.text.contains(secret),
+        "the presentation-facing excerpt reads the swept row: {}",
+        excerpt.text
+    );
+}
+
 #[tokio::test]
 async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
     let store = open_memory().await.unwrap();
@@ -4035,6 +4195,123 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
         claim,
         Ok(AttemptBeginOutcome::Stale),
         "a stale credential-set premise must refuse the send claim"
+    );
+}
+
+/// The provider claim is the send boundary of the credential premise: a proof
+/// produced by the real scrub boundary before a rotation must be refused with
+/// zero provider bytes, and only a re-scrub under the new revision may claim.
+/// The refusal itself carries no secret material.
+#[tokio::test]
+async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims() {
+    use ene_credential::{CredentialScrubber, SecretScrubber as _};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scrub-claim.db");
+    let store = Store::open(&path).await.unwrap();
+    let values = MemoryCredentialStore::new();
+    let credential = CredentialRef::new("openai", "main").unwrap();
+    values.insert(credential.clone(), "sk-a");
+    approve_pair(&store, "openai", "main", "sk-a", "reg-scrub-claim").await;
+    let seeded = save_consent(
+        &store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(matches!(seeded, ConsentCommitOutcome::Committed { .. }));
+
+    let scrubber = CredentialScrubber {
+        refs: &store,
+        store: &values,
+    };
+    let stale_proof = scrubber
+        .scrub("my key is sk-b")
+        .await
+        .expect("the registry is readable");
+    assert_eq!(
+        stale_proof.credential_set(),
+        store.current_set_revision().await.unwrap(),
+        "the proof names the revision it was scrubbed under"
+    );
+    assert!(
+        stale_proof.text().contains("sk-b"),
+        "a value that is not registered yet stays ordinary text"
+    );
+
+    // The value changes between the scrub and the claim: the request builder
+    // now carries the rotated bearer while the old proof names the old set.
+    assert!(matches!(
+        store.approve_credential_with_sweep("openai", "main", "sk-b"),
+        Ok(true)
+    ));
+    values.insert(credential, "sk-b");
+
+    let stale = store
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: stale_proof.credential_set(),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            task_agent: None,
+            pricing: None,
+        })
+        .await;
+    assert_eq!(
+        stale,
+        Ok(AttemptBeginOutcome::Stale),
+        "the stale premise must refuse the claim after the rotation"
+    );
+    assert!(
+        !format!("{stale:?}").contains("sk-b"),
+        "the stale refusal carries no secret material"
+    );
+    assert_eq!(
+        task_table_count(&store, "inference_attempt"),
+        0,
+        "a refused claim starts no attempt"
+    );
+
+    // Only the re-scrubbed proof claims: its text has the newly registered
+    // value redacted and its premise names the current set.
+    let fresh_proof = scrubber
+        .scrub("my key is sk-b")
+        .await
+        .expect("the registry is readable");
+    assert_eq!(fresh_proof.text(), "my key is [credential]");
+    assert_eq!(
+        fresh_proof.credential_set(),
+        store.current_set_revision().await.unwrap()
+    );
+    let fresh = store
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: fresh_proof.credential_set(),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            task_agent: None,
+            pricing: None,
+        })
+        .await;
+    assert_eq!(
+        fresh,
+        Ok(AttemptBeginOutcome::Started),
+        "the re-scrubbed proof claims the send"
     );
 }
 

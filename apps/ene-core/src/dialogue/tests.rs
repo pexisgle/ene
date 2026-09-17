@@ -7029,6 +7029,7 @@ async fn stale_confirmation(status: PresentationStatus) -> Result<(), String> {
     Ok(())
 }
 
+mod credential_suite;
 mod task_agent;
 mod task_control;
 mod task_run;

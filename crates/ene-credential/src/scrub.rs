@@ -157,6 +157,22 @@ pub enum SecretScrubError {
 /// not expose the secret itself. The returned [`ScrubbedText::credential_set`]
 /// must be read before the refs and bearers it covers, so an approval or
 /// startup sweep that follows leaves the premise stale.
+///
+/// An external implementation — including a test fake — can delegate to the
+/// credential-owned boundary or fail, but can never mint the proof itself:
+///
+/// ```compile_fail
+/// use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
+/// struct Fake;
+/// impl SecretScrubber for Fake {
+///     async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
+///         Ok(ScrubbedText {
+///             text: text.to_owned(),
+///             credential_set: CredentialSetRevision::initial(),
+///         })
+///     }
+/// }
+/// ```
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract style uses native async fn; Send bounds settle with the Host adapter"
