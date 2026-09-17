@@ -963,6 +963,16 @@ enum AuthenticatedUseOutcome {
 
 - 秘密情報本体は、OS の資格情報マネージャー等の独立した保護領域（E側）に安全に保管します。データベース側には秘密を含まない参照情報のみを保持します（PR グループK）。Rust のインターフェース上でも `SecretValue` 型をパブリックな戻り値として返してはなりません。必要な認証用途に対して「利用させる（認証処理を代行する）」ことはあっても、値そのものは認証秘密情報の境界内に厳重に閉じ込めます。たとえば `with_credential(handle, |opaque| ...)` のようなスコープ限定の安全なインターフェースや、接続担当者への直接供給とし、汎用的な `get_secret() -> String` のような安易な取得関数は一切設けません。
 
+#### K-C.1 ScrubbedText の構成所有者と合成境界
+
+`ScrubbedText` の構成は `ene-credential` の scrub module だけが所有します。具象 `CredentialScrubber` は Host ではなく同 module に置き、Host composition root は既存の `CredentialRefRepository` / `CredentialSetRepository` と pinned `CredentialStore` を注入します。別 registry は作りません。revision を refs / bearer より先に読み、全登録値を longest-first で除去し、registry / bearer が読めない場合や空 bearer は本文を返さず fail closed とします。
+
+`ScrubbedText` の本文・revision は private とし、読み取り accessor と本文の消費だけを公開します。public literal、任意本文と revision を受け取る constructor、Deserialize、可変本文参照、test feature による constructor は提供しません。`SecretScrubber` port の外部実装は失敗または credential-owned scrubber への委譲が可能ですが、自ら proof を mint できません。テストも repository / bearer の fixture をこの同じ具象境界へ注入します。この型は注入された credential authority に対する scrub の証明であり、任意の repository 実装が正規 Host authority であることまで型で証明するものではありません。production の authority 選択は Host composition root に残します。
+
+会話・Learning は選択予算などのために先行 scrub した断片を使ってよいものの、合成後の本文全体を再び scrub 境界へ通してから推論へ渡します。断片の連結・見出し等で値が再形成され得るため、断片の proof と任意の合成本文だけから proof を作ってはなりません。先行断片がある場合、最終 proof の premise は全先行断片と最終 scrub の revision の最小値まで保守化します。この操作は既存 proof の revision を下げるだけで、本文の差し替えや revision の昇格を許しません。先行断片がない場合も最終本文を scrub します。Task Agent は既存の契約どおり、論理入力全体の単一 scrub のままです。
+
+scrub proof は送信・保存 authority ではありません。既存の durable commit / inference attempt claim における credential-set revision の等値比較、approval / startup sweep と revision bump の不可分性は変更しません。合成中に revision が動いても、最終 scrub だけの新しい revision で古い断片の premise を洗い替えません。封止の compile-fail、同じ具象境界の redaction / failure、合成と revision drift を C1 で検証し、全域 no-secret / restart E2E の拡張は C2 / C3 に分離します。
+
 ### K-D Provider 割当解決
 
 一度解決された通信経路の情報を、恒久的に利用可能なプロバイダ割り当てのマスターデータとみなしてはなりません。
