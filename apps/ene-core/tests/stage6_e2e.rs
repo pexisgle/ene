@@ -1843,6 +1843,65 @@ async fn usage_page(client: &mut Client) -> UsageSummaryPage {
     page
 }
 
+/// One bounded usage read with an explicit provider filter, so the page names
+/// that provider's cap slots (the system scope is always included).
+async fn usage_page_for(client: &mut Client, provider: &str) -> UsageSummaryPage {
+    let answer = ask(
+        client,
+        WirePayload::UsageSummaryRequest(UsageSummaryRequest {
+            from: None,
+            to: None,
+            provider: Some(provider.to_owned()),
+            model: None,
+            consumer: None,
+            purpose: None,
+            status: None,
+            cursor: None,
+            limit: None,
+        }),
+        "provider usage",
+    )
+    .await
+    .expect("the usage read must answer");
+    let WirePayload::UsageSummaryResponse(UsageSummaryResponse::Page(page)) = answer else {
+        panic!("the usage read must answer a page: {answer:?}");
+    };
+    page
+}
+
+/// Sets or updates one provider's monthly cap through the first-party
+/// management intent and returns the typed outcome.
+async fn set_provider_monthly_cap(
+    client: &mut Client,
+    intent_id: CommandWireId,
+    provider: &str,
+    limit_micros: u64,
+) -> ManagementOutcome {
+    let page = usage_page_for(client, provider).await;
+    let mark = cmds::usage_cap_mark_for(&page, "provider", Some(provider), "monthly_utc")
+        .expect("the page names the provider monthly slot")
+        .to_string();
+    let answer = ask(
+        client,
+        WirePayload::ManagementIntent(cmds::usage_cap_intent(
+            intent_id,
+            &mark,
+            "provider",
+            Some(provider),
+            "monthly_utc",
+            "USD",
+            limit_micros,
+        )),
+        "provider-cap",
+    )
+    .await
+    .expect("the cap intent must answer");
+    let WirePayload::ManagementOutcome(outcome) = answer else {
+        panic!("the cap intent must answer an outcome: {answer:?}");
+    };
+    outcome
+}
+
 /// Sets or updates the system daily cap through the first-party management
 /// intent and returns the typed outcome.
 async fn set_system_daily_cap(
@@ -2199,18 +2258,32 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
+    // A loose system daily cap plus a tight provider monthly cap: the
+    // provider scope is the binding one for the next send.
     let outcome = set_system_daily_cap(
         &mut served.client,
         CommandWireId(uuid::Uuid::new_v4()),
+        1_000_000,
+    )
+    .await;
+    assert!(
+        matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }),
+        "the system cap must store, got {outcome:?}"
+    );
+    let outcome = set_provider_monthly_cap(
+        &mut served.client,
+        CommandWireId(uuid::Uuid::new_v4()),
+        "openai",
         CAP_UPPER_BOUND_MICROS + 40_000,
     )
     .await;
     assert!(
         matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }),
-        "the cap must store, got {outcome:?}"
+        "the provider cap must store, got {outcome:?}"
     );
     // The formation call parks after its claim: its reservation holds the
-    // last slot (250,000 limit against a 210,000 bound).
+    // last provider slot (250,000 limit against a 210,000 bound while the
+    // system daily cap alone would still admit the send).
     transport.block_input(on_learning_formation(true));
     let (round, stream, _) = send_round(&mut served.client, &first)
         .await
@@ -2232,6 +2305,53 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
         transport.sends(),
         sends_before,
         "the provider receives zero bytes for a cap-refused claim"
+    );
+    // Which scope refused: the provider monthly slot is out of room while the
+    // system daily slot alone would still admit the send.
+    let observed = usage_page_for(&mut served.client, "openai").await;
+    let provider_slot = observed
+        .caps
+        .iter()
+        .find(|cap| {
+            cap.scope == "provider"
+                && cap.provider.as_deref() == Some("openai")
+                && cap.window == "monthly_utc"
+        })
+        .expect("the provider monthly slot");
+    let UsageCapConsumptionView::Known {
+        remaining: provider_remaining,
+        ..
+    } = &provider_slot
+        .stored
+        .as_ref()
+        .expect("the provider cap is stored")
+        .consumption
+    else {
+        panic!("the provider consumption must be Known: {provider_slot:?}");
+    };
+    assert!(
+        provider_remaining.micros < CAP_UPPER_BOUND_MICROS,
+        "the provider monthly cap has no room for the refused bound: {provider_slot:?}"
+    );
+    let system_slot = observed
+        .caps
+        .iter()
+        .find(|cap| cap.scope == "system" && cap.window == "daily_utc")
+        .expect("the system daily slot");
+    let UsageCapConsumptionView::Known {
+        remaining: system_remaining,
+        ..
+    } = &system_slot
+        .stored
+        .as_ref()
+        .expect("the system cap is stored")
+        .consumption
+    else {
+        panic!("the system consumption must be Known: {system_slot:?}");
+    };
+    assert!(
+        system_remaining.micros > CAP_UPPER_BOUND_MICROS,
+        "the system cap alone would admit the send: {system_slot:?}"
     );
     // Release the reservation: the Reported settlement releases the unused
     // bound, and the next send fits.
