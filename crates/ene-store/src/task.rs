@@ -427,13 +427,36 @@ fn create_task_sync(
     {
         return Ok(TaskCreationOutcome::Superseded);
     }
+    // The A4 delayed-arrival gate: the purpose text (derived from the Owner
+    // turn) and the workspace boundary copies are materialized body-free when
+    // a canonical current condition covers them, so the creation fact
+    // survives while the covered text is never re-saved. This is the same
+    // fixed marker the Task owner sweep leaves in the purpose columns.
+    let purpose_text = crate::preservation::redact_covered_text(&tx, &premise.purpose.text)
+        .map_err(|error| task_unavailable(error.to_string()))?;
+    let workspace_paths = match &premise.workspace {
+        None => (None, None),
+        Some(workspace) => (
+            Some(
+                crate::preservation::redact_covered_text(&tx, &workspace.need.folder.path)
+                    .map_err(|error| task_unavailable(error.to_string()))?,
+            ),
+            workspace
+                .need
+                .save_target
+                .as_ref()
+                .map(|target| crate::preservation::redact_covered_text(&tx, &target.path))
+                .transpose()
+                .map_err(|error| task_unavailable(error.to_string()))?,
+        ),
+    };
     tx.execute(
         SQL_INSERT_TASK,
         params![
             task_text,
             revision_raw,
             revision_raw,
-            premise.purpose.text,
+            purpose_text,
             assignee_text,
             TaskProgress::Started.as_str(),
         ],
@@ -445,7 +468,7 @@ fn create_task_sync(
             task_text,
             revision_raw,
             revision_raw,
-            premise.purpose.text,
+            purpose_text,
             assignee_text,
         ],
     )
@@ -465,17 +488,14 @@ fn create_task_sync(
     )
     .map_err(task_unavailable)?;
     if let Some(workspace) = &premise.workspace {
+        let (folder, save_target) = &workspace_paths;
         tx.execute(
             SQL_INSERT_WORKSPACE_ASSOC,
             params![
                 encode_id(workspace.assoc.as_raw()),
                 task_text,
-                workspace.need.folder.path,
-                workspace
-                    .need
-                    .save_target
-                    .as_ref()
-                    .map(|target| target.path.as_str()),
+                folder.as_deref(),
+                save_target.as_deref(),
             ],
         )
         .map_err(task_unavailable)?;
@@ -663,11 +683,36 @@ fn forward_steering_sync(
     // provenance when the purpose does not change.
     let current_purpose_entry =
         validated_adopted_purpose_entry(&tx, &task_text, current.revision, current_adopted)?;
+    // The A4 delayed-steering gate: a forward whose adopted instruction source
+    // or newly adopted purpose is under a canonical current condition is
+    // refused with nothing written, so a delayed steering cannot re-save
+    // covered content into a new revision. The source correlation catches an
+    // instruction generated before the deletion from a covered turn; the text
+    // catches a purpose that restates the target.
+    if let Some(instruction) = &premise.adopted_instruction
+        && crate::preservation::covering_condition(&tx, &encode_id(instruction.origin.source))
+            .map_err(|error| task_unavailable(error.to_string()))?
+            .is_some()
+    {
+        return Ok(TaskCommitOutcome::HeldForErasure);
+    }
+    if let Some(adoption) = &premise.new_purpose
+        && (crate::preservation::covering_text(&tx, &adoption.purpose.text)
+            .map_err(|error| task_unavailable(error.to_string()))?
+            .is_some()
+            || crate::preservation::covering_condition(&tx, &encode_id(adoption.origin.source))
+                .map_err(|error| task_unavailable(error.to_string()))?
+                .is_some())
+    {
+        return Ok(TaskCommitOutcome::HeldForErasure);
+    }
     // The adopted-purpose entry's identity comes from the premise in both
     // branches: the repository only stamps the post-CAS reference and, on a
     // change, the adopted revision. On a carry-forward the old adopted
     // identity stays in `item`, while the provenance and acquisition are
-    // copied from the validated entry in force.
+    // copied from the validated entry in force. A carried purpose under a
+    // current condition is materialized body-free instead of blocking the
+    // steering: the new revision keeps the fact, not a second copy.
     let (adopted_revision, purpose_text, origin_kind, origin_source, acquired_at) =
         match premise.new_purpose {
             Some(adoption) => (
@@ -684,7 +729,8 @@ fn forward_steering_sync(
                 validate_adopted_purpose_provenance(&current_purpose_entry)?;
                 (
                     current_adopted,
-                    snapshot.purpose_text,
+                    crate::preservation::redact_covered_text(&tx, &snapshot.purpose_text)
+                        .map_err(|error| task_unavailable(error.to_string()))?,
                     current_purpose_entry.origin_kind,
                     current_purpose_entry.origin_source,
                     current_purpose_entry.acquired_at,
@@ -1010,16 +1056,25 @@ fn create_delegation_sync(
     }
     let delegator = current_assignee;
     // The scope is a copy of the boundary the delegator relied on, written
-    // verbatim; it records the boundary, not a permission.
+    // verbatim; it records the boundary, not a permission. A copy under a
+    // canonical current condition is materialized body-free (the same fixed
+    // marker the Task owner sweep leaves in the scope columns) instead of
+    // blocking the delegation: the delegation fact survives, the covered
+    // text is not re-saved.
     let (scope_assoc, scope_folder, scope_save_target) = match &scope_copy.workspace {
         None => (None, None, None),
         Some(workspace) => (
             Some(encode_id(workspace.assoc.as_raw())),
-            Some(workspace.folder.path.as_str()),
+            Some(
+                crate::preservation::redact_covered_text(&tx, &workspace.folder.path)
+                    .map_err(|error| task_unavailable(error.to_string()))?,
+            ),
             workspace
                 .save_target
                 .as_ref()
-                .map(|target| target.path.as_str()),
+                .map(|target| crate::preservation::redact_covered_text(&tx, &target.path))
+                .transpose()
+                .map_err(|error| task_unavailable(error.to_string()))?,
         ),
     };
     tx.execute(
@@ -1709,11 +1764,20 @@ fn record_task_result_arrival_sync(
 ) -> Result<TaskResultRecord, TaskTechnicalError> {
     let delegation_text = encode_id(arrival.delegation.as_raw());
     let result_text = encode_id(arrival.result.as_raw());
-    let body_text = arrival.body.text().to_owned();
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    // The A4 delayed-result gate: a body under a canonical current condition
+    // is collected instead of persisted — the arrival fact (sealing the
+    // delegation, its notification) survives, the target text is never
+    // stored. The same redaction applies to the idempotency comparison below,
+    // so a retry of the same result stays an idempotent replay instead of
+    // re-introducing the body; a retry arriving after the condition closed
+    // compares against the collected (body-free) stored form and fails
+    // closed rather than rewriting the target.
+    let body_text = crate::preservation::redact_covered_text(&tx, arrival.body.text())
+        .map_err(|error| task_unavailable(error.to_string()))?;
     let correspondence: Option<(String, i64)> = tx
         .query_row(
             SQL_SELECT_DELEGATION_CORRESPONDENCE,

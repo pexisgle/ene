@@ -131,6 +131,18 @@ pub enum MemoryChangeOutcome {
     /// The caller must not retry the same content: it may carry the newly
     /// registered value and needs a fresh scrub and currentness premise.
     StaleCredentialSet,
+    /// A canonical current erasure condition covers the proposed Summary
+    /// content, Memory content, or the Summary's source correlation
+    /// (lifecycle §7/§11). Nothing was written: no Summary evidence, no
+    /// current row, no revision, no token index.
+    ///
+    /// This is the delayed-formation boundary: a formation pass whose input
+    /// or output contains (or derives from) data under an active deletion is
+    /// refused instead of being persisted. The outcome carries no payload, so
+    /// the rejection path cannot re-materialize the target. Distinct from
+    /// [`Self::StaleTarget`] (the recognition moved) and
+    /// [`Self::StaleCredentialSet`] (the scrub premise moved).
+    HeldForErasure,
 }
 
 /// Durable Learning boundary.

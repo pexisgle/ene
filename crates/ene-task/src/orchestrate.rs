@@ -166,6 +166,11 @@ pub enum TaskProposalOutcome {
     /// No representable next revision can be durably committed; nothing was
     /// changed.
     RevisionExhausted { task: TaskId },
+    /// A canonical current erasure condition covers the proposed purpose text
+    /// or the instruction source the proposal derives from (lifecycle
+    /// §7/§11). Nothing was changed; the caller reports a data-use hold and
+    /// must not retry the same covered content.
+    HeldForErasure,
 }
 
 /// Orchestrates one steering proposal against the repository.
@@ -304,6 +309,7 @@ fn map_commit_outcome(outcome: TaskCommitOutcome) -> TaskProposalOutcome {
         TaskCommitOutcome::RevisionExhausted { task } => {
             TaskProposalOutcome::RevisionExhausted { task }
         }
+        TaskCommitOutcome::HeldForErasure => TaskProposalOutcome::HeldForErasure,
     }
 }
 

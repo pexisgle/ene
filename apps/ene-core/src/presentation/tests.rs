@@ -3873,3 +3873,160 @@ async fn a3c_the_read_coverage_premise_is_canonical_and_body_free() {
         "an unrelated body stays presentable"
     );
 }
+
+/// One operation admitted without driving any participant, so the Host
+/// transient fence (and any receipt) stays untouched: the A4 boundary gates
+/// are what the presentation paths meet.
+async fn admit_condition_only(handle: &HostHandle, text: &str) {
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        StartTargetedDeletionCommand, StartTargetedDeletionOutcome, TargetedDeletionTarget,
+    };
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                text.to_owned(),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    match handle
+        .store
+        .start_targeted_deletion(command)
+        .await
+        .expect("admission must commit")
+    {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("unexpected admission outcome: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a4_a_covered_item_is_neither_started_nor_acked() {
+    let (handle, _dir) = open_handle("present-a4-ack").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "the target body", generation).await;
+
+    // The condition is durable but no participant is driven: the fence is
+    // untouched, so the receipt created below is current and the store's
+    // canonical gate is the only refusal.
+    admit_condition_only(&handle, "the target body").await;
+
+    // Presentation start: the covered row is never claimed (its status stays
+    // Pending) and its excerpt is withheld by both the read-time coverage
+    // check and the in-transaction start gate.
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(
+        summary.items[0].excerpt, "",
+        "a covered body is never carried into a receipt"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].1,
+        ReportStatus::Pending,
+        "the covered row stays Pending, never PresentationUnknown or Presented"
+    );
+
+    // ACK: the held start is not a confirmation; the row still never reaches
+    // Presented.
+    let acked = ack(
+        &handle,
+        &live,
+        &summary.receipt.0,
+        summary.round.clone(),
+        summary.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        !matches!(acked, UndeliveredAckOutcome::Presented { .. }),
+        "a covered row is never confirmed presented, got {acked:?}"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(statuses[0].1, ReportStatus::Pending);
+}
+
+#[tokio::test]
+async fn a4_an_ack_after_a_condition_holds_the_presented_transition() {
+    let (handle, _dir) = open_handle("present-a4-ack-held").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "the target body", generation).await;
+
+    // The receipt is created before the condition: the row is carried and
+    // marked PresentationUnknown.
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(summary.items[0].excerpt, "the target body");
+
+    admit_condition_only(&handle, "the target body").await;
+
+    let outcome = ack(
+        &handle,
+        &live,
+        &summary.receipt.0,
+        summary.round.clone(),
+        summary.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        UndeliveredAckOutcome::HeldForErasure,
+        "the ACK is a domain hold, not a confirmation and not a stale receipt"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(
+        statuses[0].1,
+        ReportStatus::PresentationUnknown,
+        "the held ACK writes no Presented status"
+    );
+}
+
+#[tokio::test]
+async fn a4_an_unreadable_target_withholds_every_body() {
+    let (handle, _dir) = open_handle("present-a4-unreadable").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "an ordinary body", generation).await;
+    admit_condition_only(&handle, "an ordinary body").await;
+    assert!(!handle.current_coverage().await.covers("an unrelated body"));
+
+    // The finalizing material wipe leaves the condition current with no
+    // readable target: the premise can no longer prove any body uncovered,
+    // so it fails closed instead of presenting as if deletion had ended.
+    let operation = {
+        let page = handle
+            .store
+            .unfinished_deletions(None, 10)
+            .await
+            .expect("the operation must read");
+        page[0].current.operation
+    };
+    handle
+        .store
+        .wipe_protected_material_for_tests(operation)
+        .await
+        .expect("the test wipe must apply");
+    assert!(
+        handle.current_coverage().await.covers("an unrelated body"),
+        "an unreadable target withholds every body"
+    );
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(
+        summary.items[0].excerpt, "",
+        "a body behind an unreadable target is never carried"
+    );
+}

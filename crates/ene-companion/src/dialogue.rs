@@ -133,6 +133,12 @@ pub enum DialogueBegin {
     Conflict,
     /// A store failure held the append.
     Held,
+    /// A canonical current erasure condition covers the input body
+    /// (lifecycle §7/§11). The input was not appended and no undelivered
+    /// entry, round, or inference was created; the caller answers a
+    /// retry-later hold. Distinct from [`Self::Held`] (a store failure) and
+    /// [`Self::StaleCredentialSet`] (the scrub premise moved).
+    HeldForErasure,
     HeldByLifecycle(CompanionLifecycle),
     /// Admission declined without side effects.
     Declined(NotSentReason),
@@ -287,6 +293,7 @@ pub async fn begin_turn(
         // retry-safe, with no side effects either way.
         Ok(HistoryAppendOutcome::StaleOwnerInput) => DialogueBegin::Held,
         Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
+        Ok(HistoryAppendOutcome::HeldForErasure) => DialogueBegin::HeldForErasure,
         Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
             DialogueBegin::HeldByLifecycle(lifecycle)
         }
@@ -363,6 +370,7 @@ where
         // retry-safe, with no side effects either way.
         Ok(HistoryAppendOutcome::StaleOwnerInput) => DialogueBegin::Held,
         Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
+        Ok(HistoryAppendOutcome::HeldForErasure) => DialogueBegin::HeldForErasure,
         Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
             DialogueBegin::HeldByLifecycle(lifecycle)
         }

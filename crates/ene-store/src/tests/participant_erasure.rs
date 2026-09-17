@@ -628,27 +628,25 @@ async fn a_delayed_arrival_is_found_by_the_remainder_pass_not_verified_silently(
     assert_eq!(first.status(), ParticipantCompletionStatus::LocalComplete);
     assert_eq!(first.erased_count(), 0);
 
-    // A target-bearing row arrives inside the deletion interval.
-    let store_write = store
-        .create_task(TaskCreationPremise {
-            task: TaskId::generate(),
-            purpose: TaskPurpose {
-                text: format!("late arrival with {TARGET}"),
-            },
-            entry: TaskContextEntryId::generate(),
-            origin: TaskContextOrigin {
-                kind: TaskContextOriginKind::OwnerConversation,
-                source: RawId::new(),
-            },
-            acquired_at: fixture_clock(),
-            assignee: AssigneeRef {
-                companion: RawId::new(),
-            },
-            workspace: None,
-        })
-        .await
-        .expect("the late Task must commit");
-    assert_eq!(store_write.revision, TaskRevision::initial());
+    // A target-bearing row arrives inside the deletion interval. A4's
+    // acceptance boundaries collect or refuse covered bodies, so a copy that
+    // still reaches durable storage is exactly the case the remainder pass
+    // must catch: it is simulated here with a direct row write (a
+    // crash-restored or otherwise ungated copy) so the participant's
+    // positive-control property stays covered independently of the boundary
+    // gates.
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task (task_id,revision,purpose_adopted_revision,purpose_text,assignee,progress) VALUES (?1,1,1,?2,?3,'started')",
+            rusqlite::params![
+                crate::codec::encode_id(RawId::new()),
+                format!("late arrival with {TARGET}"),
+                crate::codec::encode_id(RawId::new()),
+            ],
+        )
+        .expect("the ungated late row must land");
+    }
 
     let found = demand(&participant, &store, current, ParticipantOwnerRef::Task).await;
     assert_eq!(

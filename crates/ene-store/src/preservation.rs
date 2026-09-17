@@ -263,6 +263,229 @@ pub(crate) fn covering_condition(
     Ok(None)
 }
 
+/// One mechanical text verdict against the canonical current conditions
+/// (lifecycle §7/§11).
+///
+/// [`Self::Target`] carries the protected exact target that matched; it is
+/// compared in place by the owning boundary and never rendered into a log, an
+/// outcome, a completion fact, or an audit row. [`Self::Unreadable`] is a
+/// current condition whose protected material was already wiped at finalizing:
+/// the condition still covers, but no target remains to redact mechanically,
+/// so callers fail closed (refuse; a collecting owner stores a body-free
+/// marker) rather than treating an unreadable target as "not covering".
+pub(crate) enum TextCoverage {
+    Target(String),
+    Unreadable,
+}
+
+/// Mechanical coverage of one incoming body by the canonical current erasure
+/// conditions (lifecycle §7/§11).
+///
+/// This is the same predicate the A3 owner sweeps apply — an exact substring
+/// match of each unfinished operation's protected mechanical target — read
+/// from the canonical store inside the caller's transaction, so an empty
+/// result across every current condition is the authoritative "not covered"
+/// (no sentinel, no cached verdict). A completed operation is excluded by the
+/// canonical `phase`/`closed_at` invariant: its condition stopped covering
+/// text (§7: completion is not a permanent keyword ban). Unfinished
+/// operations are the bounded candidate set: they are Owner-confirmed and
+/// validated here, so an operation whose structural rows are torn fails the
+/// check closed instead of being read as "not covering". An orphan condition
+/// row without its operation is unreadable canonical state and also fails
+/// closed.
+pub(crate) fn covering_text(
+    conn: &Connection,
+    text: &str,
+) -> Result<Option<TextCoverage>, PreservationTechnicalError> {
+    let orphan: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM erasure_condition c
+                 LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+                 WHERE o.operation_id IS NULL)",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if orphan {
+        return Err(corrupt());
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT operation_id FROM deletion_operation
+             WHERE phase!='completed' ORDER BY operation_id",
+        )
+        .map_err(storage)?;
+    let ids: Vec<String> = statement
+        .query_map((), |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    drop(statement);
+    for id in ids {
+        validate(conn, &id)?;
+        let exact: Option<String> = conn
+            .query_row(
+                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        // The material row exists for every unfinished operation except a
+        // finalizing one whose protected wipe already ran (§12 steps 2-3);
+        // that operation's condition is still current, so the body is
+        // covered with no readable target.
+        match exact {
+            None => return Ok(Some(TextCoverage::Unreadable)),
+            Some(target) if !target.is_empty() && text.contains(&target) => {
+                return Ok(Some(TextCoverage::Target(target)));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(None)
+}
+
+/// Source-correlation coverage of one logical input (lifecycle §7/§11): the
+/// same closure-aware canonical read the inference claim and Task resume use,
+/// applied across every source of one arrival.
+pub(crate) fn covering_sources(
+    conn: &Connection,
+    sources: &[RawId],
+) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
+    for source in sources {
+        if let Some(condition) = covering_condition(conn, &encode_id(*source))? {
+            return Ok(Some(condition));
+        }
+    }
+    Ok(None)
+}
+
+/// Collects one covered body instead of persisting it: redacts every current
+/// condition's mechanical target out of the text and returns the body-free
+/// result, or [`crate::erasure::ERASED_MARKER`] when a current condition's
+/// protected target is no longer readable (a finalizing wipe) so no
+/// mechanical comparison is possible at all.
+///
+/// This is the "erase collection" side of the A4 boundary contract for bodies
+/// whose objective fact must survive (a Task result arrival seals its
+/// delegation): the fact is committed, the body is not. The loop is bounded by
+/// the number of current conditions — every pass removes at least one
+/// condition's target, and a condition without material returns immediately.
+pub(crate) fn redact_covered_text(
+    conn: &Connection,
+    text: &str,
+) -> Result<String, PreservationTechnicalError> {
+    let mut current = text.to_owned();
+    loop {
+        let Some(coverage) = covering_text(conn, &current)? else {
+            return Ok(current);
+        };
+        let target = match coverage {
+            TextCoverage::Target(target) => target,
+            TextCoverage::Unreadable => {
+                return Ok(String::from(crate::erasure::ERASED_MARKER));
+            }
+        };
+        match crate::erasure::redact_exact(&current, &target) {
+            Some((redacted, _)) => current = redacted,
+            // `covering_text` matched the target, so a missing occurrence
+            // would be an inconsistent mechanical predicate; fail closed
+            // rather than storing a body that is still covered.
+            None => return Err(corrupt()),
+        }
+    }
+}
+
+/// Whether one undelivered item's canonical source is under a current
+/// erasure condition (lifecycle §7/§11), read inside the caller's
+/// transaction.
+///
+/// The item's source identity is checked as a canonical source correlation,
+/// and — when the source still carries a body — the body itself is compared
+/// mechanically against every current condition's exact target. A source row
+/// that no longer exists has no body left to re-materialize: it is not
+/// covered here (the owner sweep removes the dangling reference). A malformed
+/// stored source is unreadable canonical state and fails closed, never a
+/// silent "not covered".
+pub(crate) fn covered_undelivered_source(
+    conn: &Connection,
+    kind: &str,
+    id: &str,
+    phase: &str,
+) -> Result<bool, PreservationTechnicalError> {
+    let source =
+        crate::codec::decode_undelivered_source(conn, kind, id, phase).map_err(|_| corrupt())?;
+    let raw = crate::codec::decode_id(id).map_err(|_| corrupt())?;
+    if covering_condition(conn, &encode_id(raw))?.is_some() {
+        return Ok(true);
+    }
+    use ene_companion::{TaskFact, UndeliveredSource};
+    let body: Option<String> = match source {
+        UndeliveredSource::HistoryMessage(message) => conn
+            .query_row(
+                "SELECT body FROM history_message WHERE message_id=?1",
+                [encode_id(message)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?,
+        UndeliveredSource::TaskRecord {
+            fact: TaskFact::TaskRevision { task, revision },
+            ..
+        } => conn
+            .query_row(
+                "SELECT purpose_text FROM task_revision WHERE task_id=?1 AND revision=?2",
+                params![
+                    encode_id(task),
+                    i64::try_from(revision).map_err(|_| corrupt())?
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?,
+        UndeliveredSource::TaskRecord {
+            fact: TaskFact::ResultRecorded(result) | TaskFact::ResultAdopted(result),
+            ..
+        } => conn
+            .query_row(
+                "SELECT body FROM task_result WHERE result_id=?1",
+                [encode_id(result)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?,
+        UndeliveredSource::TaskRecord {
+            fact: TaskFact::ActionAttempt { attempt, .. },
+            ..
+        } => conn
+            .query_row(
+                "SELECT real_target FROM action_attempt WHERE attempt_id=?1",
+                [encode_id(attempt)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?,
+        UndeliveredSource::ActivityRecord(activity) => conn
+            .query_row(
+                "SELECT body FROM activity_record WHERE activity_id=?1",
+                [encode_id(activity)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?,
+        // Body-free notification sources: there is no content to collect.
+        UndeliveredSource::TaskRecord {
+            fact: TaskFact::Delegation(_) | TaskFact::Terminal { .. },
+            ..
+        } => None,
+    };
+    let Some(body) = body else {
+        return Ok(false);
+    };
+    Ok(covering_text(conn, &body)?.is_some())
+}
+
 fn decode_ref(id: &str, sweep: i64) -> Result<DeletionOperationRef, PreservationTechnicalError> {
     if sweep <= 0 {
         return Err(corrupt());
@@ -1472,6 +1695,50 @@ impl PreservationRepository for Store {
             validate(&tx, &id)?;
             tx.commit().map_err(storage)?;
             Ok(ParticipantCompletionOutcome::Recorded(progress))
+        })
+        .await
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Store {
+    /// Test-support only: advances one unfinished operation to `finalizing`
+    /// with its protected material wiped (lifecycle §12 steps 1-3), so a test
+    /// can exercise the unreadable-target fail-closed path of the acceptance
+    /// boundaries and of the presentation coverage premise without the A5
+    /// completion authority that does not exist in this slice.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError`] when the operation is unknown or torn.
+    #[doc(hidden)]
+    pub async fn wipe_protected_material_for_tests(
+        &self,
+        operation: DeletionOperationId,
+    ) -> Result<(), PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let id = encode_id(operation.as_raw());
+            validate(&tx, &id)?;
+            tx.execute(
+                "UPDATE deletion_operation SET phase='finalizing' WHERE operation_id=?1",
+                [&id],
+            )
+            .map_err(storage)?;
+            tx.execute(
+                "DELETE FROM deletion_search_material WHERE operation_id=?1",
+                [&id],
+            )
+            .map_err(storage)?;
+            // The post-write check keeps the seam from publishing a shape the
+            // production validation would refuse.
+            validate(&tx, &id)?;
+            tx.commit().map_err(storage)?;
+            Ok(())
         })
         .await
     }

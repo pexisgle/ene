@@ -260,6 +260,19 @@ fn insert_attempt_sync(
         return Ok(ActionStartOutcome::StalePremise);
     }
     let started_at = WallClockWithTz::now().to_rfc3339();
+    // The A4 delayed-action gate: the resolved target is the attempt's only
+    // stored body. A target under a canonical current condition refuses the
+    // attempt before any row exists, so no external effect starts on covered
+    // content and no target copy is saved. The refusal is a domain outcome
+    // (distinct from premise staleness and the execution seal), and a
+    // completed operation is not a current condition, so a fresh target after
+    // completion proceeds.
+    if crate::preservation::covering_text(&tx, premise.real_target.as_path())
+        .map_err(|error| action_unavailable(error.to_string()))?
+        .is_some()
+    {
+        return Ok(ActionStartOutcome::HeldForErasure);
+    }
     match tx.execute(
         SQL_INSERT_ATTEMPT,
         params![

@@ -413,6 +413,9 @@ async fn seed_legacy(handle: &HostHandle, secret: &str) -> LegacySeed {
         })
         .await
         .expect("the legacy activity must record");
+    let ene_companion::ResumeActivityOutcome::Recorded(activity) = activity else {
+        panic!("the legacy activity must record");
+    };
 
     let memory = MemoryId::generate();
     let summary = SummaryRecord {

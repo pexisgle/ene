@@ -791,6 +791,7 @@ fn not_started_observation(reason: &ActionNotStarted) -> String {
         ActionNotStarted::StalePremise => String::from("refused: the task premise moved"),
         ActionNotStarted::TaskTerminal => String::from("refused: the task is terminal"),
         ActionNotStarted::ExecutionSealed => String::from("refused: the execution is sealed"),
+        ActionNotStarted::DataUseHeld => String::from("refused: the target is under deletion"),
     }
 }
 

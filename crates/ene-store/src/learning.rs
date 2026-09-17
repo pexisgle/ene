@@ -70,6 +70,32 @@ fn commit_change_sync(
             return Ok(MemoryChangeOutcome::StaleCredentialSet);
         }
     }
+    // The A4 delayed-arrival gate: the Summary evidence, the proposed
+    // recognition text, and the Summary's source correlation are compared
+    // against the canonical current conditions inside this same transaction.
+    // A formation pass whose output re-states the target, or whose evidence
+    // derives from a covered source, is refused before any row — evidence,
+    // current Memory, revision, or token index. A completed operation is not
+    // a current condition, so new formation over a fresh source proceeds.
+    let covered = |text: &str| {
+        crate::preservation::covering_text(&tx, text)
+            .map_err(|error| learning_unavailable(error.to_string()))
+            .map(|coverage| coverage.is_some())
+    };
+    if let Some(summary) = &commit.summary {
+        if covered(&summary.content)? {
+            return Ok(MemoryChangeOutcome::HeldForErasure);
+        }
+        if crate::preservation::covering_sources(&tx, &[summary.source.start, summary.source.end])
+            .map_err(|error| learning_unavailable(error.to_string()))?
+            .is_some()
+        {
+            return Ok(MemoryChangeOutcome::HeldForErasure);
+        }
+    }
+    if covered(&commit.change.content)? {
+        return Ok(MemoryChangeOutcome::HeldForErasure);
+    }
     if let Some(summary) = &commit.summary {
         insert_summary(&tx, summary)?;
     }

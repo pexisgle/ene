@@ -535,14 +535,17 @@ impl HostHandle {
                             targets.push(text.to_string());
                         }
                     }
-                    // Destroyed material belongs to an operation whose
-                    // participants were already driven to local erasure and
-                    // whose protected material was wiped at finalizing: there
-                    // is no readable target left to compare against, and the
-                    // transient copies were invalidated at demand time. A
-                    // missing operation cannot be returned as a current
-                    // condition by the canonical read.
-                    Ok(DeletionMaterialOutcome::Destroyed | DeletionMaterialOutcome::Missing) => {}
+                    // A current condition whose protected material was already
+                    // wiped (finalizing, §12 steps 2-3) has no readable target
+                    // left to compare against: the premise cannot prove any
+                    // body uncovered, so the pass fails closed and withholds
+                    // instead of presenting as if deletion had ended. A missing
+                    // operation cannot be returned as a current condition by
+                    // the canonical read; treating it the same way is the
+                    // conservative answer.
+                    Ok(DeletionMaterialOutcome::Destroyed | DeletionMaterialOutcome::Missing) => {
+                        return CurrentCoverage::unreadable();
+                    }
                     Err(_) => return CurrentCoverage::unreadable(),
                 }
             }
@@ -1210,6 +1213,20 @@ impl HostHandle {
                             selected.push(entry.id);
                             carried.push(item);
                         }
+                        // A4: the item's canonical source is under a current
+                        // erasure condition, so the presentation start is not
+                        // claimed (no status write). The correlation stays
+                        // pageable — the same shape the read-time coverage
+                        // check produces — but the excerpt is withheld, so the
+                        // compare and the body hand-off cannot disagree with a
+                        // condition that committed after the read.
+                        Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
+                            let mut withheld = item;
+                            withheld.excerpt = String::new();
+                            withheld.truncated = false;
+                            selected.push(entry.id);
+                            carried.push(withheld);
+                        }
                         Ok(ene_companion::ReportStatusTransition::StaleSource) => {
                             dropped.push(item);
                         }
@@ -1673,20 +1690,30 @@ impl HostHandle {
                 match ack.status {
                     PresentationStatus::Presented => {
                         let mut presented = 0_u32;
+                        let mut held = 0_u32;
                         for id in &receipt.selected {
                             // Bounded to the carried id; later arrivals are never
                             // touched by this ACK.
-                            if let Ok(ene_companion::ReportStatusTransition::PendingToPresented) =
-                                store.compare_and_mark_reported_sync(
-                                    *id,
-                                    ReportStatus::PresentationUnknown,
-                                    mark,
-                                )
-                            {
-                                presented += 1;
+                            match store.compare_and_mark_reported_sync(
+                                *id,
+                                ReportStatus::PresentationUnknown,
+                                mark,
+                            ) {
+                                Ok(ene_companion::ReportStatusTransition::PendingToPresented) => {
+                                    presented += 1;
+                                }
+                                // A covered row is never confirmed presented:
+                                // the status stays un-presented and the row is
+                                // re-evaluated after the deletion settles.
+                                Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
+                                    held += 1;
+                                }
+                                _ => {}
                             }
                         }
-                        if presented > 0 {
+                        if held > 0 && presented == 0 {
+                            UndeliveredAckOutcome::HeldForErasure
+                        } else if presented > 0 {
                             UndeliveredAckOutcome::Presented { presented }
                         } else {
                             // Every carried row was already presented (a parallel

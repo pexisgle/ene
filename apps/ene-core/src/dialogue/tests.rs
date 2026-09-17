@@ -7212,3 +7212,83 @@ async fn a3c_a_deletion_mid_stream_stops_deltas_and_reply_adoption() {
         "the owner input is durable and the covered reply is never adopted"
     );
 }
+
+/// A4: an Owner submit whose body is under a canonical current condition is
+/// held at the intake boundary — no History row, no round acceptance.
+///
+/// The matching "fresh Owner input after completion" ordering is asserted at
+/// the canonical boundary (the store's `delayed_arrival` suite); the
+/// end-to-end completion walk belongs to integration slice D, which owns the
+/// A5 completion authority this slice does not have.
+#[tokio::test]
+async fn a4_a_covered_submit_is_held_without_a_history_row() {
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    let (handle, _dir) = setup_handle("dlg-a4-held").await.unwrap();
+    let transport = ok_transport();
+    let live = live_input("client-a4-held");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("the private key"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        ene_primitive::WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    match handle
+        .store
+        .start_targeted_deletion(command)
+        .await
+        .expect("admission commits")
+    {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("the operation must start, got {other:?}"),
+    }
+
+    let responses = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-a4",
+                "please keep the private key",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let (_, answers) = split_presence_fact(&responses);
+    assert!(
+        answers.iter().all(|frame| !matches!(
+            frame.payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        )),
+        "a covered submit is never accepted, got {responses:?}"
+    );
+    assert!(
+        answers.iter().any(|frame| matches!(
+            frame.payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::HeldForTransition)
+        )),
+        "the intake answers a retry-later hold, got {responses:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        0,
+        "no History row exists for the held submit"
+    );
+}

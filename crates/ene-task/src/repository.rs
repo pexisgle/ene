@@ -59,6 +59,16 @@ pub enum TaskCommitOutcome {
     MissingTask { task: TaskId },
     /// No representable next revision exists; nothing was changed.
     RevisionExhausted { task: TaskId },
+    /// A canonical current erasure condition covers the newly adopted purpose
+    /// text or the instruction source this forward derives from
+    /// (lifecycle §7/§11). Nothing was changed: no revision snapshot, no
+    /// purpose or instruction entry, no pointer move, no notification.
+    ///
+    /// This is the delayed-steering boundary: an instruction produced from (or
+    /// restating) data under an active deletion is refused rather than
+    /// re-saved into a new revision. Distinct from [`Self::StaleExpected`]
+    /// (the revision moved) and [`Self::TaskTerminal`] (the Task is closed).
+    HeldForErasure,
 }
 
 /// The Owner-utterance currentness premise of one conversation-sourced Task

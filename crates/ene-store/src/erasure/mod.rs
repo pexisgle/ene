@@ -26,6 +26,53 @@ pub use task_action_inference::{
     ActionErasureParticipant, InferenceErasureParticipant, TaskErasureParticipant,
 };
 
+/// The fixed marker a mechanically redacted value keeps in place of the
+/// target. It carries no target-derived material and is never treated as a
+/// match for a non-overlapping target.
+pub(crate) const ERASED_MARKER: &str = "[erased]";
+
+/// Redaction passes bounded before a value that keeps re-matching falls back
+/// to outright removal. A target that overlaps the marker itself is the only
+/// way to re-match; removal strictly shortens the value, so the fallback
+/// always reaches a clean fixpoint.
+const MARKER_PASS_BOUND: usize = 8;
+
+/// Mechanically removes every occurrence of `target` from `text`.
+///
+/// Returns [`None`] when the value contains no occurrence (no write needed).
+/// A replacement can join the surrounding text into a new occurrence, so the
+/// pass repeats until the value is clean; a target that overlaps the marker
+/// itself falls back to outright removal, which strictly shortens the value
+/// and therefore always reaches a clean fixpoint. The returned count is the
+/// number of occurrences removed.
+///
+/// This is the one mechanical predicate the A3 owner sweeps and the A4
+/// acceptance boundaries share: a body an accepting boundary redacts and a
+/// body an owner sweep redacts are erased (or refused) by the same rule.
+pub(crate) fn redact_exact(text: &str, target: &str) -> Option<(String, u64)> {
+    if target.is_empty() || !text.contains(target) {
+        return None;
+    }
+    let mut removed = count_occurrences(text, target);
+    let mut current = text.replace(target, ERASED_MARKER);
+    for _ in 0..MARKER_PASS_BOUND {
+        if !current.contains(target) {
+            return Some((current, removed));
+        }
+        removed += count_occurrences(&current, target);
+        current = current.replace(target, ERASED_MARKER);
+    }
+    while current.contains(target) {
+        removed += count_occurrences(&current, target);
+        current = current.replace(target, "");
+    }
+    Some((current, removed))
+}
+
+fn count_occurrences(text: &str, target: &str) -> u64 {
+    text.matches(target).count() as u64
+}
+
 #[cfg(feature = "test-support")]
 pub(crate) use companion_learning::exact_remainder_probe;
 #[cfg(test)]

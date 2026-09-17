@@ -1,8 +1,9 @@
 use crate::Store;
 use ene_companion::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
-    HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
-    ReportStatusTransition, RoundIntentMark, UndeliveredRepository,
+    ActivityId, ActivityRepository as _, AppendHistoryCommand, CommandId, CompanionId,
+    CompanionLifecycle, CompanionRepository, CompanionTechnicalError, HistoryAppendOutcome,
+    HistoryRepository, HistoryRole, PresentationMark, RecordResumeActivityCommand, ReportStatus,
+    ReportStatusTransition, ResumeActivityOutcome, RoundIntentMark, UndeliveredRepository,
 };
 use ene_credential::{
     CredentialApprovalRepository, CredentialIntentRepository as _, CredentialRef,
@@ -140,6 +141,28 @@ fn history_command_with_ids(
         round_intent: command_id.map(|_| RoundIntentMark::Auto),
         incarnation: Some((1, 2)),
         local_id: local_id.map(String::from),
+    }
+}
+
+/// Records one resume-instruction activity and returns its identity.
+///
+/// The A4 held path (`HeldForErasure`) is exercised by its own boundary
+/// tests; this helper is the committed path the existing AU17 coverage
+/// expects, and reports a held outcome as an unavailability so those legacy
+/// assertions keep their `Result` shape without conflating the outcome in
+/// production code.
+async fn record_activity_id(
+    store: &Store,
+    cmd: RecordResumeActivityCommand,
+) -> Result<ActivityId, CompanionTechnicalError> {
+    match store.record_resume_activity(cmd).await {
+        Ok(ResumeActivityOutcome::Recorded(activity)) => Ok(activity),
+        Ok(ResumeActivityOutcome::HeldForErasure) => {
+            Err(CompanionTechnicalError::StorageUnavailable {
+                reason: String::from("activity held for erasure"),
+            })
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -3916,8 +3939,9 @@ async fn approval_sweep_redacts_task_and_activity_bodies() {
     )
     .await
     .expect("the result must record");
-    let activity = store
-        .record_resume_activity(RecordResumeActivityCommand {
+    let activity = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion: CompanionId::from_raw(companion),
             task: current,
             purpose: TaskPurposeRef {
@@ -3926,9 +3950,10 @@ async fn approval_sweep_redacts_task_and_activity_bodies() {
             },
             body: format!("continue from the key {secret}"),
             command: RawId::new(),
-        })
-        .await
-        .expect("the activity must record");
+        },
+    )
+    .await
+    .expect("the activity must record");
 
     approve_pair(&store, "openai", "main", secret, "reg-sweep-task-body").await;
 
@@ -7276,6 +7301,7 @@ async fn delegation_creation_faults_roll_back_every_write() {
 mod action;
 mod agent;
 mod cancel;
+mod delayed_arrival;
 mod deletion_request;
 mod erasure;
 mod erasure_owners;

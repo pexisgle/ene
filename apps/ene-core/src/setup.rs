@@ -100,6 +100,7 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
 use ene_companion::{
     ActivityRepository as _, CompanionId, CompanionRepository, RecordResumeActivityCommand,
+    ResumeActivityOutcome,
 };
 use ene_credential::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
@@ -420,7 +421,18 @@ impl HostHandle {
                     ManagementOutcome::HeldByOperation,
                 )];
             }
-            Ok(activity) => activity,
+            // The instruction body is under a current erasure condition: the
+            // activity is not recorded and the resume is held, never answered
+            // as applied.
+            Ok(ResumeActivityOutcome::HeldForErasure) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+            Ok(ResumeActivityOutcome::Recorded(activity)) => activity,
         };
         match self
             .resume_task(ResumeTaskCommand {

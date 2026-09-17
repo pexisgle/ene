@@ -71,6 +71,8 @@ use crate::Store;
 use crate::codec::lock_shared;
 use crate::run_blocking;
 
+use super::redact_exact;
+
 /// Rows examined in one demand. The value bounds the SQL, the redaction work,
 /// and the caller's wait; a longer sweep simply spans more demands.
 pub(crate) const ROWS_PER_DEMAND: u32 = 64;
@@ -78,16 +80,6 @@ pub(crate) const ROWS_PER_DEMAND: u32 = 64;
 /// Rows fetched by one SQL page. Smaller than [`ROWS_PER_DEMAND`] so a demand
 /// never depends on one statement reading its whole budget.
 const PAGE_ROWS: u32 = 32;
-
-/// The fixed marker a redacted value keeps in place of the target. It carries
-/// no target-derived material and is never treated as a match.
-const ERASED_MARKER: &str = "[erased]";
-
-/// Redaction passes bounded before a value that keeps re-matching falls back
-/// to outright removal. A target that overlaps the marker itself is the only
-/// way to re-match; removal strictly shortens the value, so the fallback
-/// always reaches a clean fixpoint.
-const MARKER_PASS_BOUND: usize = 8;
 
 /// The fixed locator stored when redacting a path would leave a value the
 /// owner's own decode no longer accepts as a canonical absolute path
@@ -552,30 +544,10 @@ fn plan_redactions(
 
 /// Mechanically removes every occurrence of `target` from `text`.
 ///
-/// Returns [`None`] when the value contains no occurrence (no write needed).
-/// A replacement can join the surrounding text into a new occurrence, so the
-/// pass repeats until the value is clean; a target that overlaps the marker
-/// itself falls back to outright removal, which strictly shortens the value
-/// and therefore always reaches a clean fixpoint. The returned count is the
-/// number of occurrences removed.
+/// The shared A3/A4 mechanical predicate ([`super::redact_exact`]): one
+/// definition for the owner sweeps and the acceptance boundaries.
 fn erase_exact(text: &str, target: &str) -> Option<(String, u64)> {
-    if target.is_empty() || !text.contains(target) {
-        return None;
-    }
-    let mut removed = count_occurrences(text, target);
-    let mut current = text.replace(target, ERASED_MARKER);
-    for _ in 0..MARKER_PASS_BOUND {
-        if !current.contains(target) {
-            return Some((current, removed));
-        }
-        removed += count_occurrences(&current, target);
-        current = current.replace(target, ERASED_MARKER);
-    }
-    while current.contains(target) {
-        removed += count_occurrences(&current, target);
-        current = current.replace(target, "");
-    }
-    Some((current, removed))
+    redact_exact(text, target)
 }
 
 /// Redacts one stored filesystem locator, keeping it a readable canonical
@@ -594,10 +566,6 @@ fn erase_path(text: &str, target: &str) -> Result<Option<(String, u64)>, Erasure
         return Ok(Some((String::from(ERASED_LOCATOR), removed)));
     }
     Ok(Some((redacted, removed)))
-}
-
-fn count_occurrences(text: &str, target: &str) -> u64 {
-    text.matches(target).count() as u64
 }
 
 /// The Task owner's local-erasure participant.

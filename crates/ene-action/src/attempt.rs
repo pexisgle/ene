@@ -259,6 +259,15 @@ pub enum ActionStartOutcome {
     /// nothing was written and no external effect may happen, even while the
     /// Task is non-terminal.
     ExecutionSealed,
+    /// A canonical current erasure condition covers the resolved target
+    /// (lifecycle §7/§11). Nothing was written and no external effect may
+    /// start: the attempt is refused before it exists, so no target copy is
+    /// saved and no outcome has to be retracted.
+    ///
+    /// Distinct from [`Self::StalePremise`] (a correlation moved) and
+    /// [`Self::TaskTerminal`] / [`Self::ExecutionSealed`] (the Task or
+    /// delegation closed): the target itself is under an active deletion.
+    HeldForErasure,
 }
 
 /// The domain result of one certainty compare-and-set.

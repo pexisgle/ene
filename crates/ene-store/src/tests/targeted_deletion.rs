@@ -8,7 +8,7 @@
 
 use super::*;
 
-use ene_companion::{ActivityId, ActivityRepository as _, RecordResumeActivityCommand};
+use ene_companion::{ActivityId, RecordResumeActivityCommand};
 use ene_preservation::{
     DeletionOperationId, DeletionSearchMaterial, DeletionSweepGeneration,
     DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant as _,
@@ -59,7 +59,7 @@ async fn drive(
     drive_with_sources(participant, condition, owner, text, Vec::new()).await
 }
 
-async fn drive_with_sources(
+pub(super) async fn drive_with_sources(
     participant: &impl ene_preservation::ErasureParticipant,
     condition: ErasureConditionRef,
     owner: ParticipantOwnerRef,
@@ -102,8 +102,9 @@ async fn append_role(
 
 async fn record_activity(store: &Store, companion: CompanionId, body: &str) -> ActivityId {
     let task = TaskId::generate();
-    store
-        .record_resume_activity(RecordResumeActivityCommand {
+    record_activity_id(
+        store,
+        RecordResumeActivityCommand {
             companion,
             task: TaskRef {
                 task,
@@ -115,9 +116,10 @@ async fn record_activity(store: &Store, companion: CompanionId, body: &str) -> A
             },
             body: body.to_owned(),
             command: RawId::new(),
-        })
-        .await
-        .unwrap()
+        },
+    )
+    .await
+    .unwrap()
 }
 
 fn summary(companion: RawId, content: &str, start: RawId, end: RawId) -> SummaryRecord {

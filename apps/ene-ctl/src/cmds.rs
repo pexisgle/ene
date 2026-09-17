@@ -834,6 +834,9 @@ pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> AckAction {
         UndeliveredAckOutcome::StaleConnection => AckAction::Retryable {
             message: String::from("stale connection; re-query on this connection and retry"),
         },
+        UndeliveredAckOutcome::HeldForErasure => AckAction::Retryable {
+            message: String::from("items are under deletion; re-query after it settles"),
+        },
     }
 }
 

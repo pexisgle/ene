@@ -987,6 +987,7 @@ impl HostHandle {
                 ),
             ),
             DialogueBegin::Held => emit_end(sink, held_frame(frame, live)),
+            DialogueBegin::HeldForErasure => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldByLifecycle(_) => {
                 emit_end(sink, revalidate_frame(frame, live, "stopped-companion"));
             }
