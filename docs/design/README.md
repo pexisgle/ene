@@ -34,6 +34,7 @@
   - [アクション実行の安全性 (Action Execution)](critical-areas/action-execution.md)
 - **データの削除・保全・バックアップ**:
   - [指定データの完全削除 (Targeted Deletion)](critical-areas/targeted-deletion.md)
+  - [Targeted Deletion の operation・participant・完了契約](concrete/targeted-deletion-lifecycle.md)
   - [内部データの保全と消去サブシステム](subsystems/data-preservation-erasure.md)
   - [バックアップと復元 (Backup / Restore)](critical-areas/backup-restore.md)
 - **クライアント接続・画面と音声・観測**:
