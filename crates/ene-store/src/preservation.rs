@@ -23,6 +23,32 @@ fn corrupt() -> PreservationTechnicalError {
     PreservationTechnicalError::CorruptState
 }
 
+/// Whether `condition` is the operation's current, unfinished condition
+/// (lifecycle §6-§7).
+///
+/// A participant-local erasure pass must run this check inside the same
+/// transaction as its mutation: a sweep the operation has moved past or a
+/// completed operation must never erase local state. Completion ends the
+/// text's meaning as a deletion target (§7: a completed operation is not a
+/// permanent keyword ban), so a late duplicate from a superseded run must be
+/// refused instead of erasing text the Owner provided afterwards. A condition
+/// that cannot be encoded, or that has no matching operation row, is not
+/// current.
+pub(crate) fn condition_is_current(
+    conn: &Connection,
+    condition: ErasureConditionRef,
+) -> rusqlite::Result<bool> {
+    let Ok(sweep) = i64::try_from(condition.sweep.as_u64()) else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM deletion_operation
+         WHERE operation_id=?1 AND sweep=?2 AND phase!='completed')",
+        params![encode_id(condition.operation.as_raw()), sweep],
+        |row| row.get(0),
+    )
+}
+
 /// One bounded, keyset-paged candidate page for both owner queries.
 ///
 /// Candidates are unfinished operations plus torn orphan conditions with no

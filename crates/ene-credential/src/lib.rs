@@ -13,6 +13,7 @@
 
 mod approval;
 mod auth_file;
+mod erasure;
 mod pairing;
 mod registration;
 mod registry;
@@ -26,6 +27,9 @@ use thiserror::Error;
 
 pub use approval::{CredentialApprovalRepository, PendingCredentialApproval};
 pub use auth_file::FileDeviceAuthStore;
+pub use erasure::{
+    CredentialErasureOutcome, CredentialErasureParticipant, CredentialErasureRepository,
+};
 pub use pairing::{
     DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord, PendingPairing,
     pairing_proof_hex, verify_pairing_proof,

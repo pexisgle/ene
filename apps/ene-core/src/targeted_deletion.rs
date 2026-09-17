@@ -1027,11 +1027,11 @@ mod tests {
         let Some((handle, _dir)) = memory_handle("targeted-deletion-unsupported").await else {
             panic!("the host must open");
         };
-        // The semantic owners the current composition implements are
-        // registered at open, so the unregistered-owner contract is pinned
-        // with a holder-driven participant that no composition registers
-        // implicitly: a Client incarnation. The operation must still require
-        // it, hold on it, and never read the hold as completion.
+        // The demanded owner is one no composition registers: a Client
+        // incarnation identity. Later A3 slices register their own owner
+        // classes, and this test's premise — an owner with no implementation
+        // is held, never completed — must not depend on which classes those
+        // happen to be.
         let required = vec![ParticipantOwnerRef::ClientIncarnation(RawId::new())];
         let current = admit(&handle, "unsupported-target", required.clone()).await;
         let outcome = handle
@@ -1291,6 +1291,310 @@ mod tests {
             ))),
             Err(CoreError::Deletion(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn an_empty_registry_reports_an_unsupported_hold_for_the_exact_condition() {
+        let registry = ErasureParticipantRegistry::new();
+        let condition = ene_preservation::ErasureConditionRef {
+            operation: ene_preservation::DeletionOperationId::from_raw(RawId::new()),
+            sweep: DeletionSweepGeneration::from_u64(1),
+        };
+        let fact = registry
+            .demand(DemandLocalErasureCommand::new(
+                condition,
+                ParticipantOwnerRef::Task,
+                ParticipantErasureScope::correlation_only(vec![]),
+            ))
+            .await;
+        assert_eq!(fact.condition(), condition);
+        assert_eq!(fact.participant(), ParticipantOwnerRef::Task);
+        assert_eq!(
+            fact.status(),
+            ParticipantCompletionStatus::Held(ParticipantHoldClass::Unsupported),
+            "a missing implementation is an explicit hold, never a completion"
+        );
+    }
+
+    /// Stage 6 A3d end to end through the real fan-out: the permission,
+    /// credential, and presence owners erase their own target-bearing state,
+    /// survive a Host restart without a second mutation, and never let the
+    /// target text remain in any of their rows (lifecycle §6-§10).
+    #[tokio::test]
+    async fn a3d_owners_erase_through_the_fan_out_and_restart_without_double_mutation() {
+        use ene_companion::CompanionRepository as _;
+        use ene_credential::{
+            CredentialIntentRepository as _, CredentialRefRepository as _,
+            CredentialSetRepository as _, DevicePairingRepository as _, DevicePairingStatus,
+            RegistrationFingerprint,
+        };
+        use ene_permission::{
+            IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _,
+        };
+        use ene_presence::{
+            ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision,
+            PresenceCheckRef, PresenceRepository as _, PresenceState, ThinMoveReason,
+        };
+        use rusqlite::params;
+
+        let Some((handle, dir)) = memory_handle("targeted-deletion-a3d").await else {
+            panic!("the host must open");
+        };
+        // One target string exercises all three owners: it is the client
+        // identity presence references, and plain text for the control and
+        // credential metadata.
+        let target_raw = RawId::new();
+        let target = target_raw.as_uuid().to_string();
+        let client = ClientId::from_raw(target_raw);
+
+        // Permission: a decided intent whose quoted rationale carries it.
+        let intent_id = RawId::new().as_uuid().to_string();
+        handle
+            .store
+            .record_intent_outcome(IntentOutcomeRecord {
+                fingerprint: IntentFingerprint {
+                    intent_id: intent_id.clone(),
+                    kind: String::from("assign"),
+                    target: String::from("consent:dialogue"),
+                    base: String::from("consent-none"),
+                    rationale_origin: String::from("conversation"),
+                    rationale_quote: Some(target.clone()),
+                },
+                outcome: IntentOutcome::NeedsClarification,
+            })
+            .await
+            .unwrap();
+        // Credential: a usable ref, a pending registration, and a paired
+        // device, all naming the target.
+        let registration_id = RawId::new().as_uuid().to_string();
+        let registration_target = format!("credential:acme:{target}");
+        let registration = |intent_id: String| RegistrationFingerprint {
+            intent_id,
+            kind: String::from("register"),
+            target: registration_target.clone(),
+            base: String::from("consent-none"),
+            rationale_origin: String::from("management-surface"),
+            rationale_quote: None,
+        };
+        handle
+            .store
+            .request_registration_with_intent(
+                String::from("acme"),
+                target.clone(),
+                registration(registration_id),
+            )
+            .await
+            .unwrap();
+        assert!(
+            handle
+                .store
+                .approve_credential_with_sweep("acme", &target, "a3d-bearer")
+                .unwrap(),
+            "the fixture ref must become usable"
+        );
+        assert!(
+            handle
+                .store
+                .request_registration_with_intent(
+                    String::from("acme"),
+                    String::from("pending-target"),
+                    registration(RawId::new().as_uuid().to_string()),
+                )
+                .await
+                .is_ok()
+        );
+        let pairing = handle
+            .store
+            .request_pairing(format!("{target} phone"), String::from("conn-a3d"), None)
+            .await
+            .unwrap();
+        let DevicePairingStatus::Pending { pending } = pairing else {
+            panic!("a fresh pairing request must be pending");
+        };
+        assert!(
+            handle
+                .store
+                .approve_pending(&pending.pending_id, "conn-a3d")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let revision_before = handle.store.current_set_revision().await.unwrap();
+        // Presence: Present on the target client through the production path.
+        let companion = handle.store.ensure_running_companion().await.unwrap();
+        let attribution = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .unwrap()
+            .unwrap();
+        let MoveDecision::TransitioningToNew { generation } = handle
+            .store
+            .compare_and_begin_transition(
+                companion.as_raw(),
+                PresenceCheckRef {
+                    expected_generation: attribution.generation,
+                    expected_state: attribution.state,
+                    expected_active: attribution.active_client,
+                },
+                Some(client),
+                ThinMoveReason::InitialAttach,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the presence fixture must begin a transition");
+        };
+        assert!(matches!(
+            handle
+                .store
+                .confirm_transition(
+                    companion.as_raw(),
+                    generation,
+                    LiveReachabilityRef {
+                        client,
+                        connection_live: true,
+                    },
+                )
+                .await
+                .unwrap(),
+            ConfirmTransitionOutcome::Confirmed(_)
+        ));
+
+        let required = vec![
+            ParticipantOwnerRef::Permission,
+            ParticipantOwnerRef::Credential,
+            ParticipantOwnerRef::Presence,
+        ];
+        let current = admit(&handle, &target, required).await;
+        let first = handle
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            (first.demands, first.verified, first.unfinished, first.held),
+            (3, 3, 0, 0),
+            "all three owners complete their bounded pass in one demand"
+        );
+
+        // Owner-local remainder verification: no targeted row keeps the text.
+        let db_path = dir.path().join("app.db");
+        let leaked = |path: &std::path::Path| {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM management_intent
+                    WHERE instr(target, ?1) > 0 OR instr(COALESCE(rationale_quote, ''), ?1) > 0)
+                 + (SELECT COUNT(*) FROM credential_ref
+                    WHERE instr(id, ?1) > 0 OR instr(provider, ?1) > 0 OR instr(label, ?1) > 0)
+                 + (SELECT COUNT(*) FROM credential_pending
+                    WHERE instr(provider, ?1) > 0 OR instr(label, ?1) > 0)
+                 + (SELECT COUNT(*) FROM paired_device
+                    WHERE instr(device_id, ?1) > 0 OR instr(descriptor, ?1) > 0)
+                 + (SELECT COUNT(*) FROM presence_attribution
+                    WHERE instr(companion_id, ?1) > 0
+                       OR instr(COALESCE(active_client, ''), ?1) > 0)
+                 + (SELECT COUNT(*) FROM relocation_hint
+                    WHERE instr(companion_id, ?1) > 0
+                       OR instr(COALESCE(last_client, ''), ?1) > 0
+                       OR instr(COALESCE(recovery_destination, ''), ?1) > 0)",
+                params![target],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(leaked(&db_path), 0, "the fan-out leaves no remainder");
+        assert_eq!(
+            handle.store.current_set_revision().await.unwrap().as_u64(),
+            revision_before.as_u64() + 1,
+            "the erased ref advanced the usable-set revision once"
+        );
+        let stored = handle
+            .store
+            .lookup_intent_outcome(&intent_id)
+            .await
+            .unwrap()
+            .expect("the decided intent survives");
+        assert_eq!(stored.outcome, IntentOutcome::NeedsClarification);
+        assert!(
+            !stored
+                .fingerprint
+                .rationale_quote
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&target)
+        );
+        let attribution = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .unwrap()
+            .expect("the companion keeps an attribution");
+        assert_eq!(attribution.state, PresenceState::Stopped);
+        assert_eq!(attribution.active_client, None);
+
+        // Restart: the composition re-registers its implementations, the
+        // durable sweep is already verified, and nothing is demanded or
+        // mutated a second time.
+        drop(handle);
+        let reopened = reopen(dir.path()).await;
+        let second = reopened
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .unwrap();
+        assert_eq!(second.demands, 0, "a verified sweep is never re-driven");
+        assert_eq!(leaked(&db_path), 0);
+        assert_eq!(
+            reopened
+                .store
+                .current_set_revision()
+                .await
+                .unwrap()
+                .as_u64(),
+            revision_before.as_u64() + 1
+        );
+        assert!(reopened.store.list_refs().await.unwrap().is_empty());
+        assert_eq!(
+            reopened
+                .store
+                .load_attribution(companion.as_raw())
+                .await
+                .unwrap()
+                .map(|current| current.state),
+            Some(PresenceState::Stopped)
+        );
+
+        // Duplicate sweep: the same owners run again, find nothing, and the
+        // control state is not mutated twice.
+        let ene_preservation::DeletionLifecycleOutcome::Applied(advanced) = reopened
+            .store
+            .change_deletion_lifecycle(
+                current,
+                crate::targeted_deletion::DeletionLifecycleChange::NextSweep,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the duplicate sweep must apply");
+        };
+        let third = reopened
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .unwrap();
+        assert_eq!((third.demands, third.verified), (3, 3));
+        assert_eq!(
+            reopened
+                .store
+                .current_set_revision()
+                .await
+                .unwrap()
+                .as_u64(),
+            revision_before.as_u64() + 1,
+            "a duplicate sweep never advances the revision again"
+        );
+        assert!(reopened.store.list_refs().await.unwrap().is_empty());
+        assert_eq!(leaked(&db_path), 0);
+        assert_eq!(advanced.sweep.as_u64(), current.sweep.as_u64() + 1);
     }
 
     #[tokio::test]

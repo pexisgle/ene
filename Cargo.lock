@@ -353,6 +353,7 @@ dependencies = [
 name = "ene-credential"
 version = "0.1.0"
 dependencies = [
+ "ene-preservation",
  "ene-primitive",
  "hmac",
  "serde",
@@ -412,8 +413,10 @@ dependencies = [
 name = "ene-permission"
 version = "0.1.0"
 dependencies = [
+ "ene-preservation",
  "ene-primitive",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -430,6 +433,7 @@ dependencies = [
 name = "ene-presence"
 version = "0.1.0"
 dependencies = [
+ "ene-preservation",
  "ene-primitive",
  "thiserror",
  "tokio",

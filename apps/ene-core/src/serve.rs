@@ -712,7 +712,7 @@ impl HostHandle {
     fn install_local_erasure_participants(&self) -> Result<(), CoreError> {
         use std::sync::Arc;
 
-        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 5] = [
+        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 8] = [
             Arc::new(ene_store::CompanionErasureParticipant::new(
                 self.store.clone(),
             )),
@@ -724,6 +724,16 @@ impl HostHandle {
             Arc::new(ene_store::InferenceErasureParticipant::new(
                 self.store.clone(),
             )),
+            Arc::new(ene_permission::PermissionErasureParticipant::new(Arc::new(
+                self.store.clone(),
+            ))),
+            Arc::new(ene_credential::CredentialErasureParticipant::new(
+                Arc::new(self.store.clone()),
+                Arc::new(self.auth_store.clone()),
+            )),
+            Arc::new(ene_presence::PresenceErasureParticipant::new(Arc::new(
+                self.store.clone(),
+            ))),
         ];
         for participant in participants {
             self.register_deletion_participant(participant)?;
