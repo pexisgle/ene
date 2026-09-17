@@ -286,19 +286,7 @@ async fn permission_erasure_never_touches_a_superseded_or_completed_condition() 
 
     // A completed operation is terminal: even its own condition mutates
     // nothing (the Owner's later text is never a permanent keyword ban).
-    {
-        let conn = store.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
-            params![crate::codec::encode_id(new_current.operation.as_raw())],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE erasure_condition SET closed_at='2026-09-17T00:00:00+09:00' WHERE operation_id=?1",
-            params![crate::codec::encode_id(new_current.operation.as_raw())],
-        )
-        .unwrap();
-    }
+    super::preservation::complete_via_a5(&store, new_current).await;
     record_decision(&store, "intent-after", "workspace:prod", Some(target)).await;
     assert_eq!(
         PermissionErasureRepository::erase_target_text(&store, new_current.condition(), target)

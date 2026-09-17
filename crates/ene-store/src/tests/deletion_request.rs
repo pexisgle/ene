@@ -2,8 +2,8 @@
 //! confirmation boundary, the surface mark, and the bounded status read.
 //!
 //! These tests drive the production store API. Fixture SQL appears only where
-//! the slice under test cannot legally produce the state (terminal operation
-//! phases belong to the A5 completion boundary, which A1/A1b do not expose).
+//! the slice under test cannot legally produce the state (a terminal operation
+//! phase is produced by the sealed A5 completion boundary instead).
 
 use super::*;
 use ene_action::{
@@ -312,52 +312,40 @@ async fn status_read_covers_terminal_phases_and_torn_state_fails_closed() {
         .unwrap();
     let operation = store.deletion_status(None, 10).await.unwrap()[0].current;
 
-    // Only fixture SQL can enter finalizing/completed: the A5 completion
-    // boundary owns those transitions, and A1/A1b expose no completion
-    // authority. The status read must still show them when they exist.
+    // The finalizing and completed phases are owned by the A5 completion
+    // boundary; the status read must report them when they exist.
     for (phase, expected) in [
         ("finalizing", DeletionOperationPhase::Finalizing),
         ("completed", DeletionOperationPhase::Completed),
     ] {
-        {
-            let guard = store.conn.lock().unwrap();
+        if phase == "finalizing" {
+            // The durable finalizing premise: every required participant
+            // verified for the current sweep.
             let id = crate::codec::encode_id(operation.operation.as_raw());
-            if phase == "finalizing" {
-                guard
-                    .execute(
-                        "UPDATE deletion_operation SET phase=?1 WHERE operation_id=?2",
-                        params![phase, id],
-                    )
-                    .unwrap();
-            } else {
-                // The A5 invariant: a completed operation keeps a closed
-                // condition, no protected material, hints, or sources, and
-                // every required participant verified for the final sweep.
-                guard
-                    .execute(
-                        "UPDATE erasure_condition SET closed_at=?1 WHERE operation_id=?2",
-                        params![WallClockWithTz::now().to_rfc3339(), id],
-                    )
-                    .unwrap();
-                guard
-                    .execute(
-                        "DELETE FROM deletion_search_material WHERE operation_id=?1",
-                        [&id],
-                    )
-                    .unwrap();
-                guard
-                    .execute(
-                        "UPDATE deletion_participant SET state='verified', hold_class=NULL, remainder_count=0, reported_at=?1 WHERE operation_id=?2",
-                        params![WallClockWithTz::now().to_rfc3339(), id],
-                    )
-                    .unwrap();
-                guard
-                    .execute(
-                        "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
-                        [&id],
-                    )
-                    .unwrap();
-            }
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at=?1 WHERE operation_id=?2",
+                    params![WallClockWithTz::now().to_rfc3339(), id],
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .begin_deletion_finalizing(operation)
+                    .await
+                    .expect("the finalizing transition must answer"),
+                DeletionFinalizationOutcome::Finalizing
+            );
+        } else {
+            assert_eq!(
+                store
+                    .complete_deletion_finalizing(operation)
+                    .await
+                    .expect("the completion commit must answer"),
+                DeletionFinalizationOutcome::Completed
+            );
         }
         let status = store.deletion_status(None, 10).await.unwrap();
         assert_eq!(

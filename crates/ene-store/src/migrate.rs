@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 32;
+const CURRENT_VERSION: i64 = 33;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -74,18 +74,20 @@ phase TEXT NOT NULL CHECK (phase IN ('active', 'held', 'finalizing', 'completed'
 purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
 started_at TEXT NOT NULL,
 hold_reason TEXT NULL CHECK (hold_reason IN ('unavailable', 'generation_exhausted')),
+erased_total INTEGER NOT NULL DEFAULT 0 CHECK (erased_total >= 0),
 CHECK ((phase = 'held') = (hold_reason IS NOT NULL))
 );
 -- Staged Targeted Deletion requests awaiting the Host-local trusted
 -- confirmation (IPC §18.1). Staging publishes no erasure condition and no
 -- operation: the row is inert until the confirmation inlet records the
 -- matching deletion_confirmation row and the canonical admission commits.
--- `exact_text` is protected operation-lifetime material and is destroyed with
--- the operation's material, never copied into audit rows or views.
+-- `exact_text` is protected operation-lifetime material: it is destroyed (set
+-- NULL) by the A5 completion commit that admits the operation, and it is
+-- never copied into audit rows or views.
 CREATE TABLE deletion_request (
 request_id TEXT PRIMARY KEY,
 purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
-exact_text TEXT NOT NULL CHECK (length(exact_text) > 0),
+exact_text TEXT NULL CHECK (exact_text IS NULL OR length(exact_text) > 0),
 requested_at TEXT NOT NULL
 );
 -- Durable Owner confirmation facts, written only by the Host-local trusted
@@ -147,6 +149,36 @@ operation_id TEXT NOT NULL,
 sweep INTEGER NOT NULL CHECK (sweep > 0),
 source TEXT NOT NULL,
 PRIMARY KEY (operation_id, sweep, source)
+);
+-- Body-free completion audit (lifecycle §13). Written exactly once, in the
+-- same transaction that destroys the operation's protected material and closes
+-- the current condition; the rows carry only objective metadata -- the
+-- operation identity, purpose class, times, sweep count, and per-participant
+-- final status/counts -- and never the target body, a reversible encoding, a
+-- target hash/fingerprint, a search token, a credential value, or a
+-- prompt/output body. A completed operation has exactly one audit row; an
+-- unfinished operation has none (the completion commit is atomic).
+CREATE TABLE deletion_completion_audit (
+operation_id TEXT PRIMARY KEY,
+purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
+started_at TEXT NOT NULL,
+completed_at TEXT NOT NULL,
+sweep_count INTEGER NOT NULL CHECK (sweep_count > 0),
+participant_count INTEGER NOT NULL CHECK (participant_count > 0),
+verified_count INTEGER NOT NULL CHECK (verified_count >= 0),
+erased_count INTEGER NOT NULL CHECK (erased_count >= 0)
+);
+-- One audit entry per required participant of the durable snapshot at
+-- completion. `final_state` is `verified` only: a completed operation has no
+-- held or pending participant, so a hold can never be audited as success. A
+-- hold class is unfinished-status metadata and lives only in
+-- `deletion_participant`, where a completed operation keeps no row with one.
+CREATE TABLE deletion_audit_participant (
+operation_id TEXT NOT NULL,
+participant_owner TEXT NOT NULL,
+final_state TEXT NOT NULL CHECK (final_state = 'verified'),
+erased_count INTEGER NOT NULL CHECK (erased_count >= 0),
+PRIMARY KEY (operation_id, participant_owner)
 );
 CREATE TABLE history_message (
 message_id TEXT PRIMARY KEY,
@@ -483,7 +515,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

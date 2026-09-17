@@ -173,16 +173,15 @@ impl Store {
         })
     }
 
-    /// Mechanical exact-text remainder probe over every durable content
-    /// column the Companion and Learning erasure participants sweep, plus
+    /// Mechanical exact-text remainder probe over the closed system-wide
+    /// canonical content surface the A5 completion boundary verifies, plus
     /// the derived token index and the undelivered references whose canonical
     /// source is gone.
     ///
-    /// Test-support only: tests assert `0` after a local erasure instead of
-    /// re-implementing the column list. The list is shared with the
-    /// participants (`erasure::COMPANION_CONTENT`,
-    /// `erasure::LEARNING_CONTENT`), so a probe cannot check a different
-    /// column set than the sweep covers.
+    /// Test-support only: tests assert `0` after an erasure instead of
+    /// re-implementing the column list. The list is the same closed surface
+    /// `crate::erasure::system_remainder` uses, so a probe cannot check a
+    /// different column set than the completion boundary verifies.
     ///
     /// # Errors
     ///

@@ -3857,12 +3857,9 @@ async fn a3c_the_read_coverage_premise_is_canonical_and_body_free() {
     // No current condition: the canonical read answers the authoritative
     // empty set, never a cached "no deletion" sentinel.
     assert!(!handle.current_coverage().await.covers("the target body"));
-    admit_and_drive(
-        &handle,
-        "the target body",
-        vec![ParticipantOwnerRef::HostTransient],
-    )
-    .await;
+    // Admitted without driving a participant, so the operation stays current;
+    // the coverage read itself never carries a body.
+    admit_condition_only(&handle, "the target body").await;
     let coverage = handle.current_coverage().await;
     assert!(
         coverage.covers("prefix the target body suffix"),

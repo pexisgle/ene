@@ -945,12 +945,13 @@ impl HostHandle {
     /// Runs one bounded Targeted Deletion fan-out pass over the durable
     /// unfinished operations.
     ///
-    /// Only active operations are driven: held operations wait for an explicit
-    /// resume decision and finalizing operations belong to the completion
-    /// boundary. Participants already verified for the current sweep are never
-    /// demanded again, so a crash mid-fan-out continues with only the
-    /// unfinished participants (§14); the durable snapshot and the operation
-    /// identity are never regenerated.
+    /// Active operations are driven through their participants and then
+    /// through the sealed completion boundary; held operations wait for an
+    /// explicit resume decision; finalizing operations resume the remaining
+    /// completion steps from their durable marker. Participants already
+    /// verified for the current sweep are never demanded again, so a crash
+    /// mid-fan-out continues with only the unfinished participants (§14); the
+    /// durable snapshot and the operation identity are never regenerated.
     ///
     /// # Errors
     ///

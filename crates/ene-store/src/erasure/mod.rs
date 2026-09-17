@@ -17,11 +17,13 @@
 //! implement their participants behind those ports.
 
 mod companion_learning;
+mod remainder;
 mod task_action_inference;
 
 pub use companion_learning::{
     CompanionErasureParticipant, ERASURE_SCAN_ROWS, LearningErasureParticipant,
 };
+pub(crate) use remainder::system_remainder;
 pub use task_action_inference::{
     ActionErasureParticipant, InferenceErasureParticipant, TaskErasureParticipant,
 };
@@ -73,7 +75,11 @@ fn count_occurrences(text: &str, target: &str) -> u64 {
     text.matches(target).count() as u64
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use companion_learning::exact_remainder_probe;
 #[cfg(test)]
 pub(crate) use task_action_inference::{ERASED_LOCATOR, ROWS_PER_DEMAND};
+
+/// Test-support alias of the system-wide mechanical probe (see
+/// [`remainder::system_remainder`]). Tests assert `0` after an erasure pass
+/// instead of re-implementing the canonical content-surface list.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use remainder::system_remainder as exact_remainder_probe;

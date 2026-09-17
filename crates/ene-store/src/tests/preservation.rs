@@ -45,6 +45,26 @@ pub(super) async fn admit(store: &Store, text: &str, sources: Vec<RawId>) -> Del
     }
 }
 
+/// Marks every required participant `verified` for the operation's current
+/// sweep through raw fixture SQL.
+///
+/// Only tests that fabricate a durable `finalizing` shape the A5 boundary owns
+/// use this: `validate` refuses `finalizing` without the full verified
+/// participant premise, and the fixture must establish that premise
+/// explicitly instead of publishing a torn state.
+pub(super) fn mark_all_verified(store: &Store, current: DeletionOperationRef) {
+    let id = crate::codec::encode_id(current.operation.as_raw());
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
+            params![id, current.sweep.as_u64() as i64],
+        )
+        .unwrap();
+}
+
 #[tokio::test]
 async fn confirmation_clarification_duplicate_and_conflict_are_distinct() {
     let store = open_memory().await.unwrap();
@@ -161,7 +181,10 @@ async fn restart_recovers_active_held_finalizing_and_cumulative_sweep() {
         .change_deletion_lifecycle(next, DeletionLifecycleChange::Hold)
         .await
         .unwrap();
-    // Only fixture SQL can enter finalizing: no A1 production completion authority.
+    // Only fixture SQL can enter finalizing: the A5 completion boundary owns
+    // the transition, so the fixture must also establish its durable premise
+    // (every required participant verified for the current sweep).
+    mark_all_verified(&store, finalizing);
     store
         .conn
         .lock()
@@ -388,33 +411,17 @@ async fn closed_completed_condition_is_not_a_permanent_ban_and_corruption_fails_
         store.current_erasure_conditions(None, 10).await,
         Err(PreservationTechnicalError::CorruptState)
     );
+    // The early closure is canonical corruption; restoring it to open lets
+    // the sealed A5 completion boundary run steps 1-6 for this operation.
     {
-        // The completion boundary verifies every required participant, closes
-        // the current condition, and deletes material plus ALL source rows;
-        // historical erasure_condition rows may remain but no source copy is
-        // kept.
         let conn = store.conn.lock().unwrap();
         conn.execute(
-            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "DELETE FROM deletion_search_material WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "DELETE FROM erasure_condition_source WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
+            "UPDATE erasure_condition SET closed_at=NULL WHERE operation_id=?1",
             [&id],
         )
         .unwrap();
     }
+    complete_via_a5(&store, current).await;
     assert!(
         store
             .current_erasure_conditions(None, 10)
@@ -488,45 +495,58 @@ async fn concurrent_duplicate_admissions_serialize_on_sqlite_master() {
     );
 }
 
-fn complete_operation_fixture(store: &Store, current: DeletionOperationRef) {
-    // A1/A2 have no production completion authority; the fixture mirrors the
-    // A5 completion invariant: every required participant is verified for the
-    // final sweep, the current condition is closed, and the operation's
-    // material, hints, and ALL source rows are deleted (completed operations
-    // keep zero source rows in the currentness hot path — historical
-    // erasure_condition rows may remain, but no source copy is kept).
-    let id = crate::codec::encode_id(current.operation.as_raw());
-    let conn = store.conn.lock().unwrap();
-    conn.execute(
-        "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
-        params![id, current.sweep.as_u64() as i64],
-    )
-    .unwrap();
-    conn.execute(
-        "DELETE FROM deletion_search_material WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
-    conn.execute(
-        "DELETE FROM deletion_semantic_hint WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
-    conn.execute(
-        "DELETE FROM erasure_condition_source WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
-        params![id, current.sweep.as_u64() as i64],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
+/// Completes one operation through the sealed A5 boundary.
+///
+/// Every required participant is verified through the canonical completion
+/// API, then the finalizing transition and the completion commit run. The
+/// system-wide mechanical probe must be clean: a call site whose fixture still
+/// stores the target must drive that owner's real sweep first, exactly as the
+/// production fan-out would.
+pub(super) async fn complete_via_a5(store: &Store, current: DeletionOperationRef) {
+    let mut after = None;
+    loop {
+        let page = store
+            .deletion_participants(current.operation, after, 100)
+            .await
+            .expect("the required snapshot must read");
+        if page.is_empty() {
+            break;
+        }
+        let page_len = page.len();
+        for record in page {
+            after = Some(record.participant.owner);
+            let outcome = store
+                .record_participant_completion(ParticipantCompletionFact::verified(
+                    current.condition(),
+                    record.participant.owner,
+                    0,
+                    WallClockWithTz::now(),
+                ))
+                .await
+                .expect("a verified fact must record");
+            assert!(
+                matches!(outcome, ParticipantCompletionOutcome::Recorded(_)),
+                "the fixture fact must apply: {outcome:?}"
+            );
+        }
+        if page_len < 100 {
+            break;
+        }
+    }
+    assert_eq!(
+        store
+            .begin_deletion_finalizing(current)
+            .await
+            .expect("the finalizing transition must answer"),
+        DeletionFinalizationOutcome::Finalizing
+    );
+    assert_eq!(
+        store
+            .complete_deletion_finalizing(current)
+            .await
+            .expect("the completion commit must answer"),
+        DeletionFinalizationOutcome::Completed
+    );
 }
 
 #[tokio::test]
@@ -599,16 +619,16 @@ async fn covering_condition_ignores_completed_history_and_uses_the_source_index(
     let source = RawId::new();
     let probe = crate::codec::encode_id(source);
     // Requirement 4: build N completed histories that once covered the same
-    // source through the production admission path, then completed via the A5
-    // fixture invariant (closed current condition, material/hints/source rows
-    // removed). History remains as closed erasure_condition rows, but the
+    // source through the production admission path, then completed through the
+    // A5 completion boundary (closed current condition, material/hints/source
+    // rows removed). History remains as closed erasure_condition rows, but the
     // hot-path input — source rows naming this source — must not grow with
     // the history count. This durable row invariant (not EXPLAIN alone) pins
     // boundedness.
     const HISTORIES: usize = 250;
     for index in 0..HISTORIES {
         let admitted = admit(&store, &format!("history-target-{index}"), vec![source]).await;
-        complete_operation_fixture(&store, admitted);
+        complete_via_a5(&store, admitted).await;
     }
     let source_rows: i64 = {
         let guard = store.conn.lock().unwrap();
@@ -656,7 +676,7 @@ async fn covering_condition_ignores_completed_history_and_uses_the_source_index(
     );
     // Completing the current operation returns the answer to empty again
     // (requirement 6: no permanent ban) and restores the zero-row invariant.
-    complete_operation_fixture(&store, active);
+    complete_via_a5(&store, active).await;
     let source_rows: i64 = {
         let guard = store.conn.lock().unwrap();
         guard
@@ -718,35 +738,21 @@ async fn covering_condition_ignores_completed_history_and_uses_the_source_index(
 
 #[tokio::test]
 async fn completed_operation_with_remaining_source_row_fails_closed() {
-    // Requirement 3/6: the A1 fixture completion removes source rows; any
-    // remaining source row for a completed operation is canonical corruption.
+    // Requirement 3/6: the A5 completion removes source rows; any remaining
+    // source row for a completed operation is canonical corruption.
     let store = open_memory().await.unwrap();
     let source = RawId::new();
     let probe = crate::codec::encode_id(source);
     let current = admit(&store, "completed-leftover", vec![source]).await;
     let id = crate::codec::encode_id(current.operation.as_raw());
+    complete_via_a5(&store, current).await;
     {
+        // Deliberately re-insert the source row: this is the corruption the A5
+        // invariant forbids (a completed operation keeps zero source rows).
         let conn = store.conn.lock().unwrap();
         conn.execute(
-            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "DELETE FROM deletion_search_material WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
-            params![id, current.sweep.as_u64() as i64],
-        )
-        .unwrap();
-        // Deliberately leave the source row: this is the corruption the A5
-        // invariant forbids.
-        conn.execute(
-            "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
-            [&id],
+            "INSERT INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,?2,?3)",
+            params![id, current.sweep.as_u64() as i64, probe],
         )
         .unwrap();
     }
@@ -971,7 +977,9 @@ async fn finalizing_next_sweep_returns_to_active_on_remainder_and_stays_finalizi
     let store = open_memory().await.unwrap();
     let current = admit(&store, "remainder-target", vec![]).await;
     let id = crate::codec::encode_id(current.operation.as_raw());
-    // Only fixture SQL can enter finalizing: no A1 production completion authority.
+    // Only fixture SQL can enter finalizing; the durable premise (all
+    // participants verified for the current sweep) must hold for `validate`.
+    mark_all_verified(&store, current);
     store
         .conn
         .lock()
@@ -995,6 +1003,7 @@ async fn finalizing_next_sweep_returns_to_active_on_remainder_and_stays_finalizi
     assert_eq!(rows[0].phase, DeletionOperationPhase::Active);
     assert_eq!(rows[0].hold, None);
     {
+        mark_all_verified(&store, next);
         let conn = store.conn.lock().unwrap();
         conn.execute(
             "UPDATE deletion_operation SET phase='finalizing' WHERE operation_id=?1",
@@ -1467,31 +1476,9 @@ async fn completed_operation_requires_every_participant_verified_for_the_final_s
     let store = open_memory().await.unwrap();
     let current = admit(&store, "completed-participants", vec![]).await;
     let id = crate::codec::encode_id(current.operation.as_raw());
-    {
-        let conn = store.conn.lock().unwrap();
-        // A canonical completion: verified participants, closed condition,
-        // destroyed material.
-        conn.execute(
-            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "DELETE FROM deletion_search_material WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
-            [&id],
-        )
-        .unwrap();
-    }
+    // A canonical completion through the sealed boundary: verified
+    // participants, closed condition, removed material, durable audit.
+    complete_via_a5(&store, current).await;
     // The participant table alone answers the completion invariant for A5.
     let rows = store
         .deletion_participants(current.operation, None, 100)
@@ -1599,6 +1586,7 @@ async fn material_read_returns_the_protected_target_and_current_sweep_sources() 
     // A finalizing operation that already ran its material wipe reads as
     // Destroyed, never as corrupt and never as protected material.
     {
+        mark_all_verified(&store, next);
         let conn = store.conn.lock().unwrap();
         let id = crate::codec::encode_id(next.operation.as_raw());
         conn.execute(

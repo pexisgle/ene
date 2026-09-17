@@ -17,10 +17,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ene_preservation::{
-    DeletionLifecycleChange, DeletionMaterialOutcome, DeletionOperationMaterial,
-    DeletionOperationPhase, DeletionOperationRef, DemandLocalErasureCommand, ErasureParticipant,
-    ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantCompletionStatus,
-    ParticipantDemandOutcome, ParticipantErasureScope, ParticipantHoldClass, ParticipantOwnerRef,
+    DeletionFinalizationOutcome, DeletionLifecycleChange, DeletionMaterialOutcome,
+    DeletionOperationMaterial, DeletionOperationPhase, DeletionOperationRef,
+    DemandLocalErasureCommand, ErasureParticipant, ParticipantCompletionFact,
+    ParticipantCompletionOutcome, ParticipantCompletionStatus, ParticipantDemandOutcome,
+    ParticipantErasureScope, ParticipantHoldClass, ParticipantOwnerRef,
     PreservationRepository as _,
 };
 use ene_primitive::WallClockWithTz;
@@ -151,11 +152,11 @@ impl Default for TargetedDeletionPass {
 
 /// What one bounded fan-out pass observed. The counts are progress metadata
 /// for the status surface and tests; they are never a completion decision
-/// (A5 aggregates the durable participant table for that).
+/// (the durable participant aggregate plus the system-wide remainder probe
+/// are, and only the sealed completion boundary re-derives them).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TargetedDeletionPassOutcome {
-    /// Unfinished operations examined (including non-active phases, which the
-    /// pass leaves untouched until an explicit resume or finalization).
+    /// Unfinished operations examined.
     pub operations: u32,
     /// Bounded demands issued to participants.
     pub demands: u32,
@@ -169,6 +170,14 @@ pub struct TargetedDeletionPassOutcome {
     /// Demands or facts refused because the operation's sweep had already
     /// moved on, or because its phase ended the work.
     pub stale_reports: u32,
+    /// Operations that entered the durable `Finalizing` marker during this
+    /// pass (including a resumed finalizing operation observed again).
+    pub finalizing: u32,
+    /// Operations whose global completion commit ran during this pass.
+    pub finalized: u32,
+    /// Operations that found collected target data in the §12 step-1
+    /// re-check and returned to `Active` on a new sweep.
+    pub remainder_sweeps: u32,
 }
 
 fn deletion_error(error: ene_preservation::PreservationTechnicalError) -> CoreError {
@@ -191,11 +200,18 @@ fn command_scope(
 
 /// Drives one bounded fan-out pass over the durable unfinished operations.
 ///
-/// Only `Active` operations are driven: a `Held` operation waits for an
-/// explicit resume decision, and a `Finalizing` operation is owned by the
-/// completion boundary. Participants already `Verified` for the current sweep
-/// are never demanded again, so a fan-out that crashed after a participant's
-/// semantic effect continues with only the unfinished participants (§14).
+/// `Active` operations are driven through their required participants and then
+/// through the sealed completion boundary once the durable aggregate says
+/// every participant verified. A `Held` operation waits for an explicit resume
+/// decision. A `Finalizing` operation is resumed directly at the completion
+/// boundary: the durable marker means local erasure and current-sweep
+/// verification are complete and only the material wipe / audit / condition
+/// closure commit is owed (§12/§14). Participants already `Verified` for the
+/// current sweep are never demanded again, so a fan-out that crashed after a
+/// participant's semantic effect continues with only the unfinished
+/// participants (§14). No caller boolean exists anywhere on this path: the
+/// completion premise is re-derived by the store inside its own write
+/// transaction.
 ///
 /// # Errors
 ///
@@ -228,22 +244,31 @@ pub async fn drive_targeted_deletion(
         for record in page {
             after = Some(record.current.operation);
             outcome.operations += 1;
-            if record.phase != DeletionOperationPhase::Active {
-                continue;
-            }
-            let progressed = drive_operation(
-                store,
-                registry,
-                record.current,
-                pass.demands_per_participant,
-                &mut outcome,
-            )
-            .await?;
-            if !progressed {
-                // The sweep or phase moved while this pass was driving: the
-                // remaining participants belong to a decision this pass must
-                // not make.
-                break;
+            match record.phase {
+                DeletionOperationPhase::Active => {
+                    let progressed = drive_operation(
+                        store,
+                        registry,
+                        record.current,
+                        pass.demands_per_participant,
+                        &mut outcome,
+                    )
+                    .await?;
+                    if !progressed {
+                        // The sweep or phase moved while this pass was driving:
+                        // the remaining participants belong to a decision this
+                        // pass must not make.
+                        break;
+                    }
+                }
+                // A crash between the finalizing marker and the completion
+                // commit resumes here; the operation identity, the current
+                // condition, and the participant statuses come from durable
+                // state, never from memory defaults (§14).
+                DeletionOperationPhase::Finalizing => {
+                    settle_finalizing(store, record.current, &mut outcome).await?;
+                }
+                DeletionOperationPhase::Held | DeletionOperationPhase::Completed => {}
             }
         }
         if page_len < limit as usize {
@@ -251,6 +276,64 @@ pub async fn drive_targeted_deletion(
         }
     }
     Ok(outcome)
+}
+
+/// Runs the sealed completion boundary for one operation whose participant
+/// work is finished.
+///
+/// Both steps re-derive every premise from durable state: the begin step
+/// refuses unless the durable aggregate says every required participant is
+/// `Verified` for the current sweep, and the completion step re-runs the
+/// system-wide remainder probe inside its commit transaction. A remainder
+/// returns the operation to `Active` on a new sweep without destroying
+/// material, so this pass never completes over collected data.
+async fn settle_finalizing(
+    store: &Store,
+    current: DeletionOperationRef,
+    outcome: &mut TargetedDeletionPassOutcome,
+) -> Result<(), CoreError> {
+    match store
+        .begin_deletion_finalizing(current)
+        .await
+        .map_err(deletion_error)?
+    {
+        DeletionFinalizationOutcome::Finalizing => {
+            outcome.finalizing += 1;
+        }
+        DeletionFinalizationOutcome::CompletedAlready => return Ok(()),
+        DeletionFinalizationOutcome::RemainderCollected(_) => {
+            outcome.remainder_sweeps += 1;
+            return Ok(());
+        }
+        // Not every participant is verified yet, or the operation left
+        // `Active` meanwhile: nothing to finalize.
+        DeletionFinalizationOutcome::NotVerified(_)
+        | DeletionFinalizationOutcome::NotFinalizing
+        | DeletionFinalizationOutcome::Held(_)
+        | DeletionFinalizationOutcome::Missing
+        | DeletionFinalizationOutcome::StaleSweep
+        | DeletionFinalizationOutcome::UnverifiableMaterial
+        | DeletionFinalizationOutcome::Completed => return Ok(()),
+    }
+    match store
+        .complete_deletion_finalizing(current)
+        .await
+        .map_err(deletion_error)?
+    {
+        DeletionFinalizationOutcome::Completed => outcome.finalized += 1,
+        DeletionFinalizationOutcome::RemainderCollected(_) => outcome.remainder_sweeps += 1,
+        // The completion commit re-checks every premise; anything else leaves
+        // the operation unfinished for a later pass.
+        DeletionFinalizationOutcome::NotVerified(_)
+        | DeletionFinalizationOutcome::NotFinalizing
+        | DeletionFinalizationOutcome::Held(_)
+        | DeletionFinalizationOutcome::Missing
+        | DeletionFinalizationOutcome::StaleSweep
+        | DeletionFinalizationOutcome::UnverifiableMaterial
+        | DeletionFinalizationOutcome::CompletedAlready
+        | DeletionFinalizationOutcome::Finalizing => {}
+    }
+    Ok(())
 }
 
 /// Drives one active operation; returns `false` when a concurrent lifecycle
@@ -381,7 +464,12 @@ async fn drive_operation(
             .change_deletion_lifecycle(current, DeletionLifecycleChange::Hold)
             .await
             .map_err(deletion_error)?;
+        return Ok(true);
     }
+    // The participant work is (now) complete: try the sealed completion
+    // boundary. It re-reads the durable aggregate and the system-wide
+    // remainder itself, so this call is safe to repeat and safe to skip.
+    settle_finalizing(store, current, outcome).await?;
     Ok(true)
 }
 
@@ -692,15 +780,30 @@ mod tests {
         }
     }
 
-    /// Runs bounded fan-out passes until nothing is left to demand.
+    /// Runs bounded fan-out passes until nothing is left to demand,
+    /// accumulating the counters.
+    ///
+    /// A global completion runs inside the pass that verified the last
+    /// participant, so the pass that settles (zero demands) may itself be
+    /// empty; the accumulation keeps the completion observable.
     async fn drive_until_settled(handle: &HostHandle) -> TargetedDeletionPassOutcome {
+        let mut total = TargetedDeletionPassOutcome::default();
         for _ in 0..64 {
             let outcome = handle
                 .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
                 .await
                 .expect("the fan-out must not fail");
+            total.operations += outcome.operations;
+            total.demands += outcome.demands;
+            total.verified += outcome.verified;
+            total.unfinished += outcome.unfinished;
+            total.held += outcome.held;
+            total.stale_reports += outcome.stale_reports;
+            total.finalizing += outcome.finalizing;
+            total.finalized += outcome.finalized;
+            total.remainder_sweeps += outcome.remainder_sweeps;
             if outcome.held == 0 && outcome.unfinished == 0 && outcome.demands == 0 {
-                return outcome;
+                return total;
             }
         }
         panic!("the bounded fan-out must settle");
@@ -1154,8 +1257,25 @@ mod tests {
             .unfinished_deletions(None, 100)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].current, current);
+        assert!(
+            rows.is_empty(),
+            "every required participant verified: the pass completes the operation"
+        );
+        let status = reopened.store.deletion_status(None, 100).await.unwrap();
+        let record = status
+            .iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the completed operation keeps its identity");
+        assert_eq!(record.current, current);
+        assert_eq!(record.phase, DeletionOperationPhase::Completed);
+        let audit = reopened
+            .store
+            .deletion_completion_audit(current.operation)
+            .await
+            .unwrap()
+            .expect("the completion audit is durable");
+        assert_eq!(audit.sweep_count, 1);
+        assert_eq!(audit.verified_count(), 2);
         let participants = reopened
             .store
             .deletion_participants(current.operation, None, 100)
@@ -1476,6 +1596,10 @@ mod tests {
             (3, 3, 0, 0),
             "all three owners complete their bounded pass in one demand"
         );
+        assert_eq!(
+            first.finalized, 1,
+            "every required owner verified: the sealed completion boundary runs"
+        );
 
         // Owner-local remainder verification: no targeted row keeps the text.
         let db_path = dir.path().join("app.db");
@@ -1564,24 +1688,26 @@ mod tests {
             Some(PresenceState::Stopped)
         );
 
-        // Duplicate sweep: the same owners run again, find nothing, and the
-        // control state is not mutated twice.
-        let ene_preservation::DeletionLifecycleOutcome::Applied(advanced) = reopened
-            .store
-            .change_deletion_lifecycle(
-                current,
-                crate::targeted_deletion::DeletionLifecycleChange::NextSweep,
-            )
-            .await
-            .unwrap()
-        else {
-            panic!("the duplicate sweep must apply");
-        };
+        // A completed operation is terminal: a repeated pass demands nothing,
+        // a generic generation advance is refused, and the control state is
+        // not mutated a second time.
         let third = reopened
             .drive_targeted_deletion(TargetedDeletionPass::default())
             .await
             .unwrap();
-        assert_eq!((third.demands, third.verified), (3, 3));
+        assert_eq!((third.demands, third.finalized), (0, 0));
+        assert_eq!(
+            reopened
+                .store
+                .change_deletion_lifecycle(
+                    current,
+                    crate::targeted_deletion::DeletionLifecycleChange::NextSweep,
+                )
+                .await
+                .unwrap(),
+            ene_preservation::DeletionLifecycleOutcome::Completed,
+            "a terminal operation is never restarted by a generation advance"
+        );
         assert_eq!(
             reopened
                 .store
@@ -1590,11 +1716,396 @@ mod tests {
                 .unwrap()
                 .as_u64(),
             revision_before.as_u64() + 1,
-            "a duplicate sweep never advances the revision again"
+            "a repeated pass never advances the revision again"
         );
         assert!(reopened.store.list_refs().await.unwrap().is_empty());
         assert_eq!(leaked(&db_path), 0);
-        assert_eq!(advanced.sweep.as_u64(), current.sweep.as_u64() + 1);
+        let audit = reopened
+            .store
+            .deletion_completion_audit(current.operation)
+            .await
+            .unwrap()
+            .expect("the completion audit is durable");
+        assert_eq!(audit.sweep_count, current.sweep.as_u64());
+        assert_eq!(
+            audit.erased_count,
+            audit
+                .participants
+                .iter()
+                .map(|entry| entry.erased_count)
+                .sum::<u64>(),
+            "the audit's erased count is the durable participant total"
+        );
+    }
+
+    /// Stage 6 A5 end to end through the real fan-out and real participants:
+    /// every required owner verifies, the sealed completion boundary commits
+    /// the audit and closes the condition, the target is gone system-wide, the
+    /// audit carries only objective metadata, and the same string provided
+    /// afterwards is a fresh origin.
+    #[tokio::test]
+    async fn a5_a_full_sweep_completes_and_leaves_a_body_free_audit() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, dir)) = memory_handle("targeted-deletion-a5-complete").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "a5-e2e-target";
+        append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("my private note is {target}"),
+        )
+        .await;
+        let unrelated = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            "the weather is nice today",
+        )
+        .await;
+        assert!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap()
+                > 0
+        );
+
+        let required = vec![
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+        ];
+        let current = admit(&handle, target, required.clone()).await;
+        let settled = drive_until_settled(&handle).await;
+        assert_eq!(settled.held, 0);
+        assert_eq!(settled.unfinished, 0);
+        assert_eq!(settled.finalized, 1, "the operation completes once");
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0,
+            "completion requires a system-wide zero remainder"
+        );
+        assert!(
+            handle
+                .store
+                .unfinished_deletions(None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            handle
+                .store
+                .current_erasure_conditions(None, 100)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a completed operation leaves the current-condition set"
+        );
+        let status = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the terminal operation keeps its identity");
+        assert_eq!(status.current, current);
+        assert_eq!(status.phase, DeletionOperationPhase::Completed);
+        assert!(!format!("{status:?}").contains(target));
+
+        let audit = handle
+            .store
+            .deletion_completion_audit(current.operation)
+            .await
+            .unwrap()
+            .expect("completion writes the durable audit");
+        assert_eq!(audit.sweep_count, 1);
+        assert_eq!(audit.verified_count(), required.len() as u64);
+        assert_eq!(
+            audit.erased_count, 1,
+            "the collected History row is counted"
+        );
+
+        // The audit and its participant rows carry no target text: scan every
+        // audit column in the durable database.
+        let db_path = dir.path().join("app.db");
+        let audit_leak = |needle: &str| -> i64 {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM deletion_completion_audit
+                    WHERE instr(operation_id, ?1) > 0 OR instr(purpose, ?1) > 0
+                       OR instr(started_at, ?1) > 0 OR instr(completed_at, ?1) > 0)
+                 + (SELECT COUNT(*) FROM deletion_audit_participant
+                    WHERE instr(participant_owner, ?1) > 0 OR instr(final_state, ?1) > 0)",
+                rusqlite::params![needle],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            audit_leak(target),
+            0,
+            "no audit column may carry the target"
+        );
+        let timeline = handle
+            .store
+            .load_timeline(companion, None, None, 1000)
+            .await
+            .expect("the timeline must load");
+        assert!(timeline.iter().all(|item| !item.text.contains(target)));
+        assert!(timeline.iter().any(|item| item.id == unrelated));
+
+        // Restart after the commit: completion is durable and terminal.
+        drop(handle);
+        let reopened = reopen(dir.path()).await;
+        assert!(
+            reopened
+                .store
+                .unfinished_deletions(None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .store
+                .current_erasure_conditions(None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // The same string provided after completion is a new origin: the
+        // append commits and a fresh admission starts a second operation.
+        let (companion, generation) = {
+            let companion = reopened
+                .store
+                .ensure_running_companion()
+                .await
+                .expect("the companion must resolve");
+            let generation = reopened
+                .store
+                .load_attribution(companion.as_raw())
+                .await
+                .expect("attribution must load")
+                .expect("attribution must exist")
+                .generation;
+            (companion, generation)
+        };
+        append_history(
+            &reopened,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("I am saying {target} again"),
+        )
+        .await;
+        let fresh = admit(&reopened, target, required).await;
+        assert_ne!(fresh.operation, current.operation);
+    }
+
+    /// A crash between the finalizing marker and the completion commit:
+    /// restart resumes the remaining completion steps without re-demanding any
+    /// participant and without releasing the current condition early.
+    #[tokio::test]
+    async fn a5_restart_in_finalizing_resumes_from_the_durable_marker() {
+        let Some((handle, dir)) = memory_handle("targeted-deletion-a5-finalize").await else {
+            panic!("the host must open");
+        };
+        let target = "a5-finalizing-target";
+        let required = vec![
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+        ];
+        let current = admit(&handle, target, required).await;
+        // Establish the durable all-verified premise through the canonical
+        // participant API, then enter Finalizing: this is the durable shape a
+        // crashed pass leaves behind.
+        let mut after = None;
+        loop {
+            let page = handle
+                .store
+                .deletion_participants(current.operation, after, 100)
+                .await
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for record in page {
+                after = Some(record.participant.owner);
+                handle
+                    .store
+                    .record_participant_completion(ParticipantCompletionFact::verified(
+                        current.condition(),
+                        record.participant.owner,
+                        0,
+                        WallClockWithTz::now(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            if page_len < 100 {
+                break;
+            }
+        }
+        assert_eq!(
+            handle
+                .store
+                .begin_deletion_finalizing(current)
+                .await
+                .unwrap(),
+            DeletionFinalizationOutcome::Finalizing
+        );
+        drop(handle);
+
+        let reopened = reopen(dir.path()).await;
+        let conditions = reopened
+            .store
+            .current_erasure_conditions(None, 100)
+            .await
+            .unwrap();
+        assert_eq!(conditions.len(), 1, "the condition survives the crash");
+        assert_eq!(conditions[0].condition, current.condition());
+        let outcome = reopened
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .expect("the resume pass must run");
+        assert_eq!(outcome.demands, 0, "no participant is demanded again");
+        assert_eq!(outcome.finalized, 1, "only the remaining steps run");
+        assert!(
+            reopened
+                .store
+                .current_erasure_conditions(None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let audit = reopened
+            .store
+            .deletion_completion_audit(current.operation)
+            .await
+            .unwrap()
+            .expect("the resumed completion writes the audit");
+        assert_eq!(audit.sweep_count, 1);
+    }
+
+    /// Verification followed by a delayed arrival: the pass refuses to
+    /// complete, opens a new sweep, and only the real owner sweep of that
+    /// generation completes the operation.
+    #[tokio::test]
+    async fn a5_a_remainder_opens_a_new_sweep_and_the_real_owner_completes_it() {
+        use ene_companion::{CompanionRepository as _, HistoryRole};
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-a5-remainder").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "a5-delayed-arrival";
+        append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("carrying {target}"),
+        )
+        .await;
+        let current = admit(&handle, target, vec![ParticipantOwnerRef::Companion]).await;
+
+        // A participant that claims verification without erasing: the
+        // system-wide probe must refuse to complete over the stored body.
+        handle.reset_deletion_participants_for_tests();
+        handle
+            .register_deletion_participant(Arc::new(TestParticipant::new(
+                ParticipantOwnerRef::Companion,
+                ParticipantCompletionStatus::Verified,
+            )))
+            .unwrap();
+        let first = handle
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .unwrap();
+        assert_eq!(first.verified, 1);
+        assert_eq!(first.finalized, 0);
+        assert_eq!(first.remainder_sweeps, 1);
+        let rows = handle.store.unfinished_deletions(None, 100).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].current.sweep, DeletionSweepGeneration::from_u64(2));
+        assert_eq!(rows[0].phase, DeletionOperationPhase::Active);
+        assert_eq!(
+            participant_for(
+                &handle.store,
+                current.operation,
+                ParticipantOwnerRef::Companion
+            )
+            .await
+            .progress,
+            ParticipantProgress::Pending,
+            "a new sweep never inherits the old verification"
+        );
+
+        // The real owner sweep collects the remainder and the operation
+        // completes on the new generation.
+        handle.reset_deletion_participants_for_tests();
+        handle
+            .register_deletion_participant(Arc::new(ene_store::CompanionErasureParticipant::new(
+                handle.store.clone(),
+            )))
+            .unwrap();
+        let settled = drive_until_settled(&handle).await;
+        assert_eq!(settled.remainder_sweeps, 0);
+        assert_eq!(settled.finalized, 1);
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0
+        );
+        let audit = handle
+            .store
+            .deletion_completion_audit(current.operation)
+            .await
+            .unwrap()
+            .expect("the second generation completes");
+        assert_eq!(audit.sweep_count, 2);
     }
 
     #[tokio::test]

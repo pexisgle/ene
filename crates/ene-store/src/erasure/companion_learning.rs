@@ -412,39 +412,6 @@ fn pin_target_bearing(
     Ok(hit)
 }
 
-/// Counts the mechanical exact-text remainder over every durable content
-/// column the Companion and Learning sweeps cover, the derived token index,
-/// and the undelivered references whose canonical source is gone.
-///
-/// The column list is the participants' shared definition (see
-/// [`COMPANION_CONTENT`] / [`LEARNING_CONTENT`]), so a test probe can never
-/// check a different column set than the sweep covers. The exact text travels
-/// only as a bound parameter.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn exact_remainder_probe(
-    conn: &rusqlite::Connection,
-    text: &str,
-) -> Result<u64, rusqlite::Error> {
-    let mut sql = String::from("SELECT 0");
-    for (table, column) in COMPANION_CONTENT.iter().chain(LEARNING_CONTENT) {
-        sql.push_str(&format!(
-            " + (SELECT COUNT(*) FROM {table} WHERE instr({column}, ?1) > 0)"
-        ));
-    }
-    sql.push_str(&format!(
-        " + (SELECT COUNT(*) FROM {TERM_TABLE} WHERE term = ?1)"
-    ));
-    sql.push_str(&format!(
-        " + (SELECT COUNT(*) FROM undelivered u WHERE \
-           (u.source_kind = '{SOURCE_KIND_HISTORY_MESSAGE}' AND NOT EXISTS \
-               (SELECT 1 FROM history_message h WHERE h.message_id = u.source_id)) \
-           OR (u.source_kind = '{SOURCE_KIND_ACTIVITY_RECORD}' AND NOT EXISTS \
-               (SELECT 1 FROM activity_record a WHERE a.activity_id = u.source_id)))"
-    ));
-    let counted: i64 = conn.query_row(&sql, params![text], |row| row.get(0))?;
-    Ok(u64::try_from(counted).unwrap_or(u64::MAX))
-}
-
 // --- Companion owner -------------------------------------------------------
 
 /// Tables of the Companion sweep, in order: History bodies, activity-record

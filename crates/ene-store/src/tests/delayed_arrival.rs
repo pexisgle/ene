@@ -9,12 +9,13 @@
 //! body is refused or collected at the receiving boundary). No timing
 //! dependence: each order is a straight-line scenario.
 //!
-//! A1/A2 expose no completion authority (A5 owns it), so the
-//! "operation completed" boundary is exercised through the same
-//! `complete_operation_fixture` shape the preservation tests use: it mirrors
-//! the A5 completion invariant exactly (all participants verified, condition
-//! closed, material/hints/source rows deleted). Integration slice D replaces
-//! it with the production completion path.
+//! A1/A2 expose no completion authority; A5 owns the sealed finalizing and
+//! completion boundary, and the "operation completed" boundary in these tests
+//! runs through it (`complete_via_a5`): every required participant is verified
+//! through the canonical API and the durable audit/condition/output commit is
+//! the production path. A fixture that still stores the target first drives
+//! the owning participant's real sweep, because the system-wide remainder
+//! probe refuses to complete over collected target data.
 
 use super::*;
 
@@ -36,6 +37,7 @@ use ene_task::{
     TaskResultId, TaskRevision,
 };
 
+use super::preservation::complete_via_a5;
 use super::targeted_deletion::drive_with_sources;
 
 fn summary(companion: RawId, content: &str, start: RawId, end: RawId) -> SummaryRecord {
@@ -123,45 +125,6 @@ async fn admit(
         StartTargetedDeletionOutcome::Started(current) => current,
         other => panic!("the operation must start, got {other:?}"),
     }
-}
-
-/// The A5 completion invariant, without the A5 authority that does not exist
-/// in this slice: every required participant verified for the final sweep,
-/// condition closed, protected material/hints, and ALL source rows deleted.
-fn complete_fixture(store: &Store, current: DeletionOperationRef) {
-    let id = crate::codec::encode_id(current.operation.as_raw());
-    let sweep = current.sweep.as_u64() as i64;
-    let conn = store.conn.lock().unwrap();
-    conn.execute(
-        "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
-        rusqlite::params![id, sweep],
-    )
-    .unwrap();
-    conn.execute(
-        "DELETE FROM deletion_search_material WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
-    conn.execute(
-        "DELETE FROM deletion_semantic_hint WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
-    conn.execute(
-        "DELETE FROM erasure_condition_source WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
-        rusqlite::params![id, sweep],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
-        [&id],
-    )
-    .unwrap();
 }
 
 async fn current_conditions(store: &Store) -> Vec<ErasureConditionRef> {
@@ -627,7 +590,7 @@ async fn result_first_then_condition_redacts_and_a_retry_stays_idempotent() {
     // After completion the same identity still never re-writes the body: the
     // stored collected form disagrees with the incoming raw text, so the
     // retry fails closed instead of resurrecting the target.
-    complete_fixture(&store, current);
+    complete_via_a5(&store, current).await;
     let result = arrival.result;
     assert!(
         store.record_task_result_arrival(arrival).await.is_err(),
@@ -819,12 +782,30 @@ async fn condition_first_holds_a_presentation_start_and_ack() {
     };
     assert_eq!(status, "pending");
 
-    // After completion the same transitions proceed: the closed condition is
-    // not a permanent ban.
-    complete_fixture(&store, current);
+    // Completion requires the collected remainder to be gone: the Companion
+    // owner's real bounded sweep removes the covered History body and the
+    // dangling reporting reference, exactly as the production fan-out would.
+    let participant = crate::CompanionErasureParticipant::new(store.clone());
+    drive_with_sources(
+        &participant,
+        current.condition(),
+        ParticipantOwnerRef::Companion,
+        "the private key",
+        Vec::new(),
+    )
+    .await;
+    complete_via_a5(&store, current).await;
+
+    // After completion the same text is a new origin: a fresh reply commits
+    // and its own reporting transitions proceed — the closed condition is not
+    // a permanent ban.
+    let (outcome, registered) =
+        append_reply_with_body(&store, companion, generation, "the private key", true).await;
+    assert!(matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }));
+    let fresh = registered.expect("the fresh reply registers an undelivered entry");
     assert_eq!(
         store
-            .compare_and_mark_reported_sync(entry.id, ReportStatus::Pending, mark_start)
+            .compare_and_mark_reported_sync(fresh.id, ReportStatus::Pending, mark_start)
             .unwrap(),
         ReportStatusTransition::MarkedPresentationUnknown
     );
@@ -869,7 +850,7 @@ async fn condition_first_holds_a_resume_instruction_activity() {
     assert_eq!(activities, 0);
 
     // A fresh instruction after completion records normally.
-    complete_fixture(&store, current);
+    complete_via_a5(&store, current).await;
     let recorded = store
         .record_resume_activity(RecordResumeActivityCommand {
             companion,
@@ -926,7 +907,7 @@ async fn fresh_owner_input_after_completion_is_a_new_origin() {
         append_owner(&store, companion, generation, "about the private key").await,
         HistoryAppendOutcome::HeldForErasure
     );
-    complete_fixture(&store, current);
+    complete_via_a5(&store, current).await;
     assert!(current_conditions(&store).await.is_empty());
 
     let outcome = append_owner(&store, companion, generation, "about the private key").await;
@@ -986,8 +967,15 @@ async fn torn_or_unreadable_current_state_fails_closed_at_the_boundary() {
     let (companion, generation) = companion_with_generation(&store).await;
     let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
     {
+        // The finalizing premise (every required participant verified) plus
+        // the wiped material is the unreadable-target shape A5 owns.
         let id = crate::codec::encode_id(current.operation.as_raw());
         let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
         conn.execute(
             "UPDATE deletion_operation SET phase='finalizing' WHERE operation_id=?1",
             [&id],
