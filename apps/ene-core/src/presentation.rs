@@ -964,9 +964,14 @@ impl HostHandle {
     /// Commits the carried prefix (Pending→PresentationUnknown), installs
     /// the receipt, advances the cursor past the carried prefix only.
     ///
-    /// Returns `None` when the ownership section refused the receipt install:
-    /// no receipt, cursor, or subscription entry is created for a superseded
-    /// connection, and the attempt's carried refs are dropped.
+    /// The whole commit — the per-row presentation-start CAS and the
+    /// receipt/cursor/subscription install — runs inside one
+    /// connection-ownership section (CCT §10.4): a replacement that wins the
+    /// table commits no row transition and installs no receipt, and a
+    /// commit that wins the table survives the later lifecycle sweep as a
+    /// durable row (CCT §10.5). Returns `None` when the ownership section
+    /// refused: no receipt, cursor, or subscription entry is created for a
+    /// superseded connection, and the attempt's carried refs are dropped.
     #[allow(clippy::too_many_arguments)]
     async fn commit_install(
         &self,
@@ -996,133 +1001,134 @@ impl HostHandle {
                 gate.pause().await;
             }
         }
-        // Ownership check before any durable mark or fresh ref mint: a
-        // connection superseded while the page was prepared creates nothing
-        // (no rows move, no round wire, no receipt). The final install below
-        // re-verifies inside the section that performs the memory commit.
-        if self.with_current_connection(live, || ()).is_none() {
-            self.forget_carried(conn, &items).await;
-            return None;
-        }
         let round = ene_presentation::RoundId::from_raw(RawId::new());
         let mark = ene_companion::PresentationMark {
             round: round.as_raw(),
             presented: false,
         };
-        let mut selected = Vec::with_capacity(entries.len());
-        let mut carried = Vec::with_capacity(items.len());
-        let mut dropped = Vec::new();
-        for (entry, item) in entries.into_iter().zip(items) {
-            // Only a committed presentation start claims the row. A domain
-            // `StaleSource` is not an infrastructure error: the row's status
-            // moved between the page plan and this compare (another
-            // receipt/pass owns it, it was presented, or it is gone), so the
-            // row must stay out of the receipt and the frame and be left to
-            // the next pass. An `Err` is a rolled-back compare (the row was
-            // not marked) and takes the same drop; any other transition is
-            // not this call's success either.
-            if entry.status != ReportStatus::Pending {
-                // Already `PresentationUnknown`: re-displayed under this
-                // receipt without a status write, so it is claimed.
-                selected.push(entry.id);
-                carried.push(item);
-                continue;
-            }
-            match self
-                .store
-                .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
-                .await
-            {
-                Ok(ene_companion::ReportStatusTransition::MarkedPresentationUnknown) => {
-                    selected.push(entry.id);
-                    carried.push(item);
-                }
-                Ok(ene_companion::ReportStatusTransition::StaleSource) => {
-                    dropped.push(item);
-                }
-                Ok(_) => {
-                    // expected=Pending + presented=false can only commit
-                    // `MarkedPresentationUnknown`; anything else (for
-                    // example an already-presented row) is not a
-                    // presentation start and is never claimed.
-                    dropped.push(item);
-                }
-                Err(_) => {
-                    // One atomic per-row compare: the failure rolled back,
-                    // so the row was not marked and stays for the next pass.
-                    dropped.push(item);
-                }
-            }
-        }
-        if !dropped.is_empty() {
-            self.forget_carried(conn, &dropped).await;
-        }
-        let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
-        let ttl = self.receipt_ttl();
-        // The carried prefix IS the fetched prefix (the fetch bound shrank
-        // instead), so the store cursor resumes exactly: a fetched
-        // continuation pages next, a bound-reaching fetch drains the floor.
-        let installed = self.with_presentation_state(live, |state| {
-            // The round projection is minted inside the section: a stale
-            // attempt leaves no round wire behind either.
-            let round_wire = self.round_wire_or_mint(&round);
-            let receipt = Receipt {
-                id: receipt_id.clone(),
-                connection: conn.to_string(),
-                incarnation,
-                companion: companion.as_raw(),
-                client,
-                round,
-                round_wire: round_wire.0.clone(),
-                generation,
-                selected,
-                expires_at: Instant::now() + ttl,
-            };
-            // Forward-only paging consumes the cursor it continued from.
-            Self::take_cursor(state, conn, from_cursor);
-            // One receipt per Companion: installing supersedes any leftover.
-            if let Some(old) = state.receipts.insert(companion_key.clone(), receipt) {
-                state.receipt_ids.remove(&old.id);
-                Self::retire(state, &old.id, &old.connection);
-            }
-            state.receipt_ids.insert(receipt_id.clone(), companion_key);
-            let (next_cursor, drained) = match fetched_next {
-                Some(next) => {
-                    let resume = (next, pending_only, limit);
-                    if let Some(sub) = state.subs.get_mut(conn) {
-                        sub.resume = Some(resume);
+        let store = self.store.clone();
+        let presentations = std::sync::Arc::clone(&self.presentations);
+        let rounds = std::sync::Arc::clone(&self.rounds);
+        let commit_conn = conn.to_string();
+        let from_cursor = from_cursor.map(str::to_string);
+        let installed = self
+            .with_current_connection_blocking(live, move || {
+                let mut state_guard = crate::lock_unpoison(&presentations);
+                let state = &mut *state_guard;
+                let conn = commit_conn.as_str();
+                let from_cursor = from_cursor.as_deref();
+                let mut selected = Vec::with_capacity(entries.len());
+                let mut carried = Vec::with_capacity(items.len());
+                let mut dropped = Vec::new();
+                for (entry, item) in entries.into_iter().zip(items) {
+                    // Only a committed presentation start claims the row. A domain
+                    // `StaleSource` is not an infrastructure error: the row's status
+                    // moved between the page plan and this compare (another
+                    // receipt/pass owns it, it was presented, or it is gone), so the
+                    // row must stay out of the receipt and the frame and be left to
+                    // the next pass. An `Err` is a rolled-back compare (the row was
+                    // not marked) and takes the same drop; any other transition is
+                    // not this call's success either.
+                    if entry.status != ReportStatus::Pending {
+                        // Already `PresentationUnknown`: re-displayed under this
+                        // receipt without a status write, so it is claimed.
+                        selected.push(entry.id);
+                        carried.push(item);
+                        continue;
                     }
-                    (
-                        Some(Self::mint_cursor(
-                            state,
-                            conn,
-                            StoredCursor::Undelivered {
-                                companion: companion.as_raw(),
-                                cursor: next,
-                                pending_only,
-                                limit,
-                            },
-                        )),
-                        false,
-                    )
-                }
-                None => {
-                    if let Some(sub) = state.subs.get_mut(conn)
-                        && sub.companion == companion.as_raw()
-                    {
-                        sub.scan_floor = sub.scan_floor.max(upper);
-                        sub.drained_once = true;
-                        sub.resume = None;
+                    match store.compare_and_mark_reported_sync(
+                        entry.id,
+                        ReportStatus::Pending,
+                        mark,
+                    ) {
+                        Ok(ene_companion::ReportStatusTransition::MarkedPresentationUnknown) => {
+                            selected.push(entry.id);
+                            carried.push(item);
+                        }
+                        Ok(ene_companion::ReportStatusTransition::StaleSource) => {
+                            dropped.push(item);
+                        }
+                        Ok(_) => {
+                            // expected=Pending + presented=false can only commit
+                            // `MarkedPresentationUnknown`; anything else (for
+                            // example an already-presented row) is not a
+                            // presentation start and is never claimed.
+                            dropped.push(item);
+                        }
+                        Err(_) => {
+                            // One atomic per-row compare: the failure rolled back,
+                            // so the row was not marked and stays for the next pass.
+                            dropped.push(item);
+                        }
                     }
-                    (None, true)
                 }
-            };
-            (round_wire, next_cursor, drained)
-        });
-        let Some((round_wire, next_cursor, drained)) = installed else {
-            self.forget_carried(conn, &carried).await;
-            return None;
-        };
+                for item in dropped {
+                    state.carried.remove(&(conn.to_string(), item.reference.0));
+                }
+                let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
+                let ttl = state.receipt_ttl;
+                // The carried prefix IS the fetched prefix (the fetch bound shrank
+                // instead), so the store cursor resumes exactly: a fetched
+                // continuation pages next, a bound-reaching fetch drains the floor.
+                // The round projection is minted inside the section: a stale
+                // attempt leaves no round wire behind either.
+                let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
+                crate::lock_unpoison(&rounds).insert(round_wire.0.clone(), round);
+                let receipt = Receipt {
+                    id: receipt_id.clone(),
+                    connection: conn.to_string(),
+                    incarnation,
+                    companion: companion.as_raw(),
+                    client,
+                    round,
+                    round_wire: round_wire.0.clone(),
+                    generation,
+                    selected,
+                    expires_at: Instant::now() + ttl,
+                };
+                // Forward-only paging consumes the cursor it continued from.
+                Self::take_cursor(state, conn, from_cursor);
+                // One receipt per Companion: installing supersedes any leftover.
+                if let Some(old) = state.receipts.insert(companion_key.clone(), receipt) {
+                    state.receipt_ids.remove(&old.id);
+                    Self::retire(state, &old.id, &old.connection);
+                }
+                state.receipt_ids.insert(receipt_id.clone(), companion_key);
+                let (next_cursor, drained) = match fetched_next {
+                    Some(next) => {
+                        let resume = (next, pending_only, limit);
+                        if let Some(sub) = state.subs.get_mut(conn) {
+                            sub.resume = Some(resume);
+                        }
+                        (
+                            Some(Self::mint_cursor(
+                                state,
+                                conn,
+                                StoredCursor::Undelivered {
+                                    companion: companion.as_raw(),
+                                    cursor: next,
+                                    pending_only,
+                                    limit,
+                                },
+                            )),
+                            false,
+                        )
+                    }
+                    None => {
+                        if let Some(sub) = state.subs.get_mut(conn)
+                            && sub.companion == companion.as_raw()
+                        {
+                            sub.scan_floor = sub.scan_floor.max(upper);
+                            sub.drained_once = true;
+                            sub.resume = None;
+                        }
+                        (None, true)
+                    }
+                };
+                (round_wire, next_cursor, drained, receipt_id, carried)
+            })
+            .await;
+        let (round_wire, next_cursor, drained, receipt_id, carried) = installed?;
         let has_more =
             !drained || self.store.undelivered_pass_bound().await.unwrap_or(upper) > upper;
         let mut summary = UndeliveredSummary {
@@ -1303,12 +1309,6 @@ impl HostHandle {
         crate::lock_unpoison(&self.presentations).frame_budget
     }
 
-    /// Receipt ACK deadline in force (tests pin short TTLs; production keeps
-    /// [`RECEIPT_TTL`]).
-    fn receipt_ttl(&self) -> Duration {
-        crate::lock_unpoison(&self.presentations).receipt_ttl
-    }
-
     /// Test-only: pin the receipt ACK deadline so expiry-driven advance is
     /// deterministic without waiting the production 30 s.
     ///
@@ -1394,9 +1394,14 @@ impl HostHandle {
     /// Applies one ACK: validates epoch + receipt + Round + generation, then
     /// moves only the carried ids. Every refusal leaves all rows untouched.
     ///
-    /// The state guard never crosses an await: validation (including receipt
-    /// release) computes an owned verdict in one scoped section, and the
-    /// store commits run after, so the connection future stays `Send`.
+    /// The whole verdict and its durable marks run inside one
+    /// connection-ownership section (CCT §10.4–10.5): the receipt consume is
+    /// the ACK's linearization point, and the bounded per-row store compares
+    /// commit with the same currentness guarantee, so a supersession either
+    /// precedes the whole section (nothing consumed, nothing marked) or
+    /// follows the accepted observation (rows keep the ACK's decision while
+    /// the old connection's memory world is swept). The guard never crosses
+    /// an await: every store call here is the sync primitive.
     async fn apply_ack(
         &self,
         frame: &WireFrame,
@@ -1424,99 +1429,109 @@ impl HostHandle {
         // (CCT §10.4): a connection superseded before the section refuses with
         // the typed stale outcome and consumes nothing, so an in-flight ACK
         // cannot release or move rows after the lifecycle sweep.
-        let verdict = self.with_current_connection(live, || {
-            let mut state = crate::lock_unpoison(&self.presentations);
-            let Some(companion_key) = state.receipt_ids.get(&ack.receipt.0).cloned() else {
-                // Consumed or superseded receipts stay stale (never silently
-                // unknown); never-issued ids are unknown. A foreign
-                // connection still hears StaleConnection first: ACKs never
-                // migrate.
-                return match state
-                    .retired
-                    .iter()
-                    .find(|(known, _)| known == &ack.receipt.0)
-                {
-                    Some((_, issued)) if *issued != conn => {
+        let presentations = std::sync::Arc::clone(&self.presentations);
+        let store = self.store.clone();
+        let paired_client = live.paired_device.as_deref().map(device_client);
+        let ack = ack.clone();
+        let applied = self
+            .with_current_connection_blocking(live, move || {
+                let verdict = (|| {
+                    let mut state = crate::lock_unpoison(&presentations);
+                    let Some(companion_key) = state.receipt_ids.get(&ack.receipt.0).cloned() else {
+                        // Consumed or superseded receipts stay stale (never silently
+                        // unknown); never-issued ids are unknown. A foreign
+                        // connection still hears StaleConnection first: ACKs never
+                        // migrate.
+                        return match state
+                            .retired
+                            .iter()
+                            .find(|(known, _)| known == &ack.receipt.0)
+                        {
+                            Some((_, issued)) if *issued != conn => {
+                                Verdict::Refuse(UndeliveredAckOutcome::StaleConnection)
+                            }
+                            Some(_) => Verdict::Refuse(UndeliveredAckOutcome::StalePresentation),
+                            None => Verdict::Refuse(UndeliveredAckOutcome::UnknownRef),
+                        };
+                    };
+                    let Some(receipt) = state.receipts.get(&companion_key).cloned() else {
+                        return Verdict::Refuse(UndeliveredAckOutcome::UnknownRef);
+                    };
+                    if receipt.expired() {
+                        Self::remove_receipt(&mut state, &companion_key);
+                        Verdict::Refuse(UndeliveredAckOutcome::StalePresentation)
+                    } else if receipt.connection != conn || receipt.incarnation != incarnation {
+                        // The ACK never migrates across connections or incarnations.
                         Verdict::Refuse(UndeliveredAckOutcome::StaleConnection)
+                    } else if paired_client != Some(receipt.client) {
+                        // The connection's client moved under the receipt.
+                        Verdict::Refuse(UndeliveredAckOutcome::StaleConnection)
+                    } else if round_view.as_deref() != Some(receipt.round_wire.as_str())
+                        || generation_view != Some(receipt.generation)
+                    {
+                        // Round + generation ride the envelope observed marks: the
+                        // Client echoes what the summary showed, and the Host
+                        // compares.
+                        Verdict::Refuse(UndeliveredAckOutcome::StalePresentation)
+                    } else {
+                        // Consumed: any ACK releases the receipt; the rows keep
+                        // whatever the status below decided.
+                        Self::remove_receipt(&mut state, &companion_key);
+                        Verdict::Proceed(receipt)
                     }
-                    Some(_) => Verdict::Refuse(UndeliveredAckOutcome::StalePresentation),
-                    None => Verdict::Refuse(UndeliveredAckOutcome::UnknownRef),
+                })();
+                let receipt = match verdict {
+                    Verdict::Refuse(outcome) => return outcome,
+                    Verdict::Proceed(receipt) => receipt,
                 };
-            };
-            let Some(receipt) = state.receipts.get(&companion_key).cloned() else {
-                return Verdict::Refuse(UndeliveredAckOutcome::UnknownRef);
-            };
-            if receipt.expired() {
-                Self::remove_receipt(&mut state, &companion_key);
-                Verdict::Refuse(UndeliveredAckOutcome::StalePresentation)
-            } else if receipt.connection != conn || receipt.incarnation != incarnation {
-                // The ACK never migrates across connections or incarnations.
-                Verdict::Refuse(UndeliveredAckOutcome::StaleConnection)
-            } else if live.paired_device.as_deref().map(device_client) != Some(receipt.client) {
-                // The connection's client moved under the receipt.
-                Verdict::Refuse(UndeliveredAckOutcome::StaleConnection)
-            } else if round_view.as_deref() != Some(receipt.round_wire.as_str())
-                || generation_view != Some(receipt.generation)
-            {
-                // Round + generation ride the envelope observed marks: the
-                // Client echoes what the summary showed, and the Host
-                // compares.
-                Verdict::Refuse(UndeliveredAckOutcome::StalePresentation)
-            } else {
-                // Consumed: any ACK releases the receipt; the rows keep
-                // whatever the status below decided.
-                Self::remove_receipt(&mut state, &companion_key);
-                Verdict::Proceed(receipt)
-            }
-        });
-        let Some(verdict) = verdict else {
-            return UndeliveredAckOutcome::StaleConnection;
-        };
-        let receipt = match verdict {
-            Verdict::Refuse(outcome) => return outcome,
-            Verdict::Proceed(receipt) => receipt,
-        };
-        let mark = ene_companion::PresentationMark {
-            round: receipt.round.as_raw(),
-            presented: matches!(ack.status, PresentationStatus::Presented),
-        };
-        match ack.status {
-            PresentationStatus::Presented => {
-                let mut presented = 0_u32;
-                for id in &receipt.selected {
-                    // Bounded to the carried id; later arrivals are never
-                    // touched by this ACK.
-                    if let Ok(ene_companion::ReportStatusTransition::PendingToPresented) = self
-                        .store
-                        .compare_and_mark_reported(*id, ReportStatus::PresentationUnknown, mark)
-                        .await
-                    {
-                        presented += 1;
+                let mark = ene_companion::PresentationMark {
+                    round: receipt.round.as_raw(),
+                    presented: matches!(ack.status, PresentationStatus::Presented),
+                };
+                match ack.status {
+                    PresentationStatus::Presented => {
+                        let mut presented = 0_u32;
+                        for id in &receipt.selected {
+                            // Bounded to the carried id; later arrivals are never
+                            // touched by this ACK.
+                            if let Ok(ene_companion::ReportStatusTransition::PendingToPresented) =
+                                store.compare_and_mark_reported_sync(
+                                    *id,
+                                    ReportStatus::PresentationUnknown,
+                                    mark,
+                                )
+                            {
+                                presented += 1;
+                            }
+                        }
+                        if presented > 0 {
+                            UndeliveredAckOutcome::Presented { presented }
+                        } else {
+                            // Every carried row was already presented (a parallel
+                            // round observation got there first): no write.
+                            UndeliveredAckOutcome::AlreadyPresented
+                        }
                     }
-                }
-                if presented > 0 {
-                    UndeliveredAckOutcome::Presented { presented }
-                } else {
-                    // Every carried row was already presented (a parallel
-                    // round observation got there first): no write.
-                    UndeliveredAckOutcome::AlreadyPresented
-                }
-            }
-            PresentationStatus::Failed => {
-                let mut count = 0_u32;
-                for id in &receipt.selected {
-                    if let Ok(ene_companion::ReportStatusTransition::FailedToPending) = self
-                        .store
-                        .compare_and_mark_reported(*id, ReportStatus::PresentationUnknown, mark)
-                        .await
-                    {
-                        count += 1;
+                    PresentationStatus::Failed => {
+                        let mut count = 0_u32;
+                        for id in &receipt.selected {
+                            if let Ok(ene_companion::ReportStatusTransition::FailedToPending) =
+                                store.compare_and_mark_reported_sync(
+                                    *id,
+                                    ReportStatus::PresentationUnknown,
+                                    mark,
+                                )
+                            {
+                                count += 1;
+                            }
+                        }
+                        UndeliveredAckOutcome::ReturnedToPending { count }
                     }
+                    PresentationStatus::Unknown => UndeliveredAckOutcome::KeptUnknown,
                 }
-                UndeliveredAckOutcome::ReturnedToPending { count }
-            }
-            PresentationStatus::Unknown => UndeliveredAckOutcome::KeptUnknown,
-        }
+            })
+            .await;
+        applied.unwrap_or(UndeliveredAckOutcome::StaleConnection)
     }
 
     /// Dispatch entry: first-party Task list. Pure read: no presence needed,

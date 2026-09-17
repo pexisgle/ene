@@ -797,6 +797,87 @@ fn select_pass_bound(conn: &Connection) -> Result<u64, String> {
     decode_u64(raw)
 }
 
+impl Store {
+    /// Synchronous report-status compare for a connection/receipt ownership
+    /// section (CCT §10.4–10.5). Uses the same per-row transaction as the async
+    /// repository method. The caller must retain ownership through this call;
+    /// checking currentness before scheduling a later write is insufficient.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UndeliveredTechnicalError`] if the transaction cannot commit.
+    pub fn compare_and_mark_reported_sync(
+        &self,
+        id: UndeliveredId,
+        expected: ReportStatus,
+        mark: PresentationMark,
+    ) -> Result<ReportStatusTransition, UndeliveredTechnicalError> {
+        compare_and_mark_reported(&self.conn, id, expected, mark)
+    }
+}
+
+fn compare_and_mark_reported(
+    conn: &Mutex<Connection>,
+    id: UndeliveredId,
+    expected: ReportStatus,
+    mark: PresentationMark,
+) -> Result<ReportStatusTransition, UndeliveredTechnicalError> {
+    let key = encode_id(id.as_raw());
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| undelivered_unavailable(error.to_string()))?;
+    let found: Option<String> = tx
+        .query_row(SQL_SELECT_UNDELIVERED_STATUS, params![key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| undelivered_unavailable(error.to_string()))?;
+    let Some(status_text) = found else {
+        return Ok(ReportStatusTransition::StaleSource);
+    };
+    let current = decode_report_status(&status_text).map_err(undelivered_unavailable)?;
+    // `Presented` is absorbing: a duplicate ACK, a stale
+    // not-presented receipt, and a race with another receipt all
+    // write nothing instead of returning the row to `Pending`.
+    if current == ReportStatus::Presented {
+        return Ok(ReportStatusTransition::AlreadyPresented);
+    }
+    if current != expected {
+        return Ok(ReportStatusTransition::StaleSource);
+    }
+    let (next, transition) = match (mark.presented, current) {
+        (true, ReportStatus::Pending | ReportStatus::PresentationUnknown) => (
+            ReportStatus::Presented,
+            ReportStatusTransition::PendingToPresented,
+        ),
+        // A not-presented mark against a pending row is the
+        // presentation start: the row stays re-presentable.
+        (false, ReportStatus::Pending) => (
+            ReportStatus::PresentationUnknown,
+            ReportStatusTransition::MarkedPresentationUnknown,
+        ),
+        // A not-presented mark against an unknown row is a current
+        // receipt that confirmed the item was not presented.
+        (false, ReportStatus::PresentationUnknown) => (
+            ReportStatus::Pending,
+            ReportStatusTransition::FailedToPending,
+        ),
+        (_, ReportStatus::Presented) => {
+            // Handled above; keeping the arm total without a write.
+            return Ok(ReportStatusTransition::AlreadyPresented);
+        }
+    };
+    tx.execute(
+        SQL_UPDATE_UNDELIVERED_STATUS,
+        params![encode_report_status(next), key],
+    )
+    .map_err(|error| undelivered_unavailable(error.to_string()))?;
+    tx.commit()
+        .map_err(|error| undelivered_unavailable(error.to_string()))?;
+    Ok(transition)
+}
+
 impl UndeliveredRepository for Store {
     async fn compare_and_mark_reported(
         &self,
@@ -805,63 +886,7 @@ impl UndeliveredRepository for Store {
         mark: PresentationMark,
     ) -> Result<ReportStatusTransition, UndeliveredTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let key = encode_id(id.as_raw());
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            let found: Option<String> = tx
-                .query_row(SQL_SELECT_UNDELIVERED_STATUS, params![key], |row| {
-                    row.get(0)
-                })
-                .optional()
-                .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            let Some(status_text) = found else {
-                return Ok(ReportStatusTransition::StaleSource);
-            };
-            let current = decode_report_status(&status_text).map_err(undelivered_unavailable)?;
-            // `Presented` is absorbing: a duplicate ACK, a stale
-            // not-presented receipt, and a race with another receipt all
-            // write nothing instead of returning the row to `Pending`.
-            if current == ReportStatus::Presented {
-                return Ok(ReportStatusTransition::AlreadyPresented);
-            }
-            if current != expected {
-                return Ok(ReportStatusTransition::StaleSource);
-            }
-            let (next, transition) = match (mark.presented, current) {
-                (true, ReportStatus::Pending | ReportStatus::PresentationUnknown) => (
-                    ReportStatus::Presented,
-                    ReportStatusTransition::PendingToPresented,
-                ),
-                // A not-presented mark against a pending row is the
-                // presentation start: the row stays re-presentable.
-                (false, ReportStatus::Pending) => (
-                    ReportStatus::PresentationUnknown,
-                    ReportStatusTransition::MarkedPresentationUnknown,
-                ),
-                // A not-presented mark against an unknown row is a current
-                // receipt that confirmed the item was not presented.
-                (false, ReportStatus::PresentationUnknown) => (
-                    ReportStatus::Pending,
-                    ReportStatusTransition::FailedToPending,
-                ),
-                (_, ReportStatus::Presented) => {
-                    // Handled above; keeping the arm total without a write.
-                    return Ok(ReportStatusTransition::AlreadyPresented);
-                }
-            };
-            tx.execute(
-                SQL_UPDATE_UNDELIVERED_STATUS,
-                params![encode_report_status(next), key],
-            )
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            tx.commit()
-                .map_err(|error| undelivered_unavailable(error.to_string()))?;
-            Ok(transition)
-        })
-        .await
+        run_blocking(move || compare_and_mark_reported(&conn, id, expected, mark)).await
     }
 
     async fn undelivered_pass_bound(&self) -> Result<u64, UndeliveredTechnicalError> {

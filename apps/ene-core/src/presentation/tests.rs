@@ -3011,6 +3011,82 @@ async fn replacement_rejects_a_stale_undelivered_request_without_resurrecting_st
     );
 }
 
+#[tokio::test]
+async fn replacement_before_presentation_cas_leaves_pending() {
+    let (handle, _dir) = open_handle("replace-before-cas").await;
+    let live = live_input(DEVICE_A);
+    let fact = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "pending row", fact.generation).await;
+    let gate = handle.arm_presentation_commit_gate();
+    let query = UndeliveredRequest {
+        companion: None,
+        cursor: None,
+        limit: Some(1),
+        redisplay: false,
+    };
+    let frame = frame_for(
+        WirePayload::UndeliveredRequest(query.clone()),
+        &live,
+        None,
+        None,
+        None,
+    );
+    let pending = handle.request_undelivered(&frame, &live, &query);
+    tokio::pin!(pending);
+    tokio::select! {
+        () = gate.wait_entered() => {},
+        frames = &mut pending => panic!("escaped commit gate: {frames:?}"),
+    }
+    let (_, live2) = replace_connection(&handle, &live.authority, &live.connection_id, DEVICE_A);
+    gate.release();
+    assert_stale_reject(&pending.await, "stale presentation start");
+    assert!(
+        handle
+            .presentation_counts_for_test(&live.connection_id)
+            .is_empty()
+    );
+    assert_eq!(
+        unpresented_statuses(&handle).await[0].1,
+        ReportStatus::Pending
+    );
+    *crate::lock_unpoison(&handle.presentation_commit_gate) = None;
+    let summary = summary_of(fetch(&handle, &live2, None, None, true).await);
+    assert_eq!(summary.items.len(), 1);
+}
+
+#[tokio::test]
+async fn replacement_after_presentation_commit_preserves_durable_row() {
+    let (handle, _dir) = open_handle("replace-after-cas").await;
+    let live = live_input(DEVICE_A);
+    let fact = attach(&handle, DEVICE_A).await;
+    append_reply(&handle, "committed row", fact.generation).await;
+    let first = summary_of(fetch(&handle, &live, None, None, true).await);
+    assert_eq!(
+        handle
+            .presentation_counts_for_test(&live.connection_id)
+            .receipts,
+        1
+    );
+    assert_eq!(
+        unpresented_statuses(&handle).await[0].1,
+        ReportStatus::PresentationUnknown
+    );
+    let (_, live2) = replace_connection(&handle, &live.authority, &live.connection_id, DEVICE_A);
+    assert!(
+        handle
+            .presentation_counts_for_test(&live.connection_id)
+            .is_empty()
+    );
+    assert_eq!(
+        unpresented_statuses(&handle).await[0].1,
+        ReportStatus::PresentationUnknown
+    );
+    let second = summary_of(fetch(&handle, &live2, None, None, true).await);
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(first.receipt, second.receipt);
+    assert_ne!(first.round, second.round);
+}
+
 /// Replacement case B: a `SelectTask` admitted on C1 that pauses before its
 /// guarded selection commit selects nothing after C2 replaced it.
 #[tokio::test]

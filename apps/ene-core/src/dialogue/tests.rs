@@ -5504,6 +5504,7 @@ fn gate_for(
         credential_set: premises.credential_set,
         tx,
         seq: 0,
+        opened: true,
     }
 }
 
@@ -6486,6 +6487,25 @@ async fn replacement_before_acceptance_commits_no_owner_input() -> Result<(), St
             .is_empty(),
         "no provider dispatch registers a reply"
     );
+    let live2 = table.snapshot(&c2).expect("C2 current");
+    let fresh = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(1),
+                None,
+                "fresh-authorization",
+                "C2 input",
+                c2,
+            ),
+            live2,
+            &ok_transport(),
+        )
+        .await;
+    assert!(
+        accepted_round_wire(&fresh).is_ok(),
+        "a fresh evaluation is not consumed by C1: {fresh:?}"
+    );
     Ok(())
 }
 
@@ -6707,6 +6727,279 @@ async fn replacement_aborts_the_old_stream_and_redelivers_the_reply() -> Result<
             .any(|item| item.excerpt.contains("Hello")),
         "the reply re-presents to C2, got {summary:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn replacement_after_owner_commit_before_install_publishes_nothing() -> Result<(), String> {
+    accepted_replacement(false).await
+}
+
+#[tokio::test]
+async fn replacement_after_install_before_publication_publishes_nothing() -> Result<(), String> {
+    accepted_replacement(true).await
+}
+
+async fn accepted_replacement(after_install: bool) -> Result<(), String> {
+    let live = live_input("accepted-replacement");
+    let (handle, _dir) = round_test_handle("accepted-replacement", &live, &ok_transport()).await?;
+    assert!(matches!(
+        handle
+            .attach_presence(
+                &live,
+                "accepted-replacement",
+                ene_presence::PresenceGeneration::from_u64(0)
+            )
+            .await,
+        AttachOutcome::Attached(_)
+    ));
+    let gate = if after_install {
+        handle.arm_submit_publish_gate()
+    } else {
+        handle.arm_submit_open_gate()
+    };
+    let transport = CountingTransport::new("durable reply");
+    let request = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "accepted-old",
+        "durable owner",
+        live.connection_id,
+    );
+    let pending = handle.handle_frame(request, live.clone(), &transport);
+    tokio::pin!(pending);
+    tokio::select! {
+        () = gate.wait_entered() => {},
+        frames = &mut pending => panic!("escaped gate: {frames:?}"),
+    }
+    assert_eq!(timeline_count(&handle).await?, 1);
+    assert_eq!(handle.has_open_round_for_test(), after_install);
+    let c2 = live.authority.note_accept();
+    crate::test_support::authenticate(&live.authority, &c2, "accepted-replacement");
+    handle.on_connection_superseded(&live.connection_id);
+    let live2 = live.authority.snapshot(&c2).expect("C2 is current");
+    handle.disarm_submit_open_gate();
+    handle.disarm_submit_publish_gate();
+    gate.release();
+    let frames = pending.await;
+    assert!(
+        frames.is_empty(),
+        "no Accepted/Open/delta/close on old connection: {frames:?}"
+    );
+    assert!(!handle.has_open_round_for_test());
+    assert_eq!(
+        transport.calls(),
+        1,
+        "accepted work continues independently of publication"
+    );
+    assert_eq!(
+        timeline_count(&handle).await?,
+        2,
+        "Owner and adopted reply remain durable"
+    );
+    let next = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(1),
+                None,
+                "accepted-new",
+                "fresh C2",
+                c2,
+            ),
+            live2,
+            &ok_transport(),
+        )
+        .await;
+    assert!(
+        accepted_round_wire(&next).is_ok(),
+        "C2 admits a fresh request"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_confirmation_commits_nothing_after_replacement() -> Result<(), String> {
+    stale_confirmation(PresentationStatus::Failed).await?;
+    stale_confirmation(PresentationStatus::Unknown).await?;
+    stale_confirmation(PresentationStatus::Presented).await
+}
+
+/// C1's confirmation passes its candidate read, then C2 authenticates and
+/// C2's own fetch claims the rows with a fresh receipt. The stale C1
+/// observation resumes under the ownership guard and must commit nothing:
+/// zero durable mutation, and C2's receipt rows keep their state.
+async fn stale_confirmation(status: PresentationStatus) -> Result<(), String> {
+    use ene_api::v1::undelivered::{
+        UndeliveredAckOutcome, UndeliveredRequest, UndeliveredResponse,
+    };
+    use ene_companion::{CompanionRepository as _, ReportStatus, UndeliveredRepository as _};
+
+    let live1 = live_input("client-confirm-replace");
+    let (handle, _dir) = round_test_handle("dlg-confirm-replace", &live1, &ok_transport()).await?;
+    let handle = std::sync::Arc::new(handle);
+    handle
+        .attach_presence(
+            &live1,
+            "client-confirm-replace",
+            ene_presence::PresenceGeneration::from_u64(0),
+        )
+        .await;
+    append_absent_reply(
+        &handle,
+        "confirm row",
+        ene_presence::PresenceGeneration::from_u64(current_generation(&handle).await?),
+    )
+    .await;
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .map_err(|error| format!("companion: {error:?}"))?;
+    let page = handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .map_err(|error| format!("rows: {error:?}"))?;
+    assert_eq!(page.entries.len(), 1);
+    let row_round = page.entries[0]
+        .round
+        .expect("the reply registers its round");
+    let round_wire = {
+        // The confirm premise is the wire the Host itself projects: register
+        // the row's round through the Host's own mint so the observation
+        // resolves exactly as a Client's stamped confirm would.
+        handle.round_wire_or_mint(&ene_presentation::RoundId::from_raw(row_round))
+    };
+
+    // C1 already started presentation. C2's re-presentation keeps Unknown,
+    // so status CAS alone cannot distinguish the new receipt's ownership.
+    assert_eq!(
+        handle
+            .store
+            .compare_and_mark_reported(
+                page.entries[0].id,
+                ReportStatus::Pending,
+                ene_companion::PresentationMark {
+                    round: row_round,
+                    presented: false
+                },
+            )
+            .await
+            .map_err(|error| format!("start: {error:?}"))?,
+        ene_companion::ReportStatusTransition::MarkedPresentationUnknown
+    );
+    let gate = handle.arm_confirm_commit_gate();
+    let confirm = {
+        let handle = std::sync::Arc::clone(&handle);
+        let live = live1.clone();
+        let round_wire = round_wire.clone();
+        tokio::spawn(async move {
+            let mut frame = confirm_frame(&round_wire, live.connection_id);
+            if let WirePayload::ConfirmPresentation(confirm) = &mut frame.payload {
+                confirm.status = status;
+            }
+            handle.handle_frame(frame, live, &ok_transport()).await
+        })
+    };
+    gate.wait_entered().await;
+    handle.disarm_confirm_commit_gate();
+    // C2 replaces C1 and claims the row with its own receipt.
+    let table = std::sync::Arc::clone(&live1.authority);
+    let c2 = table.note_accept();
+    crate::test_support::authenticate(&table, &c2, "client-confirm-replace");
+    handle.on_connection_superseded(&live1.connection_id);
+    let live2 = table.snapshot(&c2).expect("C2 must snapshot");
+    let summary = match handle
+        .request_undelivered(
+            &{
+                let frame = ene_plugin_ipc::WireFrame {
+                    envelope: new_outgoing_envelope(
+                        ProtocolVersion::V1,
+                        sender(),
+                        WireMessageType(String::from("UndeliveredRequest")),
+                    ),
+                    payload: WirePayload::UndeliveredRequest(UndeliveredRequest {
+                        companion: None,
+                        cursor: None,
+                        limit: None,
+                        redisplay: false,
+                    }),
+                };
+                stamped(frame, c2)
+            },
+            &live2,
+            &UndeliveredRequest {
+                companion: None,
+                cursor: None,
+                limit: None,
+                redisplay: false,
+            },
+        )
+        .await
+        .into_iter()
+        .next()
+        .map(|frame| frame.payload)
+    {
+        Some(WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary))) => summary,
+        other => return Err(format!("C2 must fetch, got {other:?}")),
+    };
+    gate.release();
+    let _ = confirm.await.map_err(|error| format!("join: {error}"))?;
+    // C2's receipt still covers the row exactly as its fetch committed it.
+    let after = handle
+        .store
+        .list_unpresented(companion, None, 50)
+        .await
+        .map_err(|error| format!("rows: {error:?}"))?;
+    assert_eq!(after.entries.len(), 1);
+    match status {
+        PresentationStatus::Failed | PresentationStatus::Unknown => {
+            assert_eq!(
+                after.entries[0].status,
+                ReportStatus::PresentationUnknown,
+                "the stale observation must not move C2's claimed row"
+            );
+        }
+        PresentationStatus::Presented => {
+            // C2's own fetch already committed the presentation start, so the
+            // row is Unknown here. The stale C1 observation must not have
+            // presented it: C2's ACK below would answer AlreadyPresented if
+            // C1 had moved the row, so its success is the proof.
+            assert_eq!(
+                after.entries[0].status,
+                ReportStatus::PresentationUnknown,
+                "the stale observation must not present C2's row"
+            );
+            let outcome = match handle
+                .ack_undelivered(
+                    &summary_ack_frame(
+                        &summary.receipt.0,
+                        summary.round.clone(),
+                        summary.presence_generation,
+                        c2,
+                    ),
+                    &live2,
+                    &UndeliveredAck {
+                        receipt: summary.receipt.clone(),
+                        status: PresentationStatus::Presented,
+                    },
+                )
+                .await
+                .into_iter()
+                .next()
+                .map(|frame| frame.payload)
+            {
+                Some(WirePayload::UndeliveredAckOutcome(outcome)) => outcome,
+                other => return Err(format!("C2's ACK must answer, got {other:?}")),
+            };
+            assert!(
+                matches!(outcome, UndeliveredAckOutcome::Presented { .. }),
+                "C2's receipt must still present the row, got {outcome:?}"
+            );
+        }
+    }
     Ok(())
 }
 

@@ -596,12 +596,18 @@ impl HostHandle {
                     // fact skips the push: an ACK for a summary whose fact
                     // never arrived could only be refused stale, so that
                     // recovery belongs to the explicit request path.
-                    if sink.emit(fact).is_ok() {
+                    if matches!(
+                        self.with_current_connection(live, || sink.emit(fact)),
+                        Some(Ok(()))
+                    ) {
                         for summary in self
                             .auto_present_for(frame, live, companion, &attribution)
                             .await
                         {
-                            if sink.emit(summary).is_err() {
+                            if !matches!(
+                                self.with_current_connection(live, || sink.emit(summary)),
+                                Some(Ok(()))
+                            ) {
                                 break;
                             }
                         }
@@ -796,7 +802,14 @@ impl HostHandle {
                 // adoption to continue (the reply registers as undelivered
                 // for the new connection), while this connection opens no
                 // round and its stream aborts before any further publication.
-                let _ = self.record_open_round(
+                #[cfg(test)]
+                {
+                    let gate = crate::lock_unpoison(&self.submit_open_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
+                }
+                let installed = self.record_open_round(
                     live,
                     &live.client_ref,
                     &companion_key,
@@ -807,29 +820,36 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
-                // The owner row is durable: emit acceptance and the stream
-                // opening now, before the provider call, so the Client
-                // observes durable input acceptance as its own early fact
-                // instead of waiting for provider completion.
-                let stream = StreamWireId(RawId::new().as_uuid());
-                // A failed accept or open aborts before the provider call:
-                // streaming to an undeliverable channel would only pile up
-                // frames the client never sees.
-                if sink.emit(accept_frame(frame, live, &round_wire)).is_err() {
-                    return;
-                }
-                if sink
-                    .emit(open_frame(
-                        frame,
-                        live,
-                        &stream,
-                        &round_wire,
-                        generation_number,
-                    ))
-                    .is_err()
+                #[cfg(test)]
                 {
-                    return;
+                    let gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
                 }
+                let stream = StreamWireId(RawId::new().as_uuid());
+                // Installation is not publication authority: replacement can
+                // win between them. Queue both control frames in one short
+                // ownership section, never socket I/O or an await. Already
+                // accepted work continues without a wire stream if stale.
+                let opened = if installed {
+                    match self.with_current_connection(live, || {
+                        sink.emit(accept_frame(frame, live, &round_wire))?;
+                        sink.emit(open_frame(
+                            frame,
+                            live,
+                            &stream,
+                            &round_wire,
+                            generation_number,
+                        ))
+                    }) {
+                        Some(Ok(())) => true,
+                        Some(Err(_)) => return,
+                        None => false,
+                    }
+                } else {
+                    false
+                };
                 // Baselines the gate on the current record: the owner append
                 // committed under the admission consent, and any move since
                 // fails the attempt claim before the first delta. An
@@ -837,10 +857,15 @@ impl HostHandle {
                 // like any post-acceptance failure.
                 let Ok(Some(consent)) = self.store.load_current(CapabilityKind::Dialogue).await
                 else {
-                    return emit_end(
-                        sink,
-                        close_frame(frame, live, &stream, StreamClose::Interrupted),
-                    );
+                    if opened {
+                        self.with_current_connection(live, || {
+                            emit_end(
+                                sink,
+                                close_frame(frame, live, &stream, StreamClose::Interrupted),
+                            );
+                        });
+                    }
+                    return;
                 };
                 let consent = (consent.id, consent.rev.as_u64());
                 let mut gate = StreamGate {
@@ -857,6 +882,7 @@ impl HostHandle {
                     credential_set,
                     tx: stream_tx.clone(),
                     seq: 0,
+                    opened,
                 };
                 let task_control =
                     crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
@@ -953,6 +979,17 @@ impl HostHandle {
     /// receipt against `PresentationUnknown` (the row returns to `Pending`).
     /// Failures end silently; the durable report state stays authoritative
     /// either way.
+    ///
+    /// Linearization (CCT §10.4): the round resolve, companion resolve, and
+    /// the bounded `list_unpresented` page read run as prepare, then the
+    /// durable compare-and-mark for every matching row runs inside one
+    /// connection-ownership section with the currentness re-check. The
+    /// prepared statuses are CAS premises only: a replacement that wins the
+    /// table commits nothing (zero durable mutation for the stale
+    /// connection), and one that loses cannot interleave a supersession
+    /// between the check and any row's commit. The transition lock is taken
+    /// only across the short guarded section, never during the async
+    /// prepare.
     pub(crate) async fn confirm_presentation(
         &self,
         _frame: &WireFrame,
@@ -975,15 +1012,10 @@ impl HostHandle {
         let Ok(companion) = self.store.ensure_running_companion().await else {
             return Vec::new();
         };
-        // Serialize with the receipt and subscription transitions: the
-        // connection-owned push moves the same rows Pending→
-        // PresentationUnknown concurrently, and the read-then-compare below
-        // must not tear (a stale expected status would drop the observation
-        // and leave the row Unknown).
-        let _gate = self.presentation_gate().await;
         // The bounded first page is enough for this observation path; the
         // full reconnect backlog subscription belongs to the presentation
-        // slice, which re-pages with a cursor.
+        // slice, which re-pages with a cursor. This read is prepare only:
+        // the statuses it returns are CAS premises, never authority.
         let Ok(page) = self
             .store
             .list_unpresented(companion, None, UNDELIVERED_PAGE_MAX)
@@ -991,18 +1023,24 @@ impl HostHandle {
         else {
             return Vec::new();
         };
-        for entry in page.entries {
-            if entry.round == Some(mark.round)
-                && self
-                    .store
-                    .compare_and_mark_reported(entry.id, entry.status, mark)
-                    .await
-                    .is_err()
-            {
-                // One stale or unavailable row never blocks the remaining
-                // observations; the store stays authoritative.
-            }
+        #[cfg(test)]
+        if let Some(gate) = self.confirm_commit_gate() {
+            gate.pause().await;
         }
+        // Serialize commits, not preparation, with receipt transitions.
+        // Prepared statuses are CAS premises, never ownership authority.
+        let _gate = self.presentation_gate().await;
+        let store = self.store.clone();
+        let _applied = self
+            .with_current_connection_blocking(live, move || {
+                for entry in page.entries {
+                    if entry.round == Some(mark.round) {
+                        // An unavailable or stale row does not block the rest.
+                        drop(store.compare_and_mark_reported_sync(entry.id, entry.status, mark));
+                    }
+                }
+            })
+            .await;
         Vec::new()
     }
 
@@ -1382,6 +1420,8 @@ struct StreamGate<'a> {
     credential_set: CredentialSetRevision,
     tx: tokio::sync::mpsc::Sender<WireFrame>,
     seq: u64,
+    /// No wire close (or delta) is legal unless Open was queued.
+    opened: bool,
 }
 
 impl StreamGate<'_> {
@@ -1479,28 +1519,44 @@ impl StreamGate<'_> {
             self.interrupt().await;
             return;
         }
-        if self.tx.send(self.delta_frame("", true)).await.is_err() {
+        if !self.publish_current(self.delta_frame("", true)).await {
+            self.interrupt().await;
             return;
         }
-        if self
-            .tx
-            .send(close_frame(
+        if !self
+            .publish_current(close_frame(
                 self.frame,
                 self.live,
                 &self.stream,
                 StreamClose::Completed,
             ))
             .await
-            .is_err()
         {
-            // The connection is closing; the durable reply stands without
-            // its close frame, and the loop drops the host future with it.
+            self.interrupt().await;
         }
+    }
+
+    /// Queues one close path frame if the stream opened on the wire and the
+    /// connection is still current. An unopened stream sends nothing: a
+    /// stream the Client never saw opens no close-only lifecycle now.
+    async fn publish_current(&mut self, frame: WireFrame) -> bool {
+        if !self.opened {
+            return false;
+        }
+        let Ok(permit) = self.tx.reserve().await else {
+            return false;
+        };
+        self.handle
+            .with_current_connection(self.live, || permit.send(frame))
+            .is_some()
     }
 
     /// Closes the stream interrupted after a stale or failed run: displayed
     /// deltas stay, and no reply is adopted.
     async fn interrupt(&mut self) {
+        if !self.opened {
+            return;
+        }
         if self
             .tx
             .send(close_frame(
@@ -1525,7 +1581,7 @@ impl DeltaSink for StreamGate<'_> {
         Box::pin(async move {
             // Fast path: never reserve capacity for an already-stale
             // stream, and never hold a permit across the premise reads.
-            if !self.current().await {
+            if !self.opened || !self.current().await {
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
             let frame = self.delta_frame(delta, false);
@@ -1544,11 +1600,13 @@ impl DeltaSink for StreamGate<'_> {
             // Final connection currentness check, synchronous and after the
             // last await: a same-device replacement during the premise reads
             // must not let this stream publish one more delta (IPC §9.3).
-            if !self.connection_current() {
-                drop(permit);
+            if self
+                .handle
+                .with_current_connection(self.live, || permit.send(frame))
+                .is_none()
+            {
                 return DeltaFlow::Abort("the connection was replaced");
             }
-            permit.send(frame);
             self.seq += 1;
             DeltaFlow::Continue
         })
