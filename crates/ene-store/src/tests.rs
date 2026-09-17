@@ -7277,6 +7277,7 @@ mod preservation;
 mod report_reads;
 mod result_reevaluation;
 mod resume;
+mod targeted_deletion;
 mod task_failure;
 mod task_result;
 mod undelivered;

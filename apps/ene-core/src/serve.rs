@@ -644,7 +644,7 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))?;
         let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(Self {
+        let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
             open_rounds: StdMutex::new(HashMap::new()),
@@ -687,7 +687,22 @@ impl HostHandle {
             presentation_commit_gate: StdMutex::new(None),
             #[cfg(all(test, unix))]
             receipt_expiry_runs: std::sync::atomic::AtomicUsize::new(0),
-        })
+        };
+        // The composition registers the built-in local-erasure implementations
+        // for the owners the store serves (lifecycle §9): a reopening
+        // composition re-registers before any drive, so a restart can never
+        // turn a missing implementation into completion.
+        handle
+            .register_deletion_participant(Arc::new(ene_store::CompanionErasureParticipant::new(
+                handle.store.clone(),
+            )))
+            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        handle
+            .register_deletion_participant(Arc::new(ene_store::LearningErasureParticipant::new(
+                handle.store.clone(),
+            )))
+            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        Ok(handle)
     }
 
     /// Startup credential boundary: sweeps every registered pinned value out
@@ -814,6 +829,18 @@ impl HostHandle {
     #[must_use]
     pub fn required_deletion_participants(&self) -> Vec<ene_preservation::ParticipantOwnerRef> {
         crate::targeted_deletion::current_product_surface_owners()
+    }
+
+    /// Test-only: empties the erasure-participant registry.
+    ///
+    /// The built-in composition registers one implementation per served
+    /// owner; a fan-out test that needs the unsupported-hold path, or a
+    /// scripted implementation for a served owner, clears the registry first.
+    /// Production code has no path that removes an implementation.
+    #[cfg(test)]
+    pub(crate) fn reset_deletion_participants_for_tests(&self) {
+        *crate::lock_unpoison(&self.targeted_deletion) =
+            crate::targeted_deletion::ErasureParticipantRegistry::new();
     }
 
     /// Runs one bounded Targeted Deletion fan-out pass over the durable

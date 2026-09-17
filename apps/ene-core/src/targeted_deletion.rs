@@ -579,6 +579,387 @@ mod tests {
             .expect("the required participant row must exist")
     }
 
+    /// One durable History append for the acceptance fixture.
+    async fn append_history(
+        handle: &HostHandle,
+        companion: ene_companion::CompanionId,
+        generation: ene_presence::PresenceGeneration,
+        role: ene_companion::HistoryRole,
+        text: &str,
+    ) -> RawId {
+        use ene_companion::HistoryRepository as _;
+        match handle
+            .store
+            .append_message(ene_companion::AppendHistoryCommand {
+                companion,
+                round: RawId::new(),
+                role,
+                text: text.to_owned(),
+                lang: String::from("en"),
+                at: WallClockWithTz::now(),
+                expected_generation: generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                expected_owner_message: None,
+                command_id: None,
+                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            })
+            .await
+            .expect("the history append must commit")
+        {
+            ene_companion::HistoryAppendOutcome::CommittedAs { message } => message,
+            other => panic!("the append must commit: {other:?}"),
+        }
+    }
+
+    /// Commits one Memory change grounded on `summary`, as formation does.
+    async fn commit_learning(
+        handle: &HostHandle,
+        summary: &ene_learning::SummaryRecord,
+        target: ene_learning::MemoryTarget,
+        content: &str,
+        change: ene_learning::ChangeKind,
+    ) {
+        use ene_learning::LearningRepository as _;
+        let outcome = handle
+            .store
+            .commit_memory_change(ene_learning::MemoryChangeCommit {
+                summary: Some(summary.clone()),
+                secret_premise: None,
+                change: ene_learning::MemoryChange {
+                    target,
+                    scope: ene_learning::LearningScope::companion(summary.scope.companion_id()),
+                    content: content.to_owned(),
+                    importance: ene_learning::Importance::default(),
+                    temporal: ene_learning::TemporalMeaning::Enduring,
+                    change,
+                    recall_suppressed: false,
+                    at: WallClockWithTz::now(),
+                },
+            })
+            .await
+            .expect("the memory change must commit");
+        assert!(
+            matches!(outcome, ene_learning::MemoryChangeOutcome::Committed { .. }),
+            "the fixture change must commit: {outcome:?}"
+        );
+    }
+
+    fn summary_of(
+        companion: RawId,
+        content: String,
+        start: RawId,
+        end: RawId,
+    ) -> ene_learning::SummaryRecord {
+        ene_learning::SummaryRecord {
+            id: ene_learning::SummaryId::generate(),
+            scope: ene_learning::LearningScope::companion(companion),
+            content,
+            source: ene_learning::SourceRangeRef {
+                kind: ene_learning::ExperienceSourceKind::Dialogue,
+                start,
+                end,
+            },
+            formed_at: WallClockWithTz::now(),
+        }
+    }
+
+    /// Runs bounded fan-out passes until nothing is left to demand.
+    async fn drive_until_settled(handle: &HostHandle) -> TargetedDeletionPassOutcome {
+        for _ in 0..64 {
+            let outcome = handle
+                .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+                .await
+                .expect("the fan-out must not fail");
+            if outcome.held == 0 && outcome.unfinished == 0 && outcome.demands == 0 {
+                return outcome;
+            }
+        }
+        panic!("the bounded fan-out must settle");
+    }
+
+    #[tokio::test]
+    async fn history_to_summary_to_memory_erasure_leaves_no_exact_remainder() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+        use ene_learning::{
+            ChangeKind, LearningRepository as _, MemoryId, MemoryRevision, MemoryTarget,
+        };
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-a3a").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "swordfish-a3a-e2e";
+
+        // Conversation -> Summary -> Memory update history, with the target
+        // in every layer.
+        let source_start = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("my launch code is {target}"),
+        )
+        .await;
+        let source_end = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Companion,
+            "understood, I will remember",
+        )
+        .await;
+        let summary = summary_of(
+            companion.as_raw(),
+            format!("The owner shared a private launch code: {target}."),
+            source_start,
+            source_end,
+        );
+        let memory = MemoryId::generate();
+        commit_learning(
+            &handle,
+            &summary,
+            MemoryTarget::New { id: memory },
+            &format!("The owner's launch code is {target}."),
+            ChangeKind::Initial,
+        )
+        .await;
+        commit_learning(
+            &handle,
+            &summary,
+            MemoryTarget::Existing {
+                id: memory,
+                expected_revision: MemoryRevision::initial(),
+            },
+            &format!("The owner's launch code is {target}, still current."),
+            ChangeKind::Refined,
+        )
+        .await;
+
+        // Positive control: unrelated History, Summary, and Memory stay.
+        let unrelated_message = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            "the weather is nice today",
+        )
+        .await;
+        let unrelated_summary = summary_of(
+            companion.as_raw(),
+            String::from("The owner likes jasmine tea."),
+            RawId::new(),
+            RawId::new(),
+        );
+        let unrelated_memory = MemoryId::generate();
+        commit_learning(
+            &handle,
+            &unrelated_summary,
+            MemoryTarget::New {
+                id: unrelated_memory,
+            },
+            "The owner likes jasmine tea.",
+            ChangeKind::Initial,
+        )
+        .await;
+        assert!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap()
+                > 0,
+            "the fixture must place the target before the sweep"
+        );
+
+        let required = vec![
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+        ];
+        let current = admit(&handle, target, required.clone()).await;
+        let outcome = drive_until_settled(&handle).await;
+        assert_eq!(outcome.held, 0);
+        assert_eq!(outcome.unfinished, 0);
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0,
+            "no durable surface may keep the exact target"
+        );
+
+        // The usual reads can no longer reach the target.
+        let timeline = handle
+            .store
+            .load_timeline(companion, None, None, 100)
+            .await
+            .expect("the timeline must load");
+        assert!(timeline.iter().all(|item| !item.text.contains(target)));
+        assert!(
+            timeline.iter().any(|item| item.id == unrelated_message),
+            "unrelated History stays"
+        );
+        let recalled = handle
+            .store
+            .recall_candidates(companion.as_raw(), &[String::from("swordfish")], 50)
+            .await
+            .expect("recall must answer");
+        assert!(
+            recalled
+                .iter()
+                .all(|memory| !memory.content.contains(target))
+        );
+        let memories = handle
+            .store
+            .list_current_memories(companion.as_raw(), None, 100)
+            .await
+            .expect("memories must list");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, unrelated_memory);
+        assert!(
+            handle
+                .store
+                .list_memory_revisions(memory, None, 100)
+                .await
+                .expect("revisions must list")
+                .is_empty(),
+            "no past revision may keep the erased body"
+        );
+        let summaries = handle
+            .store
+            .load_summaries(&[summary.id, unrelated_summary.id])
+            .await
+            .expect("summaries must load");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, unrelated_summary.id);
+
+        // Every required participant verified for the current sweep, and the
+        // status view never renders the target.
+        let participants = handle
+            .store
+            .deletion_participants(current.operation, None, 100)
+            .await
+            .expect("participants must read");
+        assert!(
+            participants
+                .iter()
+                .all(|record| record.progress.is_verified())
+        );
+        let page = handle
+            .deletion_status_page(None, 50)
+            .await
+            .expect("the status page must read");
+        assert!(!format!("{page:?}").contains(target));
+    }
+
+    #[tokio::test]
+    async fn a_multi_page_erasure_survives_a_host_restart() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, dir)) = memory_handle("targeted-deletion-a3a-pages").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "swordfish-a3a-pages";
+        let rows = ene_store::ERASURE_SCAN_ROWS * 3;
+        for index in 0..rows {
+            append_history(
+                &handle,
+                companion,
+                generation,
+                HistoryRole::Owner,
+                &format!("{target} note {index}"),
+            )
+            .await;
+        }
+        let surviving = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            "an unrelated note",
+        )
+        .await;
+
+        let current = admit(
+            &handle,
+            target,
+            vec![
+                ParticipantOwnerRef::Companion,
+                ParticipantOwnerRef::Learning,
+            ],
+        )
+        .await;
+        // One bounded demand per participant: the sweep cannot finish yet.
+        let first = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 1))
+            .await
+            .expect("the fan-out must run");
+        assert!(first.unfinished > 0, "the sweep must still have work");
+
+        // Restart: the durable operation and participant snapshot survive, the
+        // in-memory continuation cursors do not, and the reopened composition
+        // re-registers the built-in implementations.
+        drop(handle);
+        let reopened = reopen(dir.path()).await;
+        let outcome = drive_until_settled(&reopened).await;
+        assert_eq!(outcome.held, 0);
+        assert_eq!(outcome.unfinished, 0);
+        assert_eq!(
+            reopened
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0
+        );
+        let record = reopened
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current == current)
+            .expect("the operation identity survives the restart");
+        assert_eq!(record.current, current);
+        let timeline = reopened
+            .store
+            .load_timeline(companion, None, None, 1000)
+            .await
+            .expect("the timeline must load");
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].id, surviving);
+    }
+
     #[tokio::test]
     async fn admission_snapshots_the_current_product_surface_and_restart_keeps_it() {
         let Some((handle, dir)) = memory_handle("targeted-deletion-snapshot").await else {
@@ -621,6 +1002,10 @@ mod tests {
         let Some((handle, _dir)) = memory_handle("targeted-deletion-unsupported").await else {
             panic!("the host must open");
         };
+        // This test observes the fan-out's unsupported-hold path itself: the
+        // built-in implementations are removed so every required owner is
+        // demanded without one.
+        handle.reset_deletion_participants_for_tests();
         let required = handle.required_deletion_participants();
         let current = admit(&handle, "unsupported-target", required.clone()).await;
         let outcome = handle
@@ -674,6 +1059,10 @@ mod tests {
         let Some((handle, dir)) = memory_handle("targeted-deletion-crash").await else {
             panic!("the host must open");
         };
+        // Scripted participants for owners the built-in composition also
+        // serves: the registry is cleared so the scripted set is the whole
+        // composition.
+        handle.reset_deletion_participants_for_tests();
         let required = vec![
             ParticipantOwnerRef::Companion,
             ParticipantOwnerRef::Learning,
@@ -704,6 +1093,7 @@ mod tests {
         // snapshot and progress do not.
         drop(handle);
         let reopened = reopen(dir.path()).await;
+        reopened.reset_deletion_participants_for_tests();
         let companion_after = Arc::new(TestParticipant::new(
             ParticipantOwnerRef::Companion,
             ParticipantCompletionStatus::Verified,
@@ -757,6 +1147,7 @@ mod tests {
         let Some((handle, _dir)) = memory_handle("targeted-deletion-client").await else {
             panic!("the host must open");
         };
+        handle.reset_deletion_participants_for_tests();
         let incarnation = ParticipantOwnerRef::ClientIncarnation(RawId::new());
         let required = vec![ParticipantOwnerRef::Companion, incarnation];
         let current = admit(&handle, "client-target", required).await;
@@ -820,6 +1211,7 @@ mod tests {
         let Some((handle, _dir)) = memory_handle("targeted-deletion-stale").await else {
             panic!("the host must open");
         };
+        handle.reset_deletion_participants_for_tests();
         let current = admit(
             &handle,
             "stale-target",
@@ -859,6 +1251,7 @@ mod tests {
         let Some((handle, _dir)) = memory_handle("targeted-deletion-duplicate").await else {
             panic!("the host must open");
         };
+        handle.reset_deletion_participants_for_tests();
         handle
             .register_deletion_participant(Arc::new(TestParticipant::new(
                 ParticipantOwnerRef::Companion,
