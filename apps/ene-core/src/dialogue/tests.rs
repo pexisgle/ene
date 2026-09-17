@@ -1,6 +1,6 @@
 use super::AttachOutcome;
 use crate::serve::{CredStore, HostHandle, LiveInput, device_client};
-use crate::test_support::{live_input, memory_handle_with};
+use crate::test_support::{live_input, memory_handle, memory_handle_with};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
@@ -4626,6 +4626,190 @@ async fn memory_view_renders_current_recognition_grounds_and_revisions() {
     assert!(body.contains("grounds summary"), "{body}");
     assert!(body.contains("The owner likes jasmine tea."), "{body}");
     assert!(body.contains("The owner prefers coffee now."), "{body}");
+}
+
+/// A current erasure condition withholds covered Memory bodies at the
+/// management read boundary — current list, revision content, and shared
+/// grounds — while an unrelated body still renders. Only a response that
+/// actually handed a non-empty body over records the calling incarnation as a
+/// possible target-bearing local copy (lifecycle §8.1; critical-areas §5.2).
+#[tokio::test]
+async fn memory_view_withholds_covered_bodies_and_tracks_only_delivered_ones() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ChangeKind, ExperienceSourceKind, Importance, LearningRepository as _, LearningScope,
+        MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, SourceRangeRef, SummaryId,
+        SummaryRecord, TemporalMeaning,
+    };
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-memory-coverage");
+    // A direct-handle test mints `LiveInput` without an admitted frame, which
+    // is what pins the incarnation; pin it exactly as that frame would.
+    assert!(
+        live.authority
+            .pin_incarnation_for_tests(&live.connection_id, 7, 8),
+        "the fixture connection must pin one incarnation"
+    );
+    let (handle, _dir) = memory_handle("dlg-memory-coverage").await.unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let scope = LearningScope::companion(companion.as_raw());
+    let covered = MemoryId::generate();
+    let evidence = SummaryRecord {
+        id: SummaryId::generate(),
+        scope,
+        content: String::from("grounds for the covered target"),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: RawId::new(),
+            end: RawId::new(),
+        },
+        formed_at: WallClockWithTz::now(),
+    };
+    let committed = handle
+        .store
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(evidence),
+            secret_premise: None,
+            claim: None,
+            change: MemoryChange {
+                target: MemoryTarget::New { id: covered },
+                scope,
+                content: String::from("the covered target body"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        committed,
+        ene_learning::MemoryChangeOutcome::Committed { .. }
+    ));
+
+    // The condition is durable but no participant is driven, so the Memory
+    // rows stay readable and the read-time filter is the only gate.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("covered target"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    match handle.store.start_targeted_deletion(command).await.unwrap() {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("unexpected admission outcome: {other:?}"),
+    }
+
+    let tracked = |handle: &HostHandle| {
+        handle
+            .required_deletion_participants()
+            .iter()
+            .any(|owner| matches!(owner, ParticipantOwnerRef::ClientIncarnation(_)))
+    };
+    assert!(!tracked(&handle), "the fixture handed no body over yet");
+
+    // The current list keeps the row identity and cursor, withholds the
+    // covered body, and records no delivery.
+    let requested = handle
+        .handle_frame(
+            memory_request_frame(live.connection_id, None),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert!(body.contains("memory "), "the row identity stays: {body}");
+    assert!(
+        !body.contains("covered target"),
+        "the covered current body is withheld: {body}"
+    );
+    assert!(
+        !tracked(&handle),
+        "a covered-only response hands over no body"
+    );
+
+    // The revision page withholds the covered revision content and its
+    // covered shared grounds in the same pass.
+    let requested = handle
+        .handle_frame(
+            revision_request_frame(
+                live.connection_id,
+                &covered.as_raw().as_uuid().to_string(),
+                None,
+            ),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert!(body.contains("rev1"), "the revision identity stays: {body}");
+    assert!(
+        !body.contains("covered target"),
+        "the covered revision content and grounds are withheld: {body}"
+    );
+    assert!(
+        !tracked(&handle),
+        "a withheld revision and grounds hand over no body"
+    );
+
+    // An unrelated body still renders and is what records the delivery.
+    let committed = handle
+        .store
+        .commit_memory_change(MemoryChangeCommit {
+            summary: None,
+            secret_premise: None,
+            claim: None,
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope,
+                content: String::from("an unrelated body"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        committed,
+        ene_learning::MemoryChangeOutcome::Committed { .. }
+    ));
+    let requested = handle
+        .handle_frame(
+            view_request_frame(live.connection_id),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert!(body.contains("an unrelated body"), "{body}");
+    assert!(
+        !body.contains("covered target"),
+        "the covered row stays withheld in a mixed page: {body}"
+    );
+    assert!(
+        tracked(&handle),
+        "the delivered Memory body records the Client incarnation"
+    );
 }
 
 /// A page cursor drives the read-only Memory view, and untrusted cursor text

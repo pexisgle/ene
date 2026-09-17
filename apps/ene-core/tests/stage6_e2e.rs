@@ -2188,6 +2188,26 @@ async fn deliver_target_copy(served: &mut Served) {
     );
 }
 
+/// Waits until the Learning Memory row itself carries the target, observed
+/// through the independent DB scan. The fixture needs the planted body
+/// without reading any body-bearing Client surface first.
+async fn wait_for_target_memory_row(served: &Served) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if db_target_hits(&served.dir.join("app.db"), TARGET)
+            .iter()
+            .any(|hit| hit.starts_with("learning_memory."))
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the Learning Memory row never carried the target"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Stage 6 Blocker 1: the Owner confirmation runs in the serving Host, so the
 /// Client that received a target-bearing copy is snapshotted as a required
 /// participant; its own local-erasure confirmation is what verifies the
@@ -2332,6 +2352,108 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     let participant = client_incarnation_participant(&page)
         .expect("the completed operation still reports the Client participant");
     assert_eq!(participant.progress, "verified");
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    served.server.abort();
+}
+
+/// Stage 6 deletion final review, Blocker B1: the management Memory view is a
+/// body-bearing first-party read. After a Host restart cleared the in-memory
+/// delivery evidence of the earlier non-target round, an incarnation that
+/// receives the target-bearing Memory only through the management view must
+/// still be snapshotted as a required participant by the serving Host's
+/// control inlet, and its own local erasure is what verifies it and lets
+/// global completion commit.
+#[tokio::test]
+async fn stage6_management_view_memory_body_is_a_required_client_participant() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    // The owner turn and the companion reply carry no target: the Memory the
+    // Learning pass forms is the only target-bearing surface, and the current
+    // list page is the only Client-facing read that renders its body.
+    let owner = "please keep this note for later";
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (on_learning_formation(true), Call::text(formation_create())),
+            (
+                on_latest_owner(owner),
+                Call::text(String::from("I will keep that in mind.")),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let (_round, _stream, reply) = send_round(served.client(), owner)
+        .await
+        .expect("the note round must complete");
+    assert!(
+        !reply.contains(TARGET),
+        "the streamed reply must not carry the target: {reply}"
+    );
+    assert_absent_all(
+        "pre-deletion history",
+        &history_texts(served.client()).await,
+        TARGET,
+    );
+    wait_for_target_memory_row(&served).await;
+
+    // A Host restart drops the Host-memory delivery evidence; the durable
+    // Memory survives and the reconnected incarnation has received no
+    // target-bearing body in this serving process yet.
+    let mut client = served.restart().await;
+    let body = memory_view(&mut client).await;
+    assert!(
+        body.contains(TARGET),
+        "the management view hands the target-bearing Memory over: {body}"
+    );
+
+    // The first-party request only stages; the serving Host's control inlet
+    // snapshots the required participants and starts the operation.
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(
+        outcome,
+        ManagementOutcome::NeedsClarification,
+        "the Client intent only stages"
+    );
+    served.client = Some(client);
+    let current = confirm_deletion_via_serving_control(&mut served).await;
+
+    // The durable participant snapshot names the incarnation whose only
+    // target-bearing delivery was the management Memory view.
+    let page = local_deletion_page(&served.handle).await;
+    let participant = client_incarnation_participant(&page)
+        .expect("the view-delivered Client incarnation is a required participant");
+    assert!(
+        participant.sweep >= current.sweep.as_u64(),
+        "the Client participant belongs to the current sweep: {participant:?}"
+    );
+
+    // While the operation is unfinished, a fresh management Memory view is
+    // covered by the current condition: no covered body is displayed again,
+    // whether the row is still present (withheld) or already erased.
+    let body = memory_view(served.client()).await;
+    assert_absent("covered management view", &body, TARGET);
+
+    // The Client answers the bounded demand and only then does the operation
+    // reach the sealed global completion.
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    let participant = client_incarnation_participant(&page)
+        .expect("the completed operation still reports the Client participant");
+    assert_eq!(
+        participant.progress, "verified",
+        "the Client's own local erasure pass is the verification premise"
+    );
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
     served.server.abort();
