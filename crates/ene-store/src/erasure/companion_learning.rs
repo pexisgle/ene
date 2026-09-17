@@ -234,9 +234,8 @@ fn run_local_demand(
 ) -> Result<ParticipantCompletionFact, rusqlite::Error> {
     let mut guard = lock_shared(&store.conn);
     let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Deleted cells are zeroed instead of being left recoverable in freed
-    // pages; the flag is connection-scoped and only ever raised on this path.
-    tx.execute_batch("PRAGMA secure_delete = ON")?;
+    // Every store connection raises `secure_delete` at open, so deleted cells
+    // are zeroed instead of being left recoverable in freed pages.
     let mut cursor = {
         let slot = lock_cursor(sweep);
         match slot.as_ref() {

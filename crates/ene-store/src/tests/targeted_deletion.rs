@@ -969,3 +969,58 @@ async fn a_local_demand_without_material_is_held_not_a_fake_success() {
         ParticipantCompletionStatus::Held(ParticipantHoldClass::Failed)
     );
 }
+
+/// Reads the raw database file and reports whether `needle` appears
+/// verbatim. SQLite stores TEXT as UTF-8 bytes, so an erased body that only
+/// survives in freed pages is visible here even when every SQL read is clean.
+fn raw_file_contains(path: &std::path::Path, needle: &str) -> bool {
+    let bytes = std::fs::read(path).expect("the database file must be readable");
+    bytes
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+#[tokio::test]
+async fn erased_body_bytes_do_not_survive_in_the_raw_database_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secure-delete.db");
+    let store = Store::open(&path).await.unwrap();
+    let companion = store.ensure_running_companion().await.unwrap();
+    let generation = store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    let canary = "raw-canary-secure-delete-0f9c1";
+    append_role(&store, companion, generation, HistoryRole::Owner, canary).await;
+    assert!(
+        raw_file_contains(&path, canary),
+        "positive control: the committed body must be in the file before erasure"
+    );
+    {
+        let guard = crate::codec::lock_shared(&store.conn);
+        let enabled: i64 = guard
+            .query_row("PRAGMA secure_delete", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(enabled, 1, "every store connection raises secure_delete");
+    }
+
+    let participant = CompanionErasureParticipant::new(store.clone());
+    let fact = drive(
+        &participant,
+        condition(1),
+        ParticipantOwnerRef::Companion,
+        canary,
+    )
+    .await;
+    assert_eq!(
+        fact.status(),
+        ParticipantCompletionStatus::Verified,
+        "the bounded erase pass must verify the canary is gone"
+    );
+    assert!(
+        !raw_file_contains(&path, canary),
+        "an erased body must not survive in the raw database file"
+    );
+}

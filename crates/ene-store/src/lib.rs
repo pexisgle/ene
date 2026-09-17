@@ -123,6 +123,13 @@ impl Store {
     fn open_sync(path: &Path) -> Result<Self, StoreError> {
         let mut conn =
             Connection::open(path).map_err(|error| StoreError::OpenFailed(error.to_string()))?;
+        // Every erase/redaction path runs on this one connection, and SQLite
+        // does not overwrite freed pages by default: deleted or redacted text
+        // could otherwise survive in the file's free space. The setting is
+        // per-connection and must be established before any deletion, not
+        // inside an individual erase transaction.
+        conn.pragma_update(None, "secure_delete", "ON")
+            .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
         migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

@@ -2209,12 +2209,9 @@ impl PreservationRepository for Store {
             }
             // §12 step 2: destroy the operation-lifetime target/search
             // material, its semantic hints, its staged request's exact text,
-            // and every source correlation. Deleted cells are zeroed instead
-            // of being left recoverable in freed pages, exactly as the local
-            // owner sweeps do; the flag is connection-scoped and only ever
-            // raised on these paths.
-            tx.execute_batch("PRAGMA secure_delete = ON")
-                .map_err(storage)?;
+            // and every source correlation. Every store connection raises
+            // `secure_delete` at open, so deleted cells are zeroed instead of
+            // being left recoverable in freed pages.
             tx.execute(
                 "DELETE FROM deletion_search_material WHERE operation_id=?1",
                 [&id],
