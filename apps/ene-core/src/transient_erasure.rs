@@ -192,17 +192,6 @@ impl ErasureParticipant for HostTransientParticipant {
     }
 }
 
-/// One Client incarnation the Host handed body-bearing material to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TrackedIncarnation {
-    /// Host-minted participant identity, derived deterministically from the
-    /// Client's boot incarnation so the durable participant snapshot survives
-    /// a Host restart.
-    identity: RawId,
-    counter: u64,
-    random: u64,
-}
-
 /// One outstanding Host → Client local-erasure demand.
 struct PendingDemand {
     id: String,
@@ -256,8 +245,11 @@ pub(crate) struct ClientTransientRegistry {
 
 #[derive(Default)]
 struct ClientTransientInner {
-    /// Delivery order, oldest first.
-    tracked: VecDeque<TrackedIncarnation>,
+    /// Delivery order, oldest first. Membership is the admission-time
+    /// requirement evidence; reachability is resolved from the identity, not
+    /// from this in-memory list, so a durable participant snapshot still
+    /// resolves after a restart.
+    tracked: VecDeque<RawId>,
     /// At most one outstanding demand per incarnation.
     pending: HashMap<RawId, PendingDemand>,
 }
@@ -288,18 +280,10 @@ impl ClientTransientRegistry {
     pub(crate) fn note_body_delivery(&self, counter: u64, random: u64) -> Option<RawId> {
         let identity = Self::identity_for(counter, random);
         let mut inner = crate::lock_unpoison(&self.inner);
-        if inner
-            .tracked
-            .iter()
-            .any(|tracked| tracked.identity == identity)
-        {
+        if inner.tracked.iter().any(|tracked| *tracked == identity) {
             return None;
         }
-        inner.tracked.push_back(TrackedIncarnation {
-            identity,
-            counter,
-            random,
-        });
+        inner.tracked.push_back(identity);
         while inner.tracked.len() > TRACKED_CLIENT_CAP {
             inner.tracked.pop_front();
         }
@@ -312,20 +296,19 @@ impl ClientTransientRegistry {
         crate::lock_unpoison(&self.inner)
             .tracked
             .iter()
-            .map(|tracked| tracked.identity)
+            .copied()
             .collect()
     }
 
     /// The current authenticated connection of one tracked incarnation.
+    ///
+    /// The boot incarnation is recovered from the identity itself, so a
+    /// durable participant snapshot resolves after a Host restart even though
+    /// the in-memory delivery list did not survive it (`transient_erasure`
+    /// module docs: identity is Host-minted deterministically from the boot
+    /// incarnation).
     fn current_connection(&self, identity: RawId) -> Option<ConnectionWireId> {
-        let (counter, random) = {
-            let inner = crate::lock_unpoison(&self.inner);
-            inner
-                .tracked
-                .iter()
-                .find(|tracked| tracked.identity == identity)
-                .map(|tracked| (tracked.counter, tracked.random))?
-        };
+        let (counter, random) = identity.as_uuid().as_u64_pair();
         let table = self.table.get()?;
         table.current_connection_for_incarnation(counter, random)
     }
@@ -669,9 +652,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::serve::LiveInput;
+    use crate::serve::{CredStore, LiveInput};
     use crate::targeted_deletion::TargetedDeletionPass;
     use crate::test_support::{authenticate, memory_handle};
+    use ene_credential::MemoryCredentialStore;
     use ene_learning::{ExperienceRole, ExperienceSourceKind, ExperienceTurn, SourceRangeRef};
     use ene_preservation::{
         DeletionPurpose, DeletionSearchMaterial, DeletionSweepGeneration,
@@ -862,6 +846,42 @@ mod tests {
                 .len(),
             1,
             "a Client hold keeps the operation retryable-incomplete"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restarted_host_resolves_a_snapshotted_client_incarnation() {
+        let fixture = client_fixture("a3c-client-restart").await;
+        // A fresh process over the same directory: it has no in-memory
+        // delivery tracking and no registered Client implementation, exactly
+        // like a real Host restart. The durable operation snapshot still
+        // names the incarnation owner.
+        let reopened = HostHandle::open_with_cred_store(
+            fixture._dir.path(),
+            CredStore::Memory(MemoryCredentialStore::new()),
+        )
+        .await
+        .expect("the restarted handle must open");
+        let outcome = reopened
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .expect("the pass runs");
+        assert_eq!(outcome.verified, 0);
+        assert!(outcome.held >= 1, "the pass reports a hold: {outcome:?}");
+        let row = reopened
+            .store
+            .deletion_participants(fixture.condition.operation, None, 100)
+            .await
+            .expect("participant rows read")
+            .into_iter()
+            .find(|record| {
+                record.participant.owner == ParticipantOwnerRef::ClientIncarnation(fixture.identity)
+            })
+            .expect("the snapshotted client row exists");
+        assert_eq!(
+            row.progress.hold_reason(),
+            Some(ParticipantHoldClass::Unavailable),
+            "a restart resolves the durable owner to an unreachable hold, never to a composition defect"
         );
     }
 

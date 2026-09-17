@@ -75,6 +75,13 @@ pub fn current_product_surface_owners() -> Vec<ParticipantOwnerRef> {
 #[derive(Default, Clone)]
 pub struct ErasureParticipantRegistry {
     participants: HashMap<ParticipantOwnerRef, Arc<dyn ErasureParticipant>>,
+    /// The composition's Client-transient plumbing. A `ClientIncarnation` owner
+    /// snapshotted by an operation must stay resolvable after a Host restart:
+    /// the in-memory delivery list does not survive it, but the owner identity
+    /// is the deterministic projection of the Client boot incarnation the
+    /// connection table is keyed by, so the participant can be reconstructed
+    /// for the exact durable owner (lifecycle §8.1, §14).
+    client_transients: Option<Arc<crate::transient_erasure::ClientTransientRegistry>>,
 }
 
 impl std::fmt::Debug for ErasureParticipantRegistry {
@@ -110,20 +117,43 @@ impl ErasureParticipantRegistry {
         Ok(())
     }
 
+    /// Installs the composition's Client-transient plumbing, so a
+    /// `ClientIncarnation` owner in a durable participant snapshot resolves
+    /// through the current connection table after a restart (lifecycle §8.1).
+    pub(crate) fn install_client_transients(
+        &mut self,
+        registry: Arc<crate::transient_erasure::ClientTransientRegistry>,
+    ) {
+        self.client_transients = Some(registry);
+    }
+
     /// Issues one bounded demand. An owner without an implementation reports
     /// [`ParticipantHoldClass::Unsupported`] for the exact demanded condition,
     /// so the durable snapshot distinguishes "not implemented yet" from
-    /// "pending" and from success.
+    /// "pending" and from success. A `ClientIncarnation` owner is resolved
+    /// against the current connection table instead: a reachable incarnation
+    /// is demanded, and an unreachable one holds as `Unavailable` — never as a
+    /// composition defect.
     pub async fn demand(&self, command: DemandLocalErasureCommand) -> ParticipantCompletionFact {
-        match self.participants.get(&command.participant()) {
-            Some(participant) => participant.demand_local_erasure(command).await,
-            None => ParticipantCompletionFact::held(
-                command.condition(),
-                command.participant(),
-                ParticipantHoldClass::Unsupported,
-                WallClockWithTz::now(),
-            ),
+        let owner = command.participant();
+        if let Some(participant) = self.participants.get(&owner) {
+            return participant.demand_local_erasure(command).await;
         }
+        if let (ParticipantOwnerRef::ClientIncarnation(identity), Some(registry)) =
+            (owner, &self.client_transients)
+        {
+            let participant = crate::transient_erasure::ClientIncarnationParticipant::new(
+                identity,
+                Arc::clone(registry),
+            );
+            return participant.demand_local_erasure(command).await;
+        }
+        ParticipantCompletionFact::held(
+            command.condition(),
+            owner,
+            ParticipantHoldClass::Unsupported,
+            WallClockWithTz::now(),
+        )
     }
 }
 
@@ -1417,11 +1447,12 @@ mod tests {
         let Some((handle, _dir)) = memory_handle("targeted-deletion-unsupported").await else {
             panic!("the host must open");
         };
-        // The demanded owner is one no composition registers: a Client
-        // incarnation identity. Later A3 slices register their own owner
-        // classes, and this test's premise — an owner with no implementation
-        // is held, never completed — must not depend on which classes those
-        // happen to be.
+        // The demanded owner is one no composition registers: the registry is
+        // cleared, and with no Client plumbing installed a Client-incarnation
+        // identity has no implementation either. This test's premise — an
+        // owner with no implementation is held, never completed — must not
+        // depend on which classes the built-in composition happens to serve.
+        handle.reset_deletion_participants_for_tests();
         let required = vec![ParticipantOwnerRef::ClientIncarnation(RawId::new())];
         let current = admit(&handle, "unsupported-target", required.clone()).await;
         let outcome = handle

@@ -790,6 +790,8 @@ impl HostHandle {
         for participant in participants {
             self.register_deletion_participant(participant)?;
         }
+        crate::lock_unpoison(&self.targeted_deletion)
+            .install_client_transients(Arc::clone(&self.client_transients));
         Ok(())
     }
 

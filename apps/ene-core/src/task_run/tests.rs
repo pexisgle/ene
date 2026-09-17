@@ -258,10 +258,10 @@ impl TaskInstructionSource for NoInstructions {
     }
 }
 
-async fn run(
+async fn run<S: SecretScrubber>(
     fixture: &Fixture,
     inference: &ScriptedInference,
-    scrubber: &MarkerScrubber,
+    scrubber: &S,
     max_turns: u32,
 ) -> Result<TaskAgentRunOutcome, super::TaskAgentRunError> {
     let registry = TaskExecutionRegistry::default();
@@ -312,6 +312,47 @@ async fn a_consent_lapse_discards_the_output_without_action_or_result() {
     );
 }
 
+/// Fails the credential scrub only for the final answer, so the run reaches
+/// the result-record boundary with an unprovable premise.
+struct FinalFailingScrubber;
+
+impl SecretScrubber for FinalFailingScrubber {
+    async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
+        if text.contains("the unscrubbable result") {
+            return Err(SecretScrubError::SecretUnavailable);
+        }
+        Ok(scrub_fixture(text, CredentialSetRevision::initial()).await)
+    }
+}
+
+#[tokio::test]
+async fn an_unscrubbable_final_answer_seals_nothing() {
+    let fixture = fixture().await;
+    let inference = ScriptedInference::new(vec![
+        r#"{"final":"the unscrubbable result that must never be stored"}"#,
+    ]);
+    let scrubber = FinalFailingScrubber;
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS).await;
+    assert!(
+        matches!(
+            outcome,
+            Err(super::TaskAgentRunError::ResultScrubUnavailable { .. })
+        ),
+        "an unprovable result scrub fails closed, got {outcome:?}"
+    );
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .expect("the result read must answer")
+            .is_none(),
+        "no result body is recorded from an unprovable scrub premise"
+    );
+    assert_eq!(inference.calls(), 1, "the provider call itself stands");
+}
+
 #[tokio::test]
 async fn a_transcript_that_outgrows_the_budget_keeps_the_task_running() {
     let fixture = fixture().await;
@@ -335,7 +376,11 @@ async fn a_transcript_that_outgrows_the_budget_keeps_the_task_running() {
         "the execution continues instead of wedging on the input bound, got {outcome:?}"
     );
     let raw = scrubber.inputs();
-    assert_eq!(raw.len(), 3, "one scrub per turn");
+    assert_eq!(
+        raw.len(),
+        4,
+        "one scrub per turn plus the final result body"
+    );
     for (index, input) in raw.iter().enumerate() {
         assert!(
             input.chars().count() <= 1050,
@@ -431,7 +476,11 @@ async fn final_answer_is_recorded_and_adopted_as_completion() {
         acceptance,
         TaskResultAcceptance::AdoptedAsCompletion(fixture.task)
     );
-    assert_eq!(result.body.text(), "report written");
+    assert_eq!(
+        result.body.text(),
+        "[scrubbed] report written",
+        "the durable result body passes the credential scrub"
+    );
     assert_eq!(result.attempt_refs, Vec::<RawId>::new());
     let loaded = fixture
         .store
@@ -521,7 +570,11 @@ async fn read_then_create_then_final_runs_the_whole_loop() {
         "the first turn has no transcript"
     );
     let scrubbed = scrubber.inputs();
-    assert_eq!(scrubbed.len(), 3, "each turn is scrubbed exactly once");
+    assert_eq!(
+        scrubbed.len(),
+        4,
+        "each turn is scrubbed exactly once, and the final result body once more"
+    );
     assert!(
         scrubbed[2].contains("read ok:\nnotes") && scrubbed[2].contains("[TOOL CALL]"),
         "the raw transcript is scrubbed as one string, got {}",

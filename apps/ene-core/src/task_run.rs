@@ -450,6 +450,12 @@ pub enum TaskAgentRunError {
     Action(#[from] WorkspaceActionHostError),
     #[error("task storage unavailable: {reason}")]
     StorageUnavailable { reason: String },
+    /// The final answer could not be proven free of registered credential
+    /// values, so no result body was recorded. Fail closed: an unprovable
+    /// scrub premise is never stored as if it were scrubbed, and the
+    /// carried reason is a fixed class that never quotes the body.
+    #[error("result body scrub unavailable: {reason}")]
+    ResultScrubUnavailable { reason: String },
 }
 
 impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
@@ -591,9 +597,20 @@ pub async fn run_task_agent_execution(
         match parse_directive(produced.output.text()) {
             Err(reason) => return Ok(TaskAgentRunOutcome::ProtocolViolation { turn, reason }),
             Ok(TaskAgentDirective::Finish { body }) => {
-                let result =
-                    orchestrate_result_arrival(store, delegation, TaskAgentOutput::new(body))
-                        .await?;
+                // The same credential boundary that admits every logical input
+                // covers the durable result body: a final answer that cannot be
+                // proven scrubbed is never recorded raw.
+                let scrubbed = scrubber.scrub(&body).await.map_err(|_| {
+                    TaskAgentRunError::ResultScrubUnavailable {
+                        reason: String::from("credential scrub failed"),
+                    }
+                })?;
+                let result = orchestrate_result_arrival(
+                    store,
+                    delegation,
+                    TaskAgentOutput::new(scrubbed.text().to_owned()),
+                )
+                .await?;
                 let acceptance = store
                     .adopt_result(ene_task::TaskResultAdoptionClaim {
                         result: result.result,
