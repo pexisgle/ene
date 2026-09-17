@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::deletion::{DeletionStatusRequest, DeletionStatusResponse};
+use super::deletion::{
+    DeletionDemand, DeletionStatusRequest, DeletionStatusResponse, LocalErasureResult,
+};
 use super::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, DisconnectNotice,
     NegotiatedConnection, PairingRequest, PairingResult,
@@ -53,6 +55,8 @@ pub enum WirePayload {
     ManagementView(ManagementView),
     DeletionStatusRequest(DeletionStatusRequest),
     DeletionStatusResponse(DeletionStatusResponse),
+    DeletionDemand(DeletionDemand),
+    LocalErasureResult(LocalErasureResult),
     UndeliveredRequest(UndeliveredRequest),
     UndeliveredResponse(UndeliveredResponse),
     UndeliveredAck(UndeliveredAck),
@@ -100,6 +104,8 @@ impl WirePayload {
             Self::ManagementView(_) => "ManagementView",
             Self::DeletionStatusRequest(_) => "DeletionStatusRequest",
             Self::DeletionStatusResponse(_) => "DeletionStatusResponse",
+            Self::DeletionDemand(_) => "DeletionDemand",
+            Self::LocalErasureResult(_) => "LocalErasureResult",
             Self::UndeliveredRequest(_) => "UndeliveredRequest",
             Self::UndeliveredResponse(_) => "UndeliveredResponse",
             Self::UndeliveredAck(_) => "UndeliveredAck",

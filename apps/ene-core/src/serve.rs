@@ -459,8 +459,9 @@ pub struct HostHandle {
     /// completion. See
     /// [`crate::dialogue`]: the pass is post-response work, never a condition
     /// of the client-visible completion, and a crash simply drops the queued
-    /// derived update instead of replaying an old pass.
-    pub(crate) learning_queue: StdMutex<VecDeque<ene_learning::ExperienceCandidate>>,
+    /// derived update instead of replaying an old pass. Shared with the
+    /// Host-transient erasure participant (A3c), which drops covered premises.
+    pub(crate) learning_queue: Arc<StdMutex<VecDeque<ene_learning::ExperienceCandidate>>>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.
     pub(crate) learning_worker: AsyncMutex<()>,
@@ -520,6 +521,19 @@ pub struct HostHandle {
     /// reopening composition re-registers its implementations before driving,
     /// so a restart can never turn a missing implementation into completion.
     pub(crate) targeted_deletion: StdMutex<crate::targeted_deletion::ErasureParticipantRegistry>,
+    /// Invalidation fence for in-flight Host transient payloads (A3c).
+    ///
+    /// Bumped by the Host-transient erasure demand; a dialogue stream or
+    /// assembled reply that started before the bump can no longer prove its
+    /// payload is uncovered and fails closed. Holds no deletion condition, so
+    /// it is not a second currentness registry.
+    pub(crate) transient_fence: Arc<crate::transient_erasure::TransientErasureFence>,
+    /// Client incarnations the Host handed body-bearing material to, plus the
+    /// in-flight local-erasure demand plumbing (A3c, lifecycle §8.1).
+    ///
+    /// Host-memory only: restart drops the tracking and every connection, so
+    /// an incarnation the Host cannot name is never claimed as required.
+    pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
     /// Test-only deterministic gate for conversation task-control commands.
     #[cfg(test)]
     pub(crate) task_control_gate:
@@ -652,6 +666,12 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))?;
         let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
             .map_err(|error| CoreError::Store(error.to_string()))?;
+        let presentations = Arc::new(StdMutex::new(
+            crate::presentation::PresentationState::default(),
+        ));
+        let learning_queue = Arc::new(StdMutex::new(VecDeque::new()));
+        let transient_fence = Arc::new(crate::transient_erasure::TransientErasureFence::default());
+        let client_transients = Arc::new(crate::transient_erasure::ClientTransientRegistry::new());
         let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
@@ -659,20 +679,20 @@ impl HostHandle {
             rounds: Arc::new(StdMutex::new(HashMap::new())),
             cred_store,
             auth_store,
-            learning_queue: StdMutex::new(VecDeque::new()),
+            learning_queue: Arc::clone(&learning_queue),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: std::sync::Arc::new(crate::task_run::TaskExecutionRegistry::default()),
             conversation_tasks: crate::task_control::ConversationTaskProjection::default(),
-            presentations: Arc::new(StdMutex::new(
-                crate::presentation::PresentationState::default(),
-            )),
+            presentations: Arc::clone(&presentations),
             presentation_lock: AsyncMutex::new(()),
             trusted_task_premises: crate::task_control::TrustedTaskPremises::default(),
             task_launcher: OnceLock::new(),
             targeted_deletion: StdMutex::new(
                 crate::targeted_deletion::ErasureParticipantRegistry::new(),
             ),
+            transient_fence: Arc::clone(&transient_fence),
+            client_transients,
             #[cfg(test)]
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -720,7 +740,7 @@ impl HostHandle {
     fn install_local_erasure_participants(&self) -> Result<(), CoreError> {
         use std::sync::Arc;
 
-        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 8] = [
+        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 9] = [
             Arc::new(ene_store::CompanionErasureParticipant::new(
                 self.store.clone(),
             )),
@@ -742,6 +762,11 @@ impl HostHandle {
             Arc::new(ene_presence::PresenceErasureParticipant::new(Arc::new(
                 self.store.clone(),
             ))),
+            Arc::new(crate::transient_erasure::HostTransientParticipant::new(
+                self.transient_fence.clone(),
+                self.presentations.clone(),
+                self.learning_queue.clone(),
+            )),
         ];
         for participant in participants {
             self.register_deletion_participant(participant)?;
@@ -868,11 +893,41 @@ impl HostHandle {
     /// The set is snapshotted durably with the operation admission; later
     /// changes in the registered implementations never widen an admitted
     /// operation, and an owner with no implementation is still required.
-    /// Client-incarnation owners are appended by the Client-transient slice
-    /// once it can identify which incarnation may hold a target-bearing copy.
+    /// Client incarnations the Host handed body-bearing material to are
+    /// appended here, so a Client that may hold a target-bearing local copy is
+    /// snapshotted as required at admission and later driven (or held when
+    /// unreachable) — an incarnation the Host cannot name is never invented
+    /// (lifecycle §8.1).
     #[must_use]
     pub fn required_deletion_participants(&self) -> Vec<ene_preservation::ParticipantOwnerRef> {
-        crate::targeted_deletion::current_product_surface_owners()
+        let mut owners = crate::targeted_deletion::current_product_surface_owners();
+        owners.extend(
+            self.client_transients
+                .tracked_incarnations()
+                .into_iter()
+                .map(ene_preservation::ParticipantOwnerRef::ClientIncarnation),
+        );
+        owners
+    }
+
+    /// Installs the serving composition's connection table as the authority
+    /// for Client-incarnation reachability (lifecycle §8.1).
+    ///
+    /// A handle opened without a serving composition has no table: every
+    /// Client demand is then an explicit unreachable hold instead of a
+    /// guessed delivery path.
+    pub(crate) fn install_client_connection_table(&self, table: std::sync::Arc<ConnectionTable>) {
+        self.client_transients.install_connection_table(table);
+    }
+
+    /// The current Host transient erasure fence epoch (A3c).
+    ///
+    /// A dialogue stream or assembled reply captures it at start and fails
+    /// closed when it moved: no transient payload published across the move
+    /// can prove it is uncovered.
+    #[must_use]
+    pub(crate) fn transient_fence_epoch(&self) -> u64 {
+        self.transient_fence.epoch()
     }
 
     /// Test-only: empties the erasure-participant registry.
@@ -1311,6 +1366,19 @@ impl HostHandle {
                     }
                 }
             }
+            WirePayload::LocalErasureResult(result) => {
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "erasure result on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
+                }
+                // A client report, not a command: it answers an outstanding
+                // demand for this connection's incarnation when it matches one
+                // and changes nothing otherwise. No reply is emitted — a
+                // local-erasure result is itself the fact, and it is never
+                // global completion (lifecycle §10).
+                self.accept_client_erasure_result(&live, result);
+            }
             // Inbound rejects, stray acks, and future variants answer
             // nothing: only the Host rejects, and only in response.
             _ => {}
@@ -1726,16 +1794,19 @@ impl HostHandle {
     ///
     /// Owners: presentation subscriptions, receipts, query-scoped refs,
     /// cursors, carried item refs, resume retry-epoch slots; conversation
-    /// open rounds; the first-party Task selection. Streams need no registry:
-    /// every publication re-checks the connection table (CCT §10.4). Durable
-    /// rows are never touched — a released receipt leaves its rows
-    /// re-presentable, and a dropped open round leaves its History rows
-    /// readable through `HistoryRequest`.
+    /// open rounds; the first-party Task selection; and any outstanding Client
+    /// local-erasure demand addressed to this connection (its waiter reports a
+    /// hold, never a completion). Streams need no registry: every publication
+    /// re-checks the connection table (CCT §10.4). Durable rows are never
+    /// touched — a released receipt leaves its rows re-presentable, and a
+    /// dropped open round leaves its History rows readable through
+    /// `HistoryRequest`.
     fn drop_connection_transient_state(&self, connection: &ConnectionWireId) {
         self.drop_presentation_connection_state(connection);
         self.drop_open_rounds_for(connection);
         self.conversation_tasks
             .drop_first_party_selection_for(connection);
+        self.client_transients.note_connection_ended(connection);
     }
 
     /// Arms the confirmation gate before either commit lock is acquired.

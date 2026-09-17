@@ -5525,6 +5525,7 @@ fn gate_for(
         tx,
         seq: 0,
         opened: true,
+        fence_epoch: premises.handle.transient_fence_epoch(),
     }
 }
 
@@ -7095,5 +7096,119 @@ async fn provider_output_never_starts_a_targeted_deletion() {
             .unwrap()
             .is_empty(),
         "no erasure condition is published by a provider turn"
+    );
+}
+
+/// Stage 6 A3c: a Targeted Deletion condition that becomes durable while a
+/// reply is streaming stops the remaining deltas and refuses the assembled
+/// reply, so the payload is neither displayed nor appended to History.
+#[tokio::test]
+async fn a3c_a_deletion_mid_stream_stops_deltas_and_reply_adoption() {
+    use crate::targeted_deletion::TargetedDeletionPass;
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+
+    let transport = GatedStreamingTransport::new(&["Hel", "lo deleted body"]);
+    let live = live_input("client-stream-erasure");
+    let (handle, _dir) = round_test_handle("dlg-stream-erasure", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream-erasure",
+        "hi",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut host =
+        Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 4 {
+        tokio::select! {
+            biased;
+            () = &mut host => panic!("the provider completed before the early frames"),
+            maybe = rx.recv() => early.push(maybe.expect("frames must arrive")),
+        }
+    }
+    let WirePayload::TextStreamFrame(first) = &early[3].payload else {
+        panic!("the fourth frame is the first delta");
+    };
+    assert_eq!(
+        first.delta, "Hel",
+        "the first delta is displayed before the condition"
+    );
+
+    // The condition becomes durable, then the Host transient holder is
+    // demanded: the in-flight stream and its assembled reply are invalidated.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("deleted body"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        ene_primitive::WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .confirmed_for_tests();
+    assert!(matches!(
+        handle
+            .store
+            .start_targeted_deletion(command)
+            .await
+            .expect("admission commits"),
+        StartTargetedDeletionOutcome::Started(_)
+    ));
+    let outcome = handle
+        .drive_targeted_deletion(TargetedDeletionPass::new(100, 4))
+        .await
+        .expect("the pass runs");
+    assert!(
+        outcome.verified >= 1,
+        "the host-transient demand verified its bounded work: {outcome:?}"
+    );
+
+    transport.release().await;
+    host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut frames = early;
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+
+    let deltas: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["Hel"],
+        "no delta after the condition is displayed: {deltas:?}"
+    );
+    let close = frames.iter().find_map(|frame| match &frame.payload {
+        WirePayload::TextStreamClose(close) => Some(close.status),
+        _ => None,
+    });
+    assert_eq!(
+        close,
+        Some(StreamClose::Interrupted),
+        "the stream fails closed instead of completing a covered reply"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        1,
+        "the owner input is durable and the covered reply is never adopted"
     );
 }

@@ -3604,3 +3604,272 @@ async fn failed_mark_stays_unselected_and_represents() {
     );
     assert!(unpresented_statuses(&handle).await.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Stage 6 A3c: Targeted Deletion transient invalidation at the presentation
+// boundary. The Host-transient participant invalidates receipts and carried
+// refs, and every fresh read re-checks the canonical current conditions before
+// materializing a body.
+// ---------------------------------------------------------------------------
+
+use crate::targeted_deletion::TargetedDeletionPass;
+use ene_preservation::{
+    DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+    PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+    TargetedDeletionTarget,
+};
+
+/// Admits one deletion operation with `participants` and runs one bounded
+/// fan-out pass, so the Host-transient owner (registered by the composition)
+/// is actually demanded.
+async fn admit_and_drive(handle: &HostHandle, text: &str, participants: Vec<ParticipantOwnerRef>) {
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                text.to_owned(),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        participants,
+    )
+    .confirmed_for_tests();
+    match handle
+        .store
+        .start_targeted_deletion(command)
+        .await
+        .expect("admission must commit")
+    {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("unexpected admission outcome: {other:?}"),
+    }
+    let outcome = handle
+        .drive_targeted_deletion(TargetedDeletionPass::new(100, 4))
+        .await
+        .expect("the pass runs");
+    assert!(
+        outcome.verified >= 1,
+        "the host-transient demand verifies its own bounded work: {outcome:?}"
+    );
+}
+
+/// One authenticated-and-current connection on a caller-owned table: the
+/// same-device replacement below installs a second record and supersedes the
+/// first, exactly like the handshake path (IPC §9.3).
+fn authenticated_connection(
+    table: &Arc<ConnectionTable>,
+    device: &str,
+) -> (ConnectionWireId, LiveInput) {
+    let id = table.note_accept();
+    authenticate(table, &id, device);
+    let live = table
+        .snapshot(&id)
+        .expect("the authenticated connection snapshots");
+    (id, live)
+}
+
+#[tokio::test]
+async fn a3c_an_old_receipt_cannot_present_after_a_condition_and_transient_demand() {
+    let (handle, _dir) = open_handle("present-a3c-ack").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "the target body", generation).await;
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(summary.items[0].excerpt, "the target body");
+
+    // The condition is durable and the Host transient holder is demanded
+    // before the ACK arrives.
+    admit_and_drive(
+        &handle,
+        "the target body",
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+
+    let outcome = ack(
+        &handle,
+        &live,
+        &summary.receipt.0,
+        summary.round.clone(),
+        summary.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            UndeliveredAckOutcome::StalePresentation | UndeliveredAckOutcome::UnknownRef
+        ),
+        "an invalidated receipt never presents a covered row, got {outcome:?}"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(statuses.len(), 1);
+    assert_ne!(
+        statuses[0].1,
+        ReportStatus::Presented,
+        "the covered row stays unpresented"
+    );
+    // A local transient drop is not the global completion: the operation is
+    // still unfinished after the verified host-transient demand.
+    assert_eq!(
+        handle
+            .store
+            .unfinished_deletions(None, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a3c_a_fresh_read_after_a_condition_withholds_the_covered_body() {
+    let (handle, _dir) = open_handle("present-a3c-read").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "covered body text", generation).await;
+    append_reply(&handle, "unrelated body text", generation).await;
+
+    admit_and_drive(
+        &handle,
+        "covered body text",
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+
+    // A reconnect (fresh connection lifetime) reconstructs the page from the
+    // canonical source: the covered body is withheld, the unrelated one is
+    // still served.
+    let reconnected = live_input(DEVICE_A);
+    let summary = summary_of(fetch(&handle, &reconnected, None, None, false).await);
+    assert_eq!(summary.items.len(), 2, "correlation rows stay pageable");
+    let excerpts: Vec<&str> = summary
+        .items
+        .iter()
+        .map(|item| item.excerpt.as_str())
+        .collect();
+    assert!(
+        excerpts
+            .iter()
+            .all(|excerpt| !excerpt.contains("covered body text")),
+        "no covered body is re-materialized: {excerpts:?}"
+    );
+    assert!(
+        excerpts.contains(&"unrelated body text"),
+        "unrelated bodies stay presentable: {excerpts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a3c_a_replacement_and_deletion_never_resurrect_the_stale_payload() {
+    let (handle, _dir) = open_handle("present-a3c-replace").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let table = Arc::new(ConnectionTable::new());
+    handle.install_client_connection_table(Arc::clone(&table));
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "stale payload body", generation).await;
+
+    // C1 receives the summary first.
+    let (c1_id, c1) = authenticated_connection(&table, DEVICE_A);
+    let first = summary_of(fetch(&handle, &c1, None, None, false).await);
+    assert_eq!(first.items.len(), 1);
+    assert!(first.items[0].excerpt.contains("stale payload body"));
+
+    // C2 replaces C1 (the handshake path reports the supersession to the
+    // Host's single lifecycle boundary), and a deletion condition becomes
+    // durable; the transient demand drops the receipt world.
+    let (_c2_id, c2) = authenticated_connection(&table, DEVICE_A);
+    handle.on_connection_superseded(&c1_id);
+    admit_and_drive(
+        &handle,
+        "stale payload body",
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+
+    // C1's own connection is superseded: nothing installs for it any more.
+    let frame = frame_for(
+        WirePayload::UndeliveredRequest(UndeliveredRequest {
+            companion: None,
+            cursor: None,
+            limit: None,
+            redisplay: false,
+        }),
+        &c1,
+        None,
+        None,
+        None,
+    );
+    let request = match &frame.payload {
+        WirePayload::UndeliveredRequest(request) => request.clone(),
+        _ => unreachable!(),
+    };
+    let refused = handle.request_undelivered(&frame, &c1, &request).await;
+    assert_eq!(refused.len(), 1, "one request answers one frame");
+    assert!(
+        matches!(refused[0].payload, WirePayload::Reject(_)),
+        "a superseded connection never restarts a presentation pass"
+    );
+    // C1's old receipt never presents covered rows on any connection.
+    let stale_ack = ack(
+        &handle,
+        &c2,
+        &first.receipt.0,
+        first.round.clone(),
+        first.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(
+            stale_ack,
+            UndeliveredAckOutcome::StaleConnection | UndeliveredAckOutcome::StalePresentation
+        ),
+        "the old receipt is stale, got {stale_ack:?}"
+    );
+
+    // C2's fresh pass re-reads the canonical source: no covered body.
+    let second = summary_of(fetch(&handle, &c2, None, None, false).await);
+    assert!(
+        second
+            .items
+            .iter()
+            .all(|item| !item.excerpt.contains("stale payload body")),
+        "the replacement never inherits the stale payload: {:?}",
+        second.items
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert!(
+        statuses
+            .iter()
+            .all(|(_, status)| *status != ReportStatus::Presented),
+        "no path moved the covered row to Presented: {statuses:?}"
+    );
+}
+
+#[tokio::test]
+async fn a3c_the_read_coverage_premise_is_canonical_and_body_free() {
+    let (handle, _dir) = open_handle("present-a3c-coverage").await;
+    // No current condition: the canonical read answers the authoritative
+    // empty set, never a cached "no deletion" sentinel.
+    assert!(!handle.current_coverage().await.covers("the target body"));
+    admit_and_drive(
+        &handle,
+        "the target body",
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+    let coverage = handle.current_coverage().await;
+    assert!(
+        coverage.covers("prefix the target body suffix"),
+        "a body containing the mechanical target is covered"
+    );
+    assert!(
+        !coverage.covers("unrelated text"),
+        "an unrelated body stays presentable"
+    );
+}

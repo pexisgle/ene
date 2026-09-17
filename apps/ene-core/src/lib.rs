@@ -18,6 +18,9 @@
 //! - [`deletion`] holds the Stage 6 Targeted Deletion management surface:
 //!   advisory wire requests, the Host-local trusted confirmation inlet, and
 //!   the bounded body-free status view.
+//! - [`transient_erasure`] holds the Stage 6 A3c Host-transient and
+//!   first-party-Client erasure participants: Host transient payload
+//!   invalidation and the bounded Client local-erasure demand round trip.
 //! - [`task_agent`] adapts the Task-owned Task Agent inference port to the
 //!   Host inference boundary.
 //! - [`action`] adapts the Task-owned delegation/workspace correspondence to
@@ -51,6 +54,7 @@ pub mod targeted_deletion;
 pub mod task_agent;
 pub mod task_control;
 pub mod task_run;
+pub mod transient_erasure;
 
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -161,6 +161,64 @@ fn session_starts_unobserved_and_tracks_latest() {
     );
 }
 
+/// One Host local-erasure demand wipes the deferred presentation buffer and
+/// reports exactly the classes this process manages; the wire reply carries
+/// no body and no system-wide completion claim (Stage 6 A3c).
+#[test]
+fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
+    use ene_api::v1::deletion::{
+        ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
+        LocalErasureResult,
+    };
+
+    let mut session = SessionState::default();
+    session.push_deferred(crate::client::frames::frame_for(
+        WirePayload::PresenceAttribution(presence_fact(1)),
+        WireSender {
+            device_id: None,
+            incarnation_id: incarnation(),
+            connection_id: None,
+        },
+    ));
+    assert!(
+        session.take_undelivered().is_empty(),
+        "the deferred queue holds the frame before the demand"
+    );
+    let drained = session.wipe_transient();
+    assert_eq!(
+        drained,
+        vec![
+            ClientTempClass::PresentationBuffer,
+            ClientTempClass::InputDraft
+        ]
+    );
+    assert!(
+        session.take_undelivered().is_empty(),
+        "the deferred presentation buffer is dropped whole"
+    );
+
+    let demand = DeletionDemand {
+        demand: DeletionDemandWireId(String::from("demand-1")),
+        operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-1")),
+        sweep: 3,
+        targets: vec![DeletionTargetWire::WipeClass {
+            class: ClientTempClass::PresentationBuffer,
+        }],
+    };
+    let result = LocalErasureResult {
+        demand: demand.demand.clone(),
+        operation: demand.operation.clone(),
+        sweep: demand.sweep,
+        wiped: drained,
+        unverified: Vec::new(),
+    };
+    let json = serde_json::to_string(&result).expect("the result must serialize");
+    assert!(
+        !json.to_lowercase().contains("deletion:"),
+        "the wire result carries no mechanical target: {json}"
+    );
+}
+
 #[test]
 fn stale_generation_of_reads_only_stale_answers() {
     assert!(

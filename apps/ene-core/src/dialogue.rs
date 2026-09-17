@@ -844,6 +844,11 @@ impl HostHandle {
                     }
                 }
                 let stream = StreamWireId(RawId::new().as_uuid());
+                // The fence epoch is captured before the stream can publish:
+                // a Targeted Deletion that invalidates Host transient payloads
+                // after this point stops the stream and refuses the assembly,
+                // because the reply can no longer prove it is uncovered.
+                let fence_epoch = self.transient_fence.epoch();
                 // Installation is not publication authority: replacement can
                 // win between them. Queue both control frames in one short
                 // ownership section, never socket I/O or an await. Already
@@ -899,6 +904,7 @@ impl HostHandle {
                     tx: stream_tx.clone(),
                     seq: 0,
                     opened,
+                    fence_epoch,
                 };
                 let task_control =
                     crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
@@ -911,8 +917,15 @@ impl HostHandle {
                     // the store transaction, which compares the turn's
                     // Owner message premise atomically.
                     let is_current = || {
-                        self.open_round_for(&live.connection_id, &companion_key)
-                            .is_none_or(|open| open.round == accepted)
+                        // A Targeted Deletion that invalidated Host transient
+                        // payloads since this turn started refuses the adoption:
+                        // the assembled reply can no longer prove it is
+                        // uncovered, and a durable reply is not worth
+                        // resurrecting a deleted body into History.
+                        self.transient_fence.epoch() == fence_epoch
+                            && self
+                                .open_round_for(&live.connection_id, &companion_key)
+                                .is_none_or(|open| open.round == accepted)
                     };
                     finish_turn(
                         turn,
@@ -1072,7 +1085,27 @@ impl HostHandle {
         request: &HistoryRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let response = self.read_history(request).await;
+        let coverage = self.current_coverage().await;
+        let response = match self.read_history(request).await {
+            HistoryResponse::Items(items) => {
+                let had_body = items.iter().any(|item| !item.text.is_empty());
+                // A covered body is not displayed: the canonical source is
+                // re-read here and checked against the current conditions, so
+                // a timeline page cannot show an erased message while the
+                // durable erasure finishes.
+                let items: Vec<_> = items
+                    .into_iter()
+                    .filter(|item| !coverage.covers(&item.text))
+                    .collect();
+                let serves_body = items.iter().any(|item| !item.text.is_empty());
+                if had_body && serves_body {
+                    // The body reaches the Client: record the local copy holder.
+                    self.note_client_body_delivery(live);
+                }
+                HistoryResponse::Items(items)
+            }
+            other => other,
+        };
         vec![outgoing_frame(
             frame,
             live,
@@ -1375,6 +1408,9 @@ struct StreamGate<'a> {
     seq: u64,
     /// No wire close (or delta) is legal unless Open was queued.
     opened: bool,
+    /// The Host transient erasure fence epoch this stream started under; a
+    /// later epoch means the payload can no longer be published.
+    fence_epoch: u64,
 }
 
 impl StreamGate<'_> {
@@ -1400,6 +1436,12 @@ impl StreamGate<'_> {
         // a replacement invalidates this stream even though the device,
         // client id, generation, and round key look unchanged.
         if !self.connection_current() {
+            return false;
+        }
+        // A Targeted Deletion invalidated Host transient payloads since this
+        // stream opened: the remaining deltas can no longer prove they are
+        // uncovered, so they fail closed instead of publishing.
+        if self.handle.transient_fence_epoch() != self.fence_epoch {
             return false;
         }
         // A newer submit replaced this stream's round: the owner's
@@ -1560,6 +1602,9 @@ impl DeltaSink for StreamGate<'_> {
             {
                 return DeltaFlow::Abort("the connection was replaced");
             }
+            // The delta body now reaches the Client: track the incarnation as
+            // a possible target-bearing local copy holder (lifecycle §8.1).
+            self.handle.note_client_body_delivery(self.live);
             self.seq += 1;
             DeltaFlow::Continue
         })

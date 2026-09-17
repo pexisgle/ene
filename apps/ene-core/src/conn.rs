@@ -77,7 +77,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use ene_inference::ProviderTransport;
 
-use crate::serve::{CoreError, HostHandle};
+use crate::serve::{CoreError, HostHandle, outgoing_frame};
 
 const SOCKET_NAME: &str = "ene.sock";
 
@@ -580,6 +580,43 @@ impl ConnectionTable {
             .map(|record| record.phase)
     }
 
+    /// The Client incarnation pinned to one connection, if a frame pinned it.
+    ///
+    /// The pin is written by the first admitted frame only; later frames must
+    /// agree or the connection is dropped, so this is Host-observed identity,
+    /// never a Client claim.
+    pub(crate) fn incarnation_of(&self, id: &ConnectionWireId) -> Option<(u64, u64)> {
+        let table = crate::lock_unpoison(&self.inner);
+        let record = table.records.get(id)?;
+        record
+            .incarnation
+            .map(|incarnation| (incarnation.counter, incarnation.random))
+    }
+
+    /// The current authenticated connection of one Client incarnation, if any.
+    ///
+    /// Only an authenticated, device-current record is reachability evidence:
+    /// a superseded, closed, or unauthenticated socket is never used to
+    /// deliver a demand, and its absence is an explicit unreachable hold.
+    pub(crate) fn current_connection_for_incarnation(
+        &self,
+        counter: u64,
+        random: u64,
+    ) -> Option<ConnectionWireId> {
+        let table = crate::lock_unpoison(&self.inner);
+        table.records.iter().find_map(|(id, record)| {
+            let incarnation = record.incarnation?;
+            if incarnation.counter != counter || incarnation.random != random {
+                return None;
+            }
+            if record.phase != ConnectionPhase::Authenticated {
+                return None;
+            }
+            let device = record.paired_device.as_ref()?;
+            (table.device_current.get(device) == Some(id)).then_some(*id)
+        })
+    }
+
     /// Runs one short synchronous commit under the connection-ownership
     /// section (CCT §10.4).
     ///
@@ -606,6 +643,26 @@ impl ConnectionTable {
             return None;
         }
         Some(commit())
+    }
+
+    /// Test-only: pins one incarnation on an accepted record exactly as the
+    /// first admitted frame would, so Client-lifecycle tests need no transport.
+    #[cfg(test)]
+    pub(crate) fn pin_incarnation_for_tests(
+        &self,
+        id: &ConnectionWireId,
+        counter: u64,
+        random: u64,
+    ) -> bool {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return false;
+        };
+        if record.incarnation.is_some() {
+            return false;
+        }
+        record.incarnation = Some(ClientIncarnationId { counter, random });
+        true
     }
 
     /// Test-only pending-challenge snapshot.
@@ -739,6 +796,9 @@ where
     ));
     let _ = handle.install_task_launcher(launcher);
     let table = Arc::new(ConnectionTable::new());
+    // The serving composition owns the reachability authority for Client
+    // incarnations: without it a Client demand would be an unreachable hold.
+    handle.install_client_connection_table(Arc::clone(&table));
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
@@ -863,6 +923,41 @@ where
         return true;
     };
     write_response(write_half, pushed, terminal).await
+}
+
+/// Emits one pending Client local-erasure demand on this connection.
+///
+/// Mirrors [`emit_push`]: the demand is addressed to the connection's pinned
+/// incarnation and written under the connection's last admitted frame as the
+/// envelope template. The demand is marked delivered before the write; a write
+/// failure ends further pushes, and the participant wait reports an explicit
+/// hold (never a completion) for this pass, so a lost demand is re-driven
+/// idempotently by a later pass.
+#[cfg(any(unix, windows))]
+async fn emit_client_demand<W>(
+    write_half: &mut W,
+    handle: &HostHandle,
+    table: &Arc<ConnectionTable>,
+    connection: &ConnectionWireId,
+    template: &Option<(WireFrame, LiveInput)>,
+    terminal: &mut bool,
+) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let Some((frame, _)) = template else {
+        return true;
+    };
+    let Some(live) = table.snapshot(connection) else {
+        return true;
+    };
+    if !table.is_current_authenticated(connection) {
+        return true;
+    }
+    let Some(payload) = handle.take_client_demand(&live) else {
+        return true;
+    };
+    write_response(write_half, outgoing_frame(frame, &live, payload), terminal).await
 }
 
 /// An incarnation mismatch, a corrupt or oversize frame, or a terminal
@@ -1008,6 +1103,19 @@ async fn serve_connection<S, T>(
                 {
                     push_blocked = true;
                 }
+                if !push_blocked
+                    && !emit_client_demand(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
                 if failed || terminal {
                     break 'connection;
                 }
@@ -1030,6 +1138,34 @@ async fn serve_connection<S, T>(
                 {
                     push_blocked = true;
                 }
+                if !push_blocked
+                    && !emit_client_demand(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
+            }
+            () = handle.client_demand_wakeup().notified() => {
+                if !push_blocked
+                    && !emit_client_demand(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
             }
             () = timer => {
                 // Expiry is durable-state progression, not a socket write:
@@ -1040,6 +1176,19 @@ async fn serve_connection<S, T>(
                 handle.expire_due_receipts(&connection);
                 if !push_blocked
                     && !emit_push(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
+                if !push_blocked
+                    && !emit_client_demand(
                         &mut write_half,
                         &handle,
                         &table,
@@ -1096,6 +1245,7 @@ where
     ));
     let _ = handle.install_task_launcher(launcher);
     let table = Arc::new(ConnectionTable::new());
+    handle.install_client_connection_table(Arc::clone(&table));
     loop {
         if server.connect().await.is_err() {
             // A failed wait leaves this instance unusable; replace it rather
