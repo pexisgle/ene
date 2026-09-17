@@ -1525,7 +1525,7 @@ mod dispatch_tests {
         );
         let result = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1553,7 +1553,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
         let result = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1718,7 +1718,7 @@ mod dispatch_tests {
         );
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
