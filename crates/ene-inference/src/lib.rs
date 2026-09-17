@@ -1308,7 +1308,7 @@ mod dispatch_tests {
     }
 
     /// Usage repository that fails every write, modelling a storage failure
-    /// right after a claimed abort.
+    /// at settlement time.
     struct FailingUsage;
 
     impl UsageRepository for FailingUsage {
@@ -1481,6 +1481,68 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
+    async fn usage_failure_on_completed_call_propagates_not_a_clean_success() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(
+            String::from("hi there"),
+            Some(RawUsage {
+                input_tokens: 4,
+                cached_input_tokens: 1,
+                output_tokens: 2,
+            }),
+        );
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a claimed call whose settlement fails must not answer Completed"
+        );
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "the storage failure propagates: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_failure_on_transport_error_propagates_not_a_clean_technical_error() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello"),
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        )
+        .await;
+        // The transport error already proves the call may have run, so losing
+        // its accounting too would report a technical failure with no durable
+        // fact; the settlement failure takes precedence.
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "the usage failure must not be swallowed by the transport error: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn never_sent_records_no_fact() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
         let consent = FixedConsent(Some(record(1)));
@@ -1609,11 +1671,11 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
-    async fn partial_usage_without_cache_detail_settles_unknown() {
+    async fn explicit_zero_cached_tokens_stays_reported() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
         let consent = FixedConsent(Some(record(1)));
-        // Input and output present but cache detail absent: adopting the
-        // counts would invent a zero-cache fact the provider never stated.
+        // A provider that decodes cache detail and reports zero hits yields a
+        // legitimate reported fact: zero here is evidence, not a filler.
         let transport = FakeProviderTransport::new(
             String::from("hi there"),
             Some(RawUsage {
@@ -1622,10 +1684,6 @@ mod dispatch_tests {
                 output_tokens: 3,
             }),
         );
-        // The transport above cannot express "input/output known, cache
-        // unknown" through RawUsage; that shape is refused at the parser, so
-        // this dispatch-level test pins the invariant from the other side: a
-        // zero cached count is a legitimate reported fact and stays Reported.
         let outcome = dispatch_authorized(
             authorized(),
             prompt("hello"),
