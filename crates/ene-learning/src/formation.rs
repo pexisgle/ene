@@ -228,7 +228,7 @@ pub async fn form_experience(
         .scrub(&summary_text)
         .await
         .map_err(secret_boundary_failure)?;
-    if summary_text.text.trim().is_empty() || answer.memories.is_empty() {
+    if summary_text.text().trim().is_empty() || answer.memories.is_empty() {
         return Ok(FormationDecision::DeclinedAsNoEndValue);
     }
     // Resolve every entry before the first commit. One entry the schema
@@ -242,7 +242,7 @@ pub async fn form_experience(
     let summary = SummaryRecord {
         id: summary_id,
         scope,
-        content: summary_text.text.trim().to_owned(),
+        content: summary_text.text().trim().to_owned(),
         source: candidate.source,
         formed_at: candidate.at,
     };
@@ -258,7 +258,7 @@ pub async fn form_experience(
             .scrub(&proposal.content)
             .await
             .map_err(secret_boundary_failure)?;
-        if content.text.trim().is_empty() {
+        if content.text().trim().is_empty() {
             // Resolution guarantees non-empty model or stored content, so an
             // empty scrub result cannot ground a Memory.
             return Ok(FormationDecision::DeferredForContext);
@@ -276,7 +276,7 @@ pub async fn form_experience(
     );
 
     for (target, change, content, importance, temporal) in prepared {
-        let content = content.text.trim().to_owned();
+        let content = content.text().trim().to_owned();
         let outcome = repository
             .commit_memory_change(MemoryChangeCommit {
                 summary: Some(summary.clone()),
@@ -333,13 +333,13 @@ async fn build_prompt(
                 .scrub(&memory.content)
                 .await
                 .map_err(secret_boundary_failure)?;
-            premises.push(content.credential_set);
+            premises.push(content.credential_set());
             prompt.push_str(&format!(
                 "{}. [importance {}] ",
                 position + 1,
                 memory.importance.as_u8()
             ));
-            prompt.push_str(&content.text);
+            prompt.push_str(content.text());
             prompt.push('\n');
         }
     }
@@ -349,7 +349,7 @@ async fn build_prompt(
             .scrub(&turn.text)
             .await
             .map_err(secret_boundary_failure)?;
-        premises.push(text.credential_set);
+        premises.push(text.credential_set());
         prompt.push_str(match turn.role {
             ExperienceRole::Owner => "Owner",
             ExperienceRole::Companion => "Companion",
@@ -360,7 +360,7 @@ async fn build_prompt(
             prompt.push_str(&format!(" [{}]", at.to_rfc3339()));
         }
         prompt.push_str(": ");
-        prompt.push_str(&text.text);
+        prompt.push_str(text.text());
         prompt.push('\n');
     }
     prompt.push('\n');
@@ -368,21 +368,15 @@ async fn build_prompt(
     prompt.push_str(&format!(
         "\nReturn at most {MAX_FORMATION_CHANGES} memory entries; keep only the most important when more changes seem needed."
     ));
-    let credential_set = match premises.into_iter().min() {
-        Some(revision) => revision,
-        // No scrubbed piece exists (empty transcript); still bind the prompt
-        // to a current premise by scrubbing an empty string.
-        None => {
-            scrubber
-                .scrub("")
-                .await
-                .map_err(secret_boundary_failure)?
-                .credential_set
-        }
-    };
-    Ok(ScrubbedText {
-        text: prompt,
-        credential_set,
+    // Assembly can introduce a value across fragment boundaries or in
+    // formatting. Only the credential owner can mint the final proof.
+    let scrubbed = scrubber
+        .scrub(&prompt)
+        .await
+        .map_err(secret_boundary_failure)?;
+    Ok(match premises.into_iter().min() {
+        Some(prior) => scrubbed.with_oldest_premise(prior),
+        None => scrubbed,
     })
 }
 

@@ -3471,8 +3471,9 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
 /// not be reported as "nothing worth keeping".
 #[tokio::test]
 async fn learning_transport_failure_is_reported_as_unavailable() {
-    use super::{CredentialScrubber, HostInference};
+    use super::HostInference;
     use ene_companion::CompanionRepository as _;
+    use ene_credential::CredentialScrubber;
     use ene_learning::{
         ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn,
         LearningTechnicalError, SourceRangeRef,
@@ -3970,7 +3971,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
         stale,
         Ok(ene_companion::HistoryAppendOutcome::StaleCredentialSet)
     );
-    let scrubber = super::CredentialScrubber {
+    let scrubber = ene_credential::CredentialScrubber {
         refs: &restarted.store,
         store: &restarted.cred_store,
     };
@@ -3978,20 +3979,21 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
         .scrub("my key is rotated-bearer")
         .await
         .expect("the fresh scrub must prove absence");
-    assert_eq!(fresh.credential_set, new_revision);
-    assert!(!fresh.text.contains("rotated-bearer"));
+    let fresh_credential_set = fresh.credential_set();
+    assert_eq!(fresh_credential_set, new_revision);
+    assert!(!fresh.text().contains("rotated-bearer"));
     let committed = restarted
         .store
         .append_message(ene_companion::AppendHistoryCommand {
             companion,
             round: RawId::new(),
             role: ene_companion::HistoryRole::Owner,
-            text: fresh.text,
+            text: fresh.into_text(),
             lang: String::from("en"),
             at: WallClockWithTz::now(),
             expected_generation: generation,
             expected_consent: None,
-            expected_credential_set: Some(fresh.credential_set),
+            expected_credential_set: Some(fresh_credential_set),
             expected_owner_message: None,
             command_id: None,
             round_wire: None,
@@ -4157,7 +4159,7 @@ async fn running_host_never_re_reads_the_environment() {
         .await
         .expect("the open must succeed");
     register_credential(&handle, "openai", "main", "test-bearer").await;
-    let scrubber = super::CredentialScrubber {
+    let scrubber = ene_credential::CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
     };
@@ -4165,7 +4167,7 @@ async fn running_host_never_re_reads_the_environment() {
         .scrub("my key is test-bearer")
         .await
         .expect("the pinned scrub must prove absence");
-    assert!(!scrubbed.text.contains("test-bearer"));
+    assert!(!scrubbed.text().contains("test-bearer"));
     assert_eq!(
         reads.get(),
         1,
@@ -4176,7 +4178,7 @@ async fn running_host_never_re_reads_the_environment() {
         .await
         .expect("the scrub must prove absence of the pinned value");
     assert!(
-        unknown.text.contains("rotated-bearer"),
+        unknown.text().contains("rotated-bearer"),
         "the rotated value is not the active bearer, so it stays untouched"
     );
 }

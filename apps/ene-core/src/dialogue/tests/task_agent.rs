@@ -2,8 +2,9 @@
 //! provider dispatch, and the stale/steering boundary.
 
 use super::{LearningAwareTransport, live_input, round_test_handle};
-use crate::dialogue::{CredentialScrubber, HostInference};
+use crate::dialogue::HostInference;
 use crate::task_agent::{OwnerInstructionSource, TaskAgentInferenceAdapter};
+use ene_credential::CredentialScrubber;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,

@@ -73,15 +73,14 @@ use ene_companion::{
     UndeliveredRepository,
 };
 use ene_credential::{
-    CredentialRefRepository, CredentialSetRepository as _, CredentialSetRevision, CredentialStore,
-    REDACTED_CREDENTIAL, ScrubbedText,
+    CredentialScrubber, CredentialSetRepository as _, CredentialSetRevision, ScrubbedText,
 };
 use ene_inference::{
     Admission, AuthorizedInference, DeltaFlow, DeltaSink, InferenceDispatchOutcome,
     InferenceExecutor, InferenceTechnicalError, NotSentReason, PreparedAdmission,
     ProviderTransport, TaskAgentAttemptPremise,
 };
-use ene_learning::{ExperienceCandidate, SecretScrubError, SecretScrubber as _};
+use ene_learning::{ExperienceCandidate, SecretScrubber as _};
 use ene_permission::{CapabilityKind, ConsentRepository as _, EvaluationTracker};
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
@@ -478,8 +477,8 @@ impl HostHandle {
         let Ok(scrubbed) = scrubber.scrub(&submit.body.text).await else {
             return emit_end(sink, held_frame(frame, live));
         };
-        let credential_set = scrubbed.credential_set;
-        let text = scrubbed.text;
+        let credential_set = scrubbed.credential_set();
+        let text = scrubbed.into_text();
         // The request fingerprint is the immutable client semantics: role,
         // body, language, sending incarnation, and the canonical round
         // intent. Force-new carries no premise (the gate above declined
@@ -1238,69 +1237,6 @@ impl HostHandle {
                 .await,
             );
         }
-    }
-}
-
-/// Redacts registered credential values from text on its way to a model
-/// prompt or durable content.
-///
-/// Uses the existing credential boundary: bearer values are borrowed inside
-/// `with_bearer` and only redacted copies escape. The credential store pins
-/// its values for the whole Host run, so the revision read here names exactly
-/// the values being applied; an explicit approval or the startup sweep
-/// advances that revision with its own durable sweep. Every value is applied
-/// longest-first so a shorter registered value cannot split an occurrence of
-/// a longer one. An unreadable registry or bearer fails closed: absence
-/// cannot be proven, so the caller must not use the original text.
-pub(crate) struct CredentialScrubber<'a> {
-    pub(crate) refs: &'a Store,
-    pub(crate) store: &'a CredStore,
-}
-
-impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
-    async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
-        let credential_set = self
-            .refs
-            .current_set_revision()
-            .await
-            .map_err(|_| SecretScrubError::RegistryUnavailable)?;
-        let refs = self
-            .refs
-            .list_refs()
-            .await
-            .map_err(|_| SecretScrubError::RegistryUnavailable)?;
-        let mut known: Vec<(usize, ene_credential::CredentialRef)> = Vec::with_capacity(refs.len());
-        for credential in refs {
-            let length = self
-                .store
-                .with_bearer(&credential, |bearer| bearer.len())
-                .map_err(|_| SecretScrubError::SecretUnavailable)?;
-            if length == 0 {
-                // An empty value matches every position; treating it as
-                // unprovable keeps the raw text out of prompts and storage.
-                return Err(SecretScrubError::SecretUnavailable);
-            }
-            known.push((length, credential));
-        }
-        known.sort_by_key(|(length, _)| std::cmp::Reverse(*length));
-        let mut scrubbed = text.to_owned();
-        for (_, credential) in known {
-            let replaced = self.store.with_bearer(&credential, |bearer| {
-                scrubbed.replace(bearer, REDACTED_CREDENTIAL)
-            });
-            let Ok(next) = replaced else {
-                // A registered credential exists but its bearer cannot be
-                // read, so absence of the value cannot be proven. Fail closed
-                // rather than risk putting the raw text in a prompt or a
-                // durable Learning row.
-                return Err(SecretScrubError::SecretUnavailable);
-            };
-            scrubbed = next;
-        }
-        Ok(ScrubbedText {
-            text: scrubbed,
-            credential_set,
-        })
     }
 }
 

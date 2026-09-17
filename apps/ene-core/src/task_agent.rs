@@ -276,17 +276,49 @@ mod tests {
         }
     }
 
-    fn task_agent_premise() -> TaskAgentInferencePremise {
+    struct ScrubRefs(ene_credential::CredentialSetRevision);
+
+    impl ene_credential::CredentialRefRepository for ScrubRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn list_refs(
+            &self,
+        ) -> Result<Vec<ene_credential::CredentialRef>, ene_credential::CredentialTechnicalError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
+    impl ene_credential::CredentialSetRepository for ScrubRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn current_set_revision(
+            &self,
+        ) -> Result<ene_credential::CredentialSetRevision, ene_credential::CredentialTechnicalError>
+        {
+            Ok(self.0)
+        }
+    }
+
+    async fn scrub_fixture(
+        text: &str,
+        revision: ene_credential::CredentialSetRevision,
+    ) -> ScrubbedText {
+        use ene_credential::SecretScrubber as _;
+        ene_credential::CredentialScrubber {
+            refs: &ScrubRefs(revision),
+            store: &ene_credential::MemoryCredentialStore::new(),
+        }
+        .scrub(text)
+        .await
+        .expect("fixture registry is readable")
+    }
+    async fn task_agent_premise() -> TaskAgentInferencePremise {
         TaskAgentInferencePremise {
             delegation: DelegationId::generate(),
             task: TaskRef {
                 task: TaskId::generate(),
                 revision: TaskRevision::initial(),
             },
-            prompt: ScrubbedText {
-                text: String::from("delegated input"),
-                credential_set: CredentialSetRevision::initial(),
-            },
+            prompt: scrub_fixture("delegated input", CredentialSetRevision::initial()).await,
             data_use: vec![RawId::new(), RawId::new()],
         }
     }
@@ -295,7 +327,7 @@ mod tests {
     async fn adapter_admits_only_as_task_agent_and_maps_the_correlation() {
         let executor = RecordingExecutor::default();
         let adapter = TaskAgentInferenceAdapter::new(&executor, None);
-        let premise = task_agent_premise();
+        let premise = task_agent_premise().await;
         let outcome = adapter
             .infer(premise.clone())
             .await

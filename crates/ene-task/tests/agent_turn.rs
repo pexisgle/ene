@@ -481,27 +481,61 @@ impl FakeScrubber {
     }
 }
 
-#[expect(
-    clippy::unused_async_trait_impl,
-    reason = "in-test fake; async matches the scrubber contract"
-)]
+struct ScrubRefs(ene_credential::CredentialSetRevision);
+
+impl ene_credential::CredentialRefRepository for ScrubRefs {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn list_refs(
+        &self,
+    ) -> Result<Vec<ene_credential::CredentialRef>, ene_credential::CredentialTechnicalError> {
+        Ok(Vec::new())
+    }
+}
+
+impl ene_credential::CredentialSetRepository for ScrubRefs {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn current_set_revision(
+        &self,
+    ) -> Result<ene_credential::CredentialSetRevision, ene_credential::CredentialTechnicalError>
+    {
+        Ok(self.0)
+    }
+}
+
+async fn scrub_fixture(
+    text: &str,
+    revision: ene_credential::CredentialSetRevision,
+) -> ScrubbedText {
+    use ene_credential::SecretScrubber as _;
+    ene_credential::CredentialScrubber {
+        refs: &ScrubRefs(revision),
+        store: &ene_credential::MemoryCredentialStore::new(),
+    }
+    .scrub(text)
+    .await
+    .expect("fixture registry is readable")
+}
+
 impl SecretScrubber for FakeScrubber {
     async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
         self.inputs
             .lock()
             .expect("fixture capture is never poisoned")
             .push(text.to_owned());
-        match self
-            .replies
-            .lock()
-            .expect("fixture script is never poisoned")
-            .pop_front()
-            .expect("every exercised scrub call has a scripted reply")
-        {
-            FakeScrubReply::Scrubbed => Ok(ScrubbedText {
-                text: format!("[scrubbed] {text}"),
-                credential_set: CredentialSetRevision::from_u64(7),
-            }),
+        let reply = {
+            let mut replies = self
+                .replies
+                .lock()
+                .expect("fixture script is never poisoned");
+            replies.pop_front()
+        }
+        .expect("every exercised scrub call has a scripted reply");
+        match reply {
+            FakeScrubReply::Scrubbed => Ok(scrub_fixture(
+                &format!("[scrubbed] {text}"),
+                CredentialSetRevision::from_u64(7),
+            )
+            .await),
             FakeScrubReply::Failed(error) => Err(error),
         }
     }
@@ -702,12 +736,12 @@ async fn produced_turn_carries_the_scrubbed_purpose_prompt_and_the_output() {
     assert_eq!(received.delegation, delegation_id);
     assert_eq!(received.task, relied, "the port gets the relied revision");
     assert_eq!(
-        received.prompt.text,
+        received.prompt.text(),
         format!("[scrubbed] {RESPONSE_FORMAT}[PURPOSE]\n{purpose_text}\n[PAST EXECUTED FACTS]\n"),
         "the port gets the scrubber's output, not the raw purpose text"
     );
     assert_eq!(
-        received.prompt.credential_set,
+        received.prompt.credential_set(),
         CredentialSetRevision::from_u64(7),
         "the scrub premise crosses unchanged"
     );
@@ -921,7 +955,7 @@ async fn action_exchanges_are_replayed_in_order_and_scrubbed_once() {
     let captured = fixture.inference.premises();
     let received = captured.first().expect("the premise was captured");
     assert_eq!(
-        received.prompt.text,
+        received.prompt.text(),
         format!("[scrubbed] {raw_input}"),
         "the whole transcript is one framed input with a single scrub"
     );
@@ -1411,16 +1445,13 @@ async fn technical_failures_stay_errors() {
     assert_eq!(inference.premises().len(), 1);
 }
 
-#[test]
-fn debug_redacts_prompt_and_output_text() {
+#[tokio::test]
+async fn debug_redacts_prompt_and_output_text() {
     let probe = "probe redaction text";
     let inference_premise = TaskAgentInferencePremise {
         delegation: DelegationId::generate(),
         task: reference(TaskId::generate(), 1),
-        prompt: ScrubbedText {
-            text: probe.to_owned(),
-            credential_set: CredentialSetRevision::initial(),
-        },
+        prompt: scrub_fixture(probe, CredentialSetRevision::initial()).await,
         data_use: vec![RawId::new()],
     };
     assert!(
@@ -1508,7 +1539,7 @@ async fn instruction_bodies_are_resolved_in_context_order_and_scrubbed_once() {
     let captured = fixture.inference.premises();
     let received = captured.first().expect("the premise was captured");
     assert_eq!(
-        received.prompt.text,
+        received.prompt.text(),
         format!("[scrubbed] {raw_input}"),
         "the port receives the single scrub of the whole framed input"
     );
@@ -1580,7 +1611,7 @@ async fn duplicate_source_adoption_keeps_both_bodies_and_correlations() {
     let captured = fixture.inference.premises();
     let received = captured.first().expect("the premise was captured");
     assert_eq!(
-        received.prompt.text.matches("repeat me").count(),
+        received.prompt.text().matches("repeat me").count(),
         2,
         "a repeated adoption repeats the body instead of deduplicating"
     );
@@ -1882,7 +1913,7 @@ async fn past_executed_facts_render_every_turn_with_sources_after_instructions()
     let captured = fixture.inference.premises();
     let received = captured.first().expect("the premise was captured");
     assert_eq!(
-        received.prompt.text,
+        received.prompt.text(),
         format!("[scrubbed] {raw_input}"),
         "the facts block follows the instructions in the fixed framing"
     );
@@ -2021,7 +2052,10 @@ async fn owner_management_instructions_resolve_like_conversation_ones() {
     let captured = fixture.inference.premises();
     let received = captured.first().expect("the premise was captured");
     assert!(
-        received.prompt.text.contains("the management instruction"),
+        received
+            .prompt
+            .text()
+            .contains("the management instruction"),
         "the activity body resolves into the logical input"
     );
     assert_eq!(

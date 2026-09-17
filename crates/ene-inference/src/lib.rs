@@ -830,7 +830,7 @@ pub async fn dispatch_authorized(
     if abort.is_some_and(DispatchAbort::is_aborted) {
         return Ok(InferenceDispatchOutcome::Aborted);
     }
-    if prompt.text.chars().count() > MAX_INPUT_CHARS {
+    if prompt.text().chars().count() > MAX_INPUT_CHARS {
         return Ok(InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit));
     }
     let ticket = authorized.ticket;
@@ -839,7 +839,7 @@ pub async fn dispatch_authorized(
     let purpose = authorized.candidate.purpose;
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
     let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
-    let credential_set = prompt.credential_set;
+    let credential_set = prompt.credential_set();
     let credential = authorized.credential;
     let task_agent = authorized.task_agent;
     // The claim is the linearization point: it reads, compares, and inserts
@@ -882,7 +882,7 @@ pub async fn dispatch_authorized(
     let request = ProviderRequest {
         model: model.clone(),
         credential,
-        input: prompt.text,
+        input: prompt.into_text(),
     };
     let response = if let Some(abort) = abort {
         tokio::select! {
@@ -1399,11 +1399,43 @@ mod dispatch_tests {
         }
     }
 
-    fn prompt(text: impl Into<String>) -> ScrubbedText {
-        ScrubbedText {
-            text: text.into(),
-            credential_set: CredentialSetRevision::initial(),
+    struct ScrubRefs(ene_credential::CredentialSetRevision);
+
+    impl ene_credential::CredentialRefRepository for ScrubRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn list_refs(
+            &self,
+        ) -> Result<Vec<ene_credential::CredentialRef>, ene_credential::CredentialTechnicalError>
+        {
+            Ok(Vec::new())
         }
+    }
+
+    impl ene_credential::CredentialSetRepository for ScrubRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn current_set_revision(
+            &self,
+        ) -> Result<ene_credential::CredentialSetRevision, ene_credential::CredentialTechnicalError>
+        {
+            Ok(self.0)
+        }
+    }
+
+    async fn scrub_fixture(
+        text: &str,
+        revision: ene_credential::CredentialSetRevision,
+    ) -> ScrubbedText {
+        use ene_credential::SecretScrubber as _;
+        ene_credential::CredentialScrubber {
+            refs: &ScrubRefs(revision),
+            store: &ene_credential::MemoryCredentialStore::new(),
+        }
+        .scrub(text)
+        .await
+        .expect("fixture registry is readable")
+    }
+    async fn prompt(text: impl Into<String>) -> ScrubbedText {
+        scrub_fixture(&text.into(), CredentialSetRevision::initial()).await
     }
 
     fn authorized() -> AuthorizedInference {
@@ -1462,7 +1494,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
         let result = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1550,7 +1582,7 @@ mod dispatch_tests {
         let attempts = RecordingAttempts(Mutex::new(0));
         let result = dispatch_authorized(
             authorized(),
-            prompt("x".repeat(MAX_INPUT_CHARS + 1)),
+            prompt("x".repeat(MAX_INPUT_CHARS + 1)).await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1582,7 +1614,7 @@ mod dispatch_tests {
         let consent = FixedConsent(Some(record(1)));
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("the key is sk-new"),
+            prompt("the key is sk-new").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1620,7 +1652,7 @@ mod dispatch_tests {
         );
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1650,7 +1682,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::new(String::from("hi there"), None);
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1710,7 +1742,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
         let result = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1740,7 +1772,7 @@ mod dispatch_tests {
         let consent = FixedConsent(Some(record(1)));
         let outcome = dispatch_authorized(
             authorized_task_agent(task_agent_premise()),
-            prompt("delegated work"),
+            prompt("delegated work").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1771,7 +1803,7 @@ mod dispatch_tests {
         let consent = FixedConsent(Some(record(1)));
         let outcome = dispatch_authorized(
             authorized_task_agent(task_agent_premise()),
-            prompt("delegated work"),
+            prompt("delegated work").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1803,7 +1835,7 @@ mod dispatch_tests {
         let premise = task_agent_premise();
         let outcome = dispatch_authorized(
             authorized_task_agent(premise.clone()),
-            prompt("delegated work"),
+            prompt("delegated work").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1848,7 +1880,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::new(String::from("ok"), None);
         dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1875,7 +1907,7 @@ mod dispatch_tests {
 
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             Some(&abort),
             &consent,
@@ -1917,7 +1949,7 @@ mod dispatch_tests {
 
         let mut dispatch = Box::pin(dispatch_authorized(
             authorized,
-            prompt("hello"),
+            prompt("hello").await,
             &mut sink,
             Some(&abort),
             &consent,
@@ -1965,7 +1997,7 @@ mod dispatch_tests {
 
         let outcome = dispatch_authorized(
             authorized,
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             Some(&abort),
             &consent,
@@ -2003,7 +2035,7 @@ mod dispatch_tests {
 
         let mut dispatch = Box::pin(dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut sink,
             Some(&abort),
             &consent,

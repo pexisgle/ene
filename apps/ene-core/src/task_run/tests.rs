@@ -197,16 +197,52 @@ impl MarkerScrubber {
     }
 }
 
+struct ScrubRefs(ene_credential::CredentialSetRevision);
+
+impl ene_credential::CredentialRefRepository for ScrubRefs {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn list_refs(
+        &self,
+    ) -> Result<Vec<ene_credential::CredentialRef>, ene_credential::CredentialTechnicalError> {
+        Ok(Vec::new())
+    }
+}
+
+impl ene_credential::CredentialSetRepository for ScrubRefs {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn current_set_revision(
+        &self,
+    ) -> Result<ene_credential::CredentialSetRevision, ene_credential::CredentialTechnicalError>
+    {
+        Ok(self.0)
+    }
+}
+
+async fn scrub_fixture(
+    text: &str,
+    revision: ene_credential::CredentialSetRevision,
+) -> ScrubbedText {
+    use ene_credential::SecretScrubber as _;
+    ene_credential::CredentialScrubber {
+        refs: &ScrubRefs(revision),
+        store: &ene_credential::MemoryCredentialStore::new(),
+    }
+    .scrub(text)
+    .await
+    .expect("fixture registry is readable")
+}
+
 impl SecretScrubber for MarkerScrubber {
     async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
         self.inputs
             .lock()
             .expect("scrub capture lock")
             .push(text.to_owned());
-        Ok(ScrubbedText {
-            text: format!("[scrubbed] {text}"),
-            credential_set: CredentialSetRevision::initial(),
-        })
+        Ok(scrub_fixture(
+            &format!("[scrubbed] {text}"),
+            CredentialSetRevision::initial(),
+        )
+        .await)
     }
 }
 
@@ -408,7 +444,7 @@ async fn final_answer_is_recorded_and_adopted_as_completion() {
     assert_eq!(inference.calls(), 1);
     let premises = inference.premises();
     assert!(
-        premises[0].prompt.text.contains("write the report"),
+        premises[0].prompt.text().contains("write the report"),
         "the turn carries the relied purpose"
     );
 }
@@ -468,12 +504,12 @@ async fn read_then_create_then_final_runs_the_whole_loop() {
     assert_eq!(inference.calls(), 3);
     let premises = inference.premises();
     assert!(
-        premises[2].prompt.text.contains("read ok:\nnotes"),
+        premises[2].prompt.text().contains("read ok:\nnotes"),
         "the file content is replayed as an observation, got {}",
-        premises[2].prompt.text
+        premises[2].prompt.text()
     );
     assert!(
-        premises[2].prompt.text.contains("create ok"),
+        premises[2].prompt.text().contains("create ok"),
         "the create observation is replayed"
     );
     assert!(
@@ -481,7 +517,7 @@ async fn read_then_create_then_final_runs_the_whole_loop() {
         "each turn replays exactly the prior exchanges"
     );
     assert!(
-        !premises[0].prompt.text.contains("[TOOL RESULT]"),
+        !premises[0].prompt.text().contains("[TOOL RESULT]"),
         "the first turn has no transcript"
     );
     let scrubbed = scrubber.inputs();
@@ -495,7 +531,7 @@ async fn read_then_create_then_final_runs_the_whole_loop() {
 
 /// Counts the replayed tool exchanges in one captured premise.
 fn premise_exchange_count(premise: &TaskAgentInferencePremise) -> usize {
-    premise.prompt.text.matches("[TOOL RESULT]").count()
+    premise.prompt.text().matches("[TOOL RESULT]").count()
 }
 
 #[tokio::test]
@@ -582,9 +618,9 @@ async fn refused_action_is_replayed_and_the_model_can_finish() {
     );
     let premises = inference.premises();
     assert!(
-        premises[1].prompt.text.contains("refused:"),
+        premises[1].prompt.text().contains("refused:"),
         "the refusal class is replayed, got {}",
-        premises[1].prompt.text
+        premises[1].prompt.text()
     );
 }
 

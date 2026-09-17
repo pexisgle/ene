@@ -103,9 +103,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::conn::{ConnectionPhase, ConnectionTable};
-use crate::dialogue::{CredentialScrubber, HostInference};
+use crate::dialogue::HostInference;
 use crate::task_agent::{OwnerInstructionSource, TaskAgentInferenceAdapter};
 use crate::task_run::{TaskAgentRunError, TaskAgentRunOutcome, TaskAgentRunRefusal};
+use ene_credential::CredentialScrubber;
 
 mod frames;
 mod handshake;
