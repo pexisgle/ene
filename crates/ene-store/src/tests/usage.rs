@@ -64,6 +64,7 @@ fn attempt_for(
         model: model.to_owned(),
         task_agent: None,
         pricing,
+        usage_estimate: None,
     }
 }
 

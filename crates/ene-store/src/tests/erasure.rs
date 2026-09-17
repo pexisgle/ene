@@ -28,6 +28,7 @@ fn task_agent_claim(
         model: String::from("dialogue-1"),
         task_agent: Some(premise),
         pricing: None,
+        usage_estimate: None,
     }
 }
 
@@ -500,6 +501,7 @@ async fn non_task_attempts_record_the_empty_data_use_and_are_not_gated() {
                 model: String::from("dialogue-1"),
                 task_agent: None,
                 pricing: None,
+                usage_estimate: None,
             })
             .await,
         Ok(AttemptBeginOutcome::Started),

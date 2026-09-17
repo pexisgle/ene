@@ -36,6 +36,7 @@ fn task_agent_claim_for(delegation: DelegationId, task: TaskRef) -> InferenceAtt
             data_use: vec![RawId::new()],
         }),
         pricing: None,
+        usage_estimate: None,
     }
 }
 

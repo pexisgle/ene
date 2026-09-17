@@ -21,6 +21,7 @@
 mod action;
 mod erasure;
 mod intent;
+mod usage_cap;
 
 use std::collections::HashMap;
 
@@ -35,6 +36,11 @@ pub use erasure::{
     PermissionErasureOutcome, PermissionErasureParticipant, PermissionErasureRepository,
 };
 pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
+pub use usage_cap::{
+    SetUsageCapCommand, SetUsageCapOutcome, UsageCap, UsageCapId, UsageCapRef, UsageCapRepository,
+    UsageCapRevision, UsageCapScope, UsageCapWindow, UsageReservationRef, UsageReservationState,
+    UtcPeriod,
+};
 
 /// Single-use authorization token for one inference use.
 ///

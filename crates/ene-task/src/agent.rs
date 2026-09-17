@@ -187,6 +187,16 @@ pub enum TaskAgentNotSent {
     /// I/O; this is a data-use hold, not revision/consent staleness, a
     /// missing source, or a technical error.
     DataUseHeld,
+    /// A current provider or system cost cap would be exceeded by this turn's
+    /// reservation upper bound. The send is refused before any provider I/O;
+    /// this is a cap refusal, not the input `OverLimit` refusal, consent
+    /// staleness, or a technical error.
+    UsageCapReached,
+    /// A current cost cap applies to this turn but no finite safe upper bound
+    /// could be established for it, so the cap cannot be proven satisfied.
+    /// The send is refused before any provider I/O; the unprovable bound is
+    /// never treated as zero or as released.
+    UsageCapIndeterminate,
 }
 
 /// Port result; provider output never leaks through [`core::fmt::Debug`]

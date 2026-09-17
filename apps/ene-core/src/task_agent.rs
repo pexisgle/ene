@@ -190,6 +190,8 @@ fn mirror_not_sent(reason: NotSentReason) -> TaskAgentInferenceOutcome {
         NotSentReason::OverLimit => Outcome::NotSent(NotSent::OverLimit),
         NotSentReason::EvaluationConsumed => Outcome::NotSent(NotSent::EvaluationConsumed),
         NotSentReason::DataUseHeld => Outcome::NotSent(NotSent::DataUseHeld),
+        NotSentReason::UsageCapReached => Outcome::NotSent(NotSent::UsageCapReached),
+        NotSentReason::UsageCapIndeterminate => Outcome::NotSent(NotSent::UsageCapIndeterminate),
     }
 }
 
@@ -387,6 +389,14 @@ mod tests {
             (
                 NotSentReason::DataUseHeld,
                 Outcome::NotSent(NotSent::DataUseHeld),
+            ),
+            (
+                NotSentReason::UsageCapReached,
+                Outcome::NotSent(NotSent::UsageCapReached),
+            ),
+            (
+                NotSentReason::UsageCapIndeterminate,
+                Outcome::NotSent(NotSent::UsageCapIndeterminate),
             ),
             (NotSentReason::TaskPremiseStale, Outcome::StaleTaskPremise),
         ] {

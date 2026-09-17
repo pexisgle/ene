@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ene_inference::cost::{TokenRate, project_cost};
+use ene_inference::cost::{TokenRate, UsageCostFact, project_cost};
 use ene_inference::pricing::{PricingCatalogRevision, PricingSnapshot};
 use ene_inference::{
     AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
@@ -167,7 +167,39 @@ impl InferenceAttemptRepository for Store {
                     Some(publish_pricing_snapshot(&tx, snapshot)?)
                 }
             };
-            let started_text = WallClockWithTz::now().to_rfc3339();
+            let now = WallClockWithTz::now();
+            // Cap admission shares the claim's linearization point: the
+            // current cap revisions, every cap's window consumption, and the
+            // new reservation compare inside this transaction, so two
+            // concurrent claims can never both consume the same remaining
+            // slot. No cap applies to the route means no reservation exists
+            // to account; a held or unprovable cap decision returns before
+            // the attempt insert, so the transaction rolls back and the
+            // provider receives zero bytes.
+            match crate::usage_cap::admit_reservation(
+                &tx,
+                &attempt.ticket,
+                crate::usage_cap::ReservationPremise {
+                    provider: &attempt.provider,
+                    model: &attempt.model,
+                    pricing: attempt.pricing.as_ref(),
+                    pricing_reference: pricing_reference.as_deref(),
+                    estimate: attempt.usage_estimate.as_ref(),
+                },
+                now,
+            )
+            .map_err(inference_unavailable)?
+            {
+                crate::usage_cap::ReservationAdmission::NoCap
+                | crate::usage_cap::ReservationAdmission::Reserved => {}
+                crate::usage_cap::ReservationAdmission::Held(cap) => {
+                    return Ok(AttemptBeginOutcome::HeldByCap(cap));
+                }
+                crate::usage_cap::ReservationAdmission::Indeterminate => {
+                    return Ok(AttemptBeginOutcome::CapIndeterminate);
+                }
+            }
+            let started_text = now.to_rfc3339();
             match tx.execute(
                 SQL_INSERT_ATTEMPT,
                 params![
@@ -755,6 +787,89 @@ fn decode_attempt_record(
     })
 }
 
+/// Settles the ticket's reservation for one usage fact, if the ticket has a
+/// non-terminal reservation.
+///
+/// `usage-cost-cap` §11: a reported fact under the bound pricing snapshot
+/// commits `CommittedReported` with the actual cost (the unused reserved
+/// amount is released by that same transition); an unknown fact commits
+/// `CommittedUnknown`, which keeps the reserved upper bound counted against
+/// every cap. An unrepresentable amount (or a reported fact whose snapshot
+/// cannot price it) also settles `CommittedUnknown`: the amount is never
+/// guessed, and the slot is never released on a mere assumption. An
+/// *unreadable* stored pricing row is different: it is a technical error
+/// that rolls the settlement back, leaving the reservation `Reserved` with
+/// its upper bound still counted (startup reconciliation then settles it
+/// `CommittedUnknown`). The `state = 'reserved'` guard makes the transition
+/// idempotent and first-wins.
+fn settle_reservation(
+    tx: &rusqlite::Transaction<'_>,
+    ticket_text: &str,
+    fact: &UsageFact,
+    pricing_reference: Option<&str>,
+) -> Result<(), InferenceTechnicalError> {
+    let stored: Option<crate::usage_cap::ReservationRow> = tx
+        .query_row(
+            crate::usage_cap::SQL_SELECT_RESERVATION_BY_TICKET,
+            params![ticket_text],
+            crate::usage_cap::reservation_row,
+        )
+        .optional()
+        .map_err(|error| inference_unavailable(error.to_string()))?;
+    let Some(raw) = stored else {
+        return Ok(());
+    };
+    let state = ene_permission::UsageReservationState::from_name(&raw.state)
+        .ok_or_else(|| inference_unavailable(String::from("unknown usage reservation state")))?;
+    if state.is_terminal() {
+        return Ok(());
+    }
+    let committed = match fact.source {
+        UsageSource::Unknown => None,
+        UsageSource::Reported => {
+            let settlement = match pricing_reference {
+                None => None,
+                Some(reference) => Some(load_pricing_snapshot(
+                    tx,
+                    reference,
+                    &fact.provider,
+                    &fact.model,
+                )?),
+            };
+            match project_cost(fact, settlement.as_ref()) {
+                Ok(UsageCostFact::Reported(cost)) => Some(cost.total),
+                // Unknown counts, no reviewed rate, or an amount that does
+                // not fit the money representation: keep the reserved upper
+                // bound rather than committing a guessed actual.
+                Ok(UsageCostFact::Unknown { .. }) | Err(_) => None,
+            }
+        }
+    };
+    let (state, committed_currency, committed_micros) = match committed {
+        Some(total) => (
+            ene_permission::UsageReservationState::CommittedReported,
+            Some(total.currency().as_str()),
+            Some(encode_u64(total.micros()).map_err(inference_unavailable)?),
+        ),
+        None => (
+            ene_permission::UsageReservationState::CommittedUnknown,
+            None,
+            None,
+        ),
+    };
+    tx.execute(
+        crate::usage_cap::SQL_SETTLE_RESERVATION,
+        params![
+            ticket_text,
+            state.as_str(),
+            committed_currency,
+            committed_micros
+        ],
+    )
+    .map_err(|error| inference_unavailable(error.to_string()))?;
+    Ok(())
+}
+
 impl UsageRepository for Store {
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError> {
         let conn = Arc::clone(&self.conn);
@@ -827,6 +942,12 @@ impl UsageRepository for Store {
                 ],
             )
             .map_err(|error| inference_unavailable(error.to_string()))?;
+            // The ticket's reservation settles in the same transaction as
+            // its usage fact, so a crash can never leave a reported fact
+            // beside a still-reserved (or wrongly released) slot. The
+            // transition is first-wins: a duplicate settlement never revises
+            // a terminal reservation.
+            settle_reservation(&tx, &ticket_text, &fact, pricing_reference.as_deref())?;
             tx.commit()
                 .map_err(|error| inference_unavailable(error.to_string()))?;
             Ok(())
@@ -887,6 +1008,124 @@ impl UsageRepository for Store {
                 }
             })?;
             Ok(Some(UsageCostRecord { usage, cost }))
+        })
+        .await
+    }
+
+    async fn load_usage_reservation(
+        &self,
+        ticket: ene_inference::InferenceTicketId,
+    ) -> Result<Option<ene_inference::UsageReservation>, InferenceTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let ticket_text = encode_id(ticket.0);
+            let guard = lock_shared(&conn);
+            let found: Option<crate::usage_cap::ReservationRow> = guard
+                .query_row(
+                    crate::usage_cap::SQL_SELECT_RESERVATION_BY_TICKET,
+                    params![ticket_text],
+                    crate::usage_cap::reservation_row,
+                )
+                .optional()
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            found
+                .as_ref()
+                .map(|raw| crate::usage_cap::decode_reservation(raw).map_err(inference_unavailable))
+                .transpose()
+        })
+        .await
+    }
+
+    async fn reconcile_orphaned_usage_reservations(&self) -> Result<u64, InferenceTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            // One bounded read of every non-terminal reservation; each one
+            // settles as CommittedUnknown in this transaction. The external
+            // consumption cannot be denied after a crash, so the reserved
+            // upper bound stays counted and the ticket records an unknown
+            // token usage fact: recovery never releases a slot and never
+            // estimates zero.
+            let orphans: Vec<crate::usage_cap::ReservationRow> = {
+                let mut statement = tx
+                    .prepare(crate::usage_cap::SQL_SELECT_ORPHANED_RESERVATIONS)
+                    .map_err(|error| inference_unavailable(error.to_string()))?;
+                statement
+                    .query_map((), crate::usage_cap::reservation_row)
+                    .map_err(|error| inference_unavailable(error.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| inference_unavailable(error.to_string()))?
+            };
+            let mut settled = 0_u64;
+            for raw in orphans {
+                let state = ene_permission::UsageReservationState::from_name(&raw.state)
+                    .ok_or_else(|| {
+                        inference_unavailable(String::from("unknown usage reservation state"))
+                    })?;
+                if state.is_terminal() {
+                    continue;
+                }
+                // The attempt row and the reservation were written in one
+                // transaction, so a missing or disagreeing route correlation
+                // is corruption: fail closed instead of recording an
+                // unattributable usage fact.
+                let route: Option<(String, String, Option<String>)> = tx
+                    .query_row(SQL_SELECT_ATTEMPT_ROUTE, params![raw.ticket], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .optional()
+                    .map_err(|error| inference_unavailable(error.to_string()))?;
+                let Some((provider, model, pricing)) = route else {
+                    return Err(inference_unavailable(String::from(
+                        "usage reservation has no claimed attempt",
+                    )));
+                };
+                if provider != raw.provider
+                    || model != raw.model
+                    || pricing.as_deref() != Some(raw.pricing_snapshot.as_str())
+                {
+                    return Err(inference_unavailable(String::from(
+                        "usage reservation attribution disagrees with its attempt",
+                    )));
+                }
+                // The unknown usage fact and the reservation transition land
+                // together: a crash mid-recovery can only re-run the same
+                // settlement, never strand one without the other.
+                tx.execute(
+                    SQL_INSERT_USAGE,
+                    params![
+                        raw.ticket,
+                        provider,
+                        model,
+                        Option::<i64>::None,
+                        Option::<i64>::None,
+                        Option::<i64>::None,
+                        encode_usage_source(UsageSource::Unknown),
+                        raw.pricing_snapshot
+                    ],
+                )
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+                let changed = tx
+                    .execute(
+                        crate::usage_cap::SQL_SETTLE_RESERVATION,
+                        params![
+                            raw.ticket,
+                            ene_permission::UsageReservationState::CommittedUnknown.as_str(),
+                            Option::<String>::None,
+                            Option::<i64>::None
+                        ],
+                    )
+                    .map_err(|error| inference_unavailable(error.to_string()))?;
+                if changed == 1 {
+                    settled += 1;
+                }
+            }
+            tx.commit()
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            Ok(settled)
         })
         .await
     }

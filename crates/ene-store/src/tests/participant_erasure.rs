@@ -313,6 +313,7 @@ async fn seed_inference_surface(
                     data_use: vec![source],
                 }),
                 pricing: None,
+                usage_estimate: None,
             })
             .await,
         Ok(AttemptBeginOutcome::Started)
@@ -884,6 +885,7 @@ async fn inference_attribution_columns_are_facts_not_body_copies() {
                 model: String::from("dialogue-1"),
                 task_agent: None,
                 pricing: None,
+                usage_estimate: None,
             })
             .await,
         Ok(AttemptBeginOutcome::Started)

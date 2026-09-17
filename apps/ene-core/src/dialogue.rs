@@ -241,9 +241,9 @@ fn command_conflict_detail(command: &CommandId) -> String {
     )
 }
 
-/// Admission never produces the over-limit, task-premise-stale, or data-use
-/// hold reasons, which belong to dispatch; they map defensively rather than
-/// claiming a setup failure.
+/// Admission never produces the over-limit, task-premise-stale, data-use
+/// hold, or usage-cap reasons, which belong to dispatch; they map defensively
+/// rather than claiming a setup failure.
 fn admission_reason(reason: NotSentReason) -> &'static str {
     match reason {
         NotSentReason::SetupIncomplete => "setup-incomplete",
@@ -253,6 +253,8 @@ fn admission_reason(reason: NotSentReason) -> &'static str {
         NotSentReason::OverLimit => "unknown-reason",
         NotSentReason::TaskPremiseStale => "unknown-reason",
         NotSentReason::DataUseHeld => "unknown-reason",
+        NotSentReason::UsageCapReached => "unknown-reason",
+        NotSentReason::UsageCapIndeterminate => "unknown-reason",
     }
 }
 

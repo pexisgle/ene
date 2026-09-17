@@ -1819,6 +1819,7 @@ mod tests {
                         data_use: vec![source],
                     }),
                     pricing: None,
+                    usage_estimate: None,
                 })
                 .await,
             Ok(AttemptBeginOutcome::Started)

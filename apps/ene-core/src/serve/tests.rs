@@ -3474,3 +3474,133 @@ async fn deletion_status_pages_are_bounded_and_reject_malformed_queries() {
         Some(ene_api::v1::deletion::DeletionHoldWire::Unavailable)
     );
 }
+
+/// The serving startup sequence re-evaluates reservations orphaned by a
+/// crash: the ticket settles `CommittedUnknown` and the reserved upper bound
+/// keeps occupying the cap, never released and never reset to zero.
+#[tokio::test]
+async fn startup_reconciliation_settles_orphaned_usage_reservations() {
+    use ene_inference::{InferenceAttempt, InferenceAttemptRepository as _, UsageRepository as _};
+    use ene_permission::{
+        CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRevision, IntentFingerprint,
+        IntentOutcomeRepository as _, IntentResolution, SetUsageCapCommand, SetUsageCapOutcome,
+        UsageCapRepository as _, UsageCapScope, UsageCapWindow, UsageReservationState,
+    };
+    use ene_primitive::{Money, RawId, WallClockWithTz};
+
+    let (handle, _dir) = memory_handle("usage-cap-recovery")
+        .await
+        .expect("the memory handle must open");
+    let store = &handle.store;
+    // Seed the dialogue consent through the production intent-atomic path.
+    let fingerprint = IntentFingerprint {
+        intent_id: RawId::new().as_uuid().to_string(),
+        kind: String::from("assign"),
+        target: String::from("consent:usage-cap-recovery"),
+        base: String::from("consent-none"),
+        rationale_origin: String::from("management-surface"),
+        rationale_quote: None,
+    };
+    let committed = store
+        .assign_with_intent(
+            None,
+            ConsentRecord {
+                capability: CapabilityKind::Dialogue,
+                id: String::from("usage-cap-consent"),
+                rev: ConsentRevision::from_u64(1),
+                provider: String::from("openai"),
+                model: String::from("gpt-4o"),
+                credential_id: String::from("openai:main"),
+            },
+            fingerprint,
+        )
+        .await
+        .expect("the consent write must answer");
+    assert!(
+        matches!(
+            committed,
+            IntentResolution::Decided(ConsentCommitOutcome::Committed { .. })
+        ),
+        "the consent must commit, got {committed:?}"
+    );
+    let cap = store
+        .set_usage_cap(SetUsageCapCommand {
+            expected: None,
+            scope: UsageCapScope::System,
+            window: UsageCapWindow::DailyUtc,
+            limit: Money::from_micros(ene_primitive::CurrencyCode::Usd, 100_000),
+        })
+        .await
+        .expect("the cap write must answer");
+    assert!(
+        matches!(cap, SetUsageCapOutcome::StoredAs(_)),
+        "the cap must store, got {cap:?}"
+    );
+    let ene_inference::pricing::PricingResolution::Priced(pricing) =
+        ene_inference::pricing::PricingCatalog::first_party()
+            .expect("the reviewed catalog must be valid")
+            .resolve("openai", "gpt-4o", WallClockWithTz::now())
+    else {
+        panic!("the reviewed route must be priced");
+    };
+    let ticket = ene_inference::InferenceTicketId(RawId::new());
+    let claim = store
+        .begin_inference_attempt(InferenceAttempt {
+            ticket,
+            consumer: ene_permission::ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: ene_permission::PurposeKind::DialogueResponse,
+            expected_consent: (
+                String::from("usage-cap-consent"),
+                ConsentRevision::from_u64(1),
+            ),
+            expected_credential_set: ene_credential::CredentialSetRevision::initial(),
+            provider: String::from("openai"),
+            model: String::from("gpt-4o"),
+            task_agent: None,
+            pricing: Some(pricing),
+            usage_estimate: Some(ene_inference::cost::UsageEstimate {
+                input_tokens_upper_bound: 100,
+                output_tokens_upper_bound: 50,
+            }),
+        })
+        .await
+        .expect("the claim must answer");
+    assert_eq!(
+        claim,
+        ene_inference::AttemptBeginOutcome::Started,
+        "the claim must reserve under the configured cap"
+    );
+    // The crash leaves the reservation non-terminal; startup must settle it.
+    handle
+        .run_startup_mutations()
+        .await
+        .expect("startup mutations must complete");
+    let reservation = store
+        .load_usage_reservation(ticket)
+        .await
+        .expect("the reservation read must answer")
+        .expect("the reservation stays durable");
+    assert_eq!(reservation.state, UsageReservationState::CommittedUnknown);
+    let cost = store
+        .load_usage_cost(ticket)
+        .await
+        .expect("the settlement read must answer")
+        .expect("startup recovery records the unknown usage fact");
+    assert_eq!(
+        cost.usage.source,
+        ene_inference::UsageSource::Unknown,
+        "an orphaned reservation settles unknown token usage, never zero"
+    );
+    // A second startup is idempotent: the terminal state is not re-settled.
+    handle
+        .run_startup_mutations()
+        .await
+        .expect("startup mutations must stay idempotent");
+    let again = store
+        .load_usage_reservation(ticket)
+        .await
+        .expect("the reservation read must answer")
+        .expect("the reservation stays durable");
+    assert_eq!(again.state, UsageReservationState::CommittedUnknown);
+}

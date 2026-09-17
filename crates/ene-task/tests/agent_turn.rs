@@ -1340,6 +1340,8 @@ async fn every_not_sent_reason_maps_through_unchanged() {
         TaskAgentNotSent::ConsentStale,
         TaskAgentNotSent::OverLimit,
         TaskAgentNotSent::EvaluationConsumed,
+        TaskAgentNotSent::UsageCapReached,
+        TaskAgentNotSent::UsageCapIndeterminate,
     ];
 
     for reason in reasons {

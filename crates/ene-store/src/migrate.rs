@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 30;
+const CURRENT_VERSION: i64 = 31;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -358,6 +358,44 @@ CHECK (
         AND cached_input_tokens <= input_tokens)
 )
 );
+-- Provider / system cost caps (usage-cost-cap §6/§13). One row per
+-- (scope, window): `provider` is '' for the system scope and the exact
+-- provider name for a provider scope. `revision` is the currentness premise
+-- the compare-and-set update and the send admission serialize on; the limit
+-- is an exact micro-currency amount in `currency`.
+CREATE TABLE usage_cap (
+scope TEXT NOT NULL CHECK (scope IN ('system', 'provider')),
+provider TEXT NOT NULL,
+window TEXT NOT NULL CHECK (window IN ('daily_utc', 'monthly_utc')),
+revision INTEGER NOT NULL CHECK (revision >= 0),
+currency TEXT NOT NULL,
+limit_micros INTEGER NOT NULL CHECK (limit_micros > 0),
+PRIMARY KEY (scope, provider, window),
+CHECK ((scope = 'provider') = (length(provider) > 0))
+);
+-- One usage reservation per claimed provider call (usage-cost-cap §7/§8).
+-- The row is written inside the same Immediate transaction as the attempt
+-- claim and its cap compare, before any provider byte. `currency` +
+-- `upper_bound_micros` is the reserved cap amount: a `committed_reported` row
+-- replaces it with the actual cost, `committed_unknown` keeps the upper bound
+-- counted, and `released` counts nothing. `opened_at` is canonical UTC text;
+-- a cap window is the UTC period containing it, and settlement never moves
+-- the row between windows.
+CREATE TABLE usage_reservation (
+reservation_id TEXT PRIMARY KEY,
+ticket TEXT NOT NULL UNIQUE,
+provider TEXT NOT NULL CHECK (length(provider) > 0),
+model TEXT NOT NULL,
+pricing_snapshot TEXT NOT NULL,
+currency TEXT NOT NULL,
+upper_bound_micros INTEGER NOT NULL CHECK (upper_bound_micros >= 0),
+state TEXT NOT NULL CHECK (state IN ('reserved', 'committed_reported', 'committed_unknown', 'released')),
+committed_currency TEXT NULL,
+committed_micros INTEGER NULL CHECK (committed_micros IS NULL OR committed_micros >= 0),
+opened_at TEXT NOT NULL,
+CHECK ((state = 'committed_reported') = (committed_micros IS NOT NULL)),
+CHECK (committed_micros IS NULL OR committed_currency IS NOT NULL)
+);
 CREATE TABLE workspace_assoc (
 assoc_id TEXT PRIMARY KEY,
 task_id TEXT NOT NULL,
@@ -383,6 +421,8 @@ CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revisio
 CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
 CREATE INDEX idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status, row_seq);
+CREATE INDEX idx_usage_reservation_opened ON usage_reservation (opened_at);
+CREATE INDEX idx_usage_reservation_provider_opened ON usage_reservation (provider, opened_at);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
 INSERT INTO credential_set (id, rev) VALUES (1, 0);
 ";
@@ -439,7 +479,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 31] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

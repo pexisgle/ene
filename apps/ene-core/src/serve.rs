@@ -87,7 +87,7 @@ use ene_credential::{
     CredentialTechnicalError, DevicePairingRepository, DeviceRecord, EnvCredentialStore,
     FileDeviceAuthStore, MemoryCredentialStore,
 };
-use ene_inference::ProviderTransport;
+use ene_inference::{ProviderTransport, UsageRepository as _};
 use ene_permission::EvaluationTracker;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, FallbackCandidate, LiveReachabilityRef, MoveDecision,
@@ -589,13 +589,16 @@ impl HostHandle {
 
     /// Runs the serving startup mutations in production order (PR §6.4):
     /// presence normalization, unapproved-pairing cleanup, credential sweep,
-    /// and sealed-result reconciliation. Normalization goes first because
+    /// sealed-result reconciliation, and orphaned usage-reservation
+    /// reconciliation. Normalization goes first because
     /// every client-dependent admission depends on it, while the sweep and
     /// reconciliation do not; unapproved pendings never survive a restart
     /// (paired records are untouched); the sweep keeps the Host from serving
     /// content prepared under an unknown credential set; reconciliation
     /// neither resumes an execution nor replays a provider call or Action,
-    /// and a still-blocked result stays withheld. The
+    /// and a still-blocked result stays withheld. Orphaned reservations
+    /// settle `CommittedUnknown` (`usage-cost-cap` §15): a crash never
+    /// releases a usage slot and never resets consumption to zero. The
     /// [`crate::serve::lifecycle::serve`] entry point runs this
     /// between the store open and the listener bind; Host-integration tests
     /// run it to restart faithfully without a second listener. Like
@@ -606,12 +609,17 @@ impl HostHandle {
     /// # Errors
     ///
     /// [`CoreError::Store`] when normalization, the pairing cleanup, the
-    /// sweep, or the reconciliation cannot complete.
+    /// sweep, the sealed-result reconciliation, or the usage-reservation
+    /// reconciliation cannot complete.
     pub async fn run_startup_mutations(&self) -> Result<(), CoreError> {
         self.normalize_presence_on_startup().await?;
         self.clear_unapproved_pendings().await?;
         self.sweep_registered_values().await?;
         self.reconcile_sealed_results()
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        self.store
+            .reconcile_orphaned_usage_reservations()
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
         Ok(())

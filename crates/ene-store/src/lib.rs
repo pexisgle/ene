@@ -37,6 +37,7 @@ mod preservation;
 mod task;
 #[cfg(test)]
 mod tests;
+mod usage_cap;
 
 pub use companion::UndeliveredExcerpt;
 pub use erasure::{
