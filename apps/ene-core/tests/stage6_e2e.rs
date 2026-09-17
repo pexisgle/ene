@@ -77,7 +77,6 @@ use ene_api::v1::usage::{
 };
 use ene_core::conn;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_core::targeted_deletion::TargetedDeletionPass;
 use ene_credential::{CredentialRef, CredentialSetRepository as _, MemoryCredentialStore};
 use ene_ctl::client::Client;
 use ene_ctl::cmds;
@@ -983,7 +982,9 @@ async fn drive_until(
             "the deletion operation did not reach {}: {page:?}",
             wanted.as_str()
         );
-        let drive = handle.drive_targeted_deletion(TargetedDeletionPass::new(100, 16));
+        // The serving composition's production tick: the same method the
+        // background driver calls, so the E2E does not step the fan-out by hand.
+        let drive = handle.run_targeted_deletion_tick();
         let poll = async {
             loop {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1354,7 +1355,11 @@ async fn stage6_targeted_deletion_completes_system_wide() {
         .await
         .expect("status must answer");
     assert_eq!(page.operations.len(), 1, "one operation exists");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Active);
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "a confirmation never completes an operation by itself"
+    );
     assert_eq!(
         page.operations[0].operation.0,
         current
@@ -1503,9 +1508,9 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
             // the Host transient fence; the parked provider call stays held
             // until the pass returns.
             let pass = handle
-                .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+                .run_targeted_deletion_tick()
                 .await
-                .expect("the fan-out pass must run");
+                .expect("the serving tick must run");
             assert_eq!(pass.held, 0, "no participant holds a reachable owner");
             barrier.release_blocked();
             driven = true;
@@ -1583,13 +1588,18 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
         history_before.len(),
         "a held submit leaves no History row"
     );
-    // The receipt predates the condition: its ACK is a domain hold.
-    assert_eq!(
-        ack_summary(served.client(), &receipt)
-            .await
-            .expect("the ack must answer"),
-        UndeliveredAckOutcome::HeldForErasure,
-        "an ACK for a covered receipt never confirms presentation"
+    // The receipt predates the condition. The confirmation's driver pass
+    // invalidates the transient receipt, so the ACK answers either as a
+    // domain hold or as a stale receipt; neither confirms presentation.
+    let acked = ack_summary(served.client(), &receipt)
+        .await
+        .expect("the ack must answer");
+    assert!(
+        matches!(
+            acked,
+            UndeliveredAckOutcome::HeldForErasure | UndeliveredAckOutcome::StalePresentation
+        ),
+        "an ACK for a covered receipt never confirms presentation, got {acked:?}"
     );
     // A fresh read withholds the covered body.
     let fresh = fetch_summary(served.client(), "covered subscription")
@@ -1702,13 +1712,20 @@ async fn stage6_deletion_restart_during_active_resumes() {
         assert_eq!(outcome, ManagementOutcome::NeedsClarification);
         confirm_deletion(&served.handle).await
     };
-    // Restart while the operation is active and no participant has run.
+    // Restart while the operation is unfinished. The confirmation already
+    // kicked one bounded pass, so the durable phase may be Active or Held on
+    // an unreachable holder; the restart must neither lose the operation nor
+    // complete it by itself.
     let mut client = served.restart().await;
     let page = deletion_page(&mut client)
         .await
         .expect("status must answer");
     assert_eq!(page.operations.len(), 1, "the operation is never lost");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Active);
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "a restart never completes a deletion operation by itself"
+    );
     assert_eq!(
         page.operations[0].operation.0,
         current
@@ -1758,19 +1775,49 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
         &[cmds::CAPABILITY_DIALOGUE],
     )
     .await;
-    let outcome = request_deletion(served.client(), FINALIZING_TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let current = confirm_deletion(&served.handle).await;
+    // The Host is stopped, and the operation is built through the canonical
+    // store producer (the same admission the Host-local confirmation runs)
+    // because the serving composition's driver would otherwise finish the
+    // operation before the crash point can be staged. Only a real crash can
+    // interleave the two sealed completion calls, so the marker is a fixture.
     served.stop().await;
+    let store = ene_store::Store::open(&dir.join("app.db"))
+        .await
+        .expect("the state database opens for the crash fixture");
+    let staged = store
+        .stage_targeted_deletion(ene_preservation::StageTargetedDeletionRequestCommand::new(
+            ene_preservation::TargetedDeletionTarget {
+                mechanical: ene_preservation::MechanicalDeletionTarget::ExactText(
+                    ene_preservation::DeletionSearchMaterial::new(FINALIZING_TARGET.to_owned()),
+                ),
+                semantic_hints: Vec::new(),
+            },
+            ene_preservation::DeletionPurpose::Privacy,
+            WallClockWithTz::now(),
+        ))
+        .await
+        .expect("the canonical staged request must commit");
+    let request = match staged {
+        ene_preservation::StageTargetedDeletionRequestOutcome::Staged(request)
+        | ene_preservation::StageTargetedDeletionRequestOutcome::AlreadyStaged(request)
+        | ene_preservation::StageTargetedDeletionRequestOutcome::Confirmed(request) => request,
+        other => panic!("the request must be staged, got {other:?}"),
+    };
+    let current = match store
+        .confirm_targeted_deletion(
+            request,
+            ene_core::targeted_deletion::current_product_surface_owners(),
+        )
+        .await
+        .expect("the canonical confirmation must answer")
+    {
+        ConfirmTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("the confirmation must start one operation, got {other:?}"),
+    };
 
     // Build the crash point: every required participant is verified for the
     // current sweep, then the durable `finalizing` marker commits and the
     // process would have crashed before the completion commit.
-    let store = ene_store::Store::open(&dir.join("app.db"))
-        .await
-        .expect("the state database opens for the crash fixture");
     let participants = store
         .deletion_participants(current.operation, None, 100)
         .await
@@ -1796,13 +1843,19 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
     );
     drop(store);
 
-    // Restart: the marker is still unfinished and never auto-completed.
+    // Restart: the startup recovery reads the durable `finalizing` marker and
+    // finishes the remaining completion steps (lifecycle §14). It resumes the
+    // completion boundary, never a phase guess and never a second sweep.
     let mut client = served.serve().await;
     let page = deletion_page(&mut client)
         .await
         .expect("status must answer");
     assert_eq!(page.operations.len(), 1, "the operation is never lost");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Finalizing);
+    assert_eq!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "the finalizing marker must resume to the sealed completion"
+    );
     assert_eq!(
         page.operations[0].operation.0,
         current
@@ -2228,7 +2281,8 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
 
 /// The safe upper bound the cap tests reserve: 1,000,000 input tokens at the
 /// non-cached input rate plus 100,000 output tokens at the output rate under
-/// the reviewed `gpt-4o-mini` snapshot = 210,000 micro-USD.
+/// the reviewed `gpt-4o-mini` snapshot plus the one-micro-unit allowance for
+/// the separately rounded input components = 210,001 micro-USD.
 fn cap_estimate() -> UsageEstimate {
     UsageEstimate {
         input_tokens_upper_bound: 1_000_000,
@@ -2236,7 +2290,7 @@ fn cap_estimate() -> UsageEstimate {
     }
 }
 
-const CAP_UPPER_BOUND_MICROS: u64 = 210_000;
+const CAP_UPPER_BOUND_MICROS: u64 = 210_001;
 
 /// E2E 2: the reservation linearization. While one claimed call's reservation
 /// holds the last cap slot, a second send is refused with zero provider bytes;
@@ -2513,16 +2567,26 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         .to_string();
     let old_mark = observed_mark.clone();
     let intent_id = CommandWireId(uuid::Uuid::new_v4());
-    let outcome =
-        set_system_daily_cap_mark(served.client(), intent_id, &observed_mark, 420_000).await;
+    let outcome = set_system_daily_cap_mark(
+        served.client(),
+        intent_id,
+        &observed_mark,
+        2 * CAP_UPPER_BOUND_MICROS,
+    )
+    .await;
     assert!(
         matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }),
         "the cap raise must store, got {outcome:?}"
     );
     // An exact replay of the same intent id observes the first decision and
     // never applies a second write.
-    let replay =
-        set_system_daily_cap_mark(served.client(), intent_id, &observed_mark, 420_000).await;
+    let replay = set_system_daily_cap_mark(
+        served.client(),
+        intent_id,
+        &observed_mark,
+        2 * CAP_UPPER_BOUND_MICROS,
+    )
+    .await;
     assert!(
         matches!(replay, ManagementOutcome::StoredAsRuleView { .. }),
         "the replayed intent observes the stored decision, got {replay:?}"
