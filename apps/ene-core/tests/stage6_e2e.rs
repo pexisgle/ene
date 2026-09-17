@@ -2557,17 +2557,56 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         "a stale cap premise is refused, got {stale:?}"
     );
 
-    // Crash with an orphaned reservation: the parked call is claimed but never
-    // settles; the restart reconciles it to CommittedUnknown, still counted.
-    transport.block_input(on_latest_owner(&parked));
-    let client = served.client();
-    let mut parked_round = Box::pin(send_round_raw(client, &parked));
-    tokio::select! {
-        result = parked_round.as_mut() => panic!("the parked round cannot finish before the crash: {result:?}"),
-        () = transport.wait_parked(1) => {}
+    // Crash with an orphaned reservation: the Host stops, and a claim left
+    // mid-flight by the stopped process (built here through the production
+    // claim boundary, because only a real crash leaves a Reserved row) is
+    // reconciled to CommittedUnknown by the restart, still counted.
+    served.stop().await;
+    {
+        use ene_credential::CredentialSetRepository as _;
+        use ene_inference::pricing::{PricingCatalog, PricingResolution};
+        use ene_inference::{InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId};
+        use ene_permission::{CapabilityKind, ConsentRepository as _, ConsumerKind, PurposeKind};
+        let store = ene_store::Store::open(&served.dir.join("app.db"))
+            .await
+            .expect("the state database opens for the crash fixture");
+        let consent = store
+            .load_current(CapabilityKind::Dialogue)
+            .await
+            .expect("the consent read must answer")
+            .expect("the dialogue consent exists");
+        let credential_set = store
+            .current_set_revision()
+            .await
+            .expect("the credential-set revision must read");
+        let PricingResolution::Priced(pricing) = PricingCatalog::first_party()
+            .expect("the reviewed catalog must be valid")
+            .resolve("openai", MODEL, WallClockWithTz::now())
+        else {
+            panic!("the reviewed route must be priced");
+        };
+        assert_eq!(
+            store
+                .begin_inference_attempt(InferenceAttempt {
+                    ticket: InferenceTicketId(RawId::new()),
+                    consumer: ConsumerKind::CompanionDialogue,
+                    capability: CapabilityKind::Dialogue,
+                    purpose: PurposeKind::DialogueResponse,
+                    expected_consent: (consent.id.clone(), consent.rev),
+                    expected_credential_set: credential_set,
+                    provider: String::from("openai"),
+                    model: String::from(MODEL),
+                    task_agent: None,
+                    pricing: Some(pricing),
+                    usage_estimate: Some(cap_estimate()),
+                })
+                .await
+                .expect("the crash claim must answer"),
+            ene_inference::AttemptBeginOutcome::Started,
+            "the crash claim reserves the last slot before the process stops"
+        );
     }
-    drop(parked_round);
-    let mut client = served.restart().await;
+    let mut client = served.serve().await;
     let page = usage_page(&mut client).await;
     let unknowns: Vec<_> = page
         .rows
