@@ -200,6 +200,8 @@ fn inference_unavailable(error: InferenceTechnicalError) -> TaskAgentInferenceEr
         InferenceTechnicalError::StreamAborted { .. } => "stream aborted",
         InferenceTechnicalError::HttpClientBuildFailed => "http client build failed",
         InferenceTechnicalError::ResponseLost => "provider response lost",
+        InferenceTechnicalError::PricingCatalogUnavailable => "pricing catalog unavailable",
+        InferenceTechnicalError::CostProjectionFailed { .. } => "usage cost projection failed",
         InferenceTechnicalError::StorageUnavailable { .. } => "inference storage unavailable",
     };
     TaskAgentInferenceError::InferenceUnavailable {

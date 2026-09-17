@@ -30,6 +30,7 @@ fn task_agent_claim(
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
         task_agent: Some(premise),
+        pricing: None,
     }
 }
 
@@ -147,6 +148,7 @@ async fn dialogue_attempt_reads_back_without_task_correlation() {
                 provider: String::from("openai"),
                 model: String::from("dialogue-1"),
                 task_agent: None,
+                pricing: None,
             })
             .await,
         Ok(AttemptBeginOutcome::Started)

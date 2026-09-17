@@ -27,6 +27,7 @@ fn task_agent_claim(
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
         task_agent: Some(premise),
+        pricing: None,
     }
 }
 
@@ -498,6 +499,7 @@ async fn non_task_attempts_record_the_empty_data_use_and_are_not_gated() {
                 provider: String::from("openai"),
                 model: String::from("dialogue-1"),
                 task_agent: None,
+                pricing: None,
             })
             .await,
         Ok(AttemptBeginOutcome::Started),

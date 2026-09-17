@@ -27,8 +27,13 @@
 //! Body text is redacted from [`core::fmt::Debug`]: [`ProviderRequest`]
 //! hides `input`, and [`InferenceResultArrival`] hides `output_text`.
 //! Usage token counts are [`Option`]s with [`UsageSource::Unknown`], never
-//! zero, when the provider reports nothing.
+//! zero, when the provider reports nothing. Cost is derived from those counts
+//! and the immutable pricing snapshot bound to the ticket at admission
+//! ([`cost::project_cost`]); a missing rate or unknown counts settle as
+//! [`cost::UsageCostFact::Unknown`], never a zero amount.
 
+pub mod cost;
+pub mod pricing;
 pub mod provider;
 
 use std::future::Future;
@@ -42,7 +47,8 @@ use ene_permission::{
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
     PermissionEvaluationId, PurposeKind, check_live_authorization,
 };
-use ene_primitive::{RawId, RevisionInner};
+use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
+use pricing::{PricingCatalog, PricingResolution, PricingSnapshot};
 use thiserror::Error;
 
 /// Maximum accepted input length in Unicode scalar values.
@@ -175,6 +181,19 @@ pub enum InferenceTechnicalError {
     /// The provider may have run the call but the response was lost.
     #[error("provider response lost")]
     ResponseLost,
+    /// The reviewed first-party pricing catalog could not be constructed (a
+    /// first-party data defect, never a provider or user failure). Detected
+    /// before the attempt claim, so no provider byte is sent.
+    #[error("pricing catalog unavailable")]
+    PricingCatalogUnavailable,
+    /// A durable cost fact cannot be projected: the stored usage and pricing
+    /// rows disagree, or the amount is not representable. Distinct from
+    /// storage unavailability and never resolved to a zero or guessed cost.
+    #[error("usage cost projection failed: {reason}")]
+    CostProjectionFailed {
+        /// Bounded cause class, without body text or secrets.
+        reason: String,
+    },
     #[error("inference storage unavailable: {reason}")]
     StorageUnavailable {
         /// Backend-supplied cause, without body text or secrets.
@@ -317,6 +336,27 @@ pub trait UsageRepository: Send + Sync {
     /// arrivals are idempotent; an Unknown settlement is not revised later.
     /// Reject orphan tickets, route mismatches, and inconsistent token facts.
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
+
+    /// Projects the durable cost fact of a settled ticket.
+    ///
+    /// `Ok(None)` means no token settlement exists for the ticket yet (the
+    /// attempt may still be in flight); it is not a zero-cost fact. A settled
+    /// fact whose stored rows disagree or whose amount does not fit the money
+    /// representation is a technical error, never a guessed or truncated
+    /// cost. This read performs no pricing refresh and rewrites nothing.
+    async fn load_usage_cost(
+        &self,
+        ticket: InferenceTicketId,
+    ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError>;
+}
+
+/// One settled ticket's durable token and cost facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageCostRecord {
+    /// Token usage exactly as settled (Reported counts or Unknown).
+    pub usage: UsageFact,
+    /// Cost projected from the pricing snapshot bound at the attempt claim.
+    pub cost: cost::UsageCostFact,
 }
 
 /// One claimed inference attempt: the ticket plus the consent premise and
@@ -349,6 +389,13 @@ pub struct InferenceAttempt {
     /// claim verifies it against the delegation row and the current Task in
     /// the same transaction.
     pub task_agent: Option<TaskAgentAttemptPremise>,
+    /// Reviewed pricing snapshot resolved for this route immediately before
+    /// the claim (`usage-cost-cap` §9), or `None` when the first-party
+    /// catalog has no reviewed rate for the route. The claim publishes the
+    /// snapshot durably and binds its reference to the attempt, so the cost
+    /// fact of this ticket can never be repriced by a later catalog revision.
+    /// `None` settles the cost as Unknown, never as zero.
+    pub pricing: Option<PricingSnapshot>,
 }
 
 /// One claimed attempt as read back for attribution and restart.
@@ -786,24 +833,28 @@ pub trait InferenceExecutor: Send + Sync {
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
-/// Dispatches one authorized use: input validation, attempt claim, provider
-/// call, adoption re-check, and usage recording.
+/// Dispatches one authorized use: input validation, pricing resolution,
+/// attempt claim, provider call, adoption re-check, and usage recording.
 ///
 /// The input cap is checked here, before the durable attempt claim: an
 /// over-limit request is a never-sent refusal and must not leave an attempt
-/// row behind. The prompt's credential-set premise is compared in the same
-/// claim transaction, so a prompt scrubbed before a credential became
-/// registered is never sent. From the successful claim onward, every path
-/// either records usage (uncertain or reported) or reports stale before any
-/// provider I/O. A technical provider failure records an unknown-usage fact
-/// before propagating: the attempt may have run. A completed call records
-/// its reported counts whether or not the reply is adopted; an adoption read
-/// failure still records the reported counts before propagating the storage
-/// error. A reported fact requires all three counts with cached input a
-/// subset of input; any missing, malformed, or inconsistent provider usage
-/// settles as [`UsageSource::Unknown`] with all counts absent, never zero.
-/// The settlement is the first complete fact for the ticket and cannot be
-/// revised by a later duplicate.
+/// row behind. The reviewed pricing snapshot for the route is resolved
+/// immediately before the claim and travels with the attempt, so the ticket's
+/// cost fact is bound to the rate the call ran under and a later catalog
+/// revision cannot reprice it; an unreviewed route claims without a rate and
+/// settles its cost as Unknown. The prompt's credential-set premise is
+/// compared in the same claim transaction, so a prompt scrubbed before a
+/// credential became registered is never sent. From the successful claim
+/// onward, every path either records usage (uncertain or reported) or reports
+/// stale before any provider I/O. A technical provider failure records an
+/// unknown-usage fact before propagating: the attempt may have run. A
+/// completed call records its reported counts whether or not the reply is
+/// adopted; an adoption read failure still records the reported counts before
+/// propagating the storage error. A reported fact requires all three counts
+/// with cached input a subset of input; any missing, malformed, or
+/// inconsistent provider usage settles as [`UsageSource::Unknown`] with all
+/// counts absent, never zero. The settlement is the first complete fact for
+/// the ticket and cannot be revised by a later duplicate.
 ///
 /// `abort` is the caller's local best-effort stop signal, when one exists.
 /// A signal already raised before the claim refuses without claiming
@@ -842,6 +893,18 @@ pub async fn dispatch_authorized(
     let credential_set = prompt.credential_set();
     let credential = authorized.credential;
     let task_agent = authorized.task_agent;
+    // The pricing snapshot is resolved right before the claim (usage-cost-cap
+    // §9): the rate this call runs under is fixed for the ticket and a later
+    // catalog revision only affects calls admitted after it. An unpriced
+    // route claims without a snapshot; its cost fact settles Unknown instead
+    // of guessing a rate, and a catalog defect refuses before any claim.
+    let pricing = match PricingCatalog::first_party()
+        .map_err(|_| InferenceTechnicalError::PricingCatalogUnavailable)?
+        .resolve(&provider, &model, WallClockWithTz::now())
+    {
+        PricingResolution::Priced(snapshot) => Some(snapshot),
+        PricingResolution::Unpriced => None,
+    };
     // The claim is the linearization point: it reads, compares, and inserts
     // in one short transaction, so a stale consent, a stale credential-set
     // premise, or a moved Task Agent delegation/task premise fails here
@@ -858,6 +921,7 @@ pub async fn dispatch_authorized(
             provider: provider.clone(),
             model: model.clone(),
             task_agent,
+            pricing,
         })
         .await
     {
@@ -1072,8 +1136,8 @@ mod dispatch_tests {
         InferenceAttemptRecord, InferenceAttemptRepository, InferenceDispatchOutcome,
         InferenceResultArrival, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
         NotSentReason, PermissionEvaluationId, ProviderRequest, ProviderResponse,
-        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageFact, UsageRepository,
-        UsageSource, dispatch_authorized,
+        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageCostRecord, UsageFact,
+        UsageRepository, UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -1321,6 +1385,19 @@ mod dispatch_tests {
                 reason: String::from("usage store down"),
             })
         }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_cost(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
     }
 
     /// Transport that counts calls without performing I/O.
@@ -1396,6 +1473,17 @@ mod dispatch_tests {
         async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError> {
             self.0.lock().expect("usage capture lock").push(fact);
             Ok(())
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_cost(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
+            Ok(None)
         }
     }
 
@@ -1485,6 +1573,76 @@ mod dispatch_tests {
             authorization: PermissionEvaluationId(RawId::new()),
             task_agent: Some(premise),
         }
+    }
+
+    /// The same authorized premise for an explicit route, so dispatch pricing
+    /// is exercised for reviewed and unreviewed provider/model pairs.
+    fn authorized_route(provider: &str, model: &str) -> AuthorizedInference {
+        let mut authorized = authorized();
+        authorized.provider = provider.to_owned();
+        authorized.model = model.to_owned();
+        authorized
+    }
+
+    #[tokio::test]
+    async fn priced_route_claims_with_the_reviewed_snapshot() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        dispatch_authorized(
+            authorized_route("openai", "gpt-4o"),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        let pricing = claimed[0]
+            .pricing
+            .as_ref()
+            .expect("a reviewed route claims under its snapshot");
+        assert_eq!(pricing.provider, "openai");
+        assert_eq!(pricing.model, "gpt-4o");
+        assert_eq!(pricing.input_rate.micros_per_million(), 2_500_000);
+        assert_eq!(pricing.cached_input_rate.micros_per_million(), 1_250_000);
+        assert_eq!(pricing.output_rate.micros_per_million(), 10_000_000);
+        assert_eq!(
+            pricing.source_revision,
+            crate::pricing::FIRST_PARTY_REVISION
+        );
+    }
+
+    #[tokio::test]
+    async fn unpriced_route_claims_without_a_guessed_rate() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert!(
+            claimed[0].pricing.is_none(),
+            "an unreviewed route must claim with no rate, never another model's"
+        );
     }
 
     #[tokio::test]

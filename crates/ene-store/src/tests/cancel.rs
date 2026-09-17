@@ -134,6 +134,7 @@ fn task_agent_claim_for(delegation: DelegationId, task: TaskRef) -> InferenceAtt
             task_revision: RevisionInner::from_u64(task.revision.as_u64()),
             data_use: vec![RawId::new()],
         }),
+        pricing: None,
     }
 }
 

@@ -180,7 +180,8 @@ credential_set_rev INTEGER NULL,
 delegation_id TEXT NULL,
 task_id TEXT NULL,
 task_revision INTEGER NULL,
-data_use_count INTEGER NULL
+data_use_count INTEGER NULL,
+pricing_snapshot TEXT NULL
 );
 CREATE TABLE inference_attempt_data_use (
 ticket TEXT NOT NULL,
@@ -248,6 +249,23 @@ pending_id TEXT PRIMARY KEY,
 descriptor TEXT NOT NULL,
 requested_at TEXT NOT NULL,
 origin_connection TEXT NOT NULL
+);
+-- Reviewed provider rates, immutable per (provider, model, revision). The id
+-- is derived from the reviewed content, so the same revision resolves to the
+-- same durable identity in every process; a row that disagrees with the
+-- revision it was published under fails closed instead of repricing history.
+-- Rates are exact micro-currency units per 1,000,000 tokens.
+CREATE TABLE pricing_snapshot (
+id TEXT PRIMARY KEY,
+provider TEXT NOT NULL,
+model TEXT NOT NULL,
+currency TEXT NOT NULL,
+input_rate INTEGER NOT NULL CHECK (input_rate >= 0),
+cached_input_rate INTEGER NOT NULL CHECK (cached_input_rate >= 0),
+output_rate INTEGER NOT NULL CHECK (output_rate >= 0),
+effective_at TEXT NOT NULL,
+source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+UNIQUE (provider, model, source_revision)
 );
 CREATE TABLE presence_attribution (
 companion_id TEXT PRIMARY KEY,
@@ -331,6 +349,7 @@ input_tokens INTEGER,
 cached_input_tokens INTEGER,
 output_tokens INTEGER,
 source TEXT NOT NULL,
+pricing_snapshot TEXT NULL,
 CHECK (
     (source = 'unknown' AND input_tokens IS NULL AND cached_input_tokens IS NULL AND output_tokens IS NULL)
     OR

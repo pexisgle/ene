@@ -9,6 +9,8 @@ use ene_companion::{
 use ene_credential::{
     CredentialTechnicalError, DeviceId, DeviceRecord, PendingCredentialApproval, PendingPairing,
 };
+use ene_inference::cost::CurrencyCode;
+use ene_inference::pricing::PricingSnapshotRef;
 use ene_inference::{InferenceTechnicalError, UsageSource};
 use ene_permission::{
     CapabilityKind, ConsentRecord, ConsentRevision, ConsumerKind, IntentFingerprint, IntentOutcome,
@@ -62,6 +64,35 @@ pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
         .parse()
         .map_err(|_| String::from("malformed identity text"))?;
     Ok(RawId::from_uuid(parsed))
+}
+
+/// Pricing references have a text form by design: the durable row is what
+/// historical cost facts join on. Malformed text never becomes a fresh or
+/// default reference.
+pub(crate) fn encode_pricing_reference(reference: PricingSnapshotRef) -> String {
+    reference.to_text()
+}
+
+pub(crate) fn decode_pricing_reference(text: &str) -> Result<PricingSnapshotRef, String> {
+    PricingSnapshotRef::from_text(text)
+        .ok_or_else(|| String::from("malformed pricing snapshot reference"))
+}
+
+pub(crate) fn encode_currency(currency: CurrencyCode) -> &'static str {
+    currency.as_str()
+}
+
+pub(crate) fn decode_currency(text: &str) -> Result<CurrencyCode, String> {
+    CurrencyCode::from_code(text).ok_or_else(|| String::from("unknown currency code"))
+}
+
+/// Canonical UTC rendering, so stored instants compare and order as text.
+pub(crate) fn encode_wall_clock(at: WallClockWithTz) -> String {
+    at.to_rfc3339_utc()
+}
+
+pub(crate) fn decode_wall_clock(text: &str) -> Result<WallClockWithTz, String> {
+    WallClockWithTz::parse_rfc3339(text).map_err(|_| String::from("malformed timestamp"))
 }
 
 pub(crate) fn encode_u64(value: u64) -> Result<i64, String> {

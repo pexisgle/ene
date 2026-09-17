@@ -2381,6 +2381,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
         task_agent: None,
+        pricing: None,
     };
     let ticket = InferenceTicketId(RawId::new());
     let started = store.begin_inference_attempt(claim(ticket, 1)).await;
@@ -4027,6 +4028,7 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             task_agent: None,
+            pricing: None,
         })
         .await;
     assert_eq!(
@@ -4192,6 +4194,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             task_agent: None,
+            pricing: None,
         })
         .await;
     assert_eq!(stale, Ok(AttemptBeginOutcome::Stale));
@@ -4207,6 +4210,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             task_agent: None,
+            pricing: None,
         })
         .await;
     assert_eq!(fresh, Ok(AttemptBeginOutcome::Started));
