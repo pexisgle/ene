@@ -567,11 +567,16 @@ async fn setup_flow(
 
 /// One served Host under test: the composition handle, the listener task, and
 /// a live first-party client.
+///
+/// The client is optional because a restart must first close the current
+/// connection: the Windows named-pipe listener creates the exclusive *first*
+/// instance for the pipe name, so the previous connection's still-open server
+/// instance would block the new listener from binding.
 struct Served {
     dir: PathBuf,
     handle: Arc<HostHandle>,
     server: tokio::task::JoinHandle<Result<(), CoreError>>,
-    client: Client,
+    client: Option<Client>,
     transport: Arc<ScriptedTransport>,
 }
 
@@ -603,35 +608,62 @@ impl Served {
             dir,
             handle,
             server,
-            client,
+            client: Some(client),
             transport,
         }
     }
 
-    /// Stops the listener. The state stays open on the current handle, exactly
-    /// like a Host process that stopped serving.
+    /// The live first-party client.
+    fn client(&mut self) -> &mut Client {
+        self.client.as_mut().expect("a live client")
+    }
+
+    /// Closes the current connection and stops the listener. The state stays
+    /// open on the current handle, exactly like a Host process that stopped
+    /// serving.
     async fn stop(&mut self) {
         self.server.abort();
+        self.client = None;
         tokio::task::yield_now().await;
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
 
     /// Opens the state again, runs the production startup mutations, and
     /// serves; returns a fresh authenticated client.
+    ///
+    /// The OS transport may still be releasing the previous connection's
+    /// server instance (the Windows named-pipe listener owns the exclusive
+    /// first instance for the pipe name), so a listener that exits immediately
+    /// is retried until it stays up.
     async fn serve(&mut self) -> Client {
         let handle = open_host(&self.dir).await;
         handle
             .run_startup_mutations()
             .await
             .expect("restart startup must complete");
-        let server = tokio::spawn(conn::run(
-            self.dir.clone(),
-            Arc::clone(&handle),
-            Arc::clone(&self.transport),
-        ));
-        self.handle = handle;
-        self.server = server;
-        connect(&self.dir).await
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let mut server = tokio::spawn(conn::run(
+                self.dir.clone(),
+                Arc::clone(&handle),
+                Arc::clone(&self.transport),
+            ));
+            // Bind is the listener's first await point: a task that exits
+            // within this window could not bind (or lost the singleton race).
+            if let Ok(outcome) = tokio::time::timeout(Duration::from_millis(250), &mut server).await
+            {
+                let failure = outcome.expect("the listener task must not panic");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the listener never bound after the restart: {failure:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            self.handle = handle;
+            self.server = server;
+            return connect(&self.dir).await;
+        }
     }
 
     /// Stops and serves again, mirroring a Host process restart.
@@ -1063,7 +1095,7 @@ fn formation_update() -> String {
 /// copies, and the undelivered presentation transient.
 async fn plant_target_fixture(served: &mut Served) {
     let dir = served.dir.clone();
-    let client = &mut served.client;
+    let client = served.client();
     // Round 1: History (owner input + companion reply) and one formation.
     let (round, stream, reply) = send_round(client, &format!("please remember {TARGET} for me"))
         .await
@@ -1217,7 +1249,7 @@ fn assert_target_is_planted(served: &Served) {
 /// report must not carry the target, and no provider request issued after the
 /// confirmation may quote it.
 async fn assert_completed_reads_are_clean(served: &mut Served, sends_at_confirmation: usize) {
-    let client = &mut served.client;
+    let client = served.client();
     let texts = history_texts(client).await;
     assert_absent_all("history", &texts, TARGET);
     let memory = memory_view(client).await;
@@ -1299,7 +1331,7 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     assert_target_is_planted(&served);
 
     // First-party request: only stages, never destructive.
-    let outcome = request_deletion(&mut served.client, TARGET)
+    let outcome = request_deletion(served.client(), TARGET)
         .await
         .expect("the request inlet must answer");
     assert_eq!(
@@ -1308,7 +1340,7 @@ async fn stage6_targeted_deletion_completes_system_wide() {
         "the Client intent only stages"
     );
     assert!(
-        deletion_page(&mut served.client)
+        deletion_page(served.client())
             .await
             .expect("status must answer")
             .operations
@@ -1318,7 +1350,7 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     // Host-local trusted confirmation starts the canonical operation.
     let current = confirm_deletion(&served.handle).await;
     let sends_at_confirmation = transport.sends();
-    let page = deletion_page(&mut served.client)
+    let page = deletion_page(served.client())
         .await
         .expect("status must answer");
     assert_eq!(page.operations.len(), 1, "one operation exists");
@@ -1334,13 +1366,10 @@ async fn stage6_targeted_deletion_completes_system_wide() {
         "the status view names the started operation"
     );
 
-    let page = drive_until(
-        &served.handle,
-        &mut served.client,
-        DeletionPhaseWire::Completed,
-    )
-    .await
-    .expect("the operation must complete");
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
     let view = &page.operations[0];
     assert_eq!(view.phase, DeletionPhaseWire::Completed);
     let DeletionParticipantReportWire::Reported(participants) = &view.participants else {
@@ -1368,21 +1397,21 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     // A completed operation is not a permanent keyword ban: the Owner may
     // provide the same text again as a fresh origin.
     let sends_before = transport.sends();
-    let (round, stream, reply) = send_round(&mut served.client, &format!("a fresh note: {TARGET}"))
+    let (round, stream, reply) = send_round(served.client(), &format!("a fresh note: {TARGET}"))
         .await
         .expect("a fresh origin must be accepted");
     assert!(
         reply.contains("acknowledged"),
         "the fresh origin round must complete: {reply}"
     );
-    confirm_round(&mut served.client, &round, stream).await;
+    confirm_round(served.client(), &round, stream).await;
     assert!(
         transport.sends() > sends_before,
         "the fresh origin is a new provider origin, not a permanent ban"
     );
-    let companion = served.client.companion_ref();
+    let companion = served.client().companion_ref();
     let history = ask(
-        &mut served.client,
+        served.client(),
         WirePayload::HistoryRequest(cmds::history_request(&companion, 100)),
         "fresh history",
     )
@@ -1437,7 +1466,7 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    let (_round, _stream, reply) = send_round(&mut served.client, &first)
+    let (_round, _stream, reply) = send_round(served.client(), &first)
         .await
         .expect("the first round must complete");
     assert!(reply.contains(TARGET));
@@ -1445,8 +1474,8 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
     // post-restart push re-tracks the reconnecting incarnation: this leg
     // targets the provider-wait race, and the Client-incarnation demand has
     // its own legs.
-    let backlog = wait_for_summary_with(&mut served.client, TARGET).await;
-    drop(ack_summary(&mut served.client, &backlog).await);
+    let backlog = wait_for_summary_with(served.client(), TARGET).await;
+    drop(ack_summary(served.client(), &backlog).await);
     let mut client = served.restart().await;
     // Advisory staging first; the condition is committed while the external
     // provider call is already in flight.
@@ -1528,20 +1557,20 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    let (_round, _stream, _reply) = send_round(&mut served.client, &first)
+    let (_round, _stream, _reply) = send_round(served.client(), &first)
         .await
         .expect("the first round must complete");
-    let receipt = wait_for_summary_with(&mut served.client, TARGET).await;
-    let outcome = request_deletion(&mut served.client, TARGET)
+    let receipt = wait_for_summary_with(served.client(), TARGET).await;
+    let outcome = request_deletion(served.client(), TARGET)
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
     confirm_deletion(&served.handle).await;
     // Condition first: a fresh target-bearing submit is held at intake with
     // zero provider bytes and leaves no History row.
-    let history_before = history_texts(&mut served.client).await;
+    let history_before = history_texts(served.client()).await;
     let sends_before = transport.sends();
-    submit_expect_hold(&mut served.client, &format!("still {TARGET}"))
+    submit_expect_hold(served.client(), &format!("still {TARGET}"))
         .await
         .expect("a covered submit must hold");
     assert_eq!(
@@ -1550,32 +1579,29 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
         "a held submit sends the provider zero bytes"
     );
     assert_eq!(
-        history_texts(&mut served.client).await.len(),
+        history_texts(served.client()).await.len(),
         history_before.len(),
         "a held submit leaves no History row"
     );
     // The receipt predates the condition: its ACK is a domain hold.
     assert_eq!(
-        ack_summary(&mut served.client, &receipt)
+        ack_summary(served.client(), &receipt)
             .await
             .expect("the ack must answer"),
         UndeliveredAckOutcome::HeldForErasure,
         "an ACK for a covered receipt never confirms presentation"
     );
     // A fresh read withholds the covered body.
-    let fresh = fetch_summary(&mut served.client, "covered subscription")
+    let fresh = fetch_summary(served.client(), "covered subscription")
         .await
         .expect("the subscription must answer");
     for item in &fresh.items {
         assert_absent("covered excerpt", &item.excerpt, TARGET);
     }
-    let page = drive_until(
-        &served.handle,
-        &mut served.client,
-        DeletionPhaseWire::Completed,
-    )
-    .await
-    .expect("the operation must complete with a reachable Client");
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete with a reachable Client");
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
@@ -1610,12 +1636,12 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    let (_round, _stream, reply) = send_round(&mut served.client, &first)
+    let (_round, _stream, reply) = send_round(served.client(), &first)
         .await
         .expect("the first round must complete");
     assert!(reply.contains(TARGET));
     transport.wait_parked(1).await;
-    let outcome = request_deletion(&mut served.client, TARGET)
+    let outcome = request_deletion(served.client(), TARGET)
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
@@ -1625,16 +1651,13 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
     // bounded window the fan-out would use, then prove no Memory exists.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
-        !memory_view(&mut served.client).await.contains(TARGET),
+        !memory_view(served.client()).await.contains(TARGET),
         "a covered formation never writes target Memory"
     );
-    let page = drive_until(
-        &served.handle,
-        &mut served.client,
-        DeletionPhaseWire::Completed,
-    )
-    .await
-    .expect("the operation must complete");
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
     assert!(
         transport
@@ -1669,11 +1692,11 @@ async fn stage6_deletion_restart_during_active_resumes() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    let (_round, _stream, _reply) = send_round(&mut served.client, &first)
+    let (_round, _stream, _reply) = send_round(served.client(), &first)
         .await
         .expect("the first round must complete");
     let current = {
-        let outcome = request_deletion(&mut served.client, TARGET)
+        let outcome = request_deletion(served.client(), TARGET)
             .await
             .expect("the request inlet must answer");
         assert_eq!(outcome, ManagementOutcome::NeedsClarification);
@@ -1735,7 +1758,7 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
         &[cmds::CAPABILITY_DIALOGUE],
     )
     .await;
-    let outcome = request_deletion(&mut served.client, FINALIZING_TARGET)
+    let outcome = request_deletion(served.client(), FINALIZING_TARGET)
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
@@ -2027,29 +2050,27 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
     let workspace = dir.join("usage-workspace");
     std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
     std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
-    select_workspace(&mut served.client, &workspace)
+    select_workspace(served.client(), &workspace)
         .await
         .expect("workspace must select");
-    let (round, stream, _) = send_round(&mut served.client, "please remember the kettle")
+    let (round, stream, _) = send_round(served.client(), "please remember the kettle")
         .await
         .expect("the reported round must complete");
-    confirm_round(&mut served.client, &round, stream).await;
-    let (round, stream, _) = send_round(
-        &mut served.client,
-        "please read input.txt and write report.md",
-    )
-    .await
-    .expect("the propose round must complete");
-    confirm_round(&mut served.client, &round, stream).await;
-    wait_task_progress(&mut served.client, "completed", 1)
+    confirm_round(served.client(), &round, stream).await;
+    let (round, stream, _) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    confirm_round(served.client(), &round, stream).await;
+    wait_task_progress(served.client(), "completed", 1)
         .await
         .expect("the task must complete");
-    let (round, stream, _) = send_round(&mut served.client, "what about the kettle")
+    let (round, stream, _) = send_round(served.client(), "what about the kettle")
         .await
         .expect("the unknown round must complete");
-    confirm_round(&mut served.client, &round, stream).await;
+    confirm_round(served.client(), &round, stream).await;
 
-    let page = usage_page(&mut served.client).await;
+    let page = usage_page(served.client()).await;
     // Attribution: one Reported row per consumer, each with the exact
     // reviewed-rate breakdown.
     let dialogue = page
@@ -2090,7 +2111,7 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
     assert!(unknown.tokens.is_none(), "Unknown is never zero tokens");
     assert!(unknown.cost.is_none(), "Unknown is never a zero cost");
     // Read-only: a second read answers the same rows and settles nothing.
-    let again = usage_page(&mut served.client).await;
+    let again = usage_page(served.client()).await;
     assert_eq!(again.rows, page.rows, "the read changes nothing durable");
 
     // Historical pricing: a settlement admitted under a different reviewed
@@ -2162,7 +2183,7 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
             .await
             .expect("the synthetic settlement must record");
     }
-    let after = usage_page(&mut served.client).await;
+    let after = usage_page(served.client()).await;
     // The synthetic ticket settled at the revision-2 rates
     // (1000 x 300_000 + 100 x 1_200_000 per million tokens = 300 + 120).
     let synthetic_row = after
@@ -2261,7 +2282,7 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     // A loose system daily cap plus a tight provider monthly cap: the
     // provider scope is the binding one for the next send.
     let outcome = set_system_daily_cap(
-        &mut served.client,
+        served.client(),
         CommandWireId(uuid::Uuid::new_v4()),
         1_000_000,
     )
@@ -2271,7 +2292,7 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
         "the system cap must store, got {outcome:?}"
     );
     let outcome = set_provider_monthly_cap(
-        &mut served.client,
+        served.client(),
         CommandWireId(uuid::Uuid::new_v4()),
         "openai",
         CAP_UPPER_BOUND_MICROS + 40_000,
@@ -2285,15 +2306,15 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     // last provider slot (250,000 limit against a 210,000 bound while the
     // system daily cap alone would still admit the send).
     transport.block_input(on_learning_formation(true));
-    let (round, stream, _) = send_round(&mut served.client, &first)
+    let (round, stream, _) = send_round(served.client(), &first)
         .await
         .expect("the first round must complete");
-    confirm_round(&mut served.client, &round, stream).await;
+    confirm_round(served.client(), &round, stream).await;
     transport.wait_parked(1).await;
     // A concurrent dialogue send cannot claim: zero provider bytes, never a
     // second attempt or reservation.
     let sends_before = transport.sends();
-    let raced = send_round_raw(&mut served.client, &second).await;
+    let raced = send_round_raw(served.client(), &second).await;
     assert!(
         raced.is_err()
             || raced.as_ref().is_ok_and(|(_, _, text, close)| {
@@ -2308,7 +2329,7 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     );
     // Which scope refused: the provider monthly slot is out of room while the
     // system daily slot alone would still admit the send.
-    let observed = usage_page_for(&mut served.client, "openai").await;
+    let observed = usage_page_for(served.client(), "openai").await;
     let provider_slot = observed
         .caps
         .iter()
@@ -2358,7 +2379,7 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     transport.release_blocked();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let page = loop {
-        let page = usage_page(&mut served.client).await;
+        let page = usage_page(served.client()).await;
         let settled = page.rows.iter().any(|row| {
             row.consumer == "companion_learning"
                 && row.status == "reported"
@@ -2399,11 +2420,11 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     assert_eq!(consumed.micros, 840);
     assert!(!held, "the settled reservation frees the slot");
     // The next send is admitted and settles Reported.
-    let (round, stream, reply) = send_round(&mut served.client, &third)
+    let (round, stream, reply) = send_round(served.client(), &third)
         .await
         .expect("the next send must be admitted");
     assert!(reply.contains("Still noted"), "{reply}");
-    confirm_round(&mut served.client, &round, stream).await;
+    confirm_round(served.client(), &round, stream).await;
     served.server.abort();
 }
 
@@ -2443,7 +2464,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     )
     .await;
     let outcome = set_system_daily_cap(
-        &mut served.client,
+        served.client(),
         CommandWireId(uuid::Uuid::new_v4()),
         CAP_UPPER_BOUND_MICROS + 40_000,
     )
@@ -2453,7 +2474,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         ManagementOutcome::StoredAsRuleView { .. }
     ));
     // ResponseLost: the attempt may have run, so the upper bound stays counted.
-    let raced = send_round_raw(&mut served.client, &lost).await;
+    let raced = send_round_raw(served.client(), &lost).await;
     assert!(
         raced.is_err()
             || raced.as_ref().is_ok_and(|(_, _, text, close)| {
@@ -2461,7 +2482,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
             }),
         "a lost provider response never completes a reply: {raced:?}"
     );
-    let page = usage_page(&mut served.client).await;
+    let page = usage_page(served.client()).await;
     let unknown = page
         .rows
         .iter()
@@ -2475,7 +2496,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     assert!(unknown.tokens.is_none() && unknown.cost.is_none());
     // A new send cannot fit while the Unknown counts.
     let sends_before = transport.sends();
-    let refused = send_round_raw(&mut served.client, "one more note").await;
+    let refused = send_round_raw(served.client(), "one more note").await;
     assert!(
         refused.is_err()
             || refused.as_ref().is_ok_and(|(_, _, text, close)| {
@@ -2486,14 +2507,14 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     assert_eq!(transport.sends(), sends_before);
 
     // First-party cap update: currentness, replay, and stale premise.
-    let observed = usage_page(&mut served.client).await;
+    let observed = usage_page(served.client()).await;
     let observed_mark = cmds::usage_cap_mark_for(&observed, "system", None, "daily_utc")
         .expect("the slot mark")
         .to_string();
     let old_mark = observed_mark.clone();
     let intent_id = CommandWireId(uuid::Uuid::new_v4());
     let outcome =
-        set_system_daily_cap_mark(&mut served.client, intent_id, &observed_mark, 420_000).await;
+        set_system_daily_cap_mark(served.client(), intent_id, &observed_mark, 420_000).await;
     assert!(
         matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }),
         "the cap raise must store, got {outcome:?}"
@@ -2501,7 +2522,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     // An exact replay of the same intent id observes the first decision and
     // never applies a second write.
     let replay =
-        set_system_daily_cap_mark(&mut served.client, intent_id, &observed_mark, 420_000).await;
+        set_system_daily_cap_mark(served.client(), intent_id, &observed_mark, 420_000).await;
     assert!(
         matches!(replay, ManagementOutcome::StoredAsRuleView { .. }),
         "the replayed intent observes the stored decision, got {replay:?}"
@@ -2509,12 +2530,12 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     // A conflicting reuse of the key (same id, different body) decides
     // nothing and never rewrites the cap.
     let conflicting =
-        set_system_daily_cap_mark(&mut served.client, intent_id, &observed_mark, 999).await;
+        set_system_daily_cap_mark(served.client(), intent_id, &observed_mark, 999).await;
     assert!(
         matches!(conflicting, ManagementOutcome::NeedsClarification),
         "a conflicting reuse is clarified, got {conflicting:?}"
     );
-    let after_replay = usage_page(&mut served.client).await;
+    let after_replay = usage_page(served.client()).await;
     assert!(
         after_replay
             .caps
@@ -2525,7 +2546,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     );
     // A stale base view is refused and decides nothing.
     let stale = set_system_daily_cap_mark(
-        &mut served.client,
+        served.client(),
         CommandWireId(uuid::Uuid::new_v4()),
         &old_mark,
         5,
@@ -2539,7 +2560,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     // Crash with an orphaned reservation: the parked call is claimed but never
     // settles; the restart reconciles it to CommittedUnknown, still counted.
     transport.block_input(on_latest_owner(&parked));
-    let client = &mut served.client;
+    let client = served.client();
     let mut parked_round = Box::pin(send_round_raw(client, &parked));
     tokio::select! {
         result = parked_round.as_mut() => panic!("the parked round cannot finish before the crash: {result:?}"),
@@ -2711,13 +2732,13 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     let workspace = dir.join("secret-workspace");
     std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
     std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
-    select_workspace(&mut served.client, &workspace)
+    select_workspace(served.client(), &workspace)
         .await
         .expect("workspace must select");
     // Dialogue + Learning: the owner input, the provider reply, and the
     // formation answer all quote the registered value.
     let (round, stream, reply) = send_round(
-        &mut served.client,
+        served.client(),
         &format!("please remember the passphrase {SECRET}"),
     )
     .await
@@ -2725,21 +2746,19 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     // The provider answer is synthetic (a real model never sees the scrubbed
     // value), so only the durable adoption is the invariant: the History row
     // must carry the redaction marker instead of the value.
-    confirm_round(&mut served.client, &round, stream).await;
+    confirm_round(served.client(), &round, stream).await;
     let _ = reply;
     // Task Agent: the directive purpose and the final answer quote it.
-    let (round, stream, _) = send_round(
-        &mut served.client,
-        "please read input.txt and write report.md",
-    )
-    .await
-    .expect("the propose round must complete");
-    confirm_round(&mut served.client, &round, stream).await;
-    wait_task_progress(&mut served.client, "completed", 1)
+    let (round, stream, _) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    confirm_round(served.client(), &round, stream).await;
+    wait_task_progress(served.client(), "completed", 1)
         .await
         .expect("the task must complete");
     // Provider failure: the request must already be scrubbed.
-    let errored = send_round_raw(&mut served.client, &format!("an error path with {SECRET}")).await;
+    let errored = send_round_raw(served.client(), &format!("an error path with {SECRET}")).await;
     match errored {
         Ok((_, _, text, _)) => assert_absent("errored round text", &text, SECRET),
         Err(rendered) => assert_absent("errored round rendering", &rendered, SECRET),
@@ -2748,14 +2767,10 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     assert_absent_all("provider request", &transport.input_texts(), SECRET);
     // Durable surfaces: History, Memory, the Task report and its sources, the
     // undelivered excerpts, and the whole state database.
-    let history = history_texts(&mut served.client).await;
+    let history = history_texts(served.client()).await;
     assert_absent_all("history", &history, SECRET);
-    assert_absent(
-        "memory view",
-        &memory_view(&mut served.client).await,
-        SECRET,
-    );
-    let summary = fetch_summary(&mut served.client, "secret subscription")
+    assert_absent("memory view", &memory_view(served.client()).await, SECRET);
+    let summary = fetch_summary(served.client(), "secret subscription")
         .await
         .expect("the subscription must answer");
     for item in &summary.items {
@@ -2766,12 +2781,10 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
         &format!("{summary:?}"),
         SECRET,
     );
-    let tasks = list_tasks(&mut served.client)
-        .await
-        .expect("tasks must list");
+    let tasks = list_tasks(served.client()).await.expect("tasks must list");
     let task = tasks.tasks.first().expect("the task exists");
     let report = ask(
-        &mut served.client,
+        served.client(),
         WirePayload::GetTaskReport(cmds::task_report_request(&task.task.0, None, None)),
         "secret report",
     )
@@ -2789,7 +2802,7 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
             continue;
         };
         let body = ask(
-            &mut served.client,
+            served.client(),
             WirePayload::GetReportSource(cmds::report_source_request(&source.0, None, None)),
             "secret report source",
         )
@@ -2805,7 +2818,7 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     }
     // Management view: credential/consent metadata renders refs, never values.
     let view = ask(
-        &mut served.client,
+        served.client(),
         WirePayload::ManagementViewRequest(cmds::setup_view_request()),
         "secret view",
     )
@@ -2866,19 +2879,19 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
     // The rotated value is not yet registered: the round's durable History
     // legitimately carries it raw, and the registration's approval sweep must
     // redact it.
-    let (round, stream, _) = send_round(&mut served.client, &rotated_round)
+    let (round, stream, _) = send_round(served.client(), &rotated_round)
         .await
         .expect("the pre-registration round must complete");
-    confirm_round(&mut served.client, &round, stream).await;
+    confirm_round(served.client(), &round, stream).await;
     assert!(
         !db_target_hits(&dir.join("app.db"), ROTATED_SECRET).is_empty(),
         "the fixture must plant the not-yet-registered value"
     );
     // Stage the rotation; the Host-local approval commits it while the next
     // provider call is parked.
-    let mark = view_mark(&mut served.client).await.expect("show");
+    let mark = view_mark(served.client()).await.expect("show");
     let staged = ask(
-        &mut served.client,
+        served.client(),
         WirePayload::ManagementIntent(ManagementIntent {
             intent_id: CommandWireId(uuid::Uuid::new_v4()),
             kind: ManagementIntentKind::ConfigureCredentialIntent,
@@ -2903,7 +2916,7 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
     transport.block_input(on_latest_owner(&parked_redacted));
     let handle = Arc::clone(&served.handle);
     let barrier = Arc::clone(&transport);
-    let mut parked = Box::pin(send_round_raw(&mut served.client, &parked_round));
+    let mut parked = Box::pin(send_round_raw(served.client(), &parked_round));
     tokio::select! {
         result = parked.as_mut() => panic!("the parked round cannot finish before the sweep: {result:?}"),
         () = barrier.wait_parked(1) => {}
@@ -2929,7 +2942,7 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
     assert_absent_all("provider request", &transport.input_texts(), SECRET);
     assert_absent_all(
         "history",
-        &history_texts(&mut served.client).await,
+        &history_texts(served.client()).await,
         ROTATED_SECRET,
     );
     served.server.abort();
