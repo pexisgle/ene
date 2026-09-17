@@ -7,8 +7,10 @@
 //! rounds with ordered streaming, restart without re-approval, rotation,
 //! tampering, and untrusted-peer denial.
 //!
-//! Unix-only: the production listener is a Unix socket (Windows uses named
-//! pipes in a follow-up).
+//! Unix-only: these production-path tests drive the Unix socket listener.
+//! The Windows named-pipe listener shares the same handshake and phase path;
+//! its transport subset runs in
+//! [`stage5_windows_pipe_e2e.rs`](stage5_windows_pipe_e2e.rs) on Windows.
 
 #![cfg(unix)]
 #![allow(
@@ -83,6 +85,21 @@ async fn wait_for_socket(dir: &std::path::Path) -> bool {
     false
 }
 
+/// Waits until a listener actually accepts on the socket path: a stopped
+/// Host leaves the path behind, so existence alone is not readiness.
+async fn wait_for_listener(dir: &std::path::Path) -> bool {
+    for _ in 0..100 {
+        if tokio::net::UnixStream::connect(dir.join("ene.sock"))
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<WirePayload, String> {
     match tokio::time::timeout(Duration::from_secs(10), client.request(payload)).await {
         Ok(Ok(answer)) => Ok(answer),
@@ -123,10 +140,22 @@ async fn view_mark(client: &mut Client) -> Result<String, String> {
 
 /// Approves through an INDEPENDENT handle (simulating the separate
 /// `approve-device` process) and provisions the device file from the
-/// one-time secret, like the operator channel would.
-async fn approve_and_provision(dir: &std::path::Path, approver: &HostHandle) -> Result<(), String> {
+/// one-time secret, like the operator channel would. Returns the approved
+/// pending id so callers can re-approve it (rotation).
+async fn approve_and_provision(
+    dir: &std::path::Path,
+    approver: &HostHandle,
+) -> Result<String, String> {
+    let pendings = approver
+        .pending_devices()
+        .await
+        .map_err(|error| format!("pendings must list: {error:?}"))?;
+    let pending = pendings
+        .first()
+        .ok_or_else(|| String::from("a pending must list"))?;
+    let pending_id = pending.pending_id.clone();
     let approval = approver
-        .approve_device(DESCRIPTOR)
+        .approve_device(&pending_id)
         .await
         .map_err(|error| format!("approve failed: {error:?}"))?;
     let Some((record, secret)) = approval else {
@@ -144,7 +173,7 @@ async fn approve_and_provision(dir: &std::path::Path, approver: &HostHandle) -> 
         ),
     )
     .map_err(|error| format!("device file must store: {error:?}"))?;
-    Ok(())
+    Ok(pending_id)
 }
 
 async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), String> {
@@ -335,10 +364,13 @@ async fn pending_empty(dir: &std::path::Path) -> bool {
         let Ok(companion) = store.ensure_running_companion().await else {
             break;
         };
-        let Ok(pending) = store.list_pending(companion).await else {
+        let Ok(page) = store
+            .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+            .await
+        else {
             break;
         };
-        if pending.is_empty() {
+        if page.entries.is_empty() {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -512,6 +544,18 @@ fn workspace_binary(name: &str) -> Option<std::path::PathBuf> {
 /// listener holding the test socket.
 struct KillOnDrop(Option<std::process::Child>);
 
+impl KillOnDrop {
+    /// Stops the serving child and waits for exit, so the OS has released the
+    /// single-writer `host.lock` before an offline mutation command runs
+    /// (PR §6.4).
+    fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            drop(child.kill());
+            drop(child.wait());
+        }
+    }
+}
+
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
@@ -589,7 +633,7 @@ async fn binaries_drive_pairing_setup_and_views() {
     server.stderr(std::process::Stdio::null());
     let server = server.spawn();
     let server = server.unwrap();
-    let _server = KillOnDrop(Some(server));
+    let mut server = KillOnDrop(Some(server));
     let bound = wait_for_socket(&dir).await;
     let listing: Vec<String> = std::fs::read_dir(&dir)
         .map(|entries| {
@@ -628,20 +672,26 @@ async fn binaries_drive_pairing_setup_and_views() {
     let listed = listed.unwrap();
     assert!(listed.status.success(), "listing pendings must exit 0");
     let pending_out = String::from_utf8_lossy(&listed.stdout).into_owned();
-    let descriptor = pending_out
+    let pending_id = pending_out
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty());
+        .find(|line| !line.is_empty())
+        .and_then(|line| line.split_whitespace().next().map(str::to_string));
     assert!(
-        descriptor.is_some(),
-        "one pending device must list, got {pending_out:?}"
+        pending_id.is_some(),
+        "one pending ID must list, got {pending_out:?}"
     );
-    let descriptor = descriptor.unwrap();
+    let pending_id = pending_id.unwrap();
+    // `approve-device` is an offline mutation command: it takes the
+    // single-writer lock, so the serving Host stops for the approval and
+    // restarts after (PR §6.4). The list names opaque pending IDs first
+    // (the descriptor after it is display-only); approval names the ID.
+    server.stop();
     let mut approve = std::process::Command::new(&core);
     approve.args([
         "approve-device",
-        "--descriptor",
-        descriptor,
+        "--pending",
+        pending_id.as_str(),
         "--config",
         &config,
     ]);
@@ -665,6 +715,12 @@ async fn binaries_drive_pairing_setup_and_views() {
     );
     let secret = secret.unwrap();
     assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    server = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")])
+        .expect("the Host must respawn after the offline approval");
+    assert!(
+        wait_for_listener(&dir).await,
+        "the restarted Host must accept after the offline approval"
+    );
 
     let status = run_cli(
         &ctl,
@@ -714,6 +770,9 @@ async fn binaries_drive_pairing_setup_and_views() {
         "unapproved setup must hold at exit 2, got {setup:?}"
     );
 
+    // The credential approval is an offline mutation command too: stop the
+    // serving Host, approve, restart.
+    server.stop();
     let mut approve_cred = std::process::Command::new(&core);
     // The approval process must be able to read the bearer: it sweeps any
     // prior plaintext occurrence before the ref becomes usable.
@@ -735,6 +794,13 @@ async fn binaries_drive_pairing_setup_and_views() {
         credential_approved.status.success(),
         "approve-credential must exit 0: {}",
         String::from_utf8_lossy(&credential_approved.stderr)
+    );
+    server.stop();
+    let _respawned = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")])
+        .expect("the Host must respawn after the offline credential approval");
+    assert!(
+        wait_for_listener(&dir).await,
+        "the restarted Host must accept after the offline credential approval"
     );
 
     let setup = run_cli(
@@ -811,7 +877,11 @@ async fn tampered_secret_cannot_authenticate() {
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
-    let approval = approver.approve_device(DESCRIPTOR).await;
+    let approval = {
+        let pendings = approver.pending_devices().await.unwrap();
+        let pending = pendings.first().expect("a pending must list");
+        approver.approve_device(&pending.pending_id).await
+    };
     let (record, _secret) = approval.unwrap().unwrap();
     let wire = record.wire.parse().map(DeviceWireId).unwrap();
     let stored = store_device(
@@ -848,11 +918,14 @@ async fn rotation_requires_reprovisioning() {
     let approver = open_host(&dir).await.unwrap();
     let provisioned = approve_and_provision(&dir, &approver).await;
     assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
+    let pending_id = provisioned.unwrap();
     let connected = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(connected.is_ok(), "provisioned connect must succeed");
     drop(connected);
 
-    let reapproved = approver.approve_device(DESCRIPTOR).await;
+    // Re-approving the same pending rotates the secret but keeps the device:
+    // the old file no longer proves ownership.
+    let reapproved = approver.approve_device(&pending_id).await;
     assert!(
         reapproved.unwrap().is_some(),
         "re-approval returns the existing record and a fresh secret"
@@ -985,7 +1058,10 @@ fn spawn_serve_binary(
 async fn pair_via_binaries(
     ctl: &std::path::Path,
     core: &std::path::Path,
+    dir: &std::path::Path,
     config: &str,
+    server: &mut KillOnDrop,
+    server_env: &[(&str, &str)],
 ) -> Option<String> {
     let status = run_cli(
         ctl,
@@ -998,29 +1074,33 @@ async fn pair_via_binaries(
         matches!(status, Some((2, _, _))),
         "pre-pairing status must pend pairing, got {status:?}"
     );
+    // The approval is an offline mutation command: it takes the single-writer
+    // lock, so the serving Host stops first and restarts after (PR §6.4).
+    server.stop();
     // The real client pairs under its platform descriptor, so approve
-    // whatever it actually requested (like the operator channel would).
+    // whatever it actually requested (like the operator channel would): the
+    // list names the opaque pending ID first.
     let listed = std::process::Command::new(core)
         .args(["approve-device", "--config", config])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
         .ok();
-    let descriptor = listed
+    let pending_id = listed
         .as_ref()
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .and_then(|out| {
             out.lines()
                 .map(str::trim)
                 .find(|line| !line.is_empty())
-                .map(str::to_string)
+                .and_then(|line| line.split_whitespace().next().map(str::to_string))
         });
-    let descriptor = descriptor?;
+    let pending_id = pending_id?;
     let mut approve = std::process::Command::new(core);
     approve.args([
         "approve-device",
-        "--descriptor",
-        descriptor.as_str(),
+        "--pending",
+        pending_id.as_str(),
         "--config",
         config,
     ]);
@@ -1038,6 +1118,11 @@ async fn pair_via_binaries(
         .find_map(|line| line.strip_prefix("pairing secret (show once): "))
         .map(str::to_string)?;
     assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    *server = spawn_serve_binary(core, config, server_env)?;
+    assert!(
+        wait_for_listener(dir).await,
+        "the restarted Host must accept after the offline approval"
+    );
     let status = run_cli(
         ctl,
         &["--config", config, "status"],
@@ -1074,10 +1159,21 @@ async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
     };
     let server = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")]);
     assert!(server.is_some(), "serve must spawn");
-    let _server = server;
+    let Some(mut server) = server else {
+        return;
+    };
     assert!(wait_for_socket(&dir).await, "listener must bind");
 
-    let Some(secret) = pair_via_binaries(&ctl, &core, &config).await else {
+    let Some(secret) = pair_via_binaries(
+        &ctl,
+        &core,
+        &dir,
+        &config,
+        &mut server,
+        &[("ENE_OPENAI_API_KEY", "sk-test-only")],
+    )
+    .await
+    else {
         return;
     };
     let device_file = ene_ctl::device::device_file_path(&dir);
@@ -1193,13 +1289,13 @@ async fn binaries_drive_send_stream_history_and_restart() {
 
     let server = spawn_serve_binary(&core, &config, &server_env);
     assert!(server.is_some(), "serve must spawn");
-    let Some(server) = server else {
+    let Some(mut server) = server else {
         fake.abort();
         return;
     };
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
 
-    let secret = pair_via_binaries(&ctl, &core, &config).await;
+    let secret = pair_via_binaries(&ctl, &core, &dir, &config, &mut server, &server_env).await;
     assert!(secret.is_some(), "binary pairing must complete");
     let setup_args = [
         "--config",
@@ -1215,6 +1311,9 @@ async fn binaries_drive_send_stream_history_and_restart() {
         matches!(setup, Some((2, _, _))),
         "unapproved setup must hold at exit 2, got {setup:?}"
     );
+    // The credential approval is an offline mutation command: it owns the
+    // data directory while the Host is stopped, then the Host restarts.
+    server.stop();
     let approve_cred = std::process::Command::new(&core)
         .env("ENE_OPENAI_API_KEY", "sk-test-only")
         .args([
@@ -1232,6 +1331,12 @@ async fn binaries_drive_send_stream_history_and_restart() {
     assert!(
         matches!(&approve_cred, Ok(output) if output.status.success()),
         "approve-credential must exit 0"
+    );
+    server = spawn_serve_binary(&core, &config, &server_env)
+        .expect("the Host must respawn after the offline credential approval");
+    assert!(
+        wait_for_listener(&dir).await,
+        "the restarted Host must accept after the offline credential approval"
     );
     let setup = run_cli(&ctl, &setup_args, &[], Duration::from_secs(10)).await;
     assert!(

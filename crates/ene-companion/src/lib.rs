@@ -2,10 +2,12 @@
 //!
 //! [`CompanionId`] names a companion. [`HistoryMessage`] facts are the
 //! Host-filtered display record; [`UndeliveredRef`] facts track items that
-//! were durably stored but not yet confirmed as presented. Presentation
-//! confirmation arrives as `ene-presentation` observations mapped to a
-//! [`PresentationMark`] at the call boundary; this crate takes no dependency
-//! on `ene-presentation` or on any store.
+//! were durably stored but not yet confirmed as presented. An entry only
+//! correlates to a canonical [`UndeliveredSource`] fact owned by Task,
+//! Action, or History and never copies a body; presentation confirmation
+//! arrives as `ene-presentation` observations mapped to a
+//! [`PresentationMark`] at the call boundary, and this crate takes no
+//! dependency on `ene-presentation` or on any store.
 //!
 //! Implementor contract (atomic-read rule): the store implementation behind
 //! [`HistoryRepository`] reads the current presence generation and the
@@ -18,6 +20,9 @@
 //! for stale / held outcomes. [`UndeliveredRepository`] follows the same
 //! split: parent-durable checks and per-row compare-and-mark are atomic,
 //! while stale marks return `Ok(ReportStatusTransition::StaleSource)`.
+//! [`UndeliveredRepository::list_unpresented`] is a SELECT-only bounded
+//! keyset read: it never mutates status, generations, Task revisions, or
+//! report state.
 //!
 //! Wire mapping (read-only): [`HistoryMessage`] maps to/from
 //! `ene_api::v1::round::HistoryItem` plus its companion, message identity,
@@ -28,6 +33,7 @@ pub mod dialogue;
 use ene_credential::CredentialSetRevision;
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{TaskPurposeRef, TaskRef};
 
 /// Wraps a [`RawId`]; never converted to any other domain newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -367,39 +373,256 @@ impl core::fmt::Debug for RequestFingerprint {
     }
 }
 
-/// Undelivered tracking fact: a durably stored item not yet confirmed.
+/// Durable identity of one undelivered item, minted by the companion owner.
+///
+/// Opaque over [`RawId`]. The store's non-reused insertion sequence is a
+/// storage order only and is never this identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UndeliveredRef {
-    pub id: RawId,
-    pub companion: CompanionId,
-    /// Durable source message this entry reports on.
-    pub source_message: RawId,
-    pub status: ReportStatus,
-    pub round: RawId,
-    pub presence_generation: PresenceGeneration,
+pub struct UndeliveredId(RawId);
+
+impl UndeliveredId {
+    #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub fn as_raw(self) -> RawId {
+        self.0
+    }
+
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(RawId::new())
+    }
 }
 
+/// Closed-world Action certainty at the undelivered boundary.
+///
+/// The Action owner's vocabulary projected as a plain value, never an
+/// imported `ene-action` newtype: the SQL source phase of an
+/// `action_attempt` source is exactly [`Self::as_str`], and a later certainty
+/// is a new source key, so an old `Unknown` entry is never shown as the
+/// current certainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActionCertaintyWire {
+    ConfirmedSuccess,
+    ConfirmedFailure,
+    Unknown,
+}
+
+impl ActionCertaintyWire {
+    /// Stable source-phase name, closed world.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfirmedSuccess => "confirmed_success",
+            Self::ConfirmedFailure => "confirmed_failure",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "confirmed_success" => Some(Self::ConfirmedSuccess),
+            "confirmed_failure" => Some(Self::ConfirmedFailure),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+/// Closed-world terminal Task transition at the undelivered boundary.
+///
+/// `Completed` is deliberately absent: completion is described by
+/// [`TaskFact::ResultAdopted`], so one transition never registers two
+/// notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TerminalKindWire {
+    Failed,
+    Cancelled,
+}
+
+impl TerminalKindWire {
+    /// Stable source-phase name, closed world.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// One Task-owned fact an undelivered item can report on (CI §5.2).
+///
+/// Every variant is a correlation to a canonical fact owned by the Task or
+/// Action repository; it is never a state copy, a body, or an execution
+/// instruction. A later fact is a new source key and therefore a new
+/// notification, and the source's body always reads the current owner row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskFact {
+    /// One durable revision snapshot (AU2 creation or AU4/AU17 forward).
+    TaskRevision { task: RawId, revision: u64 },
+    /// One accepted delegation (AU3/AU17).
+    Delegation(RawId),
+    /// One Action attempt at one certainty (AU5 insert or the certainty CAS).
+    ActionAttempt {
+        attempt: RawId,
+        certainty: ActionCertaintyWire,
+    },
+    /// One final result arrival and execution seal (AU15a).
+    ResultRecorded(RawId),
+    /// One result adoption stamp (AU15b `adopted_revision`).
+    ResultAdopted(RawId),
+    /// One terminal Task transition. `Completed` is [`Self::ResultAdopted`].
+    Terminal {
+        task: RawId,
+        progress: TerminalKindWire,
+    },
+}
+
+/// The closed sum of canonical sources an undelivered item correlates to.
+///
+/// Task-derived facts carry no round: the notification is registered by the
+/// Task or Action commit and reports a fact, not a conversation turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UndeliveredSource {
+    /// A fact under one Task record.
+    TaskRecord { task: RawId, fact: TaskFact },
+    /// One stored conversation message (History owner).
+    HistoryMessage(RawId),
+    /// One stored activity record (companion owner).
+    ActivityRecord(RawId),
+}
+
+/// Undelivered tracking fact: a durably stored item not yet confirmed.
+///
+/// The entry is a correlation plus reporting status only. Bodies, current
+/// progress, delegation, and the latest result are never copied here; report
+/// composition reads them from the source owner. `round` /
+/// `presence_generation` are `None` for task-derived notifications, which
+/// have no originating conversation round; a fabricated round is never
+/// invented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UndeliveredRef {
+    pub id: UndeliveredId,
+    pub companion: CompanionId,
+    pub source: UndeliveredSource,
+    pub status: ReportStatus,
+    /// When the source fact committed.
+    pub created_at: WallClockWithTz,
+    /// Originating round, when the source came from a conversation turn.
+    pub round: Option<RawId>,
+    /// Presence generation of that round, when one existed.
+    pub presence_generation: Option<PresenceGeneration>,
+}
+
+/// Reporting status of one undelivered item (CI §5.2).
+///
+/// [`Self::PresentationUnknown`] is re-presentable, never sticky terminal: a
+/// next receipt or explicit re-display reads it again, and only
+/// [`Self::Presented`] is absorbing for the source fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReportStatus {
+    /// Presentation has not started, or a current receipt confirmed the item
+    /// was not presented.
     Pending,
-    Presented,
-    /// Presentation unknown. Sticky: never upgraded by resend.
+    /// Presentation started (or its outcome is unconfirmed). Listed again by
+    /// [`UndeliveredRepository::list_unpresented`].
     PresentationUnknown,
+    /// The item's presentation was confirmed. Absorbing.
+    Presented,
 }
 
 /// An `Ok`-side domain outcome, never an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReportStatusTransition {
+    /// A confirmed presentation moved the row to [`ReportStatus::Presented`].
     PendingToPresented,
+    /// Presentation started: the row is now
+    /// [`ReportStatus::PresentationUnknown`].
     MarkedPresentationUnknown,
-    /// The `expected` status was not current.
+    /// The row was already [`ReportStatus::Presented`]; nothing was written.
+    AlreadyPresented,
+    /// A current receipt confirmed the row was not presented:
+    /// [`ReportStatus::PresentationUnknown`] returned to
+    /// [`ReportStatus::Pending`].
+    FailedToPending,
+    /// The `expected` status was not current, or the identity is unknown.
     StaleSource,
 }
 
+/// One bounded page of unpresented entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndeliveredPage {
+    /// Entries in insertion order.
+    pub entries: Vec<UndeliveredRef>,
+    /// Continuation inside the pass; [`None`] means the pass reached its
+    /// captured upper bound.
+    pub next: Option<UndeliveredCursor>,
+    /// Insertion bound this page read against. A drained pass leaves the
+    /// caller's scan lower bound at this value for the next pass.
+    pub pass_upper_bound: u64,
+}
+
+/// Keyset cursor over the undelivered insertion sequence (PR §4.6).
+///
+/// The sequence is the store's non-reused insertion key, never a Task
+/// revision or a presence generation. A pass captures the sequence in force
+/// when it begins ([`Self::begin`]); rows registered while the pass runs are
+/// returned by the next pass instead of shifting the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UndeliveredCursor {
+    after_seq: u64,
+    pass_upper_bound: u64,
+}
+
+impl UndeliveredCursor {
+    /// Continues a pass strictly after `after_seq`, up to the bound captured
+    /// when the pass began.
+    #[must_use]
+    pub const fn begin(after_seq: u64, pass_upper_bound: u64) -> Self {
+        Self {
+            after_seq,
+            pass_upper_bound,
+        }
+    }
+
+    /// The insertion sequence this cursor has already scanned.
+    #[must_use]
+    pub const fn after_seq(self) -> u64 {
+        self.after_seq
+    }
+
+    /// The bound captured when the pass began.
+    #[must_use]
+    pub const fn pass_upper_bound(self) -> u64 {
+        self.pass_upper_bound
+    }
+}
+
+/// Maximum entries one [`UndeliveredRepository::list_unpresented`] page
+/// returns (IPC §13.3: a page carries at most 50 items).
+pub const UNDELIVERED_PAGE_MAX: u32 = 50;
+
 /// Presentation observation mapped to the undelivered boundary.
 ///
-/// `presented` distinguishes presented (`true`) from unknown (`false`);
-/// sending alone never marks an entry.
+/// `presented` is the observation: `true` confirms the item was on screen;
+/// `false` is the presentation start when compared against
+/// [`ReportStatus::Pending`] and a not-presented receipt when compared
+/// against [`ReportStatus::PresentationUnknown`]. Sending alone never marks
+/// an entry; receipt currentness is the caller's premise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PresentationMark {
     pub round: RawId,
@@ -477,9 +700,9 @@ pub trait HistoryRepository {
     /// registers an undelivered entry for it in the same atomic section.
     ///
     /// Conversation-sourced undelivered registration shares the history
-    /// append atom; task-sourced registration is a separate transaction
-    /// after the task durable. The returned [`Option`] carries the
-    /// registered [`UndeliveredRef`] when registration happened.
+    /// append atom (AU1a); Task- and Action-sourced registration shares the
+    /// parent fact's own commit instead (AU1b). The returned [`Option`]
+    /// carries the registered [`UndeliveredRef`] when registration happened.
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
@@ -543,9 +766,10 @@ pub trait HistoryRepository {
 
 /// Undelivered registration and reporting contract.
 ///
-/// Registration happens only when the parent message is durable. Marking
-/// happens only after a presentation observation; sending alone never marks
-/// an entry as presented.
+/// Registration happens only when the parent fact is durable, inside the
+/// parent's transaction, so this trait exposes no standalone registration
+/// API. Listing and status changes are SELECT / compare commits only: reads
+/// never mutate status, generations, Task revisions, or report state.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
@@ -554,25 +778,192 @@ pub trait UndeliveredRepository {
     /// Compares `expected` against the current [`ReportStatus`] and, on
     /// match, applies `mark` in one atomic per-row compare.
     ///
+    /// `mark.presented = true` is a confirmed presentation and writes
+    /// [`ReportStatus::Presented`]; a duplicate ACK on an already presented
+    /// row writes nothing and answers
+    /// [`ReportStatusTransition::AlreadyPresented`], because `Presented`
+    /// absorbs every later mark. `mark.presented = false` against
+    /// `expected = Pending` is the presentation start and writes
+    /// [`ReportStatus::PresentationUnknown`]; against
+    /// `expected = PresentationUnknown` it is a current receipt that
+    /// confirmed the item was not presented and returns the row to
+    /// [`ReportStatus::Pending`] ([`ReportStatusTransition::FailedToPending`]).
+    /// Receipt currentness (connection, Round, presence generation, selected
+    /// id set) is validated by the caller before this call; this compare
+    /// judges only row status and the `expected` premise.
+    ///
     /// Mismatch returns `Ok(ReportStatusTransition::StaleSource)`, never
     /// `Err`.
     async fn compare_and_mark_reported(
         &self,
-        id: RawId,
+        id: UndeliveredId,
         expected: ReportStatus,
         mark: PresentationMark,
     ) -> Result<ReportStatusTransition, UndeliveredTechnicalError>;
 
-    async fn list_pending(
+    /// Captures the insertion sequence in force, for the next pass.
+    ///
+    /// `0` means no entry exists yet. This is a read: it never advances a
+    /// generation, writes a marker, or reconciles anything.
+    async fn undelivered_pass_bound(&self) -> Result<u64, UndeliveredTechnicalError>;
+
+    /// Lists one bounded page of `Pending` / `PresentationUnknown` entries,
+    /// oldest insertion first, scoped to `companion`.
+    ///
+    /// `cursor: None` begins a pass at the head and captures the current
+    /// insertion bound; `Some` continues (or resumes) a pass, and the cursor
+    /// keeps rows registered during the pass out of it. `limit` is the page
+    /// bound and is applied by the storage query (clamped to `1..=50`), so
+    /// the bound is on the rows read, not only on the returned vector. The
+    /// read changes nothing: no status, generation, or Task revision is
+    /// written, and no reconciliation runs.
+    async fn list_unpresented(
         &self,
         companion: CompanionId,
+        cursor: Option<UndeliveredCursor>,
+        limit: u32,
+    ) -> Result<UndeliveredPage, UndeliveredTechnicalError>;
+
+    /// Resolves exact undelivered identities for `companion`, in the
+    /// requested order, with the stored report status on each row.
+    ///
+    /// This is the exact-identity read a presentation receipt uses to
+    /// rehydrate its own selection: head position, later arrivals, and the
+    /// number of other rows never affect which ids resolve. An id that is
+    /// missing or belongs to another companion is omitted, so the caller
+    /// compares lengths to detect an unrehydratable selection. `ids` is
+    /// bounded by the page bound ([`UNDELIVERED_PAGE_MAX`]; extra ids are
+    /// ignored). The read changes nothing.
+    async fn load_undelivered_by_ids(
+        &self,
+        companion: CompanionId,
+        ids: &[UndeliveredId],
     ) -> Result<Vec<UndeliveredRef>, UndeliveredTechnicalError>;
+}
+
+/// Durable identity of one first-party management activity record, minted by
+/// the companion owner.
+///
+/// Opaque over [`RawId`]. The store's row order is a storage order only and
+/// is never this identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActivityId(RawId);
+
+impl ActivityId {
+    #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub fn as_raw(self) -> RawId {
+        self.0
+    }
+
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(RawId::new())
+    }
+}
+
+/// One recorded first-party Owner management input (H-A.1 resume source).
+///
+/// The body is the Owner's resume instruction text and stays canonical in
+/// this record: Task state carries only the reference, never a copy. Text
+/// is redacted from [`core::fmt::Debug`]; refs stay visible.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ManagementActivity {
+    pub id: ActivityId,
+    pub companion: CompanionId,
+    /// The explicitly selected Task and revision the instruction continues.
+    pub task: TaskRef,
+    /// The purpose identity in force at selection.
+    pub purpose: TaskPurposeRef,
+    /// The resume instruction body.
+    pub body: String,
+    /// When the record was accepted.
+    pub created_at: WallClockWithTz,
+}
+
+impl core::fmt::Debug for ManagementActivity {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ManagementActivity")
+            .field("id", &self.id)
+            .field("companion", &self.companion)
+            .field("task", &self.task)
+            .field("purpose", &self.purpose)
+            .field("body", &"[redacted]")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+/// Records one resume instruction activity from the first-party management
+/// inlet.
+///
+/// `command` is the idempotency key of the recording epoch (the management
+/// intent id): the same key returns the same activity without recording
+/// again, and a retry never mints a second record.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecordResumeActivityCommand {
+    pub companion: CompanionId,
+    pub task: TaskRef,
+    pub purpose: TaskPurposeRef,
+    /// The Owner's resume instruction body. Redacted from [`core::fmt::Debug`].
+    pub body: String,
+    /// Idempotency key of the recording epoch.
+    pub command: RawId,
+}
+
+impl core::fmt::Debug for RecordResumeActivityCommand {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RecordResumeActivityCommand")
+            .field("companion", &self.companion)
+            .field("task", &self.task)
+            .field("purpose", &self.purpose)
+            .field("body", &"[redacted]")
+            .field("command", &self.command)
+            .finish()
+    }
+}
+
+/// First-party management activity contract (owner: companion).
+///
+/// The single-record bounded read ([`Self::load_activity`]) is what the
+/// Task-owned instruction-source port resolves an `OwnerManagement` origin
+/// against; timeline loads and command lookups are not a substitute.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait ActivityRepository {
+    /// Records one resume instruction activity, idempotent by `command`.
+    ///
+    /// The same command key returns the recorded activity identity without
+    /// writing again; a key that already names different content fails
+    /// closed instead of being reinterpreted.
+    async fn record_resume_activity(
+        &self,
+        cmd: RecordResumeActivityCommand,
+    ) -> Result<ActivityId, CompanionTechnicalError>;
+
+    /// Loads one activity record by its primary key.
+    ///
+    /// [`None`] reports absence; a malformed durable row is a technical
+    /// error, never a composed substitute.
+    async fn load_activity(
+        &self,
+        activity: ActivityId,
+    ) -> Result<Option<ManagementActivity>, CompanionTechnicalError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AppendHistoryCommand, CommandId, CompanionId, HistoryMessage, HistoryRole, RoundIntentMark,
+        ActionCertaintyWire, AppendHistoryCommand, CommandId, CompanionId, HistoryMessage,
+        HistoryRole, RoundIntentMark, TerminalKindWire, UndeliveredId,
     };
     use ene_presence::PresenceGeneration;
     use ene_primitive::{RawId, WallClockWithTz};
@@ -644,6 +1035,26 @@ mod tests {
             "text redacted: {rendered}"
         );
         assert!(rendered.contains("en"), "lang stays: {rendered}");
+    }
+
+    #[test]
+    fn undelivered_wire_names_round_trip_as_a_closed_world() {
+        for certainty in [
+            ActionCertaintyWire::ConfirmedSuccess,
+            ActionCertaintyWire::ConfirmedFailure,
+            ActionCertaintyWire::Unknown,
+        ] {
+            assert_eq!(
+                ActionCertaintyWire::from_name(certainty.as_str()),
+                Some(certainty)
+            );
+        }
+        assert_eq!(ActionCertaintyWire::from_name("confirmed"), None);
+        for kind in [TerminalKindWire::Failed, TerminalKindWire::Cancelled] {
+            assert_eq!(TerminalKindWire::from_name(kind.as_str()), Some(kind));
+        }
+        assert_eq!(TerminalKindWire::from_name("completed"), None);
+        assert_ne!(UndeliveredId::generate(), UndeliveredId::generate());
     }
 
     #[test]

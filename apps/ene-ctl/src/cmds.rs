@@ -29,7 +29,14 @@ use ene_api::v1::refs::{
     RoundWireId, TextLangWire,
 };
 use ene_api::v1::round::{
-    HistoryItem, HistoryRequest, HistoryRole, RoundIntakeOutcomeWire, SubmitTextInput, TextBodyWire,
+    HistoryItem, HistoryRequest, HistoryRole, PresentationStatus, RoundIntakeOutcomeWire,
+    SubmitTextInput, TextBodyWire,
+};
+use ene_api::v1::undelivered::{
+    GetReportSource, GetTaskReport, ListTasks, PageCursorWire, ReportSourcePageView,
+    ReportSourceWireRef, ResumeTask, ResumeTaskOutcomeWire, SelectTask, TaskListPage,
+    TaskReportPage, TaskReportResponse, TaskWireRef, UndeliveredAck, UndeliveredAckOutcome,
+    UndeliveredRequest, UndeliveredResponse, UndeliveredSummary,
 };
 
 /// Fallback companion reference sent until the first presence fact arrives.
@@ -83,6 +90,44 @@ pub enum Command {
         after: Option<String>,
         revisions: Option<String>,
         after_revision: Option<u64>,
+    },
+    /// First-party Task list (stored lifecycle + execution flag, paged).
+    /// `cursor` continues from a previous page's `next:` line.
+    Tasks {
+        cursor: Option<String>,
+        limit: Option<u32>,
+    },
+    /// One Task's paged report (attempt rows before result rows, no bodies).
+    Report {
+        task: String,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    },
+    /// One bounded body page of a report source named by a report page.
+    Source {
+        source: String,
+        cursor: Option<u64>,
+        limit_bytes: Option<u32>,
+    },
+    /// Select the Owner-confirmed Task for this conversation (in-memory
+    /// display selection; no execution starts).
+    SelectTask {
+        task: String,
+    },
+    /// Explicitly resume one interrupted Task (new revision + delegation on
+    /// acceptance; refusals stay Ok-side with zero writes).
+    ResumeTask {
+        task: String,
+        revision: u64,
+        purpose: String,
+        instruction: String,
+    },
+    /// Fetch the undelivered backlog, paint it, and ACK what was painted.
+    /// `redisplay` forces an explicit head pass including failed rows.
+    Undelivered {
+        cursor: Option<String>,
+        limit: Option<u32>,
+        redisplay: bool,
     },
 }
 
@@ -185,6 +230,154 @@ pub fn submit_input(
 /// acks to sends within one Client and is never Host-canonical).
 pub fn new_local_id() -> ClientLocalId {
     ClientLocalId(uuid::Uuid::new_v4().to_string())
+}
+
+/// Subscription / paging request for the undelivered backlog. [`None`]
+/// cursor catches up (arrivals first, else an explicit head pass).
+pub fn undelivered_request(
+    cursor: Option<String>,
+    limit: Option<u32>,
+    redisplay: bool,
+) -> UndeliveredRequest {
+    UndeliveredRequest {
+        companion: None,
+        cursor: cursor.map(PageCursorWire),
+        limit,
+        redisplay,
+    }
+}
+
+/// Presentation observation for one receipt: only ever `Presented` after the
+/// batch fully painted. A partial batch sends nothing, so the Host keeps it
+/// `Unknown` instead of recording a presentation the operator never saw.
+pub fn undelivered_ack(receipt: &str, status: PresentationStatus) -> UndeliveredAck {
+    UndeliveredAck {
+        receipt: ene_api::v1::undelivered::PresentationReceiptWireRef(receipt.to_string()),
+        status,
+    }
+}
+
+pub fn list_tasks_request(cursor: Option<String>, limit: Option<u32>) -> ListTasks {
+    ListTasks {
+        cursor: cursor.map(PageCursorWire),
+        limit,
+    }
+}
+
+pub fn task_report_request(
+    task: &str,
+    cursor: Option<String>,
+    limit: Option<u32>,
+) -> GetTaskReport {
+    GetTaskReport {
+        task: TaskWireRef(task.to_string()),
+        cursor: cursor.map(PageCursorWire),
+        limit,
+    }
+}
+
+pub fn report_source_request(
+    source: &str,
+    cursor: Option<u64>,
+    limit_bytes: Option<u32>,
+) -> GetReportSource {
+    GetReportSource {
+        source: ReportSourceWireRef(source.to_string()),
+        cursor,
+        limit_bytes,
+    }
+}
+
+pub fn select_task_request(task: &str) -> SelectTask {
+    SelectTask {
+        task: TaskWireRef(task.to_string()),
+    }
+}
+
+pub fn resume_task_request(
+    task: &str,
+    expected_revision: u64,
+    expected_purpose: &str,
+    instruction: String,
+) -> ResumeTask {
+    ResumeTask {
+        task: TaskWireRef(task.to_string()),
+        expected_revision,
+        expected_purpose: expected_purpose.to_string(),
+        instruction,
+    }
+}
+
+/// One `kind subject: excerpt` line per item (truncation marked), then one
+/// headline line per Task. Excerpts are Host-scrubbed display facts.
+pub fn render_summary(summary: &UndeliveredSummary) -> String {
+    let mut lines = Vec::new();
+    for item in &summary.items {
+        let mark = if item.truncated { "…" } else { "" };
+        lines.push(format!(
+            "{} {}: {}{}",
+            item.source.kind, item.source.subject, item.excerpt, mark
+        ));
+    }
+    for report in &summary.reports {
+        lines.push(format!(
+            "task {} rev {} {}",
+            report.task.0, report.revision, report.progress
+        ));
+    }
+    if summary.has_more {
+        lines.push(String::from("(more)"));
+    }
+    if let Some(cursor) = &summary.next_cursor {
+        lines.push(format!("next: {}", cursor.0));
+    }
+    lines.join("\n")
+}
+
+/// One `task rev progress` line per entry (`running` marked), plus the
+/// `next:` continuation while a page remains.
+pub fn render_task_list(page: &TaskListPage) -> String {
+    let mut lines: Vec<String> = page
+        .tasks
+        .iter()
+        .map(|task| {
+            let running = if task.running { " running" } else { "" };
+            format!(
+                "{} rev {} {}{}",
+                task.task.0, task.revision, task.progress, running
+            )
+        })
+        .collect();
+    if let Some(cursor) = &page.next_cursor {
+        lines.push(format!("next: {}", cursor.0));
+    }
+    lines.join("\n")
+}
+
+/// Headline plus one `kind id` line per detail row, plus the `next:`
+/// continuation while rows remain. Bodies page through `source`.
+pub fn render_report_page(page: &TaskReportPage) -> String {
+    let mut lines = vec![format!(
+        "{} rev {} {}",
+        page.task.0, page.revision, page.progress
+    )];
+    for row in &page.rows {
+        lines.push(format!("{} {}", row.kind, row.id));
+    }
+    if let Some(cursor) = &page.next_cursor {
+        lines.push(format!("next: {}", cursor.0));
+    }
+    lines.join("\n")
+}
+
+/// The body page text verbatim (Host-bounded, UTF-8 cut), plus the `next:`
+/// byte cursor while the body continues.
+pub fn render_source_page(page: &ReportSourcePageView) -> String {
+    if let Some(next) = page.next {
+        format!("{}\nnext: {next}", page.text)
+    } else {
+        page.text.clone()
+    }
 }
 
 /// `"credential:<provider>:main"` via the shared [`credential_target`]
@@ -321,6 +514,144 @@ pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
     }
 }
 
+/// ACK-routing decision for an [`UndeliveredAckOutcome`]; retryable answers
+/// keep their meaning instead of being shown as presented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AckAction {
+    Confirmed { detail: String },
+    Retryable { message: String },
+}
+
+pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> AckAction {
+    match outcome {
+        UndeliveredAckOutcome::Presented { presented } => AckAction::Confirmed {
+            detail: format!("presented {presented} item(s)"),
+        },
+        UndeliveredAckOutcome::AlreadyPresented => AckAction::Confirmed {
+            detail: String::from("already presented; nothing was written"),
+        },
+        UndeliveredAckOutcome::ReturnedToPending { count } => AckAction::Confirmed {
+            detail: format!("returned {count} item(s) to pending"),
+        },
+        UndeliveredAckOutcome::KeptUnknown => AckAction::Confirmed {
+            detail: String::from("kept as unknown; a later pass re-presents"),
+        },
+        UndeliveredAckOutcome::UnknownRef => AckAction::Retryable {
+            message: String::from("unknown receipt; re-query for a new receipt and retry"),
+        },
+        UndeliveredAckOutcome::StalePresentation => AckAction::Retryable {
+            message: String::from("stale presentation; re-query for a new receipt and retry"),
+        },
+        UndeliveredAckOutcome::StaleConnection => AckAction::Retryable {
+            message: String::from("stale connection; re-query on this connection and retry"),
+        },
+    }
+}
+
+/// Resume-routing decision for a [`ResumeTaskOutcomeWire`]; only `Resumed`
+/// is applied, refusals stay Ok-side with zero Task writes, and `InFlight`
+/// / `Unavailable` are retryable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeAction {
+    Resumed { detail: String },
+    Refused { message: String },
+    Retryable { message: String },
+}
+
+pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> ResumeAction {
+    match outcome {
+        ResumeTaskOutcomeWire::Resumed {
+            revision,
+            delegation,
+            ..
+        } => ResumeAction::Resumed {
+            detail: format!("resumed at revision {revision} (delegation {delegation})"),
+        },
+        ResumeTaskOutcomeWire::StalePremise { current_revision } => ResumeAction::Refused {
+            message: format!("stale premise; current revision is {current_revision}"),
+        },
+        ResumeTaskOutcomeWire::Superseded => ResumeAction::Refused {
+            message: String::from("superseded by a newer Owner input"),
+        },
+        ResumeTaskOutcomeWire::TaskTerminal { progress } => ResumeAction::Refused {
+            message: format!("task is already {progress}"),
+        },
+        ResumeTaskOutcomeWire::AlreadyRunning => ResumeAction::Refused {
+            message: String::from("task is already running"),
+        },
+        ResumeTaskOutcomeWire::HeldByUnknownEffects => ResumeAction::Refused {
+            message: String::from("held by unknown effects; settle them first"),
+        },
+        ResumeTaskOutcomeWire::ResultAvailable => ResumeAction::Refused {
+            message: String::from("a sealed result is available to review first"),
+        },
+        ResumeTaskOutcomeWire::NeedsRevalidation { hold } => ResumeAction::Refused {
+            message: format!("needs revalidation: {hold}"),
+        },
+        ResumeTaskOutcomeWire::MissingTask => ResumeAction::Refused {
+            message: String::from("no such task"),
+        },
+        ResumeTaskOutcomeWire::RevisionExhausted => ResumeAction::Refused {
+            message: String::from("the task cannot take another change"),
+        },
+        ResumeTaskOutcomeWire::InFlight => ResumeAction::Retryable {
+            message: String::from("resume already in flight; retry for its outcome"),
+        },
+        ResumeTaskOutcomeWire::UnknownRef => ResumeAction::Retryable {
+            message: String::from("unknown task reference; re-list and retry"),
+        },
+        ResumeTaskOutcomeWire::StaleConnection => ResumeAction::Retryable {
+            message: String::from("stale sender epoch; re-prepare on this connection and retry"),
+        },
+        ResumeTaskOutcomeWire::Unavailable => ResumeAction::Retryable {
+            message: String::from("host unavailable; retry later"),
+        },
+    }
+}
+
+/// Undelivered-fetch routing for an [`UndeliveredResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchAction {
+    Paint,
+    Retryable { message: String },
+}
+
+pub fn describe_fetch(response: &UndeliveredResponse) -> FetchAction {
+    match response {
+        UndeliveredResponse::Summary(_) => FetchAction::Paint,
+        UndeliveredResponse::FrameTooLarge => FetchAction::Retryable {
+            message: String::from("frame too large; retry with a smaller limit"),
+        },
+        UndeliveredResponse::NoCurrentPresence => FetchAction::Retryable {
+            message: String::from("no current presence; summon first, then retry"),
+        },
+        UndeliveredResponse::UnknownCompanion => FetchAction::Retryable {
+            message: String::from("unknown companion; re-sync presence and retry"),
+        },
+        UndeliveredResponse::StaleBaseView { .. } => FetchAction::Retryable {
+            message: String::from("stale base view; re-query from the head"),
+        },
+    }
+}
+
+/// Report-fetch routing for a [`TaskReportResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportAction {
+    Show,
+    Retryable { message: String },
+}
+
+pub fn describe_report(response: &TaskReportResponse) -> ReportAction {
+    match response {
+        TaskReportResponse::Page(_) => ReportAction::Show,
+        TaskReportResponse::UnknownRef => ReportAction::Retryable {
+            message: String::from("unknown task reference; re-list and retry"),
+        },
+        TaskReportResponse::StaleBaseView { .. } => ReportAction::Retryable {
+            message: String::from("stale cursor; re-query from the head"),
+        },
+    }
+}
 /// Management-routing decision for a [`ManagementOutcome`]; `detail`/`message`
 /// lines carry operational facts only, never bodies or secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -752,5 +1083,195 @@ mod tests {
             uuid::Uuid::parse_str(&id).is_ok(),
             "local ID must be a UUID: {id:?}"
         );
+    }
+
+    #[test]
+    fn presentation_builders_carry_refs_limits_and_flags() {
+        use ene_api::v1::round::PresentationStatus;
+
+        let fetch = super::undelivered_request(Some(String::from("cursor-1")), Some(7), true);
+        assert!(fetch.companion.is_none());
+        assert_eq!(
+            fetch.cursor.map(|cursor| cursor.0),
+            Some(String::from("cursor-1"))
+        );
+        assert_eq!(fetch.limit, Some(7));
+        assert!(fetch.redisplay);
+        let head = super::undelivered_request(None, None, false);
+        assert!(head.cursor.is_none() && head.limit.is_none() && !head.redisplay);
+
+        let ack = super::undelivered_ack("receipt-1", PresentationStatus::Presented);
+        assert!(ack.receipt.0 == "receipt-1" && ack.status == PresentationStatus::Presented);
+
+        let list = super::list_tasks_request(None, None);
+        assert!(list.cursor.is_none() && list.limit.is_none());
+        let report = super::task_report_request("task-1", Some(String::from("c")), Some(3));
+        assert!(report.task.0 == "task-1");
+        assert_eq!(report.limit, Some(3));
+        let source = super::report_source_request("source-1", Some(9), Some(128));
+        assert!(source.source.0 == "source-1" && source.cursor == Some(9));
+        assert_eq!(source.limit_bytes, Some(128));
+        assert!(super::select_task_request("task-2").task.0 == "task-2");
+        let resume = super::resume_task_request("task-3", 4, "task-3:4", String::from("go on"));
+        assert!(resume.expected_revision == 4 && resume.expected_purpose == "task-3:4");
+    }
+
+    #[test]
+    fn renders_use_item_headline_and_continuation_lines() {
+        use ene_api::v1::refs::RoundWireId;
+        use ene_api::v1::undelivered::{
+            PageCursorWire, PresentationReceiptWireRef, ReportSourcePageView, TaskListItem,
+            TaskListPage, TaskReportPage, TaskReportRowView, TaskReportView, TaskWireRef,
+            UndeliveredItemView, UndeliveredSourceView, UndeliveredSummary, UndeliveredWireRef,
+        };
+
+        let summary = UndeliveredSummary {
+            receipt: PresentationReceiptWireRef(String::from("receipt-1")),
+            round: RoundWireId(String::from("round-1")),
+            presence_generation: 2,
+            items: vec![UndeliveredItemView {
+                reference: UndeliveredWireRef(String::from("und-1")),
+                source: UndeliveredSourceView {
+                    kind: String::from("task_revision"),
+                    subject: String::from("subject-1"),
+                    certainty: None,
+                },
+                excerpt: String::from("first words"),
+                truncated: true,
+            }],
+            reports: vec![TaskReportView {
+                task: TaskWireRef(String::from("task-1")),
+                revision: 2,
+                progress: String::from("in_progress"),
+                details_available: true,
+            }],
+            has_more: true,
+            next_cursor: Some(PageCursorWire(String::from("cursor-9"))),
+        };
+        let rendered = super::render_summary(&summary);
+        for wanted in [
+            "task_revision subject-1: first words…",
+            "task task-1 rev 2 in_progress",
+            "(more)",
+            "next: cursor-9",
+        ] {
+            assert!(
+                rendered.contains(wanted),
+                "summary must carry {wanted:?}, got {rendered:?}"
+            );
+        }
+        assert!(
+            !rendered.contains("receipt-1"),
+            "receipt refs stay off the display: {rendered:?}"
+        );
+
+        let list = super::render_task_list(&TaskListPage {
+            tasks: vec![TaskListItem {
+                task: TaskWireRef(String::from("task-7")),
+                revision: 2,
+                progress: String::from("in_progress"),
+                running: true,
+                purpose: String::from("task-7:2"),
+            }],
+            next_cursor: Some(PageCursorWire(String::from("cursor-2"))),
+        });
+        assert!(
+            list.contains("rev 2 in_progress running") && list.contains("next: cursor-2"),
+            "task list renders entries plus continuation, got {list:?}"
+        );
+        let report = super::render_report_page(&TaskReportPage {
+            task: TaskWireRef(String::from("task-7")),
+            revision: 2,
+            progress: String::from("in_progress"),
+            purpose: String::from("task-7:2"),
+            purpose_source: ene_api::v1::undelivered::ReportSourceWireRef(String::from("source-1")),
+            rows: vec![
+                TaskReportRowView {
+                    kind: String::from("action_attempt"),
+                    id: String::from("attempt-1"),
+                    adopted_revision: None,
+                    source: None,
+                },
+                TaskReportRowView {
+                    kind: String::from("task_result"),
+                    id: String::from("result-1"),
+                    adopted_revision: Some(2),
+                    source: None,
+                },
+            ],
+            next_cursor: None,
+        });
+        assert!(
+            report.contains("action_attempt") && report.contains("task_result"),
+            "report renders both row kinds, got {report:?}"
+        );
+        let source = super::render_source_page(&ReportSourcePageView {
+            text: String::from("body bytes"),
+            total_bytes: 10,
+            next: Some(4),
+        });
+        assert!(
+            source.contains("body bytes") && source.contains("next: 4"),
+            "source renders text plus byte cursor, got {source:?}"
+        );
+    }
+
+    #[test]
+    fn ack_resume_fetch_and_report_describes_split_applied_retryable() {
+        use ene_api::v1::round::PresentationStatus;
+        use ene_api::v1::undelivered::{
+            ResumeTaskOutcomeWire, TaskReportResponse, UndeliveredAckOutcome, UndeliveredResponse,
+        };
+
+        assert!(matches!(
+            super::describe_ack(&UndeliveredAckOutcome::Presented { presented: 2 }),
+            super::AckAction::Confirmed { .. }
+        ));
+        assert!(matches!(
+            super::describe_ack(&UndeliveredAckOutcome::AlreadyPresented),
+            super::AckAction::Confirmed { .. }
+        ));
+        assert!(matches!(
+            super::describe_ack(&UndeliveredAckOutcome::StaleConnection),
+            super::AckAction::Retryable { .. }
+        ));
+        let acked = super::undelivered_ack("r", PresentationStatus::Unknown);
+        assert!(acked.status == PresentationStatus::Unknown);
+
+        assert!(matches!(
+            super::describe_resume(&ResumeTaskOutcomeWire::Resumed {
+                task: ene_api::v1::undelivered::TaskWireRef(String::from("t")),
+                revision: 3,
+                delegation: String::from("d"),
+            }),
+            super::ResumeAction::Resumed { .. }
+        ));
+        assert!(matches!(
+            super::describe_resume(&ResumeTaskOutcomeWire::StalePremise {
+                current_revision: 4
+            }),
+            super::ResumeAction::Refused { .. }
+        ));
+        assert!(matches!(
+            super::describe_resume(&ResumeTaskOutcomeWire::InFlight),
+            super::ResumeAction::Retryable { .. }
+        ));
+        assert!(matches!(
+            super::describe_resume(&ResumeTaskOutcomeWire::Unavailable),
+            super::ResumeAction::Retryable { .. }
+        ));
+
+        assert!(matches!(
+            super::describe_fetch(&UndeliveredResponse::FrameTooLarge),
+            super::FetchAction::Retryable { .. }
+        ));
+        assert!(matches!(
+            super::describe_fetch(&UndeliveredResponse::NoCurrentPresence),
+            super::FetchAction::Retryable { .. }
+        ));
+        assert!(matches!(
+            super::describe_report(&TaskReportResponse::UnknownRef),
+            super::ReportAction::Retryable { .. }
+        ));
     }
 }

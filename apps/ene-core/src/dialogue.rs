@@ -55,8 +55,8 @@
 //!   reply: confirmation is an observation, never a report of completion.
 
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::RevalidationReasonWire;
 use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
+use ene_api::v1::refs::{ConnectionWireId, RevalidationReasonWire};
 use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
     ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryResponse,
@@ -64,12 +64,12 @@ use ene_api::v1::round::{
     SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
 use ene_companion::dialogue::{
-    AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification, begin_turn,
-    classify_replay, finish_turn,
+    AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification,
+    begin_turn_committed, classify_replay, finish_turn,
 };
 use ene_companion::{
     CommandId, CompanionId, CompanionLifecycle, CompanionRepository, HistoryRepository,
-    HistoryRole, PresentationMark, ReportStatus, RequestFingerprint, RoundIntentMark,
+    HistoryRole, PresentationMark, RequestFingerprint, RoundIntentMark, UNDELIVERED_PAGE_MAX,
     UndeliveredRepository,
 };
 use ene_credential::{
@@ -85,7 +85,7 @@ use ene_learning::{ExperienceCandidate, SecretScrubError, SecretScrubber as _};
 use ene_permission::{CapabilityKind, ConsentRepository as _, EvaluationTracker};
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
-    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
+    ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
     PresenceCheckRef, PresenceGeneration, PresenceRepository as _, PresenceState, ThinMoveReason,
 };
 use ene_presentation::{
@@ -97,8 +97,8 @@ use ene_store::Store;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
-    CredStore, FrameSink, HostHandle, LiveInput, device_client, emit_end, outgoing_frame,
-    reject_frame, unpaired_close,
+    CredStore, FrameSink, HostHandle, LiveInput, attribution_to_wire, device_client, emit_end,
+    outgoing_fact, outgoing_frame, reject_frame, stale_reject, unpaired_close,
 };
 
 /// Garbage maps to [`None`] (no replay key) rather than rejection: a
@@ -265,15 +265,18 @@ pub(crate) enum AttachOutcome {
     /// The compare lost or the store failed: the caller reloads instead of
     /// proceeding.
     Raced,
+    /// The connection was superseded before the ownership section: nothing
+    /// was attached and the caller answers the typed stale rejection.
+    Superseded,
 }
 
 impl HostHandle {
     pub(crate) fn open_wire_for(
         &self,
-        client_ref: &str,
+        connection: &ConnectionWireId,
         companion_key: &str,
     ) -> Option<RoundWireId> {
-        let open = self.open_round_for(client_ref, companion_key)?;
+        let open = self.open_round_for(connection, companion_key)?;
         let wire = self.wire_for_round(&open.round)?;
         Some(RoundWireId(wire))
     }
@@ -282,44 +285,78 @@ impl HostHandle {
         &self,
         frame: &WireFrame,
         live: &LiveInput,
-        client_ref: &str,
         companion_key: &str,
         generation: u64,
     ) -> WireFrame {
-        let current_round = self.open_wire_for(client_ref, companion_key);
+        let current_round = self.open_wire_for(&live.connection_id, companion_key);
         stale_frame_with(frame, live, current_round, generation)
     }
 
-    /// Attaches presence for the paired device when none is active.
+    /// Attaches presence for the paired device when none is active, or
+    /// restores it for a summoning client while recovery waits.
     ///
-    /// Called only from the submit path with the `NoActive` generation it
-    /// just read; only an [`AttachOutcome::Attached`] fact carries the fresh
-    /// generation the caller may proceed with, and [`AttachOutcome::Raced`]
-    /// means the caller reloads rather than proceeding. The [`ClientId`] comes
-    /// from the deterministic device mapping, so a re-attaching device
-    /// re-derives the same id. No reply is produced here.
+    /// Called only from the submit path with the generation it just read,
+    /// under `NoActive` or `RecoveryWait`: only an [`AttachOutcome::Attached`]
+    /// fact carries the fresh generation the caller may proceed with, and
+    /// [`AttachOutcome::Raced`] means the caller reloads rather than
+    /// proceeding. The [`ClientId`] comes from the deterministic device
+    /// mapping, so a re-attaching device re-derives the same id. A summon on
+    /// the current generation wins for any client and cancels the recovery
+    /// intent (S5-14); a stale premise loses at the store compare, so the
+    /// original client arriving late never auto-restores over a decided
+    /// present. No reply is produced here.
+    ///
+    /// The compare/begin and confirm run synchronously inside the
+    /// connection-ownership section (CCT §10.4), so a same-device replacement
+    /// that wins the section leaves presence untouched and answers
+    /// [`AttachOutcome::Superseded`]: the stale submit never attaches.
     pub(crate) async fn attach_presence(
         &self,
+        live: &LiveInput,
         device_wire: &str,
         connection_live: bool,
+        expected_state: PresenceState,
         expected_generation: PresenceGeneration,
     ) -> AttachOutcome {
         let client = device_client(device_wire);
-        let Ok(companion) = self.store.ensure_running_companion().await else {
-            return AttachOutcome::Raced;
+        let companion = match self.store.ensure_running_companion().await {
+            Ok(companion) => companion,
+            Err(_) => return AttachOutcome::Raced,
         };
-        attach_from(
-            &self.store,
-            companion.as_raw(),
-            PresenceCheckRef {
-                expected_generation,
-                expected_state: PresenceState::NoActive,
-                expected_active: None,
-            },
-            client,
-            connection_live,
-        )
-        .await
+        let store = self.store.clone();
+        let expected = PresenceCheckRef {
+            expected_generation,
+            expected_state,
+            expected_active: None,
+        };
+        let attached = self
+            .with_current_connection_blocking(live, move || {
+                let Ok(MoveDecision::TransitioningToNew { generation }) = store
+                    .compare_and_begin_transition_sync(
+                        companion.as_raw(),
+                        expected,
+                        Some(client),
+                        ThinMoveReason::InitialAttach,
+                    )
+                else {
+                    return AttachOutcome::Raced;
+                };
+                let premise = LiveReachabilityRef {
+                    client,
+                    connection_live,
+                };
+                match store.confirm_transition_sync(companion.as_raw(), generation, premise) {
+                    Ok(ConfirmTransitionOutcome::Confirmed(fact)) => AttachOutcome::Attached(fact),
+                    Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { .. }) | Err(_) => {
+                        AttachOutcome::Raced
+                    }
+                }
+            })
+            .await;
+        match attached {
+            Some(outcome) => outcome,
+            None => AttachOutcome::Superseded,
+        }
     }
 
     /// Mediates one [`SubmitTextInput`] frame into the companion turn.
@@ -339,11 +376,21 @@ impl HostHandle {
     /// adopting either side; a present-but-unresolvable round is stale, never
     /// rebound.
     ///
-    /// Presence attach runs only when the loaded attribution is `NoActive`,
-    /// and only on the envelope's observed generation premise: a missing
-    /// `presence_generation_view` revalidates, a view that does not equal the
-    /// current `NoActive` generation answers stale with the current values,
-    /// and only then does the compare-and-commit run.
+    /// Presence attach runs when the loaded attribution is `NoActive` or
+    /// `RecoveryWait`, and only on the envelope's observed generation
+    /// premise: a missing `presence_generation_view` revalidates, a view
+    /// that does not equal the current generation answers stale with the
+    /// current values, and only then does the compare-and-commit run.
+    ///
+    /// A committed attach publishes the resulting attribution fact to this
+    /// connection (IPC §12.2): the fact is unsolicited — it names no
+    /// `reply_to`, so a Client awaiting this submit's answer absorbs it
+    /// instead of mistaking it for one — and it precedes the
+    /// auto-presented absence summary as well as this submit's own accept,
+    /// open, and stream frames. The order is load-bearing: the summary's
+    /// receipt carries the fresh generation and the Client's first ACK for
+    /// it echoes the generation it observed, so a summary delivered ahead
+    /// of its fact could only be answered `StalePresentation`.
     ///
     /// Idempotency is durable over the envelope `command_id`, looked up
     /// through [`lookup_command`](HistoryRepository::lookup_command) and
@@ -416,13 +463,7 @@ impl HostHandle {
         else {
             return emit_end(
                 sink,
-                self.stale_frame(
-                    frame,
-                    live,
-                    &live.client_ref,
-                    &companion_key,
-                    attribution.generation.as_u64(),
-                ),
+                self.stale_frame(frame, live, &companion_key, attribution.generation.as_u64()),
             );
         };
         // Registered credentials never reach durable History or a model
@@ -509,7 +550,10 @@ impl HostHandle {
         // the committed fact. Any other path carries the envelope view
         // untouched: intake reports a missing or mismatched view honestly.
         let mut attached_generation: Option<PresenceGeneration> = None;
-        if attribution.state == PresenceState::NoActive {
+        if matches!(
+            attribution.state,
+            PresenceState::NoActive | PresenceState::RecoveryWait
+        ) {
             let Some(viewed) = frame.envelope.observed.presence_generation_view else {
                 return emit_end(
                     sink,
@@ -519,22 +563,70 @@ impl HostHandle {
             if viewed != attribution.generation.as_u64() {
                 return emit_end(
                     sink,
-                    self.stale_frame(
-                        frame,
-                        live,
-                        &live.client_ref,
-                        &companion_key,
-                        attribution.generation.as_u64(),
-                    ),
+                    self.stale_frame(frame, live, &companion_key, attribution.generation.as_u64()),
                 );
             }
             match self
-                .attach_presence(&device_wire, live.connection_live, attribution.generation)
+                .attach_presence(
+                    live,
+                    &device_wire,
+                    live.connection_live,
+                    attribution.state,
+                    attribution.generation,
+                )
                 .await
             {
                 AttachOutcome::Attached(fresh) => {
                     attached_generation = Some(fresh.generation);
                     attribution = fresh;
+                    // Presence transition distribution (IPC §12.1 M-6,
+                    // V-3): the compare-and-commit above made this
+                    // companion's attribution authoritative at a new
+                    // generation, so the resulting fact goes to this
+                    // subscriber before anything that depends on it.
+                    // Unsolicited by construction (outgoing_fact sets no
+                    // reply_to), so the Client absorbs it while its request
+                    // is in flight and never reads it as the answer to this
+                    // submit; the accept/open/stream frames below keep their
+                    // own correlation.
+                    //
+                    // Ordering is the invariant, not decoration: the
+                    // auto-presented summary that follows carries the fresh
+                    // generation on its receipt, and the first ACK for it
+                    // echoes the generation the Client observed. Ahead of the
+                    // fact that echo is the stale pre-summon view, and the
+                    // ACK is refused as StalePresentation, leaving the backlog
+                    // it carried unpresented.
+                    let fact = outgoing_fact(
+                        frame,
+                        live,
+                        WirePayload::PresenceAttribution(attribution_to_wire(self, &attribution)),
+                    );
+                    // Summon auto-present: this submit just established
+                    // formal presence, so the absence backlog presents
+                    // without an Owner query. Best-effort and bounded: a
+                    // full buffer drops the push (the explicit request
+                    // path re-presents), and the new turn's own reply
+                    // still streams normally afterwards. An undelivered
+                    // fact skips the push: an ACK for a summary whose fact
+                    // never arrived could only be refused stale, so that
+                    // recovery belongs to the explicit request path.
+                    if matches!(
+                        self.with_current_connection(live, || sink.emit(fact)),
+                        Some(Ok(()))
+                    ) {
+                        for summary in self
+                            .auto_present_for(frame, live, companion, &attribution)
+                            .await
+                        {
+                            if !matches!(
+                                self.with_current_connection(live, || sink.emit(summary)),
+                                Some(Ok(()))
+                            ) {
+                                break;
+                            }
+                        }
+                    }
                 }
                 AttachOutcome::Raced => {
                     let Ok(Some(current)) = self.store.load_attribution(companion.as_raw()).await
@@ -553,12 +645,20 @@ impl HostHandle {
                             self.stale_frame(
                                 frame,
                                 live,
-                                &live.client_ref,
                                 &companion_key,
                                 current.generation.as_u64(),
                             ),
                         );
                     };
+                }
+                AttachOutcome::Superseded => {
+                    // A same-device replacement won the ownership section:
+                    // this submit attaches nothing and stops before any
+                    // owner append, round, or provider dispatch.
+                    return emit_end(
+                        sink,
+                        stale_reject(frame, live, "presence attach on a superseded connection"),
+                    );
                 }
             }
         }
@@ -572,7 +672,6 @@ impl HostHandle {
                         self.stale_frame(
                             frame,
                             live,
-                            &live.client_ref,
                             &companion_key,
                             attribution.generation.as_u64(),
                         ),
@@ -619,20 +718,14 @@ impl HostHandle {
                 client,
                 connection_live: live.connection_live,
             },
-            open_round: self.open_round_for(&live.client_ref, &companion_key),
+            open_round: self.open_round_for(&live.connection_id, &companion_key),
         };
         let accepted = match check_intake(premise) {
             RoundIntakeOutcome::AcceptedForRound { round } => round,
             RoundIntakeOutcome::StaleRound { .. } => {
                 return emit_end(
                     sink,
-                    self.stale_frame(
-                        frame,
-                        live,
-                        &live.client_ref,
-                        &companion_key,
-                        attribution.generation.as_u64(),
-                    ),
+                    self.stale_frame(frame, live, &companion_key, attribution.generation.as_u64()),
                 );
             }
             RoundIntakeOutcome::HeldForTransition => {
@@ -645,6 +738,12 @@ impl HostHandle {
         // The companion owns the accepted-turn order: admission precedes the
         // durable append, the Host records the open round only after that
         // append commits, and dispatch plus reply integration follow.
+        //
+        // Admission (permission, credential, consent) runs outside the
+        // ownership section; the durable Owner append is the Client-dependent
+        // acceptance commit and runs inside it (CCT §10.4). A connection
+        // superseded while admission ran commits no row, opens no round,
+        // dispatches no provider call, and streams nothing.
         let round_wire = self.round_wire_or_mint(&accepted);
         let generation_number = attribution.generation.as_u64();
         let executor = HostInference {
@@ -669,9 +768,64 @@ impl HostHandle {
                 frame.envelope.sender.incarnation_id.random,
             )),
         };
-        match begin_turn(input, &self.store, &executor).await {
+        let authorized = match executor.admit_dialogue().await {
+            Ok(Admission::Admitted(authorized)) => *authorized,
+            Ok(Admission::Declined(reason)) => {
+                return emit_end(
+                    sink,
+                    revalidate_frame(frame, live, admission_reason(reason)),
+                );
+            }
+            Err(_) => return emit_end(sink, held_frame(frame, live)),
+        };
+        // Test-only race gate: pause after admission and before the guarded
+        // acceptance section, so a test can supersede the connection in
+        // between and pin that nothing commits.
+        #[cfg(test)]
+        if let Some(gate) = self.submit_accept_gate() {
+            gate.pause().await;
+        }
+        let store = self.store.clone();
+        let commit_input = input.clone();
+        let committed = self
+            .with_current_connection_blocking(live, move || {
+                begin_turn_committed(
+                    commit_input,
+                    authorized,
+                    |owner| store.append_message_sync(owner),
+                    |companion, command| store.lookup_command_sync(companion, command),
+                )
+            })
+            .await;
+        let begin = match committed {
+            // Superseded before the acceptance section: no Owner row, no
+            // open round, no provider dispatch, no stream, and no accept ack
+            // that could name a round.
+            None => {
+                return emit_end(
+                    sink,
+                    stale_reject(frame, live, "input on a superseded connection"),
+                );
+            }
+            Some(begin) => begin,
+        };
+        match begin {
             DialogueBegin::Ready(turn) => {
-                self.record_open_round(
+                // The connection-bound open round is installed under the
+                // ownership section: a replacement that wins this section
+                // leaves the durable Owner row and the reply's durable
+                // adoption to continue (the reply registers as undelivered
+                // for the new connection), while this connection opens no
+                // round and its stream aborts before any further publication.
+                #[cfg(test)]
+                {
+                    let gate = crate::lock_unpoison(&self.submit_open_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
+                }
+                let installed = self.record_open_round(
+                    live,
                     &live.client_ref,
                     &companion_key,
                     OpenRound {
@@ -681,29 +835,36 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
-                // The owner row is durable: emit acceptance and the stream
-                // opening now, before the provider call, so the Client
-                // observes durable input acceptance as its own early fact
-                // instead of waiting for provider completion.
-                let stream = StreamWireId(RawId::new().as_uuid());
-                // A failed accept or open aborts before the provider call:
-                // streaming to an undeliverable channel would only pile up
-                // frames the client never sees.
-                if sink.emit(accept_frame(frame, live, &round_wire)).is_err() {
-                    return;
-                }
-                if sink
-                    .emit(open_frame(
-                        frame,
-                        live,
-                        &stream,
-                        &round_wire,
-                        generation_number,
-                    ))
-                    .is_err()
+                #[cfg(test)]
                 {
-                    return;
+                    let gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
                 }
+                let stream = StreamWireId(RawId::new().as_uuid());
+                // Installation is not publication authority: replacement can
+                // win between them. Queue both control frames in one short
+                // ownership section, never socket I/O or an await. Already
+                // accepted work continues without a wire stream if stale.
+                let opened = if installed {
+                    match self.with_current_connection(live, || {
+                        sink.emit(accept_frame(frame, live, &round_wire))?;
+                        sink.emit(open_frame(
+                            frame,
+                            live,
+                            &stream,
+                            &round_wire,
+                            generation_number,
+                        ))
+                    }) {
+                        Some(Ok(())) => true,
+                        Some(Err(_)) => return,
+                        None => false,
+                    }
+                } else {
+                    false
+                };
                 // Baselines the gate on the current record: the owner append
                 // committed under the admission consent, and any move since
                 // fails the attempt claim before the first delta. An
@@ -711,17 +872,22 @@ impl HostHandle {
                 // like any post-acceptance failure.
                 let Ok(Some(consent)) = self.store.load_current(CapabilityKind::Dialogue).await
                 else {
-                    return emit_end(
-                        sink,
-                        close_frame(frame, live, &stream, StreamClose::Interrupted),
-                    );
+                    if opened {
+                        self.with_current_connection(live, || {
+                            emit_end(
+                                sink,
+                                close_frame(frame, live, &stream, StreamClose::Interrupted),
+                            );
+                        });
+                    }
+                    return;
                 };
                 let consent = (consent.id, consent.rev.as_u64());
                 let mut gate = StreamGate {
                     handle: self,
                     frame,
                     live,
-                    client_ref: live.client_ref.clone(),
+                    connection: live.connection_id,
                     companion_key: companion_key.clone(),
                     companion,
                     stream,
@@ -731,8 +897,10 @@ impl HostHandle {
                     credential_set,
                     tx: stream_tx.clone(),
                     seq: 0,
+                    opened,
                 };
-                let task_control = crate::task_control::HostTaskControl::new(self, companion);
+                let task_control =
+                    crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
                 let outcome = {
                     // The open round is Host-owned transient state the
                     // companion must never read directly: hand finish_turn
@@ -742,7 +910,7 @@ impl HostHandle {
                     // the store transaction, which compares the turn's
                     // Owner message premise atomically.
                     let is_current = || {
-                        self.open_round_for(&live.client_ref, &companion_key)
+                        self.open_round_for(&live.connection_id, &companion_key)
                             .is_none_or(|open| open.round == accepted)
                     };
                     finish_turn(
@@ -820,15 +988,35 @@ impl HostHandle {
     /// Applies one presentation observation with no reply.
     ///
     /// Confirmation is an observation, never a report of completion: matching
-    /// pending undelivered entries for the round move to presented (or to
-    /// presentation-unknown for any non-presented status, including wire
-    /// `Failed`). Failures end silently; the durable report state stays
-    /// authoritative either way.
+    /// unpresented entries for the round move to presented on a presented
+    /// status, and a non-presented status is a presentation start against
+    /// `Pending` (the row stays re-presentable) or a current not-presented
+    /// receipt against `PresentationUnknown` (the row returns to `Pending`).
+    /// Failures end silently; the durable report state stays authoritative
+    /// either way.
+    ///
+    /// Linearization (CCT §10.4): the round resolve, companion resolve, and
+    /// the bounded `list_unpresented` page read run as prepare, then the
+    /// durable compare-and-mark for every matching row runs inside one
+    /// connection-ownership section with the currentness re-check. The
+    /// prepared statuses are CAS premises only: a replacement that wins the
+    /// table commits nothing (zero durable mutation for the stale
+    /// connection), and one that loses cannot interleave a supersession
+    /// between the check and any row's commit. The transition lock is taken
+    /// only across the short guarded section, never during the async
+    /// prepare.
     pub(crate) async fn confirm_presentation(
         &self,
         _frame: &WireFrame,
+        live: &LiveInput,
         confirm: &ConfirmPresentationWire,
     ) -> Vec<WireFrame> {
+        // Confirmation moves durable presentation status for rows of one
+        // round: a connection superseded, replaced, or closed before this
+        // observation is applied changes nothing (CCT §10.4).
+        if self.with_current_connection(live, || ()).is_none() {
+            return Vec::new();
+        }
         let Some(round) = self.round_for(&confirm.round.0) else {
             return Vec::new();
         };
@@ -839,22 +1027,35 @@ impl HostHandle {
         let Ok(companion) = self.store.ensure_running_companion().await else {
             return Vec::new();
         };
-        let Ok(pending) = self.store.list_pending(companion).await else {
+        // The bounded first page is enough for this observation path; the
+        // full reconnect backlog subscription belongs to the presentation
+        // slice, which re-pages with a cursor. This read is prepare only:
+        // the statuses it returns are CAS premises, never authority.
+        let Ok(page) = self
+            .store
+            .list_unpresented(companion, None, UNDELIVERED_PAGE_MAX)
+            .await
+        else {
             return Vec::new();
         };
-        for entry in pending {
-            if entry.round == mark.round
-                && entry.status == ReportStatus::Pending
-                && self
-                    .store
-                    .compare_and_mark_reported(entry.id, ReportStatus::Pending, mark)
-                    .await
-                    .is_err()
-            {
-                // One stale or unavailable row never blocks the remaining
-                // observations; the store stays authoritative.
-            }
+        #[cfg(test)]
+        if let Some(gate) = self.confirm_commit_gate() {
+            gate.pause().await;
         }
+        // Serialize commits, not preparation, with receipt transitions.
+        // Prepared statuses are CAS premises, never ownership authority.
+        let _gate = self.presentation_gate().await;
+        let store = self.store.clone();
+        let _applied = self
+            .with_current_connection_blocking(live, move || {
+                for entry in page.entries {
+                    if entry.round == Some(mark.round) {
+                        // An unavailable or stale row does not block the rest.
+                        drop(store.compare_and_mark_reported_sync(entry.id, entry.status, mark));
+                    }
+                }
+            })
+            .await;
         Vec::new()
     }
 
@@ -976,7 +1177,6 @@ impl HostHandle {
     }
 
     /// Whether a queued formation pass is waiting.
-    #[cfg(unix)]
     pub(crate) fn has_pending_learning(&self) -> bool {
         !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
@@ -1003,7 +1203,6 @@ impl HostHandle {
     /// keeps a genuine overlap from overwriting newer recognition. Stopped
     /// companions are skipped because stopping must not start new internal
     /// activity. A pass failure drops its item, so there is no retry storm.
-    #[cfg(any(unix, test))]
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
         let _serialized = self.learning_worker.lock().await;
         loop {
@@ -1102,46 +1301,6 @@ impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
             text: scrubbed,
             credential_set,
         })
-    }
-}
-
-/// The compare pins the caller's observed `(NoActive, generation)`
-/// expectation, so a concurrent move wins by failing this compare instead of
-/// overwriting. Only a committed confirm answers [`AttachOutcome::Attached`]
-/// with the fresh fact; a lost race, denied or held outcome, failed confirm,
-/// or store failure answers [`AttachOutcome::Raced`]. An unconfirmed
-/// transition reads back as `InTransition`, so the caller's reload reports
-/// held, which is honest.
-async fn attach_from(
-    store: &Store,
-    companion: RawId,
-    expected: PresenceCheckRef,
-    client: ClientId,
-    connection_live: bool,
-) -> AttachOutcome {
-    let Ok(MoveDecision::TransitioningToNew { generation }) = store
-        .compare_and_begin_transition(
-            companion,
-            expected,
-            Some(client),
-            ThinMoveReason::InitialAttach,
-        )
-        .await
-    else {
-        return AttachOutcome::Raced;
-    };
-    let premise = LiveReachabilityRef {
-        client,
-        connection_live,
-    };
-    match store
-        .confirm_transition(companion, generation, premise)
-        .await
-    {
-        Ok(ConfirmTransitionOutcome::Confirmed(fact)) => AttachOutcome::Attached(fact),
-        Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { .. }) | Err(_) => {
-            AttachOutcome::Raced
-        }
     }
 }
 
@@ -1264,7 +1423,9 @@ struct StreamGate<'a> {
     handle: &'a HostHandle,
     frame: &'a WireFrame,
     live: &'a LiveInput,
-    client_ref: String,
+    /// The connection that opened this stream; every publication re-checks
+    /// that it is still the device's current authenticated connection.
+    connection: ConnectionWireId,
     companion_key: String,
     companion: CompanionId,
     stream: StreamWireId,
@@ -1274,18 +1435,40 @@ struct StreamGate<'a> {
     credential_set: CredentialSetRevision,
     tx: tokio::sync::mpsc::Sender<WireFrame>,
     seq: u64,
+    /// No wire close (or delta) is legal unless Open was queued.
+    opened: bool,
 }
 
 impl StreamGate<'_> {
+    /// Whether the connection that opened this stream is still current.
+    ///
+    /// Reads the connection table, never the stale `LiveInput` snapshot: a
+    /// same-device replacement keeps `client_ref` and presence generation
+    /// identical, so only the table can tell that this stream's connection
+    /// was superseded (IPC §9.3 replacement). Synchronous by design: the
+    /// publication path calls it immediately before `permit.send`, with no
+    /// await in between.
+    fn connection_current(&self) -> bool {
+        self.live
+            .authority
+            .is_current_authenticated(&self.live.connection_id)
+    }
+
     /// Re-reads every presentation premise; any move — or any unreadable
     /// premise — stops the stream. Failing closed keeps an unprovable
     /// premise from presenting as current.
     async fn current(&self) -> bool {
+        // The connection itself must still be the current authenticated one:
+        // a replacement invalidates this stream even though the device,
+        // client id, generation, and round key look unchanged.
+        if !self.connection_current() {
+            return false;
+        }
         // A newer submit replaced this stream's round: the owner's
         // attention moved on, so further deltas are not current.
         let open = self
             .handle
-            .open_round_for(&self.client_ref, &self.companion_key);
+            .open_round_for(&self.connection, &self.companion_key);
         if open.is_none_or(|retained| retained.round != self.round) {
             return false;
         }
@@ -1341,29 +1524,54 @@ impl StreamGate<'_> {
     /// frame carries the next sequence number, and the close states
     /// completion separately. A gone client ends the send; the reply is
     /// already durable, so the close is best-effort either way.
+    ///
+    /// A connection that is no longer current — replaced while the reply
+    /// committed — never hears `Completed`: the durable reply stands, but
+    /// this stream was interrupted by the replacement, and the reply reaches
+    /// the new connection through its own presentation subscription.
     async fn finish(&mut self) {
-        if self.tx.send(self.delta_frame("", true)).await.is_err() {
+        if !self.connection_current() || !self.current().await {
+            self.interrupt().await;
             return;
         }
-        if self
-            .tx
-            .send(close_frame(
+        if !self.publish_current(self.delta_frame("", true)).await {
+            self.interrupt().await;
+            return;
+        }
+        if !self
+            .publish_current(close_frame(
                 self.frame,
                 self.live,
                 &self.stream,
                 StreamClose::Completed,
             ))
             .await
-            .is_err()
         {
-            // The connection is closing; the durable reply stands without
-            // its close frame, and the loop drops the host future with it.
+            self.interrupt().await;
         }
+    }
+
+    /// Queues one close path frame if the stream opened on the wire and the
+    /// connection is still current. An unopened stream sends nothing: a
+    /// stream the Client never saw opens no close-only lifecycle now.
+    async fn publish_current(&mut self, frame: WireFrame) -> bool {
+        if !self.opened {
+            return false;
+        }
+        let Ok(permit) = self.tx.reserve().await else {
+            return false;
+        };
+        self.handle
+            .with_current_connection(self.live, || permit.send(frame))
+            .is_some()
     }
 
     /// Closes the stream interrupted after a stale or failed run: displayed
     /// deltas stay, and no reply is adopted.
     async fn interrupt(&mut self) {
+        if !self.opened {
+            return;
+        }
         if self
             .tx
             .send(close_frame(
@@ -1388,7 +1596,7 @@ impl DeltaSink for StreamGate<'_> {
         Box::pin(async move {
             // Fast path: never reserve capacity for an already-stale
             // stream, and never hold a permit across the premise reads.
-            if !self.current().await {
+            if !self.opened || !self.current().await {
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
             let frame = self.delta_frame(delta, false);
@@ -1404,7 +1612,16 @@ impl DeltaSink for StreamGate<'_> {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
-            permit.send(frame);
+            // Final connection currentness check, synchronous and after the
+            // last await: a same-device replacement during the premise reads
+            // must not let this stream publish one more delta (IPC §9.3).
+            if self
+                .handle
+                .with_current_connection(self.live, || permit.send(frame))
+                .is_none()
+            {
+                return DeltaFlow::Abort("the connection was replaced");
+            }
             self.seq += 1;
             DeltaFlow::Continue
         })

@@ -8,7 +8,7 @@ use ene_credential::EnvCredentialStore;
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
 
 #[cfg(unix)]
-pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
+pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -32,7 +32,7 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
+pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     std::fs::create_dir_all(data_dir)
         .map_err(|error| CoreError::Store(format!("create data directory: {error}")))?;
     Ok(())
@@ -48,31 +48,27 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 /// [`crate::conn`]: this entry point passes
 /// the data directory, never the socket path.
 ///
+/// Startup is ordered around the single-writer lock (PR §6.4): the `0700`
+/// data directory and the exclusive `host.lock` come first, then the store
+/// open (which runs migrations), then the explicit startup mutations (the
+/// presence normalization, the unapproved-pairing cleanup, the credential
+/// sweep, and sealed-result reconciliation), and only then the
+/// listener. A second Host in the same directory is refused before any of
+/// that runs.
+///
 /// # Errors
 ///
-/// Returns [`CoreError::Store`] when the state cannot be opened and
+/// Returns [`CoreError::AlreadyRunning`] when another Host holds the data
+/// directory, [`CoreError::Store`] when the state cannot be opened, and
 /// [`CoreError::Bind`] (or [`CoreError::UnsupportedPlatform`]) when the
 /// listener cannot run.
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
+    let _lock = crate::host_lock::HostLock::acquire(data_dir)?;
     let handle = HostHandle::open(data_dir).await?;
-    // Serving boundary, before the listener binds: sweep every registered
-    // value out of durable content and advance the credential-set revision
-    // together. A failed sweep keeps this Host from serving content prepared
-    // under an unknown credential set.
-    handle.sweep_registered_values().await?;
-    // Explicit recovery boundary, still before the listener binds:
-    // re-evaluate every sealed-but-unadopted result that AU15a recorded but
-    // AU15b did not adopt before the previous stop (or whose blockers settled
-    // while no producer listened), one bounded keyset page at a time so older
-    // permanently-unadopted candidates cannot starve later ones. This neither
-    // resumes an execution nor replays a provider call or filesystem Action,
-    // and a still-blocked result stays withheld. A page-read failure keeps the
-    // Host from serving because the durable result state itself is unreadable;
-    // per-candidate answers stay data and never wedge startup.
-    handle
-        .reconcile_sealed_results()
-        .await
-        .map_err(|error| CoreError::Store(error.to_string()))?;
+    // The serving startup mutations (PR §6.4 steps 2-5) run after the state
+    // open and before the listener binds; see
+    // [`HostHandle::run_startup_mutations`] for the order contract.
+    handle.run_startup_mutations().await?;
     // Base URL override for self-hosted endpoints and tests: production
     // keeps [`DEFAULT_BASE_URL`]. The test harness points a real `serve`
     // binary at a local fake Responses server through this variable (child

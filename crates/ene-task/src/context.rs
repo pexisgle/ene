@@ -59,6 +59,10 @@ pub struct TaskContextOrigin {
 pub enum TaskContextOriginKind {
     /// An Owner conversation, sourced from a History record.
     OwnerConversation,
+    /// A first-party Owner management operation, sourced from an activity
+    /// record. The body stays canonical there, exactly like a History
+    /// source, and is never copied into Task state.
+    OwnerManagement,
     /// The Companion's own initiative, sourced from an activity record.
     Spontaneous,
     /// A Schedule occurrence.

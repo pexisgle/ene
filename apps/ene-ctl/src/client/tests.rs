@@ -11,8 +11,7 @@ use ene_plugin_ipc::WireFrame;
 
 use super::frames::{
     PreparedRequest, auth_rejected_guidance, capability_frame, frame_for, frame_for_session,
-    missing_secret_guidance, new_incarnation, pairing_frame, pending_guidance, proof_frame,
-    retry_frame,
+    missing_secret_guidance, pairing_frame, pending_guidance, proof_frame, retry_frame,
 };
 use super::session::{AuthDecision, DEFERRED_CAP, SessionState, decide_auth, stale_generation_of};
 use super::{platform_display, socket_path};
@@ -45,7 +44,7 @@ fn platform_display_names_os_and_arch() {
 
 #[test]
 fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
-    let frame = pairing_frame("Owner laptop", incarnation());
+    let frame = pairing_frame("Owner laptop", incarnation(), None);
     let WirePayload::PairingRequest(request) = &frame.payload else {
         return Err(String::from("pairing builder must emit PairingRequest"));
     };
@@ -233,18 +232,178 @@ fn session_frames_stamp_only_text_inputs() {
     );
 }
 
+/// The boot cache is process-global; this serializes the boot tests so a
+/// reset in one never clears another's cached boot mid-assertion (nextest
+/// already isolates tests per process, this covers the shared-process runner
+/// too).
+static BOOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
-fn incarnation_names_this_process_and_advances() {
-    let first = new_incarnation();
-    let second = new_incarnation();
+fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
+    use crate::incarnation::{advance_counter, boot_incarnation, counter_path, reset_for_tests};
+
+    let _guard = BOOT_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ene-ctl-incarnation-{}-{name}", std::process::id(),))
+    }
+
+    fn remove_dir(dir: &std::path::Path) {
+        if std::fs::remove_dir_all(dir).is_err() {
+            // Best effort.
+        }
+    }
+
+    // Fresh directory: the first published counter is 1.
+    let dir = scratch("boot");
+    if std::fs::remove_dir_all(&dir).is_err() {
+        // Absent is the expected case; leftovers from a failed run clear here.
+    }
+    let created = std::fs::create_dir_all(&dir);
+    assert!(created.is_ok(), "scratch dir must create: {created:?}");
+    reset_for_tests();
+    let first = boot_incarnation(&dir);
+    assert!(first.is_ok(), "first boot must succeed: {first:?}");
+    let first = first.unwrap_or_else(|_| panic!("first boot must succeed"));
     assert!(
-        first.counter == u64::from(std::process::id()),
-        "incarnation counter is this process pid: {first:?}"
+        first.counter == 1,
+        "first published counter is 1, got {first:?}"
     );
     assert!(
-        first.random != second.random,
-        "successive incarnations differ: {first:?} vs {second:?}"
+        first.random <= i64::MAX as u64,
+        "random stays in the non-negative SQLite INTEGER range history stores, got {first:?}"
     );
+    // Same-process reconnect reuses the one boot identity without advancing.
+    let second = boot_incarnation(&dir);
+    assert!(second.is_ok(), "second boot must succeed: {second:?}");
+    assert!(
+        second.unwrap_or_else(|_| panic!("second boot must succeed")) == first,
+        "same-process reconnect must reuse the boot incarnation"
+    );
+    let stored = std::fs::read_to_string(counter_path(&dir)).unwrap_or_default();
+    assert!(
+        stored.trim() == "1",
+        "reconnect must not advance the counter file, got {stored:?}"
+    );
+    // A restart (cache forgotten) advances exactly once with fresh randomness.
+    reset_for_tests();
+    let third = boot_incarnation(&dir);
+    assert!(third.is_ok(), "post-restart boot must succeed");
+    let third = third.unwrap_or_else(|_| panic!("post-restart boot must succeed"));
+    assert!(
+        third.counter == 2,
+        "restart must publish the next counter, got {third:?}"
+    );
+    assert!(
+        third.random != first.random || third.counter != first.counter,
+        "restart must not repeat the boot identity: {first:?} vs {third:?}"
+    );
+    // The uncached advance is the same file update the boot path uses.
+    reset_for_tests();
+    let advanced = advance_counter(&dir);
+    assert!(
+        matches!(advanced, Ok(3)),
+        "direct advance publishes the next counter, got {advanced:?}"
+    );
+    remove_dir(&dir);
+    reset_for_tests();
+}
+
+#[test]
+fn boot_incarnation_fails_closed_on_corrupt_or_exhausted_counters() {
+    use crate::incarnation::{boot_incarnation, counter_path, reset_for_tests};
+
+    let _guard = BOOT_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let dir = std::env::temp_dir().join(format!(
+        "ene-ctl-incarnation-corrupt-{}",
+        std::process::id(),
+    ));
+    assert!(std::fs::create_dir_all(&dir).is_ok());
+    for (name, bytes) in [
+        ("empty", b"".as_slice()),
+        ("blank", b"   \n".as_slice()),
+        ("alpha", b"not-a-number".as_slice()),
+        ("negative", b"-3".as_slice()),
+        ("trailing", b"12x".as_slice()),
+        ("binary", &[0xff, 0x00, 0x31]),
+    ] {
+        assert!(
+            std::fs::write(counter_path(&dir), bytes).is_ok(),
+            "{name} fixture must write"
+        );
+        reset_for_tests();
+        assert!(
+            boot_incarnation(&dir).is_err(),
+            "{name} counter must fail closed, never re-initialized"
+        );
+        // Fail-closed leaves the corrupt bytes untouched for the operator.
+        assert!(
+            std::fs::read(counter_path(&dir)).unwrap_or_default() == bytes,
+            "{name} failure must not rewrite the counter"
+        );
+    }
+    assert!(
+        std::fs::write(counter_path(&dir), u64::MAX.to_string()).is_ok(),
+        "the exhausted fixture must write"
+    );
+    reset_for_tests();
+    assert!(
+        boot_incarnation(&dir).is_err(),
+        "an exhausted counter must fail closed, never wrap"
+    );
+    assert!(std::fs::remove_dir_all(&dir).is_ok() || !dir.exists());
+    reset_for_tests();
+}
+
+#[test]
+fn concurrent_boot_advances_serialize_without_loss() {
+    use crate::incarnation::{advance_counter, counter_path, reset_for_tests};
+
+    let _guard = BOOT_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let dir = std::env::temp_dir().join(format!(
+        "ene-ctl-incarnation-concurrent-{}",
+        std::process::id(),
+    ));
+    if std::fs::remove_dir_all(&dir).is_err() {
+        // Absent is the expected case.
+    }
+    assert!(std::fs::create_dir_all(&dir).is_ok());
+    reset_for_tests();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let dir = dir.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            advance_counter(&dir)
+        }));
+    }
+    let mut published = Vec::new();
+    for worker in workers {
+        let next = worker.join().expect("boot worker must not panic");
+        published.push(next.expect("concurrent advance must succeed"));
+    }
+    published.sort_unstable();
+    assert!(
+        published == vec![1, 2, 3, 4, 5, 6, 7, 8],
+        "concurrent boots must serialize to distinct counters, got {published:?}"
+    );
+    let stored = std::fs::read_to_string(counter_path(&dir)).unwrap_or_default();
+    assert!(
+        stored.trim() == "8",
+        "every advance must land exactly once, got {stored:?}"
+    );
+    assert!(std::fs::remove_dir_all(&dir).is_ok() || !dir.exists());
+    reset_for_tests();
 }
 
 fn script_frame(

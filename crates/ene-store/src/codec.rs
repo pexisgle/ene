@@ -2,8 +2,9 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use ene_companion::{
-    CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError, HistoryMessage,
-    HistoryRole, ReportStatus, RoundIntentMark, UndeliveredTechnicalError,
+    ActionCertaintyWire, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
+    HistoryMessage, HistoryRole, ReportStatus, RoundIntentMark, TaskFact, TerminalKindWire,
+    UndeliveredSource, UndeliveredTechnicalError,
 };
 use ene_credential::{
     CredentialTechnicalError, DeviceId, DeviceRecord, PendingCredentialApproval, PendingPairing,
@@ -15,13 +16,16 @@ use ene_permission::{
 };
 use ene_presence::{
     ClientId, PresenceAttribution, PresenceGeneration, PresenceState, PresenceTechnicalError,
-    ThinMoveReason,
+    RelocationHint, ThinMoveReason,
 };
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
+
+const SQL_SELECT_HINT: &str =
+    "SELECT last_client, recovery_destination FROM relocation_hint WHERE companion_id = ?1";
 
 const SQL_SELECT_CONSENT: &str =
     "SELECT id, rev, provider, model, credential_id FROM consent_record WHERE capability = ?1";
@@ -171,6 +175,193 @@ pub(crate) fn decode_report_status(text: &str) -> Result<ReportStatus, String> {
     }
 }
 
+/// The valid UTF-8 prefix of one byte-bounded page.
+///
+/// A byte cap may cut a multi-byte character; the cut character belongs to
+/// the next page, and only an actually invalid sequence fails closed.
+pub(crate) fn utf8_prefix(bytes: &[u8]) -> Result<&str, String> {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if error.error_len().is_none() => {
+            core::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|_| String::from("malformed bounded excerpt bytes"))
+        }
+        Err(_) => Err(String::from("malformed bounded excerpt bytes")),
+    }
+}
+
+/// Storage names of the undelivered source kinds (PR §4.6).
+pub(crate) const SOURCE_KIND_TASK_REVISION: &str = "task_revision";
+pub(crate) const SOURCE_KIND_DELEGATION: &str = "delegation";
+pub(crate) const SOURCE_KIND_ACTION_ATTEMPT: &str = "action_attempt";
+pub(crate) const SOURCE_KIND_RESULT_RECORDED: &str = "result_recorded";
+pub(crate) const SOURCE_KIND_RESULT_ADOPTED: &str = "result_adopted";
+pub(crate) const SOURCE_KIND_TERMINAL: &str = "terminal";
+pub(crate) const SOURCE_KIND_HISTORY_MESSAGE: &str = "history_message";
+pub(crate) const SOURCE_KIND_ACTIVITY_RECORD: &str = "activity_record";
+
+/// Encodes one source as `(source_kind, source_id, source_phase)`.
+///
+/// `source_phase` is the revision decimal for `task_revision`, the certainty
+/// name for `action_attempt`, `failed` / `cancelled` for `terminal`, and the
+/// empty string (never NULL) for kinds without a phase, so the source-key
+/// uniqueness constraint compares every part and a later fact is a new key.
+pub(crate) fn encode_undelivered_source(source: &UndeliveredSource) -> (String, String, String) {
+    let kind;
+    let id;
+    let phase;
+    match source {
+        UndeliveredSource::TaskRecord { fact, .. } => match fact {
+            TaskFact::TaskRevision { task, revision } => {
+                kind = SOURCE_KIND_TASK_REVISION;
+                id = encode_id(*task);
+                phase = revision.to_string();
+            }
+            TaskFact::Delegation(delegation) => {
+                kind = SOURCE_KIND_DELEGATION;
+                id = encode_id(*delegation);
+                phase = String::new();
+            }
+            TaskFact::ActionAttempt { attempt, certainty } => {
+                kind = SOURCE_KIND_ACTION_ATTEMPT;
+                id = encode_id(*attempt);
+                phase = certainty.as_str().to_owned();
+            }
+            TaskFact::ResultRecorded(result) => {
+                kind = SOURCE_KIND_RESULT_RECORDED;
+                id = encode_id(*result);
+                phase = String::new();
+            }
+            TaskFact::ResultAdopted(result) => {
+                kind = SOURCE_KIND_RESULT_ADOPTED;
+                id = encode_id(*result);
+                phase = String::new();
+            }
+            TaskFact::Terminal { task, progress } => {
+                kind = SOURCE_KIND_TERMINAL;
+                id = encode_id(*task);
+                phase = progress.as_str().to_owned();
+            }
+        },
+        UndeliveredSource::HistoryMessage(message) => {
+            kind = SOURCE_KIND_HISTORY_MESSAGE;
+            id = encode_id(*message);
+            phase = String::new();
+        }
+        UndeliveredSource::ActivityRecord(activity) => {
+            kind = SOURCE_KIND_ACTIVITY_RECORD;
+            id = encode_id(*activity);
+            phase = String::new();
+        }
+    }
+    (kind.to_owned(), id, phase)
+}
+
+/// The owning task of one delegation-owned notification source, read from
+/// the canonical row: the delegation row names its task, an attempt resolves
+/// through its delegation row (the delegation is authoritative, not the
+/// attempt's copied correlation), and a result row names its task.
+const SQL_SOURCE_DELEGATION_TASK: &str = "SELECT task_id FROM delegation WHERE delegation_id = ?1";
+const SQL_SOURCE_ATTEMPT_TASK: &str = "SELECT d.task_id FROM action_attempt a JOIN delegation d ON d.delegation_id = a.delegation_id WHERE a.attempt_id = ?1";
+const SQL_SOURCE_RESULT_TASK: &str = "SELECT task_id FROM task_result WHERE result_id = ?1";
+
+/// Resolves the owning task of one stored source identity. A missing owner
+/// row is an unreadable row and fails closed, never a fabricated task.
+fn resolve_source_task(
+    conn: &Connection,
+    sql: &str,
+    id: &str,
+    what: &str,
+) -> Result<RawId, String> {
+    let found: Option<String> = conn
+        .query_row(sql, params![id], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(task_text) = found else {
+        return Err(format!("{what} source names no owning task"));
+    };
+    decode_id(&task_text)
+}
+
+/// Decodes one stored source key back to its typed form.
+///
+/// An unknown kind, an undecodable identity, a non-decimal revision phase,
+/// an unknown certainty, and an unknown terminal phase are unreadable rows
+/// and fail closed. Delegation-, attempt-, and result-owned facts resolve
+/// their owning task from the canonical rows at read time (the delegation
+/// row, the attempt's delegation row, the result row): the `task` field is
+/// the owning task, never the source identity itself, so report composition
+/// finds the task behind every fact.
+pub(crate) fn decode_undelivered_source(
+    conn: &Connection,
+    kind: &str,
+    id: &str,
+    phase: &str,
+) -> Result<UndeliveredSource, String> {
+    let raw = decode_id(id)?;
+    match kind {
+        SOURCE_KIND_TASK_REVISION => {
+            let revision = phase
+                .parse::<u64>()
+                .map_err(|_| String::from("malformed task revision source phase"))?;
+            Ok(UndeliveredSource::TaskRecord {
+                task: raw,
+                fact: TaskFact::TaskRevision {
+                    task: raw,
+                    revision,
+                },
+            })
+        }
+        SOURCE_KIND_DELEGATION => {
+            let task = resolve_source_task(conn, SQL_SOURCE_DELEGATION_TASK, id, "delegation")?;
+            Ok(UndeliveredSource::TaskRecord {
+                task,
+                fact: TaskFact::Delegation(raw),
+            })
+        }
+        SOURCE_KIND_ACTION_ATTEMPT => {
+            let certainty = ActionCertaintyWire::from_name(phase)
+                .ok_or_else(|| String::from("unknown action certainty source phase"))?;
+            let task = resolve_source_task(conn, SQL_SOURCE_ATTEMPT_TASK, id, "action attempt")?;
+            Ok(UndeliveredSource::TaskRecord {
+                task,
+                fact: TaskFact::ActionAttempt {
+                    attempt: raw,
+                    certainty,
+                },
+            })
+        }
+        SOURCE_KIND_RESULT_RECORDED => {
+            let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "recorded result")?;
+            Ok(UndeliveredSource::TaskRecord {
+                task,
+                fact: TaskFact::ResultRecorded(raw),
+            })
+        }
+        SOURCE_KIND_RESULT_ADOPTED => {
+            let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "adopted result")?;
+            Ok(UndeliveredSource::TaskRecord {
+                task,
+                fact: TaskFact::ResultAdopted(raw),
+            })
+        }
+        SOURCE_KIND_TERMINAL => {
+            let progress = TerminalKindWire::from_name(phase)
+                .ok_or_else(|| String::from("unknown terminal source phase"))?;
+            Ok(UndeliveredSource::TaskRecord {
+                task: raw,
+                fact: TaskFact::Terminal {
+                    task: raw,
+                    progress,
+                },
+            })
+        }
+        SOURCE_KIND_HISTORY_MESSAGE => Ok(UndeliveredSource::HistoryMessage(raw)),
+        SOURCE_KIND_ACTIVITY_RECORD => Ok(UndeliveredSource::ActivityRecord(raw)),
+        _ => Err(String::from("unknown undelivered source kind")),
+    }
+}
+
 pub(crate) fn encode_usage_source(source: UsageSource) -> &'static str {
     match source {
         UsageSource::Reported => "reported",
@@ -201,6 +392,7 @@ pub(crate) fn encode_move_reason(reason: ThinMoveReason) -> &'static str {
         ThinMoveReason::InitialAttach => "initial_attach",
         ThinMoveReason::DisconnectObserved => "disconnect_observed",
         ThinMoveReason::RestartRecovery => "restart_recovery",
+        ThinMoveReason::Stop => "stop",
     }
 }
 
@@ -424,14 +616,18 @@ pub(crate) fn decode_device_record(
 }
 
 pub(crate) fn decode_pending_pairing(
+    pending_id: String,
     descriptor: String,
     requested_text: &str,
+    origin_connection: String,
 ) -> Result<PendingPairing, String> {
     let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
         .map_err(|_| String::from("malformed pairing request timestamp"))?;
     Ok(PendingPairing {
+        pending_id,
         descriptor,
         requested_at,
+        origin_connection,
     })
 }
 
@@ -550,6 +746,38 @@ pub(crate) fn decode_attribution(
         state,
         active_client,
         generation,
+    })
+}
+
+/// Reads the relocation hint row for `key`, the encoded companion id used as
+/// the table's primary key. A missing row is [`None`], never a defaulted hint.
+pub(crate) fn select_hint(conn: &Connection, key: &str) -> Result<Option<RelocationHint>, String> {
+    let found: Option<(Option<String>, Option<String>)> = conn
+        .query_row(SQL_SELECT_HINT, params![key], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(|error| error.to_string())?;
+    found
+        .map(|(last_text, destination_text)| {
+            decode_hint(key, last_text.as_deref(), destination_text.as_deref())
+        })
+        .transpose()
+}
+
+pub(crate) fn decode_hint(
+    companion_text: &str,
+    last_text: Option<&str>,
+    destination_text: Option<&str>,
+) -> Result<RelocationHint, String> {
+    let decode_client = |text: Option<&str>| -> Result<Option<ClientId>, String> {
+        text.map(|value| decode_id(value).map(ClientId::from_raw))
+            .transpose()
+    };
+    Ok(RelocationHint {
+        companion: decode_id(companion_text)?,
+        last_client: decode_client(last_text)?,
+        recovery_destination: decode_client(destination_text)?,
     })
 }
 

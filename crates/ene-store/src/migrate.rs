@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 24;
+const CURRENT_VERSION: i64 = 27;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -15,6 +15,17 @@ relied_evaluation TEXT NOT NULL UNIQUE,
 certainty TEXT NOT NULL,
 grounds TEXT NULL,
 started_at TEXT NOT NULL
+);
+CREATE TABLE activity_record (
+activity_id TEXT PRIMARY KEY,
+companion_id TEXT NOT NULL,
+kind TEXT NOT NULL,
+task_id TEXT NULL,
+task_revision INTEGER NULL,
+purpose_adopted_revision INTEGER NULL,
+body TEXT NOT NULL,
+created_at TEXT NOT NULL,
+command_id TEXT NULL UNIQUE
 );
 CREATE TABLE companion (
 companion_id TEXT PRIMARY KEY,
@@ -158,11 +169,14 @@ CREATE TABLE paired_device (
 device_id TEXT PRIMARY KEY,
 descriptor TEXT NOT NULL,
 paired_at TEXT NOT NULL,
-wire TEXT NULL
+wire TEXT NULL,
+pending_id TEXT NULL UNIQUE
 );
 CREATE TABLE pairing_pending (
-descriptor TEXT PRIMARY KEY,
-requested_at TEXT NOT NULL
+pending_id TEXT PRIMARY KEY,
+descriptor TEXT NOT NULL,
+requested_at TEXT NOT NULL,
+origin_connection TEXT NOT NULL
 );
 CREATE TABLE presence_attribution (
 companion_id TEXT PRIMARY KEY,
@@ -179,6 +193,11 @@ old_gen INTEGER NOT NULL,
 new_gen INTEGER NOT NULL,
 reason TEXT NOT NULL,
 at TEXT NOT NULL
+);
+CREATE TABLE relocation_hint (
+companion_id TEXT PRIMARY KEY,
+last_client TEXT,
+recovery_destination TEXT
 );
 CREATE TABLE task (
 task_id TEXT PRIMARY KEY,
@@ -221,13 +240,17 @@ assignee TEXT NOT NULL,
 PRIMARY KEY (task_id, revision)
 );
 CREATE TABLE undelivered (
-undelivered_id TEXT PRIMARY KEY,
+row_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+undelivered_id TEXT NOT NULL UNIQUE,
 companion_id TEXT NOT NULL,
-source_message TEXT NOT NULL,
+source_kind TEXT NOT NULL,
+source_id TEXT NOT NULL,
+source_phase TEXT NOT NULL,
 status TEXT NOT NULL,
-round_id TEXT NOT NULL,
-presence_generation INTEGER NOT NULL,
-created_at TEXT NOT NULL
+round_id TEXT NULL,
+presence_generation INTEGER NULL,
+created_at TEXT NOT NULL,
+UNIQUE (companion_id, source_kind, source_id, source_phase)
 );
 CREATE TABLE usage_fact (
 ticket TEXT PRIMARY KEY,
@@ -259,8 +282,9 @@ CREATE INDEX idx_learning_memory_term_memory ON learning_memory_term (memory_id)
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
 CREATE UNIQUE INDEX idx_paired_device_wire ON paired_device (wire);
 CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
+CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
 CREATE INDEX idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
-CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
+CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status, row_seq);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
 INSERT INTO credential_set (id, rev) VALUES (1, 0);
 ";
@@ -317,7 +341,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 25] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 28] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

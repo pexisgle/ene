@@ -186,6 +186,57 @@ impl TaskRepository for FakeTaskRepository {
     ) -> Result<Vec<RawId>, TaskTechnicalError> {
         Ok(Vec::new())
     }
+
+    async fn list_tasks_after(
+        &self,
+        _after: Option<TaskId>,
+        _limit: u32,
+    ) -> Result<Vec<ene_task::TaskHeadline>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("list_tasks_after is outside this fixture's scope"),
+        })
+    }
+
+    async fn list_task_report_rows_after(
+        &self,
+        _task: TaskId,
+        _after: Option<ene_task::TaskReportRowCursor>,
+        _limit: u32,
+    ) -> Result<Vec<ene_task::TaskReportRow>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("list_task_report_rows_after is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_report_source_bounded(
+        &self,
+        _source: ene_task::TaskReportSourceRef,
+        _cursor_bytes: u64,
+        _limit_bytes: u32,
+    ) -> Result<Option<ene_task::TaskReportSourcePage>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_report_source_bounded is outside this fixture's scope"),
+        })
+    }
+
+    async fn commit_task_resume(
+        &self,
+        _premise: ene_task::TaskResumeCommitPremise,
+    ) -> Result<ene_task::TaskResumeOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("commit_task_resume is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_past_executed_facts(
+        &self,
+        _task: TaskId,
+    ) -> Result<ene_task::PastExecutedFactsPage, TaskTechnicalError> {
+        Ok(ene_task::PastExecutedFactsPage {
+            facts: Vec::new(),
+            has_more: false,
+        })
+    }
 }
 
 fn proposal(workspace: bool) -> TaskProposalPremise {

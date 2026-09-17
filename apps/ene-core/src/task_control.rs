@@ -36,7 +36,9 @@ use ene_action::{
     ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, ActionTechnicalError,
     CertaintyUpdateOutcome, EffectGrounds,
 };
+use ene_api::v1::refs::ConnectionWireId;
 use ene_companion::CompanionId;
+use ene_companion::RecordResumeActivityCommand;
 use ene_companion::dialogue::{
     DialogueTaskCommand, DialogueTaskControlPort, DialogueTaskControlReply, ProposeSteeringCommand,
     ProposeTaskCommand, TaskReport, TaskReportAttempt, TaskReportCertainty,
@@ -44,15 +46,17 @@ use ene_companion::dialogue::{
 use ene_primitive::RawId;
 use ene_task::{
     ConversationTaskRepository as _, CreateDelegationCommand, DelegatedWorkspace, DelegationId,
-    DelegationOutcome, DelegationScope, OwnerMessageCurrentness, SteeringPremiseRef,
-    TaskCancelOutcome, TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskId,
-    TaskProgress, TaskProposalOutcome, TaskPurpose, TaskRef, TaskRepository as _,
-    TaskResultAcceptance, TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef,
-    orchestrate_delegation, reevaluate_result_adoption,
+    DelegationOutcome, DelegationScope, OwnerMessageCurrentness, ResumeInstructionSource,
+    ResumeTaskCommand, SteeringPremiseRef, TaskCancelOutcome, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationOutcome, TaskId, TaskProgress, TaskProposalOutcome,
+    TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance, TaskResumeOutcome,
+    TaskResumeReadiness, TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef,
+    orchestrate_delegation, orchestrate_resume, orchestrate_resume_current,
+    reevaluate_result_adoption, resume_commit_premise, route_available_result,
 };
 use thiserror::Error;
 
-use crate::serve::HostHandle;
+use crate::serve::{HostHandle, LiveInput};
 
 /// Technical failure of one conversation / first-party Task control call.
 ///
@@ -140,21 +144,114 @@ pub(crate) struct ConversationTaskProjection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ConversationTask {
-    task: TaskId,
+pub(crate) struct ConversationTask {
+    pub(crate) task: TaskId,
     /// `None` when the creation committed but the delegation was refused; the
     /// report then shows no execution-local result.
-    delegation: Option<DelegationId>,
+    pub(crate) delegation: Option<DelegationId>,
+    /// What put this Task in the projection: conversation-owned work or a
+    /// first-party wire selection bound to one connection lifetime.
+    source: ConversationTaskSource,
+}
+
+/// Why one Task is the conversation's current projection.
+///
+/// The distinction is load-bearing: a dialogue-created/steered/resumed Task
+/// is Host-only accepted work that a reconnect must not erase, while a
+/// first-party `SelectTask` is a memory-only wire selection whose lifecycle
+/// ends with the connection that made it (IPC §9.3 replacement; the
+/// projection resets to unselected on reconnect/restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationTaskSource {
+    /// Created, steered, or resumed by an accepted dialogue turn.
+    Dialogue,
+    /// First-party wire `SelectTask` on one connection lifetime.
+    FirstPartySelection { connection: ConnectionWireId },
 }
 
 impl ConversationTaskProjection {
     fn record(&self, companion: CompanionId, task: TaskId, delegation: Option<DelegationId>) {
-        crate::lock_unpoison(&self.current)
-            .insert(companion, ConversationTask { task, delegation });
+        crate::lock_unpoison(&self.current).insert(
+            companion,
+            ConversationTask {
+                task,
+                delegation,
+                source: ConversationTaskSource::Dialogue,
+            },
+        );
     }
 
-    fn current(&self, companion: CompanionId) -> Option<ConversationTask> {
-        crate::lock_unpoison(&self.current).get(&companion).copied()
+    /// Records a first-party wire selection (`SelectTask`): the Task the
+    /// Owner chose to talk about, with no execution attached.
+    ///
+    /// In-memory display selection bound to the selecting connection: every
+    /// later operation still goes through the Task owner's durable compare, a
+    /// reconnect/supersession drops the selection, and a restart drops it
+    /// back to unselected. Never called from model output, only from the
+    /// first-party wire inlet under its ownership section.
+    pub(crate) fn select(
+        &self,
+        companion: CompanionId,
+        task: TaskId,
+        connection: ConnectionWireId,
+    ) {
+        crate::lock_unpoison(&self.current).insert(
+            companion,
+            ConversationTask {
+                task,
+                delegation: None,
+                source: ConversationTaskSource::FirstPartySelection { connection },
+            },
+        );
+    }
+
+    /// The conversation's current Task for `connection`.
+    ///
+    /// A dialogue-owned projection is always current; a first-party wire
+    /// selection is visible only on the connection that made it, so a
+    /// replacement answers "unselected" until it selects again.
+    pub(crate) fn current(
+        &self,
+        companion: CompanionId,
+        connection: &ConnectionWireId,
+    ) -> Option<ConversationTask> {
+        let entry = crate::lock_unpoison(&self.current)
+            .get(&companion)
+            .copied()?;
+        match entry.source {
+            ConversationTaskSource::Dialogue => Some(entry),
+            ConversationTaskSource::FirstPartySelection { connection: owner }
+                if owner == *connection =>
+            {
+                Some(entry)
+            }
+            ConversationTaskSource::FirstPartySelection { .. } => None,
+        }
+    }
+
+    /// Drops one connection lifetime's first-party selection, leaving
+    /// dialogue-owned projections untouched.
+    pub(crate) fn drop_first_party_selection_for(&self, connection: &ConnectionWireId) {
+        crate::lock_unpoison(&self.current).retain(|_, entry| {
+            !matches!(
+                entry.source,
+                ConversationTaskSource::FirstPartySelection { connection: owner } if owner == *connection
+            )
+        });
+    }
+
+    /// Test-only: how many first-party selections are remembered at all.
+    #[cfg(test)]
+    pub(crate) fn first_party_selection_count(&self) -> usize {
+        crate::lock_unpoison(&self.current)
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.source,
+                    ConversationTaskSource::FirstPartySelection { .. }
+                )
+            })
+            .count()
     }
 }
 
@@ -220,6 +317,49 @@ impl TestTaskControlGate {
     }
 }
 
+/// Deterministic race gate for one guarded wire resume (CCT §10.4).
+///
+/// Test-only: it pauses the resume after entry validation and launch-scope
+/// acquisition but before the connection-ownership commit section, so a test
+/// can authenticate a newer connection in between and pin that the stale
+/// resume commits nothing.
+#[cfg(test)]
+pub(crate) struct TestResumeGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl Default for TestResumeGate {
+    fn default() -> Self {
+        Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TestResumeGate {
+    /// Pauses until the test releases the gate, marking entry first.
+    pub(crate) async fn pause(&self) {
+        self.entered.add_permits(1);
+        let permit = self.release.acquire().await.expect("gate stays open");
+        permit.forget();
+    }
+
+    /// Waits until a paused resume has entered the gate.
+    pub(crate) async fn wait_entered(&self) {
+        let permit = self.entered.acquire().await.expect("gate is entered");
+        permit.forget();
+    }
+
+    /// Releases one paused resume.
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
 /// Host composition root implementing the companion's Task control port.
 ///
 /// The companion interprets its provider output into a
@@ -232,11 +372,30 @@ impl TestTaskControlGate {
 pub(crate) struct HostTaskControl<'a> {
     handle: &'a HostHandle,
     companion: CompanionId,
+    /// The connection whose dialogue turn is interpreting the directive: a
+    /// first-party selection made on another connection is never visible to
+    /// it (IPC §9.3 replacement).
+    connection: ene_api::v1::refs::ConnectionWireId,
 }
 
 impl<'a> HostTaskControl<'a> {
-    pub(crate) fn new(handle: &'a HostHandle, companion: CompanionId) -> Self {
-        Self { handle, companion }
+    pub(crate) fn new(
+        handle: &'a HostHandle,
+        companion: CompanionId,
+        connection: ene_api::v1::refs::ConnectionWireId,
+    ) -> Self {
+        Self {
+            handle,
+            companion,
+            connection,
+        }
+    }
+
+    /// The conversation's current Task as this connection may see it.
+    fn current_task(&self) -> Option<ConversationTask> {
+        self.handle
+            .conversation_tasks
+            .current(self.companion, &self.connection)
     }
 
     fn no_active_task() -> DialogueTaskControlReply {
@@ -291,10 +450,10 @@ impl<'a> HostTaskControl<'a> {
                             Some(delegation.delegation),
                         );
                         // Production launcher: the existing runner starts in
-                        // the background; this turn never awaits it.
-                        if let Some(launcher) = self.handle.task_launcher() {
-                            launcher.launch(delegation.delegation);
-                        }
+                        // the background; this turn never awaits it. Without
+                        // a launcher the reservation is released and the
+                        // delegation stays durable and unexecuted.
+                        self.handle.launch_or_release(delegation.delegation);
                         DialogueTaskControlReply::Answered(String::from(
                             "Task accepted (status: in-progress). I will work on it.",
                         ))
@@ -313,7 +472,7 @@ impl<'a> HostTaskControl<'a> {
     }
 
     async fn report(&self) -> DialogueTaskControlReply {
-        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+        let Some(current) = self.current_task() else {
             return Self::no_active_task();
         };
         match self
@@ -333,7 +492,7 @@ impl<'a> HostTaskControl<'a> {
         purpose: Option<String>,
         origin: RawId,
     ) -> DialogueTaskControlReply {
-        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+        let Some(current) = self.current_task() else {
             return Self::no_active_task();
         };
         let record = match self.handle.store.load_task(current.task).await {
@@ -388,9 +547,7 @@ impl<'a> HostTaskControl<'a> {
                             reference.task,
                             Some(delegation.delegation),
                         );
-                        if let Some(launcher) = self.handle.task_launcher() {
-                            launcher.launch(delegation.delegation);
-                        }
+                        self.handle.launch_or_release(delegation.delegation);
                         DialogueTaskControlReply::Answered(format!(
                             "Instruction recorded (revision {}). I will continue with it.",
                             reference.revision.as_u64()
@@ -406,7 +563,7 @@ impl<'a> HostTaskControl<'a> {
     }
 
     async fn cancel(&self, origin: RawId) -> DialogueTaskControlReply {
-        let Some(current) = self.handle.conversation_tasks.current(self.companion) else {
+        let Some(current) = self.current_task() else {
             return Self::no_active_task();
         };
         let currentness = OwnerMessageCurrentness {
@@ -441,6 +598,61 @@ impl<'a> HostTaskControl<'a> {
             Ok(TaskCancelOutcome::MissingTask { .. }) => Self::no_active_task(),
         }
     }
+
+    async fn resume(&self, origin: RawId) -> DialogueTaskControlReply {
+        // The directive carries no target: the conversation projection holds
+        // at most one Task per companion, so a missing projection is
+        // answered with a clarification asking which Task to resume, and
+        // ambiguity cannot arise. The model never names a Task, revision,
+        // purpose, or body: the Host composes the premise from durable
+        // state and references the turn's own Owner message as the resume
+        // instruction source.
+        let Some(current) = self.current_task() else {
+            return DialogueTaskControlReply::Answered(String::from(
+                "There is no active task in this conversation. Tell me which task to resume.",
+            ));
+        };
+        let record = match self.handle.store.load_task(current.task).await {
+            Err(_) => return DialogueTaskControlReply::Unavailable,
+            Ok(None) => return Self::no_active_task(),
+            Ok(Some(record)) => record,
+        };
+        let currentness = OwnerMessageCurrentness {
+            companion: self.companion.as_raw(),
+            message: origin,
+        };
+        let command = ResumeTaskCommand {
+            premise: SteeringPremiseRef {
+                expected: record.task.reference,
+                purpose: record.task.purpose,
+            },
+            instruction: ResumeInstructionSource::OwnerHistory {
+                message: origin,
+                currentness,
+            },
+        };
+        match self.handle.resume_task_current(command, currentness).await {
+            Err(_) => DialogueTaskControlReply::Unavailable,
+            // The turn was superseded before the resume commit: nothing was
+            // written and no reply is adopted.
+            Ok(TaskResumeOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
+            Ok(TaskResumeOutcome::Resumed { task, delegation }) => {
+                // The new revision needs its own execution lifetime, and it
+                // just committed one: point the conversation at it. The
+                // launcher already started it inside the resume scope.
+                self.handle.conversation_tasks.record(
+                    self.companion,
+                    task.task,
+                    Some(delegation.delegation),
+                );
+                DialogueTaskControlReply::Answered(format!(
+                    "Task resumed (revision {}). I will continue with it.",
+                    task.revision.as_u64()
+                ))
+            }
+            Ok(outcome) => DialogueTaskControlReply::Answered(resume_outcome_text(&outcome)),
+        }
+    }
 }
 
 impl DialogueTaskControlPort for HostTaskControl<'_> {
@@ -461,6 +673,7 @@ impl DialogueTaskControlPort for HostTaskControl<'_> {
                 purpose,
             } => self.steer(instruction, purpose, origin).await,
             DialogueTaskCommand::Cancel => self.cancel(origin).await,
+            DialogueTaskCommand::Resume => self.resume(origin).await,
         }
     }
 }
@@ -489,6 +702,58 @@ fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
         }
         // The guarded mapping consumes supersession before this renderer.
         TaskProposalOutcome::Superseded => {
+            String::from("The request was superseded by a newer message.")
+        }
+    }
+}
+
+fn resume_outcome_text(outcome: &TaskResumeOutcome) -> String {
+    match outcome {
+        TaskResumeOutcome::Resumed { .. } => String::from("The task was resumed."),
+        TaskResumeOutcome::StalePremise { current } => format!(
+            "The task moved on; nothing was resumed (current revision {}).",
+            current.revision.as_u64()
+        ),
+        TaskResumeOutcome::TaskTerminal { progress, .. } => {
+            format!("That task is already {}.", progress_label(*progress))
+        }
+        TaskResumeOutcome::AlreadyRunning { .. } => {
+            String::from("That task is already running; nothing was resumed.")
+        }
+        TaskResumeOutcome::HeldByUnknownEffects { .. } => String::from(
+            "The task has effects with unknown outcomes; resume stays on hold until they settle.",
+        ),
+        TaskResumeOutcome::ResultAvailable { .. } => {
+            String::from("The task has a recorded result to review first; nothing was resumed.")
+        }
+        TaskResumeOutcome::NeedsRevalidation(hold) => String::from(match hold {
+            ene_task::TaskResumeHold::CompanionUnavailable => {
+                "The task owner is unavailable; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::WorkspaceUnavailable => {
+                "The task has no workspace to continue in; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::InstructionUnavailable => {
+                "The resume instruction is unavailable; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::PermissionUnavailable => {
+                "A permission check is needed first; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::DataUseHeld => {
+                "Some task content is under a deletion hold; nothing was resumed."
+            }
+            ene_task::TaskResumeHold::ExecutionUnavailable => {
+                "No runner is available to continue the task; nothing was resumed."
+            }
+        }),
+        TaskResumeOutcome::MissingTask { .. } => {
+            String::from("There is no active task in this conversation.")
+        }
+        TaskResumeOutcome::RevisionExhausted { .. } => {
+            String::from("The task cannot take another change.")
+        }
+        // The guarded mapping consumes supersession before this renderer.
+        TaskResumeOutcome::Superseded => {
             String::from("The request was superseded by a newer message.")
         }
     }
@@ -568,7 +833,16 @@ impl HostHandle {
     /// The committed unit supplies the boundary copy; the Task owner confirms
     /// the association and revision inside its own commit. This is the shared
     /// delegation step of the first-party and conversation proposal paths.
+    ///
+    /// The commit and the launch reservation share the registry commit scope
+    /// (CCT §7.4): the scope serializes this producer against every other
+    /// AU3/AU17 producer in the process, so the committed delegation is
+    /// reserved before any concurrent resume can observe the Task as free.
+    /// A lost reservation race is a technical error: the delegation is
+    /// durable but unlaunchable, and a retry is a new explicit delegation,
+    /// never an automatic relaunch.
     async fn delegate_task(&self, task: TaskRef) -> Result<DelegationOutcome, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
         let Some(record) = self.store.load_task(task.task).await? else {
             // The AU2 commit just succeeded: a missing read is an
             // inconsistent unit, never a domain refusal.
@@ -586,7 +860,40 @@ impl HostHandle {
             },
             None => DelegationScope { workspace: None },
         };
-        orchestrate_delegation(&self.store, CreateDelegationCommand { task, scope_copy }).await
+        let outcome =
+            orchestrate_delegation(&self.store, CreateDelegationCommand { task, scope_copy })
+                .await?;
+        if let DelegationOutcome::Delegated(delegation) = &outcome {
+            // The delegation id is freshly minted and the scope serializes
+            // this producer, so the reservation cannot already exist; a
+            // refusal here is a corrupted registry, never a lost race with
+            // another Task.
+            if !self
+                .task_executions
+                .reserve(delegation.delegation, task.task)
+            {
+                return Err(TaskTechnicalError::StorageUnavailable {
+                    reason: String::from("delegation launch reservation lost its race"),
+                });
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Starts the committed delegation's runner, or releases its launch
+    /// reservation when no runner exists.
+    ///
+    /// A handle without an installed launcher (unit tests, an offline
+    /// opener) accepts the delegation but starts no execution: the release
+    /// keeps the reservation from pinning the Task as running forever, and
+    /// the delegation stays durable and unexecuted. Production always
+    /// installs a launcher, so the reservation is consumed by the run.
+    fn launch_or_release(&self, delegation: DelegationId) {
+        if let Some(launcher) = self.task_launcher() {
+            launcher.launch(delegation);
+        } else {
+            self.task_executions.release(delegation);
+        }
     }
 
     /// Proposes one steering change from the Owner conversation.
@@ -604,6 +911,190 @@ impl HostHandle {
         command: ProposeSteeringCommand,
     ) -> Result<TaskProposalOutcome, TaskTechnicalError> {
         ene_companion::dialogue::propose_steering(command, &self.store).await
+    }
+
+    /// Host-known readiness for one resume commit.
+    ///
+    /// Read under the launch commit scope: the final permission / cap
+    /// judgement stays with the AU14/AU5 gates (`permission_available` is
+    /// always `true` here), while the Task's reservation/registration state
+    /// and the launcher's presence are read now so the commit orders them
+    /// in its refusal priority. No presence check and no provider call are
+    /// involved: an explicit Owner instruction is sufficient premise.
+    fn resume_readiness(&self, task: TaskId) -> TaskResumeReadiness {
+        TaskResumeReadiness {
+            permission_available: true,
+            execution_free: !self.task_executions.task_has_reservation_or_running(task),
+            launch_possible: self.task_launcher().is_some(),
+        }
+    }
+
+    /// Reserves and launches one resumed delegation, if the outcome carries
+    /// one.
+    ///
+    /// Call under the launch commit scope right after the resume commit, so
+    /// the commit and the reservation are one critical section (CCT §7.4).
+    /// A lost reservation race is a technical error: the revision forward
+    /// is durable but unlaunchable, and continuing is a new explicit
+    /// resume, never an automatic relaunch. Without an installed launcher
+    /// the commit already refused with `ExecutionUnavailable`, so reaching
+    /// here always launches.
+    fn reserve_and_launch_resumed(
+        &self,
+        outcome: &TaskResumeOutcome,
+    ) -> Result<(), TaskTechnicalError> {
+        let TaskResumeOutcome::Resumed { delegation, .. } = outcome else {
+            return Ok(());
+        };
+        if !self
+            .task_executions
+            .reserve(delegation.delegation, delegation.task.task)
+        {
+            return Err(TaskTechnicalError::StorageUnavailable {
+                reason: String::from("resume launch reservation lost its race"),
+            });
+        }
+        self.launch_or_release(delegation.delegation);
+        Ok(())
+    }
+
+    /// Resumes one Task explicitly with the commit linearized against the
+    /// issuing connection's currentness (CCT §10.4).
+    ///
+    /// The activity record and the AU17 commit run synchronously inside the
+    /// connection table's ownership section: the section verifies that
+    /// `live`'s connection is still its device's current authenticated
+    /// connection and holds until both commits finish, so a newer
+    /// authentication can never interleave between the check and the
+    /// commit. A connection superseded before the section answers [`None`]
+    /// with zero writes, no revision change, no delegation, and no launch;
+    /// a resume that won the section is accepted even if the connection is
+    /// superseded immediately afterwards, and its execution keeps running.
+    ///
+    /// Lock order (CCT §10.4): the launch commit scope (async) is taken
+    /// before the connection table (sync), which is held across the short
+    /// SQLite commits; no path takes the table lock and then awaits the
+    /// commit scope, so the order cannot cycle.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when the store cannot answer; the owner's
+    /// domain outcomes stay on the `Ok` side.
+    pub(crate) async fn resume_task_guarded_by_connection(
+        &self,
+        live: &LiveInput,
+        premise: SteeringPremiseRef,
+        activity: RecordResumeActivityCommand,
+    ) -> Result<Option<TaskResumeOutcome>, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
+        let launch_possible = self.task_launcher().is_some();
+        // Test-only race gate: pause before the connection-ownership
+        // section so a test can authenticate a newer connection and pin
+        // that the stale resume commits nothing.
+        #[cfg(test)]
+        {
+            let gate = crate::lock_unpoison(&self.resume_gate).clone();
+            if let Some(gate) = gate {
+                gate.pause().await;
+            }
+        }
+        let task = premise.expected.task;
+        let store = self.store.clone();
+        let registry = std::sync::Arc::clone(&self.task_executions);
+        let table = std::sync::Arc::clone(&live.authority);
+        let connection = live.connection_id;
+        let joined = tokio::task::spawn_blocking(move || {
+            table.with_current_connection(&connection, || {
+                let activity = store
+                    .record_resume_activity_sync(activity)
+                    .map_err(|error| TaskTechnicalError::StorageUnavailable {
+                        reason: error.to_string(),
+                    })?;
+                let command = ResumeTaskCommand {
+                    premise,
+                    instruction: ResumeInstructionSource::OwnerManagement {
+                        activity: activity.as_raw(),
+                    },
+                };
+                let readiness = TaskResumeReadiness {
+                    permission_available: true,
+                    execution_free: !registry.task_has_reservation_or_running(task),
+                    launch_possible,
+                };
+                let outcome =
+                    store.commit_task_resume_sync(resume_commit_premise(command, readiness))?;
+                if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome
+                    && !registry.reserve(delegation.delegation, delegation.task.task)
+                {
+                    return Err(TaskTechnicalError::StorageUnavailable {
+                        reason: String::from("resume launch reservation lost its race"),
+                    });
+                }
+                Ok(outcome)
+            })
+        })
+        .await;
+        let outcome = match joined {
+            Ok(Some(Ok(outcome))) => outcome,
+            Ok(Some(Err(error))) => return Err(error),
+            // The connection was superseded before the section: nothing was
+            // written, delegated, or launched.
+            Ok(None) => return Ok(None),
+            Err(join) => std::panic::resume_unwind(join.into_panic()),
+        };
+        if let TaskResumeOutcome::ResultAvailable { task } = &outcome {
+            route_available_result(&self.store, *task).await?;
+        }
+        if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome {
+            self.launch_or_release(delegation.delegation);
+        }
+        Ok(Some(outcome))
+    }
+
+    /// Resumes one Task explicitly from the first-party management inlet
+    /// (H-A.1 / AU17, unguarded).
+    ///
+    /// The caller composes the command from durable state: the premise is
+    /// the Task's current revision and purpose, and the instruction is the
+    /// recorded first-party activity. The Task owner compares everything
+    /// inside its single commit; a newer revision, terminal progress,
+    /// unknown effects, or an adoptable sealed result refuses with zero
+    /// writes. `Resumed` means the revision forward and the new delegation
+    /// committed and the runner launched; a launcher refusal or technical
+    /// failure after the commit is reported separately.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when the store cannot answer.
+    pub async fn resume_task(
+        &self,
+        command: ResumeTaskCommand,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
+        let readiness = self.resume_readiness(command.premise.expected.task);
+        let outcome = orchestrate_resume(&self.store, command, readiness).await?;
+        self.reserve_and_launch_resumed(&outcome)?;
+        Ok(outcome)
+    }
+
+    /// Resumes one Task explicitly from the Owner conversation (H-A.1 /
+    /// AU17, guarded).
+    ///
+    /// Identical to [`HostHandle::resume_task`] except that the commit
+    /// additionally requires the relied Owner input to still be the newest
+    /// accepted one; a superseded turn answers `Superseded` with zero
+    /// writes and launches nothing.
+    async fn resume_task_current(
+        &self,
+        command: ResumeTaskCommand,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        let _scope = self.task_executions.commit_scope().await;
+        let readiness = self.resume_readiness(command.premise.expected.task);
+        let outcome =
+            orchestrate_resume_current(&self.store, command, readiness, currentness).await?;
+        self.reserve_and_launch_resumed(&outcome)?;
+        Ok(outcome)
     }
 
     /// Settles one Action attempt's late objective evidence and, when the

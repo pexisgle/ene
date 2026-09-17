@@ -33,6 +33,7 @@ use std::process::ExitCode;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId, RoundWireId, StreamWireId};
 use ene_api::v1::round::{ConfirmPresentationWire, PresentationStatus, StreamClose};
+use ene_api::v1::undelivered::{UndeliveredResponse, UndeliveredSummary};
 use ene_config::paths::resolve_data_dir;
 use ene_config::typed::Config;
 
@@ -113,6 +114,111 @@ fn ene_ctl_command() -> clap::Command {
                         .value_parser(clap::value_parser!(u64)),
                 ),
         )
+        .subcommand(
+            clap::Command::new("tasks")
+                .about("List Tasks (stored lifecycle plus execution flag)")
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32)),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("report")
+                .about("Show one Task's paged report (no bodies)")
+                .arg(
+                    Arg::new("task")
+                        .long("task")
+                        .value_name("REF")
+                        .required(true),
+                )
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32)),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("source")
+                .about("Show one bounded body page of a report source")
+                .arg(
+                    Arg::new("source")
+                        .long("source")
+                        .value_name("REF")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("cursor")
+                        .long("cursor")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u64)),
+                )
+                .arg(
+                    Arg::new("limit-bytes")
+                        .long("limit-bytes")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32)),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("select-task")
+                .about("Select the Owner-confirmed Task for this conversation")
+                .arg(
+                    Arg::new("task")
+                        .long("task")
+                        .value_name("REF")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("resume-task")
+                .about("Explicitly resume one interrupted Task")
+                .arg(
+                    Arg::new("task")
+                        .long("task")
+                        .value_name("REF")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("revision")
+                        .long("revision")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u64))
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("purpose")
+                        .long("purpose")
+                        .value_name("REF")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("instruction")
+                        .long("instruction")
+                        .value_name("TEXT")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("undelivered")
+                .about("Fetch the undelivered backlog, paint it, and ACK what was painted")
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32)),
+                )
+                .arg(
+                    Arg::new("redisplay")
+                        .long("redisplay")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
 }
 
 struct Cli {
@@ -170,6 +276,54 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
                 after_revision,
             }
         }
+        "tasks" => cmds::Command::Tasks {
+            cursor: sub.get_one::<String>("cursor").cloned(),
+            limit: sub.get_one::<u32>("limit").copied(),
+        },
+        "report" => cmds::Command::Report {
+            task: sub
+                .get_one::<String>("task")
+                .cloned()
+                .ok_or_else(|| usage_error("report requires --task REF"))?,
+            cursor: sub.get_one::<String>("cursor").cloned(),
+            limit: sub.get_one::<u32>("limit").copied(),
+        },
+        "source" => cmds::Command::Source {
+            source: sub
+                .get_one::<String>("source")
+                .cloned()
+                .ok_or_else(|| usage_error("source requires --source REF"))?,
+            cursor: sub.get_one::<u64>("cursor").copied(),
+            limit_bytes: sub.get_one::<u32>("limit-bytes").copied(),
+        },
+        "select-task" => cmds::Command::SelectTask {
+            task: sub
+                .get_one::<String>("task")
+                .cloned()
+                .ok_or_else(|| usage_error("select-task requires --task REF"))?,
+        },
+        "resume-task" => cmds::Command::ResumeTask {
+            task: sub
+                .get_one::<String>("task")
+                .cloned()
+                .ok_or_else(|| usage_error("resume-task requires --task REF"))?,
+            revision: *sub
+                .get_one::<u64>("revision")
+                .ok_or_else(|| usage_error("resume-task requires --revision N"))?,
+            purpose: sub
+                .get_one::<String>("purpose")
+                .cloned()
+                .ok_or_else(|| usage_error("resume-task requires --purpose REF"))?,
+            instruction: sub
+                .get_one::<String>("instruction")
+                .cloned()
+                .ok_or_else(|| usage_error("resume-task requires --instruction TEXT"))?,
+        },
+        "undelivered" => cmds::Command::Undelivered {
+            cursor: sub.get_one::<String>("cursor").cloned(),
+            limit: sub.get_one::<u32>("limit").copied(),
+            redisplay: sub.get_flag("redisplay"),
+        },
         other => return Err(usage_error(format!("unknown command: {other}"))),
     };
     Ok(Cli { config, command })
@@ -317,6 +471,44 @@ async fn run_command(
             .await?;
             emit(&cmds::render_view(&view))
         }
+        cmds::Command::Tasks { cursor, limit } => {
+            let page = request_task_list(&mut session, cursor.as_deref(), limit).await?;
+            emit(&cmds::render_task_list(&page))
+        }
+        cmds::Command::Report {
+            task,
+            cursor,
+            limit,
+        } => {
+            let page = request_task_report(&mut session, &task, cursor.as_deref(), limit).await?;
+            emit(&cmds::render_report_page(&page))
+        }
+        cmds::Command::Source {
+            source,
+            cursor,
+            limit_bytes,
+        } => {
+            let page = request_report_source(&mut session, &source, cursor, limit_bytes).await?;
+            emit(&cmds::render_source_page(&page))
+        }
+        cmds::Command::SelectTask { task } => {
+            let selected = request_select_task(&mut session, &task).await?;
+            emit(&format!(
+                "selected {} rev {} {}",
+                selected.task.0, selected.revision, selected.progress
+            ))
+        }
+        cmds::Command::ResumeTask {
+            task,
+            revision,
+            purpose,
+            instruction,
+        } => run_resume_task(&mut session, &task, revision, &purpose, instruction).await,
+        cmds::Command::Undelivered {
+            cursor,
+            limit,
+            redisplay,
+        } => run_undelivered(&mut session, cursor.as_deref(), limit, redisplay).await,
     }
 }
 
@@ -391,6 +583,228 @@ async fn request_history(
             "unexpected {} while reading history; expected HistoryResponse",
             unexpected.message_type()
         ))),
+    }
+}
+
+/// One explicit Task-list read. Stale cursors and rejections keep their own
+/// exit classes instead of rendering as an empty list.
+async fn request_task_list(
+    session: &mut client::Client,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<ene_api::v1::undelivered::TaskListPage, CliError> {
+    use ene_api::v1::undelivered::TaskListResponse;
+    match session
+        .request(WirePayload::ListTasks(cmds::list_tasks_request(
+            cursor.map(str::to_owned),
+            limit,
+        )))
+        .await?
+    {
+        WirePayload::TaskListResponse(TaskListResponse::Page(page)) => Ok(page),
+        WirePayload::TaskListResponse(TaskListResponse::StaleBaseView { .. }) => {
+            Err(CliError::ServerOutcome(String::from(
+                "stale task-list cursor; re-query from the head",
+            )))
+        }
+        unexpected => Err(CliError::ServerRejected(format!(
+            "unexpected {} while listing tasks; expected TaskListResponse",
+            unexpected.message_type()
+        ))),
+    }
+}
+
+/// One explicit Task-report read (paged identities, never bodies).
+async fn request_task_report(
+    session: &mut client::Client,
+    task: &str,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<ene_api::v1::undelivered::TaskReportPage, CliError> {
+    use ene_api::v1::undelivered::TaskReportResponse;
+    let page = match session
+        .request(WirePayload::GetTaskReport(cmds::task_report_request(
+            task,
+            cursor.map(str::to_owned),
+            limit,
+        )))
+        .await?
+    {
+        WirePayload::TaskReportResponse(response) => response,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
+                "unexpected {} while reading a task report; expected TaskReportResponse",
+                unexpected.message_type()
+            )));
+        }
+    };
+    match cmds::describe_report(&page) {
+        cmds::ReportAction::Show => match page {
+            TaskReportResponse::Page(page) => Ok(page),
+            TaskReportResponse::UnknownRef | TaskReportResponse::StaleBaseView { .. } => Err(
+                CliError::ServerOutcome(String::from("task report moved underneath the request")),
+            ),
+        },
+        cmds::ReportAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
+    }
+}
+
+/// One bounded source-body page. `InputUnavailable` is retryable (exit 2):
+/// the body exists but cannot be projected safely right now.
+async fn request_report_source(
+    session: &mut client::Client,
+    source: &str,
+    cursor: Option<u64>,
+    limit_bytes: Option<u32>,
+) -> Result<ene_api::v1::undelivered::ReportSourcePageView, CliError> {
+    use ene_api::v1::undelivered::ReportSourceResponse;
+    match session
+        .request(WirePayload::GetReportSource(cmds::report_source_request(
+            source,
+            cursor,
+            limit_bytes,
+        )))
+        .await?
+    {
+        WirePayload::ReportSourceResponse(ReportSourceResponse::Page(page)) => Ok(page),
+        WirePayload::ReportSourceResponse(ReportSourceResponse::UnknownRef) => {
+            Err(CliError::ServerOutcome(String::from(
+                "unknown report source; re-read the report and retry",
+            )))
+        }
+        WirePayload::ReportSourceResponse(ReportSourceResponse::InputUnavailable) => Err(
+            CliError::ServerOutcome(String::from("report source is unavailable; retry later")),
+        ),
+        unexpected => Err(CliError::ServerRejected(format!(
+            "unexpected {} while reading a report source; expected ReportSourceResponse",
+            unexpected.message_type()
+        ))),
+    }
+}
+
+/// First-party Task selection: in-memory display selection, never an
+/// execution start.
+async fn request_select_task(
+    session: &mut client::Client,
+    task: &str,
+) -> Result<ene_api::v1::undelivered::TaskSelected, CliError> {
+    use ene_api::v1::undelivered::SelectTaskResponse;
+    match session
+        .request(WirePayload::SelectTask(cmds::select_task_request(task)))
+        .await?
+    {
+        WirePayload::SelectTaskResponse(SelectTaskResponse::Selected(selected)) => Ok(selected),
+        WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef) => Err(
+            CliError::ServerOutcome(String::from("unknown task reference; re-list and retry")),
+        ),
+        unexpected => Err(CliError::ServerRejected(format!(
+            "unexpected {} while selecting a task; expected SelectTaskResponse",
+            unexpected.message_type()
+        ))),
+    }
+}
+
+/// Explicit first-party resume through the wire command (retryable identity:
+/// a lost reply replays through `retry`, never a second command).
+async fn run_resume_task(
+    session: &mut client::Client,
+    task: &str,
+    revision: u64,
+    purpose: &str,
+    instruction: String,
+) -> Result<(), CliError> {
+    let prepared = session.prepare(WirePayload::ResumeTask(cmds::resume_task_request(
+        task,
+        revision,
+        purpose,
+        instruction,
+    )));
+    let outcome = match session.execute(&prepared).await? {
+        WirePayload::ResumeTaskOutcome(outcome) => outcome,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
+                "unexpected {} while resuming a task; expected ResumeTaskOutcome",
+                unexpected.message_type()
+            )));
+        }
+    };
+    match cmds::describe_resume(&outcome) {
+        cmds::ResumeAction::Resumed { detail } => emit(&detail),
+        cmds::ResumeAction::Refused { message } => Err(CliError::ServerRejected(message)),
+        cmds::ResumeAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
+    }
+}
+
+/// Fetches one undelivered page, paints it, and ACKs the receipts that fully
+/// painted. Any stdio failure before the flush returns early and sends no
+/// ACK, so the Host keeps the batch `Unknown` instead of recording a
+/// presentation the operator never saw.
+async fn run_undelivered(
+    session: &mut client::Client,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+    redisplay: bool,
+) -> Result<(), CliError> {
+    use ene_api::v1::undelivered::UndeliveredResponse;
+    let response = match session
+        .request(WirePayload::UndeliveredRequest(cmds::undelivered_request(
+            cursor.map(str::to_owned),
+            limit,
+            redisplay,
+        )))
+        .await?
+    {
+        WirePayload::UndeliveredResponse(response) => response,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
+                "unexpected {} while fetching undelivered items; expected UndeliveredResponse",
+                unexpected.message_type()
+            )));
+        }
+    };
+    match cmds::describe_fetch(&response) {
+        cmds::FetchAction::Paint => {}
+        cmds::FetchAction::Retryable { message } => {
+            return Err(CliError::ServerOutcome(message));
+        }
+    }
+    let UndeliveredResponse::Summary(summary) = response else {
+        return Err(CliError::ServerOutcome(String::from(
+            "undelivered fetch moved underneath the request",
+        )));
+    };
+    emit(&cmds::render_summary(&summary))?;
+    ack_summary(session, &summary).await
+}
+
+/// ACKs one fully painted summary as `Presented`, echoing the round and
+/// generation the summary showed for the Host's receipt comparison.
+async fn ack_summary(
+    session: &mut client::Client,
+    summary: &ene_api::v1::undelivered::UndeliveredSummary,
+) -> Result<(), CliError> {
+    if summary.items.is_empty() {
+        return Ok(());
+    }
+    let ack = cmds::undelivered_ack(&summary.receipt.0, PresentationStatus::Presented);
+    let outcome = match session
+        .request_observed(
+            WirePayload::UndeliveredAck(ack),
+            Some(summary.round.clone()),
+        )
+        .await?
+    {
+        WirePayload::UndeliveredAckOutcome(outcome) => outcome,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
+                "unexpected {} while confirming presentation; expected UndeliveredAckOutcome",
+                unexpected.message_type()
+            )));
+        }
+    };
+    match cmds::describe_ack(&outcome) {
+        cmds::AckAction::Confirmed { .. } => Ok(()),
+        cmds::AckAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
     }
 }
 
@@ -493,6 +907,27 @@ async fn run_send(
     let mut stdout = std::io::stdout();
     writeln!(stdout, "AcceptedForRound {round}")
         .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
+    // Backlog the Host auto-presented at attach (recovery/summon, no Owner
+    // query): paint it before the new reply and ACK it with the stream's
+    // presentation observation below. A stdio failure here sends no ACK, so
+    // the Host keeps the batch Unknown.
+    let mut auto: Vec<UndeliveredSummary> = Vec::new();
+    for frame in session.take_undelivered() {
+        if let WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) =
+            frame.payload
+        {
+            let text = cmds::render_summary(&summary);
+            if !text.is_empty() {
+                writeln!(stdout, "{text}").map_err(|error| {
+                    CliError::Transport(format!("stdout write failed: {}", error.kind()))
+                })?;
+                stdout.flush().map_err(|error| {
+                    CliError::Transport(format!("stdout flush failed: {}", error.kind()))
+                })?;
+            }
+            auto.push(summary);
+        }
+    }
     let mut stream: Option<StreamWireId> = None;
     let mut shown = false;
     let close_status = loop {
@@ -527,6 +962,24 @@ async fn run_send(
                 // Latest-value fact: the session already recorded its
                 // generation in the frame loop; there is nothing to display.
             }
+            WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) => {
+                // Auto-presented backlog interleaved with the stream: paint
+                // inline and remember the receipt for the end-of-send ACK.
+                let text = cmds::render_summary(&summary);
+                if !text.is_empty() {
+                    writeln!(stdout, "{text}").map_err(|error| {
+                        CliError::Transport(format!("stdout write failed: {}", error.kind()))
+                    })?;
+                    stdout.flush().map_err(|error| {
+                        CliError::Transport(format!("stdout flush failed: {}", error.kind()))
+                    })?;
+                }
+                auto.push(summary);
+            }
+            WirePayload::UndeliveredResponse(_) | WirePayload::UndeliveredAckOutcome(_) => {
+                // Non-summary fetch answers and stray ACK outcomes never
+                // route here; absorb them instead of failing the stream.
+            }
             unexpected => {
                 return Err(CliError::ServerRejected(format!(
                     "unexpected {} while streaming text; expected TextStreamFrame",
@@ -549,6 +1002,12 @@ async fn run_send(
             detail: None,
         }))
         .await?;
+    // The backlog painted above (attach-time and in-stream auto-presents)
+    // is ACKed only now, after its final frame painted: a partial batch
+    // would have returned early above with no ACK, keeping it Unknown.
+    for summary in &auto {
+        ack_summary(session, summary).await?;
+    }
     if success {
         Ok(())
     } else {
@@ -809,7 +1268,101 @@ mod tests {
     }
 
     #[test]
+    fn task_and_undelivered_forms_parse() {
+        let tasks = parse(&["tasks"]).expect("tasks default");
+        assert!(
+            tasks.command
+                == super::cmds::Command::Tasks {
+                    cursor: None,
+                    limit: None,
+                }
+        );
+        let paged = parse(&["tasks", "--cursor", "c1", "--limit", "7"]).expect("tasks page");
+        assert!(
+            paged.command
+                == super::cmds::Command::Tasks {
+                    cursor: Some(String::from("c1")),
+                    limit: Some(7),
+                }
+        );
+        let report = parse(&["report", "--task", "task-1"]).expect("report");
+        assert!(
+            report.command
+                == super::cmds::Command::Report {
+                    task: String::from("task-1"),
+                    cursor: None,
+                    limit: None,
+                }
+        );
+        assert!(matches!(parse(&["report"]), Err(CliError::Usage(_))));
+        let source = parse(&["source", "--source", "s1", "--cursor", "9"]).expect("source");
+        assert!(
+            source.command
+                == super::cmds::Command::Source {
+                    source: String::from("s1"),
+                    cursor: Some(9),
+                    limit_bytes: None,
+                }
+        );
+        assert!(matches!(parse(&["source"]), Err(CliError::Usage(_))));
+        let select = parse(&["select-task", "--task", "task-2"]).expect("select-task");
+        assert!(
+            select.command
+                == super::cmds::Command::SelectTask {
+                    task: String::from("task-2")
+                }
+        );
+        let resume = parse(&[
+            "resume-task",
+            "--task",
+            "task-3",
+            "--revision",
+            "4",
+            "--purpose",
+            "task-3:4",
+            "--instruction",
+            "go on",
+        ])
+        .expect("resume-task");
+        assert!(
+            resume.command
+                == super::cmds::Command::ResumeTask {
+                    task: String::from("task-3"),
+                    revision: 4,
+                    purpose: String::from("task-3:4"),
+                    instruction: String::from("go on"),
+                }
+        );
+        assert!(matches!(
+            parse(&["resume-task", "--task", "t"]),
+            Err(CliError::Usage(_))
+        ));
+        let undelivered = parse(&["undelivered"]).expect("undelivered default");
+        assert!(
+            undelivered.command
+                == super::cmds::Command::Undelivered {
+                    cursor: None,
+                    limit: None,
+                    redisplay: false,
+                }
+        );
+        let rescan = parse(&["undelivered", "--redisplay", "--limit", "3"]).expect("redisplay");
+        assert!(
+            rescan.command
+                == super::cmds::Command::Undelivered {
+                    cursor: None,
+                    limit: Some(3),
+                    redisplay: true,
+                }
+        );
+    }
+
+    #[test]
     fn unknown_flags_and_positionals_report_usage() {
+        assert!(matches!(
+            parse(&["tasks", "extra"]),
+            Err(CliError::Usage(_))
+        ));
         assert!(matches!(
             parse(&["status", "extra"]),
             Err(CliError::Usage(_))

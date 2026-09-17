@@ -345,6 +345,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -430,6 +431,7 @@ dependencies = [
  "ene-primitive",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

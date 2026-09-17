@@ -480,7 +480,11 @@ COMMIT;
 
 `LiveInput { authed: true }` の事前 snapshot は commit の根拠にしません。connection table owner は auth install、supersede、close、device revoke と、presence/Client-dependent command の admission を同じ短い同期区間で直列化します。`spawn_blocking` 内で connection table の lock を取得し、current `(device, incarnation, connection)` を検証したまま必要な短い SQLite compare/commit を完了します。先に snapshot を取り、lock を解放してから DB へ await する形は禁止します。本文解決・proof の準備・入出力は外で行い、最終の device 有効性確認と phase/nonce 消費は install の区間に含めます。device revoke もこの順序を守り、古い検証結果の install を防ぎます。
 
-lock の順序は connection table → 必要なら Task execution registry → SQLite 接続です。各操作は必要な lock だけを取り、逆順に取得しません。これは接続の admission と commit を結ぶ局所的な同期区間であり、Task runner や全 request を囲む global async lock ではありません。§15.2 の await 禁止は維持します。cancel や settlement は DB commit 後に lock を解放してから通知し、通知先からこの lock を逆取得しません。
+lock の順序は connection table → presentation memory lock → 必要なら Task execution registry → SQLite 接続です。各操作は必要な lock だけを取り、逆順に取得しません。Client-dependent operation は「prepare（本文解決・admission・expensive read・provider I/O）→ ownership 区間での currentness 検証と final commit → async continuation」に分け、ownership 区間へ入るのは最終 commit/admission だけにします。この区間で行う durable commit は同期 SQLite primitive とし、connection table を保持したまま `.await` しません。これは接続の admission と commit を結ぶ局所的な同期区間であり、Task runner や全 request を囲む global async lock ではありません。§15.2 の await 禁止は維持します。cancel や settlement は DB commit 後に lock を解放してから通知し、通知先からこの lock を逆取得しません。
+
+`SubmitTextInput` の durable acceptance は ownership 区間内の Owner append commit です。acceptance 後に connection が失効しても Owner row は取り消しません。ただし open Round install の成功は、その後の publication の許可を意味しません。`AcceptedForRound` と `TextStreamOpen` の新規 publication は、別の短い ownership 区間で currentness を再確認したまま同期 control queue へ enqueue します（socket write は区間外）。install が拒否された場合、または publication より先に replacement が成立した場合は、受理済み work の既存 dispatch/adoption 契約を維持しながら wire stream を開かず、close も送りません。delta と final/Completed も容量待ちの後に ownership 区間内で enqueue します。既に開いた stream の Interrupted は失効通知であり、新しい stream の開始ではありません。durable command の exact retry が返す既存 acceptance の再掲も、新規 Round install / stream 開始とは区別します。
+
+presence attach の unsolicited fact と auto-present summary も同期 enqueue 時の currentness を検証します。fact の commit → fact enqueue → summary の順序は維持し、fact の送信失敗時は summary を送りません。replacement が enqueue に先行した場合、durable presence fact は保持しつつ旧 connection への publication は省略します。SelectTask と Task ref/cursor mint は既存の memory ownership 区間、ResumeTask は既存の guarded owner commit を使い、replacement/close の単一 lifecycle cleanup を迂回しません。
 
 presence の begin は `(companion, state, active_client, generation)` を CAS し generation を 1 進め、hint と遷移ログを同時に記録します。confirm は同じ InTransition generation と移動先候補を比較し、その場の current authenticated connection と device 利用許可が一致する場合だけ Present にします。候補が失われたら NoActive、前提が変わっていれば StalePresence で書込なしです。confirm は同じ遷移内なので generation を再度進めません。再度の begin と startup invalidation は新 generation を発行します。
 
@@ -501,6 +505,10 @@ fallback 候補は current authenticated、SameMachine の OS peer 確認、必�
 発生元 fact と未伝達登録は PR §4.6 の同一 transaction です。表示に使う source facts を read transaction で読み、同じ Task を現在の report へまとめます。receipt に含めるのは、その report に実際に含めた通知 ID だけです。後から追加された行や、同じ Task の未選択ページを ACK の対象にしません。
 
 提示開始と ACK は connection/receipt の同期区間を経て、行ごとの status と source の存在・current erasure 条件を同じ DB transaction で比較します。成功 ACK は選択行だけを Presented にし、重複 ACK は書込なしの AlreadyPresented とします。旧 connection、失効した receipt、別 Round/generation の ACK は状態を変えません。古い receipt の Failed/Unknown で、新 receipt が確定した Presented を戻しません。
+
+提示開始は bounded page/excerpt/frame fitting を prepare した後、同じ ownership 区間内で Pending→PresentationUnknown の同期 CAS、成功した selected 集合の確定、receipt/cursor/subscription install を行います。既に Unknown の再提示は status を変更しません。StaleSource/technical error の行は frame と selected の両方から除外します。replacement が先なら durable mutation も memory install もゼロ、commit が先なら cleanup は memory だけを落とし durable Unknown は再提示対象として残します。
+
+ACK は receipt consume を受理点とし、その bounded selected 集合への同期 durable mark まで同じ connection ownership 区間に含めます。consume と durable mark の間に replacement は成立できません。ConfirmPresentation は round/companion 解決と最大50行の候補 read の後、ownership 区間内で currentness と expected status を比較して同期 CAS します。旧 connection の observation は wire reply を追加せず、durable mutation ゼロで終わります。いずれの DB commit 区間も blocking pool 上で実行し、memory/table lock を保持した async DB await は行いません。
 
 登録 commit 後の wakeup は配送保証を担いません。購読開始では wakeup receiver を設置してから durable backlog を読み、走査中の commit は走査済み挿入キーより後の次 pass に回します。接続後の new fact を coalesced wakeup で知らせ、通知落ち・receiver lag は同じ走査下限から durable query を再開します。Unknown / Failed を新着のたびに再送しません。restart では DB の未提示行を読みます。receipt や送信 queue の消失は報告漏れになりません。
 

@@ -8,10 +8,15 @@ use crate::delegation::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
 };
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
+use crate::report::{
+    PastExecutedFactsPage, TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage,
+    TaskReportSourceRef,
+};
 use crate::result::{
     TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
     TaskResultRecord, UnadoptedResultCursor,
 };
+use crate::resume::{TaskResumeCommitPremise, TaskResumeOutcome};
 use crate::task::{
     TaskCommitPremise, TaskCreationOutcome, TaskCreationPremise, TaskId, TaskProgress, TaskRecord,
     TaskRef,
@@ -345,6 +350,99 @@ pub trait TaskRepository: Send + Sync {
         &self,
         task: TaskId,
     ) -> Result<Vec<RawId>, TaskTechnicalError>;
+
+    /// Lists one bounded page of Task lifecycle headlines in canonical
+    /// `TaskId` byte order, starting strictly after `after`.
+    ///
+    /// `limit` is clamped to `1..=REPORT_PAGE_MAX` and applied by the SQL
+    /// query, so the bound is on the rows read. Every headline is stored
+    /// facts only — current revision, progress, assignee, and the adopted
+    /// result marker — never a body. The read runs no reconciliation, starts
+    /// no runner, and re-evaluates no stored result: "currently executing" is
+    /// Host memory, so a non-terminal Task with no registration is reported
+    /// as saved and not running.
+    async fn list_tasks_after(
+        &self,
+        after: Option<TaskId>,
+        limit: u32,
+    ) -> Result<Vec<TaskHeadline>, TaskTechnicalError>;
+
+    /// Lists one bounded page of one Task's report detail rows: Action
+    /// attempts first, then Task results, each in canonical ID byte order.
+    ///
+    /// The rows carry identities and the result adoption marker only, enough
+    /// to build the report headline and detail list without loading a body;
+    /// the caller reads each Action attempt from its owner. `after` continues
+    /// strictly past a previously returned row. `limit` is clamped to
+    /// `1..=REPORT_PAGE_MAX` and applied by SQL. SELECT-only.
+    async fn list_task_report_rows_after(
+        &self,
+        task: TaskId,
+        after: Option<TaskReportRowCursor>,
+        limit: u32,
+    ) -> Result<Vec<TaskReportRow>, TaskTechnicalError>;
+
+    /// Reads one byte-bounded page of a task-owned report source body.
+    ///
+    /// `cursor_bytes` is the byte offset to start at (`0` is the head);
+    /// `limit_bytes` bounds the returned page. The text ends on a UTF-8
+    /// character boundary and `next` is the byte cursor that continues
+    /// exactly after it, so a caller can page a body larger than one frame
+    /// without decoding it whole. `None` means the addressed row is gone:
+    /// absence is reported, never an empty success. SELECT-only; no body is
+    /// cached and no status, revision, or adoption changes. The wire-level
+    /// `4..=16384` clamp and the display excerpt belong to the caller.
+    async fn load_report_source_bounded(
+        &self,
+        source: TaskReportSourceRef,
+        cursor_bytes: u64,
+        limit_bytes: u32,
+    ) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError>;
+
+    /// Commits one explicit resume (AU17): the same Task at `r+1` with the
+    /// purpose carried over, the resume instruction adopted, and one new
+    /// delegation and agent.
+    ///
+    /// Inside one short `Immediate` transaction the commit compares, in
+    /// refusal priority, the Task's existence, its non-terminal progress,
+    /// the expected revision and purpose identity, the readiness premises,
+    /// the Task-wide `Unknown` barrier (every revision and delegation),
+    /// adoptable sealed results of the current revision, the
+    /// re-checkable holds (companion lifecycle, workspace association,
+    /// instruction source, permission premise, erasure coverage, launch
+    /// availability), and the representable next revision. The first
+    /// refusal wins with zero writes; a successful commit writes the new
+    /// revision snapshot, the carried-forward adopted-purpose entry, the new
+    /// adopted-instruction entry (provenance only, never the body), the
+    /// current pointer, the new delegation with its scope frozen from the
+    /// current workspace association, the `Started → InProgress` advance,
+    /// and the same-transaction undelivered registrations atomically. Older
+    /// revisions, context entries, delegations, results, and attempts are
+    /// retained untouched: no recovery generation, current-delegation
+    /// pointer, resume flag, or receipt state exists.
+    ///
+    /// The caller mints every identity in the premise; the repository stamps
+    /// only the post-CAS `(task, revision)` references.
+    async fn commit_task_resume(
+        &self,
+        premise: TaskResumeCommitPremise,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError>;
+
+    /// Reads the Task's past-executed facts for the every-turn prompt block
+    /// (H-A.1).
+    ///
+    /// The page carries attribution only — every recorded Action attempt
+    /// (all revisions and delegations) and every recorded result, oldest
+    /// first, as fixed-class lines without bodies — capped at
+    /// [`PAST_FACTS_ENTRY_CAP`](crate::PAST_FACTS_ENTRY_CAP). `has_more`
+    /// means recorded facts exist beyond the page, so the turn refuses
+    /// instead of reasoning from the prefix. SELECT-only: no status,
+    /// revision, adoption, or certainty changes, no runner starts, and no
+    /// reconciliation runs.
+    async fn load_past_executed_facts(
+        &self,
+        task: TaskId,
+    ) -> Result<PastExecutedFactsPage, TaskTechnicalError>;
 }
 
 /// Conversation-sourced Task control commits.
@@ -384,4 +482,12 @@ pub trait ConversationTaskRepository: TaskRepository {
         task: TaskId,
         currentness: OwnerMessageCurrentness,
     ) -> Result<TaskCancelOutcome, TaskTechnicalError>;
+
+    /// Commits one explicit resume iff the relied Owner input is still
+    /// current.
+    async fn commit_task_resume_from_conversation(
+        &self,
+        premise: TaskResumeCommitPremise,
+        currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError>;
 }

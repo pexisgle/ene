@@ -50,8 +50,9 @@ use ene_task::{
 };
 
 use crate::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, HistoryAppendOutcome,
-    HistoryRepository, HistoryRole, RequestFingerprint, RoundIntentMark,
+    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
+    HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole, RequestFingerprint,
+    RoundIntentMark,
 };
 
 /// One presentation-accepted client input, ready for the companion turn.
@@ -269,6 +270,82 @@ pub async fn begin_turn(
                 .lookup_command(input.companion, &input.command)
                 .await
             {
+                Ok(Some(found)) => DialogueBegin::Replayed {
+                    round: found.round,
+                    round_wire: found.round_wire,
+                },
+                _ => DialogueBegin::Held,
+            }
+        }
+        Ok(HistoryAppendOutcome::StaleExpected { current }) => {
+            DialogueBegin::StaleExpected { current }
+        }
+        Ok(HistoryAppendOutcome::StaleConsent) => DialogueBegin::StaleConsent,
+        Ok(HistoryAppendOutcome::StaleCredentialSet) => DialogueBegin::StaleCredentialSet,
+        // Owner appends carry no Owner-message premise, so the check is
+        // skipped and this arm is unreachable; Held is the safe mapping —
+        // retry-safe, with no side effects either way.
+        Ok(HistoryAppendOutcome::StaleOwnerInput) => DialogueBegin::Held,
+        Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
+        Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
+            DialogueBegin::HeldByLifecycle(lifecycle)
+        }
+        Err(_) => DialogueBegin::Held,
+    }
+}
+
+/// [`begin_turn`] with the durable Owner append supplied by the caller.
+///
+/// The Host runs the Client-dependent admission (CCT §10.4) as a guarded
+/// synchronous section: `commit` executes inside the connection-ownership
+/// section through the store's sync append, so a supersession that wins the
+/// section cannot leave an Owner row behind, and `lookup` resolves a
+/// concurrent same-command commit without leaving the section. This function
+/// is synchronous by construction — it never awaits — so the caller can run
+/// it on the blocking pool while holding the connection table. Every
+/// outcome maps exactly like [`begin_turn`].
+pub fn begin_turn_committed<C, L>(
+    input: AcceptedDialogueInput,
+    authorized: AuthorizedInference,
+    commit: C,
+    lookup: L,
+) -> DialogueBegin
+where
+    C: FnOnce(AppendHistoryCommand) -> Result<HistoryAppendOutcome, CompanionTechnicalError>,
+    L: FnOnce(CompanionId, &CommandId) -> Result<Option<HistoryMessage>, CompanionTechnicalError>,
+{
+    let (consent_id, consent_rev) = {
+        let (id, rev) = authorized.consent_premise();
+        (id.to_owned(), rev)
+    };
+    let owner = AppendHistoryCommand {
+        companion: input.companion,
+        round: input.round,
+        role: HistoryRole::Owner,
+        text: input.text.clone(),
+        lang: input.lang.clone(),
+        at: WallClockWithTz::now(),
+        expected_generation: input.generation,
+        expected_consent: Some((consent_id, consent_rev)),
+        expected_credential_set: Some(input.credential_set),
+        // Owner appends establish recency; only replies answer it.
+        expected_owner_message: None,
+        local_id: input.local_id.clone(),
+        command_id: Some(input.command),
+        round_wire: Some(input.round_wire.clone()),
+        round_intent: Some(input.round_intent.clone()),
+        incarnation: input.incarnation,
+    };
+    match commit(owner) {
+        Ok(HistoryAppendOutcome::CommittedAs { message }) => {
+            DialogueBegin::Ready(Box::new(DialogueTurn {
+                input,
+                message,
+                authorized,
+            }))
+        }
+        Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. }) => {
+            match lookup(input.companion, &input.command) {
                 Ok(Some(found)) => DialogueBegin::Replayed {
                     round: found.round,
                     round_wire: found.round_wire,
@@ -654,7 +731,7 @@ pub const DIALOGUE_CONTEXT_MESSAGES: u64 = 8;
 /// Memories offered to one dialogue prompt.
 pub const DIALOGUE_RECALL_LIMIT: usize = 6;
 
-const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions. If the owner asks for file work as a task, asks about task progress or results, changes a task's instructions, or cancels a task, reply with exactly one task-control line as the very first non-empty line and nothing else (no other prose): the line starts with [task-control] followed by one JSON object with exactly these fields: {\"kind\":\"propose_task\",\"purpose\":\"<summary of the work>\"} to start a task; {\"kind\":\"report\"} to ask about the current task; {\"kind\":\"steer\",\"instruction\":\"<instruction>\",\"purpose\":null} to change it; or {\"kind\":\"cancel\"} to cancel it. Never emit any other field, and never add a task-control line to ordinary conversation.";
+const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions. If the owner asks for file work as a task, asks about task progress or results, changes a task's instructions, resumes an interrupted task, or cancels a task, reply with exactly one task-control line as the very first non-empty line and nothing else (no other prose): the line starts with [task-control] followed by one JSON object with exactly these fields: {\"kind\":\"propose_task\",\"purpose\":\"<summary of the work>\"} to start a task; {\"kind\":\"report\"} to ask about the current task; {\"kind\":\"steer\",\"instruction\":\"<instruction>\",\"purpose\":null} to change it; {\"kind\":\"resume\"} to resume the current interrupted task; or {\"kind\":\"cancel\"} to cancel it. Never emit any other field, and never add a task-control line to ordinary conversation.";
 
 /// Prompt layout pieces shared by the budget check and the assembly, so the
 /// pre-acceptance check and the built prompt cannot drift apart.
@@ -1090,6 +1167,12 @@ pub enum DialogueTaskCommand {
     },
     /// Request cancel of the current Task.
     Cancel,
+    /// Request an explicit resume of the current Task. The command carries
+    /// no fields: the Host composes the Task, the premise, and the Owner
+    /// instruction reference from its own durable state, so a model output
+    /// can never name a Task, revision, purpose, or body. A missing or
+    /// ambiguous target is answered with a clarification, never executed.
+    Resume,
 }
 
 impl core::fmt::Debug for DialogueTaskCommand {
@@ -1111,6 +1194,7 @@ impl core::fmt::Debug for DialogueTaskCommand {
                 .field("purpose", &purpose.as_ref().map(|_| "[redacted]"))
                 .finish(),
             Self::Cancel => formatter.write_str("Cancel"),
+            Self::Resume => formatter.write_str("Resume"),
         }
     }
 }
@@ -1179,7 +1263,11 @@ fn parse_task_command(body: &str) -> Option<DialogueTaskCommand> {
     let command: DialogueTaskCommand = serde_json::from_value(value).ok()?;
     match &command {
         // Serde accepts extra fields on internally tagged unit variants.
-        DialogueTaskCommand::Report | DialogueTaskCommand::Cancel if fields != 1 => None,
+        DialogueTaskCommand::Report | DialogueTaskCommand::Cancel | DialogueTaskCommand::Resume
+            if fields != 1 =>
+        {
+            None
+        }
         DialogueTaskCommand::ProposeTask { purpose } if purpose.trim().is_empty() => None,
         DialogueTaskCommand::Steer { instruction, .. } if instruction.trim().is_empty() => None,
         _ => Some(command),
@@ -1534,6 +1622,10 @@ mod task_control_tests {
             command("[task-control] {\"kind\":\"cancel\"}"),
             DialogueTaskCommand::Cancel
         );
+        assert_eq!(
+            command("[task-control] {\"kind\":\"resume\"}"),
+            DialogueTaskCommand::Resume
+        );
         // Leading blank lines are allowed; the first non-empty line is the
         // directive.
         assert_eq!(
@@ -1550,6 +1642,7 @@ mod task_control_tests {
             "[task-control] {\"kind\":\"report\",\"extra\":1}",
             "[task-control] {\"kind\":\"steer\",\"instruction\":\"add\",\"purpose\":null,\"workspace\":\"/etc\"}",
             "[task-control] {\"kind\":\"cancel\",\"reason\":\"because\"}",
+            "[task-control] {\"kind\":\"resume\",\"task\":\"other\"}",
         ] {
             assert!(
                 matches!(

@@ -26,7 +26,8 @@ use ene_action::{
     ActionStartOutcome, ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome,
     EffectGrounds, OperationKind, RealTargetRef,
 };
-use ene_primitive::{RevisionInner, WallClockWithTz};
+use ene_companion::{ActionCertaintyWire, TaskFact, UndeliveredSource};
+use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
@@ -45,9 +46,14 @@ const SQL_SELECT_ATTEMPT_EXISTS: &str =
 const SQL_SELECT_EVALUATION_EXISTS: &str =
     "SELECT attempt_id FROM action_attempt WHERE relied_evaluation = ?1";
 
-const SQL_SELECT_CERTAINTY: &str = "SELECT certainty FROM action_attempt WHERE attempt_id = ?1";
+const SQL_SELECT_CERTAINTY: &str =
+    "SELECT certainty, task_id FROM action_attempt WHERE attempt_id = ?1";
 
 const SQL_UPDATE_CERTAINTY: &str = "UPDATE action_attempt SET certainty = ?2, grounds = ?3 WHERE attempt_id = ?1 AND certainty = ?4";
+
+/// The notification destination of an Action-attempt fact: the Task's
+/// assignee, read inside the same transaction as the attempt write.
+const SQL_SELECT_TASK_ASSIGNEE: &str = "SELECT assignee FROM task WHERE task_id = ?1";
 
 const SQL_SELECT_DELEGATION_PREMISE: &str =
     "SELECT task_id, task_revision, scope_assoc FROM delegation WHERE delegation_id = ?1";
@@ -74,6 +80,57 @@ fn decode_revision(raw: i64) -> Result<RevisionInner, ActionTechnicalError> {
     Ok(RevisionInner::from_u64(
         decode_u64(raw).map_err(action_unavailable)?,
     ))
+}
+
+/// Registers one `ActionAttempt` undelivered source inside the caller's
+/// transaction (AU1b).
+///
+/// The destination is derived from the Task row the attempt belongs to, and
+/// the phase is the certainty in force after the write, so a certainty change
+/// is a new source key and a new notification while the old `unknown` entry
+/// keeps its own row. A missing Task row is durable corruption and fails
+/// closed, rolling the attempt write back with it.
+fn register_action_attempt(
+    tx: &rusqlite::Transaction<'_>,
+    task_text: &str,
+    attempt: RawId,
+    certainty: ActionCertaintyWire,
+) -> Result<(), ActionTechnicalError> {
+    let assignee: Option<String> = tx
+        .query_row(SQL_SELECT_TASK_ASSIGNEE, params![task_text], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(action_unavailable)?;
+    let Some(assignee) = assignee else {
+        return Err(action_unavailable(
+            "task row missing for action attempt notification",
+        ));
+    };
+    let task = decode_id(task_text).map_err(action_unavailable)?;
+    let source = UndeliveredSource::TaskRecord {
+        task,
+        fact: TaskFact::ActionAttempt { attempt, certainty },
+    };
+    crate::companion::register_undelivered_tx(
+        tx,
+        &assignee,
+        RawId::new(),
+        &source,
+        None,
+        None,
+        WallClockWithTz::now(),
+    )
+    .map_err(action_unavailable)
+}
+
+/// The undelivered wire projection of the Action owner's closed world.
+fn certainty_wire(certainty: ActionCertainty) -> ActionCertaintyWire {
+    match certainty {
+        ActionCertainty::ConfirmedSuccess => ActionCertaintyWire::ConfirmedSuccess,
+        ActionCertainty::ConfirmedFailure => ActionCertaintyWire::ConfirmedFailure,
+        ActionCertainty::Unknown => ActionCertaintyWire::Unknown,
+    }
 }
 
 fn insert_attempt_sync(
@@ -231,6 +288,14 @@ fn insert_attempt_sync(
         }
         Err(error) => return Err(action_unavailable(error)),
     }
+    // AU5 registers the started attempt in the same transaction: phase
+    // `unknown` until objective evidence moves the certainty.
+    register_action_attempt(
+        &tx,
+        &task_text,
+        premise.attempt.as_raw(),
+        ActionCertaintyWire::Unknown,
+    )?;
     tx.commit().map_err(action_unavailable)?;
     Ok(ActionStartOutcome::Started)
 }
@@ -259,13 +324,13 @@ fn compare_and_set_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(action_unavailable)?;
-    let current: Option<String> = tx
+    let current: Option<(String, String)> = tx
         .query_row(SQL_SELECT_CERTAINTY, params![attempt_text], |row| {
-            row.get(0)
+            Ok((row.get(0)?, row.get(1)?))
         })
         .optional()
         .map_err(action_unavailable)?;
-    let Some(current_text) = current else {
+    let Some((current_text, task_text)) = current else {
         return Ok(CertaintyUpdateOutcome::MissingAttempt);
     };
     let current = ActionCertainty::from_name(&current_text)
@@ -289,6 +354,10 @@ fn compare_and_set_sync(
             "attempt certainty update did not apply exactly once",
         ));
     }
+    // The certainty CAS is a new fact: register the new phase in the same
+    // transaction. A grounded `unknown -> unknown` update reuses the start
+    // phase and the source-key constraint keeps that a no-op.
+    register_action_attempt(&tx, &task_text, attempt.as_raw(), certainty_wire(new))?;
     tx.commit().map_err(action_unavailable)?;
     Ok(CertaintyUpdateOutcome::Updated)
 }
@@ -408,7 +477,7 @@ impl ActionAttemptRepository for Store {
         premise: AttemptCommitPremise,
     ) -> Result<ActionStartOutcome, ActionTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || insert_attempt_sync(&conn, premise)).await
+        self.hint_after_commit(run_blocking(move || insert_attempt_sync(&conn, premise)).await)
     }
 
     async fn compare_and_set_certainty(
@@ -419,7 +488,10 @@ impl ActionAttemptRepository for Store {
         grounds: EffectGrounds,
     ) -> Result<CertaintyUpdateOutcome, ActionTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || compare_and_set_sync(&conn, attempt, expected, new, grounds)).await
+        self.hint_after_commit(
+            run_blocking(move || compare_and_set_sync(&conn, attempt, expected, new, grounds))
+                .await,
+        )
     }
 
     async fn load_attempt(
