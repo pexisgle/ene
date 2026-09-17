@@ -24,6 +24,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+ene-preservation = { path = "../ene-preservation", features = ["test-support"] }
 tempfile.workspace = true
 tokio.workspace = true
 

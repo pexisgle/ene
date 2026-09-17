@@ -5,7 +5,7 @@ use ene_inference::{
     InferenceTechnicalError, TaskAgentAttemptPremise, UsageFact, UsageRepository,
 };
 use ene_permission::{CapabilityKind, ConsumerKind};
-use ene_preservation::{DeletionOperationId, DeletionSweepGeneration, ErasureConditionRef};
+use ene_preservation::ErasureConditionRef;
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -29,20 +29,6 @@ const SQL_SELECT_DATA_USE: &str =
 const SQL_SELECT_ATTEMPT: &str = "SELECT capability, consumer, purpose, provider, model, delegation_id, task_id, task_revision, data_use_count FROM inference_attempt WHERE ticket = ?1";
 
 const SQL_SELECT_ATTEMPT_TICKET: &str = "SELECT ticket FROM inference_attempt WHERE ticket = ?1";
-
-/// The bounded coverage probe of the canonical erasure-condition store: the
-/// canonical source correlation of the current conditions. One covering row
-/// is enough to hold the send, and the row's identity is decoded through the
-/// preservation owner's types so a malformed canonical row fails closed
-/// instead of reading as "not covering". A missing table is a technical
-/// failure, never "no deletion": the authoritative empty set is an empty
-/// query result on this table, not the absence of the store.
-///
-/// Stage 4 has no deletion-operation producer and therefore no closure state:
-/// every durable condition row is currently active. Stage 6 adds the
-/// operation lifecycle and narrows the same canonical table's read instead of
-/// adding another currentness registry.
-const SQL_SELECT_COVERING_CONDITION: &str = "SELECT operation_id, sweep FROM erasure_condition_source WHERE source = ?1 ORDER BY operation_id, sweep LIMIT 1";
 
 const SQL_SELECT_DELEGATION_PREMISE: &str =
     "SELECT task_id, task_revision FROM delegation WHERE delegation_id = ?1";
@@ -276,33 +262,18 @@ enum DataUseCheck {
 /// and the claim refuses. An empty probe result across all sources is the
 /// authoritative "not covered" — there is no sentinel and no default. A
 /// malformed stored identity is a technical error (fail closed), never a
-/// silent "not covering". The source correlation alone decides coverage: an
-/// orphan source row (without its condition parent) still holds, so a torn
-/// canonical store can never open a send.
+/// silent "not covering". Structural corruption, including orphan sources,
+/// fails closed through the shared closure-aware preservation query.
 fn check_data_use_currentness(
     tx: &rusqlite::Transaction<'_>,
     data_use: &[String],
 ) -> Result<DataUseCheck, InferenceTechnicalError> {
     for source in data_use {
-        let covering: Option<(String, i64)> = tx
-            .query_row(SQL_SELECT_COVERING_CONDITION, params![source], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .optional()
-            .map_err(|error| inference_unavailable(error.to_string()))?;
-        let Some((operation_text, sweep_raw)) = covering else {
-            continue;
-        };
-        let operation = DeletionOperationId::from_raw(
-            decode_id(&operation_text).map_err(inference_unavailable)?,
-        );
-        let sweep = DeletionSweepGeneration::from_u64(
-            decode_u64(sweep_raw).map_err(inference_unavailable)?,
-        );
-        return Ok(DataUseCheck::Covered(ErasureConditionRef {
-            operation,
-            sweep,
-        }));
+        if let Some(condition) = crate::preservation::covering_condition(tx, source)
+            .map_err(|error| inference_unavailable(error.to_string()))?
+        {
+            return Ok(DataUseCheck::Covered(condition));
+        }
     }
     Ok(DataUseCheck::Clear)
 }

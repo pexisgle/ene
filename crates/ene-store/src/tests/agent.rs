@@ -569,7 +569,7 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_databases() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("delegation-index.db");
     let store = Store::open(&path).await.expect("a fresh store must open");
-    assert_eq!(read_schema_version(&path), Some(27));
+    assert_eq!(read_schema_version(&path), Some(28));
     drop(store);
     let index = |path: &std::path::Path| -> Option<String> {
         let conn = rusqlite::Connection::open(path).expect("the store file must open");

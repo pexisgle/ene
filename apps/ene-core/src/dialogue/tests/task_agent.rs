@@ -54,25 +54,26 @@ async fn seed_task_and_delegation(
     (created, delegation, purpose_source)
 }
 
-/// Writes one canonical erasure condition covering `source` directly into the
-/// canonical Group J tables. Stage 4 has no production deletion-operation
-/// producer, so the fixture writes exactly the rows the Stage 6 producer will
-/// write; the gate then reads them through the real AU14 claim.
-fn seed_covering_condition(data_dir: &std::path::Path, source: RawId) {
-    let rendered = |raw: RawId| raw.as_uuid().as_hyphenated().to_string();
-    let conn = rusqlite::Connection::open(data_dir.join("app.db"))
-        .expect("the store file must open for the fixture");
-    let operation = rendered(RawId::new());
-    conn.execute(
-        "INSERT INTO erasure_condition (operation_id, sweep) VALUES (?1, 1)",
-        rusqlite::params![operation],
+/// Uses the A1 production producer, with test-only confirmation evidence;
+/// the first-party trusted confirmation issuer is the separate A1b slice.
+async fn seed_covering_condition(store: &ene_store::Store, source: RawId) {
+    use ene_preservation::*;
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                "fixture".into(),
+            )),
+            semantic_hints: vec![],
+        },
+        DeletionPurpose::Privacy,
+        ene_primitive::WallClockWithTz::now(),
+        vec![source],
     )
-    .expect("the condition row must seed");
-    conn.execute(
-        "INSERT INTO erasure_condition_source (operation_id, sweep, source) VALUES (?1, 1, ?2)",
-        rusqlite::params![operation, rendered(source)],
-    )
-    .expect("the source coverage row must seed");
+    .confirmed_for_tests();
+    assert!(matches!(
+        store.start_targeted_deletion(command).await.unwrap(),
+        StartTargetedDeletionOutcome::Started(_)
+    ));
 }
 
 fn durable_data_use_sources(data_dir: &std::path::Path) -> Vec<String> {
@@ -179,7 +180,7 @@ async fn task_agent_turn_is_data_use_held_when_the_purpose_source_is_covered() {
     let (created, delegation, purpose_source) = seed_task_and_delegation(&handle).await;
     // A condition covering the logical input's only source lands before the
     // send admission; the AU14 claim must see it in the same transaction.
-    seed_covering_condition(dir.path(), purpose_source);
+    seed_covering_condition(&handle.store, purpose_source).await;
 
     let executor = HostInference {
         store: &handle.store,
@@ -645,7 +646,7 @@ async fn task_agent_turn_is_data_use_held_when_the_instruction_source_is_covered
             .is_some(),
         "the source exists at read time: the refusal must not be a missing source"
     );
-    seed_covering_condition(dir.path(), instruction_source);
+    seed_covering_condition(&handle.store, instruction_source).await;
 
     let executor = HostInference {
         store: &handle.store,

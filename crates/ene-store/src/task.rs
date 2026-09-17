@@ -215,14 +215,6 @@ const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
 /// a History source.
 const ORIGIN_KIND_OWNER_MANAGEMENT: &str = "owner_management";
 
-/// The erasure coverage probe for the resume commit (AU17): a canonical
-/// source covered by any durable erasure condition holds the resume as
-/// [`TaskResumeHold::DataUseHeld`](ene_task::TaskResumeHold::DataUseHeld).
-/// Presence in the canonical table is the hold; no placeholder default
-/// means "no condition".
-const SQL_SOURCE_COVERED_BY_ERASURE: &str =
-    "SELECT EXISTS(SELECT 1 FROM erasure_condition_source WHERE source = ?1)";
-
 /// The current-revision sealed-but-unadopted results for the resume
 /// availability check: `adopted_revision IS NULL` on the relied revision is
 /// the durable "may still adopt" marker. Bodies are never read here.
@@ -2746,12 +2738,9 @@ fn source_covered_by_erasure(
     tx: &rusqlite::Transaction<'_>,
     source: RawId,
 ) -> Result<bool, TaskTechnicalError> {
-    tx.query_row(
-        SQL_SOURCE_COVERED_BY_ERASURE,
-        params![encode_id(source)],
-        |row| row.get::<_, bool>(0),
-    )
-    .map_err(task_unavailable)
+    crate::preservation::covering_condition(tx, &encode_id(source))
+        .map(|condition| condition.is_some())
+        .map_err(task_unavailable)
 }
 
 /// Whether the current revision carries a sealed result adoption may still

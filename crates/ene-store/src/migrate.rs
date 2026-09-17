@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 27;
+const CURRENT_VERSION: i64 = 28;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -66,9 +66,30 @@ scope_assoc TEXT NULL,
 scope_folder TEXT NULL,
 scope_save_target TEXT NULL
 );
+CREATE TABLE deletion_operation (
+operation_id TEXT PRIMARY KEY,
+sweep INTEGER NOT NULL CHECK (sweep > 0),
+phase TEXT NOT NULL CHECK (phase IN ('active', 'held', 'finalizing', 'completed')),
+purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
+started_at TEXT NOT NULL,
+hold_reason TEXT NULL CHECK (hold_reason IN ('unavailable', 'generation_exhausted')),
+CHECK ((phase = 'held') = (hold_reason IS NOT NULL))
+);
+CREATE TABLE deletion_search_material (
+operation_id TEXT PRIMARY KEY,
+exact_text TEXT NOT NULL CHECK (length(exact_text) > 0)
+);
+CREATE TABLE deletion_semantic_hint (
+operation_id TEXT NOT NULL,
+ordinal INTEGER NOT NULL,
+material TEXT NOT NULL,
+PRIMARY KEY (operation_id, ordinal)
+);
 CREATE TABLE erasure_condition (
 operation_id TEXT NOT NULL,
-sweep INTEGER NOT NULL,
+sweep INTEGER NOT NULL CHECK (sweep > 0),
+opened_at TEXT NOT NULL,
+closed_at TEXT NULL,
 PRIMARY KEY (operation_id, sweep)
 );
 CREATE TABLE erasure_condition_source (
@@ -341,7 +362,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 28] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 29] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

@@ -2,9 +2,9 @@
 //! erasure-condition store, the AU14 `data_use` coverage compare, and the
 //! durable attempt source correlation.
 //!
-//! Stage 4 has no deletion-operation producer, so these tests seed the
-//! canonical tables directly — the same rows the Stage 6 producer will write.
-//! No production producer exists for tests.
+//! Historical/corrupt-state fixtures seed canonical lifecycle rows directly.
+//! Admission, atomicity and restart are tested through the owner producer in
+//! `preservation`; these tests pin the existing AU14 consumer behavior.
 
 use super::*;
 use ene_preservation::{DeletionOperationId, DeletionSweepGeneration, ErasureConditionRef};
@@ -76,9 +76,16 @@ fn seed_condition(store: &Store, sweep: u64, sources: &[RawId]) {
     };
     let operation_text = crate::codec::encode_id(condition.operation.as_raw());
     let sweep_raw = i64::try_from(condition.sweep.as_u64()).expect("the sweep fixture fits i64");
+    guard.execute("INSERT INTO deletion_operation (operation_id,sweep,phase,purpose,started_at) VALUES (?1,?2,'active','privacy','2026-09-17T00:00:00Z')", params![operation_text,sweep_raw]).unwrap();
     guard
         .execute(
-            "INSERT INTO erasure_condition (operation_id, sweep) VALUES (?1, ?2)",
+            "INSERT INTO deletion_search_material (operation_id,exact_text) VALUES (?1,'fixture')",
+            [&operation_text],
+        )
+        .unwrap();
+    guard
+        .execute(
+            "INSERT INTO erasure_condition (operation_id, sweep, opened_at) VALUES (?1, ?2, '2026-09-17T00:00:00Z')",
             params![operation_text, sweep_raw],
         )
         .expect("the condition row must seed");

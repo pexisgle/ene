@@ -29,6 +29,7 @@ mod learning;
 mod migrate;
 mod permission;
 mod presence;
+mod preservation;
 mod task;
 #[cfg(test)]
 mod tests;

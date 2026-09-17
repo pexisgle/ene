@@ -336,6 +336,7 @@ dependencies = [
  "ene-plugin-ipc",
  "ene-presence",
  "ene-presentation",
+ "ene-preservation",
  "ene-primitive",
  "ene-store",
  "ene-task",
@@ -447,6 +448,8 @@ name = "ene-preservation"
 version = "0.1.0"
 dependencies = [
  "ene-primitive",
+ "thiserror",
+ "zeroize",
 ]
 
 [[package]]

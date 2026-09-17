@@ -635,28 +635,7 @@ async fn revalidation_holds_answer_in_order_without_writes() {
 
     // DataUseHeld: the instruction source is covered by a durable erasure
     // condition.
-    {
-        let guard = match store.conn.lock() {
-            Ok(locked) => locked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard
-            .execute(
-                "INSERT INTO erasure_condition (operation_id, sweep) VALUES (?1, ?2)",
-                params![crate::codec::encode_id(RawId::new()), 1_i64,],
-            )
-            .expect("the condition must insert");
-        guard
-            .execute(
-                "INSERT INTO erasure_condition_source (operation_id, sweep, source) VALUES (?1, ?2, ?3)",
-                params![
-                    crate::codec::encode_id(RawId::new()),
-                    1_i64,
-                    crate::codec::encode_id(message),
-                ],
-            )
-            .expect("the coverage must insert");
-    }
+    super::preservation::admit(&store, "resume fixture", vec![message]).await;
     let outcome = commit(
         &store,
         resume_premise(&record, history_instruction(message, companion), ready()),
