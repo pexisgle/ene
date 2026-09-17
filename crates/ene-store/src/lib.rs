@@ -2,7 +2,10 @@
 //! [`ene_presence`], [`ene_companion`], [`ene_permission`],
 //! [`ene_credential`], [`ene_inference`], [`ene_learning`], [`ene_task`], and
 //! [`ene_action`]; those owners never depend on this crate and program against
-//! their own traits.
+//! their own traits. It also implements the preservation-owned local-erasure
+//! participants for the owners whose durable master lives here
+//! ([`TaskErasureParticipant`], [`ActionErasureParticipant`], and
+//! [`InferenceErasureParticipant`]); the Host composition registers them.
 //!
 //! Concurrency shape: the connection is `Send` but not `Sync`, so an
 //! `Arc<std::sync::Mutex<Connection>>` shares it across callers. Each
@@ -36,7 +39,10 @@ mod task;
 mod tests;
 
 pub use companion::UndeliveredExcerpt;
-pub use erasure::{CompanionErasureParticipant, ERASURE_SCAN_ROWS, LearningErasureParticipant};
+pub use erasure::{
+    ActionErasureParticipant, CompanionErasureParticipant, ERASURE_SCAN_ROWS,
+    InferenceErasureParticipant, LearningErasureParticipant, TaskErasureParticipant,
+};
 
 /// Messages carry the short backend cause only. Paths are non-secret but are
 /// kept out of messages for operational brevity.

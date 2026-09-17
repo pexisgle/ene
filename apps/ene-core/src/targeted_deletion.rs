@@ -394,14 +394,39 @@ mod tests {
     use super::*;
     use crate::serve::{CredStore, HostHandle};
     use crate::test_support::memory_handle;
-    use ene_credential::MemoryCredentialStore;
+    use ene_action::{
+        ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, ActionStartOutcome,
+        AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds, OperationKind, RealTargetRef,
+    };
+    use ene_companion::{TaskFact, UndeliveredSource};
+    use ene_credential::{CredentialScrubber, CredentialSetRevision, MemoryCredentialStore};
+    use ene_inference::{
+        AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
+        TaskAgentAttemptPremise, UsageFact, UsageRepository as _, UsageSource,
+    };
+    use ene_permission::{
+        CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRevision, ConsumerKind,
+        IntentFingerprint, IntentOutcomeRepository as _, IntentResolution, PurposeKind,
+    };
     use ene_preservation::{
         DeletionPurpose, DeletionSearchMaterial, DeletionSweepGeneration, ErasureParticipant,
         MechanicalDeletionTarget, ParticipantCompletionFact, ParticipantCompletionStatus,
         ParticipantHoldClass, ParticipantOwnerRef, ParticipantProgress,
         StartTargetedDeletionCommand, StartTargetedDeletionOutcome, TargetedDeletionTarget,
     };
-    use ene_primitive::{RawId, WallClockWithTz};
+    use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
+    use ene_task::{
+        AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
+        DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskAgentInference,
+        TaskAgentInferenceError, TaskAgentInferenceOutcome, TaskAgentInferencePremise,
+        TaskAgentOutput, TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCommitOutcome,
+        TaskCommitPremise, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
+        TaskCreationPremise, TaskId, TaskInstructionSource, TaskInstructionSourceError,
+        TaskInstructionSourceRecord, TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
+        TaskReportSourceRef, TaskRepository as _, TaskResultId, WorkspaceAssocId,
+        WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
+        orchestrate_result_arrival, orchestrate_task_agent_turn,
+    };
 
     /// One scripted participant that records how often it was demanded and
     /// whether its demand scope was body-free. A test may change the answer
@@ -1002,11 +1027,12 @@ mod tests {
         let Some((handle, _dir)) = memory_handle("targeted-deletion-unsupported").await else {
             panic!("the host must open");
         };
-        // This test observes the fan-out's unsupported-hold path itself: the
-        // built-in implementations are removed so every required owner is
-        // demanded without one.
-        handle.reset_deletion_participants_for_tests();
-        let required = handle.required_deletion_participants();
+        // The semantic owners the current composition implements are
+        // registered at open, so the unregistered-owner contract is pinned
+        // with a holder-driven participant that no composition registers
+        // implicitly: a Client incarnation. The operation must still require
+        // it, hold on it, and never read the hold as completion.
+        let required = vec![ParticipantOwnerRef::ClientIncarnation(RawId::new())];
         let current = admit(&handle, "unsupported-target", required.clone()).await;
         let outcome = handle
             .drive_targeted_deletion(TargetedDeletionPass::default())
@@ -1282,5 +1308,540 @@ mod tests {
                 Err(CoreError::Deletion(_))
             ));
         }
+    }
+
+    // --- Stage 6 A3b: the real Task / Action / Inference participants ------
+
+    /// One host-side fixture carrying the same target in every current
+    /// production surface of the three owners.
+    struct TargetSurface {
+        task: TaskRef,
+        delegation: DelegationId,
+        result: TaskResultId,
+        done: ActionAttemptId,
+        unknown: ActionAttemptId,
+        ticket: InferenceTicketId,
+    }
+
+    fn target_folder(target: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("ene-a3b-{target}"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Seeds the whole Task / Action / Inference surface through the
+    /// canonical producers, in execution order: attempts (and the inference
+    /// claim) before the result arrival seals the delegation.
+    async fn seed_target_surface(handle: &HostHandle, target: &str) -> TargetSurface {
+        let folder = target_folder(target);
+        let save_target = format!("{folder}/out");
+        let workspace = WorkspaceAssociationPremise {
+            assoc: WorkspaceAssocId::generate(),
+            need: WorkspaceNeedRef {
+                folder: WorkspaceFolderRef {
+                    path: folder.clone(),
+                },
+                save_target: Some(WorkspaceFolderRef {
+                    path: save_target.clone(),
+                }),
+            },
+        };
+        let assoc = workspace.assoc;
+        let source = RawId::new();
+        let created = handle
+            .store
+            .create_task(TaskCreationPremise {
+                task: TaskId::generate(),
+                purpose: TaskPurpose {
+                    text: format!("keep {target} private"),
+                },
+                entry: TaskContextEntryId::generate(),
+                origin: TaskContextOrigin {
+                    kind: TaskContextOriginKind::OwnerConversation,
+                    source,
+                },
+                acquired_at: WallClockWithTz::now(),
+                assignee: AssigneeRef {
+                    companion: RawId::new(),
+                },
+                workspace: Some(workspace),
+            })
+            .await
+            .expect("the task must commit");
+        let advanced = handle
+            .store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose: Some(TaskPurposeAdoptionPremise {
+                    purpose: TaskPurpose {
+                        text: format!("now {target} is adopted"),
+                    },
+                    origin: TaskContextOrigin {
+                        kind: TaskContextOriginKind::OwnerConversation,
+                        source: RawId::new(),
+                    },
+                    acquired_at: WallClockWithTz::now(),
+                }),
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
+            })
+            .await
+            .expect("the steering must commit");
+        let TaskCommitOutcome::CommittedAs(current) = advanced else {
+            panic!("the steering must commit, got {advanced:?}");
+        };
+        let delegation = DelegationId::generate();
+        assert!(matches!(
+            handle
+                .store
+                .create_delegation(DelegationCreationPremise {
+                    delegation,
+                    task: current,
+                    agent: TaskAgentEphemeralId::generate(),
+                    scope_copy: DelegationScope {
+                        workspace: Some(DelegatedWorkspace {
+                            assoc,
+                            folder: WorkspaceFolderRef {
+                                path: folder.clone(),
+                            },
+                            save_target: Some(WorkspaceFolderRef {
+                                path: save_target.clone(),
+                            }),
+                        }),
+                    },
+                })
+                .await
+                .expect("the delegation must commit"),
+            DelegationOutcome::Delegated(_)
+        ));
+        let done = ActionAttemptId::generate();
+        assert_eq!(
+            handle
+                .store
+                .insert_attempt_if_current(AttemptCommitPremise {
+                    attempt: done,
+                    delegation: delegation.as_raw(),
+                    task: current.task.as_raw(),
+                    task_revision: RevisionInner::from_u64(current.revision.as_u64()),
+                    workspace: assoc.as_raw(),
+                    real_target: RealTargetRef::from_canonical_path(format!(
+                        "{folder}/{target}.md"
+                    )),
+                    operation: OperationKind::Create,
+                    relied_evaluation: RawId::new(),
+                })
+                .await
+                .unwrap(),
+            ActionStartOutcome::Started
+        );
+        assert_eq!(
+            handle
+                .store
+                .compare_and_set_certainty(
+                    done,
+                    ActionCertainty::Unknown,
+                    ActionCertainty::ConfirmedSuccess,
+                    EffectGrounds::ObservedAtTarget,
+                )
+                .await
+                .unwrap(),
+            CertaintyUpdateOutcome::Updated
+        );
+        let unknown = ActionAttemptId::generate();
+        assert_eq!(
+            handle
+                .store
+                .insert_attempt_if_current(AttemptCommitPremise {
+                    attempt: unknown,
+                    delegation: delegation.as_raw(),
+                    task: current.task.as_raw(),
+                    task_revision: RevisionInner::from_u64(current.revision.as_u64()),
+                    workspace: assoc.as_raw(),
+                    real_target: RealTargetRef::from_canonical_path(format!(
+                        "{folder}/{target}-open.md"
+                    )),
+                    operation: OperationKind::Read,
+                    relied_evaluation: RawId::new(),
+                })
+                .await
+                .unwrap(),
+            ActionStartOutcome::Started
+        );
+        let assigned = handle
+            .store
+            .assign_with_intent(
+                None,
+                ConsentRecord {
+                    capability: CapabilityKind::Dialogue,
+                    id: String::from("consent-1"),
+                    rev: ConsentRevision::from_u64(1),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    credential_id: String::from("openai:main"),
+                },
+                IntentFingerprint {
+                    intent_id: RawId::new().as_uuid().to_string(),
+                    kind: String::from("assign"),
+                    target: String::from("consent:a3b-fixture"),
+                    base: String::from("consent-a3b-fixture"),
+                    rationale_origin: String::from("management-surface"),
+                    rationale_quote: None,
+                },
+            )
+            .await
+            .expect("the consent fixture must commit");
+        assert!(matches!(
+            assigned,
+            IntentResolution::Decided(ConsentCommitOutcome::Committed { .. })
+        ));
+        let ticket = InferenceTicketId(RawId::new());
+        assert_eq!(
+            handle
+                .store
+                .begin_inference_attempt(InferenceAttempt {
+                    ticket,
+                    consumer: ConsumerKind::TaskAgent,
+                    capability: CapabilityKind::Dialogue,
+                    purpose: PurposeKind::TaskAgentTurn,
+                    expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+                    expected_credential_set: CredentialSetRevision::initial(),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    task_agent: Some(TaskAgentAttemptPremise {
+                        delegation: delegation.as_raw(),
+                        task: current.task.as_raw(),
+                        task_revision: RevisionInner::from_u64(current.revision.as_u64()),
+                        data_use: vec![source],
+                    }),
+                    pricing: None,
+                })
+                .await,
+            Ok(AttemptBeginOutcome::Started)
+        );
+        handle
+            .store
+            .record_usage(UsageFact {
+                ticket,
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                input_tokens: Some(200),
+                cached_input_tokens: Some(50),
+                output_tokens: Some(80),
+                source: UsageSource::Reported,
+            })
+            .await
+            .expect("the usage settlement must commit");
+        let result = orchestrate_result_arrival(
+            &handle.store,
+            delegation,
+            TaskAgentOutput::new(format!("final report mentions {target}")),
+        )
+        .await
+        .expect("the result arrival must commit");
+        TargetSurface {
+            task: current,
+            delegation,
+            result: result.result,
+            done,
+            unknown,
+            ticket,
+        }
+    }
+
+    /// Counts stored values of one owner column that still contain the exact
+    /// target. This is the mechanical remainder check on the real database
+    /// file, independent of any repository read or cache.
+    fn matching_cells(dir: &std::path::Path, table: &str, column: &str, target: &str) -> i64 {
+        let conn = rusqlite::Connection::open(dir.join("app.db"))
+            .expect("the store file must open for the remainder probe");
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table} WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
+            ),
+            rusqlite::params![target],
+            |row| row.get(0),
+        )
+        .expect("the remainder probe must read")
+    }
+
+    /// Drives the fan-out until the local owners of the fixture verify.
+    async fn drive_until_local_owners_verify(
+        handle: &HostHandle,
+        expected: u32,
+    ) -> TargetedDeletionPassOutcome {
+        for _ in 0..8 {
+            let outcome = handle
+                .drive_targeted_deletion(TargetedDeletionPass::default())
+                .await
+                .unwrap();
+            if outcome.verified == expected {
+                return outcome;
+            }
+        }
+        panic!("the bounded participants must settle");
+    }
+
+    /// A port that records the assembled logical input instead of dispatching.
+    struct RecordingPort {
+        prompt: StdMutex<Option<String>>,
+    }
+
+    impl RecordingPort {
+        fn new() -> Self {
+            Self {
+                prompt: StdMutex::new(None),
+            }
+        }
+
+        fn prompt(&self) -> String {
+            self.prompt
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the port must have been called")
+        }
+    }
+
+    impl TaskAgentInference for RecordingPort {
+        fn input_budget(&self) -> usize {
+            ene_inference::MAX_INPUT_CHARS
+        }
+
+        async fn infer(
+            &self,
+            premise: TaskAgentInferencePremise,
+        ) -> Result<TaskAgentInferenceOutcome, TaskAgentInferenceError> {
+            *self.prompt.lock().unwrap() = Some(premise.prompt.text().to_owned());
+            Ok(TaskAgentInferenceOutcome::Produced {
+                output: TaskAgentOutput::new(String::from("captured")),
+                adoption_consent_current: true,
+            })
+        }
+    }
+
+    /// The fixture Tasks adopt no instruction entry, so no body is read; a
+    /// call would mean the fixture drifted.
+    struct NoInstructions;
+
+    impl TaskInstructionSource for NoInstructions {
+        async fn load_owner_instruction(
+            &self,
+            _origin: TaskContextOrigin,
+        ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn local_owners_erase_the_current_surface_and_keep_objective_facts() {
+        let Some((handle, dir)) = memory_handle("targeted-deletion-a3b-e2e").await else {
+            panic!("the host must open");
+        };
+        let target = "e2e-target-1587";
+        let fixture = seed_target_surface(&handle, target).await;
+        let before_attempt = handle
+            .store
+            .load_inference_attempt(fixture.ticket)
+            .await
+            .unwrap()
+            .expect("the claimed attempt exists");
+        let before_usage = handle
+            .store
+            .load_usage_cost(fixture.ticket)
+            .await
+            .unwrap()
+            .expect("the settled usage exists");
+
+        // Positive control: every body-bearing owner column carries the
+        // target before the sweep.
+        let columns = [
+            ("task", "purpose_text"),
+            ("task_revision", "purpose_text"),
+            ("task_result", "body"),
+            ("workspace_assoc", "folder"),
+            ("workspace_assoc", "save_target"),
+            ("delegation", "scope_folder"),
+            ("delegation", "scope_save_target"),
+            ("action_attempt", "real_target"),
+        ];
+        for (table, column) in columns {
+            assert!(
+                matching_cells(dir.path(), table, column, target) > 0,
+                "{table}.{column} must carry the target before erasure"
+            );
+        }
+
+        let current = admit(
+            &handle,
+            target,
+            vec![
+                ParticipantOwnerRef::Task,
+                ParticipantOwnerRef::Action,
+                ParticipantOwnerRef::Inference,
+            ],
+        )
+        .await;
+        let outcome = drive_until_local_owners_verify(&handle, 3).await;
+        assert_eq!(outcome.verified, 3);
+        assert_eq!(outcome.held, 0);
+        for owner in [
+            ParticipantOwnerRef::Task,
+            ParticipantOwnerRef::Action,
+            ParticipantOwnerRef::Inference,
+        ] {
+            let record = participant_for(&handle.store, current.operation, owner).await;
+            assert!(record.progress.is_verified(), "{owner:?} must verify");
+            assert_eq!(record.remainder_count, 0);
+        }
+
+        // Mechanical remainder: zero on the real database file.
+        for (table, column) in columns {
+            assert_eq!(
+                matching_cells(dir.path(), table, column, target),
+                0,
+                "{table}.{column} must carry no remainder"
+            );
+        }
+
+        // Objective facts survive: the execution fact, the certainty, the
+        // Task lifecycle, and the usage attribution.
+        let done = handle
+            .store
+            .load_attempt(fixture.done)
+            .await
+            .unwrap()
+            .expect("the completed attempt stays");
+        assert_eq!(done.certainty, ActionCertainty::ConfirmedSuccess);
+        assert_eq!(done.grounds, Some(EffectGrounds::ObservedAtTarget));
+        assert!(
+            std::path::Path::new(done.real_target.as_path()).is_absolute(),
+            "the erased locator stays a readable absolute path"
+        );
+        let unknown = handle
+            .store
+            .load_attempt(fixture.unknown)
+            .await
+            .unwrap()
+            .expect("the unknown attempt stays");
+        assert_eq!(
+            unknown.certainty,
+            ActionCertainty::Unknown,
+            "deletion never downgrades an unknown effect to not executed"
+        );
+        let task = handle
+            .store
+            .load_task(fixture.task.task)
+            .await
+            .unwrap()
+            .expect("the task stays");
+        assert_eq!(task.task.reference, fixture.task);
+        assert_eq!(task.task.progress, ene_task::TaskProgress::InProgress);
+        assert!(!task.revision.purpose_text.text.contains(target));
+        assert_eq!(
+            handle
+                .store
+                .load_inference_attempt(fixture.ticket)
+                .await
+                .unwrap(),
+            Some(before_attempt),
+            "the ticket correlation is untouched"
+        );
+        assert_eq!(
+            handle.store.load_usage_cost(fixture.ticket).await.unwrap(),
+            Some(before_usage),
+            "settled usage is neither zeroed nor double-counted"
+        );
+
+        // The report readers and the derived presentation excerpt read the
+        // erased owner rows, never a stale snapshot.
+        let result_body = handle
+            .store
+            .load_report_source_bounded(TaskReportSourceRef::ResultBody(fixture.result), 0, 4096)
+            .await
+            .unwrap()
+            .expect("the recorded result stays");
+        assert!(!result_body.text.contains(target));
+        let excerpt = handle
+            .store
+            .load_undelivered_excerpt(
+                UndeliveredSource::TaskRecord {
+                    task: fixture.task.task.as_raw(),
+                    fact: TaskFact::ActionAttempt {
+                        attempt: fixture.done.as_raw(),
+                        certainty: ene_companion::ActionCertaintyWire::ConfirmedSuccess,
+                    },
+                },
+                4096,
+            )
+            .await
+            .unwrap()
+            .expect("the attempt derives a presentation excerpt");
+        assert!(
+            !excerpt.text.contains(target),
+            "the excerpt derives from the erased attempt row: {}",
+            excerpt.text
+        );
+    }
+
+    #[tokio::test]
+    async fn the_task_agent_prompt_is_rebuilt_from_erased_rows() {
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-a3b-prompt").await else {
+            panic!("the host must open");
+        };
+        let target = "e2e-prompt-target-1587";
+        let fixture = seed_target_surface(&handle, target).await;
+        let port = RecordingPort::new();
+        let scrubber = CredentialScrubber {
+            refs: &handle.store,
+            store: &handle.cred_store,
+        };
+        let before = orchestrate_task_agent_turn(
+            &handle.store,
+            &NoInstructions,
+            &port,
+            &scrubber,
+            TaskAgentTurnPremise {
+                delegation: fixture.delegation,
+                exchanges: Vec::new(),
+            },
+        )
+        .await
+        .expect("the turn must answer");
+        assert!(matches!(before, TaskAgentTurnOutcome::Produced(_)));
+        assert!(
+            port.prompt().contains(target),
+            "positive control: the assembled prompt carries the Task-owned purpose"
+        );
+
+        let current = admit(
+            &handle,
+            target,
+            vec![ParticipantOwnerRef::Task, ParticipantOwnerRef::Action],
+        )
+        .await;
+        let outcome = drive_until_local_owners_verify(&handle, 2).await;
+        assert_eq!(outcome.verified, 2);
+        let _ = current;
+
+        let after = orchestrate_task_agent_turn(
+            &handle.store,
+            &NoInstructions,
+            &port,
+            &scrubber,
+            TaskAgentTurnPremise {
+                delegation: fixture.delegation,
+                exchanges: Vec::new(),
+            },
+        )
+        .await
+        .expect("the post-erasure turn must answer");
+        assert!(matches!(after, TaskAgentTurnOutcome::Produced(_)));
+        let prompt = port.prompt();
+        assert!(
+            !prompt.contains(target),
+            "the prompt is assembled from the erased rows, got {prompt}"
+        );
+        assert!(prompt.contains("[erased]"));
     }
 }

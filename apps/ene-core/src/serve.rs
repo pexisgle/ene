@@ -688,21 +688,47 @@ impl HostHandle {
             #[cfg(all(test, unix))]
             receipt_expiry_runs: std::sync::atomic::AtomicUsize::new(0),
         };
-        // The composition registers the built-in local-erasure implementations
-        // for the owners the store serves (lifecycle §9): a reopening
-        // composition re-registers before any drive, so a restart can never
-        // turn a missing implementation into completion.
-        handle
-            .register_deletion_participant(Arc::new(ene_store::CompanionErasureParticipant::new(
-                handle.store.clone(),
-            )))
-            .map_err(|error| CoreError::Deletion(error.to_string()))?;
-        handle
-            .register_deletion_participant(Arc::new(ene_store::LearningErasureParticipant::new(
-                handle.store.clone(),
-            )))
-            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        // The composition root owns the concrete participant mapping: the
+        // current product surface's local owners are registered before the
+        // handle is handed out, so a fan-out never sees an admitted
+        // requirement whose implementation this process simply forgot to add.
+        handle.install_local_erasure_participants()?;
         Ok(handle)
+    }
+
+    /// Registers the local-erasure implementations of the current product
+    /// surface (lifecycle §9).
+    ///
+    /// This is the composition seam: `ene-preservation` owns the trait and
+    /// never depends on a concrete participant crate, and each implementation
+    /// lives with its owner's durable master. An owner without an
+    /// implementation stays an explicit unsupported hold; this method only
+    /// adds the implementations that exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Deletion`] if an owner already has an
+    /// implementation, which would make the fan-out nondeterministic.
+    fn install_local_erasure_participants(&self) -> Result<(), CoreError> {
+        use std::sync::Arc;
+
+        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 5] = [
+            Arc::new(ene_store::CompanionErasureParticipant::new(
+                self.store.clone(),
+            )),
+            Arc::new(ene_store::LearningErasureParticipant::new(
+                self.store.clone(),
+            )),
+            Arc::new(ene_store::TaskErasureParticipant::new(self.store.clone())),
+            Arc::new(ene_store::ActionErasureParticipant::new(self.store.clone())),
+            Arc::new(ene_store::InferenceErasureParticipant::new(
+                self.store.clone(),
+            )),
+        ];
+        for participant in participants {
+            self.register_deletion_participant(participant)?;
+        }
+        Ok(())
     }
 
     /// Startup credential boundary: sweeps every registered pinned value out

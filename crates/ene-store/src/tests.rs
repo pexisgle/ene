@@ -7272,6 +7272,7 @@ mod agent;
 mod cancel;
 mod deletion_request;
 mod erasure;
+mod participant_erasure;
 mod presence;
 mod preservation;
 mod report_reads;
