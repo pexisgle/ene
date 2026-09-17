@@ -540,6 +540,7 @@ async fn claim(
             expected_credential_set: CredentialSetRevision::initial(),
             provider: String::from("acme"),
             model: String::from("dialogue-1"),
+            data_use: data_use.clone(),
             task_agent: Some(TaskAgentAttemptPremise {
                 delegation: delegation.as_raw(),
                 task: task.task.as_raw(),

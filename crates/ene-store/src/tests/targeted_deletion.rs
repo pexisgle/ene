@@ -145,6 +145,7 @@ fn change(
     MemoryChangeCommit {
         summary: Some(summary.clone()),
         secret_premise: None,
+        claim: None,
         change: MemoryChange {
             target,
             scope: LearningScope::companion(summary.scope.companion_id()),

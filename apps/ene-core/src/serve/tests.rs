@@ -3694,6 +3694,7 @@ async fn startup_reconciliation_settles_orphaned_usage_reservations() {
             expected_credential_set: ene_credential::CredentialSetRevision::initial(),
             provider: String::from("openai"),
             model: String::from("gpt-4o"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: Some(pricing),
             usage_estimate: Some(ene_inference::cost::UsageEstimate {

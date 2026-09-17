@@ -20,6 +20,7 @@ use ene_task::{
 
 /// One Task Agent attempt premise for the sealed/terminal claim checks.
 fn task_agent_claim_for(delegation: DelegationId, task: TaskRef) -> InferenceAttempt {
+    let data_use = vec![RawId::new()];
     InferenceAttempt {
         ticket: InferenceTicketId(RawId::new()),
         consumer: ConsumerKind::TaskAgent,
@@ -29,11 +30,12 @@ fn task_agent_claim_for(delegation: DelegationId, task: TaskRef) -> InferenceAtt
         expected_credential_set: CredentialSetRevision::initial(),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
+        data_use: data_use.clone(),
         task_agent: Some(TaskAgentAttemptPremise {
             delegation: delegation.as_raw(),
             task: task.task.as_raw(),
             task_revision: RevisionInner::from_u64(task.revision.as_u64()),
-            data_use: vec![RawId::new()],
+            data_use,
         }),
         pricing: None,
         usage_estimate: None,

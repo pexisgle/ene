@@ -498,6 +498,16 @@ pub struct InferenceAttempt {
     /// claim verifies it against the delegation row and the current Task in
     /// the same transaction.
     pub task_agent: Option<TaskAgentAttemptPremise>,
+    /// Ordered canonical source correlation of the logical input this attempt
+    /// sends, in input order. A Task Agent attempt carries its premise's
+    /// `data_use` verbatim; a Learning formation carries the transcript
+    /// message identities and the current Memory identities its prompt read;
+    /// dialogue carries no correlation in this slice. The values are opaque
+    /// [`RawId`]s, never bodies or hashes. The claim compares every source
+    /// against the current erasure conditions inside its transaction, and a
+    /// deletion admission may associate the claimed attempt with its interval
+    /// so a result arriving after completion is still recognized as stale.
+    pub data_use: Vec<RawId>,
     /// Reviewed pricing snapshot resolved for this route immediately before
     /// the claim (`usage-cost-cap` §9), or `None` when the first-party
     /// catalog has no reviewed rate for the route. The claim publishes the
@@ -531,6 +541,10 @@ pub struct InferenceAttemptRecord {
     /// Task Agent correlation, present iff the consumer is
     /// [`ConsumerKind::TaskAgent`]; a record that disagrees is never composed.
     pub task_agent: Option<TaskAgentAttemptPremise>,
+    /// Ordered canonical source correlation read back from the attempt. For a
+    /// Task Agent attempt it equals
+    /// [`TaskAgentAttemptPremise::data_use`].
+    pub data_use: Vec<RawId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -623,6 +637,7 @@ pub struct AdmissionRequest {
     consent: ConsentRecord,
     credential: CredentialRef,
     task_agent: Option<TaskAgentAttemptPremise>,
+    data_use: Vec<RawId>,
 }
 
 impl AdmissionRequest {
@@ -648,6 +663,7 @@ impl AdmissionRequest {
                         candidate: self.candidate,
                         authorization,
                         task_agent: self.task_agent,
+                        data_use: self.data_use,
                     }))
                 } else {
                     Admission::Declined(NotSentReason::EvaluationConsumed)
@@ -687,10 +703,13 @@ pub async fn prepare_dialogue_admission(
         consent,
         credential_refs,
         credential_store,
-        ConsumerKind::CompanionDialogue,
-        CapabilityKind::Dialogue,
-        PurposeKind::DialogueResponse,
-        None,
+        AdmissionBinding {
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            task_agent: None,
+            data_use: Vec::new(),
+        },
     )
     .await
 }
@@ -701,6 +720,11 @@ pub async fn prepare_dialogue_admission(
 /// Learning is a distinct consumer and purpose: it shares the current
 /// provider assignment, but never presents itself as dialogue, so consent
 /// accounting and the closed-world allowlist can tell the two uses apart.
+/// `data_use` is the formation's ordered canonical source correlation (the
+/// transcript message identities and the Memory identities the prompt read);
+/// it rides the attempt claim, so a condition that committed first holds the
+/// send and a deletion admission can associate an already-claimed formation
+/// with the interval its provenance belongs to.
 ///
 /// The returned request still needs [`AdmissionRequest::authorize`]; this
 /// function performs no authorization and holds no lock.
@@ -708,15 +732,19 @@ pub async fn prepare_learning_admission(
     consent: &impl ConsentRepository,
     credential_refs: &impl CredentialRefRepository,
     credential_store: &impl CredentialStore,
+    data_use: Vec<RawId>,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
     prepare_admission(
         consent,
         credential_refs,
         credential_store,
-        ConsumerKind::CompanionLearning,
-        CapabilityKind::Learning,
-        PurposeKind::MemoryFormation,
-        None,
+        AdmissionBinding {
+            consumer: ConsumerKind::CompanionLearning,
+            capability: CapabilityKind::Learning,
+            purpose: PurposeKind::MemoryFormation,
+            task_agent: None,
+            data_use,
+        },
     )
     .await
 }
@@ -739,16 +767,29 @@ pub async fn prepare_task_agent_admission(
     credential_store: &impl CredentialStore,
     task_agent: TaskAgentAttemptPremise,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
+    let data_use = task_agent.data_use.clone();
     prepare_admission(
         consent,
         credential_refs,
         credential_store,
-        ConsumerKind::TaskAgent,
-        CapabilityKind::Dialogue,
-        PurposeKind::TaskAgentTurn,
-        Some(task_agent),
+        AdmissionBinding {
+            consumer: ConsumerKind::TaskAgent,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::TaskAgentTurn,
+            task_agent: Some(task_agent),
+            data_use,
+        },
     )
     .await
+}
+
+/// The consumer binding and durable correlation of one admission.
+struct AdmissionBinding {
+    consumer: ConsumerKind,
+    capability: CapabilityKind,
+    purpose: PurposeKind,
+    task_agent: Option<TaskAgentAttemptPremise>,
+    data_use: Vec<RawId>,
 }
 
 /// Shared preparation for one consumer's admission.
@@ -760,11 +801,15 @@ async fn prepare_admission(
     consent: &impl ConsentRepository,
     credential_refs: &impl CredentialRefRepository,
     credential_store: &impl CredentialStore,
-    consumer: ConsumerKind,
-    capability: CapabilityKind,
-    purpose: PurposeKind,
-    task_agent: Option<TaskAgentAttemptPremise>,
+    binding: AdmissionBinding,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
+    let AdmissionBinding {
+        consumer,
+        capability,
+        purpose,
+        task_agent,
+        data_use,
+    } = binding;
     let record = consent.load_current(capability).await.map_err(|_| {
         InferenceTechnicalError::StorageUnavailable {
             reason: String::from("load consent"),
@@ -800,6 +845,7 @@ async fn prepare_admission(
         consent: record,
         credential,
         task_agent,
+        data_use,
     })))
 }
 
@@ -818,6 +864,7 @@ pub struct AuthorizedInference {
     candidate: InferenceUseCandidate,
     authorization: PermissionEvaluationId,
     task_agent: Option<TaskAgentAttemptPremise>,
+    data_use: Vec<RawId>,
 }
 
 impl AuthorizedInference {
@@ -831,6 +878,12 @@ impl AuthorizedInference {
     #[must_use]
     pub fn task_agent_premise(&self) -> Option<&TaskAgentAttemptPremise> {
         self.task_agent.as_ref()
+    }
+
+    /// Ordered canonical source correlation carried through the claim.
+    #[must_use]
+    pub fn data_use(&self) -> &[RawId] {
+        &self.data_use
     }
 }
 
@@ -929,8 +982,13 @@ pub trait InferenceExecutor: Send + Sync {
     /// Resolves and authorizes one learning-formation use without sending.
     ///
     /// A distinct consumer/purpose from dialogue: the result is judged by
-    /// Learning, never presented as a dialogue response.
-    async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError>;
+    /// Learning, never presented as a dialogue response. `data_use` is the
+    /// formation's ordered canonical source correlation; it rides the attempt
+    /// claim so a current condition holds the send before any provider byte.
+    async fn admit_learning(
+        &self,
+        data_use: Vec<RawId>,
+    ) -> Result<Admission, InferenceTechnicalError>;
 
     /// Resolves and authorizes one Task Agent turn without sending.
     ///
@@ -1033,6 +1091,7 @@ pub async fn dispatch_authorized(
     let credential_set = prompt.credential_set();
     let credential = authorized.credential;
     let task_agent = authorized.task_agent;
+    let data_use = authorized.data_use;
     // The pricing snapshot is resolved right before the claim (usage-cost-cap
     // §9): the rate this call runs under is fixed for the ticket and a later
     // catalog revision only affects calls admitted after it. An unpriced
@@ -1072,6 +1131,7 @@ pub async fn dispatch_authorized(
             provider: provider.clone(),
             model: model.clone(),
             task_agent,
+            data_use,
             pricing,
             usage_estimate,
         })
@@ -1822,6 +1882,7 @@ mod dispatch_tests {
             },
             authorization: PermissionEvaluationId(RawId::new()),
             task_agent: None,
+            data_use: Vec::new(),
         }
     }
 
@@ -1836,6 +1897,7 @@ mod dispatch_tests {
 
     fn authorized_task_agent(premise: TaskAgentAttemptPremise) -> AuthorizedInference {
         let consent = record(1);
+        let data_use = premise.data_use.clone();
         AuthorizedInference {
             ticket: InferenceTicketId(RawId::new()),
             consent: (consent.id, consent.rev),
@@ -1851,6 +1913,7 @@ mod dispatch_tests {
             },
             authorization: PermissionEvaluationId(RawId::new()),
             task_agent: Some(premise),
+            data_use,
         }
     }
 
@@ -2681,7 +2744,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let consent = FixedConsent(Some(record_for(CapabilityKind::Learning)));
         let refs = FixedRefs(vec![credential]);
-        let prepared = prepare_learning_admission(&consent, &refs, &credential_store).await;
+        let prepared =
+            prepare_learning_admission(&consent, &refs, &credential_store, Vec::new()).await;
         let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
             panic!("a complete setup must prepare a learning admission");
         };
@@ -2699,7 +2763,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
         let refs = FixedRefs(vec![credential]);
-        let prepared = prepare_learning_admission(&consent, &refs, &credential_store).await;
+        let prepared =
+            prepare_learning_admission(&consent, &refs, &credential_store, Vec::new()).await;
         assert_eq!(
             prepared,
             Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
@@ -2772,7 +2837,8 @@ mod admission_tests {
         let (credential_store, _) = provisioned();
         let refs = FixedRefs(Vec::new());
         let prepared =
-            prepare_learning_admission(&FixedConsent(None), &refs, &credential_store).await;
+            prepare_learning_admission(&FixedConsent(None), &refs, &credential_store, Vec::new())
+                .await;
         assert_eq!(
             prepared,
             Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
@@ -2789,6 +2855,7 @@ mod admission_tests {
             &FixedConsent(Some(record_for(CapabilityKind::Learning))),
             &refs,
             &credential_store,
+            Vec::new(),
         )
         .await;
         assert_eq!(
@@ -2805,7 +2872,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let refs = FixedRefs(vec![credential]);
         let failing = FailingConsent;
-        let result = prepare_learning_admission(&failing, &refs, &credential_store).await;
+        let result =
+            prepare_learning_admission(&failing, &refs, &credential_store, Vec::new()).await;
         assert!(matches!(
             result,
             Err(InferenceTechnicalError::StorageUnavailable { .. })

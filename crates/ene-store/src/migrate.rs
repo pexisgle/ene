@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 33;
+const CURRENT_VERSION: i64 = 34;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -149,6 +149,28 @@ operation_id TEXT NOT NULL,
 sweep INTEGER NOT NULL CHECK (sweep > 0),
 source TEXT NOT NULL,
 PRIMARY KEY (operation_id, sweep, source)
+);
+-- Durable correspondence between an already-claimed use and the deletion
+-- operation whose condition committed after the claim (lifecycle §11 R2).
+-- Written inside the admission transaction for every in-flight inference
+-- attempt / unsealed task delegation whose durable provenance intersects the
+-- operation's covered sources; the work kinds are the closed set of claims
+-- that can produce a delayed target-bearing body. Unlike the
+-- operation-lifetime search material, a hold deliberately outlives
+-- completion: a delayed result from a use that started before the condition
+-- must still be refused after the operation completed and `closed_at` is set.
+-- A hold is objective metadata only -- the claim identity, the operation
+-- identity, and the hold time -- never a target body, a reversible encoding,
+-- a target hash/fingerprint, or a search token, so it can never become a
+-- keyword ban, a reusable matcher, or a work item's permanent text blacklist;
+-- a claim is single-use, so the row loses its force once that claim settles.
+
+CREATE TABLE erasure_use_hold (
+use_kind TEXT NOT NULL CHECK (use_kind IN ('inference_attempt', 'task_delegation')),
+use_id TEXT NOT NULL,
+operation_id TEXT NOT NULL,
+held_at TEXT NOT NULL,
+PRIMARY KEY (use_kind, use_id)
 );
 -- Body-free completion audit (lifecycle §13). Written exactly once, in the
 -- same transaction that destroys the operation's protected material and closes
@@ -437,6 +459,11 @@ save_target TEXT
 CREATE INDEX idx_action_attempt_delegation ON action_attempt (delegation_id);
 CREATE INDEX idx_action_attempt_task ON action_attempt (task_id);
 CREATE INDEX idx_erasure_condition_source_source ON erasure_condition_source (source);
+-- Admission associates already-claimed uses by joining their ordered source
+-- correlation against the operation's covered sources; this index serves that
+-- probe from the (bounded) covered set instead of scanning every attempt's
+-- correlation rows.
+CREATE INDEX idx_inference_attempt_data_use_source ON inference_attempt_data_use (source);
 CREATE INDEX idx_history_message_companion ON history_message (companion_id);
 CREATE INDEX idx_history_message_companion_at ON history_message (companion_id, at_utc);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
@@ -515,7 +542,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

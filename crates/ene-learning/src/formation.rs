@@ -32,7 +32,7 @@ use thiserror::Error;
 
 use ene_credential::{ScrubbedText, SecretScrubError, SecretScrubber};
 
-use crate::identity::{MemoryId, SourceRangeRef, SummaryId};
+use crate::identity::{LearningClaimRef, MemoryId, SourceRangeRef, SummaryId};
 use crate::memory::{ChangeKind, Importance, Memory, TemporalMeaning};
 use crate::repository::{
     LearningRepository, LearningTechnicalError, MemoryChange, MemoryChangeCommit,
@@ -133,6 +133,13 @@ pub struct ExperienceCandidate {
     /// produce.
     pub companion: RawId,
     pub source: SourceRangeRef,
+    /// Every History message identity the transcript was read from, in read
+    /// order. The coarse [`Self::source`] range is the Summary's evidence
+    /// reference; this ordered set is the formation's canonical provenance
+    /// claim, so a deletion operation that covers any of these messages can
+    /// associate an already-claimed formation with its interval. Values are
+    /// identities, never bodies or hashes.
+    pub sources: Vec<RawId>,
     pub transcript: Vec<ExperienceTurn>,
     pub at: WallClockWithTz,
 }
@@ -155,19 +162,59 @@ pub enum FormationDecision {
     DeferredForContext,
 }
 
+/// The canonical provenance of one formation pass, carried to the inference
+/// boundary.
+///
+/// The identities are the same opaque correlation values the repository and
+/// the Summary use: the transcript message identities and the current Memory
+/// identities the prompt read. They are never bodies or hashes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearningInferencePremise {
+    pub data_use: Vec<RawId>,
+}
+
+impl LearningInferencePremise {
+    #[must_use]
+    pub fn new(data_use: Vec<RawId>) -> Self {
+        Self { data_use }
+    }
+
+    #[must_use]
+    pub fn data_use(&self) -> &[RawId] {
+        &self.data_use
+    }
+}
+
+/// One inference answer together with the durable claim it ran under.
+///
+/// The claim is the opaque identity of the provider attempt (the inference
+/// ticket). The formation carries it into every commit so the store can
+/// refuse a delayed formation whose provenance was associated with a deletion
+/// operation, even after that operation completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearningInferenceAnswer {
+    pub answer: String,
+    pub claim: LearningClaimRef,
+}
+
 /// The model boundary used to judge one Experience.
 ///
 /// Kept as a port so this crate does not depend on inference or permission
 /// crates: the Host supplies an implementation through the inference boundary
-/// with its own consumer and purpose. The prompt carries the credential-set
+/// with its own consumer and purpose. The premise carries the formation's
+/// canonical source correlation, and the prompt carries the credential-set
 /// premise it was scrubbed under, so the send claim can refuse a prompt that
-/// predates a credential registration.
+/// predates a credential registration or derives from covered data.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract style uses native async fn; Send bounds settle with the Host adapter"
 )]
 pub trait LearningInference: Send + Sync {
-    async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError>;
+    async fn infer(
+        &self,
+        premise: LearningInferencePremise,
+        prompt: ScrubbedText,
+    ) -> Result<LearningInferenceAnswer, LearningInferenceError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -207,7 +254,17 @@ pub async fn form_experience(
         .await?;
     let existing = select_existing(scanned, &candidate.transcript);
     let prompt = build_prompt(&existing, &candidate, scrubber).await?;
-    let answer = match inference.infer(prompt).await {
+    // The claim's provenance is exactly what the prompt read: the transcript
+    // messages pinned at reply completion and the current Memory identities
+    // offered to the model, in prompt order. It rides the provider claim, so
+    // a condition that committed first holds the send, and a deletion
+    // admission can associate this formation with its interval.
+    let mut data_use = candidate.sources.clone();
+    data_use.extend(existing.iter().map(|memory| memory.id.as_raw()));
+    let inferred = match inference
+        .infer(LearningInferencePremise::new(data_use), prompt)
+        .await
+    {
         Ok(answer) => answer,
         Err(LearningInferenceError::Declined) => {
             return Ok(FormationDecision::DeferredForContext);
@@ -216,6 +273,8 @@ pub async fn form_experience(
             return Err(LearningTechnicalError::InferenceUnavailable { reason });
         }
     };
+    let claim = inferred.claim;
+    let answer = inferred.answer;
     let Some(answer) = parse_answer(&answer) else {
         return Ok(FormationDecision::DeferredForContext);
     };
@@ -281,6 +340,7 @@ pub async fn form_experience(
             .commit_memory_change(MemoryChangeCommit {
                 summary: Some(summary.clone()),
                 secret_premise,
+                claim: Some(claim),
                 change: MemoryChange {
                     target,
                     scope,
@@ -625,6 +685,7 @@ mod tests {
                 start: RawId::new(),
                 end: RawId::new(),
             },
+            sources: Vec::new(),
             transcript: turns
                 .iter()
                 .map(|(role, text)| ExperienceTurn {
@@ -795,6 +856,7 @@ mod tests {
                 start: RawId::new(),
                 end: RawId::new(),
             },
+            sources: Vec::new(),
             transcript: vec![
                 ExperienceTurn {
                     role: ExperienceRole::Owner,
@@ -894,6 +956,7 @@ mod tests {
         let seeded = crate::repository::MemoryChangeCommit {
             summary: None,
             secret_premise: None,
+            claim: None,
             change: crate::repository::MemoryChange {
                 target: crate::repository::MemoryTarget::New {
                     id: crate::identity::MemoryId::generate(),
@@ -941,6 +1004,7 @@ mod tests {
         let seeded = crate::repository::MemoryChangeCommit {
             summary: None,
             secret_premise: None,
+            claim: None,
             change: crate::repository::MemoryChange {
                 target: crate::repository::MemoryTarget::New {
                     id: crate::identity::MemoryId::generate(),
@@ -1003,6 +1067,7 @@ mod consolidation_tests {
                 start: RawId::new(),
                 end: RawId::new(),
             },
+            sources: Vec::new(),
             transcript: vec![ExperienceTurn {
                 role: ExperienceRole::Owner,
                 text: text.to_owned(),

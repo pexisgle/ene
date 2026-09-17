@@ -3251,7 +3251,10 @@ async fn learning_admission_requires_its_own_capability_assignment() {
         "dialogue admission still works independently"
     );
     assert!(
-        matches!(executor.admit_learning().await, Ok(Admission::Declined(_))),
+        matches!(
+            executor.admit_learning(Vec::new()).await,
+            Ok(Admission::Declined(_))
+        ),
         "dialogue consent must not authorize learning formation"
     );
 
@@ -3278,7 +3281,10 @@ async fn learning_admission_requires_its_own_capability_assignment() {
         "the learning assignment must commit, got {assigned:?}"
     );
     assert!(
-        matches!(executor.admit_learning().await, Ok(Admission::Admitted(_))),
+        matches!(
+            executor.admit_learning(Vec::new()).await,
+            Ok(Admission::Admitted(_))
+        ),
         "learning is admitted only after its own consent exists"
     );
     assert!(
@@ -3506,6 +3512,7 @@ async fn learning_transport_failure_is_reported_as_unavailable() {
             start: RawId::new(),
             end: RawId::new(),
         },
+        sources: Vec::new(),
         transcript: vec![ExperienceTurn {
             role: ExperienceRole::Owner,
             text: String::from("remember this"),
@@ -4644,6 +4651,7 @@ async fn memory_view_cursor_pages_older_memories_and_rejects_invalid_ids() {
             .commit_memory_change(MemoryChangeCommit {
                 summary: None,
                 secret_premise: None,
+                claim: None,
                 change: MemoryChange {
                     target: MemoryTarget::New {
                         id: MemoryId::generate(),
@@ -4743,6 +4751,7 @@ async fn memory_revision_pages_are_bounded_and_fully_traversable() {
                   summary: Option<SummaryRecord>| MemoryChangeCommit {
         summary,
         secret_premise: None,
+        claim: None,
         change: MemoryChange {
             target,
             scope,
@@ -4951,6 +4960,7 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
         .commit_memory_change(MemoryChangeCommit {
             summary: None,
             secret_premise: Some(premise),
+            claim: None,
             change: MemoryChange {
                 target: MemoryTarget::New {
                     id: MemoryId::generate(),

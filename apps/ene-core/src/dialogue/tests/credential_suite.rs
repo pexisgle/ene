@@ -434,6 +434,7 @@ async fn seed_legacy(handle: &HostHandle, secret: &str) -> LegacySeed {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(summary.clone()),
             secret_premise: None,
+            claim: None,
             change: MemoryChange {
                 target: MemoryTarget::New { id: memory },
                 scope: LearningScope::companion(companion.as_raw()),
@@ -1197,6 +1198,9 @@ fn learning_candidate(companion: RawId, transcript: &str) -> ExperienceCandidate
             start: RawId::new(),
             end: RawId::new(),
         },
+        // The production pin always names at least the transcript message it
+        // read; the claim refuses an empty correlation.
+        sources: vec![RawId::new()],
         transcript: vec![ExperienceTurn {
             role: ExperienceRole::Owner,
             text: transcript.to_owned(),

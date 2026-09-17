@@ -930,6 +930,9 @@ async fn pin_experience(
             start: first.id,
             end: last.id,
         },
+        // The ordered per-message provenance the formation claim carries; the
+        // coarse range above stays the Summary's evidence reference.
+        sources: items.iter().map(|item| item.id).collect(),
         transcript: items
             .iter()
             .map(|item| ExperienceTurn {
@@ -974,8 +977,16 @@ struct LearningInferenceAdapter<'a, I> {
 }
 
 impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInferenceAdapter<'_, I> {
-    async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
-        match self.inference.admit_learning().await {
+    async fn infer(
+        &self,
+        premise: ene_learning::LearningInferencePremise,
+        prompt: ScrubbedText,
+    ) -> Result<ene_learning::LearningInferenceAnswer, LearningInferenceError> {
+        match self
+            .inference
+            .admit_learning(premise.data_use().to_vec())
+            .await
+        {
             Ok(Admission::Admitted(authorized)) => {
                 match self
                     .inference
@@ -985,7 +996,13 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
                     Ok(InferenceDispatchOutcome::Completed {
                         arrival,
                         adopted: true,
-                    }) => Ok(arrival.output_text),
+                    }) => Ok(ene_learning::LearningInferenceAnswer {
+                        // The durable claim handle: the inference ticket the
+                        // formation's commit carries for the erasure-hold
+                        // check.
+                        claim: ene_learning::LearningClaimRef::from_raw(arrival.ticket.0),
+                        answer: arrival.output_text,
+                    }),
                     Ok(
                         InferenceDispatchOutcome::Completed { adopted: false, .. }
                         | InferenceDispatchOutcome::NotSent(_)

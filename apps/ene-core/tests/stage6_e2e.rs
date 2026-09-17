@@ -1688,6 +1688,180 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
     served.server.abort();
 }
 
+/// E2E 1 race (design R2, post-completion): a Learning formation already
+/// claimed when the deletion condition commits is refused at its commit even
+/// after the operation completed and every current condition closed; the
+/// completed surface keeps no target body. A fresh Owner origin after
+/// completion is learned normally: the durable correspondence names the
+/// claim, never the text.
+#[tokio::test]
+async fn stage6_delayed_formation_after_completion_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let fresh = format!("a fresh note about {TARGET}");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (on_learning_formation(true), Call::text(formation_create())),
+            (
+                on_latest_owner(&first),
+                Call::text(format!("I will keep {TARGET} in mind.")),
+            ),
+            (on_latest_owner(&fresh), Call::text("acknowledged")),
+        ],
+        &[],
+    ));
+    // The formation pass parks after its durable claim; the deletion runs to
+    // completion while the provider work is still in flight.
+    transport.block_input(on_learning_formation(true));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let (_round, _stream, reply) = send_round(served.client(), &first)
+        .await
+        .expect("the first round must complete");
+    assert!(reply.contains(TARGET));
+    transport.wait_parked(1).await;
+    let outcome = request_deletion(served.client(), TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = Arc::clone(&served.handle);
+    confirm_deletion(&handle).await;
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete while the formation is parked");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    // The parked provider call resumes after completion. Its settlement is
+    // durable before the formation's commit attempt, so observing it orders
+    // the refusal asserted below.
+    transport.release_blocked();
+    wait_for_usage_consumer(served.client(), "companion_learning").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !memory_view(served.client()).await.contains(TARGET),
+        "a formation claimed before the interval never writes target Memory after completion"
+    );
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    // The completed operation is not a permanent ban: a fresh Owner origin
+    // after completion is learned as a new experience.
+    let (_round, _stream, reply) = send_round(served.client(), &fresh)
+        .await
+        .expect("a fresh origin must be accepted");
+    assert!(reply.contains("acknowledged"), "{reply}");
+    wait_for_memory_revision_at_least(served.client(), 1).await;
+    assert!(
+        memory_view(served.client()).await.contains(TARGET),
+        "the fresh origin forms a new Memory"
+    );
+    served.server.abort();
+}
+
+/// E2E 1 race (design R2, post-completion): a Task Agent execution already
+/// claimed when the deletion condition commits has its delayed final result
+/// collected after the operation completed; the execution seal, certainty,
+/// and adoption facts survive and the task still completes. A fresh Owner
+/// origin after completion is a new History row.
+#[tokio::test]
+async fn stage6_delayed_task_result_after_completion_is_collected() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let proposal = task_reply(serde_json::json!({
+        "kind": "propose_task",
+        "purpose": format!("write a report covering {TARGET}"),
+    }));
+    let fresh = format!("a fresh note about {TARGET}");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_task_agent_turn(0),
+                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::text(r##"{"tool":"create","path":"report.md","content":"# Report\nnotes"}"##),
+            ),
+            (
+                on_task_agent_turn(2),
+                Call::text(format!(
+                    r##"{{"final":"created report.md covering {TARGET}"}}"##
+                )),
+            ),
+            (
+                on_latest_owner("please read input.txt and write report.md"),
+                Call::text(proposal),
+            ),
+            (on_latest_owner(&fresh), Call::text("acknowledged")),
+        ],
+        &[],
+    ));
+    // The final turn parks after its durable claim; the deletion runs to
+    // completion while the provider work is still in flight.
+    transport.block_input(on_task_agent_turn(2));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    let (round, stream, reply) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    assert!(
+        reply.contains("Task accepted"),
+        "the task proposal must be accepted: {reply}"
+    );
+    confirm_round(served.client(), &round, stream).await;
+    transport.wait_parked(1).await;
+    let outcome = request_deletion(served.client(), TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = Arc::clone(&served.handle);
+    confirm_deletion(&handle).await;
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete while the final turn is parked");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    // The parked final answer arrives after completion: the delegation's
+    // admission-time hold collects the body, and the durable execution facts
+    // still seal, adopt, and complete the task.
+    transport.release_blocked();
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the task completes on the collected result");
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "the delayed result body is never stored"
+    );
+    // The completed operation is not a permanent ban: a fresh Owner origin
+    // after completion is a new History row.
+    let (_round, _stream, reply) = send_round(served.client(), &fresh)
+        .await
+        .expect("a fresh origin must be accepted");
+    assert!(reply.contains("acknowledged"), "{reply}");
+    assert!(
+        history_texts(served.client())
+            .await
+            .iter()
+            .any(|text| text.contains(TARGET)),
+        "the fresh origin is appended as new History"
+    );
+    served.server.abort();
+}
+
 /// E2E 1 restart: an unfinished operation survives a Host restart in `active`,
 /// keeps its current condition, and resumes to completion; a restart never
 /// completes it by itself.
@@ -2203,6 +2377,28 @@ async fn usage_page(client: &mut Client) -> UsageSummaryPage {
     page
 }
 
+/// Polls the first-party usage surface until one row for `consumer` exists.
+///
+/// The usage fact settles inside dispatch *before* the caller can adopt or
+/// commit the provider output, so observing the row orders the delayed
+/// adoption/commit attempt that follows it: a test can assert the refusal is
+/// decided after the parked call actually resumed, not before it.
+async fn wait_for_usage_consumer(client: &mut Client, consumer: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let page = usage_page(client).await;
+        if page.rows.iter().any(|row| row.consumer == consumer) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no {consumer} usage row appeared: {:?}",
+            page.rows
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// One bounded usage read with an explicit provider filter, so the page names
 /// that provider's cap slots (the system scope is always included).
 async fn usage_page_for(client: &mut Client, provider: &str) -> UsageSummaryPage {
@@ -2496,6 +2692,7 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
                     expected_credential_set: credential_set,
                     provider: String::from("openai"),
                     model: String::from(MODEL),
+                    data_use: Vec::new(),
                     task_agent: None,
                     pricing: Some(synthetic.clone()),
                     usage_estimate: Some(UsageEstimate {
@@ -2944,6 +3141,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
                     expected_credential_set: credential_set,
                     provider: String::from("openai"),
                     model: String::from(MODEL),
+                    data_use: Vec::new(),
                     task_agent: None,
                     pricing: Some(pricing),
                     usage_estimate: Some(cap_estimate()),

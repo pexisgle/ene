@@ -81,9 +81,13 @@ fn exact_text(target: &TargetedDeletionTarget) -> &str {
 /// its transcript text contains the exact mechanical target, or one of its
 /// correlated source bounds is a covered source.
 fn experience_covered(experience: &ExperienceCandidate, exact: &str, sources: &[RawId]) -> bool {
-    if sources
+    // The ordered per-message provenance is the exact read set; the coarse
+    // range bounds stay checked for a candidate assembled without it.
+    if experience
+        .sources
         .iter()
-        .any(|source| *source == experience.source.start || *source == experience.source.end)
+        .chain([experience.source.start, experience.source.end].iter())
+        .any(|source| sources.iter().any(|covered| covered == source))
     {
         return true;
     }
@@ -683,6 +687,7 @@ mod tests {
                 start: RawId::new(),
                 end: RawId::new(),
             },
+            sources: Vec::new(),
             transcript: vec![ExperienceTurn {
                 role: ExperienceRole::Owner,
                 text: text.to_owned(),

@@ -306,6 +306,7 @@ async fn seed_inference_surface(
                 expected_credential_set: CredentialSetRevision::initial(),
                 provider: String::from("openai"),
                 model: String::from("dialogue-1"),
+                data_use: vec![source],
                 task_agent: Some(ene_inference::TaskAgentAttemptPremise {
                     delegation: delegation.as_raw(),
                     task: task.task.as_raw(),
@@ -881,6 +882,7 @@ async fn inference_attribution_columns_are_facts_not_body_copies() {
                 expected_credential_set: CredentialSetRevision::initial(),
                 provider: String::from(route),
                 model: String::from("dialogue-1"),
+                data_use: vec![RawId::new()],
                 task_agent: None,
                 pricing: None,
                 usage_estimate: None,

@@ -900,6 +900,123 @@ fn enumerate_known_sources(
     Ok(sources)
 }
 
+/// Closed work-kind vocabulary of [`erasure_use_hold`]: one claimed inference
+/// attempt or one unsealed task delegation.
+pub(crate) const USE_KIND_INFERENCE_ATTEMPT: &str = "inference_attempt";
+pub(crate) const USE_KIND_TASK_DELEGATION: &str = "task_delegation";
+
+/// Whether one already-claimed use was associated with a deletion operation
+/// when the operation's condition committed (lifecycle §11 R2).
+///
+/// The hold is the durable correspondence that a current-condition check
+/// cannot provide after the operation completed: it names the claim, not the
+/// target, so it refuses only that claim's delayed target-bearing body and
+/// never becomes a keyword ban. Read inside the adopting boundary's own
+/// transaction; a claim without a row is a genuine "not held" answer (no
+/// sentinel, no cached verdict).
+pub(crate) fn held_use(
+    conn: &Connection,
+    use_kind: &str,
+    use_id: RawId,
+) -> Result<bool, PreservationTechnicalError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM erasure_use_hold WHERE use_kind=?1 AND use_id=?2)",
+        params![use_kind, encode_id(use_id)],
+        |row| row.get(0),
+    )
+    .map_err(storage)
+}
+
+/// The attempt-side hold enumeration of [`mark_inflight_uses`].
+///
+/// Exposed so tests can `EXPLAIN QUERY PLAN` the exact production statement:
+/// the join must be driven from the operation's (bounded) covered sources
+/// through `idx_inference_attempt_data_use_source`, never by scanning every
+/// attempt's correlation rows.
+pub(crate) const ASSOCIATE_ATTEMPTS_SQL: &str =
+    "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+     SELECT ?3, a.ticket, ?1, ?4
+     FROM erasure_condition_source s
+     JOIN inference_attempt_data_use u ON u.source = s.source
+     JOIN inference_attempt a ON a.ticket = u.ticket
+     WHERE s.operation_id = ?1 AND s.sweep = ?2
+     GROUP BY a.ticket";
+
+/// Associates every already-claimed use whose durable provenance intersects
+/// the operation's published source correlations with the operation
+/// (lifecycle §11 R2).
+///
+/// Runs inside the admission transaction, after the operation's
+/// `erasure_condition_source` rows exist. The same Immediate writer domain
+/// serializes this against the claim transactions: a claim that committed
+/// first is seen here and held; a claim that commits after sees the current
+/// condition at its own gate instead (the `data_use` compare) and never
+/// starts. The enumeration is mechanical:
+///
+/// - an inference attempt whose ordered `data_use` names a covered source
+///   (driven from the bounded covered-source set through the correlation
+///   index);
+/// - an unsealed task delegation under an attempt held above, whose relied
+///   revision or in-force purpose body still carries the target, whose
+///   business context source is covered, or whose delegated workspace scope
+///   carries the target. Sealed executions are excluded: a recorded final
+///   result cannot be produced again, and its stored body is the sweep's.
+///
+/// The target text travels only as a bound parameter and is never copied into
+/// a hold row.
+fn mark_inflight_uses(
+    tx: &rusqlite::Transaction<'_>,
+    operation: &str,
+    sweep: i64,
+    target: &str,
+    held_at: &str,
+) -> Result<(), PreservationTechnicalError> {
+    tx.execute(
+        ASSOCIATE_ATTEMPTS_SQL,
+        params![operation, sweep, USE_KIND_INFERENCE_ATTEMPT, held_at],
+    )
+    .map_err(storage)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+         SELECT ?3, d.delegation_id, ?1, ?5
+         FROM delegation d
+         WHERE NOT EXISTS
+             (SELECT 1 FROM task_result r WHERE r.delegation_id = d.delegation_id)
+           AND (
+             EXISTS
+                 (SELECT 1 FROM erasure_use_hold h
+                  JOIN inference_attempt a ON a.ticket = h.use_id
+                  WHERE h.use_kind = ?6 AND h.operation_id = ?1
+                    AND a.delegation_id = d.delegation_id)
+             OR EXISTS
+                 (SELECT 1 FROM task t
+                  WHERE t.task_id = d.task_id AND instr(t.purpose_text, ?4) > 0)
+             OR EXISTS
+                 (SELECT 1 FROM task_revision tr
+                  WHERE tr.task_id = d.task_id AND tr.revision = d.task_revision
+                    AND instr(tr.purpose_text, ?4) > 0)
+             OR EXISTS
+                 (SELECT 1 FROM task_context_entry ce
+                  WHERE ce.task_id = d.task_id
+                    AND ce.origin_source IN
+                        (SELECT source FROM erasure_condition_source
+                         WHERE operation_id = ?1 AND sweep = ?2))
+             OR instr(COALESCE(d.scope_folder, ''), ?4) > 0
+             OR instr(COALESCE(d.scope_save_target, ''), ?4) > 0
+           )",
+        params![
+            operation,
+            sweep,
+            USE_KIND_TASK_DELEGATION,
+            target,
+            held_at,
+            USE_KIND_INFERENCE_ATTEMPT
+        ],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
 /// The canonical admission body: duplicate detection plus the
 /// durable-before-enforce insert of operation, protected material, initial
 /// condition, and source correlations (lifecycle §4.1).
@@ -995,6 +1112,12 @@ fn admit_deletion(
         )
         .map_err(storage)?;
     }
+    // Already-claimed uses whose provenance this operation covers are
+    // associated with the operation in the same transaction that publishes
+    // the condition (§4.1/§11 R2): the correspondence is durable before the
+    // condition enforces, and it outlives completion so a delayed result can
+    // still be recognized as stale for erasure.
+    mark_inflight_uses(tx, &id, 1, material.expose_for_erasure(), &at)?;
     // The required participant snapshot commits with the operation and the
     // condition: no participant effect can start before the operation that
     // needs it is durable (durable-before-enforce §4.1).

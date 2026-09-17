@@ -214,6 +214,13 @@ async fn claim_usage(
             expected_credential_set: CredentialSetRevision::initial(),
             provider: provider.to_owned(),
             model: model.to_owned(),
+            data_use: match (&task_agent, consumer) {
+                (Some(premise), _) => premise.data_use.clone(),
+                // A Learning formation always names at least the messages its
+                // prompt read; the claim refuses an empty correlation.
+                (None, ConsumerKind::CompanionLearning) => vec![RawId::new()],
+                (None, _) => Vec::new(),
+            },
             task_agent,
             pricing,
             usage_estimate: estimate,

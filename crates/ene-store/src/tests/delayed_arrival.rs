@@ -27,6 +27,7 @@ use ene_companion::{
     PresentationMark, RecordResumeActivityCommand, ReportStatus, ReportStatusTransition,
     ResumeActivityOutcome,
 };
+use ene_learning::LearningClaimRef;
 use ene_preservation::{
     DeletionOperationRef, DeletionSearchMaterial, ErasureConditionRef, MechanicalDeletionTarget,
     ParticipantOwnerRef, PreservationRepository as _, StartTargetedDeletionCommand,
@@ -63,6 +64,7 @@ fn change(
     MemoryChangeCommit {
         summary: Some(summary.clone()),
         secret_premise: None,
+        claim: None,
         change: MemoryChange {
             target,
             scope: LearningScope::companion(summary.scope.companion_id()),
@@ -520,6 +522,170 @@ async fn formation_first_then_condition_refuses_the_delayed_formation() {
     assert_eq!(current_conditions(&store).await, vec![current.condition()]);
 }
 
+/// Commits one Learning consent row so a formation claim can run through the
+/// production inference claim path.
+async fn seed_learning_consent(store: &Store) {
+    let saved = save_consent(
+        store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Learning,
+            id: String::from("consent-learning"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("cred-1"),
+        },
+    )
+    .await;
+    assert!(
+        matches!(saved, ConsentCommitOutcome::Committed { .. }),
+        "the learning consent must seed, got {saved:?}"
+    );
+}
+
+/// Claims one Learning formation attempt through the production repository
+/// boundary and returns its ticket (the durable claim the formation carries).
+async fn claim_formation(
+    store: &Store,
+    ticket: InferenceTicketId,
+    data_use: Vec<RawId>,
+) -> InferenceTicketId {
+    let outcome = store
+        .begin_inference_attempt(InferenceAttempt {
+            ticket,
+            consumer: ConsumerKind::CompanionLearning,
+            capability: CapabilityKind::Learning,
+            purpose: PurposeKind::MemoryFormation,
+            expected_consent: (
+                String::from("consent-learning"),
+                ConsentRevision::from_u64(1),
+            ),
+            expected_credential_set: CredentialSetRevision::initial(),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            task_agent: None,
+            data_use,
+            pricing: None,
+            usage_estimate: None,
+        })
+        .await
+        .expect("the formation claim must answer");
+    assert_eq!(
+        outcome,
+        AttemptBeginOutcome::Started,
+        "the formation claim must start"
+    );
+    ticket
+}
+
+#[tokio::test]
+async fn the_admission_hold_probe_uses_the_source_correlation_index() {
+    let store = open_memory().await.unwrap();
+    // The admission association is bounded by the operation's covered
+    // sources: the exact production statement must reach the attempt
+    // correlation through its source index instead of scanning every
+    // attempt's ordered rows. Boundedness itself is pinned by the behavior
+    // tests above; this is the structural guard against a silent rewrite.
+    let plan: Vec<String> = {
+        let conn = store.conn.lock().unwrap();
+        let mut explained = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::preservation::ASSOCIATE_ATTEMPTS_SQL
+            ))
+            .unwrap();
+        explained
+            .query_map(
+                params![String::new(), 1_i64, "inference_attempt", String::new()],
+                |row| row.get(3),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert!(!plan.is_empty(), "missing plan for the admission probe");
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("idx_inference_attempt_data_use_source")),
+        "the admission probe must use the source-correlation index, plan: {plan:?}"
+    );
+    assert!(
+        !plan
+            .iter()
+            .any(|line| line.contains("SCAN inference_attempt_data_use")),
+        "the admission probe must not scan every attempt correlation, plan: {plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_formation_claimed_before_completion_stays_held_after_it() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let source = RawId::new();
+    seed_learning_consent(&store).await;
+    // R2 use-first: the formation's provider claim (with its ordered source
+    // correlation) commits before the deletion condition.
+    let ticket = claim_formation(&store, InferenceTicketId(RawId::new()), vec![source]).await;
+    let current = admit(&store, "the secret plan", vec![source], Vec::new()).await;
+    // The operation completes while the provider work is still in flight; the
+    // condition, its material, and its source rows are gone.
+    complete_via_a5(&store, current).await;
+    assert!(current_conditions(&store).await.is_empty());
+
+    // The delayed formation arrives with a clean paraphrase: no current
+    // condition and no literal match, yet the claim hold still refuses it.
+    let record = summary(companion, "a clean paraphrase of the plan", source, source);
+    let mut delayed = change(
+        &record,
+        MemoryTarget::New {
+            id: MemoryId::generate(),
+        },
+        "a clean paraphrase",
+        ChangeKind::Initial,
+    );
+    delayed.claim = Some(LearningClaimRef::from_raw(ticket.0));
+    assert_eq!(
+        commit(&store, delayed).await,
+        MemoryChangeOutcome::HeldForErasure,
+        "a claim from before the interval is stale for erasure after completion"
+    );
+    assert_eq!(learning_rows(&store, companion), 0);
+    // The objective attempt fact survives: the refused formation does not
+    // erase the provider claim or its ordered correlation.
+    let attempt = store
+        .load_inference_attempt(ticket)
+        .await
+        .unwrap()
+        .expect("the claimed attempt stays readable");
+    assert_eq!(attempt.data_use, vec![source]);
+
+    // A claim committed after completion is a new origin: the hold names the
+    // claim, never the text.
+    let fresh_source = RawId::new();
+    let fresh_ticket =
+        claim_formation(&store, InferenceTicketId(RawId::new()), vec![fresh_source]).await;
+    let fresh = summary(companion, "a fresh note", fresh_source, fresh_source);
+    let mut fresh_change = change(
+        &fresh,
+        MemoryTarget::New {
+            id: MemoryId::generate(),
+        },
+        "a fresh note",
+        ChangeKind::Initial,
+    );
+    fresh_change.claim = Some(LearningClaimRef::from_raw(fresh_ticket.0));
+    assert!(
+        matches!(
+            commit(&store, fresh_change).await,
+            MemoryChangeOutcome::Committed { .. }
+        ),
+        "a post-completion claim is not held"
+    );
+    // The fresh Summary evidence and its Memory.
+    assert_eq!(learning_rows(&store, companion), 2);
+}
+
 // --- Task result arrival / adoption ---
 
 #[tokio::test]
@@ -597,6 +763,158 @@ async fn result_first_then_condition_redacts_and_a_retry_stays_idempotent() {
         "a post-completion retry never rewrites the collected body"
     );
     assert_collected(&task_result_body(&store, result), "the private key");
+}
+
+#[tokio::test]
+async fn a_delegation_claimed_before_completion_collects_its_delayed_result() {
+    let store = open_memory().await.unwrap();
+    // The task purpose itself carries the target at admission, so the
+    // unsealed delegation is associated with the interval even without an
+    // explicit source correlation.
+    let (_task, delegation) = seed_workspace_execution(&store, "write about the private key").await;
+    let current = admit(
+        &store,
+        "the private key",
+        Vec::new(),
+        vec![ParticipantOwnerRef::Task],
+    )
+    .await;
+    // The production owner sweep erases the purpose copy; the hold written at
+    // admission survives it.
+    let participant = crate::TaskErasureParticipant::new(store.clone());
+    drive_with_sources(
+        &participant,
+        current.condition(),
+        ParticipantOwnerRef::Task,
+        "the private key",
+        Vec::new(),
+    )
+    .await;
+    complete_via_a5(&store, current).await;
+    assert!(current_conditions(&store).await.is_empty());
+
+    let arrival = result_arrival(delegation, "final report quotes the private key");
+    let record = store
+        .record_task_result_arrival(arrival.clone())
+        .await
+        .expect("the delayed arrival must record its fact");
+    assert_collected(record.body.text(), "the private key");
+    assert_collected(&task_result_body(&store, arrival.result), "the private key");
+    assert!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_some(),
+        "the execution seal survives the collected body"
+    );
+}
+
+#[tokio::test]
+async fn a_task_agent_claim_source_associates_its_delegation() {
+    let store = open_memory().await.unwrap();
+    let (task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    // The purpose body is clean; the association comes from the already
+    // claimed Task Agent turn's ordered source correlation.
+    let saved = save_consent(&store, None, consent_record("consent-1", 1)).await;
+    assert!(matches!(saved, ConsentCommitOutcome::Committed { .. }));
+    let source = RawId::new();
+    let task_agent = TaskAgentAttemptPremise {
+        delegation: delegation.as_raw(),
+        task: task.task.as_raw(),
+        task_revision: RevisionInner::from_u64(task.revision.as_u64()),
+        data_use: vec![source],
+    };
+    assert_eq!(
+        store
+            .begin_inference_attempt(InferenceAttempt {
+                ticket: InferenceTicketId(RawId::new()),
+                consumer: ConsumerKind::TaskAgent,
+                capability: CapabilityKind::Dialogue,
+                purpose: PurposeKind::TaskAgentTurn,
+                expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+                expected_credential_set: CredentialSetRevision::initial(),
+                provider: String::from("acme"),
+                model: String::from("dialogue-1"),
+                task_agent: Some(task_agent),
+                data_use: vec![source],
+                pricing: None,
+                usage_estimate: None,
+            })
+            .await
+            .unwrap(),
+        AttemptBeginOutcome::Started
+    );
+    let current = admit(&store, "the private key", vec![source], Vec::new()).await;
+    complete_via_a5(&store, current).await;
+
+    let arrival = result_arrival(delegation, "an otherwise clean report");
+    let record = store
+        .record_task_result_arrival(arrival.clone())
+        .await
+        .expect("the delayed arrival must record its fact");
+    assert_collected(record.body.text(), "the private key");
+    assert_collected(&task_result_body(&store, arrival.result), "the private key");
+}
+
+#[tokio::test]
+async fn a_held_delegation_refuses_a_delayed_action_after_completion() {
+    let store = open_memory().await.unwrap();
+    let (task, delegation) = seed_workspace_execution(&store, "write about the private key").await;
+    let assoc = {
+        let key = crate::codec::encode_id(task.task.as_raw());
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT assoc_id FROM workspace_assoc WHERE task_id=?1",
+            [&key],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("the association must read")
+    };
+    let assoc = WorkspaceAssocId::from_raw(crate::codec::decode_id(&assoc).unwrap());
+    let current = admit(
+        &store,
+        "the private key",
+        Vec::new(),
+        vec![ParticipantOwnerRef::Task],
+    )
+    .await;
+    let participant = crate::TaskErasureParticipant::new(store.clone());
+    drive_with_sources(
+        &participant,
+        current.condition(),
+        ParticipantOwnerRef::Task,
+        "the private key",
+        Vec::new(),
+    )
+    .await;
+    complete_via_a5(&store, current).await;
+
+    // A delayed Action from the held execution never starts, even though the
+    // resolved target itself is clean.
+    let target = std::env::temp_dir()
+        .join("ene-held-delegation/report.txt")
+        .to_string_lossy()
+        .into_owned();
+    let attempt = ActionAttemptId::generate();
+    let outcome = store
+        .insert_attempt_if_current(AttemptCommitPremise {
+            attempt,
+            delegation: delegation.as_raw(),
+            task: task.task.as_raw(),
+            task_revision: RevisionInner::from_u64(task.revision.as_u64()),
+            workspace: assoc.as_raw(),
+            real_target: RealTargetRef::from_canonical_path(target),
+            operation: OperationKind::Create,
+            relied_evaluation: RawId::new(),
+        })
+        .await
+        .expect("the attempt insert must answer");
+    assert_eq!(outcome, ActionStartOutcome::HeldForErasure);
+    assert!(
+        store.load_attempt(attempt).await.unwrap().is_none(),
+        "no attempt row exists for a held execution"
+    );
 }
 
 /// The collected form of a covered body: the mechanical target is gone and

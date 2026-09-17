@@ -1334,11 +1334,15 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         .await
     }
 
-    async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError> {
+    async fn admit_learning(
+        &self,
+        data_use: Vec<ene_primitive::RawId>,
+    ) -> Result<Admission, InferenceTechnicalError> {
         self.admit(ene_inference::prepare_learning_admission(
             self.store,
             self.store,
             self.cred_store,
+            data_use,
         ))
         .await
     }

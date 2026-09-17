@@ -251,7 +251,10 @@ mod tests {
             Ok(Admission::Declined(NotSentReason::NotInAllowlist))
         }
 
-        async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError> {
+        async fn admit_learning(
+            &self,
+            _data_use: Vec<RawId>,
+        ) -> Result<Admission, InferenceTechnicalError> {
             self.record("admit_learning");
             Ok(Admission::Declined(NotSentReason::NotInAllowlist))
         }

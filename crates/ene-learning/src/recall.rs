@@ -303,6 +303,7 @@ mod tests {
             .commit_memory_change(MemoryChangeCommit {
                 summary: None,
                 secret_premise: None,
+                claim: None,
                 change: MemoryChange {
                     target: MemoryTarget::Existing {
                         id: memory,

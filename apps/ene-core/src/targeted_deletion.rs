@@ -1059,6 +1059,7 @@ mod tests {
             .commit_memory_change(ene_learning::MemoryChangeCommit {
                 summary: Some(summary.clone()),
                 secret_premise: None,
+                claim: None,
                 change: ene_learning::MemoryChange {
                     target,
                     scope: ene_learning::LearningScope::companion(summary.scope.companion_id()),
@@ -2641,6 +2642,7 @@ mod tests {
                     expected_credential_set: CredentialSetRevision::initial(),
                     provider: String::from("openai"),
                     model: String::from("dialogue-1"),
+                    data_use: vec![source],
                     task_agent: Some(TaskAgentAttemptPremise {
                         delegation: delegation.as_raw(),
                         task: current.task.as_raw(),

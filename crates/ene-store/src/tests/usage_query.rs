@@ -88,6 +88,7 @@ struct ClaimSpec<'a> {
     model: &'a str,
     pricing: Option<PricingSnapshot>,
     estimate: Option<UsageEstimate>,
+    data_use: Vec<RawId>,
     task_agent: Option<TaskAgentAttemptPremise>,
 }
 
@@ -105,6 +106,7 @@ async fn claim(store: &Store, spec: ClaimSpec<'_>) -> InferenceTicketId {
             provider: spec.provider.to_owned(),
             model: spec.model.to_owned(),
             task_agent: spec.task_agent,
+            data_use: spec.data_use.clone(),
             pricing: spec.pricing,
             usage_estimate: spec.estimate,
         })
@@ -129,6 +131,7 @@ async fn claim_dialogue(store: &Store, spec_pricing: Option<PricingSnapshot>) ->
             model: MODEL,
             pricing: spec_pricing,
             estimate: None,
+            data_use: Vec::new(),
             task_agent: None,
         },
     )
@@ -146,6 +149,9 @@ async fn claim_learning(store: &Store) -> InferenceTicketId {
             model: MODEL,
             pricing: None,
             estimate: None,
+            // A Learning formation always names at least the messages its
+            // prompt read; an empty correlation is refused at the claim.
+            data_use: vec![RawId::new()],
             task_agent: None,
         },
     )
@@ -168,6 +174,7 @@ async fn claim_task_agent(store: &Store) -> InferenceTicketId {
         matches!(outcome, DelegationOutcome::Delegated(_)),
         "the seed delegation must commit, got {outcome:?}"
     );
+    let data_use = vec![RawId::new()];
     claim(
         store,
         ClaimSpec {
@@ -178,11 +185,12 @@ async fn claim_task_agent(store: &Store) -> InferenceTicketId {
             model: MODEL,
             pricing: None,
             estimate: None,
+            data_use: data_use.clone(),
             task_agent: Some(TaskAgentAttemptPremise {
                 delegation: delegation.as_raw(),
                 task: created.task.as_raw(),
                 task_revision: RevisionInner::from_u64(created.revision.as_u64()),
-                data_use: vec![RawId::new()],
+                data_use,
             }),
         },
     )
@@ -386,6 +394,7 @@ async fn reported_unknown_and_reserved_are_distinct_states() {
             model: MODEL,
             pricing: Some(pricing(1)),
             estimate: Some(estimate),
+            data_use: Vec::new(),
             task_agent: None,
         },
     )
@@ -400,6 +409,7 @@ async fn reported_unknown_and_reserved_are_distinct_states() {
             model: MODEL,
             pricing: Some(pricing(1)),
             estimate: Some(estimate),
+            data_use: Vec::new(),
             task_agent: None,
         },
     )
@@ -414,6 +424,7 @@ async fn reported_unknown_and_reserved_are_distinct_states() {
             model: MODEL,
             pricing: Some(pricing(1)),
             estimate: Some(estimate),
+            data_use: Vec::new(),
             task_agent: None,
         },
     )
@@ -632,6 +643,7 @@ async fn read_settles_nothing_and_mutates_no_cap_or_pricing() {
                 input_tokens_upper_bound: 100,
                 output_tokens_upper_bound: 50,
             }),
+            data_use: Vec::new(),
             task_agent: None,
         },
     )
@@ -710,6 +722,7 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
                     model: MODEL,
                     pricing: Some(pricing(1)),
                     estimate: Some(estimate),
+                    data_use: Vec::new(),
                     task_agent: None,
                 },
             )
@@ -789,6 +802,7 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
             model: MODEL,
             pricing: Some(pricing(1)),
             estimate: Some(estimate),
+            data_use: Vec::new(),
             task_agent: None,
         },
     )
@@ -852,6 +866,7 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
             expected_credential_set: CredentialSetRevision::initial(),
             provider: PROVIDER.to_owned(),
             model: MODEL.to_owned(),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: Some(pricing(1)),
             usage_estimate: Some(estimate),

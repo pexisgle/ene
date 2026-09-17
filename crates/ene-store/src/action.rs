@@ -260,16 +260,25 @@ fn insert_attempt_sync(
         return Ok(ActionStartOutcome::StalePremise);
     }
     let started_at = WallClockWithTz::now().to_rfc3339();
-    // The A4 delayed-action gate: the resolved target is the attempt's only
-    // stored body. A target under a canonical current condition refuses the
-    // attempt before any row exists, so no external effect starts on covered
-    // content and no target copy is saved. The refusal is a domain outcome
-    // (distinct from premise staleness and the execution seal), and a
-    // completed operation is not a current condition, so a fresh target after
-    // completion proceeds.
+    // The A4/R2 delayed-action gate: the resolved target is the attempt's only
+    // stored body. A target under a canonical current condition — or an
+    // Action started by a delegation already associated with a deletion
+    // interval at admission — refuses the attempt before any row exists, so no
+    // external effect starts on covered content and no target copy is saved.
+    // The hold names the execution, never the text, and it outlives the
+    // operation, so a delayed Action from a pre-deletion execution stays
+    // refused while a fresh execution after completion proceeds. The refusal
+    // is a domain outcome (distinct from premise staleness and the execution
+    // seal).
     if crate::preservation::covering_text(&tx, premise.real_target.as_path())
         .map_err(|error| action_unavailable(error.to_string()))?
         .is_some()
+        || crate::preservation::held_use(
+            &tx,
+            crate::preservation::USE_KIND_TASK_DELEGATION,
+            premise.delegation,
+        )
+        .map_err(|error| action_unavailable(error.to_string()))?
     {
         return Ok(ActionStartOutcome::HeldForErasure);
     }

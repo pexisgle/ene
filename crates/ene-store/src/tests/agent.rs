@@ -29,6 +29,7 @@ fn task_agent_claim(
         expected_credential_set: CredentialSetRevision::initial(),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
+        data_use: premise.data_use.clone(),
         task_agent: Some(premise),
         pricing: None,
         usage_estimate: None,
@@ -148,6 +149,7 @@ async fn dialogue_attempt_reads_back_without_task_correlation() {
                 expected_credential_set: CredentialSetRevision::initial(),
                 provider: String::from("openai"),
                 model: String::from("dialogue-1"),
+                data_use: Vec::new(),
                 task_agent: None,
                 pricing: None,
                 usage_estimate: None,
@@ -576,7 +578,7 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_databases() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("delegation-index.db");
     let store = Store::open(&path).await.expect("a fresh store must open");
-    assert_eq!(read_schema_version(&path), Some(33));
+    assert_eq!(read_schema_version(&path), Some(34));
     drop(store);
     let index = |path: &std::path::Path| -> Option<String> {
         let conn = rusqlite::Connection::open(path).expect("the store file must open");
@@ -607,5 +609,20 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_databases() {
         usage_index(&path).as_deref(),
         Some("idx_inference_attempt_started"),
         "a fresh schema carries the bounded usage read index"
+    );
+    let data_use_index = |path: &std::path::Path| -> Option<String> {
+        let conn = rusqlite::Connection::open(path).expect("the store file must open");
+        conn.query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inference_attempt_data_use_source'",
+            (),
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("the index probe must run")
+    };
+    assert_eq!(
+        data_use_index(&path).as_deref(),
+        Some("idx_inference_attempt_data_use_source"),
+        "a fresh schema carries the bounded source-correlation admission index"
     );
 }

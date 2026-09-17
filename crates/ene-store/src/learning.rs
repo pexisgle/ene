@@ -70,6 +70,23 @@ fn commit_change_sync(
             return Ok(MemoryChangeOutcome::StaleCredentialSet);
         }
     }
+    // The A4/R2 claim-hold gate: a formation claimed before a deletion
+    // condition committed was associated with that operation at admission
+    // (`erasure_use_hold`). The association outlives the operation, so a
+    // delayed formation is refused even when the operation completed and no
+    // current condition is readable. The check names the claim, never the
+    // target text: the same string from a fresh claim after completion is a
+    // new origin.
+    if let Some(claim) = commit.claim
+        && crate::preservation::held_use(
+            &tx,
+            crate::preservation::USE_KIND_INFERENCE_ATTEMPT,
+            claim.as_raw(),
+        )
+        .map_err(|error| learning_unavailable(error.to_string()))?
+    {
+        return Ok(MemoryChangeOutcome::HeldForErasure);
+    }
     // The A4 delayed-arrival gate: the Summary evidence, the proposed
     // recognition text, and the Summary's source correlation are compared
     // against the canonical current conditions inside this same transaction.

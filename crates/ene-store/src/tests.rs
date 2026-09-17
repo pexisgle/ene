@@ -2403,6 +2403,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
         expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(rev)),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
+        data_use: Vec::new(),
         task_agent: None,
         pricing: None,
         usage_estimate: None,
@@ -2618,6 +2619,7 @@ fn commit(summary: Option<SummaryRecord>, change: MemoryChange) -> MemoryChangeC
     MemoryChangeCommit {
         summary,
         secret_premise: None,
+        claim: None,
         change,
     }
 }
@@ -4146,6 +4148,7 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(evidence.clone()),
             secret_premise: Some(premise),
+            claim: None,
             change: learning_change(
                 companion,
                 MemoryTarget::New { id: memory },
@@ -4213,6 +4216,7 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
             expected_credential_set: premise,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
             usage_estimate: None,
@@ -4291,6 +4295,7 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
             expected_credential_set: stale_proof.credential_set(),
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
             usage_estimate: None,
@@ -4332,6 +4337,7 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
             expected_credential_set: fresh_proof.credential_set(),
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
             usage_estimate: None,
@@ -4413,6 +4419,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(evidence.clone()),
             secret_premise: Some(premise),
+            claim: None,
             change: learning_change(
                 companion,
                 MemoryTarget::New { id: memory },
@@ -4444,6 +4451,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(learning_summary(companion, "fresh evidence")),
             secret_premise: Some(updated),
+            claim: None,
             change: learning_change(
                 companion,
                 MemoryTarget::New { id: fresh_memory },
@@ -4499,6 +4507,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
             expected_credential_set: premise,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
             usage_estimate: None,
@@ -4516,6 +4525,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
             expected_credential_set: updated,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
             usage_estimate: None,

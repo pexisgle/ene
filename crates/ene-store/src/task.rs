@@ -1768,16 +1768,30 @@ fn record_task_result_arrival_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
-    // The A4 delayed-result gate: a body under a canonical current condition
-    // is collected instead of persisted — the arrival fact (sealing the
-    // delegation, its notification) survives, the target text is never
-    // stored. The same redaction applies to the idempotency comparison below,
-    // so a retry of the same result stays an idempotent replay instead of
-    // re-introducing the body; a retry arriving after the condition closed
-    // compares against the collected (body-free) stored form and fails
-    // closed rather than rewriting the target.
-    let body_text = crate::preservation::redact_covered_text(&tx, arrival.body.text())
-        .map_err(|error| task_unavailable(error.to_string()))?;
+    // The A4/R2 delayed-result gate: a body under a canonical current
+    // condition — or one produced by a delegation already associated with a
+    // deletion operation at admission (`erasure_use_hold`) — is collected
+    // instead of persisted. The arrival fact (sealing the delegation, its
+    // notification) survives, the target text is never stored. The claim hold
+    // outlives the operation, so a result arriving after completion is still
+    // refused even though no current condition is readable; a delegation
+    // never held is unaffected. The same redaction applies to the idempotency
+    // comparison below, so a retry of the same result stays an idempotent
+    // replay instead of re-introducing the body; a retry arriving after the
+    // condition closed compares against the collected (body-free) stored form
+    // and fails closed rather than rewriting the target.
+    let held = crate::preservation::held_use(
+        &tx,
+        crate::preservation::USE_KIND_TASK_DELEGATION,
+        arrival.delegation.as_raw(),
+    )
+    .map_err(|error| task_unavailable(error.to_string()))?;
+    let body_text = if held {
+        String::from(crate::erasure::ERASED_MARKER)
+    } else {
+        crate::preservation::redact_covered_text(&tx, arrival.body.text())
+            .map_err(|error| task_unavailable(error.to_string()))?
+    };
     let correspondence: Option<(String, i64)> = tx
         .query_row(
             SQL_SELECT_DELEGATION_CORRESPONDENCE,
