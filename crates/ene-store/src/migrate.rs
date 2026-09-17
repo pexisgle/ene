@@ -282,7 +282,7 @@ created_at TEXT NOT NULL,
 UNIQUE (companion_id, source_kind, source_id, source_phase)
 );
 CREATE TABLE usage_fact (
-ticket TEXT PRIMARY KEY REFERENCES inference_attempt(ticket),
+ticket TEXT PRIMARY KEY,
 provider TEXT NOT NULL,
 model TEXT NOT NULL,
 input_tokens INTEGER,
