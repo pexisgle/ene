@@ -737,7 +737,10 @@ impl HostHandle {
     /// Returns `None` when the connection-ownership section refused the
     /// install: the connection was superseded or closed while the page was
     /// prepared, so nothing is created for it.
-    #[expect(clippy::too_many_arguments, reason = "pass state is intentionally explicit")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "pass state is intentionally explicit"
+    )]
     async fn begin_pass(
         &self,
         live: &LiveInput,
@@ -972,7 +975,10 @@ impl HostHandle {
     /// durable row (CCT §10.5). Returns `None` when the ownership section
     /// refused: no receipt, cursor, or subscription entry is created for a
     /// superseded connection, and the attempt's carried refs are dropped.
-    #[expect(clippy::too_many_arguments, reason = "commit state is intentionally explicit")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "commit state is intentionally explicit"
+    )]
     async fn commit_install(
         &self,
         live: &LiveInput,
