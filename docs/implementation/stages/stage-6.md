@@ -18,6 +18,7 @@ Stage 4 で導入した erasure-currentness foundation を拡張し、次を完�
 ## 設計の入口
 
 - [Targeted Deletion](../../design/critical-areas/targeted-deletion.md)
+- [Targeted Deletion Lifecycle / Participant Contract](../../design/concrete/targeted-deletion-lifecycle.md)
 - [Concurrency Control](../../design/concrete/concurrency-control.md)
 - [Persistence / Recovery](../../design/concrete/persistence-recovery.md)
 - [Interface Boundaries](../../design/concrete/interface-boundaries.md)
