@@ -1,16 +1,23 @@
 //! Preservation owner boundary: canonical erasure-condition state.
 //!
-//! Owns deletion admission, unfinished lifecycle, and the erasure identities
-//! consumed by the canonical Group J store in `ene-store`. Active, held and
+//! Owns deletion admission, unfinished lifecycle, the erasure identities
+//! consumed by the canonical Group J store in `ene-store`, and the required
+//! participant snapshot with its completion vocabulary. Active, held and
 //! finalizing operations keep their current condition effective across restart.
 //! An empty current set is a database result, never a sentinel or cached gate.
 //!
-//! Trusted first-party confirmation issuance, participant fan-out/erasure,
-//! delayed-arrival collection and verified global completion belong to later
-//! slices. This boundary cannot close a condition or declare global completion.
+//! Trusted first-party confirmation issuance, participant-local erasure
+//! implementations, delayed-arrival collection, and verified global completion
+//! belong to other slices and crates. This boundary cannot close a condition
+//! or declare global completion, and it never depends on a concrete
+//! participant crate: the Host composition registers [`ErasureParticipant`]
+//! implementations and performs the fan-out.
 
 mod operation;
 pub use operation::*;
+
+mod participant;
+pub use participant::*;
 
 use ene_primitive::RawId;
 
@@ -88,6 +95,44 @@ mod tests {
         assert_ne!(
             first, second,
             "a later sweep is a different condition of the same operation"
+        );
+    }
+
+    /// The participant boundary must stay cross-cutting: this crate owns the
+    /// vocabulary and the trait, the composition registers concrete
+    /// implementations, and `ene-preservation` never depends on a participant
+    /// crate (lifecycle §9, crate-module-decomposition §5).
+    #[test]
+    fn preservation_depends_on_no_participant_crate() {
+        let manifest = include_str!("../Cargo.toml");
+        let dependencies = manifest
+            .split("[dependencies]")
+            .nth(1)
+            .expect("the manifest has a dependencies section")
+            .split('[')
+            .next()
+            .expect("the dependencies section has a body");
+        for crate_name in [
+            "ene-store",
+            "ene-companion",
+            "ene-learning",
+            "ene-task",
+            "ene-action",
+            "ene-inference",
+            "ene-presence",
+            "ene-presentation",
+            "ene-permission",
+            "ene-credential",
+            "ene-core",
+        ] {
+            assert!(
+                !dependencies.contains(crate_name),
+                "ene-preservation must not depend on {crate_name}"
+            );
+        }
+        assert!(
+            dependencies.contains("ene-primitive"),
+            "the shared identity primitive stays the one domain dependency"
         );
     }
 }

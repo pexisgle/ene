@@ -69,6 +69,7 @@ async fn seed_covering_condition(store: &ene_store::Store, source: RawId) {
         DeletionPurpose::Privacy,
         ene_primitive::WallClockWithTz::now(),
         vec![source],
+        vec![ParticipantOwnerRef::Companion],
     )
     .confirmed_for_tests();
     assert!(matches!(

@@ -2,7 +2,24 @@ use super::*;
 use ene_preservation::*;
 use std::sync::Arc;
 
+/// The current product surface's participant snapshot for store fixtures; the
+/// Host composition decides it in production, and the store only round-trips it.
+fn fixture_participants() -> Vec<ParticipantOwnerRef> {
+    vec![
+        ParticipantOwnerRef::Companion,
+        ParticipantOwnerRef::Learning,
+    ]
+}
+
 fn command(text: &str, sources: Vec<RawId>) -> StartTargetedDeletionCommand {
+    command_with(text, sources, fixture_participants())
+}
+
+fn command_with(
+    text: &str,
+    sources: Vec<RawId>,
+    participants: Vec<ParticipantOwnerRef>,
+) -> StartTargetedDeletionCommand {
     StartTargetedDeletionCommand::new(
         TargetedDeletionTarget {
             mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
@@ -13,6 +30,7 @@ fn command(text: &str, sources: Vec<RawId>) -> StartTargetedDeletionCommand {
         DeletionPurpose::Privacy,
         WallClockWithTz::now(),
         sources,
+        participants,
     )
 }
 
@@ -96,6 +114,7 @@ async fn admission_rollback_leaves_no_partial_publication() {
         "deletion_search_material",
         "erasure_condition",
         "erasure_condition_source",
+        "deletion_participant",
     ] {
         assert_eq!(task_table_count(&store, table), 0);
     }
@@ -239,6 +258,13 @@ async fn generation_exhaustion_is_durable_and_cannot_resume() {
             params![id, i64::MAX],
         )
         .unwrap();
+        // The participant rows track the operation's current sweep, so the
+        // fixture moves them together with the operation.
+        conn.execute(
+            "UPDATE deletion_participant SET sweep=?2 WHERE operation_id=?1",
+            params![id, i64::MAX],
+        )
+        .unwrap();
     }
     let current = DeletionOperationRef {
         sweep: DeletionSweepGeneration::from_u64(i64::MAX as u64),
@@ -363,10 +389,16 @@ async fn closed_completed_condition_is_not_a_permanent_ban_and_corruption_fails_
         Err(PreservationTechnicalError::CorruptState)
     );
     {
-        // The completion boundary closes the current condition and deletes
-        // material plus ALL source rows; historical erasure_condition rows
-        // may remain but no source copy is kept.
+        // The completion boundary verifies every required participant, closes
+        // the current condition, and deletes material plus ALL source rows;
+        // historical erasure_condition rows may remain but no source copy is
+        // kept.
         let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
         conn.execute(
             "DELETE FROM deletion_search_material WHERE operation_id=?1",
             [&id],
@@ -457,13 +489,19 @@ async fn concurrent_duplicate_admissions_serialize_on_sqlite_master() {
 }
 
 fn complete_operation_fixture(store: &Store, current: DeletionOperationRef) {
-    // A1 has no production completion authority; the fixture mirrors the A5
-    // completion invariant: close the current condition and delete the
-    // operation's material, hints, and ALL source rows (completed operations
+    // A1/A2 have no production completion authority; the fixture mirrors the
+    // A5 completion invariant: every required participant is verified for the
+    // final sweep, the current condition is closed, and the operation's
+    // material, hints, and ALL source rows are deleted (completed operations
     // keep zero source rows in the currentness hot path — historical
     // erasure_condition rows may remain, but no source copy is kept).
     let id = crate::codec::encode_id(current.operation.as_raw());
     let conn = store.conn.lock().unwrap();
+    conn.execute(
+        "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
+        params![id, current.sweep.as_u64() as i64],
+    )
+    .unwrap();
     conn.execute(
         "DELETE FROM deletion_search_material WHERE operation_id=?1",
         [&id],
@@ -689,6 +727,11 @@ async fn completed_operation_with_remaining_source_row_fails_closed() {
     let id = crate::codec::encode_id(current.operation.as_raw());
     {
         let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
         conn.execute(
             "DELETE FROM deletion_search_material WHERE operation_id=?1",
             [&id],
@@ -975,4 +1018,693 @@ async fn finalizing_next_sweep_returns_to_active_on_remainder_and_stays_finalizi
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].current, next);
     assert_eq!(rows[0].phase, DeletionOperationPhase::Finalizing);
+}
+
+#[tokio::test]
+async fn admission_snapshots_the_required_participants_and_restart_keeps_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("participant-snapshot.db");
+    let store = Store::open(&path).await.unwrap();
+    let participants = vec![
+        ParticipantOwnerRef::Companion,
+        ParticipantOwnerRef::Learning,
+        ParticipantOwnerRef::ClientIncarnation(RawId::new()),
+    ];
+    let current = match store
+        .start_targeted_deletion(
+            command_with("snapshot-target", vec![], participants).confirmed_for_tests(),
+        )
+        .await
+        .unwrap()
+    {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    let page = store
+        .deletion_participants(current.operation, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 3, "the whole required set is snapshotted");
+    assert_eq!(
+        page.iter()
+            .map(|record| record.participant.owner)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "the snapshot keeps the exact owners without duplicates"
+    );
+    for record in &page {
+        assert_eq!(record.participant.operation, current.operation);
+        assert_eq!(
+            record.progress,
+            ParticipantProgress::Pending,
+            "admission must not claim any participant progress"
+        );
+        assert_eq!(record.erased_count, 0);
+        assert_eq!(record.remainder_count, 0);
+        assert!(record.reported_at.is_none());
+    }
+    // Keyset paging is bounded at the storage boundary.
+    let first = store
+        .deletion_participants(current.operation, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 2);
+    let rest = store
+        .deletion_participants(current.operation, Some(first[1].participant.owner), 100)
+        .await
+        .unwrap();
+    assert_eq!(rest.len(), 1);
+    drop(store);
+    let reopened = Store::open(&path).await.unwrap();
+    let after_restart = reopened
+        .deletion_participants(current.operation, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        after_restart, page,
+        "the required set and progress are durable, not memory defaults"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_or_duplicate_required_participant_set_is_refused() {
+    let store = open_memory().await.unwrap();
+    assert_eq!(
+        store
+            .start_targeted_deletion(
+                command_with("no-participants", vec![], vec![]).confirmed_for_tests()
+            )
+            .await,
+        Err(PreservationTechnicalError::InvalidParticipantSet),
+        "an operation with no required participant could never be verified"
+    );
+    assert_eq!(
+        store
+            .start_targeted_deletion(
+                command_with(
+                    "duplicate-participants",
+                    vec![],
+                    vec![
+                        ParticipantOwnerRef::Companion,
+                        ParticipantOwnerRef::Companion
+                    ],
+                )
+                .confirmed_for_tests(),
+            )
+            .await,
+        Err(PreservationTechnicalError::InvalidParticipantSet)
+    );
+    assert_eq!(task_table_count(&store, "deletion_operation"), 0);
+    assert_eq!(task_table_count(&store, "deletion_participant"), 0);
+}
+
+#[tokio::test]
+async fn duplicate_admission_requires_the_existing_snapshot_to_cover_the_request() {
+    let store = open_memory().await.unwrap();
+    let source = RawId::new();
+    let current = admit(&store, "covered-scope", vec![source]).await;
+    // The fixture snapshot covers Companion and Learning. A duplicate request
+    // with a subset is idempotent; a request needing an owner outside the
+    // durable snapshot is a live-operation conflict, never a silent widening.
+    let subset = command_with(
+        "covered-scope",
+        vec![source],
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    assert_eq!(
+        store.start_targeted_deletion(subset).await.unwrap(),
+        StartTargetedDeletionOutcome::AlreadyCoveredBy(current)
+    );
+    let wider = command_with(
+        "covered-scope",
+        vec![source],
+        vec![
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::ClientIncarnation(RawId::new()),
+        ],
+    )
+    .confirmed_for_tests();
+    assert_eq!(
+        store.start_targeted_deletion(wider).await.unwrap(),
+        StartTargetedDeletionOutcome::HeldByOperation(current)
+    );
+    let rows = store
+        .deletion_participants(current.operation, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "the snapshot is not widened in place");
+}
+
+#[tokio::test]
+async fn participant_progress_is_durable_and_verified_is_terminal_for_the_sweep() {
+    let store = open_memory().await.unwrap();
+    let current = admit(&store, "participant-progress", vec![]).await;
+    let condition = current.condition();
+    let owner = ParticipantOwnerRef::Companion;
+    assert_eq!(
+        store
+            .begin_participant_demand(condition, owner)
+            .await
+            .unwrap(),
+        ParticipantDemandOutcome::Marked(ParticipantProgress::Running {
+            sweep: current.sweep
+        })
+    );
+    // The same command is idempotent: a retry after a crash re-marks Running.
+    assert_eq!(
+        store
+            .begin_participant_demand(condition, owner)
+            .await
+            .unwrap(),
+        ParticipantDemandOutcome::Marked(ParticipantProgress::Running {
+            sweep: current.sweep
+        })
+    );
+    let at = WallClockWithTz::now();
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::more_work(
+                condition, owner, 2, 5, at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::Recorded(ParticipantProgress::Running {
+            sweep: current.sweep
+        })
+    );
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::local_complete(
+                condition, owner, 5, 0, at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::Recorded(ParticipantProgress::LocalComplete {
+            sweep: current.sweep,
+        })
+    );
+    // Local completion is not verification: the participant row is still not
+    // verified, so nothing may treat this sweep as finished.
+    let local = participant_row(&store, current.operation, owner).await;
+    assert_eq!(
+        local.progress,
+        ParticipantProgress::LocalComplete {
+            sweep: current.sweep
+        }
+    );
+    assert!(!local.progress.is_verified());
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::verified(
+                condition, owner, 5, at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::Recorded(ParticipantProgress::Verified {
+            sweep: current.sweep
+        })
+    );
+    let verified = participant_row(&store, current.operation, owner).await;
+    assert_eq!(
+        verified.progress,
+        ParticipantProgress::Verified {
+            sweep: current.sweep
+        }
+    );
+    assert_eq!(verified.erased_count, 5);
+    assert_eq!(verified.remainder_count, 0);
+    assert_eq!(verified.reported_at, Some(at));
+    // A repeated verification is idempotent, and verification is terminal for
+    // the sweep: a later downgrading report cannot reopen it.
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::verified(
+                condition, owner, 5, at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::Recorded(ParticipantProgress::Verified {
+            sweep: current.sweep
+        })
+    );
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::more_work(
+                condition, owner, 0, 9, at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::AlreadyVerified
+    );
+    assert_eq!(
+        store
+            .begin_participant_demand(condition, owner)
+            .await
+            .unwrap(),
+        ParticipantDemandOutcome::AlreadyVerified,
+        "a verified participant is never re-demanded"
+    );
+    let unchanged = participant_row(&store, current.operation, owner).await;
+    assert_eq!(
+        unchanged.progress,
+        ParticipantProgress::Verified {
+            sweep: current.sweep
+        }
+    );
+    assert_eq!(unchanged.erased_count, 5);
+}
+
+/// Reads one participant row for a store test.
+async fn participant_row(
+    store: &Store,
+    operation: DeletionOperationId,
+    owner: ParticipantOwnerRef,
+) -> DeletionParticipantRecord {
+    store
+        .deletion_participants(operation, None, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.participant.owner == owner)
+        .expect("the required participant row must exist")
+}
+
+#[tokio::test]
+async fn holds_are_distinct_durable_incomplete_outcomes() {
+    let store = open_memory().await.unwrap();
+    let participants = vec![
+        ParticipantOwnerRef::Companion,
+        ParticipantOwnerRef::Learning,
+        ParticipantOwnerRef::Task,
+    ];
+    let current = match store
+        .start_targeted_deletion(
+            command_with("held-target", vec![], participants).confirmed_for_tests(),
+        )
+        .await
+        .unwrap()
+    {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    let condition = current.condition();
+    let at = WallClockWithTz::now();
+    // A participant that erased some items and then hit a hold keeps its last
+    // reported counts: a hold carries no usable counts of its own.
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::more_work(
+                condition,
+                ParticipantOwnerRef::Companion,
+                4,
+                2,
+                at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::Recorded(ParticipantProgress::Running {
+            sweep: current.sweep,
+        })
+    );
+    for (owner, reason) in [
+        (
+            ParticipantOwnerRef::Companion,
+            ParticipantHoldClass::Unavailable,
+        ),
+        (ParticipantOwnerRef::Learning, ParticipantHoldClass::Failed),
+        (ParticipantOwnerRef::Task, ParticipantHoldClass::Unsupported),
+    ] {
+        assert_eq!(
+            store
+                .record_participant_completion(ParticipantCompletionFact::held(
+                    condition, owner, reason, at,
+                ))
+                .await
+                .unwrap(),
+            ParticipantCompletionOutcome::Recorded(ParticipantProgress::Held {
+                sweep: current.sweep,
+                reason,
+            })
+        );
+    }
+    let rows = store
+        .deletion_participants(current.operation, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    for record in &rows {
+        // Held is durable, distinct, and never verified: no completion
+        // candidate can be derived while a participant is held (§10).
+        assert!(record.progress.hold_reason().is_some());
+        assert!(!record.progress.is_verified());
+    }
+    let companion = rows
+        .iter()
+        .find(|record| record.participant.owner == ParticipantOwnerRef::Companion)
+        .expect("the companion row must exist");
+    assert_eq!(
+        (companion.erased_count, companion.remainder_count),
+        (4, 2),
+        "a hold preserves the last reported counts"
+    );
+    // A fact for an owner outside the durable snapshot never registers lazily.
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::verified(
+                condition,
+                ParticipantOwnerRef::Presence,
+                1,
+                at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::NotRequired
+    );
+    assert_eq!(
+        store
+            .begin_participant_demand(condition, ParticipantOwnerRef::Presence)
+            .await
+            .unwrap(),
+        ParticipantDemandOutcome::NotRequired
+    );
+    assert_eq!(
+        store
+            .deletion_participants(current.operation, None, 100)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn stale_generation_reports_and_demands_never_update_current_state() {
+    let store = open_memory().await.unwrap();
+    let first = admit(&store, "stale-generation", vec![]).await;
+    let DeletionLifecycleOutcome::Applied(second) = store
+        .change_deletion_lifecycle(first, DeletionLifecycleChange::NextSweep)
+        .await
+        .unwrap()
+    else {
+        panic!("the generation must advance");
+    };
+    // A new sweep reopens every participant: old-sweep verification never
+    // counts for the new one, while the owner set itself is unchanged.
+    let reset = store
+        .deletion_participants(second.operation, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(reset.len(), fixture_participants().len());
+    for record in &reset {
+        assert_eq!(record.progress, ParticipantProgress::Pending);
+        assert!(record.reported_at.is_none());
+    }
+    assert_eq!(
+        store
+            .begin_participant_demand(second.condition(), ParticipantOwnerRef::Companion)
+            .await
+            .unwrap(),
+        ParticipantDemandOutcome::Marked(ParticipantProgress::Running {
+            sweep: second.sweep
+        })
+    );
+    let at = WallClockWithTz::now();
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::verified(
+                first.condition(),
+                ParticipantOwnerRef::Companion,
+                9,
+                at,
+            ))
+            .await
+            .unwrap(),
+        ParticipantCompletionOutcome::StaleSweep,
+        "an older generation must not advance the current sweep"
+    );
+    assert_eq!(
+        store
+            .begin_participant_demand(first.condition(), ParticipantOwnerRef::Companion)
+            .await
+            .unwrap(),
+        ParticipantDemandOutcome::StaleSweep
+    );
+    let current = participant_row(&store, second.operation, ParticipantOwnerRef::Companion).await;
+    assert_eq!(
+        current.progress,
+        ParticipantProgress::Running {
+            sweep: second.sweep
+        }
+    );
+    assert_eq!(current.erased_count, 0);
+    assert_eq!(current.remainder_count, 0);
+}
+
+#[tokio::test]
+async fn completed_operation_requires_every_participant_verified_for_the_final_sweep() {
+    let store = open_memory().await.unwrap();
+    let current = admit(&store, "completed-participants", vec![]).await;
+    let id = crate::codec::encode_id(current.operation.as_raw());
+    {
+        let conn = store.conn.lock().unwrap();
+        // A canonical completion: verified participants, closed condition,
+        // destroyed material.
+        conn.execute(
+            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM deletion_search_material WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE deletion_operation SET phase='completed' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+    }
+    // The participant table alone answers the completion invariant for A5.
+    let rows = store
+        .deletion_participants(current.operation, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().all(|record| record.progress.is_verified()),
+        "a completed operation has every participant verified"
+    );
+    assert_eq!(
+        store
+            .deletion_operation_material(current.operation)
+            .await
+            .unwrap(),
+        DeletionMaterialOutcome::Destroyed,
+        "completion destroys the protected material"
+    );
+    // A completed operation whose participant row is not verified is torn
+    // canonical state; reads fail closed instead of reporting the snapshot.
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE deletion_participant SET state='held',hold_class='failed',reported_at='2026-09-17T02:00:00Z' WHERE operation_id=?1 AND participant_owner='companion'",
+            [&id],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store
+            .deletion_participants(current.operation, None, 100)
+            .await,
+        Err(PreservationTechnicalError::CorruptState)
+    );
+    assert_eq!(
+        store
+            .begin_participant_demand(current.condition(), ParticipantOwnerRef::Companion)
+            .await,
+        Err(PreservationTechnicalError::CorruptState),
+        "the torn completion fails closed on every participant path"
+    );
+    // A canonical completion instead answers the participant paths with the
+    // completed domain outcome.
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0 WHERE operation_id=?1 AND participant_owner='companion'",
+            [&id],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store
+            .begin_participant_demand(current.condition(), ParticipantOwnerRef::Companion)
+            .await,
+        Ok(ParticipantDemandOutcome::Completed)
+    );
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::verified(
+                current.condition(),
+                ParticipantOwnerRef::Companion,
+                1,
+                WallClockWithTz::now(),
+            ))
+            .await,
+        Ok(ParticipantCompletionOutcome::Completed)
+    );
+}
+
+#[tokio::test]
+async fn material_read_returns_the_protected_target_and_current_sweep_sources() {
+    let store = open_memory().await.unwrap();
+    let source = RawId::new();
+    let other = RawId::new();
+    let current = admit(&store, "material-target", vec![source, other]).await;
+    let DeletionMaterialOutcome::Material(material) = store
+        .deletion_operation_material(current.operation)
+        .await
+        .unwrap()
+    else {
+        panic!("an active operation keeps its material");
+    };
+    let MechanicalDeletionTarget::ExactText(exact) = &material.target().mechanical;
+    assert_eq!(exact.expose_for_erasure(), "material-target");
+    assert_eq!(material.sources().len(), 2);
+    assert!(material.sources().contains(&source));
+    assert!(material.sources().contains(&other));
+    let DeletionLifecycleOutcome::Applied(next) = store
+        .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
+        .await
+        .unwrap()
+    else {
+        panic!("the generation must advance");
+    };
+    // The correlation moves to the current sweep, so the material read stays
+    // complete after a generation advance.
+    let DeletionMaterialOutcome::Material(next_material) = store
+        .deletion_operation_material(next.operation)
+        .await
+        .unwrap()
+    else {
+        panic!("the new sweep keeps the material");
+    };
+    assert_eq!(next_material.sources().len(), 2);
+    // A finalizing operation that already ran its material wipe reads as
+    // Destroyed, never as corrupt and never as protected material.
+    {
+        let conn = store.conn.lock().unwrap();
+        let id = crate::codec::encode_id(next.operation.as_raw());
+        conn.execute(
+            "UPDATE deletion_operation SET phase='finalizing' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM deletion_search_material WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store
+            .deletion_operation_material(next.operation)
+            .await
+            .unwrap(),
+        DeletionMaterialOutcome::Destroyed
+    );
+    assert_eq!(
+        store
+            .deletion_operation_material(DeletionOperationId::from_raw(RawId::new()))
+            .await
+            .unwrap(),
+        DeletionMaterialOutcome::Missing
+    );
+}
+
+#[tokio::test]
+async fn missing_or_foreign_participant_rows_fail_closed() {
+    // 1. An operation whose required participant snapshot disappeared is torn
+    // canonical state: the unfinished set, the current-condition set, and the
+    // source-coverage hot path all fail closed instead of reading it as an
+    // incomplete-but-valid operation.
+    {
+        let store = open_memory().await.unwrap();
+        let source = RawId::new();
+        let current = admit(&store, "missing-snapshot", vec![source]).await;
+        let id = crate::codec::encode_id(current.operation.as_raw());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM deletion_participant WHERE operation_id=?1",
+                [&id],
+            )
+            .unwrap();
+        assert_eq!(
+            store.unfinished_deletions(None, 10).await,
+            Err(PreservationTechnicalError::CorruptState)
+        );
+        assert_eq!(
+            store.current_erasure_conditions(None, 10).await,
+            Err(PreservationTechnicalError::CorruptState)
+        );
+        assert_eq!(
+            crate::preservation::covering_condition(
+                &store.conn.lock().unwrap(),
+                &crate::codec::encode_id(source)
+            ),
+            Err(PreservationTechnicalError::CorruptState)
+        );
+        assert_eq!(
+            store
+                .deletion_participants(current.operation, None, 10)
+                .await,
+            Err(PreservationTechnicalError::CorruptState)
+        );
+    }
+    // 2. A participant row outside the operation's current sweep cannot be
+    // read as current progress.
+    {
+        let store = open_memory().await.unwrap();
+        let current = admit(&store, "foreign-sweep", vec![]).await;
+        let id = crate::codec::encode_id(current.operation.as_raw());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE deletion_participant SET sweep=sweep+1 WHERE operation_id=?1",
+                [&id],
+            )
+            .unwrap();
+        assert_eq!(
+            store.unfinished_deletions(None, 10).await,
+            Err(PreservationTechnicalError::CorruptState)
+        );
+        assert_eq!(
+            store
+                .deletion_participants(current.operation, None, 10)
+                .await,
+            Err(PreservationTechnicalError::CorruptState)
+        );
+    }
+    // 3. An unknown operation is never an authoritative empty participant set.
+    let store = open_memory().await.unwrap();
+    let unknown = DeletionOperationId::from_raw(RawId::new());
+    assert_eq!(
+        store.deletion_participants(unknown, None, 10).await,
+        Err(PreservationTechnicalError::UnknownOperation)
+    );
+    assert_eq!(
+        store.deletion_participants(unknown, None, 0).await,
+        Err(PreservationTechnicalError::InvalidLimit)
+    );
 }

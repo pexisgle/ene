@@ -7,7 +7,11 @@
 use ene_primitive::{RawId, WallClockWithTz};
 use zeroize::Zeroizing;
 
-use crate::{DeletionOperationId, DeletionSweepGeneration, ErasureConditionRef};
+use crate::{
+    DeletionMaterialOutcome, DeletionOperationId, DeletionParticipantRecord,
+    DeletionSweepGeneration, ErasureConditionRef, ParticipantCompletionFact,
+    ParticipantCompletionOutcome, ParticipantDemandOutcome, ParticipantOwnerRef,
+};
 
 /// Operation-lifetime material; never an audit field or management payload.
 #[derive(Clone, PartialEq, Eq)]
@@ -65,7 +69,9 @@ pub struct TrustedOwnerConfirmationRef {
 
 /// Immutable request: confirmation cannot be transferred to a changed target,
 /// purpose, or source scope. Known correlations come from semantic owners,
-/// never from a Client's choice of database rows.
+/// never from a Client's choice of database rows. The required participant set
+/// is the current product surface the composition decides on; this crate does
+/// not enumerate capabilities.
 #[derive(Debug, Clone)]
 pub struct StartTargetedDeletionCommand {
     request: RawId,
@@ -73,6 +79,7 @@ pub struct StartTargetedDeletionCommand {
     purpose: DeletionPurpose,
     requested_at: WallClockWithTz,
     known_sources: Vec<RawId>,
+    required_participants: Vec<ParticipantOwnerRef>,
     confirmation: Option<TrustedOwnerConfirmationRef>,
 }
 
@@ -83,6 +90,7 @@ impl StartTargetedDeletionCommand {
         purpose: DeletionPurpose,
         requested_at: WallClockWithTz,
         known_sources: Vec<RawId>,
+        required_participants: Vec<ParticipantOwnerRef>,
     ) -> Self {
         Self {
             request: RawId::new(),
@@ -90,6 +98,7 @@ impl StartTargetedDeletionCommand {
             purpose,
             requested_at,
             known_sources,
+            required_participants,
             confirmation: None,
         }
     }
@@ -109,6 +118,14 @@ impl StartTargetedDeletionCommand {
     #[must_use]
     pub fn known_sources(&self) -> &[RawId] {
         &self.known_sources
+    }
+    /// Required participant snapshot for the operation being admitted. The
+    /// durable set must be non-empty and duplicate-free: an operation with no
+    /// required participants could be completed without any erasure, so it is
+    /// refused rather than treated as vacuously complete.
+    #[must_use]
+    pub fn required_participants(&self) -> &[ParticipantOwnerRef] {
+        &self.required_participants
     }
     #[must_use]
     pub fn is_confirmed(&self) -> bool {
@@ -212,11 +229,21 @@ pub enum PreservationTechnicalError {
     CorruptState,
     #[error("invalid preservation query limit")]
     InvalidLimit,
+    /// The required participant set is empty or repeats an owner. Either shape
+    /// would make the durable snapshot ambiguous, and an empty set would let an
+    /// operation be completed without any erasure.
+    #[error("invalid required participant set")]
+    InvalidParticipantSet,
+    /// The requested deletion operation does not exist. An unknown operation
+    /// is never an authoritative empty participant set.
+    #[error("unknown deletion operation")]
+    UnknownOperation,
 }
 
 /// Canonical persistence boundary. Admission publishes operation, protected
-/// material, initial condition and known source correlations atomically before
-/// returning Started. No participant effects occur within these methods.
+/// material, initial condition, known source correlations, and the required
+/// participant snapshot atomically before returning Started. No participant
+/// effects occur within these methods.
 ///
 /// Source-correlation invariant for the erasure-currentness hot path: an
 /// unfinished operation keeps `erasure_condition_source` rows only in its
@@ -226,6 +253,12 @@ pub enum PreservationTechnicalError {
 /// source rows atomically — historical `erasure_condition` rows may remain,
 /// but no source copy is kept for audit/history. Any remaining source row for
 /// a completed operation is canonical corruption and fails closed.
+///
+/// Participant invariant (same canonical store, no second registry): every
+/// operation carries a non-empty required participant snapshot from admission;
+/// every participant row tracks the operation's current sweep; a completed
+/// operation has every participant `Verified` for that sweep. Any other shape
+/// is canonical corruption and fails closed.
 pub trait PreservationRepository: Send + Sync {
     fn start_targeted_deletion(
         &self,
@@ -255,5 +288,51 @@ pub trait PreservationRepository: Send + Sync {
         limit: u32,
     ) -> impl std::future::Future<
         Output = Result<Vec<CurrentErasureCondition>, PreservationTechnicalError>,
+    > + Send;
+
+    /// SELECT-only, keyset-paged at the database boundary; limit is 1..=100.
+    /// The page is ordered by stored owner name, and the operation's rows are
+    /// validated before they are returned, so torn participant state fails
+    /// closed instead of reading as an incomplete set. An unknown operation is
+    /// [`PreservationTechnicalError::UnknownOperation`], never an empty set.
+    fn deletion_participants(
+        &self,
+        operation: DeletionOperationId,
+        after: Option<ParticipantOwnerRef>,
+        limit: u32,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<DeletionParticipantRecord>, PreservationTechnicalError>,
+    > + Send;
+
+    /// Protected operation-lifetime material for one fan-out pass. Reads no
+    /// body once the operation completed and its material was destroyed.
+    fn deletion_operation_material(
+        &self,
+        operation: DeletionOperationId,
+    ) -> impl std::future::Future<
+        Output = Result<DeletionMaterialOutcome, PreservationTechnicalError>,
+    > + Send;
+
+    /// Durably marks one required participant `Running` for the operation's
+    /// current sweep before any participant effect starts. The write is
+    /// idempotent for the same `(operation, sweep, participant)` and refuses
+    /// to regress a sweep that already reached `Verified`.
+    fn begin_participant_demand(
+        &self,
+        condition: ErasureConditionRef,
+        participant: ParticipantOwnerRef,
+    ) -> impl std::future::Future<
+        Output = Result<ParticipantDemandOutcome, PreservationTechnicalError>,
+    > + Send;
+
+    /// Records one completion fact against the current sweep only. A fact from
+    /// an older generation never updates current state, an owner outside the
+    /// durable snapshot is never registered lazily, and a verified sweep is
+    /// terminal: a later downgrading report cannot reopen it.
+    fn record_participant_completion(
+        &self,
+        fact: ParticipantCompletionFact,
+    ) -> impl std::future::Future<
+        Output = Result<ParticipantCompletionOutcome, PreservationTechnicalError>,
     > + Send;
 }

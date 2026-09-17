@@ -89,6 +89,14 @@ fn seed_condition(store: &Store, sweep: u64, sources: &[RawId]) {
             params![operation_text, sweep_raw],
         )
         .expect("the condition row must seed");
+    // Every operation carries a non-empty required participant snapshot
+    // (lifecycle §8); the fixture seeds the same shape admission would.
+    guard
+        .execute(
+            "INSERT INTO deletion_participant (operation_id,participant_owner,state,sweep,erased_count,remainder_count) VALUES (?1,'companion','pending',?2,0,0)",
+            params![operation_text, sweep_raw],
+        )
+        .expect("the participant snapshot must seed");
     for source in sources {
         guard
             .execute(

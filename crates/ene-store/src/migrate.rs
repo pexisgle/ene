@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 29;
+const CURRENT_VERSION: i64 = 30;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -78,6 +78,27 @@ CHECK ((phase = 'held') = (hold_reason IS NOT NULL))
 CREATE TABLE deletion_search_material (
 operation_id TEXT PRIMARY KEY,
 exact_text TEXT NOT NULL CHECK (length(exact_text) > 0)
+);
+-- Required participant snapshot plus current progress (lifecycle §8-§10).
+-- Every operation carries a non-empty set from admission; every row tracks the
+-- operation's current sweep (NextSweep resets progress to pending in the same
+-- transaction that advances the generation); a completed operation has every
+-- row verified for the final sweep. Progress is keyed by the stable owner name
+-- (a semantic owner class or `client_incarnation:<uuid>`), so a replacement
+-- Client incarnation never inherits another incarnation's status.
+CREATE TABLE deletion_participant (
+operation_id TEXT NOT NULL,
+participant_owner TEXT NOT NULL,
+state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'local_complete', 'verified', 'held')),
+sweep INTEGER NOT NULL CHECK (sweep > 0),
+hold_class TEXT NULL CHECK (hold_class IN ('unavailable', 'unsupported', 'failed')),
+erased_count INTEGER NOT NULL CHECK (erased_count >= 0),
+remainder_count INTEGER NOT NULL CHECK (remainder_count >= 0),
+reported_at TEXT NULL,
+PRIMARY KEY (operation_id, participant_owner),
+CHECK ((state = 'held') = (hold_class IS NOT NULL)),
+CHECK (state != 'verified' OR remainder_count = 0),
+CHECK ((state = 'pending') = (reported_at IS NULL))
 );
 CREATE TABLE deletion_semantic_hint (
 operation_id TEXT NOT NULL,
@@ -378,7 +399,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 30] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 31] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

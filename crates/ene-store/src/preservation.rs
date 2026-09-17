@@ -29,6 +29,12 @@ fn corrupt() -> PreservationTechnicalError {
 /// operation row at all: the union keeps the page bounded while an orphan
 /// condition can never be omitted from a query result as a silent
 /// authoritative empty set — it fails closed through `validate`.
+///
+/// Participant rows add no candidate class: they are read only for an
+/// operation the caller already has (and their operation-side integrity is
+/// enforced by `validate` on that operation), so an orphan participant row is
+/// inert for the current-condition set rather than a silently missing
+/// participant.
 fn candidate_page(
     tx: &rusqlite::Transaction<'_>,
     after: &str,
@@ -63,6 +69,13 @@ fn candidate_page(
 /// completed operation keeps zero source rows (the A5 completion boundary
 /// must delete them — A1 exposes no completion authority — and any remaining
 /// row fails closed). No second copy exists for audit/history.
+///
+/// Participant invariant: every operation carries a non-empty required
+/// participant snapshot from admission; every row tracks the operation's
+/// current sweep (`NextSweep` resets all progress to pending atomically); a
+/// completed operation has every row `verified` for that sweep. A participant
+/// row for an unknown owner, a foreign sweep, or a missing snapshot is torn
+/// canonical state and fails closed, never a silently incomplete set.
 /// Bounded by the touching query's page, never a whole-store scan.
 fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechnicalError> {
     let broken: bool = conn
@@ -80,7 +93,13 @@ fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechni
              (SELECT 1 FROM deletion_search_material m WHERE m.operation_id=o.operation_id AND length(m.exact_text)>0))
          OR (o.phase='completed' AND (EXISTS
              (SELECT 1 FROM deletion_search_material m WHERE m.operation_id=o.operation_id) OR EXISTS
-             (SELECT 1 FROM deletion_semantic_hint h WHERE h.operation_id=o.operation_id)))))
+             (SELECT 1 FROM deletion_semantic_hint h WHERE h.operation_id=o.operation_id)))
+         OR NOT EXISTS
+             (SELECT 1 FROM deletion_participant p WHERE p.operation_id=o.operation_id)
+         OR EXISTS
+             (SELECT 1 FROM deletion_participant p WHERE p.operation_id=o.operation_id AND p.sweep != o.sweep)
+         OR (o.phase='completed' AND EXISTS
+             (SELECT 1 FROM deletion_participant p WHERE p.operation_id=o.operation_id AND p.state != 'verified'))))
          OR EXISTS(SELECT 1 FROM erasure_condition c LEFT JOIN deletion_operation o
              ON o.operation_id=c.operation_id
              WHERE c.operation_id=?1 AND (o.operation_id IS NULL OR c.sweep<=0 OR c.sweep>o.sweep))
@@ -252,6 +271,65 @@ fn decode_operation(
     })
 }
 
+type RawParticipant = (
+    String,
+    String,
+    i64,
+    Option<String>,
+    i64,
+    i64,
+    Option<String>,
+);
+
+fn raw_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawParticipant> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+/// One participant row is composed only when it is internally consistent: a
+/// known owner and state name, a positive sweep, a hold class exactly when
+/// held, non-negative counts, and a parseable report time. Anything else is
+/// an unreadable row, never a guessed progress.
+fn decode_participant(
+    operation: DeletionOperationId,
+    raw: RawParticipant,
+) -> Result<DeletionParticipantRecord, PreservationTechnicalError> {
+    let owner = ParticipantOwnerRef::from_storage_name(&raw.0).ok_or_else(corrupt)?;
+    if raw.2 <= 0 {
+        return Err(corrupt());
+    }
+    let sweep = DeletionSweepGeneration::from_u64(raw.2 as u64);
+    let hold = match raw.3.as_deref() {
+        None => None,
+        Some(name) => Some(ParticipantHoldClass::from_name(name).ok_or_else(corrupt)?),
+    };
+    let progress = match (raw.1.as_str(), hold) {
+        ("pending", None) => ParticipantProgress::Pending,
+        ("running", None) => ParticipantProgress::Running { sweep },
+        ("local_complete", None) => ParticipantProgress::LocalComplete { sweep },
+        ("verified", None) => ParticipantProgress::Verified { sweep },
+        ("held", Some(reason)) => ParticipantProgress::Held { sweep, reason },
+        _ => return Err(corrupt()),
+    };
+    let erased_count = u64::try_from(raw.4).map_err(|_| corrupt())?;
+    let remainder_count = u64::try_from(raw.5).map_err(|_| corrupt())?;
+    let reported_at = raw.6.as_deref().map(parse_time).transpose()?;
+    Ok(DeletionParticipantRecord {
+        participant: DeletionParticipantRef { operation, owner },
+        progress,
+        erased_count,
+        remainder_count,
+        reported_at,
+    })
+}
+
 impl PreservationRepository for Store {
     async fn start_targeted_deletion(
         &self,
@@ -263,6 +341,20 @@ impl PreservationRepository for Store {
         }
         if !command.is_confirmed() {
             return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
+        }
+        // The snapshot is part of the admitted operation identity: an empty
+        // set would let the operation be finalized without any erasure, and a
+        // repeated owner would make the durable progress ambiguous. Both are
+        // caller contract violations, not storage failures.
+        if command.required_participants().is_empty()
+            || command
+                .required_participants()
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != command.required_participants().len()
+        {
+            return Err(PreservationTechnicalError::InvalidParticipantSet);
         }
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
@@ -318,6 +410,24 @@ impl PreservationRepository for Store {
                         .map_err(storage)?;
                     covered &= found;
                 }
+                // The participant snapshot is part of the operation's scope: a
+                // duplicate request is already covered only when the durable
+                // snapshot covers its required owners too. A request needing an
+                // owner outside the snapshot is a live-operation conflict, not
+                // a silent widening of a confirmed operation.
+                for owner in command.required_participants() {
+                    let found: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM deletion_participant WHERE operation_id=?1 AND participant_owner=?2)",
+                            params![
+                                encode_id(record.current.operation.as_raw()),
+                                owner.storage_name()
+                            ],
+                            |r| r.get(0),
+                        )
+                        .map_err(storage)?;
+                    covered &= found;
+                }
                 return Ok(if covered {
                     StartTargetedDeletionOutcome::AlreadyCoveredBy(record.current)
                 } else {
@@ -361,6 +471,16 @@ impl PreservationRepository for Store {
                 tx.execute(
                     "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
                     params![id, encode_id(*source)],
+                )
+                .map_err(storage)?;
+            }
+            // The required participant snapshot commits with the operation and
+            // the condition: no participant effect can start before the
+            // operation that needs it is durable (durable-before-enforce §4.1).
+            for owner in command.required_participants() {
+                tx.execute(
+                    "INSERT INTO deletion_participant (operation_id,participant_owner,state,sweep,erased_count,remainder_count) VALUES (?1,?2,'pending',1,0,0)",
+                    params![id, owner.storage_name()],
                 )
                 .map_err(storage)?;
             }
@@ -502,6 +622,15 @@ impl PreservationRepository for Store {
                         params![id, next],
                     )
                     .map_err(storage)?;
+                    // A new generation re-opens every participant: erasure or
+                    // verification done for the old sweep never counts for the
+                    // new one (§6). The owner set is unchanged — the snapshot
+                    // is fixed at admission — and only progress resets.
+                    tx.execute(
+                        "UPDATE deletion_participant SET state='pending',sweep=?2,hold_class=NULL,erased_count=0,remainder_count=0,reported_at=NULL WHERE operation_id=?1",
+                        params![id, next],
+                    )
+                    .map_err(storage)?;
                     current.sweep = DeletionSweepGeneration::from_u64(next as u64);
                 }
             }
@@ -592,6 +721,326 @@ impl PreservationRepository for Store {
                     })
                 })
                 .collect()
+        })
+        .await
+    }
+
+    async fn deletion_participants(
+        &self,
+        operation: DeletionOperationId,
+        after: Option<ParticipantOwnerRef>,
+        limit: u32,
+    ) -> Result<Vec<DeletionParticipantRecord>, PreservationTechnicalError> {
+        if !(1..=100).contains(&limit) {
+            return Err(PreservationTechnicalError::InvalidLimit);
+        }
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            // A read transaction gives validation and the bounded page the same snapshot.
+            let tx = guard.unchecked_transaction().map_err(storage)?;
+            let id = encode_id(operation.as_raw());
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM deletion_operation WHERE operation_id=?1)",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if !exists {
+                return Err(PreservationTechnicalError::UnknownOperation);
+            }
+            validate(&tx, &id)?;
+            let after = after.map(ParticipantOwnerRef::storage_name).unwrap_or_default();
+            let mut statement = tx
+                .prepare(
+                    "SELECT participant_owner,state,sweep,hold_class,erased_count,remainder_count,reported_at
+                     FROM deletion_participant WHERE operation_id=?1 AND participant_owner>?2
+                     ORDER BY participant_owner LIMIT ?3",
+                )
+                .map_err(storage)?;
+            let rows: Vec<RawParticipant> = statement
+                .query_map(params![id, after, limit], raw_participant)
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?;
+            rows.into_iter()
+                .map(|raw| decode_participant(operation, raw))
+                .collect()
+        })
+        .await
+    }
+
+    async fn deletion_operation_material(
+        &self,
+        operation: DeletionOperationId,
+    ) -> Result<DeletionMaterialOutcome, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let tx = guard.unchecked_transaction().map_err(storage)?;
+            let id = encode_id(operation.as_raw());
+            let row: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(storage)?;
+            let Some((sweep, phase)) = row else {
+                return Ok(DeletionMaterialOutcome::Missing);
+            };
+            validate(&tx, &id)?;
+            if phase == "completed" {
+                // Completion wipes the material before the completed commit
+                // (§3.1); a protected read cannot resurrect it.
+                return Ok(DeletionMaterialOutcome::Destroyed);
+            }
+            let material_exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM deletion_search_material WHERE operation_id=?1)",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if !material_exists {
+                // `validate` refuses an active or held operation without
+                // material, so only a finalizing operation that already ran its
+                // wipe reaches this branch (§12); a read must not resurrect it.
+                return Ok(DeletionMaterialOutcome::Destroyed);
+            }
+            let exact: Option<String> = tx
+                .query_row(
+                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            let exact = exact.ok_or_else(corrupt)?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT material FROM deletion_semantic_hint WHERE operation_id=?1 ORDER BY ordinal",
+                )
+                .map_err(storage)?;
+            let hints: Vec<DeletionSearchMaterial> = statement
+                .query_map([&id], |r| r.get::<_, String>(0))
+                .map_err(storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?
+                .into_iter()
+                .map(DeletionSearchMaterial::new)
+                .collect();
+            let mut statement = tx
+                .prepare(
+                    "SELECT source FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?2 ORDER BY source",
+                )
+                .map_err(storage)?;
+            let sources: Vec<RawId> = statement
+                .query_map(params![id, sweep], |r| r.get::<_, String>(0))
+                .map_err(storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?
+                .into_iter()
+                .map(|text| decode_id(&text).map_err(|_| corrupt()))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DeletionMaterialOutcome::Material(
+                DeletionOperationMaterial::new(
+                    TargetedDeletionTarget {
+                        mechanical: MechanicalDeletionTarget::ExactText(
+                            DeletionSearchMaterial::new(exact),
+                        ),
+                        semantic_hints: hints,
+                    },
+                    sources,
+                ),
+            ))
+        })
+        .await
+    }
+
+    async fn begin_participant_demand(
+        &self,
+        condition: ErasureConditionRef,
+        participant: ParticipantOwnerRef,
+    ) -> Result<ParticipantDemandOutcome, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let id = encode_id(condition.operation.as_raw());
+            validate(&tx, &id)?;
+            let row: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(storage)?;
+            let Some((sweep, phase)) = row else {
+                return Ok(ParticipantDemandOutcome::Missing);
+            };
+            if phase == "completed" {
+                return Ok(ParticipantDemandOutcome::Completed);
+            }
+            // Only the current generation accepts a demand. An older command
+            // must not reopen a participant the new sweep already reset.
+            if sweep <= 0 || u64::try_from(sweep).ok() != Some(condition.sweep.as_u64()) {
+                return Ok(ParticipantDemandOutcome::StaleSweep);
+            }
+            let stored: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM deletion_participant WHERE operation_id=?1 AND participant_owner=?2",
+                    params![id, participant.storage_name()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            let Some(state) = stored else {
+                return Ok(ParticipantDemandOutcome::NotRequired);
+            };
+            if state == "verified" {
+                return Ok(ParticipantDemandOutcome::AlreadyVerified);
+            }
+            tx.execute(
+                "UPDATE deletion_participant SET state='running',hold_class=NULL,reported_at=?3 WHERE operation_id=?1 AND participant_owner=?2",
+                params![id, participant.storage_name(), WallClockWithTz::now().to_rfc3339()],
+            )
+            .map_err(storage)?;
+            validate(&tx, &id)?;
+            tx.commit().map_err(storage)?;
+            Ok(ParticipantDemandOutcome::Marked(ParticipantProgress::Running {
+                sweep: condition.sweep,
+            }))
+        })
+        .await
+    }
+
+    async fn record_participant_completion(
+        &self,
+        fact: ParticipantCompletionFact,
+    ) -> Result<ParticipantCompletionOutcome, PreservationTechnicalError> {
+        let condition = fact.condition();
+        let participant = fact.participant();
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let id = encode_id(condition.operation.as_raw());
+            validate(&tx, &id)?;
+            let row: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(storage)?;
+            let Some((sweep, phase)) = row else {
+                return Ok(ParticipantCompletionOutcome::Missing);
+            };
+            if phase == "completed" {
+                return Ok(ParticipantCompletionOutcome::Completed);
+            }
+            // Stale generations never update current state (§6/§9.1), and the
+            // fact's own condition is the generation it was minted against.
+            if sweep <= 0 || u64::try_from(sweep).ok() != Some(condition.sweep.as_u64()) {
+                return Ok(ParticipantCompletionOutcome::StaleSweep);
+            }
+            let stored: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM deletion_participant WHERE operation_id=?1 AND participant_owner=?2",
+                    params![id, participant.storage_name()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            let Some(state) = stored else {
+                return Ok(ParticipantCompletionOutcome::NotRequired);
+            };
+            if state == "verified" {
+                // Verification is terminal for the sweep: an idempotent repeat
+                // is recorded, a later downgrading report cannot reopen it.
+                return Ok(
+                    if fact.status() == ParticipantCompletionStatus::Verified {
+                        ParticipantCompletionOutcome::Recorded(ParticipantProgress::Verified {
+                            sweep: condition.sweep,
+                        })
+                    } else {
+                        ParticipantCompletionOutcome::AlreadyVerified
+                    },
+                );
+            }
+            let (state_name, hold_name, progress) = match fact.status() {
+                ParticipantCompletionStatus::MoreWork => (
+                    "running",
+                    None,
+                    ParticipantProgress::Running {
+                        sweep: condition.sweep,
+                    },
+                ),
+                ParticipantCompletionStatus::LocalComplete => (
+                    "local_complete",
+                    None,
+                    ParticipantProgress::LocalComplete {
+                        sweep: condition.sweep,
+                    },
+                ),
+                ParticipantCompletionStatus::Verified => (
+                    "verified",
+                    None,
+                    ParticipantProgress::Verified {
+                        sweep: condition.sweep,
+                    },
+                ),
+                ParticipantCompletionStatus::Held(reason) => (
+                    "held",
+                    Some(reason.as_str()),
+                    ParticipantProgress::Held {
+                        sweep: condition.sweep,
+                        reason,
+                    },
+                ),
+            };
+            if let ParticipantCompletionStatus::Held(_) = fact.status() {
+                // A held report carries no usable counts, so the last reported
+                // counts stay durable instead of being erased to zero.
+                tx.execute(
+                    "UPDATE deletion_participant SET state=?3,hold_class=?4,reported_at=?5 WHERE operation_id=?1 AND participant_owner=?2",
+                    params![
+                        id,
+                        participant.storage_name(),
+                        state_name,
+                        hold_name,
+                        fact.observed_at().to_rfc3339(),
+                    ],
+                )
+                .map_err(storage)?;
+            } else {
+                tx.execute(
+                    "UPDATE deletion_participant SET state=?3,sweep=?4,hold_class=?5,erased_count=?6,remainder_count=?7,reported_at=?8 WHERE operation_id=?1 AND participant_owner=?2",
+                    params![
+                        id,
+                        participant.storage_name(),
+                        state_name,
+                        condition.sweep.as_u64() as i64,
+                        hold_name,
+                        i64::try_from(fact.erased_count()).map_err(|_| corrupt())?,
+                        i64::try_from(fact.remainder_count()).map_err(|_| corrupt())?,
+                        fact.observed_at().to_rfc3339(),
+                    ],
+                )
+                .map_err(storage)?;
+            }
+            validate(&tx, &id)?;
+            tx.commit().map_err(storage)?;
+            Ok(ParticipantCompletionOutcome::Recorded(progress))
         })
         .await
     }
