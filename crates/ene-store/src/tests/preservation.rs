@@ -249,6 +249,81 @@ async fn generation_exhaustion_is_durable_and_cannot_resume() {
 }
 
 #[tokio::test]
+async fn current_set_follows_the_current_sweep_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("current-sweep.db");
+    let store = Store::open(&path).await.unwrap();
+    let mut current = admit(&store, "sweeping", vec![]).await;
+    for _ in 0..2 {
+        let DeletionLifecycleOutcome::Applied(next) = store
+            .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
+            .await
+            .unwrap()
+        else {
+            panic!("the generation must advance");
+        };
+        current = next;
+    }
+    assert_eq!(current.sweep.as_u64(), 3);
+    let current = DeletionOperationRef {
+        sweep: DeletionSweepGeneration::from_u64(3),
+        ..current
+    };
+    // Age only the historical sweeps so the current row's opened time is
+    // distinguishable from them; the current sweep must win, not sweep 1.
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE erasure_condition SET opened_at='2020-01-01T00:00:00Z' WHERE operation_id=?1 AND sweep<3",
+            [crate::codec::encode_id(current.operation.as_raw())],
+        )
+        .unwrap();
+    }
+    let current_row = async |store: &Store| -> CurrentErasureCondition {
+        store.current_erasure_conditions(None, 10).await.unwrap()[0].clone()
+    };
+    assert_eq!(current_row(&store).await.condition, current.condition());
+    drop(store);
+    let reopened = Store::open(&path).await.unwrap();
+    let after_restart = current_row(&reopened).await;
+    assert_eq!(
+        after_restart.condition,
+        current.condition(),
+        "the current sweep, not a historical one"
+    );
+    assert!(
+        after_restart.opened_at.as_datetime()
+            > WallClockWithTz::parse_rfc3339("2020-01-01T00:00:00Z")
+                .unwrap()
+                .as_datetime()
+    );
+}
+
+#[tokio::test]
+async fn an_orphan_condition_fails_closed_instead_of_reading_as_empty() {
+    let store = open_memory().await.unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        // A condition row with no deletion_operation parent is torn canonical
+        // state: the active set must refuse, never report an authoritative
+        // empty set for it.
+        conn.execute(
+            "INSERT INTO erasure_condition (operation_id,sweep,opened_at) VALUES (?1,1,'2026-09-17T00:00:00Z')",
+            [crate::codec::encode_id(RawId::new())],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store.current_erasure_conditions(None, 10).await,
+        Err(PreservationTechnicalError::CorruptState)
+    );
+    assert_eq!(
+        store.unfinished_deletions(None, 10).await,
+        Err(PreservationTechnicalError::CorruptState)
+    );
+}
+
+#[tokio::test]
 async fn closed_completed_condition_is_not_a_permanent_ban_and_corruption_fails_closed() {
     let store = open_memory().await.unwrap();
     let source = RawId::new();

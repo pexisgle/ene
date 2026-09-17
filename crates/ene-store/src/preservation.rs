@@ -23,6 +23,34 @@ fn corrupt() -> PreservationTechnicalError {
     PreservationTechnicalError::CorruptState
 }
 
+/// One bounded, keyset-paged candidate page for both owner queries.
+///
+/// Candidates are unfinished operations plus torn orphan conditions with no
+/// operation row at all: the union keeps the page bounded while an orphan
+/// condition can never be omitted from a query result as a silent
+/// authoritative empty set — it fails closed through `validate`.
+fn candidate_page(
+    tx: &rusqlite::Transaction<'_>,
+    after: &str,
+    limit: u32,
+) -> Result<Vec<String>, PreservationTechnicalError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT operation_id FROM deletion_operation WHERE phase!='completed' AND operation_id>?1
+         UNION
+         SELECT c.operation_id FROM erasure_condition c
+             LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+             WHERE o.operation_id IS NULL AND c.operation_id>?1
+         ORDER BY operation_id LIMIT ?2",
+        )
+        .map_err(storage)?;
+    statement
+        .query_map(params![after, limit], |r| r.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)
+}
+
 /// Structural integrity of one operation's canonical rows, scoped to the
 /// operation a query actually touches: an inner join must never silently hide
 /// an orphan correlation, an unfinished operation whose condition was closed
@@ -396,25 +424,22 @@ impl PreservationRepository for Store {
             let guard = lock_shared(&conn);
             // A read transaction gives validation and the bounded page the same snapshot.
             let tx = guard.unchecked_transaction().map_err(storage)?;
-            let mut statement = tx
-                .prepare(
-                    "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason FROM deletion_operation WHERE phase!='completed' AND operation_id>?1 ORDER BY operation_id LIMIT ?2",
-                )
-                .map_err(storage)?;
-            let rows: Vec<(RawOperation, String)> = statement
-                .query_map(
-                    params![
-                        after.map(|id| encode_id(id.as_raw())).unwrap_or_default(),
-                        limit
-                    ],
-                    |row| Ok((raw_operation(row)?, row.get::<_, String>(0)?)),
-                )
-                .map_err(storage)?
-                .collect::<Result<_, _>>()
-                .map_err(storage)?;
-            rows.into_iter()
-                .map(|(raw, id)| {
+            let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
+            let ids = candidate_page(&tx, &after, limit)?;
+            ids.into_iter()
+                .map(|id| {
                     validate(&tx, &id)?;
+                    let raw = tx
+                        .query_row(
+                            "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason FROM deletion_operation WHERE operation_id=?1",
+                            [&id],
+                            raw_operation,
+                        )
+                        .optional()
+                        .map_err(storage)?
+                        // An orphan condition candidate has no operation row:
+                        // that is exactly the torn state `validate` refuses.
+                        .ok_or_else(corrupt)?;
                     decode_operation(raw)
                 })
                 .collect()
@@ -434,22 +459,8 @@ impl PreservationRepository for Store {
         run_blocking(move || {
             let guard = lock_shared(&conn);
             let tx = guard.unchecked_transaction().map_err(storage)?;
-            let mut statement = tx
-                .prepare(
-                    "SELECT operation_id FROM deletion_operation WHERE phase!='completed' AND operation_id>?1 ORDER BY operation_id LIMIT ?2",
-                )
-                .map_err(storage)?;
-            let ids: Vec<String> = statement
-                .query_map(
-                    params![
-                        after.map(|id| encode_id(id.as_raw())).unwrap_or_default(),
-                        limit
-                    ],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?
-                .collect::<Result<_, _>>()
-                .map_err(storage)?;
+            let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
+            let ids = candidate_page(&tx, &after, limit)?;
             // Paging over unfinished operations (not over open conditions)
             // keeps validation total for the page: an unfinished operation
             // whose current condition was closed early never silently drops
@@ -457,9 +468,15 @@ impl PreservationRepository for Store {
             ids.iter()
                 .map(|id| {
                     validate(&tx, id)?;
+                    // Only the current sweep is the current condition (§7):
+                    // the operation's stated sweep joins the condition, so a
+                    // historical sweep row can never be returned after a
+                    // generation advance.
                     let (sweep, opened): (i64, String) = tx
                         .query_row(
-                            "SELECT sweep,opened_at FROM erasure_condition WHERE operation_id=?1",
+                            "SELECT c.sweep,c.opened_at FROM erasure_condition c
+                         JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
+                         WHERE c.operation_id=?1 AND c.closed_at IS NULL AND o.phase!='completed'",
                             [id],
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )
