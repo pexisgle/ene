@@ -857,4 +857,16 @@ impl CredentialErasureRepository for Store {
             .await
         }
     }
+
+    fn before_device_auth_file_erase(&self) -> impl std::future::Future<Output = ()> + Send {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let parks = Arc::clone(&self.test_parks);
+            async move {
+                parks.device_auth_file.pause_if_armed().await;
+            }
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        std::future::ready(())
+    }
 }

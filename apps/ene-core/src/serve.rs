@@ -530,6 +530,18 @@ pub struct HostHandle {
     /// resumes independently). See
     /// [`HeldRetrySchedule`](crate::targeted_deletion::HeldRetrySchedule).
     pub(crate) deletion_hold_retry: AsyncMutex<crate::targeted_deletion::HeldRetrySchedule>,
+    /// Process-local serialization of every Targeted Deletion fan-out and
+    /// finalization entry (drive, serving tick, confirmation kick, startup
+    /// recovery).
+    ///
+    /// This is not a second deletion authority: currentness, completion, and
+    /// participant facts stay in the canonical store. It only ensures one
+    /// participant demand cannot still be in-flight in this process while
+    /// another driver Completes the same operation, so a non-rollbackable
+    /// side effect (process memory, device-auth file, Client wire wipe)
+    /// cannot run after closure. A Host restart drops the in-flight work and
+    /// resumes from durable store state.
+    pub(crate) targeted_deletion_drive: AsyncMutex<()>,
     /// Invalidation fence for in-flight Host transient payloads (A3c).
     ///
     /// Bumped by the Host-transient erasure demand; a dialogue stream or
@@ -699,7 +711,9 @@ impl HostHandle {
         ));
         let learning_queue = Arc::new(StdMutex::new(VecDeque::new()));
         let transient_fence = Arc::new(crate::transient_erasure::TransientErasureFence::default());
-        let client_transients = Arc::new(crate::transient_erasure::ClientTransientRegistry::new());
+        let client_transients = Arc::new(crate::transient_erasure::ClientTransientRegistry::new(
+            store.clone(),
+        ));
         let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
@@ -720,6 +734,7 @@ impl HostHandle {
                 crate::targeted_deletion::ErasureParticipantRegistry::new(),
             ),
             deletion_hold_retry: AsyncMutex::new(crate::targeted_deletion::HeldRetrySchedule::new()),
+            targeted_deletion_drive: AsyncMutex::new(()),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
             #[cfg(test)]
@@ -844,7 +859,10 @@ impl HostHandle {
     ///
     /// Parks live on this in-memory instance. A second [`Store::open`] on the
     /// same file would not share them, so production-path race tests must arm
-    /// the serving handle's store rather than reopening the database.
+    /// the serving handle's store rather than reopening the database. Park
+    /// methods exist only on a `test-support` / `cfg(test)` store build;
+    /// this accessor itself is the integration-test seam onto the same
+    /// in-process store the participants already hold.
     #[doc(hidden)]
     pub fn store_for_tests(&self) -> &Store {
         &self.store
@@ -1023,6 +1041,8 @@ impl HostHandle {
     /// verified for the current sweep are never demanded again, so a crash
     /// mid-fan-out continues with only the unfinished participants (§14); the
     /// durable snapshot and the operation identity are never regenerated.
+    /// Production entries serialize on the process-local drive lock so one
+    /// in-flight demand cannot overlap another driver's completion.
     ///
     /// # Errors
     ///
@@ -1032,6 +1052,7 @@ impl HostHandle {
         &self,
         pass: crate::targeted_deletion::TargetedDeletionPass,
     ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
+        let _drive = self.targeted_deletion_drive.lock().await;
         let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
         crate::targeted_deletion::drive_targeted_deletion(&self.store, &registry, pass).await
     }
@@ -1044,9 +1065,10 @@ impl HostHandle {
     /// ([`TargetedDeletionPass::default`](crate::targeted_deletion::TargetedDeletionPass::default));
     /// a hold therefore cannot be
     /// retried in a tight loop, and `Held(GenerationExhausted)` is never
-    /// resumed. Concurrent callers serialize on the retry schedule, so two
-    /// ticks cannot double-drive one hold; the durable store still owns every
-    /// idempotency and completion premise.
+    /// resumed. Concurrent callers serialize on the process-local drive lock
+    /// (and then the retry schedule), so two ticks cannot double-drive one
+    /// hold or complete an operation while another demand is in-flight; the
+    /// durable store still owns every idempotency and completion premise.
     ///
     /// # Errors
     ///
@@ -1056,6 +1078,7 @@ impl HostHandle {
     pub async fn run_targeted_deletion_tick(
         &self,
     ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
+        let _drive = self.targeted_deletion_drive.lock().await;
         let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
         let mut schedule = self.deletion_hold_retry.lock().await;
         crate::targeted_deletion::tick_targeted_deletion(
@@ -1076,13 +1099,15 @@ impl HostHandle {
     /// `Active` / `Finalizing` operation is driven through bounded fan-out
     /// passes, and `Held(GenerationExhausted)` stays held. Failures are
     /// technical and fail startup; a still-held or unfinished operation is a
-    /// domain state, not an error.
+    /// domain state, not an error. Shares the process-local drive lock with
+    /// the serving tick and confirmation kick.
     ///
     /// # Errors
     ///
     /// [`CoreError::Deletion`] when the canonical store refuses the recovery
     /// drive.
     pub(crate) async fn recover_targeted_deletion_on_startup(&self) -> Result<(), CoreError> {
+        let _drive = self.targeted_deletion_drive.lock().await;
         let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
         crate::targeted_deletion::recover_targeted_deletions(
             &self.store,
@@ -1101,10 +1126,12 @@ impl HostHandle {
     /// must not make the caller report the confirmation as failed — the
     /// durable operation stays for the serving tick or the next startup
     /// recovery — and it never estimates completion, because every pass
-    /// re-derives its premises inside the sealed store boundary.
+    /// re-derives its premises inside the sealed store boundary. Shares the
+    /// process-local drive lock with the serving tick and startup recovery.
     pub(crate) async fn kick_targeted_deletion(&self) {
+        let _drive = self.targeted_deletion_drive.lock().await;
         let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
-        let _drive = crate::targeted_deletion::drive_targeted_deletion_until_settled(
+        let _drive_outcome = crate::targeted_deletion::drive_targeted_deletion_until_settled(
             &self.store,
             &registry,
             crate::targeted_deletion::TargetedDeletionPass::default(),

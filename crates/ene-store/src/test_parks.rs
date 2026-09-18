@@ -57,9 +57,11 @@ impl TestPark {
     }
 }
 
-/// Parks for the two mutation windows the Stage 6 race regressions fix.
+/// Parks for the mutation windows the Stage 6 race regressions fix.
 #[derive(Debug, Default)]
 pub(crate) struct TestParks {
     pub(crate) observation_write: TestPark,
     pub(crate) erasure_mutation: TestPark,
+    pub(crate) device_auth_file: TestPark,
+    pub(crate) client_demand: TestPark,
 }

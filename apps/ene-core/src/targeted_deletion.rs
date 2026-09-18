@@ -290,15 +290,19 @@ fn deletion_error(error: ene_preservation::PreservationTechnicalError) -> CoreEr
 
 /// Builds the body-free projection for a Client-bound holder and the local
 /// material scope for an in-process owner (lifecycle §8.1).
+///
+/// Covered-source identities are not copied into the command: Learning and
+/// other semantic owners probe the canonical `(operation, sweep, source)`
+/// primary key for each candidate they inspect, so one demand stays bounded
+/// in its own page rather than in the whole sweep.
 fn command_scope(
     material: &DeletionOperationMaterial,
     owner: ParticipantOwnerRef,
 ) -> ParticipantErasureScope {
-    let sources = material.sources().to_vec();
     if owner.is_incarnation() {
-        ParticipantErasureScope::correlation_only(sources)
+        ParticipantErasureScope::correlation_only(Vec::new())
     } else {
-        ParticipantErasureScope::local(material.target().clone(), sources)
+        ParticipantErasureScope::local(material.target().clone(), Vec::new())
     }
 }
 
@@ -531,21 +535,20 @@ async fn drive_operation(
                     }
                 }
                 outcome.demands += 1;
-                // Currentness boundary for this demand's source set: the
-                // canonical coverage is re-read only after reconciliation
+                // Currentness boundary for this demand's protected target: the
+                // canonical material is re-read only after reconciliation
                 // reported Complete for `current`, and again immediately
-                // before this demand so a source this pass just published
-                // (or one another writer published during an earlier
-                // participant) is in the scope Learning pin-correlation
-                // walks. A handle taken before the walk would omit
-                // identities past the admission page; Missing/Destroyed
-                // here means a concurrent lifecycle transition ended this
-                // pass's authority and the pass must not mutate with a
-                // stale snapshot. The page size is a work bound, never a
+                // before this demand so a concurrent wipe cannot hand a
+                // destroyed target to a participant. Covered-source
+                // membership is not snapshotted here; the owner probes the
+                // `(operation, sweep, source)` primary key for each
+                // candidate it inspects. Missing/Destroyed means a
+                // concurrent lifecycle transition ended this pass's
+                // authority. The page size is a work bound, never a
                 // coverage bound. Each participant's actual erase
                 // transaction re-checks `condition_is_current` on the same
                 // Immediate writer; this read only chooses the demand
-                // scope, it is not the mutation gate.
+                // target, it is not the mutation gate.
                 let material = match store
                     .deletion_operation_material(current.operation)
                     .await
@@ -884,12 +887,13 @@ mod tests {
     };
     use ene_preservation::{
         ConfirmTargetedDeletionOutcome, DeletionFinalizationOutcome, DeletionHoldReason,
-        DeletionOperationId, DeletionOperationPhase, DeletionOperationRecord, DeletionOperationRef,
-        DeletionPurpose, DeletionSearchMaterial, DeletionSweepGeneration, ErasureParticipant,
-        MechanicalDeletionTarget, ParticipantCompletionFact, ParticipantCompletionStatus,
-        ParticipantHoldClass, ParticipantOwnerRef, ParticipantProgress,
-        StageTargetedDeletionRequestCommand, StageTargetedDeletionRequestOutcome,
-        StartTargetedDeletionCommand, StartTargetedDeletionOutcome, TargetedDeletionTarget,
+        DeletionMaterialOutcome, DeletionOperationId, DeletionOperationPhase,
+        DeletionOperationRecord, DeletionOperationRef, DeletionPurpose, DeletionSearchMaterial,
+        DeletionSweepGeneration, ErasureParticipant, MechanicalDeletionTarget,
+        ParticipantCompletionFact, ParticipantCompletionStatus, ParticipantHoldClass,
+        ParticipantOwnerRef, ParticipantProgress, StageTargetedDeletionRequestCommand,
+        StageTargetedDeletionRequestOutcome, StartTargetedDeletionCommand,
+        StartTargetedDeletionOutcome, TargetedDeletionTarget,
     };
     use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
     use ene_task::{
@@ -1525,6 +1529,18 @@ mod tests {
             ],
         )
         .await;
+        let DeletionMaterialOutcome::Material(material) = handle
+            .store
+            .deletion_operation_material(current.operation)
+            .await
+            .expect("the protected material must read")
+        else {
+            panic!("an unfinished operation keeps its material");
+        };
+        assert!(
+            material.sources().is_empty(),
+            "fan-out material must not load the covered-source set"
+        );
         let outcome = drive_until_settled(&handle).await;
         assert_eq!(outcome.held, 0, "semantic derived data must not hold");
         assert_eq!(outcome.unfinished, 0);
@@ -1713,6 +1729,296 @@ mod tests {
             operation_record(&handle, current.operation).await.phase,
             DeletionOperationPhase::Completed
         );
+    }
+
+    /// Blocker 3 remainder: Host-transient process memory cannot share the
+    /// Immediate writer. A demand parked after currentness, while another
+    /// driver Completes and the Owner re-queues the same string, must not
+    /// drop the fresh premise.
+    #[tokio::test]
+    async fn a_stale_host_transient_demand_does_not_drop_fresh_post_completion_premises() {
+        use crate::transient_erasure::HostTransientParticipant;
+        use ene_learning::{
+            ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn,
+            SourceRangeRef,
+        };
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-stale-transient").await else {
+            panic!("the host must open");
+        };
+        let target = "host-transient-stale-canary";
+        let old = ExperienceCandidate {
+            companion: RawId::new(),
+            source: SourceRangeRef {
+                kind: ExperienceSourceKind::Dialogue,
+                start: RawId::new(),
+                end: RawId::new(),
+            },
+            sources: Vec::new(),
+            transcript: vec![ExperienceTurn {
+                role: ExperienceRole::Owner,
+                text: format!("old copy of {target}"),
+                at: None,
+            }],
+            at: WallClockWithTz::now(),
+        };
+        crate::lock_unpoison(&handle.learning_queue).push_back(old);
+
+        let current = admit(&handle, target, vec![ParticipantOwnerRef::HostTransient]).await;
+        handle.store.arm_erasure_mutation_park_for_tests();
+        let parked = {
+            let store = handle.store.clone();
+            let fence = Arc::clone(&handle.transient_fence);
+            let presentations = Arc::clone(&handle.presentations);
+            let queue = Arc::clone(&handle.learning_queue);
+            let condition = current.condition();
+            tokio::spawn(async move {
+                let material = match store
+                    .deletion_operation_material(current.operation)
+                    .await
+                    .expect("the material must read")
+                {
+                    DeletionMaterialOutcome::Material(material) => material,
+                    other => panic!("the protected material must read, got {other:?}"),
+                };
+                HostTransientParticipant::new(store, fence, presentations, queue)
+                    .demand_local_erasure(DemandLocalErasureCommand::new(
+                        condition,
+                        ParticipantOwnerRef::HostTransient,
+                        command_scope(&material, ParticipantOwnerRef::HostTransient),
+                    ))
+                    .await
+            })
+        };
+        handle.store.wait_erasure_mutation_park_for_tests().await;
+
+        let outcome = drive_until_settled(&handle).await;
+        assert_eq!(outcome.held, 0);
+        assert_eq!(
+            operation_record(&handle, current.operation).await.phase,
+            DeletionOperationPhase::Completed
+        );
+
+        let fresh_text = format!("fresh origin of {target}");
+        let fresh = ExperienceCandidate {
+            companion: RawId::new(),
+            source: SourceRangeRef {
+                kind: ExperienceSourceKind::Dialogue,
+                start: RawId::new(),
+                end: RawId::new(),
+            },
+            sources: Vec::new(),
+            transcript: vec![ExperienceTurn {
+                role: ExperienceRole::Owner,
+                text: fresh_text.clone(),
+                at: None,
+            }],
+            at: WallClockWithTz::now(),
+        };
+        crate::lock_unpoison(&handle.learning_queue).push_back(fresh);
+
+        handle.store.release_erasure_mutation_park_for_tests();
+        let stale = parked.await.expect("the parked demand joins");
+        assert_eq!(
+            stale.status(),
+            ParticipantCompletionStatus::LocalComplete,
+            "a completed condition is NotCurrent, never Verified"
+        );
+
+        let queue = crate::lock_unpoison(&handle.learning_queue);
+        assert_eq!(queue.len(), 1, "the fresh premise must remain");
+        assert_eq!(queue[0].transcript[0].text, fresh_text);
+    }
+
+    /// Blocker 3 remainder: the credential device-auth file cannot share the
+    /// metadata transaction. A demand parked after the DB pass, while another
+    /// driver Completes and the Owner saves a fresh entry of the same string,
+    /// must leave that entry byte-for-byte.
+    #[tokio::test]
+    async fn a_stale_credential_file_erase_does_not_drop_fresh_device_auth() {
+        use ene_credential::{CredentialErasureParticipant, DeviceId};
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-stale-device-auth").await
+        else {
+            panic!("the host must open");
+        };
+        let target = "device-auth-stale-canary";
+        let old_device = DeviceId(RawId::new());
+        handle
+            .auth_store
+            .save_secret(&old_device, &format!("phone {target}"), "old-secret")
+            .expect("the old device-auth entry saves");
+
+        let current = admit(&handle, target, vec![ParticipantOwnerRef::Credential]).await;
+        handle.store.arm_device_auth_file_park_for_tests();
+        let parked = {
+            let store = handle.store.clone();
+            let auth = std::sync::Arc::new(handle.auth_store.clone());
+            let condition = current.condition();
+            tokio::spawn(async move {
+                let material = match store
+                    .deletion_operation_material(current.operation)
+                    .await
+                    .expect("the material must read")
+                {
+                    DeletionMaterialOutcome::Material(material) => material,
+                    other => panic!("the protected material must read, got {other:?}"),
+                };
+                CredentialErasureParticipant::new(std::sync::Arc::new(store), auth)
+                    .demand_local_erasure(DemandLocalErasureCommand::new(
+                        condition,
+                        ParticipantOwnerRef::Credential,
+                        command_scope(&material, ParticipantOwnerRef::Credential),
+                    ))
+                    .await
+            })
+        };
+        handle.store.wait_device_auth_file_park_for_tests().await;
+
+        let outcome = drive_until_settled(&handle).await;
+        assert_eq!(outcome.held, 0);
+        assert_eq!(
+            operation_record(&handle, current.operation).await.phase,
+            DeletionOperationPhase::Completed
+        );
+
+        let fresh_device = DeviceId(RawId::new());
+        let fresh_descriptor = format!("laptop {target}");
+        handle
+            .auth_store
+            .save_secret(&fresh_device, &fresh_descriptor, "fresh-secret")
+            .expect("the fresh device-auth entry saves");
+
+        handle.store.release_device_auth_file_park_for_tests();
+        let stale = parked.await.expect("the parked demand joins");
+        assert_eq!(
+            stale.status(),
+            ParticipantCompletionStatus::LocalComplete,
+            "a completed condition is NotCurrent, never Verified"
+        );
+        assert_eq!(
+            handle
+                .auth_store
+                .count_target_text(target)
+                .expect("the file remainder must read"),
+            1,
+            "the fresh device-auth entry must remain"
+        );
+        assert!(
+            handle
+                .auth_store
+                .load_secret(&fresh_device)
+                .expect("the fresh entry must load")
+                .is_some(),
+            "the fresh device-auth secret must remain"
+        );
+    }
+
+    /// Coverage stays exhaustive without materializing every source into one
+    /// command: a paraphrase pin past many covered identities is still erased,
+    /// and the material read stays empty of source ids.
+    #[tokio::test]
+    async fn a_large_covered_source_set_does_not_unbounded_one_demand() {
+        use ene_companion::{CompanionRepository as _, HistoryRole};
+        use ene_learning::{ChangeKind, LearningRepository as _, MemoryId, MemoryTarget};
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-many-sources").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "many-sources-pin-canary";
+        let mut sources = Vec::new();
+        for index in 0..128 {
+            sources.push(
+                append_history(
+                    &handle,
+                    companion,
+                    generation,
+                    HistoryRole::Owner,
+                    &format!("note {index} carries {target}"),
+                )
+                .await,
+            );
+        }
+        let late = *sources
+            .iter()
+            .max_by_key(|source| source.as_uuid())
+            .expect("the fixture has sources");
+        let paraphrase = summary_of(
+            companion.as_raw(),
+            String::from("The owner keeps a private launch credential."),
+            late,
+            late,
+        );
+        let memory = MemoryId::generate();
+        commit_learning(
+            &handle,
+            &paraphrase,
+            MemoryTarget::New { id: memory },
+            "The owner keeps a private launch credential.",
+            ChangeKind::Initial,
+        )
+        .await;
+
+        let current = admit_first_party(
+            &handle,
+            target,
+            vec![
+                ParticipantOwnerRef::Companion,
+                ParticipantOwnerRef::Learning,
+            ],
+        )
+        .await;
+        let DeletionMaterialOutcome::Material(material) = handle
+            .store
+            .deletion_operation_material(current.operation)
+            .await
+            .expect("the protected material must read")
+        else {
+            panic!("an unfinished operation keeps its material");
+        };
+        assert!(
+            material.sources().is_empty(),
+            "one material read must not grow with the covered-source set"
+        );
+
+        let outcome = drive_until_settled(&handle).await;
+        assert_eq!(outcome.held, 0);
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0
+        );
+        let summaries = handle
+            .store
+            .load_summaries(&[paraphrase.id])
+            .await
+            .expect("summaries must load");
+        assert!(
+            summaries.is_empty(),
+            "the paraphrase pin past the large set is still erased"
+        );
+        let memories = handle
+            .store
+            .list_current_memories(companion.as_raw(), None, 100)
+            .await
+            .expect("memories must list");
+        assert!(memories.iter().all(|item| item.id != memory));
     }
 
     #[tokio::test]

@@ -246,76 +246,111 @@ impl Store {
     /// Arms the first-waiter park just before a Task Agent observation row is
     /// written. Production never calls this; tests use it to hold the
     /// body-in-memory window closed by the in-flight Action correspondence.
-    /// Without the test-support build this is a no-op.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn arm_observation_write_park_for_tests(&self) {
-        #[cfg(any(test, feature = "test-support"))]
         self.test_parks.observation_write.arm();
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = self;
     }
 
     /// Waits until the armed observation-write park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
-    #[cfg_attr(
-        not(any(test, feature = "test-support")),
-        expect(
-            clippy::unused_async,
-            reason = "production no-op of a test-only observation-write park"
-        )
-    )]
     pub async fn wait_observation_write_park_for_tests(&self) {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            self.test_parks.observation_write.wait_entered().await;
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = self;
+        self.test_parks.observation_write.wait_entered().await;
     }
 
     /// Releases the parked observation write.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn release_observation_write_park_for_tests(&self) {
-        #[cfg(any(test, feature = "test-support"))]
         self.test_parks.observation_write.release();
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = self;
     }
 
     /// Arms the first-waiter park just before a durable erasure mutation.
-    /// Without the test-support build this is a no-op.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn arm_erasure_mutation_park_for_tests(&self) {
-        #[cfg(any(test, feature = "test-support"))]
         self.test_parks.erasure_mutation.arm();
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = self;
     }
 
     /// Waits until the armed erasure-mutation park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
-    #[cfg_attr(
-        not(any(test, feature = "test-support")),
-        expect(
-            clippy::unused_async,
-            reason = "production no-op of a test-only erasure-mutation park"
-        )
-    )]
     pub async fn wait_erasure_mutation_park_for_tests(&self) {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            self.test_parks.erasure_mutation.wait_entered().await;
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = self;
+        self.test_parks.erasure_mutation.wait_entered().await;
     }
 
     /// Releases the parked erasure mutation.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn release_erasure_mutation_park_for_tests(&self) {
-        #[cfg(any(test, feature = "test-support"))]
         self.test_parks.erasure_mutation.release();
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = self;
+    }
+
+    /// Arms the first-waiter park just before the credential device-auth
+    /// file mutation. The metadata transaction has already committed; this
+    /// is the non-rollbackable file writer.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_device_auth_file_park_for_tests(&self) {
+        self.test_parks.device_auth_file.arm();
+    }
+
+    /// Waits until the armed device-auth file park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_device_auth_file_park_for_tests(&self) {
+        self.test_parks.device_auth_file.wait_entered().await;
+    }
+
+    /// Releases the parked device-auth file mutation.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_device_auth_file_park_for_tests(&self) {
+        self.test_parks.device_auth_file.release();
+    }
+
+    /// Arms the first-waiter park just before a Client class-wipe demand is
+    /// created in the in-process registry (before it can reach the wire).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_client_demand_park_for_tests(&self) {
+        self.test_parks.client_demand.arm();
+    }
+
+    /// Waits until the armed Client-demand park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_client_demand_park_for_tests(&self) {
+        self.test_parks.client_demand.wait_entered().await;
+    }
+
+    /// Releases the parked Client demand.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_client_demand_park_for_tests(&self) {
+        self.test_parks.client_demand.release();
+    }
+
+    /// Pauses when the erasure-mutation park is armed. Called from
+    /// production participant paths that live outside this crate.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_erasure_mutation_if_armed_for_tests(&self) {
+        self.test_parks.erasure_mutation.pause_if_armed().await;
+    }
+
+    /// Pauses when the Client-demand park is armed.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_client_demand_if_armed_for_tests(&self) {
+        self.test_parks.client_demand.pause_if_armed().await;
+    }
+
+    /// Pauses when the device-auth file park is armed.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_device_auth_file_if_armed_for_tests(&self) {
+        self.test_parks.device_auth_file.pause_if_armed().await;
     }
 }

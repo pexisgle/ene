@@ -37,7 +37,7 @@ use ene_task::{
     DelegationId, TaskAgentEphemeralId, TaskAgentResultArrival, TaskId, TaskResultId, TaskRevision,
 };
 
-use super::preservation::complete_via_a5;
+use super::preservation::{complete_via_a5, enter_finalizing_via_a5};
 use super::targeted_deletion::drive_with_sources;
 
 fn summary(companion: RawId, content: &str, start: RawId, end: RawId) -> SummaryRecord {
@@ -2511,5 +2511,168 @@ async fn an_observation_write_parked_across_completion_stays_old_origin() {
     assert_eq!(
         loaded.revision.purpose_text.text, "please keep the private key",
         "a post-completion Owner origin of the same string is accepted"
+    );
+}
+
+/// Blocker 1 remainder: Action start during Finalizing must still hold the
+/// execution. Lifecycle §11 collects delayed arrival onto Active / Held /
+/// Finalizing; skipping Finalizing would let the parked observation write
+/// look like a fresh origin after the completion commit.
+#[tokio::test]
+async fn an_observation_write_parked_across_finalizing_completion_stays_old_origin() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (companion, _) = companion_with_generation(&store).await;
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "ordinary notes");
+
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    enter_finalizing_via_a5(&store, current).await;
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        0,
+        "purpose/path carry no target, so admission does not hold the execution"
+    );
+
+    std::fs::write(&source, "the private key is here").expect("the workspace source is rewritten");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    assert_eq!(
+        action_certainty(&store, attempt),
+        "unknown",
+        "start is an objective fact; certainty is still Unknown"
+    );
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        1,
+        "a read that starts while Finalizing is associated by execution identity"
+    );
+
+    store.arm_observation_write_park_for_tests();
+    let parked = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            record_observation(
+                &store,
+                delegation,
+                Some(attempt),
+                Some("read ok:\nthe private key is here"),
+            )
+            .await
+        })
+    };
+    store.wait_observation_write_park_for_tests().await;
+    assert_eq!(
+        observation_rows(&store),
+        0,
+        "the occurrence must not be durable while the body is still in memory"
+    );
+
+    std::fs::write(&source, "ordinary notes").expect("the workspace source is rewritten clean");
+    assert_eq!(
+        store
+            .complete_deletion_finalizing(current)
+            .await
+            .expect("the completion commit must answer"),
+        ene_preservation::DeletionFinalizationOutcome::Completed
+    );
+    assert!(current_conditions(&store).await.is_empty());
+
+    store.release_observation_write_park_for_tests();
+    let observation = parked.await.expect("the parked observation write joins");
+    assert_eq!(observation_rows(&store), 1);
+    assert!(
+        observation_body_observed(&store, observation),
+        "the ledger records that a workspace body was reproduced"
+    );
+    assert!(
+        store
+            .task_delegation_held(delegation.as_raw())
+            .await
+            .expect("the hold must read"),
+        "the hold outlives completion so the delayed body stays old-origin"
+    );
+
+    let arrival = result_arrival(
+        &store,
+        delegation,
+        "the report summarizes confidential material without quoting it",
+    )
+    .await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the delayed arrival must record its fact"),
+    );
+    assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
+    assert_eq!(
+        action_certainty(&store, attempt),
+        "unknown",
+        "Action certainty is never rewritten by deletion"
+    );
+
+    let fresh = seed_task(&store, companion, "please keep the private key").await;
+    let loaded = store
+        .load_task(fresh.task)
+        .await
+        .unwrap()
+        .expect("the fresh origin must load");
+    assert_eq!(
+        loaded.revision.purpose_text.text, "please keep the private key",
+        "a post-completion Owner origin of the same string is accepted"
+    );
+}
+
+/// Immediate-writer dual of the Finalizing hold: when the completion commit
+/// lands first, a later read/list start is a post-closure origin and must
+/// not inherit a hold from the closed operation.
+#[tokio::test]
+async fn a_read_started_after_finalizing_completion_is_a_fresh_origin() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "ordinary notes");
+
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    enter_finalizing_via_a5(&store, current).await;
+    assert_eq!(
+        store
+            .complete_deletion_finalizing(current)
+            .await
+            .expect("the completion commit must answer"),
+        ene_preservation::DeletionFinalizationOutcome::Completed
+    );
+    assert!(current_conditions(&store).await.is_empty());
+
+    std::fs::write(&source, "the private key is here").expect("the workspace source is rewritten");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    assert_eq!(
+        action_certainty(&store, attempt),
+        "unknown",
+        "start is an objective fact; certainty is still Unknown"
+    );
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        0,
+        "a read that starts after completion is a fresh origin"
+    );
+    assert!(
+        !store
+            .task_delegation_held(delegation.as_raw())
+            .await
+            .expect("the hold must read"),
+        "the closed operation must not hold a post-completion start"
     );
 }

@@ -49,6 +49,32 @@ pub(crate) fn condition_is_current(
     )
 }
 
+/// Indexed `(operation, sweep, source)` membership in the current sweep's
+/// covered-source set.
+///
+/// Semantic owners match a candidate pin against this primary key instead of
+/// receiving every covered identity in the demand command. One probe is one
+/// indexed EXISTS; the caller never materializes the whole set.
+pub(crate) fn source_is_covered(
+    conn: &Connection,
+    condition: ErasureConditionRef,
+    source: RawId,
+) -> rusqlite::Result<bool> {
+    let Ok(sweep) = i64::try_from(condition.sweep.as_u64()) else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM erasure_condition_source
+         WHERE operation_id=?1 AND sweep=?2 AND source=?3)",
+        params![
+            encode_id(condition.operation.as_raw()),
+            sweep,
+            encode_id(source)
+        ],
+        |row| row.get(0),
+    )
+}
+
 /// One bounded, keyset-paged candidate page for both owner queries.
 ///
 /// Candidates are unfinished operations plus torn orphan conditions with no
@@ -1704,6 +1730,30 @@ impl Store {
         })
         .await
     }
+
+    /// Indexed membership of `candidates` in the current sweep's covered
+    /// source set.
+    ///
+    /// Returns one flag per candidate, in candidate order. The statement is
+    /// the `(operation, sweep, source)` primary key; this never loads the
+    /// rest of the sweep. An unreadable condition is a technical error, not
+    /// an empty set.
+    pub async fn erasure_sources_covered(
+        &self,
+        condition: ErasureConditionRef,
+        candidates: Vec<RawId>,
+    ) -> Result<Vec<bool>, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let mut flags = Vec::with_capacity(candidates.len());
+            for source in candidates {
+                flags.push(source_is_covered(&guard, condition, source).map_err(storage)?);
+            }
+            Ok(flags)
+        })
+        .await
+    }
 }
 
 /// The attempt-side hold enumeration of [`mark_inflight_uses`].
@@ -2139,10 +2189,16 @@ pub(crate) fn hold_delegation(
 /// refusing it would rewrite an objective start fact. While a current
 /// condition exists the yet-unread (or already-read, not-yet-recorded) body
 /// cannot be proven unrelated to the protected text without I/O this
-/// transaction forbids, so the execution is held by identity. Completing
-/// operations are skipped: their condition is closing and must not acquire
-/// new uses. A store with no unfinished operation is a no-op, so a fresh
-/// execution after completion is not held.
+/// transaction forbids, so the execution is held by identity. Lifecycle §11
+/// collects delayed arrival onto the current operation for the whole
+/// Active / Held / Finalizing interval: skipping `finalizing` would let a
+/// read that started under a still-open condition look like a fresh origin
+/// once the completion commit lands. This statement shares the Immediate
+/// writer with the completion commit, so the two orders are exclusive: a
+/// completion that commits first leaves no unfinished row and the start is
+/// a post-closure origin; a start that commits first inserts the hold and
+/// the delayed body stays old-origin. A store with no unfinished operation
+/// is a no-op.
 pub(crate) fn hold_body_observing_delegation(
     tx: &rusqlite::Transaction<'_>,
     delegation: RawId,
@@ -2152,7 +2208,7 @@ pub(crate) fn hold_body_observing_delegation(
         "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
          SELECT ?1, ?2, operation_id, ?3
          FROM deletion_operation
-         WHERE phase IN ('active', 'held')",
+         WHERE phase IN ('active', 'held', 'finalizing')",
         params![USE_KIND_TASK_DELEGATION, encode_id(delegation), held_at],
     )
     .map_err(storage)?;
@@ -3112,7 +3168,7 @@ impl PreservationRepository for Store {
                 )
                 .optional()
                 .map_err(storage)?;
-            let Some((sweep, phase)) = row else {
+            let Some((_sweep, phase)) = row else {
                 return Ok(DeletionMaterialOutcome::Missing);
             };
             validate(&tx, &id)?;
@@ -3156,19 +3212,12 @@ impl PreservationRepository for Store {
                 .into_iter()
                 .map(DeletionSearchMaterial::new)
                 .collect();
-            let mut statement = tx
-                .prepare(
-                    "SELECT source FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?2 ORDER BY source",
-                )
-                .map_err(storage)?;
-            let sources: Vec<RawId> = statement
-                .query_map(params![id, sweep], |r| r.get::<_, String>(0))
-                .map_err(storage)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(storage)?
-                .into_iter()
-                .map(|text| decode_id(&text).map_err(|_| corrupt()))
-                .collect::<Result<Vec<_>, _>>()?;
+            // Covered-source identities stay in the canonical
+            // `(operation, sweep, source)` primary key. Materializing them
+            // here would allocate in proportion to the whole sweep before
+            // any participant ran, which is the work the page-sized
+            // reconciliation walk already bounded (§9). Semantic owners
+            // probe membership per candidate instead.
             Ok(DeletionMaterialOutcome::Material(
                 DeletionOperationMaterial::new(
                     TargetedDeletionTarget {
@@ -3177,7 +3226,7 @@ impl PreservationRepository for Store {
                         ),
                         semantic_hints: hints,
                     },
-                    sources,
+                    Vec::new(),
                 ),
             ))
         })

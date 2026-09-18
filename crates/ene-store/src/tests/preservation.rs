@@ -521,15 +521,15 @@ pub(super) async fn reconcile_to_complete(store: &Store, current: DeletionOperat
     panic!("the exhaustive walk must finish inside the fixture budget");
 }
 
-/// Completes one operation through the sealed A5 boundary.
+/// Drives one operation to the durable `finalizing` marker through the sealed
+/// A5 begin step, without the completion commit.
 ///
 /// The current sweep's exhaustive covered-source reconciliation is driven to
 /// completion first, then every required participant is verified through the
-/// canonical completion API, and the finalizing transition and the completion
-/// commit run. The system-wide mechanical probe must be clean: a call site
-/// whose fixture still stores the target must drive that owner's real sweep
-/// first, exactly as the production fan-out would.
-pub(super) async fn complete_via_a5(store: &Store, current: DeletionOperationRef) {
+/// canonical completion API. The system-wide mechanical probe must be clean:
+/// a call site whose fixture still stores the target must drive that owner's
+/// real sweep first, exactly as the production fan-out would.
+pub(super) async fn enter_finalizing_via_a5(store: &Store, current: DeletionOperationRef) {
     reconcile_to_complete(store, current).await;
     let mut after = None;
     loop {
@@ -568,6 +568,14 @@ pub(super) async fn complete_via_a5(store: &Store, current: DeletionOperationRef
             .expect("the finalizing transition must answer"),
         DeletionFinalizationOutcome::Finalizing
     );
+}
+
+/// Completes one operation through the sealed A5 boundary.
+///
+/// [`enter_finalizing_via_a5`] then the completion commit. The durable
+/// audit/condition/output commit is the production path.
+pub(super) async fn complete_via_a5(store: &Store, current: DeletionOperationRef) {
+    enter_finalizing_via_a5(store, current).await;
     assert_eq!(
         store
             .complete_deletion_finalizing(current)
@@ -1594,9 +1602,15 @@ async fn material_read_returns_the_protected_target_and_current_sweep_sources() 
     };
     let MechanicalDeletionTarget::ExactText(exact) = &material.target().mechanical;
     assert_eq!(exact.expose_for_erasure(), "material-target");
-    assert_eq!(material.sources().len(), 2);
-    assert!(material.sources().contains(&source));
-    assert!(material.sources().contains(&other));
+    assert!(
+        material.sources().is_empty(),
+        "the material read must not load the covered-source set"
+    );
+    let flags = store
+        .erasure_sources_covered(current.condition(), vec![source, other])
+        .await
+        .expect("indexed membership must read");
+    assert_eq!(flags, vec![true, true]);
     let DeletionLifecycleOutcome::Applied(next) = store
         .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
         .await
@@ -1613,7 +1627,15 @@ async fn material_read_returns_the_protected_target_and_current_sweep_sources() 
     else {
         panic!("the new sweep keeps the material");
     };
-    assert_eq!(next_material.sources().len(), 2);
+    assert!(
+        next_material.sources().is_empty(),
+        "a generation advance still does not materialize the covered-source set"
+    );
+    let flags = store
+        .erasure_sources_covered(next.condition(), vec![source, other])
+        .await
+        .expect("indexed membership must follow the current sweep");
+    assert_eq!(flags, vec![true, true]);
     // A finalizing operation that already ran its material wipe reads as
     // Destroyed, never as corrupt and never as protected material.
     {
@@ -1648,6 +1670,42 @@ async fn material_read_returns_the_protected_target_and_current_sweep_sources() 
             .unwrap(),
         DeletionMaterialOutcome::Missing
     );
+}
+
+#[tokio::test]
+async fn material_read_does_not_materialize_a_large_covered_source_set() {
+    let store = open_memory().await.unwrap();
+    let mut sources = Vec::new();
+    for _ in 0..256 {
+        sources.push(RawId::new());
+    }
+    let current = admit(&store, "bounded-material-target", sources.clone()).await;
+    let DeletionMaterialOutcome::Material(material) = store
+        .deletion_operation_material(current.operation)
+        .await
+        .unwrap()
+    else {
+        panic!("an active operation keeps its material");
+    };
+    assert!(
+        material.sources().is_empty(),
+        "one material read must not allocate the whole covered-source set"
+    );
+    let flags = store
+        .erasure_sources_covered(current.condition(), sources.clone())
+        .await
+        .expect("indexed membership must read");
+    assert_eq!(flags.len(), 256);
+    assert!(
+        flags.iter().all(|hit| *hit),
+        "every named source is still a current-sweep member"
+    );
+    let foreign = RawId::new();
+    let miss = store
+        .erasure_sources_covered(current.condition(), vec![foreign])
+        .await
+        .expect("a miss must still be a bounded probe");
+    assert_eq!(miss, vec![false]);
 }
 
 #[tokio::test]

@@ -100,15 +100,26 @@ fn exact_text(target: &TargetedDeletionTarget) -> &str {
 
 /// Whether one queued formation premise can carry the covered target: either
 /// its transcript text contains the exact mechanical target, or one of its
-/// correlated source bounds is a covered source.
-fn experience_covered(experience: &ExperienceCandidate, exact: &str, sources: &[RawId]) -> bool {
+/// correlated source bounds is a covered source of the current sweep.
+fn experience_covered(
+    experience: &ExperienceCandidate,
+    exact: &str,
+    covered: &[bool],
+    identities: &[RawId],
+) -> bool {
+    debug_assert_eq!(covered.len(), identities.len());
     // The ordered per-message provenance is the exact read set; the coarse
     // range bounds stay checked for a candidate assembled without it.
     if experience
         .sources
         .iter()
         .chain([experience.source.start, experience.source.end].iter())
-        .any(|source| sources.iter().any(|covered| covered == source))
+        .any(|source| {
+            identities
+                .iter()
+                .zip(covered.iter())
+                .any(|(identity, hit)| identity == source && *hit)
+        })
     {
         return true;
     }
@@ -119,6 +130,13 @@ fn experience_covered(experience: &ExperienceCandidate, exact: &str, sources: &[
         .transcript
         .iter()
         .any(|turn| turn.text.contains(exact))
+}
+
+fn experience_identities(experience: &ExperienceCandidate) -> Vec<RawId> {
+    let mut identities = experience.sources.clone();
+    identities.push(experience.source.start);
+    identities.push(experience.source.end);
+    identities
 }
 
 /// Invalidation fence for in-flight Host transient payloads.
@@ -172,11 +190,12 @@ impl HostTransientParticipant {
     }
 
     /// Drops every queued formation premise that can carry the target and
-    /// returns how many were dropped.
-    fn prune_learning_queue(&self, exact: &str, sources: &[RawId]) -> u64 {
+    /// returns how many were dropped. `covered` is indexed membership of
+    /// `identities`, not a materialization of the whole sweep.
+    fn prune_learning_queue(&self, exact: &str, identities: &[RawId], covered: &[bool]) -> u64 {
         let mut queue = crate::lock_unpoison(&self.learning_queue);
         let before = queue.len();
-        queue.retain(|experience| !experience_covered(experience, exact, sources));
+        queue.retain(|experience| !experience_covered(experience, exact, covered, identities));
         (before - queue.len()) as u64
     }
 }
@@ -195,9 +214,11 @@ impl ErasureParticipant for HostTransientParticipant {
             // Process-memory mutation cannot share the Immediate writer with
             // the canonical row. The same currentness predicate durable
             // participants re-check inside their erase transaction is read
-            // here before any drop: a completed or superseded condition must
-            // not discard a fresh post-closure premise. Unreadable
-            // currentness fails closed (no mutation, not Verified).
+            // here immediately before any drop: a completed or superseded
+            // condition must not discard a fresh post-closure premise.
+            // Unreadable currentness fails closed (no mutation, not Verified).
+            #[cfg(any(test, feature = "test-support"))]
+            self.store.pause_erasure_mutation_if_armed_for_tests().await;
             let current = self
                 .store
                 .erasure_condition_is_current(command.condition())
@@ -212,20 +233,42 @@ impl ErasureParticipant for HostTransientParticipant {
                     WallClockWithTz::now(),
                 );
             }
-            let sources = command.scope().sources().to_vec();
             let exact = command
                 .scope()
                 .target()
                 .map(exact_text)
                 .unwrap_or_default()
                 .to_owned();
+            let identities = {
+                let queue = crate::lock_unpoison(&self.learning_queue);
+                queue
+                    .iter()
+                    .flat_map(experience_identities)
+                    .collect::<Vec<_>>()
+            };
+            let covered = match self
+                .store
+                .erasure_sources_covered(command.condition(), identities.clone())
+                .await
+            {
+                Ok(flags) => flags,
+                Err(_) => {
+                    return ParticipantCompletionFact::local_complete(
+                        command.condition(),
+                        ParticipantOwnerRef::HostTransient,
+                        0,
+                        0,
+                        WallClockWithTz::now(),
+                    );
+                }
+            };
             // Presentation receipts, carried refs, cursors, subscriptions, and
             // resume slots are all reconstructible from canonical rows; none is
             // provably body-free, so the whole per-connection world is
             // invalidated. Future presentation re-reads the canonical source.
             let dropped_presentation =
                 crate::lock_unpoison(&self.presentations).invalidate_for_erasure();
-            let dropped_learning = self.prune_learning_queue(&exact, &sources);
+            let dropped_learning = self.prune_learning_queue(&exact, &identities, &covered);
             // In-flight streams and assembled replies fail closed from here on;
             // nothing published before the fence is treated as proof of
             // completion (a durable reply is the History owner's to erase).
@@ -311,7 +354,6 @@ enum ClientErasureWait {
 /// report source bodies, or text stream deltas). A Client that only sent
 /// requests has no copy the Host could erase, and is not claimed as a
 /// required participant.
-#[derive(Default)]
 pub(crate) struct ClientTransientRegistry {
     inner: std::sync::Mutex<ClientTransientInner>,
     /// Wakes connection loops to deliver a pending demand.
@@ -322,6 +364,10 @@ pub(crate) struct ClientTransientRegistry {
     /// installation (a transport-free handle) no Client is reachable and every
     /// demand holds as unavailable.
     table: OnceLock<Arc<ConnectionTable>>,
+    /// Canonical currentness authority for the pre-wire check. The registry
+    /// is not a second deletion store; it only refuses to mint a demand when
+    /// the operation is already closed.
+    store: Store,
     /// Test-only wait bound override.
     #[cfg(test)]
     wait_limit: std::sync::Mutex<Option<Duration>>,
@@ -335,8 +381,16 @@ struct ClientTransientInner {
 
 impl ClientTransientRegistry {
     #[must_use]
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(store: Store) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(ClientTransientInner::default()),
+            delivery_wake: Notify::new(),
+            result_wake: Notify::new(),
+            table: OnceLock::new(),
+            store,
+            #[cfg(test)]
+            wait_limit: std::sync::Mutex::new(None),
+        }
     }
 
     pub(crate) fn install_connection_table(&self, table: Arc<ConnectionTable>) {
@@ -645,6 +699,31 @@ impl ErasureParticipant for ClientIncarnationParticipant {
                     condition,
                     owner,
                     ParticipantHoldClass::Failed,
+                    WallClockWithTz::now(),
+                );
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            self.registry
+                .store
+                .pause_client_demand_if_armed_for_tests()
+                .await;
+            // The durable Running mark may already exist; the wire demand is
+            // the non-rollbackable side effect. Re-read currentness after any
+            // park and before minting the in-process/wire demand so a
+            // completed operation cannot class-wipe a fresh post-closure
+            // Client copy.
+            let current = self
+                .registry
+                .store
+                .erasure_condition_is_current(condition)
+                .await
+                .unwrap_or(false);
+            if !current {
+                return ParticipantCompletionFact::local_complete(
+                    condition,
+                    owner,
+                    0,
+                    0,
                     WallClockWithTz::now(),
                 );
             }
@@ -1668,6 +1747,125 @@ mod tests {
         assert!(
             handle.transient_fence_epoch() > epoch,
             "in-flight streams and assembled replies fail closed after the demand"
+        );
+    }
+
+    /// Blocker 3 remainder: a Client class-wipe demand parked after durable
+    /// admission, while another driver Completes and a fresh delivery lands,
+    /// must not go on the wire.
+    #[tokio::test]
+    async fn a_stale_client_class_wipe_does_not_land_after_completion() {
+        use ene_preservation::{
+            DeletionFinalizationOutcome, DeletionOperationRef, DeletionReconciliationOutcome,
+            ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantProgress,
+        };
+
+        let fixture = client_fixture("a3c-stale-class-wipe").await;
+        let current = DeletionOperationRef {
+            operation: fixture.condition.operation,
+            sweep: fixture.condition.sweep,
+        };
+        fixture.handle.store.arm_client_demand_park_for_tests();
+        let parked = {
+            let identity = fixture.identity;
+            let registry = Arc::clone(&fixture.handle.client_transients);
+            let condition = fixture.condition;
+            tokio::spawn(async move {
+                ClientIncarnationParticipant::new(identity, registry)
+                    .demand_local_erasure(command(
+                        condition,
+                        ParticipantOwnerRef::ClientIncarnation(identity),
+                        ParticipantErasureScope::correlation_only(Vec::new()),
+                    ))
+                    .await
+            })
+        };
+        fixture
+            .handle
+            .store
+            .wait_client_demand_park_for_tests()
+            .await;
+
+        loop {
+            match fixture
+                .handle
+                .store
+                .reconcile_deletion_sources(current, 64)
+                .await
+                .expect("reconciliation must answer")
+            {
+                DeletionReconciliationOutcome::Complete => break,
+                DeletionReconciliationOutcome::Advanced => continue,
+                other => panic!("the walk must finish, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            fixture
+                .handle
+                .store
+                .record_participant_completion(ParticipantCompletionFact::verified(
+                    fixture.condition,
+                    ParticipantOwnerRef::ClientIncarnation(fixture.identity),
+                    0,
+                    WallClockWithTz::now(),
+                ))
+                .await
+                .expect("the verified fact must record"),
+            ParticipantCompletionOutcome::Recorded(ParticipantProgress::Verified {
+                sweep: fixture.condition.sweep,
+            })
+        );
+        assert_eq!(
+            fixture
+                .handle
+                .store
+                .begin_deletion_finalizing(current)
+                .await
+                .expect("the finalizing transition must answer"),
+            DeletionFinalizationOutcome::Finalizing
+        );
+        assert_eq!(
+            fixture
+                .handle
+                .store
+                .complete_deletion_finalizing(current)
+                .await
+                .expect("the completion commit must answer"),
+            DeletionFinalizationOutcome::Completed
+        );
+
+        assert!(
+            fixture
+                .handle
+                .note_client_body_delivery(&fixture.live)
+                .await,
+            "a post-completion delivery is a fresh origin"
+        );
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            Some(2),
+            "the fresh delivery advances the durable evidence"
+        );
+
+        fixture.handle.store.release_client_demand_park_for_tests();
+        let stale = parked.await.expect("the parked demand joins");
+        assert_eq!(
+            stale.status(),
+            ParticipantCompletionStatus::LocalComplete,
+            "a completed condition is NotCurrent, never a wire demand"
+        );
+        assert!(
+            fixture
+                .handle
+                .take_client_demand(&fixture.live)
+                .await
+                .is_none(),
+            "a stale class-wipe must not reach the wire"
+        );
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            Some(2),
+            "the fresh delivery evidence must remain"
         );
     }
 }

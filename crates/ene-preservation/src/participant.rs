@@ -235,12 +235,13 @@ impl ParticipantProgress {
 
 /// Bounded work scope for one participant demand (§9).
 ///
-/// The scope is bounded by construction: it carries the covered
-/// source-correlation identities for the operation's current sweep plus, for a
-/// local owner, the operation's protected exact-text material. The material is
-/// never rendered into logs, never copied into a completion fact, and is
-/// absent from a correlation-only scope — the shape a Client-bound projection
-/// must use, because the wire never carries the target body or search material
+/// The scope is bounded by construction: it carries, for a local owner, the
+/// operation's protected exact-text material. Exhaustive covered-source
+/// identities stay in the canonical `(operation, sweep, source)` primary key;
+/// the command does not materialize that set. The material is never rendered
+/// into logs, never copied into a completion fact, and is absent from a
+/// correlation-only scope — the shape a Client-bound projection must use,
+/// because the wire never carries the target body or search material
 /// (§8.1, IPC §23).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParticipantErasureScope {
@@ -250,8 +251,8 @@ pub struct ParticipantErasureScope {
 
 impl ParticipantErasureScope {
     /// In-process scope for a local semantic owner: the owner may hold the
-    /// body, so it receives the protected material together with the covered
-    /// correlation identities.
+    /// body, so it receives the protected material. Covered-source membership
+    /// is the canonical indexed table, not a snapshot copied into this value.
     #[must_use]
     pub fn local(target: TargetedDeletionTarget, sources: Vec<RawId>) -> Self {
         Self {
@@ -277,7 +278,9 @@ impl ParticipantErasureScope {
         self.target.as_ref()
     }
 
-    /// Current-sweep covered source-correlation identities.
+    /// Optional caller-supplied correlation identities. Production fan-out
+    /// leaves this empty: owners probe `erasure_condition_source` by primary
+    /// key for each candidate they actually inspect.
     #[must_use]
     pub fn sources(&self) -> &[RawId] {
         &self.sources
@@ -470,7 +473,11 @@ impl ParticipantCompletionFact {
 ///
 /// The material exists only while the operation is unfinished and is destroyed
 /// before global completion; it is never persisted by a participant and never
-/// copied into a completion fact or audit record.
+/// copied into a completion fact or audit record. Covered-source identities
+/// are not loaded into this value: the current sweep's
+/// `erasure_condition_source` primary key is the membership authority, so a
+/// material read stays bounded in the target/hint rows rather than in the
+/// whole covered-source set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletionOperationMaterial {
     target: TargetedDeletionTarget,
@@ -489,7 +496,8 @@ impl DeletionOperationMaterial {
         &self.target
     }
 
-    /// Current-sweep covered source-correlation identities.
+    /// Optional correlation identities. The canonical store's material read
+    /// does not populate this: membership is an indexed probe per candidate.
     #[must_use]
     pub fn sources(&self) -> &[RawId] {
         &self.sources

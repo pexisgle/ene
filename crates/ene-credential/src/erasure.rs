@@ -89,6 +89,15 @@ pub trait CredentialErasureRepository: Send + Sync {
         &self,
         condition: ErasureConditionRef,
     ) -> impl std::future::Future<Output = Result<bool, CredentialTechnicalError>> + Send;
+
+    /// Test-only pause immediately before the protected file mutation.
+    ///
+    /// Production implementations return a ready future. The participant
+    /// re-reads [`Self::condition_is_current`] after this point and before
+    /// taking the file lock.
+    fn before_device_auth_file_erase(&self) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
 }
 
 /// The credential owner's [`ErasureParticipant`] implementation.
@@ -158,9 +167,11 @@ impl<R: CredentialErasureRepository + 'static> ErasureParticipant
                 Ok(CredentialErasureOutcome::Applied { erased, remainder }) => {
                     // The metadata transaction already committed under a
                     // then-current condition. The file is a different writer:
-                    // re-read canonical currentness immediately before any
-                    // file mutation so a completed operation cannot delete a
-                    // fresh post-closure device entry of the same string.
+                    // park (tests) then re-read canonical currentness
+                    // immediately before any file mutation so a completed
+                    // operation cannot delete a fresh post-closure device
+                    // entry of the same string.
+                    self.repository.before_device_auth_file_erase().await;
                     let still_current = self
                         .repository
                         .condition_is_current(condition)
