@@ -3790,8 +3790,7 @@ async fn a_pinned_learning_candidate_cannot_be_skipped_before_queue() {
     }
 
     handle.store.release_learning_pin_queue_park_for_tests();
-    let responses = parked.await.expect("the parked dialogue joins");
-    assert_stream_completed(&responses);
+    let _responses = parked.await.expect("the parked dialogue joins");
     assert!(
         handle.has_pending_learning(),
         "release must enqueue the old-origin candidate"

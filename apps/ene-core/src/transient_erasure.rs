@@ -2803,7 +2803,7 @@ mod tests {
             let handle = Arc::clone(&handle);
             tokio::spawn(async move {
                 handle
-                    .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+                    .drive_targeted_deletion(TargetedDeletionPass::new(100, 1))
                     .await
             })
         };
@@ -2834,6 +2834,12 @@ mod tests {
         assert!(
             !host_transient_is_verified(&handle, current.operation).await,
             "the durable HostTransient row must not keep the stale Verified fact"
+        );
+        assert!(
+            crate::lock_unpoison(&handle.learning_queue)
+                .iter()
+                .any(|item| item.transcript[0].text.contains("secret body")),
+            "the arrival must still be present for the next HostTransient drive"
         );
         drive_until_completed(&handle, current.operation).await;
         assert!(
