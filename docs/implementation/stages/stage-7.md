@@ -30,7 +30,7 @@ Stage 7 は Stage 0〜6 の domain authority と安全性契約を再設計し�
 - Host が durable domain state と最終 authority を持ち、Client の表示状態を master にしない。
 - connection / incarnation / presence / presentation を同一視しない。
 - credential raw value を通常の Host↔Client payload、DB、ログ、エラーへ流さない。秘密寿命を通常 DTO・Debug・Targeted Deletion に依存させない。
-- high-privilege の最終確認を remote input、LLM、tool、plugin、Computer Use、通常の Client、同一 OS ユーザーであるだけの local process が代理しない。
+- high-privilege の最終確認を remote input、LLM、tool、plugin、Computer Use 結果電文、通常の Client、seat を持たない local process が代理しない。nonce は freshness だけとし、完了は exclusive `FirstPartyControlSeat` に束縛する。
 - UI / renderer の障害で Host-only Task や text / management の利用を壊さない。
 - usage / cost / cap、Targeted Deletion、Task recovery 等は既存 semantic owner の query / command / currentness を使う。
 - GUI 専用の authoritative DB、permission registry、presence registry、accounting registry を作らない。
@@ -42,11 +42,11 @@ A0 の成果物は [First-party desktop](../../design/concrete/first-party-deskt
 
 ### 3.1 Process / 名前（確定）
 
-- **Host**: `apps/ene-core`。GUI / wgpu を持たない。serving 中に control listener と `ConfirmationSession` の minter を持つ。
+- **Host**: `apps/ene-core`。GUI / wgpu を持たない。serving 中に control listener、exclusive `FirstPartyControlSeat`、`ConfirmationSession` の minter を持つ。
 - **text GUI**: `apps/ene-desktop`。Client channel と control を話す。Body の親。first-party 確認面。
 - **VRM overlay**: `apps/ene-body`。Host にも Client protocol にも接続しない。GUI の任意 child。
 - **CLI**: `apps/ene-ctl`。Client channel のみ。control は話さない。
-- **共有**: `crates/ene-client`（A1 で `ene-ctl` から抽出）、`crates/ene-local-control`（`ene-api` に載せない。秘密フィールドは redacted。確認完了は session 束縛）。
+- **共有**: `crates/ene-client`（A1 で `ene-ctl` から抽出）、`crates/ene-local-control`（`ene-api` に載せない。秘密フィールドは redacted。確認完了は seat に束縛した session）。
 
 作らない: `ene-stage`, `ene-stage-ui`, `ene-vrm`, `ene-tray-linux`。
 
@@ -65,9 +65,9 @@ A0 の成果物は [First-party desktop](../../design/concrete/first-party-deskt
 
 ### 3.3 Trust / credential（確定）
 
-Client channel（`ene-api`）では high-priv 最終確定を成立させない。control channel は request / 秘密 intake / `ConfirmationSession` 完了返送に使うが、**十分ではない**。同一 OS ユーザー、data dir を読めること、control socket を開けたことは Owner 本人の確認ではない。最終確認は Host 発行の one-shot session と first-party 確認面での Owner 明示ジェスチャに束縛する。通常の Client、`ene-ctl`、任意の local process、LLM、tool、plugin、Computer Use は最終確認を直接成立させられない。
+Client channel（`ene-api`）では high-priv 最終確定を成立させない。control channel は request / 秘密 intake / `ConfirmationSession` 完了返送に使うが、**nonce は freshness だけ**である。同一 OS ユーザー、data dir を読めること、control socket を開けたことは Owner 本人の確認ではない。Host は exclusive `FirstPartyControlSeat`（`ene-desktop` 高々1つ）に session を束縛し、その同一接続・同一 peer PID からの完了だけを受理する。seat を持たない local process の nonce 提示、`ene-ctl`、通常 Client、LLM、tool、plugin、Computer Use の `EffectReport` は完了ではない。ene 認可の Computer Use は確認面・秘密面を対象にできない（クリック後の区別はできないため、対象から外す）。seat 保持 process への ene 外入力注入はプロトコルの残差であり、Owner とは再分類しない。
 
-credential 生値の区間と破棄は first-party-desktop 第5.2節（C1 widget → C2 control frame → C3 `ene-credential` → C4 OS store → C5 scoped use）。通常 DTO の Debug、log、`app.db`、GUI 永続 state、Targeted Deletion に秘密寿命を依存させない。widget を erasure participant に見立てない。
+credential 生値の区間と破棄は first-party-desktop 第5.2節。ene 所有の C1–C3–C5 は破棄する。通常 DTO の Debug、log、`app.db`、GUI 永続 state、Targeted Deletion に秘密寿命を依存させない。widget を erasure participant に見立てない。toolkit / IME / OS が作る複製は保証できない残差として書き、無いとはしない。
 
 ### 3.4 Probe と acceptance の分離（未実施。合格したとは書かない）
 
@@ -79,7 +79,7 @@ NixOS 26.11 は Support Matrix の Linux 対象だが、この時点では正式
 
 **後日の最終 acceptance**: slice F。Windows 11 と正式リリースされた NixOS 26.11 KDE Wayland。今の KDE Wayland probe 成功を 26.11 合格と書かない。26.11 が F 時点で未リリースなら Linux 最終 acceptance は open のまま残す。
 
-**A0 design gate（本 PR）**: 名前と境界が要件から説明できる。同一 UID を Owner 確認に弱めていない。credential 区間が書かれている。未検証依存が provisional である。probe と最終 acceptance が分離されている。current design と異なる箇所は production より先に更新されている。
+**A0 design gate（本 PR）**: 名前と境界が要件から説明できる。同一 UID を Owner 確認に弱めていない。`ConfirmationSession` が freshness 以上の seat 束縛を持つ。Computer Use は文言禁止ではなく denylist で強制する。credential 区間と toolkit/OS 残差が書かれている。未検証依存が provisional である。probe と最終 acceptance が分離されている。current design と異なる箇所は production より先に更新されている。
 
 **A0 技術成立 probe（残。Stage 7 全体の blocker ではない）**: 上記。記録しただけで潰したことにしない。
 
@@ -89,18 +89,20 @@ NixOS 26.11 は Support Matrix の Linux 対象だが、この時点では正式
 
 ### A1: Client 接続と serving 中 control
 
-[First-party desktop](../../design/concrete/first-party-desktop.md) に従い、GUI が必要とする Host 接続を `ene-client` に抜き、serving Host に control listener を足す。`ene-core approve-*` は serving 中 control を使い、未起動時だけ現行の offline lock を使う。Host は `ConfirmationSession` を発行し、live session 無しの `{ confirmed: true }` と Client 経路の自己申告を拒否する。GUI toolkit / overlay の production は含めない。
+[First-party desktop](../../design/concrete/first-party-desktop.md) に従い、GUI が必要とする Host 接続を `ene-client` に抜き、serving Host に control listener を足す。`ene-core approve-*` は serving 中 control を使い、未起動時だけ現行の offline lock を使う。Host は exclusive `FirstPartyControlSeat` と、それに束縛した `ConfirmationSession` を持つ。GUI toolkit / overlay の production は含めない。
 
 - GUI event loop を接続待ち・provider 待ちで塞がない。
 - connection / incarnation / presence を混同しない。
 - 古い connection の入力・receipt・cursor・選択状態を継承しない。
 - 再接続で未送信本文や mutation command を自動 replay しない。
 - bounded queue と cancellation を持ち、遅い Client が Host-only Task を止めない。
-- `ene-ctl` は control を話さない。既存 Client 回帰を維持する。
-- 同一 UID や control socket 開封だけでは高権限を成立させない。
-- credential 生値は `ene-api` に載せない。control の秘密フィールドは redacted。通常 DTO の Debug / log に出さない。
+- `ene-ctl` は control を話さず、seat を取れない。既存 Client 回帰を維持する。
+- seat は高々1つ。第二の control speaker は `DeniedByBoundary`。
+- 完了は mint 時の同一 control 接続・同一 peer PID からだけ。別接続の nonce 提示、live session 無しの `{ confirmed: true }`、Client `confirmed=true` は拒否する。seat 再接続は outstanding session を無効化する。
+- `EffectReport` および Client 経路は session を完了できない。
+- credential 生値は `ene-api` に載せない。control の秘密フィールドは redacted。通常 DTO の Debug / log に出さない。secret intake も seat 接続だけ。
 
-**gate**: 実 socket / named pipe で既存 Client 回帰が維持され、GUI 側でも connection replacement、response correlation、slow consumer、待機中の deletion demand を検証できること。serving 中に control 経由の approve / credential `put` が、Host 発行 session に束縛されて通ること。session 無し・Client `confirmed=true`・`ene-ctl` からの control は拒否されること。
+**gate**: 実 socket / named pipe で既存 Client 回帰が維持され、GUI 側でも connection replacement、response correlation、slow consumer、待機中の deletion demand を検証できること。serving 中に control 経由の approve / credential `put` が、seat に束縛した Host session でのみ通ること。session 無し・別接続の nonce・Client `confirmed=true`・`ene-ctl` からの control / seat 取得は拒否されること。接続の取り直しで旧 session が使えないこと。
 
 ### B: 初回セットアップからテキスト会話までの縦断 GUI
 
@@ -111,7 +113,7 @@ NixOS 26.11 は Support Matrix の Linux 対象だが、この時点では正式
 3. 一対一 timeline、入力、stream、履歴 page、接続・presence の表示を実装する。管理画面は Companion 停止中・provider 不通・avatar 不在でも開けるようにする。
 4. 日本語 IME の未確定入力を誤送信せず、日英のラベル・拒否理由を切り替えられるようにする。言語切り替えで会話本文や domain state を書き換えない。
 
-**gate**: acceptance §1 を新規環境から GUI で通し、キー登録直後の provider 呼出しゼロ、割り当て後の会話、Host 再起動後の履歴、日英切り替えを確認する。キーを通常本文・ログ・エラー・保存した GUI state に残さない。入力 widget は C1 の自己破棄を行い、Targeted Deletion に秘密寿命を預けない。高権限は first-party 確認面の Owner ジェスチャと Host session に束縛する。
+**gate**: acceptance §1 を新規環境から GUI で通し、キー登録直後の provider 呼出しゼロ、割り当て後の会話、Host 再起動後の履歴、日英切り替えを確認する。キーを通常本文・ログ・エラー・保存した GUI state に残さない。入力 widget は C1 の自己破棄を行い、Targeted Deletion に秘密寿命を預けない。toolkit / IME / アクセシビリティに残る複製は残差として記録し、無いとはしない。高権限は seated first-party 面と Host の seat 束縛 session に限る。
 
 ### C1: Memory と由来の管理画面
 

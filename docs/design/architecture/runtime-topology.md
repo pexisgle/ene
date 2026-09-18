@@ -178,7 +178,7 @@ flowchart TB
 
 以下に挙げる項目は未解決の要求ではなく、確定したセキュリティ境界と責務分担を満たすための「実装上の選択肢」です。
 
-- **内部の責務分割と実装構造:** サブシステム、crateやモジュールの分割、型やトレイトの設計、内部API、エージェントランタイムやハーネスの内部構造、スレッドや非同期タスク、イベントバスなど。HやC、信頼境界をそのまま1対1のモジュールやプロセスに固定する必要はありません。first-party desktop の Host / GUI / Body の process 分割、control channel、Owner 確認（同一 UID を本人確認と同一視しない）、投影 IPC、性能の分母は [First-party desktop](../concrete/first-party-desktop.md) が具体化しており、GUI と VRM overlay を同一 process に戻すこと、Body を paired Client にすること、Host に wgpu を入れることはここでの自由度ではありません。
+- **内部の責務分割と実装構造:** サブシステム、crateやモジュールの分割、型やトレイトの設計、内部API、エージェントランタイムやハーネスの内部構造、スレッドや非同期タスク、イベントバスなど。HやC、信頼境界をそのまま1対1のモジュールやプロセスに固定する必要はありません。first-party desktop の Host / GUI / Body の process 分割、control channel、exclusive `FirstPartyControlSeat` と seat 束縛の確認（同一 UID を本人確認と同一視しない）、投影 IPC、性能の分母は [First-party desktop](../concrete/first-party-desktop.md) が具体化しており、GUI と VRM overlay を同一 process に戻すこと、Body を paired Client にすること、Host に wgpu を入れることはここでの自由度ではありません。
 - **接続・入出力の実現方式:** プロセス間通信（IPC）やネットワーク電文フォーマット、同期アルゴリズム、ペアリングや端末失効の手順、切断検知の仕組み、音声や画面キャプチャデータの中継・直接送信、アバター描画や音声処理の計算負荷の割り振りなど。RT-01・02・04・05の制約と「Clientはマスターデータを持たない」原則を満たす範囲で自由に選択できます。first-party の toolkit 選定と overlay の OS API は [First-party desktop](../concrete/first-party-desktop.md) 第7節の provisional 候補であり、probe 前に恒久 contract としない。
 - **拡張機能の実装技術:** サブプロセスのOSレベルの隔離技術、外部コードのエラーハンドリング、MCPプロセスの起動・終了管理、プラグインの具体的な拡張API設計、MCP Appsの画面描画・分離方式など。ローカルMCPの標準隔離と明示例外、プラグインの権限制限、外部UIと公式管理機能の分離は前提条件となります。
 - **データ構造と永続化:** ドメインオブジェクトの設計、参照の持ち方、DBスキーマ、リポジトリ構成、保存・バックアップ・マイグレーションの具体的な実装コード、暗号化アルゴリズム、完全削除時の協調処理など。「Hostがマスターを持つ」という理由だけで、すべてのデータを1つのファイルや1つのライフサイクルに強引にまとめる必要はありません。
