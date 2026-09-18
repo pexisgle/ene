@@ -45,8 +45,10 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ConnectionWireId, DeletionOperationWireRef};
 use ene_learning::ExperienceCandidate;
 use ene_preservation::{
-    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, MechanicalDeletionTarget,
-    ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef, TargetedDeletionTarget,
+    DeletionMaterialOutcome, DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant,
+    MechanicalDeletionTarget, ParticipantCompletionFact, ParticipantCompletionOutcome,
+    ParticipantHoldClass, ParticipantOwnerRef, PreservationRepository as _,
+    PreservationTechnicalError, TargetedDeletionTarget,
 };
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
@@ -292,12 +294,111 @@ impl LearningFormationQueue {
     }
 }
 
+/// Process-local ordering for HostTransient Learning arrivals.
+///
+/// Canonical deletion authority stays in Store. This gate only linearizes
+/// process-memory occupancy and queue mutation against HostTransient's
+/// Verified-commit and the composition's finalizing attempt, so a stale
+/// Verified fact cannot become durable after generation G+1 arrived, and a
+/// pin that already exists as a body-bearing local value cannot be skipped
+/// by global completion. The `std` queue mutex is never held across an
+/// await; this tokio mutex may be held across a short Store commit.
+#[derive(Debug)]
+pub(crate) struct HostTransientArrival {
+    gate: tokio::sync::Mutex<()>,
+    inflight_pins: AtomicU64,
+    verified_generation: AtomicU64,
+}
+
+impl Default for HostTransientArrival {
+    fn default() -> Self {
+        Self {
+            gate: tokio::sync::Mutex::new(()),
+            inflight_pins: AtomicU64::new(0),
+            verified_generation: AtomicU64::new(0),
+        }
+    }
+}
+
+impl HostTransientArrival {
+    pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
+    }
+
+    pub(crate) fn begin_pin(&self) {
+        self.inflight_pins.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn end_pin(&self) {
+        self.inflight_pins.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn inflight_pins(&self) -> u64 {
+        self.inflight_pins.load(Ordering::SeqCst)
+    }
+
+    fn set_verified_generation(&self, generation: u64) {
+        self.verified_generation.store(generation, Ordering::SeqCst);
+    }
+
+    fn verified_generation(&self) -> u64 {
+        self.verified_generation.load(Ordering::SeqCst)
+    }
+}
+
+/// Whether one pinned Experience is old-origin work for an unfinished
+/// Targeted Deletion: either its transcript carries the mechanical target
+/// or one of its source identities is covered by the current sweep.
+///
+/// Unreadable currentness fails closed (treat as covered) so a producer
+/// cannot skip the delayed-arrival publish. No unfinished operation is a
+/// genuine post-completion origin.
+pub(crate) async fn learning_experience_is_old_origin(
+    store: &Store,
+    experience: &ExperienceCandidate,
+) -> bool {
+    let unfinished = match store.unfinished_deletions(None, 100).await {
+        Ok(page) => page,
+        Err(_) => return true,
+    };
+    if unfinished.is_empty() {
+        return false;
+    }
+    if unfinished.len() == 100 {
+        return true;
+    }
+    for record in unfinished {
+        let material = match store
+            .deletion_operation_material(record.current.operation)
+            .await
+        {
+            Ok(DeletionMaterialOutcome::Material(material)) => material,
+            Ok(DeletionMaterialOutcome::Missing | DeletionMaterialOutcome::Destroyed) => continue,
+            Err(_) => return true,
+        };
+        let exact = exact_text(material.target()).to_owned();
+        let identities = experience_identities(experience);
+        let covered = match store
+            .erasure_sources_covered(record.current.condition(), identities.clone())
+            .await
+        {
+            Ok(flags) => flags,
+            Err(_) => return true,
+        };
+        if experience_covered(experience, &exact, &covered, &identities) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Host-process transient erasure participant (lifecycle §8, SO §4.17).
 pub(crate) struct HostTransientParticipant {
     store: Store,
     fence: Arc<TransientErasureFence>,
     presentations: Arc<std::sync::Mutex<PresentationState>>,
     learning_queue: Arc<std::sync::Mutex<LearningFormationQueue>>,
+    arrival: Arc<HostTransientArrival>,
     /// Serializes HostTransient demands. The queue `std` mutex is never held
     /// across an await; this tokio lock only prevents two demands from
     /// overlapping snapshot/apply on the same process-local cursor.
@@ -314,17 +415,65 @@ impl HostTransientParticipant {
         fence: Arc<TransientErasureFence>,
         presentations: Arc<std::sync::Mutex<PresentationState>>,
         learning_queue: Arc<std::sync::Mutex<LearningFormationQueue>>,
+        arrival: Arc<HostTransientArrival>,
     ) -> Self {
         Self {
             store,
             fence,
             presentations,
             learning_queue,
+            arrival,
             demand_lock: tokio::sync::Mutex::new(()),
             sweep: std::sync::Mutex::new(None),
             #[cfg(test)]
             last_scanned: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) async fn lock_arrival(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.arrival.lock().await
+    }
+
+    pub(crate) fn has_inflight_pins(&self) -> bool {
+        self.arrival.inflight_pins() > 0
+    }
+
+    /// Records a HostTransient Verified fact only while the examined queue
+    /// generation is still live and no body-bearing pin is in flight.
+    ///
+    /// The park sits *before* the arrival gate so a test can enqueue G+1
+    /// while the in-memory fact exists and the durable row is still
+    /// `running`. The gate then serializes that enqueue against this commit.
+    pub(crate) async fn commit_verified(
+        &self,
+        fact: ParticipantCompletionFact,
+    ) -> Result<ParticipantCompletionOutcome, PreservationTechnicalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.store
+            .pause_host_transient_verified_record_if_armed_for_tests()
+            .await;
+        let _gate = self.arrival.lock().await;
+        let inflight = self.arrival.inflight_pins();
+        let (live_generation, remainder) = {
+            let live = crate::lock_unpoison(&self.learning_queue);
+            (
+                live.mutation_generation(),
+                live.len() as u64 + u64::from(live.taken().is_some()) + inflight,
+            )
+        };
+        if inflight > 0 || live_generation != self.arrival.verified_generation() {
+            return self
+                .store
+                .record_participant_completion(ParticipantCompletionFact::more_work(
+                    fact.condition(),
+                    ParticipantOwnerRef::HostTransient,
+                    fact.erased_count(),
+                    remainder.max(1),
+                    WallClockWithTz::now(),
+                ))
+                .await;
+        }
+        self.store.record_participant_completion(fact).await
     }
 
     #[cfg(test)]
@@ -509,16 +658,21 @@ impl ErasureParticipant for HostTransientParticipant {
             // The currentness re-check awaits. A producer enqueue or worker
             // take in that window must not complete from the older snapshot:
             // Verified is allowed only while the examined generation is still
-            // the live queue generation.
+            // the live queue generation. A body-bearing pin that has not
+            // reached the queue yet is the same remainder.
+            let inflight = self.arrival.inflight_pins();
             {
                 let queue = crate::lock_unpoison(&self.learning_queue);
-                if queue.mutation_generation() != generation {
-                    self.rebase_sweep(
-                        command.condition(),
-                        queue.mutation_generation(),
-                        queue.len(),
-                    );
-                    let remainder = queue.len() as u64 + u64::from(queue.taken().is_some());
+                if queue.mutation_generation() != generation || inflight > 0 {
+                    if queue.mutation_generation() != generation {
+                        self.rebase_sweep(
+                            command.condition(),
+                            queue.mutation_generation(),
+                            queue.len(),
+                        );
+                    }
+                    let remainder =
+                        queue.len() as u64 + u64::from(queue.taken().is_some()) + inflight;
                     return ParticipantCompletionFact::more_work(
                         command.condition(),
                         ParticipantOwnerRef::HostTransient,
@@ -528,6 +682,7 @@ impl ErasureParticipant for HostTransientParticipant {
                     );
                 }
             }
+            self.arrival.set_verified_generation(generation);
             ParticipantCompletionFact::verified(
                 command.condition(),
                 ParticipantOwnerRef::HostTransient,
@@ -1168,8 +1323,8 @@ mod tests {
     use ene_learning::{ExperienceRole, ExperienceSourceKind, ExperienceTurn, SourceRangeRef};
     use ene_preservation::{
         DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, DemandLocalErasureCommand,
-        ParticipantCompletionStatus, ParticipantErasureScope, PreservationRepository as _,
-        StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        ParticipantCompletionStatus, ParticipantErasureScope, StartTargetedDeletionCommand,
+        StartTargetedDeletionOutcome,
     };
     use ene_primitive::WallClockWithTz;
 
@@ -1241,6 +1396,7 @@ mod tests {
             Arc::clone(&handle.transient_fence),
             Arc::clone(&handle.presentations),
             Arc::clone(&handle.learning_queue),
+            Arc::clone(&handle.host_transient_arrival),
         )
     }
 
@@ -1259,6 +1415,58 @@ mod tests {
     fn page_demand_bound(queued: usize) -> usize {
         let page = super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE;
         queued.div_ceil(page).max(1)
+    }
+
+    async fn deletion_phase(
+        handle: &HostHandle,
+        operation: ene_preservation::DeletionOperationId,
+    ) -> DeletionOperationPhase {
+        handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == operation)
+            .expect("the operation must stay readable")
+            .phase
+    }
+
+    async fn host_transient_is_verified(
+        handle: &HostHandle,
+        operation: ene_preservation::DeletionOperationId,
+    ) -> bool {
+        handle
+            .store
+            .deletion_participants(operation, None, 100)
+            .await
+            .expect("participant rows read")
+            .into_iter()
+            .find(|record| record.participant.owner == ParticipantOwnerRef::HostTransient)
+            .expect("the HostTransient row exists")
+            .progress
+            .is_verified()
+    }
+
+    async fn drive_until_completed(
+        handle: &HostHandle,
+        operation: ene_preservation::DeletionOperationId,
+    ) {
+        for _ in 0..page_demand_bound(8) + 8 {
+            let outcome = handle
+                .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+                .await
+                .expect("the fan-out must not fail");
+            if deletion_phase(handle, operation).await == DeletionOperationPhase::Completed
+                && outcome.held == 0
+                && outcome.unfinished == 0
+                && outcome.demands == 0
+                && outcome.reconciliation_pages == 0
+            {
+                return;
+            }
+        }
+        panic!("Targeted Deletion must converge after the arrival is collected");
     }
 
     async fn demand_secret(
@@ -2029,6 +2237,7 @@ mod tests {
             Arc::clone(&handle.transient_fence),
             Arc::clone(&handle.presentations),
             Arc::clone(&handle.learning_queue),
+            Arc::clone(&handle.host_transient_arrival),
         );
         let current = admit(
             &handle,
@@ -2157,6 +2366,7 @@ mod tests {
             Arc::clone(&handle.transient_fence),
             Arc::clone(&handle.presentations),
             Arc::clone(&handle.learning_queue),
+            Arc::clone(&handle.host_transient_arrival),
         );
         let current = admit(
             &handle,
@@ -2569,6 +2779,118 @@ mod tests {
             remaining
                 .iter()
                 .all(|text| text.starts_with("unrelated-cap-"))
+        );
+    }
+
+    /// P1: a Verified HostTransient fact cannot become durable after a
+    /// TARGET-bearing old-origin candidate arrives in the record window.
+    #[tokio::test]
+    async fn a_verified_fact_cannot_commit_after_a_host_transient_arrival() {
+        let (handle, _dir) = memory_handle("a3c-verified-record-arrival")
+            .await
+            .expect("the handle opens");
+        let handle = Arc::new(handle);
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        handle
+            .store
+            .arm_host_transient_verified_record_park_for_tests();
+        let parked = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move {
+                handle
+                    .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+                    .await
+            })
+        };
+        handle
+            .store
+            .wait_host_transient_verified_record_park_for_tests()
+            .await;
+        assert!(
+            crate::lock_unpoison(&handle.learning_queue).is_empty(),
+            "the Verified fact examined an empty queue"
+        );
+        handle
+            .queue_learning_formation(experience("contains secret body"))
+            .await;
+        assert_eq!(crate::lock_unpoison(&handle.learning_queue).len(), 1);
+        handle
+            .store
+            .release_host_transient_verified_record_park_for_tests();
+        parked
+            .await
+            .expect("the parked drive joins")
+            .expect("the parked drive must not fail");
+        assert_ne!(
+            deletion_phase(&handle, current.operation).await,
+            DeletionOperationPhase::Completed,
+            "stale G must not complete over a G+1 arrival"
+        );
+        assert!(
+            !host_transient_is_verified(&handle, current.operation).await,
+            "the durable HostTransient row must not keep the stale Verified fact"
+        );
+        drive_until_completed(&handle, current.operation).await;
+        assert!(
+            crate::lock_unpoison(&handle.learning_queue)
+                .iter()
+                .all(|item| !item.transcript[0].text.contains("secret body")),
+            "the arrival must be collected before completion"
+        );
+    }
+
+    /// P1: a durable HostTransient Verified row cannot finalize over a
+    /// TARGET-bearing arrival that lands before the sealed completion boundary.
+    #[tokio::test]
+    async fn a_durable_verified_host_transient_cannot_finalize_over_a_new_arrival() {
+        let (handle, _dir) = memory_handle("a3c-verified-finalizing-arrival")
+            .await
+            .expect("the handle opens");
+        let handle = Arc::new(handle);
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        handle.store.arm_deletion_finalizing_park_for_tests();
+        let parked = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move {
+                handle
+                    .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+                    .await
+            })
+        };
+        handle.store.wait_deletion_finalizing_park_for_tests().await;
+        assert!(
+            host_transient_is_verified(&handle, current.operation).await,
+            "HostTransient must already be durably Verified before finalizing"
+        );
+        handle
+            .queue_learning_formation(experience("contains secret body"))
+            .await;
+        handle.store.release_deletion_finalizing_park_for_tests();
+        parked
+            .await
+            .expect("the parked drive joins")
+            .expect("the parked drive must not fail");
+        assert_ne!(
+            deletion_phase(&handle, current.operation).await,
+            DeletionOperationPhase::Completed,
+            "finalizing must not complete over a new HostTransient remainder"
+        );
+        drive_until_completed(&handle, current.operation).await;
+        assert!(
+            crate::lock_unpoison(&handle.learning_queue)
+                .iter()
+                .all(|item| !item.transcript[0].text.contains("secret body")),
+            "the arrival must be collected before completion"
         );
     }
 

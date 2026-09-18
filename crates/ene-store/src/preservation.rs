@@ -2055,6 +2055,93 @@ impl Store {
         })
         .await
     }
+
+    /// Publishes a body-free signal that new Host-transient Learning work
+    /// arrived while Targeted Deletion may still be unfinished.
+    ///
+    /// This is not a second deletion registry and stores no target body,
+    /// hash, or fingerprint. When HostTransient is already `verified` for an
+    /// unfinished operation, or the operation is `finalizing`, the current
+    /// sweep is closed and a new generation is opened so the arrival is
+    /// collected before global completion (lifecycle §6/§11/§12). A
+    /// `completed` operation is left untouched: post-completion origin is a
+    /// genuine fresh Owner input, never a keyword ban.
+    pub async fn note_host_transient_learning_arrival(
+        &self,
+    ) -> Result<HostTransientArrivalOutcome, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let outcome = note_host_transient_learning_arrival_sync(&tx)?;
+            tx.commit().map_err(storage)?;
+            Ok(outcome)
+        })
+        .await
+    }
+}
+
+/// Outcome of publishing a body-free HostTransient Learning arrival into the
+/// canonical deletion lifecycle (lifecycle §6/§11/§12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostTransientArrivalOutcome {
+    /// No unfinished HostTransient participant was verified or finalizing.
+    Unchanged,
+    /// At least one unfinished operation opened a new sweep and reset
+    /// participants, so a stale HostTransient verification cannot complete.
+    SweepOpened,
+}
+
+/// Invalidates HostTransient verification (and `Finalizing`) for every
+/// unfinished operation that lists that participant, by opening the next
+/// sweep. Completed operations are not in the scan.
+fn note_host_transient_learning_arrival_sync(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<HostTransientArrivalOutcome, PreservationTechnicalError> {
+    let rows: Vec<(String, i64, String, String)> = {
+        let mut statement = tx
+            .prepare(
+                "SELECT o.operation_id, o.sweep, o.phase, p.state
+                 FROM deletion_operation o
+                 INNER JOIN deletion_participant p
+                   ON p.operation_id = o.operation_id
+                  AND p.participant_owner = 'host_transient'
+                 WHERE o.phase IN ('active', 'held', 'finalizing')
+                 ORDER BY o.operation_id",
+            )
+            .map_err(storage)?;
+        let mapped = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage)?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(storage)?
+    };
+    let mut opened = false;
+    for (id, sweep, phase, state) in rows {
+        if phase != "finalizing" && state != "verified" {
+            continue;
+        }
+        match open_next_sweep(tx, &id, sweep)? {
+            Some(_) => {
+                validate(tx, &id)?;
+                opened = true;
+            }
+            None => validate(tx, &id)?,
+        }
+    }
+    Ok(if opened {
+        HostTransientArrivalOutcome::SweepOpened
+    } else {
+        HostTransientArrivalOutcome::Unchanged
+    })
 }
 
 /// The attempt-side hold enumeration of [`mark_inflight_uses`].

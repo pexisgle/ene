@@ -47,6 +47,7 @@ pub use erasure::{
     ActionErasureParticipant, CompanionErasureParticipant, ERASURE_SCAN_ROWS,
     InferenceErasureParticipant, LearningErasureParticipant, TaskErasureParticipant,
 };
+pub use preservation::HostTransientArrivalOutcome;
 
 /// Messages carry the short backend cause only. Paths are non-secret but are
 /// kept out of messages for operational brevity.
@@ -446,5 +447,102 @@ impl Store {
     #[doc(hidden)]
     pub async fn pause_device_auth_file_if_armed_for_tests(&self) {
         self.test_parks.device_auth_file.pause_if_armed().await;
+    }
+
+    /// Arms the first-waiter park after HostTransient has minted a Verified
+    /// fact and before that fact is recorded durably.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_host_transient_verified_record_park_for_tests(&self) {
+        self.test_parks.host_transient_verified_record.arm();
+    }
+
+    /// Waits until the armed HostTransient verified-record park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_host_transient_verified_record_park_for_tests(&self) {
+        self.test_parks
+            .host_transient_verified_record
+            .wait_entered()
+            .await;
+    }
+
+    /// Releases the parked HostTransient verified-record commit.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_host_transient_verified_record_park_for_tests(&self) {
+        self.test_parks.host_transient_verified_record.release();
+    }
+
+    /// Pauses when the HostTransient verified-record park is armed. Called
+    /// from the composition commit helper after a Verified fact exists and
+    /// before the arrival gate is taken.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_host_transient_verified_record_if_armed_for_tests(&self) {
+        self.test_parks
+            .host_transient_verified_record
+            .pause_if_armed()
+            .await;
+    }
+
+    /// Arms the first-waiter park at the start of the sealed finalizing
+    /// boundary, before the HostTransient arrival gate is taken.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_deletion_finalizing_park_for_tests(&self) {
+        self.test_parks.deletion_finalizing.arm();
+    }
+
+    /// Waits until the armed deletion-finalizing park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_deletion_finalizing_park_for_tests(&self) {
+        self.test_parks.deletion_finalizing.wait_entered().await;
+    }
+
+    /// Releases the parked deletion-finalizing attempt.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_deletion_finalizing_park_for_tests(&self) {
+        self.test_parks.deletion_finalizing.release();
+    }
+
+    /// Pauses when the deletion-finalizing park is armed.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_deletion_finalizing_if_armed_for_tests(&self) {
+        self.test_parks.deletion_finalizing.pause_if_armed().await;
+    }
+
+    /// Arms the first-waiter park after Dialogue has pinned an
+    /// `ExperienceCandidate` and before that candidate is handed to the
+    /// Learning formation queue.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_learning_pin_queue_park_for_tests(&self) {
+        self.test_parks.learning_pin_queue.arm();
+    }
+
+    /// Waits until the armed pin-to-queue park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_learning_pin_queue_park_for_tests(&self) {
+        self.test_parks.learning_pin_queue.wait_entered().await;
+    }
+
+    /// Releases the parked pin-to-queue handoff.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_learning_pin_queue_park_for_tests(&self) {
+        self.test_parks.learning_pin_queue.release();
+    }
+
+    /// Pauses when the pin-to-queue park is armed. Called after occupancy is
+    /// registered and `pin_experience` has produced the candidate.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_learning_pin_queue_if_armed_for_tests(&self) {
+        self.test_parks.learning_pin_queue.pause_if_armed().await;
     }
 }

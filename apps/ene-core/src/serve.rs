@@ -464,6 +464,10 @@ pub struct HostHandle {
     /// A worker-owned `taken` slot keeps a popped candidate visible until its
     /// body-free formation identity is published.
     pub(crate) learning_queue: Arc<StdMutex<crate::transient_erasure::LearningFormationQueue>>,
+    /// Process-local linearization of HostTransient Learning arrivals against
+    /// Verified-commit and finalizing. Shared with
+    /// [`crate::transient_erasure::HostTransientParticipant`].
+    pub(crate) host_transient_arrival: Arc<crate::transient_erasure::HostTransientArrival>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.
     pub(crate) learning_worker: AsyncMutex<()>,
@@ -714,6 +718,8 @@ impl HostHandle {
         let learning_queue = Arc::new(StdMutex::new(
             crate::transient_erasure::LearningFormationQueue::default(),
         ));
+        let host_transient_arrival =
+            Arc::new(crate::transient_erasure::HostTransientArrival::default());
         let transient_fence = Arc::new(crate::transient_erasure::TransientErasureFence::default());
         let client_transients = Arc::new(crate::transient_erasure::ClientTransientRegistry::new(
             store.clone(),
@@ -726,6 +732,7 @@ impl HostHandle {
             cred_store,
             auth_store,
             learning_queue: Arc::clone(&learning_queue),
+            host_transient_arrival: Arc::clone(&host_transient_arrival),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: std::sync::Arc::new(crate::task_run::TaskExecutionRegistry::default()),
@@ -790,7 +797,7 @@ impl HostHandle {
     fn install_local_erasure_participants(&self) -> Result<(), CoreError> {
         use std::sync::Arc;
 
-        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 9] = [
+        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 8] = [
             Arc::new(ene_store::CompanionErasureParticipant::new(
                 self.store.clone(),
             )),
@@ -812,16 +819,25 @@ impl HostHandle {
             Arc::new(ene_presence::PresenceErasureParticipant::new(Arc::new(
                 self.store.clone(),
             ))),
-            Arc::new(crate::transient_erasure::HostTransientParticipant::new(
-                self.store.clone(),
-                self.transient_fence.clone(),
-                self.presentations.clone(),
-                self.learning_queue.clone(),
-            )),
         ];
         for participant in participants {
             self.register_deletion_participant(participant)?;
         }
+        let host_transient = Arc::new(crate::transient_erasure::HostTransientParticipant::new(
+            self.store.clone(),
+            self.transient_fence.clone(),
+            self.presentations.clone(),
+            self.learning_queue.clone(),
+            Arc::clone(&self.host_transient_arrival),
+        ));
+        crate::lock_unpoison(&self.targeted_deletion)
+            .register_host_transient(host_transient)
+            .map_err(|owner| {
+                CoreError::Deletion(format!(
+                    "duplicate deletion participant for owner class {}",
+                    owner.class_name()
+                ))
+            })?;
         crate::lock_unpoison(&self.targeted_deletion)
             .install_client_transients(Arc::clone(&self.client_transients));
         Ok(())

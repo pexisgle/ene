@@ -82,6 +82,10 @@ pub struct ErasureParticipantRegistry {
     /// table is keyed by, so the participant can be reconstructed for the
     /// exact durable owner (lifecycle §8.1, §14).
     client_transients: Option<Arc<crate::transient_erasure::ClientTransientRegistry>>,
+    /// Typed HostTransient handle so Verified-commit and finalizing can share
+    /// the process-local arrival gate with Learning enqueue. The same `Arc`
+    /// is also in `participants`.
+    host_transient: Option<Arc<crate::transient_erasure::HostTransientParticipant>>,
 }
 
 impl std::fmt::Debug for ErasureParticipantRegistry {
@@ -125,6 +129,42 @@ impl ErasureParticipantRegistry {
         registry: Arc<crate::transient_erasure::ClientTransientRegistry>,
     ) {
         self.client_transients = Some(registry);
+    }
+
+    /// Registers the typed HostTransient participant so Verified-commit and
+    /// finalizing share its process-local arrival gate.
+    pub(crate) fn register_host_transient(
+        &mut self,
+        participant: Arc<crate::transient_erasure::HostTransientParticipant>,
+    ) -> Result<(), ParticipantOwnerRef> {
+        if self
+            .participants
+            .contains_key(&ParticipantOwnerRef::HostTransient)
+        {
+            return Err(ParticipantOwnerRef::HostTransient);
+        }
+        self.host_transient = Some(Arc::clone(&participant));
+        self.participants
+            .insert(ParticipantOwnerRef::HostTransient, participant);
+        Ok(())
+    }
+
+    /// Records one completion fact. HostTransient Verified facts go through
+    /// the arrival gate so a concurrent Learning enqueue cannot land between
+    /// the in-memory fact and the durable participant row.
+    async fn record_completion(
+        &self,
+        store: &Store,
+        fact: ParticipantCompletionFact,
+    ) -> Result<ParticipantCompletionOutcome, ene_preservation::PreservationTechnicalError> {
+        if fact.participant() == ParticipantOwnerRef::HostTransient
+            && fact.status() == ParticipantCompletionStatus::Verified
+        {
+            if let Some(host) = &self.host_transient {
+                return host.commit_verified(fact).await;
+            }
+        }
+        store.record_participant_completion(fact).await
     }
 
     /// Issues one bounded demand. An owner without an implementation reports
@@ -374,7 +414,7 @@ pub async fn drive_targeted_deletion(
                 // condition, and the participant statuses come from durable
                 // state, never from memory defaults (§14).
                 DeletionOperationPhase::Finalizing => {
-                    settle_finalizing(store, record.current, &mut outcome).await?;
+                    settle_finalizing(store, registry, record.current, &mut outcome).await?;
                 }
                 DeletionOperationPhase::Held | DeletionOperationPhase::Completed => {}
             }
@@ -397,9 +437,21 @@ pub async fn drive_targeted_deletion(
 /// material, so this pass never completes over collected data.
 async fn settle_finalizing(
     store: &Store,
+    registry: &ErasureParticipantRegistry,
     current: DeletionOperationRef,
     outcome: &mut TargetedDeletionPassOutcome,
 ) -> Result<(), CoreError> {
+    #[cfg(any(test, feature = "test-support"))]
+    store.pause_deletion_finalizing_if_armed_for_tests().await;
+    let _arrival_gate = if let Some(host) = &registry.host_transient {
+        let gate = host.lock_arrival().await;
+        if host.has_inflight_pins() {
+            return Ok(());
+        }
+        Some(gate)
+    } else {
+        None
+    };
     match store
         .begin_deletion_finalizing(current)
         .await
@@ -572,8 +624,8 @@ async fn drive_operation(
                     return Ok(false);
                 }
                 let fact_status = fact.status();
-                match store
-                    .record_participant_completion(fact)
+                match registry
+                    .record_completion(store, fact)
                     .await
                     .map_err(deletion_error)?
                 {
@@ -630,7 +682,7 @@ async fn drive_operation(
     // The participant work is (now) complete: try the sealed completion
     // boundary. It re-reads the durable aggregate and the system-wide
     // remainder itself, so this call is safe to repeat and safe to skip.
-    settle_finalizing(store, current, outcome).await?;
+    settle_finalizing(store, registry, current, outcome).await?;
     Ok(true)
 }
 
@@ -1771,6 +1823,7 @@ mod tests {
             let fence = Arc::clone(&handle.transient_fence);
             let presentations = Arc::clone(&handle.presentations);
             let queue = Arc::clone(&handle.learning_queue);
+            let arrival = Arc::clone(&handle.host_transient_arrival);
             let condition = current.condition();
             tokio::spawn(async move {
                 let material = match store
@@ -1781,7 +1834,7 @@ mod tests {
                     DeletionMaterialOutcome::Material(material) => material,
                     other => panic!("the protected material must read, got {other:?}"),
                 };
-                HostTransientParticipant::new(store, fence, presentations, queue)
+                HostTransientParticipant::new(store, fence, presentations, queue, arrival)
                     .demand_local_erasure(DemandLocalErasureCommand::new(
                         condition,
                         ParticipantOwnerRef::HostTransient,

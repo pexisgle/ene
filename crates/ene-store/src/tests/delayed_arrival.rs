@@ -29,7 +29,8 @@ use ene_companion::{
 };
 use ene_learning::LearningClaimRef;
 use ene_preservation::{
-    DeletionOperationRef, DeletionSearchMaterial, ErasureConditionRef, MechanicalDeletionTarget,
+    DeletionOperationPhase, DeletionOperationRef, DeletionSearchMaterial, ErasureConditionRef,
+    MechanicalDeletionTarget, ParticipantCompletionFact, ParticipantCompletionOutcome,
     ParticipantOwnerRef, PreservationRepository as _, StartTargetedDeletionCommand,
     StartTargetedDeletionOutcome, TargetedDeletionTarget,
 };
@@ -3020,4 +3021,110 @@ async fn a_learning_formation_taken_off_the_queue_stays_old_origin_after_complet
         "a post-completion Owner origin is a new formation, not a ban"
     );
     claim_formation(&store, InferenceTicketId(RawId::new()), vec![fresh]).await;
+}
+
+#[tokio::test]
+async fn a_host_transient_arrival_after_verified_opens_a_new_sweep() {
+    let store = open_memory().await.unwrap();
+    let current = admit(
+        &store,
+        "secret body",
+        Vec::new(),
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+    assert_eq!(
+        store
+            .record_participant_completion(ParticipantCompletionFact::verified(
+                current.condition(),
+                ParticipantOwnerRef::HostTransient,
+                0,
+                fixture_clock(),
+            ))
+            .await
+            .expect("the verified fact must record"),
+        ParticipantCompletionOutcome::Recorded(ene_preservation::ParticipantProgress::Verified {
+            sweep: current.sweep,
+        })
+    );
+    assert_eq!(
+        store
+            .note_host_transient_learning_arrival()
+            .await
+            .expect("the arrival must publish"),
+        crate::HostTransientArrivalOutcome::SweepOpened
+    );
+    let unfinished = store
+        .unfinished_deletions(None, 100)
+        .await
+        .expect("unfinished operations read");
+    assert_eq!(unfinished.len(), 1);
+    assert_eq!(unfinished[0].phase, DeletionOperationPhase::Active);
+    assert_ne!(unfinished[0].current.sweep, current.sweep);
+    let host = store
+        .deletion_participants(unfinished[0].current.operation, None, 100)
+        .await
+        .expect("participant rows read")
+        .into_iter()
+        .find(|record| record.participant.owner == ParticipantOwnerRef::HostTransient)
+        .expect("HostTransient remains required");
+    assert!(
+        !host.progress.is_verified(),
+        "the previous verification must not count for the new sweep"
+    );
+}
+
+#[tokio::test]
+async fn a_host_transient_arrival_during_finalizing_returns_to_active() {
+    let store = open_memory().await.unwrap();
+    let current = admit(
+        &store,
+        "secret body",
+        Vec::new(),
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+    enter_finalizing_via_a5(&store, current).await;
+    assert_eq!(
+        store
+            .note_host_transient_learning_arrival()
+            .await
+            .expect("the arrival must publish"),
+        crate::HostTransientArrivalOutcome::SweepOpened
+    );
+    let unfinished = store
+        .unfinished_deletions(None, 100)
+        .await
+        .expect("unfinished operations read");
+    assert_eq!(unfinished.len(), 1);
+    assert_eq!(unfinished[0].phase, DeletionOperationPhase::Active);
+    assert_ne!(unfinished[0].current.sweep, current.sweep);
+}
+
+#[tokio::test]
+async fn a_host_transient_arrival_after_completion_does_not_reopen() {
+    let store = open_memory().await.unwrap();
+    let current = admit(
+        &store,
+        "secret body",
+        Vec::new(),
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+    complete_via_a5(&store, current).await;
+    assert_eq!(
+        store
+            .note_host_transient_learning_arrival()
+            .await
+            .expect("the arrival must publish"),
+        crate::HostTransientArrivalOutcome::Unchanged
+    );
+    let unfinished = store
+        .unfinished_deletions(None, 100)
+        .await
+        .expect("unfinished operations read");
+    assert!(
+        unfinished.is_empty(),
+        "the completed operation stays closed"
+    );
 }

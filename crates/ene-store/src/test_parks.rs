@@ -67,4 +67,7 @@ pub(crate) struct TestParks {
     pub(crate) learning_formation: TestPark,
     pub(crate) host_transient_queue: TestPark,
     pub(crate) learning_take: TestPark,
+    pub(crate) host_transient_verified_record: TestPark,
+    pub(crate) deletion_finalizing: TestPark,
+    pub(crate) learning_pin_queue: TestPark,
 }

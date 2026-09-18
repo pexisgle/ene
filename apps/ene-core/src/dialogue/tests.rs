@@ -3685,6 +3685,203 @@ async fn a_popped_learning_candidate_is_refused_after_deletion_completes() {
     );
 }
 
+/// P1: a TARGET-bearing ExperienceCandidate that exists after pin_experience
+/// and before the Learning queue cannot be skipped by Targeted Deletion.
+#[tokio::test]
+async fn a_pinned_learning_candidate_cannot_be_skipped_before_queue() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::LearningRepository as _;
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "pin-queue-learning-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes pin-queue-learning-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes pin-queue-learning-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-pin-queue-learning");
+    let setup = round_test_handle("dlg-pin-queue-learning", &live, transport.as_ref()).await;
+    let (handle, dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let handle = Arc::new(handle);
+    handle.store.arm_learning_pin_queue_park_for_tests();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-pin-queue-learning",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let parked = {
+        let handle = Arc::clone(&handle);
+        let live = live.clone();
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { handle.handle_frame(frame, live, transport.as_ref()).await })
+    };
+    handle.store.wait_learning_pin_queue_park_for_tests().await;
+    assert!(
+        !handle.has_pending_learning(),
+        "the candidate exists after pin and before the queue"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    for _ in 0..16 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        assert_ne!(
+            phase,
+            DeletionOperationPhase::Completed,
+            "deletion must not complete over a pinned unqueued candidate: {outcome:?}"
+        );
+        if outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+            && phase != DeletionOperationPhase::Completed
+        {
+            break;
+        }
+    }
+
+    handle.store.release_learning_pin_queue_park_for_tests();
+    let responses = parked.await.expect("the parked dialogue joins");
+    assert_stream_completed(&responses);
+    assert!(
+        handle.has_pending_learning(),
+        "release must enqueue the old-origin candidate"
+    );
+
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        if outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            break;
+        }
+    }
+    let phase = handle
+        .store
+        .deletion_status(None, 100)
+        .await
+        .expect("the status must read")
+        .into_iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the operation must stay readable")
+        .phase;
+    assert_eq!(phase, DeletionOperationPhase::Completed);
+
+    let db = dir.path().join("app.db");
+    let sqlite_count = |sql: &str| -> i64 {
+        let conn = rusqlite::Connection::open(&db).expect("the state database opens");
+        conn.query_row(sql, [], |row| row.get(0))
+            .expect("the probe must answer")
+    };
+    let learning_bytes: usize = transport
+        .inputs()
+        .iter()
+        .filter(|input| input.contains("learning formation pass"))
+        .map(String::len)
+        .sum();
+    assert_eq!(
+        learning_bytes, 0,
+        "the stale candidate must not send one byte to the provider"
+    );
+    assert_eq!(sqlite_count("SELECT COUNT(*) FROM learning_summary"), 0);
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM learning_memory_revision"),
+        0
+    );
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert!(
+        memories.is_empty(),
+        "old-origin derived Memory must not form, got {memories:?}"
+    );
+
+    let fresh = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "local-pin-queue-learning-fresh",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let fresh_responses = handle
+        .handle_frame(fresh, live.clone(), transport.as_ref())
+        .await;
+    assert_stream_completed(&fresh_responses);
+    handle.run_pending_learning(transport.as_ref()).await;
+    let fresh_memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh_memories.len(),
+        1,
+        "a genuine post-completion dialogue must still form, got {fresh_memories:?}"
+    );
+    assert!(
+        fresh_memories[0].content.contains(target),
+        "the fresh Memory keeps the Owner's new origin"
+    );
+}
+
 /// A provider or transport failure in the Learning pass is a technical
 /// failure, not a semantic decline: an experience the model never judged must
 /// not be reported as "nothing worth keeping".

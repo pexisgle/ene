@@ -931,6 +931,10 @@ impl HostHandle {
                 };
                 let task_control =
                     crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
+                // Occupancy starts before pin_experience so a body-bearing
+                // local candidate cannot exist outside HostTransient's
+                // remainder while Targeted Deletion finalizes.
+                self.begin_learning_pin().await;
                 let outcome = {
                     // The open round is Host-owned transient state the
                     // companion must never read directly: hand finish_turn
@@ -976,11 +980,17 @@ impl HostHandle {
                         // are not one condition). The queue item is the
                         // premise pinned at completion, never a later re-read.
                         if let Some(experience) = experience {
-                            self.queue_learning_formation(*experience);
+                            #[cfg(any(test, feature = "test-support"))]
+                            self.store
+                                .pause_learning_pin_queue_if_armed_for_tests()
+                                .await;
+                            self.queue_learning_formation(*experience).await;
                         }
+                        self.end_learning_pin().await;
                         gate.finish().await;
                     }
                     DialogueOutcome::Interrupted => {
+                        self.end_learning_pin().await;
                         gate.interrupt().await;
                     }
                 }
@@ -1251,8 +1261,29 @@ impl HostHandle {
     /// worker judges exactly that Experience; it never reads a later History
     /// window and silently folds newer turns into an older pass. A full queue
     /// drops the oldest pending pass rather than growing without bound.
-    fn queue_learning_formation(&self, experience: ExperienceCandidate) {
+    ///
+    /// TARGET-bearing old-origin work is published to the canonical store as
+    /// a body-free delayed-arrival so an already-Verified HostTransient row
+    /// cannot complete over the new remainder.
+    pub(crate) async fn queue_learning_formation(&self, experience: ExperienceCandidate) {
+        let _gate = self.host_transient_arrival.lock().await;
+        let covered =
+            crate::transient_erasure::learning_experience_is_old_origin(&self.store, &experience)
+                .await;
         crate::lock_unpoison(&self.learning_queue).push_back(experience);
+        if covered {
+            drop(self.store.note_host_transient_learning_arrival().await);
+        }
+    }
+
+    async fn begin_learning_pin(&self) {
+        let _gate = self.host_transient_arrival.lock().await;
+        self.host_transient_arrival.begin_pin();
+    }
+
+    async fn end_learning_pin(&self) {
+        let _gate = self.host_transient_arrival.lock().await;
+        self.host_transient_arrival.end_pin();
     }
 
     /// Whether a queued formation pass is waiting.
