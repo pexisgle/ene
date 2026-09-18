@@ -169,12 +169,70 @@ impl TransientErasureFence {
 /// Remaining entries continue on a later demand via [`ParticipantCompletionStatus::MoreWork`].
 pub(crate) const HOST_TRANSIENT_LEARNING_QUEUE_PAGE: usize = 32;
 
+/// In-memory Learning formation work: the pending queue plus at most one
+/// worker-owned candidate that has left the queue but does not yet have a
+/// canonical formation identity.
+///
+/// HostTransient must not report Verified while `taken` still carries a
+/// covered transcript. The worker clears `taken` only after
+/// `begin_learning_formation` commits, so the pop→claim window cannot lose
+/// deletion provenance. The pending queue itself stays the HostTransient
+/// drop surface; `taken` is counted as remainder, never dropped here.
+#[derive(Debug, Default)]
+pub(crate) struct LearningFormationQueue {
+    pending: VecDeque<ExperienceCandidate>,
+    taken: Option<ExperienceCandidate>,
+}
+
+impl LearningFormationQueue {
+    pub(crate) fn push_back(&mut self, experience: ExperienceCandidate) {
+        self.pending.push_back(experience);
+    }
+
+    pub(crate) fn pop_front(&mut self) -> Option<ExperienceCandidate> {
+        self.pending.pop_front()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> std::collections::vec_deque::Iter<'_, ExperienceCandidate> {
+        self.pending.iter()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn front(&self) -> Option<&ExperienceCandidate> {
+        self.pending.front()
+    }
+
+    /// Moves the next pending candidate into the worker-owned slot. The
+    /// returned clone is the pass body; HostTransient still sees `taken`.
+    pub(crate) fn take_pending(&mut self) -> Option<ExperienceCandidate> {
+        let next = self.pending.pop_front()?;
+        self.taken = Some(next.clone());
+        Some(next)
+    }
+
+    pub(crate) fn clear_taken(&mut self) {
+        self.taken = None;
+    }
+
+    pub(crate) fn taken(&self) -> Option<&ExperienceCandidate> {
+        self.taken.as_ref()
+    }
+}
+
 /// Host-process transient erasure participant (lifecycle §8, SO §4.17).
 pub(crate) struct HostTransientParticipant {
     store: Store,
     fence: Arc<TransientErasureFence>,
     presentations: Arc<std::sync::Mutex<PresentationState>>,
-    learning_queue: Arc<std::sync::Mutex<VecDeque<ExperienceCandidate>>>,
+    learning_queue: Arc<std::sync::Mutex<LearningFormationQueue>>,
 }
 
 impl HostTransientParticipant {
@@ -183,7 +241,7 @@ impl HostTransientParticipant {
         store: Store,
         fence: Arc<TransientErasureFence>,
         presentations: Arc<std::sync::Mutex<PresentationState>>,
-        learning_queue: Arc<std::sync::Mutex<VecDeque<ExperienceCandidate>>>,
+        learning_queue: Arc<std::sync::Mutex<LearningFormationQueue>>,
     ) -> Self {
         Self {
             store,
@@ -261,15 +319,23 @@ impl ErasureParticipant for HostTransientParticipant {
                 .map(exact_text)
                 .unwrap_or_default()
                 .to_owned();
-            let (identities, page_len, more_unexamined) = {
+            let (identities, page_len, more_unexamined, taken) = {
                 let queue = crate::lock_unpoison(&self.learning_queue);
                 let page_len = queue.len().min(HOST_TRANSIENT_LEARNING_QUEUE_PAGE);
-                let identities = queue
+                let mut identities = queue
                     .iter()
                     .take(page_len)
                     .flat_map(experience_identities)
                     .collect::<Vec<_>>();
-                (identities, page_len, queue.len() > page_len)
+                if let Some(taken) = queue.taken() {
+                    identities.extend(experience_identities(taken));
+                }
+                (
+                    identities,
+                    page_len,
+                    queue.len() > page_len,
+                    queue.taken().cloned(),
+                )
             };
             let covered = match self
                 .store
@@ -317,8 +383,14 @@ impl ErasureParticipant for HostTransientParticipant {
                     WallClockWithTz::now(),
                 );
             }
-            if more_unexamined {
-                let remainder = crate::lock_unpoison(&self.learning_queue).len() as u64;
+            let taken_covered = taken.as_ref().is_some_and(|experience| {
+                experience_covered(experience, &exact, &covered, &identities)
+            });
+            if more_unexamined || taken_covered {
+                let remainder = {
+                    let queue = crate::lock_unpoison(&self.learning_queue);
+                    queue.len() as u64 + u64::from(queue.taken().is_some())
+                };
                 return ParticipantCompletionFact::more_work(
                     command.condition(),
                     ParticipantOwnerRef::HostTransient,
@@ -1807,7 +1879,14 @@ mod tests {
         assert!(fact.erased_count() >= 1);
         let queue = crate::lock_unpoison(&handle.learning_queue);
         assert_eq!(queue.len(), 1, "only the covered premise drops");
-        assert!(queue[0].transcript[0].text.contains("unrelated text"));
+        assert!(
+            queue
+                .front()
+                .expect("one uncovered premise remains")
+                .transcript[0]
+                .text
+                .contains("unrelated text")
+        );
         drop(queue);
         assert!(
             handle.transient_fence_epoch() > epoch,
@@ -1890,6 +1969,54 @@ mod tests {
                 .all(|item| !item.transcript[0].text.contains("secret body")),
             "no remaining entry may carry the target"
         );
+    }
+
+    /// A candidate taken off the pending queue stays visible to HostTransient
+    /// until its formation identity is published, so an empty pending queue is
+    /// not a Verified completion while the worker still holds the body.
+    #[tokio::test]
+    async fn a_taken_learning_candidate_keeps_the_host_transient_demand_unfinished() {
+        let (handle, _dir) = memory_handle("a3c-host-transient-taken")
+            .await
+            .expect("the handle opens");
+        {
+            let mut queue = crate::lock_unpoison(&handle.learning_queue);
+            queue.push_back(experience("contains secret body"));
+            assert!(queue.take_pending().is_some());
+            assert!(queue.is_empty(), "the pending queue is empty after take");
+            assert!(
+                queue.taken().is_some(),
+                "the worker-owned slot still holds the body"
+            );
+        }
+        let participant = HostTransientParticipant::new(
+            handle.store.clone(),
+            Arc::clone(&handle.transient_fence),
+            Arc::clone(&handle.presentations),
+            Arc::clone(&handle.learning_queue),
+        );
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let fact = participant
+            .demand_local_erasure(command(
+                current.condition(),
+                ParticipantOwnerRef::HostTransient,
+                ParticipantErasureScope::local(target("secret body"), Vec::new()),
+            ))
+            .await;
+        assert_eq!(fact.status(), ParticipantCompletionStatus::MoreWork);
+        let queue = crate::lock_unpoison(&handle.learning_queue);
+        assert!(
+            queue
+                .taken()
+                .is_some_and(|item| item.transcript[0].text.contains("secret body")),
+            "HostTransient must not drop the worker-owned taken slot"
+        );
+        assert!(queue.is_empty());
     }
 
     /// Blocker 3 remainder: a Client class-wipe demand parked after durable

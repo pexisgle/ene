@@ -70,7 +70,7 @@
 //! - [`HostHandle`] methods take `&self`: every lock guard is dropped before
 //!   the next await, and no handle-wide async lock spans provider I/O.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -461,7 +461,9 @@ pub struct HostHandle {
     /// of the client-visible completion, and a crash simply drops the queued
     /// derived update instead of replaying an old pass. Shared with the
     /// Host-transient erasure participant (A3c), which drops covered premises.
-    pub(crate) learning_queue: Arc<StdMutex<VecDeque<ene_learning::ExperienceCandidate>>>,
+    /// A worker-owned `taken` slot keeps a popped candidate visible until its
+    /// body-free formation identity is published.
+    pub(crate) learning_queue: Arc<StdMutex<crate::transient_erasure::LearningFormationQueue>>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.
     pub(crate) learning_worker: AsyncMutex<()>,
@@ -709,7 +711,9 @@ impl HostHandle {
         let presentations = Arc::new(StdMutex::new(
             crate::presentation::PresentationState::default(),
         ));
-        let learning_queue = Arc::new(StdMutex::new(VecDeque::new()));
+        let learning_queue = Arc::new(StdMutex::new(
+            crate::transient_erasure::LearningFormationQueue::default(),
+        ));
         let transient_fence = Arc::new(crate::transient_erasure::TransientErasureFence::default());
         let client_transients = Arc::new(crate::transient_erasure::ClientTransientRegistry::new(
             store.clone(),

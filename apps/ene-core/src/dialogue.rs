@@ -1292,9 +1292,11 @@ impl HostHandle {
     /// companions are skipped because stopping must not start new internal
     /// activity. A pass failure drops its item, so there is no retry storm.
     ///
-    /// Taking a candidate off the queue publishes a body-free formation
-    /// identity into the canonical store before any further await. HostTransient
-    /// can no longer see the transcript; deletion correspondence can, so a
+    /// Taking a candidate off the pending queue parks it in the worker-owned
+    /// `taken` slot until a body-free formation identity is published. HostTransient
+    /// can no longer drop that transcript as a queue entry; it also cannot
+    /// report Verified while the slot still carries a covered body. After the
+    /// identity commits, deletion correspondence outlives the slot, so a
     /// deletion that completes before the Learning claim still refuses the
     /// stale origin at the provider gate.
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
@@ -1302,7 +1304,7 @@ impl HostHandle {
         loop {
             let next = {
                 let mut queue = crate::lock_unpoison(&self.learning_queue);
-                queue.pop_front()
+                queue.take_pending()
             };
             let Some(experience) = next else {
                 break;
@@ -1313,8 +1315,12 @@ impl HostHandle {
                 .await
             {
                 Ok(formation) => formation,
-                Err(_) => continue,
+                Err(_) => {
+                    crate::lock_unpoison(&self.learning_queue).clear_taken();
+                    continue;
+                }
             };
+            crate::lock_unpoison(&self.learning_queue).clear_taken();
             #[cfg(any(test, feature = "test-support"))]
             self.store
                 .pause_learning_formation_if_armed_for_tests()

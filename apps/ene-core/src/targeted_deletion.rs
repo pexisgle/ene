@@ -1827,7 +1827,14 @@ mod tests {
 
         let queue = crate::lock_unpoison(&handle.learning_queue);
         assert_eq!(queue.len(), 1, "the fresh premise must remain");
-        assert_eq!(queue[0].transcript[0].text, fresh_text);
+        assert_eq!(
+            queue
+                .front()
+                .expect("the fresh premise must remain")
+                .transcript[0]
+                .text,
+            fresh_text
+        );
     }
 
     /// Blocker 3 remainder: the credential device-auth file cannot share the
