@@ -13,7 +13,7 @@ crate 名と依存方向の表は [Crate / Module 分解](crate-module-decomposi
 - first-party 実行を構成する process と寿命（第2節）。
 - text UI と VRM overlay を同一 process にしない理由、および Body を paired Client にしない理由（第3節）。
 - desktop と Body の投影 IPC（Host Client プロトコルではない）（第4節）。
-- Client channel と Host-local control channel の区別、exclusive `FirstPartyControlSeat`、nonce が freshness に過ぎないこと、ene Computer Use の denylist、credential の ene 所有区間と保証できない複製、失敗の非同一視（第5節）。
+- Client channel と Host-local control channel の区別、exclusive `FirstPartyControlSeat`（同時に高々1つ。取得者の真正性は証明しない）、nonce が freshness に過ぎないこと、ene Computer Use の denylist、credential の ene 所有区間と保証できない複製、失敗の非同一視（第5節）。
 - application / crate / module の命名と「作らない名前」（第6節）。詳細な Host ドメイン分解は CM が所有する。
 - 確定する不採用と、probe 前は provisional に留める依存（第7節）。
 - acceptance の Performance Gates を弱めない測り方と縮退順（第8節）。
@@ -36,7 +36,7 @@ crate 名と依存方向の表は [Crate / Module 分解](crate-module-decomposi
 ```mermaid
 flowchart TB
   owner[Owner at seated first-party surface]
-  desktop["ene-desktop exclusive FirstPartyControlSeat"]
+  desktop["ene-desktop intended FirstPartyControlSeat"]
   body["ene-body VRM overlay only"]
   host["ene-core Host composition / OS credential store"]
   ctl["ene-ctl CLI Client"]
@@ -48,13 +48,13 @@ flowchart TB
   host -->|"session を seat へだけ push"| desktop
   cu -.->|"denylist: confirm / secret / OS prompt を狙えない"| desktop
   desktop -->|"projection IPC no secrets / no domain"| body
-  ctl -->|"Client channel only. seat は取れない"| host
+  ctl -->|"Client channel only"| host
 ```
 
 - **Host (`apps/ene-core`)** は GUI / wgpu を持たない。Client 切断後も Task を続ける。control listener を serving 中に持つ。Body process の有無を知らない。`FirstPartyControlSeat` と `ConfirmationSession` の唯一の minter / binder である。
-- **First-party GUI (`apps/ene-desktop`)** は通常ウィンドウの text / management。Host より短命。閉じても Host は止まらない。overlay / 3D は持たない。Host の Client channel と、**唯一の** first-party control seat を話す。Body の親。高権限の最終確認面はここだが、socket を開けたことや同一 UID であることが Owner 確認ではない（第5.1節）。
+- **First-party GUI (`apps/ene-desktop`)** は通常ウィンドウの text / management。Host より短命。閉じても Host は止まらない。overlay / 3D は持たない。Host の Client channel と control を話す。製品が意図する席の占有者である。空席を先に取られれば `SeatOccupied` であり、取得者の真正性証明ではない（第5.1.2節）。Body の親。高権限の最終確認面はここだが、socket を開けたことや同一 UID であることが Owner 確認ではない（第5.1節）。
 - **Body (`apps/ene-body`)** は GUI の任意 child。Host にも Client protocol にも接続しない。落ちても chat / settings は生きる。VRM runtime（provisional: 第7.2節）で VRM を動かし、wgpu に載せる。
-- **CLI (`apps/ene-ctl`)** は Client channel のみ。control は話さない。製品 idle に常駐させない。
+- **CLI (`apps/ene-ctl`)** は Client channel のみ。control は話さない（製品バイナリの契約。同一 UID の任意 process が空席の control を取れないことではない。第5.1.2節）。製品 idle に常駐させない。
 
 製品起動: `ene-desktop` が Host 未起動なら `ene-core serve` を detach 起動し、その後 control と Client に接続する。Host を GUI の子にしたままにしない。GUI を閉じても Host の serve は続く。
 
@@ -131,7 +131,7 @@ body → desktop:
 1. `ene-core approve-*` は HostLock で serving 中に失敗する。テストだけ in-process `HostHandle` を使う。
 2. 秘密は env にしか無く、Host 起動後に GUI から入れられない。
 3. IPC §18 は「公式第一者画面」と書くが、判定手段が無かった。同一 UID や control socket を開けたことをその手段にしてはいけない。
-4. nonce だけの `ConfirmationSession` は freshness しか証明しない。模倣 GUI や Computer Use が同じ完了を返せるなら未完成である。
+4. nonce だけの `ConfirmationSession` は freshness しか証明しない。seat の exclusive 性と接続束縛は、空席を先に取った process の真正性を証明しない。
 
 ### 5.1 二つの channel と Owner 確認
 
@@ -144,7 +144,7 @@ peer UID / DACL / 同一 OS ユーザー / data dir を読めること / SameMac
 
 #### 5.1.1 `ConfirmationSession` が証明すること / しないこと
 
-Host 発行の nonce と premise generation への束縛が証明するのは **freshness** だけである。操作種別・対象・世代に結び付き、再利用・転用・期限切れを拒否する。これだけでは「誰が完了したか」は証明しない。nonce を知った同一 UID の別 process や、seat 上の GUI を操作する Computer Use が同じ完了電文を返せれば、契約は未完成である。
+Host 発行の nonce と premise generation への束縛が証明するのは **freshness** だけである。操作種別・対象・世代に結び付き、再利用・転用・期限切れを拒否する。これだけでは「誰が完了したか」は証明しない。完了を mint 時の同一 seat 接続に束縛しても、その席を誰が取ったかは証明しない。
 
 Owner 確認として Host が受理してよい完了は、次を **すべて** 満たすものに限る。
 
@@ -158,15 +158,31 @@ nonce は Client wire、plugin IPC、tool 結果、LLM 出力、Computer Use コ
 
 #### 5.1.2 `FirstPartyControlSeat`（強制する境界）
 
-Host は first-party control speaker を **高々1つ** 認める。`ene-desktop` だけが seat を取る。`ene-ctl`、`ene-body`、通常の Client、第二の `ene-desktop`、任意の local process が開けた control socket は seat を取れない（`SeatOccupied` / `DeniedByBoundary`）。
+Host は first-party control speaker を **高々1つ** 認める。空席のとき、local transport 適格（同一 UID / 狭い DACL）な最初の control 接続が席を取る。席が埋まっているときの第二接続は `SeatOccupied` / `DeniedByBoundary` であり、完了も秘密 intake もできない。
 
-Host は session challenge を **その seat へだけ push** する。任意 process が作ったダイアログや、Client が捏造した確認面は session の提示先ではない。製品として同時に2つの first-party GUI を動かさない。seat 保持 process が落ちたら seat は空く。再接続は新しい seat であり、古い session は使えない。
+これが証明するのは **同時に高々1つの control speaker と、完了がその接続に束縛されること** だけである。席の取得者を公式 `ene-desktop` だと証明しない。本物の GUI より先に同一 OS ユーザーの別 process が control endpoint へ接続すれば、その process が席を取る。
 
-peer の実行ファイルパスを seat の足切りに使ってよい（誤って `ene-ctl` やスクリプトが seat を取る事故の防止）。これは Owner 証明でもコード署名でもない。同じ UID がインストール済みバイナリを差し替えれば通る。attestation としては扱わない。
+Milestone 1 で空席先着の真正性を強制する手段は無い。peer UID / DACL は同一ユーザーまでしか見ない。data dir の cookie はそのユーザーが読める。起動時の env / argv トークンは同一 UID が `/proc/<pid>/environ` 相当で読める。コード署名は未検証の attestation であり、確認メカニズムにしない。Host が GUI を子として fd を渡す方式は、desktop が Host を detach 起動するという確定トポロジの逆転であり、採用しない。逆向きの socketpair 継承は初回接続の先着だけ防げる。GUI を閉じても Host が残る確定寿命のあと、再接続には listener が要り、空席先着に戻る。3 process 構成と起動順は変えない。
 
-この境界が **強制できる** こと: 束縛した seat 以外の同一 UID process は、nonce を知っていても完了を成立させられない。模倣 GUI を第二接続として立てても成立させられない。
+製品の `ene-ctl` と `ene-body` は control を話さない。これはそれらの公式バイナリの契約である。同一 UID で control 方言を話す任意 process を OS が排除する、という意味ではない。
 
-この境界が **強制できない** こと: すでに seat を持っている process の内部からの完了。seat 上の確認面への OS 入力注入。seat 保持バイナリの差し替え。
+Host は session challenge を **現在の seat へだけ push** する。Client が捏造した確認面は提示先ではない。製品として同時に2つの first-party GUI を動かさない。seat 保持 process が落ちたら席は空く。再接続は新しい席であり、古い session は使えない。公式 `ene-desktop` が `SeatOccupied` を見たら高権限を Client 経路へ落として成立させず、失敗として提示する。占有者を自動で蹴らない（本物の GUI を悪意ある第二インスタンスが落とせるようになる）。
+
+peer の実行ファイルパスを足切りに使ってよい（誤って公式 `ene-ctl` が繋ぐ事故の防止）。これは真正性証明でもコード署名でもない。同じ UID がパスを偽れる。attestation としては扱わない。
+
+この境界が **強制できる** こと:
+
+- リモートからの control
+- 席が埋まっているときの第二接続による完了 / 秘密 intake（nonce を知っていても）
+- Client 経路の `confirmed=true`
+- 製品 `ene-ctl` が control を話さないこと
+
+この境界が **強制できない** こと:
+
+- 空席への同一 UID 先着が公式 GUI であること
+- すでに席を持っている process の内部からの完了
+- 席上の確認面への OS 入力注入
+- 席保持バイナリの差し替え
 
 #### 5.1.3 Computer Use（強制する境界）
 
@@ -185,14 +201,15 @@ ene が認可する Computer Use については、これが X-10 / DR の「承
 | 主体 | 最終確認を成立させられるか | 強制手段 |
 |---|---|---|
 | リモート Client | 否 | control を WebSocket に出さない。`confirmed=true` は `DeniedByBoundary` |
-| `ene-ctl` / 通常 Client / `ene-body` | 否 | seat を取れない。Client 経路は完了ではない |
-| seat を持たない同一 UID の任意 process | 否 | exclusive seat。完了は束縛接続だけ。第二 socket の nonce 提示は拒否 |
+| 製品 `ene-ctl` / 通常 Client / `ene-body` | 否（公式バイナリ） | control を話さない。Client 経路は完了ではない |
+| 席が埋まっているときの第二の同一 UID process | 否 | exclusive seat。完了は束縛接続だけ。第二 socket の nonce 提示は拒否 |
+| 空席の control に先着した同一 UID process | **成立し得る** | M1 は取得者の真正性を証明しない。残差。Owner とは呼ばない |
 | plugin / MCP Apps / LLM / tool の DTO | 否 | 完了型ではない |
 | ene が認可した Computer Use | 否 | 確認面・秘密面・OS prompt を対象にしない。`EffectReport` は完了ではない |
-| seat 保持 process への、ene 外の SendInput / アクセシビリティ注入 | **プロトコルでは否と区別できない** | OS ユーザー session のcompromise。Owner とは再分類しない。ene はこれを生体 Owner とは呼ばない |
-| seat 保持バイナリの差し替え、当該 PID への debugger / メモリ読み | 同上 | インストール完全性とプロセス完全性は本プロトコルの外 |
+| 席保持 process への、ene 外の SendInput / アクセシビリティ注入 | **プロトコルでは否と区別できない** | OS ユーザー session のcompromise。Owner とは再分類しない |
+| 席保持バイナリの差し替え、当該 PID への debugger / メモリ読み | 同上 | インストール完全性とプロセス完全性は本プロトコルの外 |
 
-残差を「同一 UID は Owner である」とは書かない。残差は **「seat を握った first-party GUI を、その OS セッションから直接駆動できる者」** である。要件の「手元のホスト PC 画面」は、その seated 面での確認を指す。ene エージェントと別 process はそこに到達できない。
+残差を「同一 UID は Owner である」とは書かない。残差は **席の取得者の真正性** と、**席を握った process をその OS セッションから駆動できる者** である。要件の「手元のホスト PC 画面」は、公式 `ene-desktop` がその席を持っているときの確認面を指す。M1 のプロトコルは空席の先着を公式 GUI だと認証しない。ene エージェントの結果電文と、席が埋まっているときの別 process は完了経路ではない。
 
 OS 保護ストアの unlock 済みセッションや、同一ユーザーに対して無認証で通る polkit は Owner 存在証明ではない。ストア API が追加の認可 UI を出したらそれに従うが、unlocked store への `put` 成功を本人確認の代わりにしない。Windows Hello / UAC secure desktop を全高権限操作の必須因子としては固定しない（未検証、製品導線としても未確定）。
 
@@ -424,7 +441,7 @@ Linux は **今使える KDE Wayland** でよい。実際の distro / nixpkgs re
 - 複数 Companion を同じ Client に出すときの renderer 数。
 - Slint から iced への切替は第9.1節の IME / windowing probe が失敗したときに限る。別 toolkit を probe 無しで正本にしない。
 
-プロセスを GUI と Body で分けること、Host に GPU を入れないこと、control を `ene-api` に載せないこと、exclusive `FirstPartyControlSeat` と seat 束縛完了、同一 UID を Owner 確認にしないこと、ene Computer Use の確認面 denylist、credential 寿命を通常 DTO / log / Targeted Deletion に依存させないことは Freedom ではない。nonce 秘匿や「クリックは受理しない」という文言だけで Owner を証明することも Freedom ではない（強制境界は第5.1節）。
+プロセスを GUI と Body で分けること、Host に GPU を入れないこと、control を `ene-api` に載せないこと、exclusive `FirstPartyControlSeat`（同時に高々1つ）と席への完了束縛、同一 UID を Owner 確認にしないこと、空席先着の真正性を証明しないこと、ene Computer Use の確認面 denylist、credential 寿命を通常 DTO / log / Targeted Deletion に依存させないことは Freedom ではない。nonce 秘匿や「任意 local process を必ず排除できる」という過剰保証は Freedom ではない。
 
 ## 11. Traceability
 
@@ -433,7 +450,7 @@ Linux は **今使える KDE Wayland** でよい。実際の distro / nixpkgs re
 | Host に GUI/wgpu を置かない | RT-01、SC-09、AD-01 |
 | text と Body を別 process | IO-3 / IO-7、acceptance §2.4 / §6、AD-13、SC-09 |
 | Body は Client ではない | RT-02、IPC §19、X-C |
-| high-priv は exclusive seat に束縛した Host session。nonce は freshness だけ。同一 UID や別 process の完了は成立しない | 要件「信頼境界」、IPC §18、IB 第9節、X-10 |
+| high-priv は exclusive seat に束縛した Host session。nonce は freshness。空席先着の真正性は証明しない | 要件「信頼境界」、IPC §18、IB 第9節、X-10 |
 | ene Computer Use は確認面 / 秘密面を対象にできない。クリック後の区別はできない | X-10、DR 4.1 / 5.2、IPC §15 |
 | credential 生値の区間 C1–C5。ene 所有バッファは破棄。toolkit / OS / IME 複製は保証しない | 要件 Credential、S-1〜S-5、AD-14、IB K-C |
 | 性能の分母と全 process 計上 | acceptance Performance Gates、#1636 §6 |

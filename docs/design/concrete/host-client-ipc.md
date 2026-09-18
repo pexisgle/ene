@@ -40,7 +40,7 @@
 - ハートビートの間隔、キープアライブやタイムアウトの秒数、再試行回数、スケジューリングや画面キャプチャのアルゴリズム、利用枠（費用）の算定式。
 - 具体的な TCP ポート番号、mDNS の有無、NAT 越え、リレーサーバーの運用（そもそも中央リレーは非目標であり導入しません）。
 - 音声コーデックや画面キャプチャ画像形式の最終選定（満たすべき制約条件のみ第13・14節で固定）。
-- Client 側の UI レイアウト、画面の文言、具体的なデータ保持期間、監査ログの出力形式。first-party の process 分割・control channel・exclusive `FirstPartyControlSeat` と seat 束縛の確認は [First-party desktop](first-party-desktop.md) が固定する。toolkit / overlay backend / keyring crate は同文書第7節の provisional であり、probe 前に恒久 contract としない。
+- Client 側の UI レイアウト、画面の文言、具体的なデータ保持期間、監査ログの出力形式。first-party の process 分割・control channel・exclusive `FirstPartyControlSeat` と seat 束縛の確認は [First-party desktop](first-party-desktop.md) が固定する。席の取得者の真正性は証明しない。toolkit / overlay backend / keyring crate は同文書第7節の provisional であり、probe 前に恒久 contract としない。
 
 ## 2. Remote-capable 選別 — 何を wire へ出すか
 
@@ -69,7 +69,7 @@ IB 第15節で定めた「ネットワーク越境可能なインターフェー
   - **理由**: 前提条件の比較とデータ更新を Host 側の単一 SQLite トランザクション内で不可分に実行するためです。DB トランザクションを Client 側へ露出させてはいけません。また、認証の秘密情報を通常の通信経路に乗せてはなりません。
 - 画面観測専用の LLM プロバイダー割り当て情報や、ルーティングのドメイン的な判断そのもの。Client に権威ある情報として公開しません。Client が見るのはキャプチャチケットと自分自身のキャプチャ結果だけです。
 - リポジトリの不可分な前提比較、利用枠の事前予約、バックアップ復元の本番切り替え。これらを通信電文に乗せてはなりません。
-- 高権限操作の最終確認（§18）。ネットワーク経由で届いた操作要求や「確認済み」という自己申告を、Host 側での正式な確認として扱ってはなりません。最終確認は [First-party desktop](first-party-desktop.md) 第5節の exclusive `FirstPartyControlSeat` に束縛した `ConfirmationSession` であり、`ene-api` に載せません。nonce は freshness だけです。seat 以外の接続、socket 開封、同一 UID だけでは成立しません。Computer Use の `EffectReport` は完了ではありません。
+- 高権限操作の最終確認（§18）。ネットワーク経由で届いた操作要求や「確認済み」という自己申告を、Host 側での正式な確認として扱ってはなりません。最終確認は [First-party desktop](first-party-desktop.md) 第5節の exclusive `FirstPartyControlSeat` に束縛した `ConfirmationSession` であり、`ene-api` に載せません。nonce は freshness だけです。席が埋まっているときの第二接続、socket 開封、同一 UID だけでは成立しません。空席への同一 UID 先着は真正性を証明しません。Computer Use の `EffectReport` は完了ではありません。
 
 ### 2.3 選別の帰結
 
@@ -355,7 +355,7 @@ Stage 5 の Windows は Tokio の named-pipe adapter を使い、`PIPE_REJECT_RE
 
 ### 10.3 Host-local control transport（Client channel ではない）
 
-高権限操作の Host-local request、credential 生値の intake、および `FirstPartyControlSeat` に束縛した `ConfirmationSession` の完了返送は、本節の Client transport（unix socket / named pipe の `ene-api`）とは別の control listener を使う。配置・ピア判定・DTO クレートは [First-party desktop](first-party-desktop.md) 第5節。control を remote WebSocket に出さない。seat は高々1つ。`ene-ctl` は話さないし seat も取れない。`ene-body` はどちらの channel にも接続しない。peer UID / DACL は local transport の適格であり、Owner 本人の確認ではない。seat 以外の同一 UID process が nonce を提示しても最終確認は成立しない。接続の取り直しは outstanding session を無効化する。
+高権限操作の Host-local request、credential 生値の intake、および `FirstPartyControlSeat` に束縛した `ConfirmationSession` の完了返送は、本節の Client transport（unix socket / named pipe の `ene-api`）とは別の control listener を使う。配置・ピア判定・DTO クレートは [First-party desktop](first-party-desktop.md) 第5節。control を remote WebSocket に出さない。席は同時に高々1つ。製品の `ene-ctl` は control を話さない。`ene-body` はどちらの channel にも接続しない。peer UID / DACL は local transport の適格であり、Owner 本人の確認でも席の真正性でもない。空席へ先着した同一 UID process が席を取る。席が埋まっているとき、別の同一 UID process が nonce を提示しても最終確認は成立しない。接続の取り直しは outstanding session を無効化する。
 
 ### 10.2 transport adapter boundary
 
@@ -635,7 +635,7 @@ enum DeletionTargetWire {
 デバイスペアリングの承認など、システムの信頼の基点（Trust root）を変更する高権限操作の最終確認は、必ず **Host PC 上の信頼された第一者管理画面（trusted first-party management surface）** で直接実行します。リモートの Client 端末から変更要求（intent）を送信すること自体は許容されますが、リモート端末の操作だけで完結させてはなりません。
 
 - **対象となる操作**: デバイスのペアリング承認・再ペアリング、デバイスの信頼関係や機能許可の変更・失効（自身の端末を含む）、認証秘密（Credential）の登録・更新・差し替え・失効、バックアップ復元の実行確認と復元データの一括有効化、全データ削除（Full Reset）の確認。また、同一の信頼境界やアクセス制御を変更する操作（ローカル MCP のサンドボックス外実行の例外許可や重要変更など）も同一の厳格な確認を通します。操作種別の名前ではなく、実際の操作対象とシステムへの影響度に基づいて分類し、汎用設定のリセットなどを経由した迂回を決して許しません。
-- **Host PC 上の第一者管理画面の判定**: Host は exclusive `FirstPartyControlSeat`（高々1つの first-party control 接続。Linux `SO_PEERCRED` / Windows named-pipe client PID）に `ConfirmationSession` を束縛し、その同一接続から届いた完了だけを受理する。nonce と premise generation は freshness であり、Owner 身元ではない。control channel は必要だが、seat を持たない同一 UID process が nonce を提示しても成立しない。同一 OS ユーザー、data dir を読めること、control socket を開けたこと、SameMachine、ペアリング済み、Client wire の自己申告は Owner 本人の確認ではない。`confirmed=true` を Client payload に載せても `DeniedByBoundary` です。`ene-ctl` は seat を取れない。plugin / LLM / tool の DTO と Computer Use の `EffectReport` は完了ではない。ene 認可の Computer Use は確認面・秘密面を対象にできない。seat 保持 process への ene 外入力注入はプロトコルで Owner と区別できず、脅威モデルの残差とする（[First-party desktop](first-party-desktop.md) 第5.1節）。初回のセットアップも、この seated first-party 面を使用します。
+- **Host PC 上の第一者管理画面の判定**: Host は exclusive `FirstPartyControlSeat`（同時に高々1つの first-party control 接続。Linux `SO_PEERCRED` / Windows named-pipe client PID）に `ConfirmationSession` を束縛し、その同一接続から届いた完了だけを受理する。nonce と premise generation は freshness であり、Owner 身元ではない。席の exclusive 性は取得者の真正性を証明しない。空席へ先着した同一 UID process が席を取る。control channel は必要だが、席が埋まっているときに別の同一 UID process が nonce を提示しても成立しない。同一 OS ユーザー、data dir を読めること、control socket を開けたこと、SameMachine、ペアリング済み、Client wire の自己申告は Owner 本人の確認ではない。`confirmed=true` を Client payload に載せても `DeniedByBoundary` です。製品の `ene-ctl` は control を話さない。plugin / LLM / tool の DTO と Computer Use の `EffectReport` は完了ではない。ene 認可の Computer Use は確認面・秘密面を対象にできない。席保持 process への ene 外入力注入、および空席先着はプロトコルで公式 GUI / Owner と区別できず、脅威モデルの残差とする（[First-party desktop](first-party-desktop.md) 第5.1節）。初回のセットアップも、公式 `ene-desktop` が席を持っているときの確認面を使用します。
 - **リモートからの要求の受入フロー**: リモート端末からの高権限操作の要求はリクエストとして受け付け、`NeedsClarification` とフィルタリングされた閲覧ビューを返し、Host PC 側での最終確認待ち状態であることを画面に表示します。「リモート側ですでに承認済みである」という申告や、リモートからの代行承認は `DeniedByBoundary` として拒否し、変更は適用しません。Host PC 上でユーザー自身が変更内容と影響を確認した事実があって初めて、Host 内部で現在の前提条件と紐付けられて各担当者へ手渡されます。この最終確認の電文をリモート通信に乗せることはなく、確認完了後に操作対象が変更された場合や前提世代が古くなった場合は、再確認を必須とします。確認結果の使い回しや包括的な流用は禁止します。
 - **自動化・外部入力による代理確認の禁止**: Computer Use、ツール実行、MCP Apps、プラグイン、LLM の出力、リモートからの代理入力は、確認完了の入力経路ではない。ene 認可の Computer Use は確認面を操作対象にできない。座った GUI をクリックした後から「Computer Use だった」と却下することはできない。管理画面の利用においてキャラクターが稼働中であることは必須ではなく、テキスト操作から直接アクセス可能であり、メイン LLM や長時間タスク、立ち絵描画、音声出力の成功を待つことなく確実に操作できます。
 - **通常操作との分離**: 通常のフィルタリングされた設定閲覧、キャラクターの停止、キャンセル、承認の拒否などは、既存のリモート通信経路から安全に実行できます。バックアップ作成や通常の会話削除を含む複合操作全体を一括して高権限扱いにするのではなく、上記に該当する危険な操作に対してのみ個別の確認条件を適用します。また、認証秘密の平文入力や保管は保護された Host ローカルの設定経路でのみ扱い、通信電文のペイロードに乗せることは決してありません。
@@ -1045,7 +1045,7 @@ struct ManagementViewWire {
 ### V-14 Remote 管理要求 → Host-local 最終確認
 
 1. ペアリング済みのリモートクライアントから、新しいデバイスの追加承認、認証情報の差し替え、デバイスの失効、バックアップ復元や完全初期化などの管理意図（intent）が送られてきます。ホストはこの要求を受け取っても、`NeedsClarification`（確認が必要）を返してホストPCの画面に確認待ちのダイアログを表示するに留め、設定変更や破壊的な処理を勝手に開始してはなりません。
-2. リモート側から「承認した」と申告されたり、同一マシンからの自己申告であったり、Computer Use の `EffectReport` や seat を持たない process からの nonce 提示であっても、それらを管理操作の「最終確認」として受理してはなりません（`DeniedByBoundary`）。ene 認可の Computer Use は確認面を対象にできません。座った first-party GUI への ene 外入力注入は、完了電文上は Owner ジェスチャと区別できません（[First-party desktop](first-party-desktop.md) 第5.1.4節）。
+2. リモート側から「承認した」と申告されたり、同一マシンからの自己申告であったり、Computer Use の `EffectReport` や、席が埋まっているときの別 process からの nonce 提示であっても、それらを管理操作の「最終確認」として受理してはなりません（`DeniedByBoundary`）。ene 認可の Computer Use は確認面を対象にできません。空席へ先着した同一 UID process が席を取ること、および席保持 process への ene 外入力注入は、完了電文上は公式 GUI / Owner ジェスチャと区別できません（[First-party desktop](first-party-desktop.md) 第5.1.4節）。
 3. 信頼できるホストPC本体の画面（Host-local surface）において、オーナー自身が対象・変更内容・影響範囲を目視で確認した後、担当ドメインが現在の前提条件を再照合して初めて変更を適用します。確認中に対象の状態が変わったり期限切れになったりした場合は、最初から確認をやり直します。なお、バックアップ復元の実行と、復元された設定の一括有効化は、安全のため必ず別々の手順として確認を行います。
 
 ## 27. Avoid over-engineering — 導入しないもの
