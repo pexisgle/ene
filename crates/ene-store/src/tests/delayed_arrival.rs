@@ -34,8 +34,7 @@ use ene_preservation::{
     StartTargetedDeletionOutcome, TargetedDeletionTarget,
 };
 use ene_task::{
-    DelegationId, TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival, TaskId,
-    TaskResultId, TaskRevision,
+    DelegationId, TaskAgentEphemeralId, TaskAgentResultArrival, TaskId, TaskResultId, TaskRevision,
 };
 
 use super::preservation::complete_via_a5;
@@ -304,11 +303,26 @@ async fn seed_workspace_execution(store: &Store, purpose: &str) -> (TaskRef, Del
     (task, delegation)
 }
 
-fn result_arrival(delegation: DelegationId, body: &str) -> TaskAgentResultArrival {
+async fn result_arrival(
+    store: &Store,
+    delegation: DelegationId,
+    body: &str,
+) -> TaskAgentResultArrival {
     TaskAgentResultArrival {
         delegation,
         result: TaskResultId::generate(),
-        body: TaskAgentOutput::new(body.to_owned()),
+        body: scrubbed_result(store, body).await,
+    }
+}
+
+/// Unwraps a recorded arrival outcome; these fixtures scrub at the store's
+/// current revision, so a stale refusal would be a fixture error.
+fn expect_recorded(outcome: TaskResultArrivalOutcome) -> TaskResultRecord {
+    match outcome {
+        TaskResultArrivalOutcome::Recorded(record) => record,
+        TaskResultArrivalOutcome::StaleCredentialSet { .. } => {
+            panic!("the fixture scrubbed at the current revision")
+        }
     }
 }
 
@@ -694,11 +708,13 @@ async fn condition_first_collects_a_task_result_body_and_keeps_the_fact() {
     let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
     admit(&store, "the private key", Vec::new(), Vec::new()).await;
 
-    let arrival = result_arrival(delegation, "the report quotes the private key");
-    let record = store
-        .record_task_result_arrival(arrival.clone())
-        .await
-        .expect("the arrival must record its fact");
+    let arrival = result_arrival(&store, delegation, "the report quotes the private key").await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival.clone())
+            .await
+            .expect("the arrival must record its fact"),
+    );
     assert_collected(record.body.text(), "the private key");
     assert_collected(&task_result_body(&store, arrival.result), "the private key");
     // The objective fact survives: the delegation is sealed and the result is
@@ -722,7 +738,7 @@ async fn condition_first_collects_a_task_result_body_and_keeps_the_fact() {
 async fn result_first_then_condition_redacts_and_a_retry_stays_idempotent() {
     let store = open_memory().await.unwrap();
     let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
-    let arrival = result_arrival(delegation, "final report mentions the private key");
+    let arrival = result_arrival(&store, delegation, "final report mentions the private key").await;
     store
         .record_task_result_arrival(arrival.clone())
         .await
@@ -746,10 +762,12 @@ async fn result_first_then_condition_redacts_and_a_retry_stays_idempotent() {
     )
     .await;
     assert_collected(&task_result_body(&store, arrival.result), "the private key");
-    let retry = store
-        .record_task_result_arrival(arrival.clone())
-        .await
-        .expect("the covered retry must stay an idempotent replay");
+    let retry = expect_recorded(
+        store
+            .record_task_result_arrival(arrival.clone())
+            .await
+            .expect("the covered retry must stay an idempotent replay"),
+    );
     assert_collected(retry.body.text(), "the private key");
     assert_collected(&task_result_body(&store, arrival.result), "the private key");
 
@@ -793,11 +811,13 @@ async fn a_delegation_claimed_before_completion_collects_its_delayed_result() {
     complete_via_a5(&store, current).await;
     assert!(current_conditions(&store).await.is_empty());
 
-    let arrival = result_arrival(delegation, "final report quotes the private key");
-    let record = store
-        .record_task_result_arrival(arrival.clone())
-        .await
-        .expect("the delayed arrival must record its fact");
+    let arrival = result_arrival(&store, delegation, "final report quotes the private key").await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival.clone())
+            .await
+            .expect("the delayed arrival must record its fact"),
+    );
     assert_collected(record.body.text(), "the private key");
     assert_collected(&task_result_body(&store, arrival.result), "the private key");
     assert!(
@@ -848,11 +868,13 @@ async fn a_task_agent_claim_source_associates_its_delegation() {
     let current = admit(&store, "the private key", vec![source], Vec::new()).await;
     complete_via_a5(&store, current).await;
 
-    let arrival = result_arrival(delegation, "an otherwise clean report");
-    let record = store
-        .record_task_result_arrival(arrival.clone())
-        .await
-        .expect("the delayed arrival must record its fact");
+    let arrival = result_arrival(&store, delegation, "an otherwise clean report").await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival.clone())
+            .await
+            .expect("the delayed arrival must record its fact"),
+    );
     assert_collected(record.body.text(), "the private key");
     assert_collected(&task_result_body(&store, arrival.result), "the private key");
 }
@@ -1711,16 +1733,20 @@ async fn an_observation_of_a_covered_workspace_source_holds_its_delayed_result()
     // correspondence can. The body is collected to the fixed body-free form
     // and the execution still seals.
     let arrival = result_arrival(
+        &store,
         delegation,
         "the report summarizes confidential material without quoting it",
+    )
+    .await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the delayed arrival must record its fact"),
     );
-    let record = store
-        .record_task_result_arrival(arrival.clone())
-        .await
-        .expect("the delayed arrival must record its fact");
     assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
     assert_eq!(
-        task_result_body(&store, arrival.result),
+        task_result_body(&store, record.result),
         crate::erasure::ERASED_MARKER
     );
     assert!(
@@ -1767,11 +1793,18 @@ async fn an_unreadable_observation_source_fails_closed_into_a_hold() {
     );
     complete_via_a5(&store, current).await;
 
-    let arrival = result_arrival(delegation, "a clean paraphrase of unknown provenance");
-    let record = store
-        .record_task_result_arrival(arrival)
-        .await
-        .expect("the delayed arrival must record its fact");
+    let arrival = result_arrival(
+        &store,
+        delegation,
+        "a clean paraphrase of unknown provenance",
+    )
+    .await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the delayed arrival must record its fact"),
+    );
     assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
 }
 
@@ -1816,11 +1849,13 @@ async fn a_provably_clean_observation_leaves_the_delegation_adoptable() {
             .unwrap(),
         ene_action::CertaintyUpdateOutcome::Updated
     );
-    let arrival = result_arrival(delegation, "the ordinary report");
-    let recorded = store
-        .record_task_result_arrival(arrival)
-        .await
-        .expect("the clean arrival must record");
+    let arrival = result_arrival(&store, delegation, "the ordinary report").await;
+    let recorded = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the clean arrival must record"),
+    );
     let acceptance = store
         .adopt_result(ene_task::TaskResultAdoptionClaim {
             result: recorded.result,
@@ -1871,11 +1906,13 @@ async fn an_observation_body_covered_at_mint_is_published_and_held() {
     assert_eq!(observation_source_rows(&store, observation), 1);
     complete_via_a5(&store, current).await;
 
-    let arrival = result_arrival(delegation, "a later paraphrase of what was read");
-    let record = store
-        .record_task_result_arrival(arrival)
-        .await
-        .expect("the delayed arrival must record its fact");
+    let arrival = result_arrival(&store, delegation, "a later paraphrase of what was read").await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the delayed arrival must record its fact"),
+    );
     assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
 }
 
@@ -1999,11 +2036,18 @@ async fn reopening_the_store_keeps_the_observation_hold_and_replay() {
     assert_eq!(observation_source_rows(&reopened, observation), 1);
 
     complete_via_a5(&reopened, current).await;
-    let arrival = result_arrival(delegation, "a paraphrase that omits the exact words");
-    let record = reopened
-        .record_task_result_arrival(arrival)
-        .await
-        .expect("the delayed arrival must record its fact");
+    let arrival = result_arrival(
+        &reopened,
+        delegation,
+        "a paraphrase that omits the exact words",
+    )
+    .await;
+    let record = expect_recorded(
+        reopened
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the delayed arrival must record its fact"),
+    );
     assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
 }
 
@@ -2103,12 +2147,16 @@ async fn an_observation_path_covered_after_admission_is_published_and_held() {
     complete_via_a5(&store, current).await;
 
     let arrival = result_arrival(
+        &store,
         delegation,
         "a clean paraphrase that omits the path and the exact words",
+    )
+    .await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the delayed arrival must record its fact"),
     );
-    let record = store
-        .record_task_result_arrival(arrival)
-        .await
-        .expect("the delayed arrival must record its fact");
     assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
 }

@@ -17,7 +17,7 @@ use ene_action::ActionAttemptRepository as _;
 use ene_action::{ActionAttemptId, ActionCertainty, OperationKind};
 use ene_companion::{TaskFact, UndeliveredSource};
 use ene_preservation::*;
-use ene_task::{TaskReportSourceRef, TaskResultId, orchestrate_result_arrival};
+use ene_task::{TaskReportSourceRef, TaskResultArrivalOutcome, TaskResultId};
 
 const TARGET: &str = "probe-target-1587";
 const MARKER: &str = "[erased]";
@@ -351,13 +351,19 @@ async fn seed_fixture(store: &Store) -> Fixture {
     let (task, delegation, workspace, source) = seed_task_surface(store).await;
     let (done, unknown) = seed_action_surface(store, task, delegation, workspace).await;
     let ticket = seed_inference_surface(store, task, delegation, source).await;
-    let result = orchestrate_result_arrival(
+    let result = match orchestrate_result_arrival(
         store,
         delegation,
-        ene_task::TaskAgentOutput::new(format!("final report mentions {TARGET}")),
+        scrubbed_result(store, &format!("final report mentions {TARGET}")).await,
     )
     .await
-    .expect("the result arrival must commit");
+    .expect("the result arrival must commit")
+    {
+        TaskResultArrivalOutcome::Recorded(result) => result,
+        TaskResultArrivalOutcome::StaleCredentialSet { .. } => {
+            panic!("the fixture scrubbed at the current revision")
+        }
+    };
     let current = admit_target(store, TARGET, vec![source]).await;
     Fixture {
         current,

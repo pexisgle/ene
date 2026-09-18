@@ -887,7 +887,7 @@ mod tests {
         TaskInstructionSourceRecord, TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
         TaskReportSourceRef, TaskRepository as _, TaskResultId, WorkspaceAssocId,
         WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
-        orchestrate_result_arrival, orchestrate_task_agent_turn,
+        orchestrate_task_agent_turn,
     };
 
     /// One scripted participant that records how often it was demanded and
@@ -2739,13 +2739,12 @@ mod tests {
             })
             .await
             .expect("the usage settlement must commit");
-        let result = orchestrate_result_arrival(
+        let result = crate::test_support::record_result(
             &handle.store,
             delegation,
-            TaskAgentOutput::new(format!("final report mentions {target}")),
+            &format!("final report mentions {target}"),
         )
-        .await
-        .expect("the result arrival must commit");
+        .await;
         TargetSurface {
             task: current,
             delegation,

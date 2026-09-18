@@ -48,7 +48,7 @@ use ene_task::{
     DelegationScope, TaskAgentEphemeralId, TaskContextEntryId, TaskContextOrigin,
     TaskContextOriginKind, TaskCreationPremise, TaskId, TaskPurpose, TaskRef, TaskRepository as _,
     TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId, WorkspaceAssociationPremise,
-    WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
+    WorkspaceFolderRef, WorkspaceNeedRef,
 };
 
 use crate::conn::{ConnectionPhase, ConnectionTable};
@@ -3478,13 +3478,7 @@ async fn task_fact_notifications_attach_their_task_report() {
         .await
         .expect("the certainty CAS must answer");
     assert_eq!(settled, CertaintyUpdateOutcome::Updated);
-    let arrival = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        ene_task::TaskAgentOutput::new(String::from("done")),
-    )
-    .await
-    .expect("the arrival must record");
+    let arrival = crate::test_support::record_result(&handle.store, delegation, "done").await;
     let acceptance = handle
         .store
         .adopt_result(TaskResultAdoptionClaim {

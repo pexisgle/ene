@@ -58,15 +58,16 @@
 //! only as a new Task.
 
 use ene_action::{ActionCertainty, ActionNotStarted, ActionOutput, ObservedEffect, OperationKind};
-use ene_credential::SecretScrubber;
+use ene_credential::{CredentialSetRevision, SecretScrubber};
 use ene_inference::{DispatchAbort, ProviderTransport};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 use ene_task::{
     TaskAgentActionExchange, TaskAgentInference, TaskAgentNotSent, TaskAgentObservation,
-    TaskAgentObservationId, TaskAgentObservationPremise, TaskAgentOutput, TaskAgentTurnOutcome,
+    TaskAgentObservationId, TaskAgentObservationPremise, TaskAgentTurnOutcome,
     TaskAgentTurnPremise, TaskInstructionSource, TaskProgress, TaskRef, TaskRepository as _,
-    TaskResultRecord, orchestrate_result_arrival, orchestrate_task_agent_turn,
+    TaskResultArrivalOutcome, TaskResultRecord, TaskResultScrubPremise, orchestrate_result_arrival,
+    orchestrate_task_agent_turn,
 };
 use std::sync::Arc;
 
@@ -397,6 +398,14 @@ pub enum TaskAgentRunRefusal {
         entry: ene_task::TaskContextEntryId,
         source: RawId,
     },
+    /// The credential set kept advancing past every re-scrub of the final
+    /// answer, so no result body was recorded. Fail closed: the original
+    /// answer is never stored raw and a scrubbed body prepared under an old
+    /// revision is never committed.
+    StaleCredentialSet {
+        /// The most recently observed durable revision.
+        current: CredentialSetRevision,
+    },
 }
 
 /// The domain result of one delegated execution.
@@ -488,6 +497,14 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
 /// result record: the consent premise that admitted the send no longer holds,
 /// while the already-started attempt and its usage fact stay durable. An
 /// output refused before the send at all stays [`TaskAgentRunOutcome::NotSent`].
+///
+/// A final answer is scrubbed through the injected credential boundary and
+/// arrives with that scrub premise; the durable commit compares the premise
+/// inside its transaction. If the credential set advanced since the scrub,
+/// the commit refuses without writing and the answer is re-scrubbed under the
+/// observed revision (bounded by `FINAL_RESULT_SCRUB_ATTEMPTS`); an answer
+/// whose premise keeps going stale is never committed and ends as
+/// [`TaskAgentRunRefusal::StaleCredentialSet`].
 ///
 /// The execution's in-process identity and cooperative stop token come from
 /// `registration`: holding a [`TaskExecutionRegistration`] is what makes the
@@ -601,19 +618,21 @@ pub async fn run_task_agent_execution(
             Err(reason) => return Ok(TaskAgentRunOutcome::ProtocolViolation { turn, reason }),
             Ok(TaskAgentDirective::Finish { body }) => {
                 // The same credential boundary that admits every logical input
-                // covers the durable result body: a final answer that cannot be
-                // proven scrubbed is never recorded raw.
-                let scrubbed = scrubber.scrub(&body).await.map_err(|_| {
-                    TaskAgentRunError::ResultScrubUnavailable {
-                        reason: String::from("credential scrub failed"),
+                // covers the durable result body: a final answer that cannot
+                // be proven scrubbed is never recorded raw, and the durable
+                // arrival commit compares the scrub premise inside its own
+                // transaction. A stale refusal re-scrubs the original answer
+                // under the revision just observed; the stale text itself is
+                // never retried as it is.
+                let arrival = finalize_result_body(store, scrubber, delegation, &body).await?;
+                let result = match arrival {
+                    TaskResultArrivalOutcome::Recorded(result) => result,
+                    TaskResultArrivalOutcome::StaleCredentialSet { current } => {
+                        return Ok(TaskAgentRunOutcome::Refused(
+                            TaskAgentRunRefusal::StaleCredentialSet { current },
+                        ));
                     }
-                })?;
-                let result = orchestrate_result_arrival(
-                    store,
-                    delegation,
-                    TaskAgentOutput::new(scrubbed.text().to_owned()),
-                )
-                .await?;
+                };
                 let acceptance = store
                     .adopt_result(ene_task::TaskResultAdoptionClaim {
                         result: result.result,
@@ -714,6 +733,57 @@ pub async fn run_task_agent_execution(
                             TaskAgentRunRefusal::WorkspaceUnavailable { task },
                         ));
                     }
+                }
+            }
+        }
+    }
+}
+
+/// The bounded number of scrubs of one final answer before the execution
+/// refuses the result.
+///
+/// Each stale refusal means the credential set advanced between the scrub and
+/// the durable arrival commit. The original answer is still in memory, so the
+/// execution re-scrubs it under the revision the commit just observed and
+/// arrives again; the bound keeps a continuously moving set from spinning
+/// forever, and the refusal that ends the bounded loop is a domain outcome
+/// with no result row.
+const FINAL_RESULT_SCRUB_ATTEMPTS: u32 = 3;
+
+/// Scrubs one final answer and arrives with the credential premise until the
+/// durable commit accepts it, or gives up with the last observed revision.
+///
+/// Only a credential-owned scrub proof is ever submitted: the raw answer is
+/// never passed to the repository, and a scrubbed body whose premise went
+/// stale is dropped uncommitted. Exhaustion returns
+/// [`TaskResultArrivalOutcome::StaleCredentialSet`] with zero writes.
+async fn finalize_result_body(
+    store: &Store,
+    scrubber: &impl SecretScrubber,
+    delegation: ene_task::DelegationId,
+    body: &str,
+) -> Result<TaskResultArrivalOutcome, TaskAgentRunError> {
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        let scrubbed =
+            scrubber
+                .scrub(body)
+                .await
+                .map_err(|_| TaskAgentRunError::ResultScrubUnavailable {
+                    reason: String::from("credential scrub failed"),
+                })?;
+        let arrival = orchestrate_result_arrival(
+            store,
+            delegation,
+            TaskResultScrubPremise::from_scrubbed(scrubbed),
+        )
+        .await?;
+        match arrival {
+            TaskResultArrivalOutcome::Recorded(_) => return Ok(arrival),
+            TaskResultArrivalOutcome::StaleCredentialSet { current } => {
+                if attempts == FINAL_RESULT_SCRUB_ATTEMPTS {
+                    return Ok(TaskResultArrivalOutcome::StaleCredentialSet { current });
                 }
             }
         }

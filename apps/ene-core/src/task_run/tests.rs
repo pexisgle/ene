@@ -19,7 +19,11 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use ene_action::{ActionAttemptRepository as _, ActionCertainty, OperationKind};
-use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
+use ene_credential::{
+    CredentialIntentRepository as _, CredentialRef, CredentialScrubber, CredentialSetRevision,
+    MemoryCredentialStore, RegistrationApply, RegistrationFingerprint, RegistrationState,
+    ScrubbedText, SecretScrubError, SecretScrubber,
+};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 use ene_task::{
@@ -1130,4 +1134,253 @@ fn release_drops_a_reservation_without_starting_anything() {
     ));
     // The freed Task accepts a new explicit reservation.
     assert!(registry.reserve(DelegationId::generate(), task));
+}
+
+/// Registers one usable pair through the production register-then-approve
+/// path and provisions its bearer in the memory store.
+async fn register_scrub_pair(
+    store: &Store,
+    values: &MemoryCredentialStore,
+    provider: &str,
+    label: &str,
+    bearer: &str,
+    intent_id: &str,
+) {
+    let applied = store
+        .request_registration_with_intent(
+            provider.to_owned(),
+            label.to_owned(),
+            RegistrationFingerprint {
+                intent_id: intent_id.to_owned(),
+                kind: String::from("register"),
+                target: format!("credential:{provider}:{label}"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+            },
+        )
+        .await;
+    assert_eq!(
+        applied,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
+        "a fresh pair must pend Owner approval"
+    );
+    assert!(
+        store
+            .approve_credential_with_sweep(provider, label, bearer)
+            .expect("the approval write must commit"),
+        "the approval makes the pair usable"
+    );
+    values.insert(
+        CredentialRef::new(provider, label).expect("valid fixture ref"),
+        bearer,
+    );
+}
+
+/// The deterministic race barrier for the final result commit: a real
+/// credential scrubber whose final-answer scrub advances the credential set
+/// (and provisions the new bearer) `rotate_every`-th time, so the stale
+/// refusal and the re-scrub are exercised without any timing dependence.
+struct RotateAfterFinalScrub<'a> {
+    store: &'a Store,
+    values: &'a MemoryCredentialStore,
+    provider: &'a str,
+    label: &'a str,
+    rotated: &'a str,
+    final_body: &'a str,
+    rotate_every: bool,
+    final_scrubs: Mutex<u32>,
+}
+
+impl RotateAfterFinalScrub<'_> {
+    /// Advances the set with one approval; the sweep itself is production's.
+    fn rotate(&self) {
+        assert!(
+            self.store
+                .approve_credential_with_sweep(self.provider, self.label, self.rotated)
+                .expect("the rotation approval must commit"),
+            "the fixture pair is usable and the rotation applies"
+        );
+        self.values.insert(
+            CredentialRef::new(self.provider, self.label).expect("valid fixture ref"),
+            self.rotated,
+        );
+    }
+
+    fn final_scrubs(&self) -> u32 {
+        *self.final_scrubs.lock().expect("scrub count lock")
+    }
+}
+
+impl SecretScrubber for RotateAfterFinalScrub<'_> {
+    async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
+        let proof = CredentialScrubber {
+            refs: self.store,
+            store: self.values,
+        }
+        .scrub(text)
+        .await?;
+        if text == self.final_body {
+            let first = {
+                let mut scrubs = self.final_scrubs.lock().expect("scrub count lock");
+                *scrubs += 1;
+                *scrubs == 1
+            };
+            if self.rotate_every || first {
+                self.rotate();
+            }
+        }
+        Ok(proof)
+    }
+}
+
+/// The required race: the final answer is scrubbed under revision N, the
+/// credential set advances to N+1 before the durable result commit, the
+/// commit refuses the stale premise with zero writes, the execution re-scrubs
+/// the original answer under N+1, and only the newly scrubbed result commits.
+/// The raw value never lands durably and the diagnostics stay body-free.
+#[tokio::test]
+async fn a_rotation_between_result_scrub_and_commit_rescrubs_before_recording() {
+    let secret = "sk-stage6-c3-race-secret-marker";
+    let fixture = fixture().await;
+    let values = MemoryCredentialStore::new();
+    register_scrub_pair(
+        &fixture.store,
+        &values,
+        "acme",
+        "main",
+        "sk-placeholder-value",
+        "reg-c3-race",
+    )
+    .await;
+
+    let answer = format!("the final report quotes {secret}");
+    let inference = ScriptedInference::new(vec![&format!(r#"{{"final":"{answer}"}}"#)]);
+    let scrubber = RotateAfterFinalScrub {
+        store: &fixture.store,
+        values: &values,
+        provider: "acme",
+        label: "main",
+        rotated: secret,
+        final_body: &answer,
+        rotate_every: false,
+        final_scrubs: Mutex::new(0),
+    };
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
+        .await
+        .expect("the re-scrub must finalize");
+    assert!(
+        !format!("{outcome:?}").contains(secret),
+        "the final outcome diagnostics carry no secret"
+    );
+    let result = match outcome {
+        TaskAgentRunOutcome::Finalized { result, .. } => result,
+        other => panic!("the execution must finalize, got {other:?}"),
+    };
+    assert_eq!(
+        scrubber.final_scrubs(),
+        2,
+        "the stale body is dropped and the answer re-scrubbed exactly once"
+    );
+    assert_eq!(
+        result.body.text(),
+        format!(
+            "the final report quotes {}",
+            ene_credential::REDACTED_CREDENTIAL
+        )
+    );
+    assert_eq!(
+        fixture
+            .store
+            .count_exact_text_remainder_for_tests(secret)
+            .await
+            .expect("the remainder probe must answer"),
+        0,
+        "the raw value never lands durably"
+    );
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .expect("the seal reads")
+            .is_some(),
+        "only the re-scrubbed result seals the execution"
+    );
+}
+
+/// A set that keeps advancing past every re-scrub exhausts the bounded
+/// re-scrub budget: the execution refuses with the stale domain outcome and
+/// writes no result, so neither the raw answer nor a stale scrubbed body can
+/// be committed.
+#[tokio::test]
+async fn a_credential_set_that_keeps_moving_refuses_without_a_result() {
+    let secret = "sk-stage6-c3-churn-secret-marker";
+    let fixture = fixture().await;
+    let values = MemoryCredentialStore::new();
+    register_scrub_pair(
+        &fixture.store,
+        &values,
+        "acme",
+        "main",
+        "sk-placeholder-value",
+        "reg-c3-churn",
+    )
+    .await;
+
+    let answer = format!("the churning report quotes {secret}");
+    let inference = ScriptedInference::new(vec![&format!(r#"{{"final":"{answer}"}}"#)]);
+    let scrubber = RotateAfterFinalScrub {
+        store: &fixture.store,
+        values: &values,
+        provider: "acme",
+        label: "main",
+        rotated: secret,
+        final_body: &answer,
+        rotate_every: true,
+        final_scrubs: Mutex::new(0),
+    };
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
+        .await
+        .expect("a moving set is a domain outcome");
+    assert_eq!(
+        scrubber.final_scrubs(),
+        super::FINAL_RESULT_SCRUB_ATTEMPTS,
+        "the bounded re-scrub budget is exhausted before giving up"
+    );
+    assert!(
+        !format!("{outcome:?}").contains(secret),
+        "the refusal diagnostics carry no secret"
+    );
+    let TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::StaleCredentialSet { current }) = outcome
+    else {
+        panic!("a moving set must refuse as stale, got {outcome:?}");
+    };
+    assert_eq!(
+        current,
+        CredentialSetRevision::from_u64(1 + u64::from(super::FINAL_RESULT_SCRUB_ATTEMPTS)),
+        "the refusal names the last observed revision"
+    );
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .expect("the seal reads")
+            .is_none(),
+        "no result body is recorded when the set never settles"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .count_exact_text_remainder_for_tests(secret)
+            .await
+            .expect("the remainder probe must answer"),
+        0,
+        "the raw value never lands durably"
+    );
 }

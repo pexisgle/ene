@@ -151,7 +151,7 @@ impl TaskRepository for FakeResumeRepository {
     async fn record_task_result_arrival(
         &self,
         _arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<ene_task::TaskResultArrivalOutcome, TaskTechnicalError> {
         Err(TaskTechnicalError::StorageUnavailable {
             reason: String::from("record_task_result_arrival is outside this fixture's scope"),
         })
@@ -723,7 +723,7 @@ impl TaskRepository for GuardedResumeRepository {
     async fn record_task_result_arrival(
         &self,
         arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<ene_task::TaskResultArrivalOutcome, TaskTechnicalError> {
         self.inner.record_task_result_arrival(arrival).await
     }
 

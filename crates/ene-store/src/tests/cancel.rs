@@ -14,8 +14,8 @@ use ene_action::{
 };
 use ene_inference::{AttemptBeginOutcome, InferenceAttempt, InferenceTicketId};
 use ene_task::{
-    TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome, TaskProgress, TaskResultAcceptance,
-    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, orchestrate_result_arrival,
+    TaskAgentResultArrival, TaskCancelOutcome, TaskProgress, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultArrivalOutcome, TaskResultId, TaskResultRecord,
 };
 
 async fn open_store() -> Store {
@@ -159,9 +159,7 @@ async fn seed_dialogue_consent(store: &Store) {
 }
 
 async fn finalize(store: &Store, delegation: DelegationId, body: &str) -> TaskResultRecord {
-    orchestrate_result_arrival(store, delegation, TaskAgentOutput::new(body.to_owned()))
-        .await
-        .expect("finalization records the result before any adoption")
+    record_result(store, delegation, body).await
 }
 
 fn claim(result: TaskResultId, attempts: &[ActionAttemptId]) -> TaskResultAdoptionClaim {
@@ -536,12 +534,18 @@ async fn cancelled_task_keeps_late_result_and_never_adopts_it() {
     let arrival = TaskAgentResultArrival {
         delegation,
         result: TaskResultId::generate(),
-        body: TaskAgentOutput::new(String::from("late final body")),
+        body: scrubbed_result(&store, "late final body").await,
     };
-    let recorded = store
+    let recorded = match store
         .record_task_result_arrival(arrival.clone())
         .await
-        .expect("cancel does not block the arrival record");
+        .expect("cancel does not block the arrival record")
+    {
+        TaskResultArrivalOutcome::Recorded(recorded) => recorded,
+        TaskResultArrivalOutcome::StaleCredentialSet { .. } => {
+            panic!("the fixture scrubbed at the current revision")
+        }
+    };
     assert_eq!(recorded.delegation, delegation);
     assert!(recorded.adopted_revision.is_none());
 

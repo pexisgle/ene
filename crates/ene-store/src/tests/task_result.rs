@@ -182,9 +182,7 @@ pub(super) async fn finalize(
     delegation: DelegationId,
     body: &str,
 ) -> TaskResultRecord {
-    orchestrate_result_arrival(store, delegation, TaskAgentOutput::new(body.to_owned()))
-        .await
-        .expect("finalization records the result before any adoption")
+    record_result(store, delegation, body).await
 }
 
 pub(super) fn claim(result: TaskResultId, attempts: &[ActionAttemptId]) -> TaskResultAdoptionClaim {
@@ -502,11 +500,11 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
             result: result.result,
-            body: TaskAgentOutput::new(String::from("body one")),
+            body: scrubbed_result(&store, "body one").await,
         })
         .await
         .unwrap();
-    assert_eq!(retried, result);
+    assert_eq!(retried, TaskResultArrivalOutcome::Recorded(result.clone()));
     assert_eq!(task_table_count(&store, "task_result"), 1);
 
     // Same identity with a different body is a technical error, never an
@@ -515,7 +513,7 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
             result: result.result,
-            body: TaskAgentOutput::new(String::from("probe secret body")),
+            body: scrubbed_result(&store, "probe secret body").await,
         })
         .await
         .expect_err("reusing the identity with another body must fail closed");
@@ -530,7 +528,7 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
             result: TaskResultId::generate(),
-            body: TaskAgentOutput::new(String::from("body two")),
+            body: scrubbed_result(&store, "body two").await,
         })
         .await;
     assert!(
@@ -544,7 +542,7 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation: DelegationId::generate(),
             result: TaskResultId::generate(),
-            body: TaskAgentOutput::new(String::from("orphan")),
+            body: scrubbed_result(&store, "orphan").await,
         })
         .await;
     assert!(matches!(
@@ -1708,12 +1706,9 @@ async fn stamped_attempt_correlation_corruption_fails_closed() {
         store.load_task_result(x.result).await,
         Err(TaskTechnicalError::StorageUnavailable { .. })
     ));
-    let arrival = orchestrate_result_arrival(
-        &store,
-        delegation,
-        TaskAgentOutput::new(String::from("x body")),
-    )
-    .await;
+    let arrival =
+        orchestrate_result_arrival(&store, delegation, scrubbed_result(&store, "x body").await)
+            .await;
     assert!(
         matches!(arrival, Err(TaskTechnicalError::StorageUnavailable { .. })),
         "an arrival retry must not return a corrupted record, got {arrival:?}"
@@ -1820,7 +1815,7 @@ async fn arrival_retry_fails_closed_on_adopted_result_full_wipe() {
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
             result,
-            body: TaskAgentOutput::new(String::from("x body")),
+            body: scrubbed_result(&store, "x body").await,
         })
         .await;
     assert!(
@@ -1861,7 +1856,7 @@ async fn assert_adopted_unit_corruption_fails_closed(
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
             result,
-            body: TaskAgentOutput::new(String::from("x body")),
+            body: scrubbed_result(store, "x body").await,
         })
         .await;
     assert!(
@@ -2070,11 +2065,11 @@ async fn true_no_action_adopted_result_stays_healthy() {
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
             result: result.result,
-            body: TaskAgentOutput::new(String::from("no action body")),
+            body: scrubbed_result(&store, "no action body").await,
         })
         .await
         .unwrap();
-    assert_eq!(arrival, loaded);
+    assert_eq!(arrival, TaskResultArrivalOutcome::Recorded(loaded));
     assert_eq!(task_table_count(&store, "task_result_attempt"), 0);
 }
 
@@ -2099,11 +2094,11 @@ async fn healthy_non_empty_adopted_retry_is_idempotent() {
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation: loaded.delegation,
             result,
-            body: TaskAgentOutput::new(String::from("x body")),
+            body: scrubbed_result(&store, "x body").await,
         })
         .await
         .unwrap();
-    assert_eq!(arrival, loaded);
+    assert_eq!(arrival, TaskResultArrivalOutcome::Recorded(loaded));
     assert_eq!(task_table_count(&store, "task_result_attempt"), 2);
     assert_eq!(
         store.load_task(task.task).await.unwrap().unwrap(),
@@ -2206,13 +2201,13 @@ async fn adopted_retry_rejects_multiple_adopted_results() {
 
 // --- debug / leakage ---
 
-#[test]
-fn result_debug_renderings_redact_the_body() {
+#[tokio::test]
+async fn result_debug_renderings_redact_the_body() {
     let probe = "probe result body text";
     let arrival = TaskAgentResultArrival {
         delegation: DelegationId::generate(),
         result: TaskResultId::generate(),
-        body: TaskAgentOutput::new(probe.to_owned()),
+        body: scrubbed_result_at(CredentialSetRevision::initial(), probe).await,
     };
     assert!(
         !format!("{arrival:?}").contains(probe),
@@ -2233,5 +2228,145 @@ fn result_debug_renderings_redact_the_body() {
     assert!(
         !format!("{record:?}").contains(probe),
         "the result record Debug must redact the body"
+    );
+}
+
+// --- credential currentness premise (Stage 6 C3) ---
+
+/// Mechanical exact-text remainder count over the system-wide canonical
+/// surface. The Store's test-support probe is behind a feature its own test
+/// target does not enable, so the same closed walk is invoked directly.
+fn exact_remainder(store: &Store, text: &str) -> u64 {
+    let guard = crate::codec::lock_shared(&store.conn);
+    crate::erasure::exact_remainder_probe(&guard, text).expect("the remainder probe must answer")
+}
+
+/// The durable commit reads the credential-set revision in the same short
+/// transaction as the insert: a set that advanced after the scrub refuses
+/// with a domain outcome and zero writes, and only a re-scrub under the new
+/// revision records. Idempotent same-identity retries work only under a
+/// current premise, and no diagnostic carries the body.
+#[tokio::test]
+async fn stale_result_scrub_premise_refuses_and_a_rescrub_records() {
+    use ene_credential::SecretScrubber as _;
+
+    let secret = "sk-store-c3-secret-marker";
+    let store = open_store().await;
+    let (_task, delegation, _assoc) = seed_workspace_execution(&store).await;
+
+    // Scrub under the current set while the value is still ordinary text.
+    let stale_revision = store.current_set_revision().await.unwrap();
+    let stale = scrubbed_result_at(stale_revision, &format!("the report quotes {secret}")).await;
+    assert_eq!(stale.credential_set(), stale_revision);
+
+    // The set advances (with the value now registered) before the commit.
+    approve_pair(&store, "acme", "main", secret, "reg-c3-store").await;
+    let current = store.current_set_revision().await.unwrap();
+    assert!(current > stale_revision);
+
+    let stale_arrival = TaskAgentResultArrival {
+        delegation,
+        result: TaskResultId::generate(),
+        body: stale,
+    };
+    let refused = store
+        .record_task_result_arrival(stale_arrival.clone())
+        .await
+        .expect("a stale premise is a domain outcome");
+    assert_eq!(
+        refused,
+        TaskResultArrivalOutcome::StaleCredentialSet { current }
+    );
+    assert!(
+        !format!("{refused:?}").contains(secret),
+        "the stale refusal carries no body or secret"
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 0);
+    assert!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused arrival never seals the delegation"
+    );
+    assert_eq!(
+        exact_remainder(&store, secret),
+        0,
+        "no raw occurrence lands from the stale body"
+    );
+
+    // The same identity is still refused after the set moved: an idempotent
+    // replay is only current under the premise it was scrubbed with.
+    assert_eq!(
+        store.record_task_result_arrival(stale_arrival).await,
+        Ok(TaskResultArrivalOutcome::StaleCredentialSet { current })
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 0);
+
+    // Re-scrub the original answer under the new revision: the bearer is now
+    // registered, so only the redacted body commits.
+    let values = MemoryCredentialStore::new();
+    values.insert(
+        CredentialRef::new("acme", "main").expect("valid fixture ref"),
+        secret,
+    );
+    let fresh_proof = CredentialScrubber {
+        refs: &store,
+        store: &values,
+    }
+    .scrub(&format!("the report quotes {secret}"))
+    .await
+    .expect("the registered value is readable");
+    let fresh = TaskAgentResultArrival {
+        delegation,
+        result: TaskResultId::generate(),
+        body: TaskResultScrubPremise::from_scrubbed(fresh_proof),
+    };
+    let recorded = match store
+        .record_task_result_arrival(fresh.clone())
+        .await
+        .expect("the fresh premise is current")
+    {
+        TaskResultArrivalOutcome::Recorded(record) => record,
+        TaskResultArrivalOutcome::StaleCredentialSet { .. } => {
+            panic!("the fresh premise must commit")
+        }
+    };
+    let redacted = format!("the report quotes {}", ene_credential::REDACTED_CREDENTIAL);
+    assert_eq!(recorded.body.text(), redacted);
+    assert_eq!(task_table_count(&store, "task_result"), 1);
+    assert_eq!(exact_remainder(&store, secret), 0);
+
+    // A same-identity retry is idempotent while the premise is still current.
+    assert_eq!(
+        store.record_task_result_arrival(fresh.clone()).await,
+        Ok(TaskResultArrivalOutcome::Recorded(recorded.clone()))
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 1);
+
+    // Once the set moves again the same retry refuses without a second row or
+    // a body rewrite; the stored redacted body stays the durable one. A
+    // re-approval of the usable pair advances the revision in place.
+    assert!(
+        store
+            .approve_credential_with_sweep("acme", "main", "sk-rotated-value")
+            .expect("the re-approval must commit")
+    );
+    let advanced = store.current_set_revision().await.unwrap();
+    assert_eq!(
+        store.record_task_result_arrival(fresh).await,
+        Ok(TaskResultArrivalOutcome::StaleCredentialSet { current: advanced })
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 1);
+    let stored = store
+        .load_task_result(recorded.result)
+        .await
+        .unwrap()
+        .expect("the recorded result stays readable");
+    assert_eq!(stored.body.text(), redacted);
+    assert!(
+        !format!("{stored:?}").contains(secret),
+        "the stored record diagnostics carry no secret"
     );
 }

@@ -7,9 +7,9 @@ use ene_companion::{
 };
 use ene_credential::{
     CredentialApprovalRepository, CredentialIntentRepository as _, CredentialRef,
-    CredentialRefRepository, CredentialSetRepository, CredentialSetRevision,
-    DevicePairingRepository, DevicePairingStatus, MemoryCredentialStore, RegistrationApply,
-    RegistrationFingerprint, RegistrationState,
+    CredentialRefRepository, CredentialScrubber, CredentialSetRepository, CredentialSetRevision,
+    CredentialTechnicalError, DevicePairingRepository, DevicePairingStatus, MemoryCredentialStore,
+    RegistrationApply, RegistrationFingerprint, RegistrationState,
 };
 use ene_inference::{
     AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _,
@@ -35,9 +35,9 @@ use ene_task::{
     DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome, TaskCommitPremise,
     TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
     TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise, TaskPurpose,
-    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskRevision,
-    TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef,
-    WorkspaceNeedRef,
+    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskResultArrivalOutcome,
+    TaskResultRecord, TaskResultScrubPremise, TaskRevision, TaskTechnicalError, WorkspaceAssocId,
+    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
 };
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -3883,7 +3883,7 @@ async fn approval_sweep_redacts_task_and_activity_bodies() {
     use ene_companion::{
         ActivityRepository as _, RecordResumeActivityCommand, TaskFact, UndeliveredSource,
     };
-    use ene_task::{TaskAgentOutput, TaskReportSourceRef, orchestrate_result_arrival};
+    use ene_task::TaskReportSourceRef;
 
     let secret = "sk-sweep-task-body";
     let store = open_memory().await.unwrap();
@@ -3939,13 +3939,12 @@ async fn approval_sweep_redacts_task_and_activity_bodies() {
             .expect("the delegation must commit"),
         DelegationOutcome::Delegated(_)
     ));
-    let arrival = orchestrate_result_arrival(
+    let arrival = record_result(
         &store,
         delegation,
-        TaskAgentOutput::new(format!("final report mentions {secret}")),
+        &format!("final report mentions {secret}"),
     )
-    .await
-    .expect("the result must record");
+    .await;
     let activity = record_activity_id(
         &store,
         RecordResumeActivityCommand {
@@ -7311,6 +7310,67 @@ async fn delegation_creation_faults_roll_back_every_write() {
         "the retried premise commits, got {committed:?}"
     );
     assert_eq!(task_table_count(&store, "delegation"), 1);
+}
+
+/// A readable credential registry with no refs, pinned at one revision.
+struct EmptyRevisionRegistry(CredentialSetRevision);
+
+impl CredentialRefRepository for EmptyRevisionRegistry {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError> {
+        Ok(Vec::new())
+    }
+}
+
+impl CredentialSetRepository for EmptyRevisionRegistry {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn current_set_revision(
+        &self,
+    ) -> Result<CredentialSetRevision, CredentialTechnicalError> {
+        Ok(self.0)
+    }
+}
+
+/// Scrubs `text` through the credential-owned boundary under `revision`; the
+/// returned premise is the only way a test can name a Task result body.
+async fn scrubbed_result_at(revision: CredentialSetRevision, text: &str) -> TaskResultScrubPremise {
+    use ene_credential::SecretScrubber as _;
+
+    let registry = EmptyRevisionRegistry(revision);
+    let values = MemoryCredentialStore::new();
+    TaskResultScrubPremise::from_scrubbed(
+        ene_credential::CredentialScrubber {
+            refs: &registry,
+            store: &values,
+        }
+        .scrub(text)
+        .await
+        .expect("the empty fixture registry is readable"),
+    )
+}
+
+/// Scrubs `text` under the store's current credential-set revision.
+async fn scrubbed_result(store: &Store, text: &str) -> TaskResultScrubPremise {
+    let revision = store
+        .current_set_revision()
+        .await
+        .expect("the fixture credential-set revision reads");
+    scrubbed_result_at(revision, text).await
+}
+
+/// Records one result through the production arrival boundary and returns the
+/// recorded result. Fixtures scrub at the current revision, so a stale
+/// refusal here would be a fixture error.
+async fn record_result(store: &Store, delegation: DelegationId, text: &str) -> TaskResultRecord {
+    match orchestrate_result_arrival(store, delegation, scrubbed_result(store, text).await)
+        .await
+        .expect("the arrival must answer")
+    {
+        TaskResultArrivalOutcome::Recorded(record) => record,
+        TaskResultArrivalOutcome::StaleCredentialSet { .. } => {
+            panic!("the fixture scrubbed at the current revision")
+        }
+    }
 }
 
 mod action;

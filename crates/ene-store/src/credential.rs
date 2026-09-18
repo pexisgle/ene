@@ -228,6 +228,23 @@ fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), Credenti
     Ok(())
 }
 
+/// Reads the durable credential-set revision inside a caller transaction.
+///
+/// The read shares the caller's transaction, so a writer can compare the
+/// revision against a scrub premise in the same short window as the write it
+/// admits: a set advanced between the premise's revision read and the commit
+/// is observed here and refuses the write.
+pub(crate) fn current_set_revision(
+    conn: &rusqlite::Connection,
+) -> Result<CredentialSetRevision, CredentialTechnicalError> {
+    let stored_rev: i64 = conn
+        .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+    let revision = u64::try_from(stored_rev)
+        .map_err(|_| credential_unavailable("credential set revision out of range"))?;
+    Ok(CredentialSetRevision::from_u64(revision))
+}
+
 impl CredentialSetRepository for Store {
     async fn current_set_revision(
         &self,
@@ -235,12 +252,7 @@ impl CredentialSetRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let stored_rev: i64 = guard
-                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let revision = u64::try_from(stored_rev)
-                .map_err(|_| credential_unavailable("credential set revision out of range"))?;
-            Ok(CredentialSetRevision::from_u64(revision))
+            current_set_revision(&guard)
         })
         .await
     }

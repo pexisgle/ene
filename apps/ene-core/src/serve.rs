@@ -1146,7 +1146,7 @@ impl HostHandle {
     ///
     /// [`TaskAgentRunError`] for storage and inference technical failures;
     /// stale, terminal, sealed, already-started, already-running,
-    /// reservation, refused, and
+    /// reservation, a stale final-result credential premise, refused, and
     /// not-sent answers stay domain outcomes inside [`TaskAgentRunOutcome`].
     pub async fn run_task_agent<T: ProviderTransport + Send + Sync>(
         &self,

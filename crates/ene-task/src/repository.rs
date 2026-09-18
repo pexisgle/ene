@@ -14,8 +14,8 @@ use crate::report::{
     TaskReportSourceRef,
 };
 use crate::result::{
-    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord, UnadoptedResultCursor,
+    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultArrivalOutcome, TaskResultId, TaskResultRecord, UnadoptedResultCursor,
 };
 use crate::resume::{TaskResumeCommitPremise, TaskResumeOutcome};
 use crate::task::{
@@ -234,16 +234,25 @@ pub trait TaskRepository: Send + Sync {
     /// the result becomes visible. The relied `(task, revision)` is copied
     /// from the delegation row inside one short `Immediate` transaction; the
     /// committed row's existence is the execution seal, so no separate seal
-    /// state exists. A retry of the same [`TaskResultId`] is idempotent when
-    /// the body, delegation, and relied revision match exactly; a different
-    /// body or relied revision under the same identity, and a second final
-    /// result for an already-sealed delegation, are technical errors (fail
-    /// closed, never a domain outcome). This step judges no currentness,
-    /// certainty, terminal state, or completion.
+    /// state exists. The same transaction reads the durable credential-set
+    /// revision and compares it with the arrival body's scrub premise before
+    /// any body handling: a set that advanced after the scrub refuses with
+    /// [`TaskResultArrivalOutcome::StaleCredentialSet`] and zero writes, so a
+    /// stale body can never land. The caller must re-scrub the original
+    /// answer under the reported current revision and arrive again.
+    ///
+    /// A retry of the same [`TaskResultId`] is idempotent when the body,
+    /// delegation, and relied revision match exactly and the premise is still
+    /// current; a stale premise refuses before that comparison, so an
+    /// idempotent retry never succeeds under an old set. A different body or
+    /// relied revision under the same identity, and a second final result for
+    /// an already-sealed delegation, are technical errors (fail closed, never
+    /// a domain outcome). This step judges no certainty, terminal state, or
+    /// completion.
     async fn record_task_result_arrival(
         &self,
         arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError>;
+    ) -> Result<TaskResultArrivalOutcome, TaskTechnicalError>;
 
     /// Loads one final result by identity, with its verified attempt
     /// correlation and adoption state.

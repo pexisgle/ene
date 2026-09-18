@@ -3,7 +3,6 @@
 
 use ene_primitive::{RawId, WallClockWithTz};
 
-use crate::agent::TaskAgentOutput;
 use crate::context::{TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind};
 use crate::delegation::{
     CreateDelegationCommand, DelegationCreationPremise, DelegationId, DelegationOutcome,
@@ -13,7 +12,10 @@ use crate::repository::{
     ConversationTaskRepository, OwnerMessageCurrentness, TaskCommitOutcome, TaskRepository,
     TaskTechnicalError,
 };
-use crate::result::{TaskAgentResultArrival, TaskResultAcceptance, TaskResultId, TaskResultRecord};
+use crate::result::{
+    TaskAgentResultArrival, TaskResultAcceptance, TaskResultArrivalOutcome, TaskResultId,
+    TaskResultScrubPremise,
+};
 use crate::task::{
     AssigneeRef, SteeringPremiseRef, TaskCommitPremise, TaskCreationOutcome, TaskCreationPremise,
     TaskId, TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise,
@@ -369,16 +371,21 @@ pub async fn orchestrate_delegation(
 ///
 /// The orchestration mints the [`TaskResultId`], so the caller names no
 /// identity, and records `{ delegation, result, body }` through
-/// [`TaskRepository::record_task_result_arrival`] before returning. The
-/// committed row is the execution seal; the arrival judges no currentness,
-/// certainty, or completion. Repository technical errors (including a broken
-/// delegation correspondence, a reused identity with different content, and a
-/// second final result for the same delegation) stay `Err` and fail closed.
+/// [`TaskRepository::record_task_result_arrival`] before returning. `body` is
+/// the credential-owned scrub premise, so the durable commit can compare its
+/// revision in the same transaction as the insert. The committed row is the
+/// execution seal; the arrival judges no certainty or completion.
+/// Repository technical errors (including a broken delegation
+/// correspondence, a reused identity with different content, and a second
+/// final result for the same delegation) stay `Err` and fail closed, while
+/// [`TaskResultArrivalOutcome::StaleCredentialSet`] is a domain refusal with
+/// zero writes: the caller must re-scrub the original answer under the
+/// reported current revision and arrive again.
 pub async fn orchestrate_result_arrival(
     repository: &impl TaskRepository,
     delegation: DelegationId,
-    body: TaskAgentOutput,
-) -> Result<TaskResultRecord, TaskTechnicalError> {
+    body: TaskResultScrubPremise,
+) -> Result<TaskResultArrivalOutcome, TaskTechnicalError> {
     repository
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,

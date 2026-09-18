@@ -45,9 +45,10 @@ use ene_task::{
     TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId, TaskProgress, TaskPurpose,
     TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow, TaskReportRowCursor, TaskReportRowKind,
     TaskReportSourcePage, TaskReportSourceRef, TaskRepository, TaskResultAcceptance,
-    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskResumeCommitPremise,
-    TaskResumeHold, TaskResumeOutcome, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
-    UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
+    TaskResultAdoptionClaim, TaskResultArrivalOutcome, TaskResultId, TaskResultRecord,
+    TaskResumeCommitPremise, TaskResumeHold, TaskResumeOutcome, TaskRevision, TaskRevisionRecord,
+    TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation,
+    WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -1762,22 +1763,37 @@ fn compose_result(
 
 /// Records one final result arrival and seals its delegation (AU15a).
 ///
-/// Every check lives in the one short `Immediate` transaction: the
-/// delegation correspondence must exist and decode, a same-identity retry
-/// must match the stored body/delegation/revision exactly (idempotent, one
-/// body row), and a different identity for an already-sealed delegation is a
-/// fail-closed technical error. Currentness, certainty, terminal state, and
-/// completion are deliberately not judged here.
+/// Every check lives in the one short `Immediate` transaction. The first
+/// read is the durable credential-set revision, compared against the arrival
+/// body's scrub premise before any body work: a set that advanced after the
+/// scrub refuses with [`TaskResultArrivalOutcome::StaleCredentialSet`] and
+/// zero writes, so neither the body nor a body-free seal row is ever written
+/// from a stale premise. The delegation correspondence must then exist and
+/// decode, a same-identity retry must match the stored
+/// body/delegation/revision exactly (idempotent, one body row) and only under
+/// a current premise, and a different identity for an already-sealed
+/// delegation is a fail-closed technical error. Certainty, terminal state,
+/// and completion are deliberately not judged here.
 fn record_task_result_arrival_sync(
     conn: &Mutex<Connection>,
     arrival: TaskAgentResultArrival,
-) -> Result<TaskResultRecord, TaskTechnicalError> {
+) -> Result<TaskResultArrivalOutcome, TaskTechnicalError> {
     let delegation_text = encode_id(arrival.delegation.as_raw());
     let result_text = encode_id(arrival.result.as_raw());
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    // Credential currentness first, in the same transaction as the insert:
+    // the scrub read the revision before the values it covers, so a set that
+    // advanced since leaves the body unproven and nothing may be written. The
+    // refusal is a domain outcome; the caller re-scrubs the original answer
+    // under `current` and arrives again.
+    let current = crate::credential::current_set_revision(&tx)
+        .map_err(|error| task_unavailable(error.to_string()))?;
+    if current != arrival.body.credential_set() {
+        return Ok(TaskResultArrivalOutcome::StaleCredentialSet { current });
+    }
     // The A4/R2 delayed-result gate: a body under a canonical current
     // condition — or one produced by a delegation already associated with a
     // deletion operation at admission (`erasure_use_hold`) — is collected
@@ -1799,7 +1815,7 @@ fn record_task_result_arrival_sync(
     let body_text = if held {
         String::from(crate::erasure::ERASED_MARKER)
     } else {
-        crate::preservation::redact_covered_text(&tx, arrival.body.text())
+        crate::preservation::redact_covered_text(&tx, arrival.body.body())
             .map_err(|error| task_unavailable(error.to_string()))?
     };
     let correspondence: Option<(String, i64)> = tx
@@ -1849,7 +1865,7 @@ fn record_task_result_arrival_sync(
             raw.recorded_at,
         )?;
         tx.commit().map_err(task_unavailable)?;
-        return Ok(record);
+        return Ok(TaskResultArrivalOutcome::Recorded(record));
     }
     let sealed: Option<String> = tx
         .query_row(
@@ -1902,7 +1918,7 @@ fn record_task_result_arrival_sync(
         TaskFact::ResultRecorded(arrival.result.as_raw()),
     )?;
     tx.commit().map_err(task_unavailable)?;
-    Ok(TaskResultRecord {
+    Ok(TaskResultArrivalOutcome::Recorded(TaskResultRecord {
         result: arrival.result,
         task: TaskRef {
             task: TaskId::from_raw(delegation_task),
@@ -1913,7 +1929,7 @@ fn record_task_result_arrival_sync(
         attempt_refs: Vec::new(),
         adopted_revision: None,
         recorded_at,
-    })
+    }))
 }
 
 fn load_task_result_sync(
@@ -3602,7 +3618,7 @@ impl TaskRepository for Store {
     async fn record_task_result_arrival(
         &self,
         arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<TaskResultArrivalOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         self.hint_after_commit(
             run_blocking(move || record_task_result_arrival_sync(&conn, arrival)).await,

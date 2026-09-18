@@ -20,8 +20,8 @@ use ene_action::{
 use ene_companion::{ManagementActivity, RecordResumeActivityCommand};
 use ene_task::{
     ConversationTaskRepository as _, OwnerMessageCurrentness, ResumeInstructionSource,
-    ResumeTaskCommand, SteeringPremiseRef, TaskAgentOutput, TaskResumeCommitPremise,
-    TaskResumeHold, TaskResumeOutcome, TaskResumeReadiness, orchestrate_result_arrival,
+    ResumeTaskCommand, SteeringPremiseRef, TaskResumeCommitPremise, TaskResumeHold,
+    TaskResumeOutcome, TaskResumeReadiness,
 };
 
 async fn open_store() -> Store {
@@ -495,13 +495,7 @@ async fn adoptable_sealed_result_answers_before_any_new_work() {
     let (created, assoc) = seed_task(&store, companion).await;
     let delegation = seed_delegation(&store, created, assoc).await;
     let message = append_owner(&store, companion, generation, "keep going").await;
-    orchestrate_result_arrival(
-        &store,
-        delegation,
-        TaskAgentOutput::new(String::from("the recorded answer")),
-    )
-    .await
-    .expect("the arrival must record");
+    record_result(&store, delegation, "the recorded answer").await;
 
     let record = store.load_task(created.task).await.unwrap().unwrap();
     let before = table_counts(&store);
@@ -538,13 +532,7 @@ async fn result_blocked_only_by_confirmed_failure_does_not_hold_resume() {
         .await
         .expect("the certainty CAS must answer");
     assert_eq!(settled, CertaintyUpdateOutcome::Updated);
-    orchestrate_result_arrival(
-        &store,
-        delegation,
-        TaskAgentOutput::new(String::from("the recorded answer")),
-    )
-    .await
-    .expect("the arrival must record");
+    record_result(&store, delegation, "the recorded answer").await;
 
     let record = store.load_task(created.task).await.unwrap().unwrap();
     let outcome = commit(
@@ -1133,13 +1121,7 @@ async fn late_old_delegation_result_records_to_the_original_only() {
 
     // The old execution's late final result still records and seals under
     // its own identity, but adoption leaves the new revision alone.
-    let arrival = orchestrate_result_arrival(
-        &store,
-        old_delegation,
-        TaskAgentOutput::new(String::from("the late answer")),
-    )
-    .await
-    .expect("the late arrival must record");
+    let arrival = record_result(&store, old_delegation, "the late answer").await;
     let claim = store
         .load_result_adoption_claim(arrival.result)
         .await
@@ -1168,13 +1150,7 @@ async fn past_facts_page_carries_attribution_without_bodies() {
     let first = start_attempt(&store, delegation, created, assoc, "first.txt").await;
     settle_success(&store, first).await;
     let second = start_attempt(&store, delegation, created, assoc, "second.txt").await;
-    let result = orchestrate_result_arrival(
-        &store,
-        delegation,
-        TaskAgentOutput::new(String::from("the sealed answer body")),
-    )
-    .await
-    .expect("the arrival must record");
+    let result = record_result(&store, delegation, "the sealed answer body").await;
     let _ = append_owner(&store, companion, generation, "keep going").await;
 
     let page = store
@@ -1221,13 +1197,7 @@ async fn superseded_instruction_source_wins_over_execution_and_availability_gate
                 start_attempt(&store, delegation, created, assoc, "pending.txt").await;
             }
             _ => {
-                orchestrate_result_arrival(
-                    &store,
-                    delegation,
-                    TaskAgentOutput::new(String::from("the sealed answer")),
-                )
-                .await
-                .expect("the arrival must record");
+                record_result(&store, delegation, "the sealed answer").await;
             }
         }
         let record = store.load_task(created.task).await.unwrap().unwrap();

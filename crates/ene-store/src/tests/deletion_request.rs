@@ -12,7 +12,6 @@ use ene_action::{
 };
 use ene_companion::RecordResumeActivityCommand;
 use ene_preservation::*;
-use ene_task::{TaskAgentOutput, orchestrate_result_arrival};
 
 fn target(text: &str) -> TargetedDeletionTarget {
     TargetedDeletionTarget {
@@ -676,13 +675,12 @@ async fn first_party_confirmation_enumerates_known_covered_sources() {
         ActionStartOutcome::Started,
         "the fixture records before any condition exists"
     );
-    let result = orchestrate_result_arrival(
+    let result = record_result(
         &store,
         delegation,
-        TaskAgentOutput::new(format!("final report mentions {target}")),
+        &format!("final report mentions {target}"),
     )
-    .await
-    .expect("the result must record");
+    .await;
 
     // The first-party production path: stage, then the trusted confirmation.
     let request = request_id(&stage(&store, target, DeletionPurpose::Privacy).await);

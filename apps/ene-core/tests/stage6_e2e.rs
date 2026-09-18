@@ -419,8 +419,15 @@ async fn connect(dir: &Path) -> Client {
     }
 }
 
+/// Hang guard for one request round-trip. This is not a synchronization
+/// mechanism: every wait the tests rely on is a barrier or a durable-state
+/// poll, and this bound exists only so a genuinely wedged run fails instead of
+/// hanging forever. It is generous because a loaded CI runner (notably the
+/// Windows runner) can stall a background round while other race legs run.
+const ROUND_TRIP_GUARD: Duration = Duration::from_secs(60);
+
 async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<WirePayload, String> {
-    match tokio::time::timeout(Duration::from_secs(20), client.request(payload)).await {
+    match tokio::time::timeout(ROUND_TRIP_GUARD, client.request(payload)).await {
         Ok(Ok(answer)) => Ok(answer),
         Ok(Err(error)) => Err(format!("{what} errored: {error:?}")),
         Err(_) => Err(format!("{what} timed out")),
@@ -428,7 +435,7 @@ async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<Wi
 }
 
 async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
-    match tokio::time::timeout(Duration::from_secs(20), client.next_frame()).await {
+    match tokio::time::timeout(ROUND_TRIP_GUARD, client.next_frame()).await {
         Ok(Ok(payload)) => Ok(payload),
         Ok(Err(error)) => Err(format!("stream frame errored: {error:?}")),
         Err(_) => Err(String::from("stream frame timed out")),
@@ -4503,4 +4510,183 @@ fn transient_sole_result_body(db: &Path) -> String {
         |row| row.get(0),
     )
     .expect("the result body must read")
+}
+
+/// E2E 4 (Stage 6 C3): a credential rotation that commits while the Task
+/// Agent's final provider call is parked is current at the result commit, so
+/// the final answer is scrubbed under the advanced set: the durable result
+/// body carries only the redaction marker, the raw value is absent from every
+/// durable surface and every provider request, and no diagnostic carries it.
+///
+/// The stale-refusal half of the same premise is driven deterministically at
+/// the execution boundary in `task_run::tests`, where a delegating scrubber
+/// can advance the set between the scrub and the commit; the serving
+/// composition reads the revision immediately before its own commit, so this
+/// E2E pins the current-premise path end to end.
+#[tokio::test]
+async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scrub() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let proposal = task_reply(serde_json::json!({
+        "kind": "propose_task",
+        "purpose": "write a report",
+    }));
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_task_agent_turn(0),
+                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::text(r##"{"tool":"create","path":"report.md","content":"# Report notes"}"##),
+            ),
+            (
+                on_task_agent_turn(2),
+                Call::text(format!(
+                    r##"{{"final":"created report.md quoting {ROTATED_SECRET}"}}"##
+                )),
+            ),
+            (
+                on_latest_owner("please read input.txt and write report.md"),
+                Call::text(proposal),
+            ),
+        ],
+        &[],
+    ));
+    // The final turn parks after its prompt was scrubbed and sent; the
+    // rotation commits while the answer is still in flight.
+    transport.block_input(on_task_agent_turn(2));
+    let mut served = Served::start(
+        dir.clone(),
+        memory_store_with_rotated(SECRET, ROTATED_SECRET),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let workspace = dir.join("c3-current-workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    let (round, stream, reply) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    assert!(
+        reply.contains("Task accepted"),
+        "the task proposal must be accepted: {reply}"
+    );
+    confirm_round(served.client(), &round, stream).await;
+    transport.wait_parked(1).await;
+
+    // Stage and commit the rotation while the final answer is in flight.
+    let mark = view_mark(served.client()).await.expect("show");
+    let staged = ask(
+        served.client(),
+        WirePayload::ManagementIntent(ManagementIntent {
+            intent_id: CommandWireId(uuid::Uuid::new_v4()),
+            kind: ManagementIntentKind::ConfigureCredentialIntent,
+            target: ene_api::v1::management::credential_target("openai", "rotated"),
+            base_view: BaseViewMark(mark),
+            rationale: IntentRationaleWire {
+                origin: RationaleOrigin::ManagementSurface,
+                quote: None,
+            },
+        }),
+        "rotate",
+    )
+    .await
+    .expect("the rotation intent must answer");
+    assert!(
+        matches!(
+            staged,
+            WirePayload::ManagementOutcome(ManagementOutcome::HeldByOperation)
+        ),
+        "the rotation waits for the Host-local approval, got {staged:?}"
+    );
+    let handle = Arc::clone(&served.handle);
+    assert!(
+        matches!(
+            handle.approve_credential("openai", "rotated").await,
+            Ok(true)
+        ),
+        "the Host-local approval must register the rotated value"
+    );
+    transport.release_blocked();
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the final result commits under the advanced set");
+
+    // Durable result bodies: the final answer was scrubbed after the
+    // rotation, so every result body is redacted and none carries the value.
+    let tasks = list_tasks(served.client()).await.expect("tasks must list");
+    let task = tasks.tasks.first().expect("the task exists");
+    let report = ask(
+        served.client(),
+        WirePayload::GetTaskReport(cmds::task_report_request(&task.task.0, None, None)),
+        "c3 report",
+    )
+    .await
+    .expect("the report must answer");
+    assert_absent("task report debug", &format!("{report:?}"), ROTATED_SECRET);
+    let WirePayload::TaskReportResponse(ene_api::v1::undelivered::TaskReportResponse::Page(page)) =
+        report
+    else {
+        panic!("the report must answer a page: {report:?}");
+    };
+    let mut result_bodies = Vec::new();
+    for row in &page.rows {
+        if row.kind != "task_result" {
+            continue;
+        }
+        let Some(source) = row.source.as_ref() else {
+            continue;
+        };
+        let body = ask(
+            served.client(),
+            WirePayload::GetReportSource(cmds::report_source_request(&source.0, None, None)),
+            "c3 report source",
+        )
+        .await
+        .expect("the report source must answer");
+        assert_absent("report source debug", &format!("{body:?}"), ROTATED_SECRET);
+        if let WirePayload::ReportSourceResponse(
+            ene_api::v1::undelivered::ReportSourceResponse::Page(source_page),
+        ) = body
+        {
+            result_bodies.push(source_page.text);
+        }
+    }
+    assert!(
+        !result_bodies.is_empty(),
+        "the completed execution must expose a result body"
+    );
+    assert!(
+        result_bodies
+            .iter()
+            .any(|body| body.contains(ene_credential::REDACTED_CREDENTIAL)),
+        "the result body must carry the redaction marker: {result_bodies:?}"
+    );
+    for body in &result_bodies {
+        assert_absent("result body", body, ROTATED_SECRET);
+    }
+
+    // The rotated value never reached a provider request either: it appeared
+    // only in the parked answer, after the rotation.
+    assert_absent_all("provider request", &transport.input_texts(), ROTATED_SECRET);
+    assert_absent_all("provider request", &transport.input_texts(), SECRET);
+    assert_absent_all(
+        "history",
+        &history_texts(served.client()).await,
+        ROTATED_SECRET,
+    );
+    assert!(
+        db_target_hits(&dir.join("app.db"), ROTATED_SECRET).is_empty(),
+        "no durable table may carry the rotated value: {:?}",
+        db_target_hits(&dir.join("app.db"), ROTATED_SECRET)
+    );
+    assert!(db_target_hits(&dir.join("app.db"), SECRET).is_empty());
+    served.server.abort();
 }

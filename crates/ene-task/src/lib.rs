@@ -64,8 +64,9 @@ pub use repository::{
     TaskTechnicalError,
 };
 pub use result::{
-    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord, UnadoptedResultCursor,
+    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultArrivalOutcome, TaskResultId, TaskResultRecord, TaskResultScrubPremise,
+    UnadoptedResultCursor,
 };
 pub use resume::{
     ResumeInstructionSource, ResumeTaskCommand, TaskResumeCommitPremise, TaskResumeHold,

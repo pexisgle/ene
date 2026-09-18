@@ -2241,10 +2241,9 @@ fn control_emit_reports_closed() {
 async fn cancel_task_admission_wires_the_cooperative_stop() {
     use ene_task::{
         AssigneeRef, CancelTaskCommand, DelegationCreationPremise, DelegationId, DelegationOutcome,
-        DelegationScope, TaskAgentEphemeralId, TaskAgentOutput, TaskCancelOutcome,
-        TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
-        TaskProgress, TaskPurpose, TaskRepository as _, TaskResultAcceptance,
-        TaskResultAdoptionClaim, orchestrate_result_arrival,
+        DelegationScope, TaskAgentEphemeralId, TaskCancelOutcome, TaskContextEntryId,
+        TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress,
+        TaskPurpose, TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim,
     };
 
     let Some((handle, _dir)) = memory_handle("cancel-task").await else {
@@ -2344,13 +2343,8 @@ async fn cancel_task_admission_wires_the_cooperative_stop() {
         .await
         .unwrap();
     assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
-    let arrival = orchestrate_result_arrival(
-        &handle.store,
-        completed_delegation,
-        TaskAgentOutput::new(String::from("done")),
-    )
-    .await
-    .unwrap();
+    let arrival =
+        crate::test_support::record_result(&handle.store, completed_delegation, "done").await;
     let adopted = handle
         .store
         .adopt_result(TaskResultAdoptionClaim {
@@ -2394,10 +2388,9 @@ async fn management_cancel_reaches_the_cancel_admission_and_replays() {
     use ene_primitive::RawId;
     use ene_task::{
         AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,
-        TaskAgentEphemeralId, TaskAgentOutput, TaskContextEntryId, TaskContextOrigin,
-        TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose,
-        TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim,
-        orchestrate_result_arrival,
+        TaskAgentEphemeralId, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
+        TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskRepository as _,
+        TaskResultAcceptance, TaskResultAdoptionClaim,
     };
 
     let Some((handle, _dir)) = memory_handle("management-cancel").await else {
@@ -2507,13 +2500,7 @@ async fn management_cancel_reaches_the_cancel_admission_and_replays() {
         .await
         .unwrap();
     assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
-    let arrival = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        TaskAgentOutput::new(String::from("done")),
-    )
-    .await
-    .unwrap();
+    let arrival = crate::test_support::record_result(&handle.store, delegation, "done").await;
     assert!(matches!(
         handle
             .store

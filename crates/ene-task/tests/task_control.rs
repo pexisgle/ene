@@ -129,7 +129,7 @@ impl TaskRepository for FakeTaskRepository {
     async fn record_task_result_arrival(
         &self,
         _arrival: ene_task::TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<ene_task::TaskResultArrivalOutcome, TaskTechnicalError> {
         Err(unsupported("record_task_result_arrival"))
     }
 
