@@ -65,7 +65,7 @@ use ene_api::v1::round::{
 };
 use ene_companion::dialogue::{
     AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification,
-    assemble_dialogue_input, begin_turn_committed, classify_replay, finish_turn,
+    assemble_dialogue_input, begin_turn_committed, classify_replay, finish_turn, pin_experience,
 };
 use ene_companion::{
     CommandId, CompanionId, CompanionLifecycle, CompanionRepository, HistoryRepository,
@@ -931,10 +931,6 @@ impl HostHandle {
                 };
                 let task_control =
                     crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
-                // Occupancy starts before pin_experience so a body-bearing
-                // local candidate cannot exist outside HostTransient's
-                // remainder while Targeted Deletion finalizes.
-                self.begin_learning_pin().await;
                 let outcome = {
                     // The open round is Host-owned transient state the
                     // companion must never read directly: hand finish_turn
@@ -972,25 +968,24 @@ impl HostHandle {
                     .await
                 };
                 match outcome {
-                    DialogueOutcome::Completed { experience, .. } => {
-                        // The durable reply is the client-visible completion:
-                        // the formation pass is queued and runs after the
-                        // response is handed off, never before it (design
-                        // H-1: response completion and all Learning updates
-                        // are not one condition). The queue item is the
-                        // premise pinned at completion, never a later re-read.
-                        if let Some(experience) = experience {
+                    DialogueOutcome::Completed { input, .. } => {
+                        // Occupancy starts before pin_experience so a
+                        // body-bearing local candidate cannot exist outside
+                        // HostTransient remainder. It starts after dispatch:
+                        // an in-flight stream is the fence's remainder, not a
+                        // Learning pin, and must not block Verified.
+                        self.begin_learning_pin().await;
+                        if let Some(experience) = pin_experience(&input, &self.store).await {
                             #[cfg(any(test, feature = "test-support"))]
                             self.store
                                 .pause_learning_pin_queue_if_armed_for_tests()
                                 .await;
-                            self.queue_learning_formation(*experience).await;
+                            self.queue_learning_formation(experience).await;
                         }
                         self.end_learning_pin().await;
                         gate.finish().await;
                     }
                     DialogueOutcome::Interrupted => {
-                        self.end_learning_pin().await;
                         gate.interrupt().await;
                     }
                 }

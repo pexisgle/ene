@@ -169,13 +169,9 @@ pub enum DialogueOutcome {
     Completed {
         /// Adopted reply body; redacted from [`core::fmt::Debug`].
         text: String,
-        /// Experience premise pinned at reply completion: source range and
-        /// transcript. The caller queues exactly this; the worker never
-        /// re-reads a later History window as if it were the same Experience.
-        /// [`None`] when the bounded window was empty or unreadable: the
-        /// reply stands and the post-response pass is skipped rather than
-        /// invented.
-        experience: Option<Box<ExperienceCandidate>>,
+        /// Accepted input of this turn, so the caller can occupy the pin
+        /// window and then [`pin_experience`] after the durable reply.
+        input: AcceptedDialogueInput,
     },
     /// The reply could not be adopted: the caller closes interrupted.
     Interrupted,
@@ -187,7 +183,7 @@ impl core::fmt::Debug for DialogueOutcome {
             Self::Completed { .. } => formatter
                 .debug_struct("Completed")
                 .field("text", &"<redacted>")
-                .field("experience", &"<premise>")
+                .field("input", &"<accepted>")
                 .finish(),
             Self::Interrupted => formatter.write_str("Interrupted"),
         }
@@ -729,12 +725,12 @@ pub async fn finish_turn(
                 .await
             {
                 Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => {
-                    // Pin the Experience premise only after the reply is
-                    // durable; the queued pass judges exactly this window.
-                    let experience = pin_experience(&input, history).await.map(Box::new);
+                    // The Experience premise is pinned by the caller after
+                    // occupancy is registered; this outcome only proves the
+                    // reply is durable.
                     DialogueOutcome::Completed {
                         text: reply_text,
-                        experience,
+                        input,
                     }
                 }
                 _ => DialogueOutcome::Interrupted,
@@ -978,7 +974,11 @@ pub const EXPERIENCE_SOURCE_MESSAGES: u64 = 12;
 /// pass judges exactly this transcript. Returns [`None`] when the window is
 /// empty or unreadable; the caller then skips the pass instead of later
 /// re-reading a different window as if it were the same Experience.
-async fn pin_experience(
+///
+/// The caller occupies any process-local remainder this candidate belongs
+/// to *before* calling this function, so the pinned body cannot exist
+/// outside that remainder.
+pub async fn pin_experience(
     input: &AcceptedDialogueInput,
     history: &impl HistoryRepository,
 ) -> Option<ExperienceCandidate> {
