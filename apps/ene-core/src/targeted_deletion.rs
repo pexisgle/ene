@@ -1061,6 +1061,44 @@ mod tests {
         }
     }
 
+    /// First-party request/confirmation: admission publishes only the first
+    /// bounded identity page and leaves the durable reconciliation cursor
+    /// incomplete. The sealed [`admit`] path names its whole source scope up
+    /// front and must not be used to exercise page-late coverage.
+    async fn admit_first_party(
+        handle: &HostHandle,
+        text: &str,
+        participants: Vec<ParticipantOwnerRef>,
+    ) -> DeletionOperationRef {
+        let staged = handle
+            .store
+            .stage_targeted_deletion(StageTargetedDeletionRequestCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        text.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+            ))
+            .await
+            .expect("staging must answer");
+        let request = match staged {
+            StageTargetedDeletionRequestOutcome::Staged(request) => request,
+            other => panic!("the scope must stage, got {other:?}"),
+        };
+        match handle
+            .store
+            .confirm_targeted_deletion(request, participants)
+            .await
+            .expect("the confirmation must answer")
+        {
+            ConfirmTargetedDeletionOutcome::Started(current) => current,
+            other => panic!("the confirmation must start, got {other:?}"),
+        }
+    }
+
     async fn reopen(dir: &std::path::Path) -> HostHandle {
         HostHandle::open_with_cred_store(dir, CredStore::Memory(MemoryCredentialStore::new()))
             .await
@@ -1478,7 +1516,7 @@ mod tests {
         )
         .await;
 
-        let current = admit(
+        let current = admit_first_party(
             &handle,
             target,
             vec![
