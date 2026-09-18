@@ -171,7 +171,7 @@ pub enum DialogueOutcome {
         text: String,
         /// Accepted input of this turn, so the caller can occupy the pin
         /// window and then [`pin_experience`] after the durable reply.
-        input: AcceptedDialogueInput,
+        input: Box<AcceptedDialogueInput>,
     },
     /// The reply could not be adopted: the caller closes interrupted.
     Interrupted,
@@ -730,7 +730,7 @@ pub async fn finish_turn(
                     // reply is durable.
                     DialogueOutcome::Completed {
                         text: reply_text,
-                        input,
+                        input: Box::new(input),
                     }
                 }
                 _ => DialogueOutcome::Interrupted,
