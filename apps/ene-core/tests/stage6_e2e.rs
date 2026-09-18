@@ -2328,27 +2328,45 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     assert_eq!(participant.progress, "held:unavailable");
 
     // 7a: a replacement connection alone (same incarnation, new connection
-    // lifetime) changes no durable fact and confirms nothing.
+    // lifetime) changes no durable fact and confirms nothing. The serving
+    // tick may resume an Unavailable hold and re-demand the now-reachable
+    // socket; this Client is not pumped, so that demand cannot verify.
     let replacement = connect(&served.dir).await;
     let page = local_deletion_page(&served.handle).await;
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Held);
-    assert_eq!(
-        client_incarnation_participant(&page)
-            .expect("the Client participant stays")
-            .progress,
-        "held:unavailable",
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "a replacement connection must not complete the operation"
+    );
+    let progress = client_incarnation_participant(&page)
+        .expect("the Client participant stays")
+        .progress
+        .clone();
+    assert_ne!(
+        progress, "verified",
         "a replacement connection never verifies the participant by itself"
+    );
+    assert!(
+        progress == "held:unavailable" || progress == "running",
+        "the unpumped replacement stays held or in a retry demand, got {progress}"
     );
     drop(replacement);
 
     // 8: a Host restart keeps the durable snapshot; the restart itself
-    // completes nothing and the same Client participant survives.
+    // completes nothing and the same Client participant survives. Startup
+    // recovery may resume the Unavailable hold and re-demand; this Client is
+    // not pumped yet, so that demand cannot verify.
     let mut client = served.restart().await;
     let page = local_deletion_page(&served.handle).await;
     assert_ne!(page.operations[0].phase, DeletionPhaseWire::Completed);
     let participant = client_incarnation_participant(&page)
         .expect("the Client participant must survive the restart");
-    assert_eq!(participant.progress, "held:unavailable");
+    assert_ne!(participant.progress, "verified");
+    assert!(
+        participant.progress == "held:unavailable" || participant.progress == "running",
+        "restart must not verify the unpumped Client, got {}",
+        participant.progress
+    );
 
     // 6: the reconnected Client reads frames, answers the bounded demand, and
     // only then does the durable participant verify and completion commit.
