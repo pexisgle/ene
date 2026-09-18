@@ -47,7 +47,7 @@ pub use erasure::{
     ActionErasureParticipant, CompanionErasureParticipant, ERASURE_SCAN_ROWS,
     InferenceErasureParticipant, LearningErasureParticipant, TaskErasureParticipant,
 };
-pub use preservation::HostTransientArrivalOutcome;
+pub use preservation::{HOST_TRANSIENT_ARRIVAL_PAGE, HostTransientArrivalOutcome};
 
 /// Messages carry the short backend cause only. Paths are non-secret but are
 /// kept out of messages for operational brevity.
@@ -544,5 +544,121 @@ impl Store {
     #[doc(hidden)]
     pub async fn pause_learning_pin_queue_if_armed_for_tests(&self) {
         self.test_parks.learning_pin_queue.pause_if_armed().await;
+    }
+
+    /// Arms the first-waiter park after a Learning candidate is on the queue
+    /// and before canonical HostTransient arrival publication.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_host_transient_arrival_publish_park_for_tests(&self) {
+        self.test_parks.host_transient_arrival_publish.arm();
+    }
+
+    /// Waits until the armed arrival-publish park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_host_transient_arrival_publish_park_for_tests(&self) {
+        self.test_parks
+            .host_transient_arrival_publish
+            .wait_entered()
+            .await;
+    }
+
+    /// Releases the parked arrival-publish handoff.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_host_transient_arrival_publish_park_for_tests(&self) {
+        self.test_parks.host_transient_arrival_publish.release();
+    }
+
+    /// Pauses when the arrival-publish park is armed.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_host_transient_arrival_publish_if_armed_for_tests(&self) {
+        self.test_parks
+            .host_transient_arrival_publish
+            .pause_if_armed()
+            .await;
+    }
+
+    /// Forces the next `note_host_transient_learning_arrival` to fail closed.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_next_host_transient_arrival_for_tests(&self) {
+        self.test_parks
+            .fail_host_transient_arrival
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Forces every `note_host_transient_learning_arrival` to fail until
+    /// [`Self::allow_host_transient_arrival_for_tests`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_host_transient_arrivals_until_allow_for_tests(&self) {
+        self.test_parks
+            .fail_host_transient_arrival_sticky
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Clears a forced HostTransient arrival publication failure.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn allow_host_transient_arrival_for_tests(&self) {
+        self.test_parks
+            .fail_host_transient_arrival_sticky
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.test_parks
+            .fail_host_transient_arrival
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Forces HostTransient arrival classification for one operation to fail
+    /// until [`Self::allow_deletion_operation_material_for_tests`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_deletion_operation_material_for_tests(
+        &self,
+        operation: ene_preservation::DeletionOperationId,
+    ) {
+        *self
+            .test_parks
+            .fail_deletion_material
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(operation);
+    }
+
+    /// Clears a forced HostTransient arrival classification failure.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn allow_deletion_operation_material_for_tests(&self) {
+        *self
+            .test_parks
+            .fail_deletion_material
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Whether arrival classification for `operation` is forced to fail.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn host_transient_arrival_classify_fails_for_tests(
+        &self,
+        operation: ene_preservation::DeletionOperationId,
+    ) -> bool {
+        *self
+            .test_parks
+            .fail_deletion_material
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == Some(operation)
+    }
+
+    /// How many times `note_host_transient_learning_arrival` has been entered.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn host_transient_arrival_attempts_for_tests(&self) -> u64 {
+        self.test_parks
+            .host_transient_arrival_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }

@@ -6,7 +6,8 @@
 //! driver finishes the operation, then release the parked caller to observe
 //! a stale no-op. Production builds never compile this module.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::Semaphore;
 
@@ -70,4 +71,9 @@ pub(crate) struct TestParks {
     pub(crate) host_transient_verified_record: TestPark,
     pub(crate) deletion_finalizing: TestPark,
     pub(crate) learning_pin_queue: TestPark,
+    pub(crate) host_transient_arrival_publish: TestPark,
+    pub(crate) fail_host_transient_arrival: AtomicBool,
+    pub(crate) fail_host_transient_arrival_sticky: AtomicBool,
+    pub(crate) fail_deletion_material: Mutex<Option<ene_preservation::DeletionOperationId>>,
+    pub(crate) host_transient_arrival_attempts: AtomicU64,
 }

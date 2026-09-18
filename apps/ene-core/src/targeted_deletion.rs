@@ -375,6 +375,9 @@ pub async fn drive_targeted_deletion(
             "invalid targeted deletion pass parameters",
         )));
     }
+    if let Some(host) = &registry.host_transient {
+        host.publish_owed_arrivals().await;
+    }
     let mut outcome = TargetedDeletionPassOutcome::default();
     let mut after = None;
     while (outcome.operations as usize) < pass.operation_limit as usize {
@@ -444,9 +447,15 @@ async fn settle_finalizing(
     store.pause_deletion_finalizing_if_armed_for_tests().await;
     let _arrival_gate = if let Some(host) = &registry.host_transient {
         let gate = host.lock_arrival().await;
-        if host.has_inflight_pins() {
+        host.publish_owed_arrivals_locked().await;
+        if host.unpublished_blocks_finalizing(current).await {
             return Ok(());
         }
+        // Finalizing proceeds only when inflight_pins == 0, this operation
+        // does not owe an unpublished HostTransient arrival, classification
+        // of the live remainder has not failed closed, and a generation
+        // mismatch is unrelated to this operation. Unrelated enqueue may
+        // bump `mutation_generation` without resetting this participant.
         Some(gate)
     } else {
         None

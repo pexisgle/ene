@@ -3049,7 +3049,7 @@ async fn a_host_transient_arrival_after_verified_opens_a_new_sweep() {
     );
     assert_eq!(
         store
-            .note_host_transient_learning_arrival()
+            .note_host_transient_learning_arrival(vec![current.operation])
             .await
             .expect("the arrival must publish"),
         crate::HostTransientArrivalOutcome::SweepOpened
@@ -3087,7 +3087,7 @@ async fn a_host_transient_arrival_during_finalizing_returns_to_active() {
     enter_finalizing_via_a5(&store, current).await;
     assert_eq!(
         store
-            .note_host_transient_learning_arrival()
+            .note_host_transient_learning_arrival(vec![current.operation])
             .await
             .expect("the arrival must publish"),
         crate::HostTransientArrivalOutcome::SweepOpened
@@ -3114,7 +3114,7 @@ async fn a_host_transient_arrival_after_completion_does_not_reopen() {
     complete_via_a5(&store, current).await;
     assert_eq!(
         store
-            .note_host_transient_learning_arrival()
+            .note_host_transient_learning_arrival(vec![current.operation])
             .await
             .expect("the arrival must publish"),
         crate::HostTransientArrivalOutcome::Unchanged
@@ -3127,4 +3127,100 @@ async fn a_host_transient_arrival_after_completion_does_not_reopen() {
         unfinished.is_empty(),
         "the completed operation stays closed"
     );
+}
+
+#[tokio::test]
+async fn a_host_transient_arrival_invalidates_only_the_named_operation() {
+    let store = open_memory().await.unwrap();
+    let a = admit(
+        &store,
+        "secret-a",
+        Vec::new(),
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+    let b = admit(
+        &store,
+        "secret-b",
+        Vec::new(),
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+    for current in [a, b] {
+        assert_eq!(
+            store
+                .record_participant_completion(ParticipantCompletionFact::verified(
+                    current.condition(),
+                    ParticipantOwnerRef::HostTransient,
+                    0,
+                    fixture_clock(),
+                ))
+                .await
+                .expect("the verified fact must record"),
+            ParticipantCompletionOutcome::Recorded(
+                ene_preservation::ParticipantProgress::Verified {
+                    sweep: current.sweep,
+                }
+            )
+        );
+    }
+    assert_eq!(
+        store
+            .note_host_transient_learning_arrival(vec![a.operation])
+            .await
+            .expect("the A arrival must publish"),
+        crate::HostTransientArrivalOutcome::SweepOpened
+    );
+    let unfinished = store
+        .unfinished_deletions(None, 100)
+        .await
+        .expect("unfinished operations read");
+    let record_a = unfinished
+        .iter()
+        .find(|record| record.current.operation == a.operation)
+        .expect("A stays unfinished");
+    let record_b = unfinished
+        .iter()
+        .find(|record| record.current.operation == b.operation)
+        .expect("B stays unfinished");
+    assert_eq!(record_a.phase, DeletionOperationPhase::Active);
+    assert_ne!(record_a.current.sweep, a.sweep);
+    assert_eq!(record_b.phase, DeletionOperationPhase::Active);
+    assert_eq!(record_b.current.sweep, b.sweep);
+    let host_b = store
+        .deletion_participants(b.operation, None, 100)
+        .await
+        .expect("B participants read")
+        .into_iter()
+        .find(|record| record.participant.owner == ParticipantOwnerRef::HostTransient)
+        .expect("B HostTransient remains required");
+    assert!(
+        host_b.progress.is_verified(),
+        "an unrelated operation must keep its HostTransient verification"
+    );
+
+    assert_eq!(
+        store
+            .note_host_transient_learning_arrival(vec![b.operation])
+            .await
+            .expect("the B arrival must publish"),
+        crate::HostTransientArrivalOutcome::SweepOpened
+    );
+    let unfinished = store
+        .unfinished_deletions(None, 100)
+        .await
+        .expect("unfinished operations read");
+    let record_b = unfinished
+        .iter()
+        .find(|record| record.current.operation == b.operation)
+        .expect("B stays unfinished");
+    assert_ne!(record_b.current.sweep, b.sweep);
+    let host_b = store
+        .deletion_participants(b.operation, None, 100)
+        .await
+        .expect("B participants read")
+        .into_iter()
+        .find(|record| record.participant.owner == ParticipantOwnerRef::HostTransient)
+        .expect("B HostTransient remains required");
+    assert!(!host_b.progress.is_verified());
 }

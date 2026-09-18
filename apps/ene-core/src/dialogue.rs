@@ -1262,13 +1262,18 @@ impl HostHandle {
     /// cannot complete over the new remainder.
     pub(crate) async fn queue_learning_formation(&self, experience: ExperienceCandidate) {
         let _gate = self.host_transient_arrival.lock().await;
-        let covered =
-            crate::transient_erasure::learning_experience_is_old_origin(&self.store, &experience)
-                .await;
         crate::lock_unpoison(&self.learning_queue).push_back(experience);
-        if covered {
-            drop(self.store.note_host_transient_learning_arrival().await);
-        }
+        self.host_transient_arrival.note_queued_arrival();
+        #[cfg(any(test, feature = "test-support"))]
+        self.store
+            .pause_host_transient_arrival_publish_if_armed_for_tests()
+            .await;
+        crate::transient_erasure::publish_owed_learning_arrivals(
+            &self.store,
+            &self.host_transient_arrival,
+            &self.learning_queue,
+        )
+        .await;
     }
 
     async fn begin_learning_pin(&self) {
