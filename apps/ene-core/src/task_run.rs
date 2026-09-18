@@ -680,6 +680,15 @@ pub async fn run_task_agent_execution(
                             observed,
                         )
                         .await?;
+                        // The occurrence is body-free. If this execution was
+                        // associated with a deletion interval — including one
+                        // that closed after the Action read and before the
+                        // occurrence write — the in-memory body is old-origin
+                        // and must not enter the next provider turn. The hold
+                        // names the execution, not the text, so a later fresh
+                        // Owner origin of the same string is unaffected.
+                        let text =
+                            replay_observation_text(store, delegation, &effect, text).await?;
                         exchanges.push(TaskAgentActionExchange {
                             request: produced.output,
                             observation: TaskAgentObservation::new(occurrence, text),
@@ -865,6 +874,32 @@ fn observed_workspace_body(effect: &ObservedEffect) -> bool {
         effect.output,
         Some(ActionOutput::Bytes(_) | ActionOutput::Listing(_))
     )
+}
+
+/// Observation text replayed into the next provider turn.
+///
+/// A body-observing execution associated with a deletion interval is
+/// old-origin even when the current condition has already closed: the
+/// transient body must not become logical input. Fail closed if the hold
+/// cannot be read.
+async fn replay_observation_text(
+    store: &Store,
+    delegation: ene_task::DelegationId,
+    effect: &ObservedEffect,
+    text: String,
+) -> Result<String, TaskAgentRunError> {
+    if !observed_workspace_body(effect) {
+        return Ok(text);
+    }
+    match store.task_delegation_held(delegation.as_raw()).await {
+        Ok(true) => Ok(String::from(
+            "the observed workspace content was discarded because its producing execution is associated with a deletion interval",
+        )),
+        Ok(false) => Ok(text),
+        Err(error) => Err(TaskAgentRunError::StorageUnavailable {
+            reason: error.to_string(),
+        }),
+    }
 }
 
 /// Renders the executor's own observation for the next turn.

@@ -323,6 +323,16 @@ fn insert_attempt_sync(
         premise.attempt.as_raw(),
         ActionCertaintyWire::Unknown,
     )?;
+    // A body-observing Action that starts while a deletion interval is open
+    // cannot prove its yet-recorded observation body is unrelated to the
+    // protected text inside this transaction. The start fact is already
+    // written (certainty stays Unknown); associating the execution keeps that
+    // work old-origin if the observation write lands after completion. No
+    // unfinished operation is a no-op, so a post-completion start is free.
+    if matches!(premise.operation, OperationKind::Read | OperationKind::List) {
+        crate::preservation::hold_body_observing_delegation(&tx, premise.delegation, &started_at)
+            .map_err(|error| action_unavailable(error.to_string()))?;
+    }
     tx.commit().map_err(action_unavailable)?;
     Ok(ActionStartOutcome::Started)
 }

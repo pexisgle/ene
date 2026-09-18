@@ -1008,3 +1008,117 @@ async fn derived_presentation_reads_never_resurrect_an_erased_body() {
         .expect("the result row is retained");
     assert!(!report.text.contains(TARGET));
 }
+
+/// Blocker 3: actual Task erase re-reads canonical currentness in the same
+/// Immediate transaction. A demand parked after it was admitted current must
+/// not redact a fresh post-completion purpose, and must not rewrite Action
+/// certainty.
+#[tokio::test]
+async fn a_stale_task_erase_does_not_mutate_fresh_post_completion_purpose() {
+    let store = open_memory().await.unwrap();
+    let (task, delegation, workspace, _source) = seed_task_surface(&store).await;
+    let (done, unknown) = seed_action_surface(&store, task, delegation, workspace).await;
+    let current = admit_target_with(
+        &store,
+        TARGET,
+        Vec::new(),
+        vec![ParticipantOwnerRef::Task, ParticipantOwnerRef::Action],
+    )
+    .await;
+
+    store.arm_erasure_mutation_park_for_tests();
+    let parked = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            let participant = TaskErasureParticipant::new(store.clone());
+            demand(&participant, &store, current, ParticipantOwnerRef::Task).await
+        })
+    };
+    store.wait_erasure_mutation_park_for_tests().await;
+
+    sweep_to_verified(
+        &TaskErasureParticipant::new(store.clone()),
+        &store,
+        current,
+        ParticipantOwnerRef::Task,
+    )
+    .await;
+    sweep_to_verified(
+        &ActionErasureParticipant::new(store.clone()),
+        &store,
+        current,
+        ParticipantOwnerRef::Action,
+    )
+    .await;
+    super::preservation::complete_via_a5(&store, current).await;
+
+    let fresh_purpose = format!("keep {TARGET} private");
+    let fresh = store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: fresh_purpose.clone(),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: fixture_clock(),
+            assignee: AssigneeRef {
+                companion: RawId::new(),
+            },
+            workspace: None,
+        })
+        .await
+        .expect("the fresh origin must commit");
+
+    store.release_erasure_mutation_park_for_tests();
+    let stale = parked.await.expect("the parked demand joins");
+    assert_eq!(
+        stale.status(),
+        ParticipantCompletionStatus::LocalComplete,
+        "a completed condition is NotCurrent, never Verified"
+    );
+    assert_eq!(stale.erased_count(), 0);
+
+    let loaded = store
+        .load_task(fresh.task)
+        .await
+        .unwrap()
+        .expect("the fresh task must load");
+    assert_eq!(
+        loaded.revision.purpose_text.text, fresh_purpose,
+        "fresh post-completion purpose must remain byte-identical"
+    );
+    let old = store
+        .load_task(task.task)
+        .await
+        .unwrap()
+        .expect("the swept task still loads");
+    assert!(old.revision.purpose_text.text.contains(MARKER));
+    assert!(!old.revision.purpose_text.text.contains(TARGET));
+
+    let done_row = store
+        .load_attempt(done)
+        .await
+        .unwrap()
+        .expect("the confirmed attempt remains");
+    assert_eq!(done_row.certainty, ActionCertainty::ConfirmedSuccess);
+    let unknown_row = store
+        .load_attempt(unknown)
+        .await
+        .unwrap()
+        .expect("the unknown attempt remains");
+    assert_eq!(unknown_row.certainty, ActionCertainty::Unknown);
+
+    let page = store.deletion_status(None, 10).await.unwrap();
+    let record = page
+        .iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the completed operation remains on the status view");
+    assert_eq!(
+        record.phase,
+        ene_preservation::DeletionOperationPhase::Completed
+    );
+}

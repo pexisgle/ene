@@ -794,6 +794,7 @@ impl HostHandle {
                 self.store.clone(),
             ))),
             Arc::new(crate::transient_erasure::HostTransientParticipant::new(
+                self.store.clone(),
                 self.transient_fence.clone(),
                 self.presentations.clone(),
                 self.learning_queue.clone(),
@@ -837,6 +838,16 @@ impl HostHandle {
 
     pub(crate) fn companion_wire(&self) -> &str {
         &self.companion_wire
+    }
+
+    /// The composition store handle this Host cloned into participants.
+    ///
+    /// Parks live on this in-memory instance. A second [`Store::open`] on the
+    /// same file would not share them, so production-path race tests must arm
+    /// the serving handle's store rather than reopening the database.
+    #[doc(hidden)]
+    pub fn store_for_tests(&self) -> &Store {
+        &self.store
     }
 
     /// Resolves an inbound companion wire ref to its domain companion.

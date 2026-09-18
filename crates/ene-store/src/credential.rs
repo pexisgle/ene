@@ -775,9 +775,13 @@ impl CredentialErasureRepository for Store {
     ) -> impl std::future::Future<
         Output = Result<CredentialErasureOutcome, CredentialTechnicalError>,
     > + Send {
+        #[cfg(any(test, feature = "test-support"))]
+        let parks = Arc::clone(&self.test_parks);
         let conn = Arc::clone(&self.conn);
         let target = target.to_owned();
         async move {
+            #[cfg(any(test, feature = "test-support"))]
+            parks.erasure_mutation.pause_if_armed().await;
             run_blocking(move || {
                 let mut guard = lock_shared(&conn);
                 let tx = guard
@@ -834,6 +838,21 @@ impl CredentialErasureRepository for Store {
                 tx.commit()
                     .map_err(|error| credential_unavailable(error.to_string()))?;
                 Ok(CredentialErasureOutcome::Applied { erased, remainder })
+            })
+            .await
+        }
+    }
+
+    fn condition_is_current(
+        &self,
+        condition: ErasureConditionRef,
+    ) -> impl std::future::Future<Output = Result<bool, CredentialTechnicalError>> + Send {
+        let conn = Arc::clone(&self.conn);
+        async move {
+            run_blocking(move || {
+                let guard = lock_shared(&conn);
+                condition_is_current(&guard, condition)
+                    .map_err(|error| credential_unavailable(error.to_string()))
             })
             .await
         }

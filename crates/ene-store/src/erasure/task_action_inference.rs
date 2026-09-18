@@ -286,6 +286,9 @@ enum ErasurePageError {
     /// marker itself contains the target). Fail closed instead of writing an
     /// unreadable row or a value that still contains the target.
     Unrepresentable,
+    /// The demanded condition is no longer the operation's current unfinished
+    /// condition. The page mutates nothing.
+    NotCurrent,
 }
 
 /// Identity of one swept condition. The operation and generation travel
@@ -319,6 +322,12 @@ impl ErasureCore {
     /// Runs one bounded demand and reports the fact. Every failure is an
     /// explicit hold: the caller's durable progress stays what it was.
     async fn demand(&self, command: DemandLocalErasureCommand) -> ParticipantCompletionFact {
+        #[cfg(any(test, feature = "test-support"))]
+        self.store
+            .test_parks
+            .erasure_mutation
+            .pause_if_armed()
+            .await;
         let condition = command.condition();
         let observed_at = WallClockWithTz::now();
         let Some(target) = exact_target(&command) else {
@@ -366,6 +375,11 @@ impl ErasureCore {
                 ParticipantHoldClass::Failed,
                 observed_at,
             ),
+            // Not-current work mutates nothing and cannot verify the demanded
+            // condition; the durable record refuses it as stale or completed.
+            Err(ErasurePageError::NotCurrent) => {
+                ParticipantCompletionFact::local_complete(condition, self.owner, 0, 0, observed_at)
+            }
         }
     }
 
@@ -376,6 +390,21 @@ impl ErasureCore {
         target: &str,
         condition: ErasureConditionRef,
     ) -> Result<Chunk, ErasurePageError> {
+        if self.stages.is_empty() {
+            // Inference has no body column, so it never opens an erase-page
+            // transaction. The same currentness predicate still applies: a
+            // stale or completed condition must not report Verified.
+            let conn = Arc::clone(&self.store.conn);
+            let current = run_blocking(move || {
+                let guard = lock_shared(&conn);
+                crate::preservation::condition_is_current(&guard, condition)
+                    .map_err(|_| ErasurePageError::Storage)
+            })
+            .await?;
+            if !current {
+                return Err(ErasurePageError::NotCurrent);
+            }
+        }
         let mut examined = 0u32;
         loop {
             if progress.stage >= self.stages.len() {
@@ -470,8 +499,7 @@ async fn erase_page(
 ) -> Result<ErasePage, ErasurePageError> {
     let conn = Arc::clone(&store.conn);
     let target = target.to_owned();
-    let operation = encode_id(condition.operation.as_raw());
-    run_blocking(move || erase_page_sync(&conn, stage, &target, &operation, after_rowid, limit))
+    run_blocking(move || erase_page_sync(&conn, stage, &target, condition, after_rowid, limit))
         .await
 }
 
@@ -479,7 +507,7 @@ fn erase_page_sync(
     conn: &Mutex<Connection>,
     stage: &ErasureStage,
     target: &str,
-    operation: &str,
+    condition: ErasureConditionRef,
     after_rowid: i64,
     limit: u32,
 ) -> Result<ErasePage, ErasurePageError> {
@@ -487,6 +515,17 @@ fn erase_page_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| ErasurePageError::Storage)?;
+    // The demand was admitted against a then-current condition. Actual
+    // mutation re-reads canonical currentness in this same Immediate
+    // transaction: a completed operation or a superseded sweep must not
+    // change a byte of target-bearing state, including a fresh origin the
+    // Owner provided after closure. NotCurrent is not Verified.
+    if !crate::preservation::condition_is_current(&tx, condition)
+        .map_err(|_| ErasurePageError::Storage)?
+    {
+        return Err(ErasurePageError::NotCurrent);
+    }
+    let operation = encode_id(condition.operation.as_raw());
     let rows = {
         let mut statement = tx
             .prepare(&page_sql(stage))
@@ -513,7 +552,7 @@ fn erase_page_sync(
         examined += 1;
         last_rowid = row.rowid;
         let provenance_linked = stage.table == "task_result"
-            && result_delegation_held_for_operation(&tx, row.rowid, operation)?;
+            && result_delegation_held_for_operation(&tx, row.rowid, &operation)?;
         for value in plan_redactions(stage, row, target, provenance_linked)? {
             let sql = format!(
                 "UPDATE {} SET {} = ?1 WHERE rowid = ?2",

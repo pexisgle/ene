@@ -454,16 +454,6 @@ async fn drive_operation(
     outcome: &mut TargetedDeletionPassOutcome,
 ) -> Result<bool, CoreError> {
     let condition = current.condition();
-    let material = match store
-        .deletion_operation_material(current.operation)
-        .await
-        .map_err(deletion_error)?
-    {
-        DeletionMaterialOutcome::Material(material) => material,
-        // Missing means the operation vanished (nothing to drive); Destroyed
-        // means completion started and this pass must not fan out erasure.
-        DeletionMaterialOutcome::Missing | DeletionMaterialOutcome::Destroyed => return Ok(false),
-    };
     // Phase 1: exhaust the covered-source reconciliation before the first
     // participant demand. The identity bodies carrying the target are the
     // evidence the already-claimed in-flight-use correspondence is derived
@@ -541,6 +531,31 @@ async fn drive_operation(
                     }
                 }
                 outcome.demands += 1;
+                // Currentness boundary for this demand's source set: the
+                // canonical coverage is re-read only after reconciliation
+                // reported Complete for `current`, and again immediately
+                // before this demand so a source this pass just published
+                // (or one another writer published during an earlier
+                // participant) is in the scope Learning pin-correlation
+                // walks. A handle taken before the walk would omit
+                // identities past the admission page; Missing/Destroyed
+                // here means a concurrent lifecycle transition ended this
+                // pass's authority and the pass must not mutate with a
+                // stale snapshot. The page size is a work bound, never a
+                // coverage bound. Each participant's actual erase
+                // transaction re-checks `condition_is_current` on the same
+                // Immediate writer; this read only chooses the demand
+                // scope, it is not the mutation gate.
+                let material = match store
+                    .deletion_operation_material(current.operation)
+                    .await
+                    .map_err(deletion_error)?
+                {
+                    DeletionMaterialOutcome::Material(material) => material,
+                    DeletionMaterialOutcome::Missing | DeletionMaterialOutcome::Destroyed => {
+                        return Ok(false);
+                    }
+                };
                 let command = DemandLocalErasureCommand::new(
                     condition,
                     record.participant.owner,
@@ -1375,6 +1390,291 @@ mod tests {
             .await
             .expect("the status page must read");
         assert!(!format!("{page:?}").contains(target));
+    }
+
+    /// Blocker 2: a paraphrase Summary whose History pin sits past the
+    /// admission/reconciliation page must still be erased by the same sweep.
+    /// Page size is a work bound. The driver re-reads canonical coverage
+    /// after reconciliation Complete before Learning fan-out, so semantic
+    /// derived data cannot survive because the pin's source was published
+    /// after the admission page.
+    #[tokio::test]
+    async fn reconciliation_then_fan_out_erases_paraphrase_pinned_past_the_page() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+        use ene_learning::{ChangeKind, LearningRepository as _, MemoryId, MemoryTarget};
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-page-pin").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "page-late-pin-canary";
+        let mut sources = Vec::new();
+        for index in 0..(DELETION_RECONCILIATION_PAGE_SIZE + 6) {
+            sources.push(
+                append_history(
+                    &handle,
+                    companion,
+                    generation,
+                    HistoryRole::Owner,
+                    &format!("note {index} carries {target}"),
+                )
+                .await,
+            );
+        }
+        let late = *sources
+            .iter()
+            .max_by_key(|source| source.as_uuid())
+            .expect("the fixture has sources");
+        let paraphrase = summary_of(
+            companion.as_raw(),
+            String::from("The owner keeps a private launch credential."),
+            late,
+            late,
+        );
+        let memory = MemoryId::generate();
+        commit_learning(
+            &handle,
+            &paraphrase,
+            MemoryTarget::New { id: memory },
+            "The owner keeps a private launch credential.",
+            ChangeKind::Initial,
+        )
+        .await;
+        let unrelated = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            "the weather is nice today",
+        )
+        .await;
+        let unrelated_summary = summary_of(
+            companion.as_raw(),
+            String::from("The owner likes jasmine tea."),
+            unrelated,
+            unrelated,
+        );
+        let unrelated_memory = MemoryId::generate();
+        commit_learning(
+            &handle,
+            &unrelated_summary,
+            MemoryTarget::New {
+                id: unrelated_memory,
+            },
+            "The owner likes jasmine tea.",
+            ChangeKind::Initial,
+        )
+        .await;
+
+        let current = admit(
+            &handle,
+            target,
+            vec![
+                ParticipantOwnerRef::Companion,
+                ParticipantOwnerRef::Learning,
+            ],
+        )
+        .await;
+        let outcome = drive_until_settled(&handle).await;
+        assert_eq!(outcome.held, 0, "semantic derived data must not hold");
+        assert_eq!(outcome.unfinished, 0);
+        assert!(
+            outcome.reconciliation_pages >= 1,
+            "the walk needed a continuation page: {outcome:?}"
+        );
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0
+        );
+
+        let timeline = handle
+            .store
+            .load_timeline(companion, None, None, 200)
+            .await
+            .expect("the timeline must load");
+        assert!(timeline.iter().all(|item| !item.text.contains(target)));
+        assert!(
+            timeline.iter().any(|item| item.id == unrelated),
+            "unrelated History stays"
+        );
+        assert!(
+            timeline.iter().all(|item| item.id != late),
+            "the late covered History source is erased"
+        );
+        let summaries = handle
+            .store
+            .load_summaries(&[paraphrase.id, unrelated_summary.id])
+            .await
+            .expect("summaries must load");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, unrelated_summary.id);
+        let memories = handle
+            .store
+            .list_current_memories(companion.as_raw(), None, 100)
+            .await
+            .expect("memories must list");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, unrelated_memory);
+        assert!(
+            handle
+                .store
+                .list_memory_revisions(memory, None, 100)
+                .await
+                .expect("revisions must list")
+                .is_empty()
+        );
+        let recalled = handle
+            .store
+            .recall_candidates(companion.as_raw(), &[String::from("launch")], 50)
+            .await
+            .expect("recall must answer");
+        assert!(recalled.iter().all(|item| item.id != memory));
+        assert_eq!(
+            operation_record(&handle, current.operation).await.phase,
+            DeletionOperationPhase::Completed
+        );
+
+        let fresh = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("a fresh note about {target}"),
+        )
+        .await;
+        let timeline = handle
+            .store
+            .load_timeline(companion, None, None, 200)
+            .await
+            .expect("the timeline must load");
+        assert!(
+            timeline
+                .iter()
+                .any(|item| item.id == fresh && item.text.contains(target)),
+            "a post-completion Owner origin of the same string is accepted"
+        );
+    }
+
+    /// Blocker 3: a demand parked after it was current, while another driver
+    /// completes the operation and the Owner re-provides the same string,
+    /// must return NotCurrent and leave the fresh body byte-identical.
+    #[tokio::test]
+    async fn a_stale_hosted_erase_does_not_mutate_fresh_post_completion_history() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+        use ene_presence::PresenceRepository as _;
+        use ene_store::CompanionErasureParticipant;
+
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-stale-erase").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "hosted-stale-erase-canary";
+        let old = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &format!("old copy of {target}"),
+        )
+        .await;
+        let current = admit(&handle, target, vec![ParticipantOwnerRef::Companion]).await;
+
+        handle.store.arm_erasure_mutation_park_for_tests();
+        let parked = {
+            let store = handle.store.clone();
+            let condition = current.condition();
+            tokio::spawn(async move {
+                let material = match store
+                    .deletion_operation_material(current.operation)
+                    .await
+                    .expect("the material must read")
+                {
+                    DeletionMaterialOutcome::Material(material) => material,
+                    other => panic!("the protected material must read, got {other:?}"),
+                };
+                CompanionErasureParticipant::new(store)
+                    .demand_local_erasure(DemandLocalErasureCommand::new(
+                        condition,
+                        ParticipantOwnerRef::Companion,
+                        command_scope(&material, ParticipantOwnerRef::Companion),
+                    ))
+                    .await
+            })
+        };
+        handle.store.wait_erasure_mutation_park_for_tests().await;
+
+        let outcome = drive_until_settled(&handle).await;
+        assert_eq!(outcome.held, 0);
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0
+        );
+
+        let fresh_body = format!("fresh origin of {target}");
+        let fresh = append_history(
+            &handle,
+            companion,
+            generation,
+            HistoryRole::Owner,
+            &fresh_body,
+        )
+        .await;
+
+        handle.store.release_erasure_mutation_park_for_tests();
+        let stale = parked.await.expect("the parked demand joins");
+        assert_eq!(
+            stale.status(),
+            ParticipantCompletionStatus::LocalComplete,
+            "a completed condition is NotCurrent, never Verified"
+        );
+        assert_eq!(stale.erased_count(), 0);
+
+        let timeline = handle
+            .store
+            .load_timeline(companion, None, None, 100)
+            .await
+            .expect("the timeline must load");
+        let fresh_row = timeline
+            .iter()
+            .find(|item| item.id == fresh)
+            .expect("the fresh origin must remain");
+        assert_eq!(fresh_row.text, fresh_body);
+        assert!(timeline.iter().all(|item| item.id != old));
+        assert_eq!(
+            operation_record(&handle, current.operation).await.phase,
+            DeletionOperationPhase::Completed
+        );
     }
 
     #[tokio::test]

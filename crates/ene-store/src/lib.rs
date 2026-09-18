@@ -36,6 +36,8 @@ mod permission;
 mod presence;
 mod preservation;
 mod task;
+#[cfg(any(test, feature = "test-support"))]
+mod test_parks;
 #[cfg(test)]
 mod tests;
 mod usage_cap;
@@ -111,6 +113,11 @@ pub struct Store {
     /// Bumped after any commit that may have registered an undelivered row;
     /// see [`UndeliveredSignal`].
     undelivered: UndeliveredSignal,
+    /// First-waiter parks for production mutation races. Compiled out of
+    /// production binaries; tests arm them on the same `Store` handle the
+    /// Host composition clones into participants.
+    #[cfg(any(test, feature = "test-support"))]
+    test_parks: Arc<test_parks::TestParks>,
 }
 
 impl Store {
@@ -132,10 +139,16 @@ impl Store {
         conn.pragma_update(None, "secure_delete", "ON")
             .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
         migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
-        Ok(Self {
+        Ok(Self::from_connection(conn))
+    }
+
+    fn from_connection(conn: Connection) -> Self {
+        Self {
             conn: Arc::new(Mutex::new(conn)),
             undelivered: UndeliveredSignal::new(),
-        })
+            #[cfg(any(test, feature = "test-support"))]
+            test_parks: Arc::new(test_parks::TestParks::default()),
+        }
     }
 
     /// Relaxes SQLite durability for test fixtures while keeping the database
@@ -175,10 +188,7 @@ impl Store {
         let mut conn = Connection::open_in_memory()
             .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
         migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-            undelivered: UndeliveredSignal::new(),
-        })
+        Ok(Self::from_connection(conn))
     }
 
     /// Mechanical exact-text remainder probe over the closed system-wide
@@ -231,5 +241,81 @@ impl Store {
             self.undelivered.bump();
         }
         result
+    }
+
+    /// Arms the first-waiter park just before a Task Agent observation row is
+    /// written. Production never calls this; tests use it to hold the
+    /// body-in-memory window closed by the in-flight Action correspondence.
+    /// Without the test-support build this is a no-op.
+    #[doc(hidden)]
+    pub fn arm_observation_write_park_for_tests(&self) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.test_parks.observation_write.arm();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = self;
+    }
+
+    /// Waits until the armed observation-write park has a waiter.
+    #[doc(hidden)]
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            clippy::unused_async,
+            reason = "production no-op of a test-only observation-write park"
+        )
+    )]
+    pub async fn wait_observation_write_park_for_tests(&self) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.test_parks.observation_write.wait_entered().await;
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = self;
+    }
+
+    /// Releases the parked observation write.
+    #[doc(hidden)]
+    pub fn release_observation_write_park_for_tests(&self) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.test_parks.observation_write.release();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = self;
+    }
+
+    /// Arms the first-waiter park just before a durable erasure mutation.
+    /// Without the test-support build this is a no-op.
+    #[doc(hidden)]
+    pub fn arm_erasure_mutation_park_for_tests(&self) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.test_parks.erasure_mutation.arm();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = self;
+    }
+
+    /// Waits until the armed erasure-mutation park has a waiter.
+    #[doc(hidden)]
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            clippy::unused_async,
+            reason = "production no-op of a test-only erasure-mutation park"
+        )
+    )]
+    pub async fn wait_erasure_mutation_park_for_tests(&self) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.test_parks.erasure_mutation.wait_entered().await;
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = self;
+    }
+
+    /// Releases the parked erasure mutation.
+    #[doc(hidden)]
+    pub fn release_erasure_mutation_park_for_tests(&self) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.test_parks.erasure_mutation.release();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = self;
     }
 }

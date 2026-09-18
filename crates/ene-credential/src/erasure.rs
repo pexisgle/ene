@@ -78,6 +78,17 @@ pub trait CredentialErasureRepository: Send + Sync {
     ) -> impl std::future::Future<
         Output = Result<CredentialErasureOutcome, CredentialTechnicalError>,
     > + Send;
+
+    /// Whether `condition` is the operation's current unfinished condition.
+    ///
+    /// The protected device-auth file cannot share the metadata transaction.
+    /// The participant re-reads this predicate immediately before mutating
+    /// the file so a completed or superseded condition cannot erase a fresh
+    /// post-closure origin that landed after the metadata pass committed.
+    fn condition_is_current(
+        &self,
+        condition: ErasureConditionRef,
+    ) -> impl std::future::Future<Output = Result<bool, CredentialTechnicalError>> + Send;
 }
 
 /// The credential owner's [`ErasureParticipant`] implementation.
@@ -145,6 +156,25 @@ impl<R: CredentialErasureRepository + 'static> ErasureParticipant
                     )
                 }
                 Ok(CredentialErasureOutcome::Applied { erased, remainder }) => {
+                    // The metadata transaction already committed under a
+                    // then-current condition. The file is a different writer:
+                    // re-read canonical currentness immediately before any
+                    // file mutation so a completed operation cannot delete a
+                    // fresh post-closure device entry of the same string.
+                    let still_current = self
+                        .repository
+                        .condition_is_current(condition)
+                        .await
+                        .unwrap_or(false);
+                    if !still_current {
+                        return ParticipantCompletionFact::local_complete(
+                            condition,
+                            Self::OWNER,
+                            0,
+                            0,
+                            WallClockWithTz::now(),
+                        );
+                    }
                     // The protected device-auth file is part of the same
                     // credential-owned local surface and runs only after the
                     // database pass proved the condition current.
@@ -237,6 +267,15 @@ mod tests {
         > + Send {
             let outcome = *self.outcome.lock().unwrap();
             async move { Ok(outcome) }
+        }
+
+        fn condition_is_current(
+            &self,
+            _condition: ErasureConditionRef,
+        ) -> impl std::future::Future<Output = Result<bool, CredentialTechnicalError>> + Send
+        {
+            let current = *self.outcome.lock().unwrap() != CredentialErasureOutcome::NotCurrent;
+            async move { Ok(current) }
         }
     }
 

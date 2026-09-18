@@ -1657,6 +1657,53 @@ impl Store {
         let guard = lock_shared(&self.conn);
         held_use(&guard, USE_KIND_INFERENCE_ATTEMPT, claim)
     }
+
+    /// Whether one task delegation was associated with a deletion interval
+    /// (lifecycle §11 R2).
+    ///
+    /// Same durable-correspondence read as [`Self::inference_claim_held`]: the
+    /// hold outlives completion so a delayed observation body or result from a
+    /// pre-deletion execution stays old-origin after `closed_at`. A read
+    /// failure is a technical error the caller must fail closed on.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold table
+    /// cannot be read.
+    pub async fn task_delegation_held(
+        &self,
+        delegation: RawId,
+    ) -> Result<bool, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            held_use(&guard, USE_KIND_TASK_DELEGATION, delegation)
+        })
+        .await
+    }
+
+    /// Whether `condition` is the operation's current unfinished condition.
+    ///
+    /// Host-transient mutation is process memory, not this connection, so it
+    /// cannot share the Immediate writer with the canonical row. This read is
+    /// the same predicate durable participants re-check inside their erase
+    /// transaction; a stale or unreadable answer must not mutate.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError::StorageUnavailable`] when the operation
+    /// row cannot be read.
+    pub async fn erasure_condition_is_current(
+        &self,
+        condition: ErasureConditionRef,
+    ) -> Result<bool, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            condition_is_current(&guard, condition).map_err(storage)
+        })
+        .await
+    }
 }
 
 /// The attempt-side hold enumeration of [`mark_inflight_uses`].
@@ -1696,7 +1743,12 @@ pub(crate) const ASSOCIATE_ATTEMPTS_SQL: &str =
 /// - a task delegation that owns a covered observation occurrence, sealed or
 ///   not. The occurrence identity is the durable name of a discarded
 ///   observed body, so the already-stored result of a sealed execution is
-///   still the sweep's derived personal data.
+///   still the sweep's derived personal data;
+/// - an unsealed task delegation whose body-observing (`read`/`list`) Action
+///   has started while the occurrence row is not yet durable. The in-memory
+///   observation body is not a canonical source; associating the execution
+///   here is what keeps that work "old origin" if Targeted Deletion runs
+///   before the occurrence write.
 ///
 /// The target text travels only as a bound parameter and is never copied into
 /// a hold row.
@@ -1755,6 +1807,11 @@ fn mark_inflight_uses(
         params![operation, sweep, USE_KIND_TASK_DELEGATION, held_at],
     )
     .map_err(storage)?;
+    tx.execute(
+        ASSOCIATE_INFLIGHT_BODY_OBSERVING_DELEGATIONS_SQL,
+        params![operation, USE_KIND_TASK_DELEGATION, held_at],
+    )
+    .map_err(storage)?;
     Ok(())
 }
 
@@ -1777,6 +1834,30 @@ pub(crate) const ASSOCIATE_OBSERVATION_DELEGATIONS_SQL: &str =
      JOIN task_agent_observation o ON o.observation_id = s.source
      WHERE s.operation_id = ?1 AND s.sweep = ?2
      GROUP BY o.delegation_id";
+
+/// Associates unsealed executions whose body-observing Action has started
+/// but whose observation occurrence is not durable yet.
+///
+/// A `read`/`list` attempt is the producing work of a workspace-body
+/// observation. Until the occurrence row exists, admission cannot survey that
+/// discarded body, and a later write after the current condition closes would
+/// otherwise look like a fresh origin. The hold names the execution, not the
+/// text, and is the same correspondence the Task owner sweep and the
+/// observation replay path already consult. Write confirmations are excluded:
+/// they reproduce no workspace body.
+pub(crate) const ASSOCIATE_INFLIGHT_BODY_OBSERVING_DELEGATIONS_SQL: &str =
+    "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+     SELECT ?2, d.delegation_id, ?1, ?3
+     FROM delegation d
+     WHERE NOT EXISTS
+         (SELECT 1 FROM task_result r WHERE r.delegation_id = d.delegation_id)
+       AND EXISTS
+         (SELECT 1 FROM action_attempt a
+          WHERE a.delegation_id = d.delegation_id
+            AND a.operation IN ('read', 'list')
+            AND NOT EXISTS
+                (SELECT 1 FROM task_agent_observation o
+                 WHERE o.action_attempt_id = a.attempt_id))";
 
 /// Holds every delegation that owns at least one observation occurrence (the
 /// fail-closed overflow fallback of [`survey_task_observation_sources`]).
@@ -2047,6 +2128,32 @@ pub(crate) fn hold_delegation(
             encode_id(condition.operation.as_raw()),
             held_at
         ],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Associates one body-observing execution with every unfinished operation.
+///
+/// AU5 has already inserted the `read`/`list` attempt: the Action started, so
+/// refusing it would rewrite an objective start fact. While a current
+/// condition exists the yet-unread (or already-read, not-yet-recorded) body
+/// cannot be proven unrelated to the protected text without I/O this
+/// transaction forbids, so the execution is held by identity. Completing
+/// operations are skipped: their condition is closing and must not acquire
+/// new uses. A store with no unfinished operation is a no-op, so a fresh
+/// execution after completion is not held.
+pub(crate) fn hold_body_observing_delegation(
+    tx: &rusqlite::Transaction<'_>,
+    delegation: RawId,
+    held_at: &str,
+) -> Result<(), PreservationTechnicalError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+         SELECT ?1, ?2, operation_id, ?3
+         FROM deletion_operation
+         WHERE phase IN ('active', 'held')",
+        params![USE_KIND_TASK_DELEGATION, encode_id(delegation), held_at],
     )
     .map_err(storage)?;
     Ok(())

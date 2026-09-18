@@ -49,6 +49,7 @@ use ene_preservation::{
     ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef, TargetedDeletionTarget,
 };
 use ene_primitive::{RawId, WallClockWithTz};
+use ene_store::Store;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -148,6 +149,7 @@ impl TransientErasureFence {
 
 /// Host-process transient erasure participant (lifecycle §8, SO §4.17).
 pub(crate) struct HostTransientParticipant {
+    store: Store,
     fence: Arc<TransientErasureFence>,
     presentations: Arc<std::sync::Mutex<PresentationState>>,
     learning_queue: Arc<std::sync::Mutex<VecDeque<ExperienceCandidate>>>,
@@ -156,11 +158,13 @@ pub(crate) struct HostTransientParticipant {
 impl HostTransientParticipant {
     #[must_use]
     pub(crate) fn new(
+        store: Store,
         fence: Arc<TransientErasureFence>,
         presentations: Arc<std::sync::Mutex<PresentationState>>,
         learning_queue: Arc<std::sync::Mutex<VecDeque<ExperienceCandidate>>>,
     ) -> Self {
         Self {
+            store,
             fence,
             presentations,
             learning_queue,
@@ -188,6 +192,26 @@ impl ErasureParticipant for HostTransientParticipant {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>>
     {
         Box::pin(async move {
+            // Process-memory mutation cannot share the Immediate writer with
+            // the canonical row. The same currentness predicate durable
+            // participants re-check inside their erase transaction is read
+            // here before any drop: a completed or superseded condition must
+            // not discard a fresh post-closure premise. Unreadable
+            // currentness fails closed (no mutation, not Verified).
+            let current = self
+                .store
+                .erasure_condition_is_current(command.condition())
+                .await
+                .unwrap_or(false);
+            if !current {
+                return ParticipantCompletionFact::local_complete(
+                    command.condition(),
+                    ParticipantOwnerRef::HostTransient,
+                    0,
+                    0,
+                    WallClockWithTz::now(),
+                );
+            }
             let sources = command.scope().sources().to_vec();
             let exact = command
                 .scope()
@@ -206,6 +230,24 @@ impl ErasureParticipant for HostTransientParticipant {
             // nothing published before the fence is treated as proof of
             // completion (a durable reply is the History owner's to erase).
             self.fence.invalidate();
+            // Process memory cannot roll back. A second currentness read
+            // after the drop refuses Verified when the operation closed in
+            // the window: the durable record will not treat a stale demand as
+            // completion, and a later pass of a still-current sweep re-demands.
+            let still_current = self
+                .store
+                .erasure_condition_is_current(command.condition())
+                .await
+                .unwrap_or(false);
+            if !still_current {
+                return ParticipantCompletionFact::local_complete(
+                    command.condition(),
+                    ParticipantOwnerRef::HostTransient,
+                    0,
+                    0,
+                    WallClockWithTz::now(),
+                );
+            }
             ParticipantCompletionFact::verified(
                 command.condition(),
                 ParticipantOwnerRef::HostTransient,
@@ -780,9 +822,9 @@ mod tests {
     use ene_credential::MemoryCredentialStore;
     use ene_learning::{ExperienceRole, ExperienceSourceKind, ExperienceTurn, SourceRangeRef};
     use ene_preservation::{
-        DeletionPurpose, DeletionSearchMaterial, DeletionSweepGeneration,
-        DemandLocalErasureCommand, ParticipantCompletionStatus, ParticipantErasureScope,
-        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        DeletionPurpose, DeletionSearchMaterial, DemandLocalErasureCommand,
+        ParticipantCompletionStatus, ParticipantErasureScope, PreservationRepository as _,
+        StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
     };
     use ene_primitive::WallClockWithTz;
 
@@ -1599,17 +1641,20 @@ mod tests {
         crate::lock_unpoison(&handle.learning_queue).push_back(experience("unrelated text"));
         let epoch = handle.transient_fence_epoch();
         let participant = HostTransientParticipant::new(
+            handle.store.clone(),
             Arc::clone(&handle.transient_fence),
             Arc::clone(&handle.presentations),
             Arc::clone(&handle.learning_queue),
         );
-        let condition = ErasureConditionRef {
-            operation: ene_preservation::DeletionOperationId::from_raw(RawId::new()),
-            sweep: DeletionSweepGeneration::from_u64(1),
-        };
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
         let fact = participant
             .demand_local_erasure(command(
-                condition,
+                current.condition(),
                 ParticipantOwnerRef::HostTransient,
                 ParticipantErasureScope::local(target("secret body"), Vec::new()),
             ))

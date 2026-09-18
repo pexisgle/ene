@@ -10,10 +10,12 @@ use super::*;
 
 use ene_companion::{ActivityId, RecordResumeActivityCommand};
 use ene_preservation::{
-    DeletionOperationId, DeletionSearchMaterial, DeletionSweepGeneration,
-    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant as _,
-    MechanicalDeletionTarget, ParticipantCompletionFact, ParticipantCompletionStatus,
-    ParticipantErasureScope, ParticipantHoldClass, ParticipantOwnerRef, TargetedDeletionTarget,
+    DeletionLifecycleChange, DeletionLifecycleOutcome, DeletionOperationId, DeletionPurpose,
+    DeletionSearchMaterial, DeletionSweepGeneration, DemandLocalErasureCommand,
+    ErasureConditionRef, ErasureParticipant as _, MechanicalDeletionTarget,
+    ParticipantCompletionFact, ParticipantCompletionStatus, ParticipantErasureScope,
+    ParticipantHoldClass, ParticipantOwnerRef, PreservationRepository as _,
+    StartTargetedDeletionCommand, StartTargetedDeletionOutcome, TargetedDeletionTarget,
 };
 use ene_task::{TaskId, TaskPurposeRef, TaskRef, TaskRevision};
 
@@ -24,6 +26,46 @@ fn condition(sweep: u64) -> ErasureConditionRef {
     ErasureConditionRef {
         operation: DeletionOperationId::from_raw(RawId::new()),
         sweep: DeletionSweepGeneration::from_u64(sweep),
+    }
+}
+
+async fn admit_owner(store: &Store, text: &str, owner: ParticipantOwnerRef) -> ErasureConditionRef {
+    match store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        text.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                fixture_clock(),
+                Vec::new(),
+                vec![owner],
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("the sweep fixture must admit")
+    {
+        StartTargetedDeletionOutcome::Started(current) => current.condition(),
+        other => panic!("the sweep fixture must start, got {other:?}"),
+    }
+}
+
+async fn next_sweep(store: &Store, condition: ErasureConditionRef) -> ErasureConditionRef {
+    let current = ene_preservation::DeletionOperationRef {
+        operation: condition.operation,
+        sweep: condition.sweep,
+    };
+    match store
+        .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
+        .await
+        .expect("the next sweep must apply")
+    {
+        DeletionLifecycleOutcome::Applied(next) => next.condition(),
+        other => panic!("the next sweep must apply, got {other:?}"),
     }
 }
 
@@ -211,9 +253,10 @@ async fn companion_erasure_removes_exact_bodies_and_dangling_references() {
     assert_eq!(remainder(&store, target), 3);
 
     let participant = CompanionErasureParticipant::new(store.clone());
+    let condition = admit_owner(&store, target, ParticipantOwnerRef::Companion).await;
     let fact = drive(
         &participant,
-        condition(1),
+        condition,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -333,9 +376,10 @@ async fn learning_erasure_removes_every_revision_and_the_derived_index() {
     assert!(remainder(&store, target) >= 4);
 
     let participant = LearningErasureParticipant::new(store.clone());
+    let condition = admit_owner(&store, target, ParticipantOwnerRef::Learning).await;
     let fact = drive(
         &participant,
-        condition(1),
+        condition,
         ParticipantOwnerRef::Learning,
         target,
     )
@@ -383,7 +427,7 @@ async fn learning_erasure_removes_every_revision_and_the_derived_index() {
     // scope; both participants together must leave no exact remainder.
     drive(
         &CompanionErasureParticipant::new(store.clone()),
-        condition(1),
+        admit_owner(&store, target, ParticipantOwnerRef::Companion).await,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -429,9 +473,10 @@ async fn a_memory_grounded_only_on_erased_evidence_is_erased_with_it() {
     ));
 
     let participant = LearningErasureParticipant::new(store.clone());
+    let condition = admit_owner(&store, target, ParticipantOwnerRef::Learning).await;
     let fact = drive(
         &participant,
-        condition(1),
+        condition,
         ParticipantOwnerRef::Learning,
         target,
     )
@@ -458,7 +503,7 @@ async fn a_memory_grounded_only_on_erased_evidence_is_erased_with_it() {
     // two participants together leave no exact remainder.
     drive(
         &CompanionErasureParticipant::new(store.clone()),
-        condition(1),
+        admit_owner(&store, target, ParticipantOwnerRef::Companion).await,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -538,7 +583,7 @@ async fn a_summary_pinning_a_covered_source_is_erased_with_it() {
     // occur in either Summary.
     let fact = drive_with_sources(
         &participant,
-        condition(1),
+        admit_owner(&store, target, ParticipantOwnerRef::Learning).await,
         ParticipantOwnerRef::Learning,
         target,
         vec![pinned],
@@ -555,7 +600,7 @@ async fn a_summary_pinning_a_covered_source_is_erased_with_it() {
     // Erasing the pinned History turn is the Companion participant's scope.
     drive(
         &CompanionErasureParticipant::new(store.clone()),
-        condition(1),
+        admit_owner(&store, target, ParticipantOwnerRef::Companion).await,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -628,7 +673,7 @@ async fn a_covered_source_correlates_a_summary_after_the_history_row_is_erased()
     // The fan-out drives Companion before Learning, so the pinned turn is
     // already gone when the Learning sweep correlates. The operation's
     // covered source correlation is the durable link that still resolves.
-    let sweep = condition(1);
+    let sweep = admit_owner(&store, target, ParticipantOwnerRef::Companion).await;
     let history = drive(
         &CompanionErasureParticipant::new(store.clone()),
         sweep,
@@ -721,9 +766,10 @@ async fn a_summary_pinning_a_target_bearing_message_is_erased_with_it() {
     ));
 
     let participant = LearningErasureParticipant::new(store.clone());
+    let condition = admit_owner(&store, target, ParticipantOwnerRef::Learning).await;
     let fact = drive(
         &participant,
-        condition(1),
+        condition,
         ParticipantOwnerRef::Learning,
         target,
     )
@@ -763,9 +809,10 @@ async fn a_multi_page_sweep_restarts_from_the_head_after_a_lost_cursor() {
     .await;
 
     let participant = CompanionErasureParticipant::new(store.clone());
+    let sweep = admit_owner(&store, target, ParticipantOwnerRef::Companion).await;
     let first = participant
         .demand_local_erasure(local_command(
-            condition(1),
+            sweep,
             ParticipantOwnerRef::Companion,
             target,
             Vec::new(),
@@ -777,13 +824,7 @@ async fn a_multi_page_sweep_restarts_from_the_head_after_a_lost_cursor() {
     // the sweep from its head and must not miss the rows the first page did
     // not reach.
     let restarted = CompanionErasureParticipant::new(store.clone());
-    let fact = drive(
-        &restarted,
-        condition(1),
-        ParticipantOwnerRef::Companion,
-        target,
-    )
-    .await;
+    let fact = drive(&restarted, sweep, ParticipantOwnerRef::Companion, target).await;
     assert_eq!(fact.status(), ParticipantCompletionStatus::Verified);
     assert_eq!(remainder(&store, target), 0);
     assert_eq!(history_row_count(&store, companion).unwrap(), 1);
@@ -797,9 +838,10 @@ async fn a_new_sweep_re_walks_instead_of_inheriting_a_verified_claim() {
 
     // Sweep 1 verifies the empty store.
     let participant = CompanionErasureParticipant::new(store.clone());
+    let first_condition = admit_owner(&store, target, ParticipantOwnerRef::Companion).await;
     let first = drive(
         &participant,
-        condition(1),
+        first_condition,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -819,7 +861,7 @@ async fn a_new_sweep_re_walks_instead_of_inheriting_a_verified_claim() {
     .await;
     let second = drive(
         &participant,
-        condition(2),
+        next_sweep(&store, first_condition).await,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -844,7 +886,7 @@ async fn a_repeat_demand_of_a_verified_sweep_erases_nothing_new() {
     .await;
 
     let participant = CompanionErasureParticipant::new(store.clone());
-    let sweep = condition(1);
+    let sweep = admit_owner(&store, target, ParticipantOwnerRef::Companion).await;
     let first = drive(&participant, sweep, ParticipantOwnerRef::Companion, target).await;
     assert_eq!(first.status(), ParticipantCompletionStatus::Verified);
     let erased = first.erased_count();
@@ -914,9 +956,10 @@ async fn a_matching_current_memory_takes_its_history_and_index_with_it() {
     }
 
     let participant = LearningErasureParticipant::new(store.clone());
+    let condition = admit_owner(&store, target, ParticipantOwnerRef::Learning).await;
     let fact = drive(
         &participant,
-        condition(1),
+        condition,
         ParticipantOwnerRef::Learning,
         target,
     )
@@ -1010,7 +1053,7 @@ async fn erased_body_bytes_do_not_survive_in_the_raw_database_file() {
     let participant = CompanionErasureParticipant::new(store.clone());
     let fact = drive(
         &participant,
-        condition(1),
+        admit_owner(&store, canary, ParticipantOwnerRef::Companion).await,
         ParticipantOwnerRef::Companion,
         canary,
     )
@@ -1023,5 +1066,100 @@ async fn erased_body_bytes_do_not_survive_in_the_raw_database_file() {
     assert!(
         !raw_file_contains(&path, canary),
         "an erased body must not survive in the raw database file"
+    );
+}
+
+/// Blocker 3: a demand that passed its pre-check can still race a completed
+/// operation. The actual erase transaction re-reads canonical currentness and
+/// must leave a fresh post-completion History body byte-identical.
+#[tokio::test]
+async fn a_stale_companion_erase_does_not_mutate_fresh_post_completion_history() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let target = "stale-erase-fresh-origin";
+    let old = append_role(
+        &store,
+        companion,
+        generation,
+        HistoryRole::Owner,
+        &format!("old copy of {target}"),
+    )
+    .await;
+    let condition = admit_owner(&store, target, ParticipantOwnerRef::Companion).await;
+    let current = ene_preservation::DeletionOperationRef {
+        operation: condition.operation,
+        sweep: condition.sweep,
+    };
+
+    store.arm_erasure_mutation_park_for_tests();
+    let parked = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            CompanionErasureParticipant::new(store)
+                .demand_local_erasure(local_command(
+                    condition,
+                    ParticipantOwnerRef::Companion,
+                    target,
+                    Vec::new(),
+                ))
+                .await
+        })
+    };
+    store.wait_erasure_mutation_park_for_tests().await;
+
+    let verified = drive(
+        &CompanionErasureParticipant::new(store.clone()),
+        condition,
+        ParticipantOwnerRef::Companion,
+        target,
+    )
+    .await;
+    assert_eq!(verified.status(), ParticipantCompletionStatus::Verified);
+    super::preservation::complete_via_a5(&store, current).await;
+    assert_eq!(remainder(&store, target), 0);
+
+    let fresh_body = format!("fresh origin of {target}");
+    let fresh = append_role(
+        &store,
+        companion,
+        generation,
+        HistoryRole::Owner,
+        &fresh_body,
+    )
+    .await;
+
+    store.release_erasure_mutation_park_for_tests();
+    let stale = parked.await.expect("the parked demand joins");
+    assert_eq!(
+        stale.status(),
+        ParticipantCompletionStatus::LocalComplete,
+        "a completed condition is NotCurrent, never Verified"
+    );
+    assert_eq!(stale.erased_count(), 0);
+
+    let timeline = store
+        .load_timeline(companion, None, None, 100)
+        .await
+        .unwrap();
+    let fresh_row = timeline
+        .iter()
+        .find(|item| item.id == fresh)
+        .expect("the fresh origin must remain");
+    assert_eq!(fresh_row.text, fresh_body);
+    assert!(
+        timeline.iter().all(|item| item.id != old),
+        "the pre-completion copy is erased by the current sweep"
+    );
+    let status = store
+        .deletion_status(None, 10)
+        .await
+        .expect("the status must read");
+    let record = status
+        .iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the completed operation remains on the status view");
+    assert_eq!(
+        record.phase,
+        ene_preservation::DeletionOperationPhase::Completed
     );
 }

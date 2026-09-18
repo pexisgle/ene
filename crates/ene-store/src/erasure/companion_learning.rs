@@ -236,6 +236,18 @@ fn run_local_demand(
     let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Every store connection raises `secure_delete` at open, so deleted cells
     // are zeroed instead of being left recoverable in freed pages.
+    let at = WallClockWithTz::now();
+    // The demand was admitted against a then-current condition. Actual
+    // mutation re-reads canonical currentness in this same Immediate
+    // transaction: a completed operation or a superseded sweep must not
+    // change a byte of target-bearing state, including a fresh origin the
+    // Owner provided after closure. NotCurrent is reported as local_complete
+    // so the durable record refuses it as stale, never as Verified.
+    if !crate::preservation::condition_is_current(&tx, condition)? {
+        return Ok(ParticipantCompletionFact::local_complete(
+            condition, owner, 0, 0, at,
+        ));
+    }
     let mut cursor = {
         let slot = lock_cursor(sweep);
         match slot.as_ref() {
@@ -243,7 +255,6 @@ fn run_local_demand(
             _ => SweepCursor::fresh(condition),
         }
     };
-    let at = WallClockWithTz::now();
     step(&tx, &mut cursor, target, covered)?;
     tx.commit()?;
     let fact = cursor.fact(owner, at);
@@ -516,6 +527,8 @@ impl ErasureParticipant for CompanionErasureParticipant {
         let store = self.store.clone();
         let sweep = Arc::clone(&self.sweep);
         Box::pin(async move {
+            #[cfg(any(test, feature = "test-support"))]
+            store.test_parks.erasure_mutation.pause_if_armed().await;
             let condition = command.condition();
             let owner = command.participant();
             let held = |reason| {
@@ -896,6 +909,8 @@ impl ErasureParticipant for LearningErasureParticipant {
         let store = self.store.clone();
         let sweep = Arc::clone(&self.sweep);
         Box::pin(async move {
+            #[cfg(any(test, feature = "test-support"))]
+            store.test_parks.erasure_mutation.pause_if_armed().await;
             let condition = command.condition();
             let owner = command.participant();
             let held = |reason| {

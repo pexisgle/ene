@@ -4643,6 +4643,373 @@ async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rew
     served.server.abort();
 }
 
+/// Blocker 1: Action result body is in memory, the occurrence row is not yet
+/// durable, and Targeted Deletion runs to completion in that window. The
+/// in-flight read/list correspondence keeps the delayed body old-origin, so
+/// it cannot re-enter the next provider turn or a durable result. A later
+/// fresh Owner origin of the same string is accepted.
+#[tokio::test]
+async fn stage6_observation_write_across_deletion_stays_old_origin() {
+    const LEG_TARGET: &str = TARGET;
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let paraphrase = "The input file describes confidential material; I did not copy its contents.";
+    let fresh = format!("a fresh note about {LEG_TARGET}");
+    let proposal = task_reply(serde_json::json!({
+        "kind": "propose_task",
+        "purpose": "write a report about the workspace input",
+    }));
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_task_agent_turn(0),
+                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
+            ),
+            (
+                on_latest_owner("please read input.txt and write report.md"),
+                Call::text(proposal),
+            ),
+            (on_latest_owner(&fresh), Call::text("acknowledged")),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let workspace = dir.join("workspace");
+    let input = workspace.join("input.txt");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    std::fs::write(&input, format!("confidential: {LEG_TARGET}"))
+        .expect("the workspace source writes");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+
+    served
+        .handle
+        .store_for_tests()
+        .arm_observation_write_park_for_tests();
+    let (round, stream, reply) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    assert!(
+        reply.contains("Task accepted"),
+        "the task proposal must be accepted: {reply}"
+    );
+    confirm_round(served.client(), &round, stream).await;
+    served
+        .handle
+        .store_for_tests()
+        .wait_observation_write_park_for_tests()
+        .await;
+
+    let db = served.dir.join("app.db");
+    assert_eq!(
+        transient_observation_rows(&db),
+        0,
+        "the occurrence is not durable while the Action body is still in memory"
+    );
+
+    std::fs::write(&input, "ordinary notes after the observation")
+        .expect("the workspace source is rewritten clean");
+    assert!(
+        !std::fs::read_to_string(&input)
+            .expect("the rewritten source reads")
+            .contains(LEG_TARGET),
+        "deletion admission happens after the current workspace read is clean"
+    );
+
+    let outcome = request_deletion(served.client(), LEG_TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = Arc::clone(&served.handle);
+    confirm_deletion(&handle).await;
+    assert_eq!(
+        transient_task_delegation_holds(&db),
+        1,
+        "the unobserved read/list execution is associated at admission"
+    );
+    assert_eq!(transient_observation_rows(&db), 0);
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete while the observation write is parked");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+
+    served
+        .handle
+        .store_for_tests()
+        .release_observation_write_park_for_tests();
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the task completes on the collected result");
+
+    assert_eq!(transient_observation_rows(&db), 1);
+    assert!(
+        transient_observation_body_observed(&db),
+        "the occurrence reproduced a target-bearing body"
+    );
+    for input_text in transport.input_texts() {
+        if input_text.starts_with("[RESPONSE FORMAT]") && input_text.contains("[TOOL CALL]") {
+            assert!(
+                !input_text.contains(LEG_TARGET),
+                "the old observation body must not enter a later provider turn: {input_text}"
+            );
+        }
+    }
+    let body = transient_sole_result_body(&db);
+    assert_eq!(
+        body, "[erased]",
+        "the delayed paraphrase is never stored raw"
+    );
+    assert!(!body.contains(paraphrase));
+    assert!(!body.contains(LEG_TARGET));
+    assert_eq!(
+        transient_action_success_rows(&db),
+        1,
+        "Action certainty is an objective fact and is never rewritten"
+    );
+    assert_eq!(served.canonical_remainder(LEG_TARGET).await, 0);
+    assert!(
+        db_target_hits(&db, LEG_TARGET).is_empty(),
+        "the completed surface keeps no target body: {:?}",
+        db_target_hits(&db, LEG_TARGET)
+    );
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the sealed execution stays completed");
+    let (_round, _stream, reply) = send_round(served.client(), &fresh)
+        .await
+        .expect("a fresh origin must be accepted");
+    assert!(reply.contains("acknowledged"), "{reply}");
+    assert!(
+        history_texts(served.client())
+            .await
+            .iter()
+            .any(|text| text.contains(LEG_TARGET)),
+        "a fresh post-completion Owner input remains allowed"
+    );
+    served.server.abort();
+}
+
+/// Blocker 2: a paraphrase Summary whose History pin sits past the
+/// admission page is erased with that source. Exact-text remainder of 0 is
+/// not enough; the semantic derived Summary/Memory must actually disappear.
+#[tokio::test]
+async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+    use ene_learning::{
+        ChangeKind, ExperienceSourceKind, Importance, LearningRepository as _, LearningScope,
+        MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, SourceRangeRef, SummaryId,
+        SummaryRecord, TemporalMeaning,
+    };
+    use ene_presence::PresenceRepository as _;
+
+    async fn seed_owner_message(
+        store: &ene_store::Store,
+        companion: ene_companion::CompanionId,
+        generation: ene_presence::PresenceGeneration,
+        text: &str,
+    ) -> RawId {
+        match store
+            .append_message(ene_companion::AppendHistoryCommand {
+                companion,
+                round: RawId::new(),
+                role: HistoryRole::Owner,
+                text: text.to_owned(),
+                lang: String::from("en"),
+                at: WallClockWithTz::now(),
+                expected_generation: generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                expected_owner_message: None,
+                command_id: None,
+                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            })
+            .await
+            .expect("the History append must commit")
+        {
+            ene_companion::HistoryAppendOutcome::CommittedAs { message } => message,
+            other => panic!("the History append must commit, got {other:?}"),
+        }
+    }
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    served.stop().await;
+    let (late, paraphrase_id, memory_id, companion_raw) = {
+        let store = ene_store::Store::open(&dir.join("app.db"))
+            .await
+            .expect("the state database opens for seeding");
+        let companion = store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let mut sources = Vec::new();
+        for index in 0..(ene_preservation::DELETION_RECONCILIATION_PAGE_SIZE + 6) {
+            sources.push(
+                seed_owner_message(
+                    &store,
+                    companion,
+                    generation,
+                    &format!("note {index} carries {TARGET}"),
+                )
+                .await,
+            );
+        }
+        let late = *sources
+            .iter()
+            .max_by_key(|source| source.as_uuid())
+            .expect("the fixture has sources");
+        let paraphrase_id = SummaryId::generate();
+        let memory_id = MemoryId::generate();
+        let committed = store
+            .commit_memory_change(MemoryChangeCommit {
+                summary: Some(SummaryRecord {
+                    id: paraphrase_id,
+                    scope: LearningScope::companion(companion.as_raw()),
+                    content: String::from("The owner keeps a private launch credential."),
+                    source: SourceRangeRef {
+                        kind: ExperienceSourceKind::Dialogue,
+                        start: late,
+                        end: late,
+                    },
+                    formed_at: WallClockWithTz::now(),
+                }),
+                secret_premise: None,
+                claim: None,
+                change: MemoryChange {
+                    target: MemoryTarget::New { id: memory_id },
+                    scope: LearningScope::companion(companion.as_raw()),
+                    content: String::from("The owner keeps a private launch credential."),
+                    importance: Importance::default(),
+                    temporal: TemporalMeaning::Enduring,
+                    change: ChangeKind::Initial,
+                    recall_suppressed: false,
+                    at: WallClockWithTz::now(),
+                },
+            })
+            .await
+            .expect("the paraphrase formation must answer");
+        assert!(
+            matches!(
+                committed,
+                ene_learning::MemoryChangeOutcome::Committed { .. }
+            ),
+            "the paraphrase Memory must commit: {committed:?}"
+        );
+        (late, paraphrase_id, memory_id, companion.as_raw())
+    };
+
+    let mut client = served.serve().await;
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = Arc::clone(&served.handle);
+    confirm_deletion(&handle).await;
+    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must reconcile every page and erase derived data");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "no durable table keeps the target: {:?}",
+        db_target_hits(&served.dir.join("app.db"), TARGET)
+    );
+
+    served.stop().await;
+    let store = ene_store::Store::open(&dir.join("app.db"))
+        .await
+        .expect("the state database reopens");
+    let late_text = late.as_uuid().as_hyphenated().to_string();
+    let remaining_late: i64 = {
+        let conn = rusqlite::Connection::open(dir.join("app.db"))
+            .expect("the state database opens for inspection");
+        conn.query_row(
+            "SELECT COUNT(*) FROM history_message WHERE message_id=?1",
+            [&late_text],
+            |row| row.get(0),
+        )
+        .expect("the late History probe must answer")
+    };
+    assert_eq!(remaining_late, 0, "H_late is erased");
+    let summaries = store
+        .load_summaries(&[paraphrase_id])
+        .await
+        .expect("summaries must load");
+    assert!(
+        summaries.is_empty(),
+        "the paraphrase Summary pinned on H_late must be erased"
+    );
+    assert!(
+        store
+            .list_memory_revisions(memory_id, None, 100)
+            .await
+            .expect("revisions must list")
+            .is_empty(),
+        "the derived Memory must be erased"
+    );
+    let recalled = store
+        .recall_candidates(companion_raw, &[String::from("launch")], 50)
+        .await
+        .expect("recall must answer");
+    assert!(recalled.iter().all(|item| item.id != memory_id));
+
+    let companion = store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let generation = store
+        .load_attribution(companion.as_raw())
+        .await
+        .expect("attribution must load")
+        .expect("attribution must exist")
+        .generation;
+    let fresh = seed_owner_message(
+        &store,
+        companion,
+        generation,
+        &format!("a fresh note about {TARGET}"),
+    )
+    .await;
+    let timeline = store
+        .load_timeline(companion, None, None, 200)
+        .await
+        .expect("the timeline must load");
+    assert!(
+        timeline
+            .iter()
+            .any(|item| item.id == fresh && item.text.contains(TARGET)),
+        "a post-completion Owner origin of the same string is accepted"
+    );
+}
+
 /// Observation occurrence ledger rows in the state database, read over an
 /// independent connection.
 fn transient_observation_rows(db: &Path) -> i64 {
