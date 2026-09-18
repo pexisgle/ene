@@ -168,6 +168,7 @@ async fn append_reply(
                 local_id: None,
             },
             true,
+            None,
         )
         .await
         .expect("the append must commit");

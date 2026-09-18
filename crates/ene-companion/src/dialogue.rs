@@ -2,12 +2,13 @@
 //!
 //! Wire mapping, presentation intake, and composition stay in the Host;
 //! this module owns the companion-side turn order. A turn starts after
-//! presentation accepts the input: admission resolves and authorizes the
-//! inference premise, the owner row commits durably, the provider call runs
-//! under the claimed attempt, and an adopted reply registers with the same
-//! atomic append. `ene-inference` owns permission, credential, attempt, and
-//! usage ordering behind [`InferenceExecutor`]; this module never sees
-//! those types.
+//! presentation accepts the input: [`assemble_dialogue_input`] reads the
+//! bounded recent History and recall, admission resolves and authorizes the
+//! inference premise carrying that read-set, the owner row commits durably,
+//! the provider call runs under the claimed attempt, and an adopted reply
+//! registers with the same atomic append. `ene-inference` owns permission,
+//! credential, attempt, and usage ordering behind [`InferenceExecutor`]; this
+//! module never sees those types.
 //!
 //! Durable replay precedes acceptance and stays outside a turn (see
 //! [`classify_replay`]): an exact retry answers from the stored marker
@@ -98,13 +99,30 @@ impl core::fmt::Debug for AcceptedDialogueInput {
 ///
 /// The Host records the open round between [`begin_turn`] and
 /// [`finish_turn`], so nothing in here is inspected outside this module.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `prompt` is assembled before admission (the prompt's read-set rides the
+/// admission as the attempt's `data_use`) and carried here so the exact bytes
+/// admitted are the bytes dispatched; the turn never re-reads History or
+/// Memory after its claim.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DialogueTurn {
     input: AcceptedDialogueInput,
-    /// Durable identity of the owner row this turn committed. Context
-    /// assembly excludes exactly this message, never a text match.
+    /// Durable identity of the owner row this turn committed.
     message: RawId,
+    prompt: DialogueInput,
     authorized: AuthorizedInference,
+}
+
+impl core::fmt::Debug for DialogueTurn {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("DialogueTurn")
+            .field("input", &self.input)
+            .field("message", &self.message)
+            .field("prompt", &"<redacted>")
+            .field("authorized", &self.authorized)
+            .finish()
+    }
 }
 
 /// Result of starting a turn.
@@ -225,15 +243,18 @@ pub async fn classify_replay(
 /// Admits one accepted input and commits its owner row durably.
 ///
 /// Admission precedes the append, so a declined input leaves neither a
-/// history row nor an open-round record. An append that already committed
-/// under the same command resolves the stored row and reports
+/// history row nor an open-round record. The pre-assembled `prompt` supplies
+/// the admission's canonical read-set, so the claim compares exactly the
+/// sources the provider input was built from. An append that already
+/// committed under the same command resolves the stored row and reports
 /// [`DialogueBegin::Replayed`] without dispatching.
 pub async fn begin_turn(
     input: AcceptedDialogueInput,
+    prompt: DialogueInput,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
 ) -> DialogueBegin {
-    let authorized = match inference.admit_dialogue().await {
+    let authorized = match inference.admit_dialogue(prompt.data_use().to_vec()).await {
         Ok(Admission::Admitted(authorized)) => *authorized,
         Ok(Admission::Declined(reason)) => return DialogueBegin::Declined(reason),
         Err(_) => return DialogueBegin::Held,
@@ -265,6 +286,7 @@ pub async fn begin_turn(
             DialogueBegin::Ready(Box::new(DialogueTurn {
                 input,
                 message,
+                prompt,
                 authorized,
             }))
         }
@@ -313,6 +335,7 @@ pub async fn begin_turn(
 /// outcome maps exactly like [`begin_turn`].
 pub fn begin_turn_committed<C, L>(
     input: AcceptedDialogueInput,
+    prompt: DialogueInput,
     authorized: AuthorizedInference,
     commit: C,
     lookup: L,
@@ -348,6 +371,7 @@ where
             DialogueBegin::Ready(Box::new(DialogueTurn {
                 input,
                 message,
+                prompt,
                 authorized,
             }))
         }
@@ -378,34 +402,35 @@ where
     }
 }
 
-/// Dispatches the turn's inference call and registers an adopted reply.
+/// Dispatches the turn's already-assembled inference call and registers an
+/// adopted reply.
 ///
-/// The dialogue prompt is assembled from bounded recent History and the
-/// memories recall offers for the current input; the current owner input is
-/// excluded from the recent-context section by its committed message
-/// identity, never by comparing text, so an earlier identical message stays
-/// in the window. Retrieval is derived and best-effort: a history or recall
-/// read failure degrades to less context rather than failing a reply, and a
-/// suppressed Memory is simply absent. A secret-boundary failure is not
-/// degraded: the owner input and the provider output both pass through the
-/// scrubber before they reach a model or durable History, and an unprovable
-/// boundary closes the stream interrupted instead of sending or storing raw
-/// text. The dispatch carries the prompt's credential-set premise, so the
-/// send claim refuses a prompt that predates a credential registration. A
-/// never-sent or technical outcome closes the stream interrupted; usage
-/// accounting is already decided inside the inference boundary. An adopted
-/// reply appends with its undelivered registration in the same atomic
-/// section; any other reply outcome is interrupted. Provider deltas are
-/// pushed to `sink` as they arrive, each gated on a current presentation
-/// premise; a delta shown before an invalidation stays as historical
-/// partial presentation, never rewound. `is_current` runs once more after
-/// provider completion as an early, best-effort refusal of a superseded
-/// reply: it only avoids a doomed append attempt. Durable adoption
+/// The prompt was built by [`assemble_dialogue_input`] before admission from
+/// bounded recent History and the memories recall offers (retrieval is
+/// derived and best-effort: a history or recall read failure degrades to less
+/// context rather than failing a reply, and a suppressed Memory is simply
+/// absent), and it is carried by the turn unchanged. A secret-boundary
+/// failure is not degraded: the owner input and the provider output both pass
+/// through the scrubber before they reach a model or durable History, and an
+/// unprovable boundary closes the stream interrupted instead of sending or
+/// storing raw text. The dispatch carries the prompt's credential-set
+/// premise, so the send claim refuses a prompt that predates a credential
+/// registration. A never-sent or technical outcome closes the stream
+/// interrupted; usage accounting is already decided inside the inference
+/// boundary. An adopted reply appends with its undelivered registration in
+/// the same atomic section; any other reply outcome is interrupted. Provider
+/// deltas are pushed to `sink` as they arrive, each gated on a current
+/// presentation premise; a delta shown before an invalidation stays as
+/// historical partial presentation, never rewound. `is_current` runs once
+/// more after provider completion as an early, best-effort refusal of a
+/// superseded reply: it only avoids a doomed append attempt. Durable adoption
 /// authority stays inside the append transaction — the reply carries the
 /// turn's Owner message identity as its premise, and the store refuses the
 /// append when a newer accepted Owner input committed first, even inside
-/// the same round. After the durable append, the Experience premise is
-/// pinned for the post-response Learning pass. A reply carrying the reserved
+/// the same round, or when the provider claim it was produced under is
+/// already associated with a deletion interval. After the durable append, the
+/// Experience premise is pinned for the post-response Learning pass. A reply
+/// carrying the reserved
 /// `[task-control]` protocol is interpreted before the append: a valid
 /// first-line-only command runs through the composition root's port and the
 /// stored reply is the scrubbed owner outcome, while a marker that is not a
@@ -589,15 +614,10 @@ impl DeltaSink for ControlHoldingSink<'_> {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "each parameter is one distinct owner boundary the turn composes; grouping them would restate the boundary set"
-)]
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
-    learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
     task_control: &impl DialogueTaskControlPort,
     sink: &mut (dyn ene_inference::DeltaSink + Send),
@@ -606,23 +626,12 @@ pub async fn finish_turn(
     let DialogueTurn {
         input,
         message,
+        prompt,
         authorized,
     } = *turn;
     let (consent_id, consent_rev) = {
         let (id, rev) = authorized.consent_premise();
         (id.to_owned(), rev)
-    };
-    let Ok(prompt) = assemble_dialogue_input(
-        input.companion,
-        message,
-        &input.text,
-        history,
-        learning,
-        scrubber,
-    )
-    .await
-    else {
-        return DialogueOutcome::Interrupted;
     };
     // Dialogue has no cooperative stop token: it is not a Task Agent
     // execution, so no abort exists to forward. The presentation sink holds
@@ -630,7 +639,7 @@ pub async fn finish_turn(
     // never leak the protocol to the client.
     let mut holder = ControlHoldingSink::new(sink);
     match inference
-        .dispatch(authorized, prompt, &mut holder, None)
+        .dispatch(authorized, prompt.into_prompt(), &mut holder, None)
         .await
     {
         Ok(InferenceDispatchOutcome::Completed {
@@ -711,7 +720,14 @@ pub async fn finish_turn(
                 round_intent: None,
                 incarnation: None,
             };
-            match history.append_reply_with_undelivered(reply, true).await {
+            // The reply's durable adoption carries the provider claim it was
+            // produced under: a claim a deletion admission associated with an
+            // interval is refused even after the operation completed and no
+            // current condition is readable (lifecycle §11 R2).
+            match history
+                .append_reply_with_undelivered(reply, true, Some(arrival.ticket.0))
+                .await
+            {
                 Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => {
                     // Pin the Experience premise only after the reply is
                     // durable; the queued pass judges exactly this window.
@@ -772,6 +788,51 @@ pub fn dialogue_input_fits(input_text: &str) -> bool {
         <= ene_inference::MAX_INPUT_CHARS
 }
 
+/// One assembled dialogue provider input and its canonical read-set.
+///
+/// The prompt is the exact scrubbed logical input the claim's credential-set
+/// premise belongs to. `data_use` is the ordered canonical source correlation
+/// of what that logical input actually consumed — the remembered Memory
+/// identities (rendered order) and the History message identities
+/// (oldest-first rendered order) — so the attempt's provenance names only
+/// rows that were really read and the deletion association can hold the
+/// claim whose prompt derived from a covered source.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DialogueInput {
+    prompt: ScrubbedText,
+    data_use: Vec<RawId>,
+}
+
+impl DialogueInput {
+    /// Borrows the scrubbed prompt.
+    #[must_use]
+    pub fn prompt(&self) -> &ScrubbedText {
+        &self.prompt
+    }
+
+    /// Consumes the input, yielding the scrubbed prompt for dispatch.
+    #[must_use]
+    pub fn into_prompt(self) -> ScrubbedText {
+        self.prompt
+    }
+
+    /// The ordered canonical identities the assembled prompt read.
+    #[must_use]
+    pub fn data_use(&self) -> &[RawId] {
+        &self.data_use
+    }
+}
+
+impl core::fmt::Debug for DialogueInput {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("DialogueInput")
+            .field("prompt", &"<redacted>")
+            .field("data_use_len", &self.data_use.len())
+            .finish()
+    }
+}
+
 /// Builds the dialogue input within the final request budget.
 ///
 /// Priority order: the current input and the fixed labels are secured first;
@@ -781,24 +842,25 @@ pub fn dialogue_input_fits(input_text: &str) -> bool {
 /// budget, so the assembled prompt never exceeds
 /// [`ene_inference::MAX_INPUT_CHARS`] no matter how large old context grows.
 ///
-/// The current owner input is carried once, after the context sections, and
-/// is excluded from the recent-context window by `current_message` identity.
-/// Memory content, History text, and the input itself pass through the
-/// scrubber before they enter the prompt; a scrub failure is returned so the
-/// caller can close the stream without sending or storing raw text. The
-/// returned premise is the oldest of every scrubbed piece, so the send claim
-/// accepts the prompt only when all pieces were scrubbed under the same
-/// current credential set. The memory and history reads stay best-effort:
-/// retrieval is derived, so a read failure degrades the context rather than
-/// turning a follow-up into an error.
-async fn assemble_dialogue_input(
+/// The current owner input is carried once, after the context sections; it is
+/// not yet a durable History identity and is therefore not part of the
+/// read-set correlation (the reply append compares it separately as the
+/// relied Owner message). The read-set names exactly the Memory and History
+/// rows the prompt consumed. Memory content, History text, and the input
+/// itself pass through the scrubber before they enter the prompt; a scrub
+/// failure is returned so the caller can close the stream without sending or
+/// storing raw text. The returned premise is the oldest of every scrubbed
+/// piece, so the send claim accepts the prompt only when all pieces were
+/// scrubbed under the same current credential set. The memory and history
+/// reads stay best-effort: retrieval is derived, so a read failure degrades
+/// the context rather than turning a follow-up into an error.
+pub async fn assemble_dialogue_input(
     companion: CompanionId,
-    current_message: RawId,
     input_text: &str,
     history: &impl HistoryRepository,
     learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
-) -> Result<ScrubbedText, SecretScrubError> {
+) -> Result<DialogueInput, SecretScrubError> {
     let recent = history
         .load_recent_timeline(companion, DIALOGUE_CONTEXT_MESSAGES)
         .await
@@ -826,13 +888,9 @@ async fn assemble_dialogue_input(
     // Recent History first, newest to oldest: a fitting older message is
     // still useful when the newest one is too large, and whole messages are
     // never cut. Selection order is reversed for the oldest-first rendering.
-    let mut chosen_history: Vec<String> = Vec::new();
+    let mut chosen_history: Vec<(RawId, String)> = Vec::new();
     let mut history_header = false;
-    for item in recent
-        .iter()
-        .filter(|item| item.id != current_message)
-        .rev()
-    {
+    for item in recent.iter().rev() {
         let text = scrubber.scrub(&item.text).await?;
         credential_set = credential_set.min(text.credential_set());
         let role = match item.role {
@@ -853,12 +911,12 @@ async fn assemble_dialogue_input(
         }
         budget -= line_chars + header_cost;
         history_header = true;
-        chosen_history.push(line);
+        chosen_history.push((item.id, line));
     }
     chosen_history.reverse();
 
     // Recalled Memory fills what remains, in recall rank order.
-    let mut chosen_memories: Vec<String> = Vec::new();
+    let mut chosen_memories: Vec<(RawId, String)> = Vec::new();
     let mut memories_header = false;
     for memory in &recalled {
         let content = scrubber.scrub(&memory.content).await?;
@@ -875,7 +933,7 @@ async fn assemble_dialogue_input(
         }
         budget -= line_chars + header_cost;
         memories_header = true;
-        chosen_memories.push(line);
+        chosen_memories.push((memory.id.as_raw(), line));
     }
 
     let mut prompt = String::new();
@@ -885,24 +943,30 @@ async fn assemble_dialogue_input(
     prompt.push('\n');
     if !chosen_memories.is_empty() {
         prompt.push_str(MEMORIES_HEADER);
-        for line in &chosen_memories {
+        for (_, line) in &chosen_memories {
             prompt.push_str(line);
         }
     }
     if !chosen_history.is_empty() {
         prompt.push_str(RECENT_HEADER);
-        for line in &chosen_history {
+        for (_, line) in &chosen_history {
             prompt.push_str(line);
         }
     }
     prompt.push_str(OWNER_LABEL);
     prompt.push_str(input.text());
+    // The read-set follows the logical input: the Memory section renders
+    // before the conversation section, so its identities lead; each section
+    // keeps its rendered order.
+    let mut data_use: Vec<RawId> = chosen_memories.into_iter().map(|(id, _)| id).collect();
+    data_use.extend(chosen_history.into_iter().map(|(id, _)| id));
     // Scrub formatting and fragment joins too, without refreshing away the
     // oldest preparation premise if credentials changed during assembly.
-    Ok(scrubber
+    let prompt = scrubber
         .scrub(&prompt)
         .await?
-        .with_oldest_premise(credential_set))
+        .with_oldest_premise(credential_set);
+    Ok(DialogueInput { prompt, data_use })
 }
 
 /// Recent History messages read into one Experience source.

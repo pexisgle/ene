@@ -502,11 +502,14 @@ pub struct InferenceAttempt {
     /// sends, in input order. A Task Agent attempt carries its premise's
     /// `data_use` verbatim; a Learning formation carries the transcript
     /// message identities and the current Memory identities its prompt read;
-    /// dialogue carries no correlation in this slice. The values are opaque
-    /// [`RawId`]s, never bodies or hashes. The claim compares every source
-    /// against the current erasure conditions inside its transaction, and a
-    /// deletion admission may associate the claimed attempt with its interval
-    /// so a result arriving after completion is still recognized as stale.
+    /// a dialogue attempt carries the assembled prompt's read-set (the
+    /// History message identities and remembered Memory identities it
+    /// consumed, possibly empty when no background was read). The values are
+    /// opaque [`RawId`]s, never bodies or hashes. The claim compares every
+    /// source against the current erasure conditions inside its transaction,
+    /// and a deletion admission may associate the claimed attempt with its
+    /// interval so a result arriving after completion is still recognized as
+    /// stale.
     pub data_use: Vec<RawId>,
     /// Reviewed pricing snapshot resolved for this route immediately before
     /// the claim (`usage-cost-cap` §9), or `None` when the first-party
@@ -692,12 +695,20 @@ pub enum PreparedAdmission {
 
 /// Resolves the consent and credential premises for one dialogue admission.
 ///
+/// `data_use` is the ordered canonical source correlation of the assembled
+/// logical input: the History message identities and remembered Memory
+/// identities the dialogue prompt actually read (empty when the prompt
+/// carried no background). It rides the attempt claim, so a condition that
+/// committed first holds the send, and a deletion admission can associate an
+/// already-claimed turn with the interval its provenance belongs to.
+///
 /// The returned request still needs [`AdmissionRequest::authorize`]; this
 /// function performs no authorization and holds no lock.
 pub async fn prepare_dialogue_admission(
     consent: &impl ConsentRepository,
     credential_refs: &impl CredentialRefRepository,
     credential_store: &impl CredentialStore,
+    data_use: Vec<RawId>,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
     prepare_admission(
         consent,
@@ -708,7 +719,7 @@ pub async fn prepare_dialogue_admission(
             capability: CapabilityKind::Dialogue,
             purpose: PurposeKind::DialogueResponse,
             task_agent: None,
-            data_use: Vec::new(),
+            data_use,
         },
     )
     .await
@@ -874,6 +885,18 @@ impl AuthorizedInference {
         (&self.consent.0, self.consent.1.as_u64())
     }
 
+    /// The ticket this use will claim at dispatch.
+    ///
+    /// The ticket is the durable, single-use correlation of the provider
+    /// call: a caller that must observe the claimed use before dispatch (for
+    /// example a presentation predicate that refuses a reply whose claim a
+    /// deletion admission already associated with an interval) reads it here.
+    /// It is not authority and can never be re-claimed twice.
+    #[must_use]
+    pub fn ticket(&self) -> InferenceTicketId {
+        self.ticket
+    }
+
     /// Task Agent correlation carried through the claim, when present.
     #[must_use]
     pub fn task_agent_premise(&self) -> Option<&TaskAgentAttemptPremise> {
@@ -977,7 +1000,16 @@ pub enum InferenceDispatchOutcome {
 )]
 pub trait InferenceExecutor: Send + Sync {
     /// Resolves and authorizes one dialogue-purpose use without sending.
-    async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError>;
+    ///
+    /// `data_use` is the assembled dialogue prompt's ordered canonical source
+    /// correlation (the History message identities and remembered Memory
+    /// identities it read); it rides the attempt claim so a current condition
+    /// holds the send and a deletion admission can associate an already-claimed
+    /// turn with the interval its provenance belongs to.
+    async fn admit_dialogue(
+        &self,
+        data_use: Vec<RawId>,
+    ) -> Result<Admission, InferenceTechnicalError>;
 
     /// Resolves and authorizes one learning-formation use without sending.
     ///
@@ -2821,7 +2853,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
         let refs = FixedRefs(vec![credential]);
-        let prepared = prepare_dialogue_admission(&consent, &refs, &credential_store).await;
+        let prepared =
+            prepare_dialogue_admission(&consent, &refs, &credential_store, Vec::new()).await;
         let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
             panic!("a complete setup must prepare a dialogue admission");
         };

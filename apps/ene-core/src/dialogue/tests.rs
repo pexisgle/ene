@@ -441,6 +441,7 @@ async fn append_absent_reply(
                 local_id: None,
             },
             true,
+            None,
         )
         .await
         .expect("the absent reply must commit");
@@ -3247,7 +3248,10 @@ async fn learning_admission_requires_its_own_capability_assignment() {
     };
     // Stage 2 setup assigned the dialogue capability only.
     assert!(
-        matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
+        matches!(
+            executor.admit_dialogue(Vec::new()).await,
+            Ok(Admission::Admitted(_))
+        ),
         "dialogue admission still works independently"
     );
     assert!(
@@ -3288,7 +3292,10 @@ async fn learning_admission_requires_its_own_capability_assignment() {
         "learning is admitted only after its own consent exists"
     );
     assert!(
-        matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
+        matches!(
+            executor.admit_dialogue(Vec::new()).await,
+            Ok(Admission::Admitted(_))
+        ),
         "the dialogue assignment is untouched"
     );
 }
@@ -5849,6 +5856,7 @@ fn gate_for(
         seq: 0,
         opened: true,
         fence_epoch: premises.handle.transient_fence_epoch(),
+        inference_claim: RawId::new(),
     }
 }
 
@@ -7613,5 +7621,151 @@ async fn a4_a_covered_submit_is_held_without_a_history_row() {
         timeline_count(&handle).await.unwrap(),
         0,
         "no History row exists for the held submit"
+    );
+}
+
+/// M2: a dialogue claim that a deletion admission associated with its interval
+/// through the prompt read-set stops the remaining deltas and refuses the
+/// reply, even though the Host transient fence never moved.
+///
+/// This is the durable old-claim provenance boundary in isolation: the
+/// admission names a History identity the prompt actually read, the claim is
+/// already durable, and no participant is driven — so only the per-delta claim
+/// hold can refuse the second delta and the adoption.
+#[tokio::test]
+async fn m2_a_dialogue_claim_hold_stops_streaming_and_reply_adoption() {
+    use ene_companion::{AppendHistoryCommand, CompanionRepository as _, HistoryRepository as _};
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+
+    let transport = GatedStreamingTransport::new(&["Hel", "lo paraphrased"]);
+    let live = live_input("client-claim-hold");
+    let (handle, _dir) = round_test_handle("dlg-claim-hold", &live, &transport)
+        .await
+        .unwrap();
+    // Seed one durable History row the next prompt will read, so the claim's
+    // read-set names a canonical identity the admission can associate.
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let generation = current_generation(&handle).await.unwrap();
+    let seeded = match handle
+        .store
+        .append_message(AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("a seeded ordinary question"),
+            lang: String::from("en"),
+            at: ene_primitive::WallClockWithTz::now(),
+            expected_generation: ene_presence::PresenceGeneration::from_u64(generation),
+            expected_consent: None,
+            expected_credential_set: None,
+            expected_owner_message: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .expect("the seed append must answer")
+    {
+        ene_companion::HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the seed append must commit, got {other:?}"),
+    };
+
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-claim-hold",
+        "hi",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut host =
+        Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 4 {
+        tokio::select! {
+            biased;
+            () = &mut host => panic!("the provider completed before the early frames"),
+            maybe = rx.recv() => early.push(maybe.expect("frames must arrive")),
+        }
+    }
+    let WirePayload::TextStreamFrame(first) = &early[3].payload else {
+        panic!("the fourth frame is the first delta");
+    };
+    assert_eq!(
+        first.delta, "Hel",
+        "the first delta is displayed before the admission"
+    );
+
+    // The admission names the seeded row as a covered source: the already
+    // claimed dialogue attempt's read-set intersects it, so the durable hold
+    // is written. No participant is driven, so the transient fence stays put
+    // and only the claim hold can stop the rest.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("an unrelated target"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        ene_primitive::WallClockWithTz::now(),
+        vec![seeded],
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    assert!(matches!(
+        handle
+            .store
+            .start_targeted_deletion(command)
+            .await
+            .expect("admission commits"),
+        StartTargetedDeletionOutcome::Started(_)
+    ));
+
+    transport.release().await;
+    host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut frames = early;
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+    let deltas: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["Hel"],
+        "the delta produced under a held claim is never presented: {deltas:?}"
+    );
+    let close = frames.iter().find_map(|frame| match &frame.payload {
+        WirePayload::TextStreamClose(close) => Some(close.status),
+        _ => None,
+    });
+    assert_eq!(
+        close,
+        Some(StreamClose::Interrupted),
+        "a held claim closes the stream interrupted instead of adopting"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        2,
+        "the seeded row and the owner input are durable, never the held reply"
     );
 }

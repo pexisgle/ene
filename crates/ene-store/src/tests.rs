@@ -481,7 +481,7 @@ async fn reply_after_newer_owner_input_is_stale() {
     stale_reply.role = HistoryRole::Companion;
     stale_reply.expected_owner_message = Some(owner1);
     let (outcome, registered) = store
-        .append_reply_with_undelivered(stale_reply, true)
+        .append_reply_with_undelivered(stale_reply, true, None)
         .await
         .unwrap();
     assert_eq!(
@@ -497,7 +497,7 @@ async fn reply_after_newer_owner_input_is_stale() {
     current_reply.role = HistoryRole::Companion;
     current_reply.expected_owner_message = Some(owner2);
     let (outcome, _) = store
-        .append_reply_with_undelivered(current_reply, true)
+        .append_reply_with_undelivered(current_reply, true, None)
         .await
         .unwrap();
     assert!(
@@ -616,7 +616,11 @@ async fn undelivered_register_mark_and_stale_mark() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
     let appended = store
-        .append_reply_with_undelivered(history_command(companion, generation, "reply body"), true)
+        .append_reply_with_undelivered(
+            history_command(companion, generation, "reply body"),
+            true,
+            None,
+        )
         .await;
     let (outcome, registered) = appended.unwrap();
     assert!(
@@ -1103,7 +1107,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         Some("send-1"),
     );
     let first = store
-        .append_reply_with_undelivered(base.clone(), true)
+        .append_reply_with_undelivered(base.clone(), true, None)
         .await;
     let (first_outcome, first_registered) = first.unwrap();
     let HistoryAppendOutcome::CommittedAs { message: first_id } = first_outcome else {
@@ -1114,7 +1118,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         "first commit registers undelivered"
     );
     let retry = store
-        .append_reply_with_undelivered(base.clone(), true)
+        .append_reply_with_undelivered(base.clone(), true, None)
         .await;
     let (retry_outcome, retry_registered) = retry.unwrap();
     let HistoryAppendOutcome::AlreadyCommittedAs { message, round } = retry_outcome else {
@@ -2515,6 +2519,7 @@ async fn restart_keeps_timeline_intact() {
         .append_reply_with_undelivered(
             history_command(companion, current.generation, "second"),
             false,
+            None,
         )
         .await;
     assert!(second_append.is_ok(), "second append must succeed");

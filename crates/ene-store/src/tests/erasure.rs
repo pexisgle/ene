@@ -485,8 +485,8 @@ async fn condition_and_data_use_survive_reopen() {
 async fn dialogue_attempts_record_the_empty_data_use_and_are_not_gated() {
     let store = open_memory().await.unwrap();
     seed_dialogue_consent(&store).await;
-    // A condition covering the dialogue consumer's (nonexistent) sources
-    // cannot hold it: a dialogue attempt carries no correlation.
+    // An empty read-set is a genuine "the prompt read no canonical source",
+    // not a default: a condition covering an unrelated source cannot hold it.
     seed_condition(&store, 1, &[RawId::new()]);
     let ticket = InferenceTicketId(RawId::new());
     assert_eq!(

@@ -246,7 +246,10 @@ mod tests {
         reason = "in-test fake; async matches the executor contract"
     )]
     impl InferenceExecutor for RecordingExecutor {
-        async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError> {
+        async fn admit_dialogue(
+            &self,
+            _data_use: Vec<RawId>,
+        ) -> Result<Admission, InferenceTechnicalError> {
             self.record("admit_dialogue");
             Ok(Admission::Declined(NotSentReason::NotInAllowlist))
         }

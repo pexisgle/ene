@@ -190,7 +190,7 @@ async fn companion_erasure_removes_exact_bodies_and_dangling_references() {
     let mut reply = history_command(companion, generation, &format!("noted: {target}"));
     reply.role = HistoryRole::Companion;
     let (outcome, registered) = store
-        .append_reply_with_undelivered(reply, true)
+        .append_reply_with_undelivered(reply, true, None)
         .await
         .unwrap();
     let HistoryAppendOutcome::CommittedAs {

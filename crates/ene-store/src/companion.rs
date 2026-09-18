@@ -193,6 +193,7 @@ fn append_history(
     conn: &Mutex<Connection>,
     cmd: &AppendHistoryCommand,
     register_unpresented: bool,
+    inference_claim: Option<RawId>,
 ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
     let message = RawId::new();
     let message_text = encode_id(message);
@@ -347,6 +348,22 @@ fn append_history(
         && crate::preservation::covering_condition(&tx, &encode_id(expected))
             .map_err(|error| companion_unavailable(error.to_string()))?
             .is_some()
+    {
+        return Ok((HistoryAppendOutcome::HeldForErasure, None));
+    }
+    // The durable old-claim provenance (lifecycle §11 R2): a reply adopted
+    // from a provider claim that admission associated with a deletion
+    // interval is refused even after the operation completed and no current
+    // condition is readable. The hold names the single-use claim, never the
+    // text, so the refusal cannot re-materialize the target and a fresh claim
+    // after completion is not a permanent keyword ban.
+    if let Some(claim) = inference_claim
+        && crate::preservation::held_use(
+            &tx,
+            crate::preservation::USE_KIND_INFERENCE_ATTEMPT,
+            claim,
+        )
+        .map_err(|error| companion_unavailable(error.to_string()))?
     {
         return Ok((HistoryAppendOutcome::HeldForErasure, None));
     }
@@ -510,7 +527,7 @@ impl Store {
         &self,
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
-        let (outcome, _) = append_history(&self.conn, &cmd, false)?;
+        let (outcome, _) = append_history(&self.conn, &cmd, false, None)?;
         Ok(outcome)
     }
 
@@ -589,7 +606,7 @@ impl HistoryRepository for Store {
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            let (outcome, _) = append_history(&conn, &cmd, false)?;
+            let (outcome, _) = append_history(&conn, &cmd, false, None)?;
             Ok(outcome)
         })
         .await
@@ -599,10 +616,14 @@ impl HistoryRepository for Store {
         &self,
         cmd: AppendHistoryCommand,
         register_unpresented: bool,
+        inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         self.hint_after_commit(
-            run_blocking(move || append_history(&conn, &cmd, register_unpresented)).await,
+            run_blocking(move || {
+                append_history(&conn, &cmd, register_unpresented, inference_claim)
+            })
+            .await,
         )
     }
 
@@ -721,6 +742,13 @@ impl HistoryRepository for Store {
             let key = encode_id(companion.as_raw());
             let cap = encode_u64(limit).map_err(companion_unavailable)?;
             let guard = lock_shared(&conn);
+            // The current-condition premise is read once for the page and
+            // compared in place: a body under a current deletion condition is
+            // not handed to a caller (the dialogue prompt would otherwise put
+            // it into the provider input), and an unreadable premise withholds
+            // every body instead of serving one as uncovered.
+            let premise = crate::preservation::TextCoveragePremise::read(&guard)
+                .map_err(|error| companion_unavailable(error.to_string()))?;
             let mut query = guard
                 .prepare(SQL_SELECT_RECENT_TIMELINE)
                 .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -732,6 +760,9 @@ impl HistoryRepository for Store {
                 let row = row.map_err(|error| companion_unavailable(error.to_string()))?;
                 let message =
                     decode_history_message(companion, row).map_err(companion_unavailable)?;
+                if premise.covers(&message.text) {
+                    continue;
+                }
                 timeline.push(message);
             }
             // The SQL walk is newest-first so the cap keeps the newest items;

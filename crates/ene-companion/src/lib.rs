@@ -728,10 +728,20 @@ pub trait HistoryRepository {
     /// append atom (AU1a); Task- and Action-sourced registration shares the
     /// parent fact's own commit instead (AU1b). The returned [`Option`]
     /// carries the registered [`UndeliveredRef`] when registration happened.
+    ///
+    /// `inference_claim` is the durable provider claim this reply was
+    /// produced under, when the caller obtained one. The implementor compares
+    /// it inside the same transaction against the canonical deletion
+    /// correspondence: a claim a deletion admission already associated with
+    /// an interval is refused with [`HistoryAppendOutcome::HeldForErasure`]
+    /// even after the operation completed and no current condition is
+    /// readable (lifecycle §11 R2). [`None`] skips the check (non-provider
+    /// appends and direct test fixtures).
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
         register_unpresented: bool,
+        inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError>;
 
     /// Loads timeline items for one companion, oldest first.
@@ -756,6 +766,12 @@ pub trait HistoryRepository {
     /// This is the bounded recent-context query: callers that need the
     /// conversation near the present (dialogue context, Experience source)
     /// must not read the whole timeline to find it.
+    ///
+    /// Items under a current deletion condition are withheld from the
+    /// returned window (the implementor compares the canonical premise inside
+    /// the read), so a recent-context read never hands a covered body to a
+    /// consumer that would put it into a provider input. An unreadable
+    /// current condition withholds the whole window.
     async fn load_recent_timeline(
         &self,
         companion: CompanionId,

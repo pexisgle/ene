@@ -482,6 +482,13 @@ fn recall_candidates_sync(
         values.push(Box::new(term.clone()));
     }
     let guard = lock_shared(conn);
+    // Recall is a use, not only a read: a Memory under a current deletion
+    // condition is not offered to any consumer (the dialogue prompt would
+    // otherwise put its content into the provider input), and an unreadable
+    // premise withholds every body. The durable erase is the owner sweep's;
+    // this is the same canonical premise applied at the read boundary.
+    let premise = crate::preservation::TextCoveragePremise::read(&guard)
+        .map_err(|error| learning_unavailable(error.to_string()))?;
     let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;
     let rows = statement
         .query_map(
@@ -497,6 +504,9 @@ fn recall_candidates_sync(
     for row in rows {
         let (raw, insertion_order) = row.map_err(learning_unavailable)?;
         let memory = decode_memory(raw)?;
+        if premise.covers(&memory.content) {
+            continue;
+        }
         if !candidates
             .iter()
             .any(|(_, existing)| existing.id == memory.id)

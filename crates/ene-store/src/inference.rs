@@ -295,10 +295,11 @@ impl InferenceAttemptRepository for Store {
 /// together; a partial group can never be written. `data_use` is the ordered
 /// source correlation of the logical input: non-empty for a Task Agent
 /// attempt (whose premise always names at least its purpose source) and for a
-/// Learning formation (whose prompt read history and/or current Memory),
-/// empty for dialogue in this slice. A Task Agent attempt whose premise and
-/// attempt correlation disagree is refused instead of recording a provenance
-/// the claim gate would not have compared.
+/// Learning formation (whose prompt read history and/or current Memory), and
+/// the prompt read-set for a dialogue attempt (possibly empty when the
+/// assembled prompt carried no background). A Task Agent attempt whose
+/// premise and attempt correlation disagree is refused instead of recording a
+/// provenance the claim gate would not have compared.
 struct EncodedCorrelation {
     delegation: Option<String>,
     task: Option<String>,
@@ -358,16 +359,21 @@ fn encode_correlation(
             })
         }
         ConsumerKind::CompanionDialogue => {
-            if attempt.task_agent.is_some() || !attempt.data_use.is_empty() {
+            // A dialogue attempt carries the ordered identities of the
+            // History messages and remembered Memories its assembled prompt
+            // actually read (possibly empty for a turn with no background);
+            // the Task Agent correlation group is never present, because the
+            // dialogue consumer has no delegation to compare it against.
+            if attempt.task_agent.is_some() {
                 return Err(inference_unavailable(String::from(
-                    "dialogue attempt carries a provenance correlation",
+                    "dialogue attempt carries a task agent correlation",
                 )));
             }
             Ok(EncodedCorrelation {
                 delegation: None,
                 task: None,
                 task_revision: None,
-                data_use: Vec::new(),
+                data_use: encode_data_use(&attempt.data_use),
             })
         }
     }
@@ -786,10 +792,9 @@ fn decode_data_use(
 /// A claimed attempt is composed only when it is internally consistent:
 /// known capability/consumer/purpose names, a Task Agent consumer whose
 /// correlation group is complete and whose `data_use` is non-empty, a
-/// Learning consumer with no Task Agent group, a dialogue consumer with no
-/// correlation at all, and a `data_use` child relation whose count, order, and
-/// identities agree with the attempt row. Anything else is an unreadable row,
-/// never guessed.
+/// Learning or dialogue consumer with no Task Agent group, and a `data_use`
+/// child relation whose count, order, and identities agree with the attempt
+/// row. Anything else is an unreadable row, never guessed.
 fn decode_attempt_record(
     conn: &Connection,
     ticket: ene_inference::InferenceTicketId,
@@ -809,7 +814,12 @@ fn decode_attempt_record(
     let data_use = decode_data_use(conn, &encode_id(ticket.0), raw.data_use_count)?;
     let task_agent = match (raw.delegation_id, raw.task_id, raw.task_revision) {
         (None, None, None) => {
-            if !data_use.is_empty() && consumer != ConsumerKind::CompanionLearning {
+            if !data_use.is_empty()
+                && !matches!(
+                    consumer,
+                    ConsumerKind::CompanionLearning | ConsumerKind::CompanionDialogue
+                )
+            {
                 return Err(inference_unavailable(String::from(
                     "non-learning attempt carries a data-use correlation",
                 )));

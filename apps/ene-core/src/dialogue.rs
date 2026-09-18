@@ -65,7 +65,7 @@ use ene_api::v1::round::{
 };
 use ene_companion::dialogue::{
     AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification,
-    begin_turn_committed, classify_replay, finish_turn,
+    assemble_dialogue_input, begin_turn_committed, classify_replay, finish_turn,
 };
 use ene_companion::{
     CommandId, CompanionId, CompanionLifecycle, CompanionRepository, HistoryRepository,
@@ -363,12 +363,16 @@ impl HostHandle {
     /// Mediates one [`SubmitTextInput`] frame into the companion turn.
     ///
     /// Order: companion mapping, mandatory command key, durable idempotent
-    /// replay, presence attach, presentation intake, then the companion-owned
-    /// turn (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
-    /// inference boundary. Admission precedes the append so a declined input
-    /// leaves neither history rows nor transient round claims behind; the
-    /// round projection is minted atomically with its map entry (one domain
-    /// round, one wire), and a racy duplicate that lands on
+    /// replay, presence attach, presentation intake, dialogue prompt
+    /// assembly, then the companion-owned turn
+    /// (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
+    /// inference boundary. The assembled prompt's canonical read-set rides
+    /// the admission as the attempt's `data_use`, so the claim gate and the
+    /// deletion admission see the exact provenance the provider input was
+    /// built from. Admission precedes the append so a declined input leaves
+    /// neither history rows nor transient round claims behind; the round
+    /// projection is minted atomically with its map entry (one domain round,
+    /// one wire), and a racy duplicate that lands on
     /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
     /// accept without re-running inference. The canonical round premise comes
     /// from the input `round`, a populated envelope `round_view` must agree
@@ -753,6 +757,18 @@ impl HostHandle {
             tracker: &self.tracker,
             transport,
         };
+        // The prompt is assembled before admission: its canonical read-set
+        // (the History and Memory identities actually consumed) rides the
+        // admission into the attempt's `data_use`, so the claim gate and the
+        // deletion admission see the same provenance the provider input was
+        // built from. A read failure degrades the context, but a scrub
+        // failure holds the send without an Owner row, exactly like the input
+        // scrub above.
+        let Ok(prompt) =
+            assemble_dialogue_input(companion, &text, &self.store, &self.store, &scrubber).await
+        else {
+            return emit_end(sink, held_frame(frame, live));
+        };
         let input = AcceptedDialogueInput {
             companion,
             round: accepted.as_raw(),
@@ -769,7 +785,7 @@ impl HostHandle {
                 frame.envelope.sender.incarnation_id.random,
             )),
         };
-        let authorized = match executor.admit_dialogue().await {
+        let authorized = match executor.admit_dialogue(prompt.data_use().to_vec()).await {
             Ok(Admission::Admitted(authorized)) => *authorized,
             Ok(Admission::Declined(reason)) => {
                 return emit_end(
@@ -779,6 +795,11 @@ impl HostHandle {
             }
             Err(_) => return emit_end(sink, held_frame(frame, live)),
         };
+        // The claimed ticket is the durable correlation of the provider call
+        // this turn is about to start: the stream predicate reads it so a
+        // reply whose claim a deletion admission associated with an interval
+        // is never presented, even when the Host transient fence did not move.
+        let inference_claim = authorized.ticket().0;
         // Test-only race gate: pause after admission and before the guarded
         // acceptance section, so a test can supersede the connection in
         // between and pin that nothing commits.
@@ -792,6 +813,7 @@ impl HostHandle {
             .with_current_connection_blocking(live, move || {
                 begin_turn_committed(
                     commit_input,
+                    prompt,
                     authorized,
                     |owner| store.append_message_sync(owner),
                     |companion, command| store.lookup_command_sync(companion, command),
@@ -905,6 +927,7 @@ impl HostHandle {
                     seq: 0,
                     opened,
                     fence_epoch,
+                    inference_claim,
                 };
                 let task_control =
                     crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
@@ -921,8 +944,14 @@ impl HostHandle {
                         // payloads since this turn started refuses the adoption:
                         // the assembled reply can no longer prove it is
                         // uncovered, and a durable reply is not worth
-                        // resurrecting a deleted body into History.
+                        // resurrecting a deleted body into History. The
+                        // durable claim hold is the second, completion-proof
+                        // refusal: an unreadable hold fails closed.
                         self.transient_fence.epoch() == fence_epoch
+                            && matches!(
+                                self.store.inference_claim_held_sync(inference_claim),
+                                Ok(false)
+                            )
                             && self
                                 .open_round_for(&live.connection_id, &companion_key)
                                 .is_none_or(|open| open.round == accepted)
@@ -931,7 +960,6 @@ impl HostHandle {
                         turn,
                         &self.store,
                         &executor,
-                        &self.store,
                         &scrubber,
                         &task_control,
                         &mut gate,
@@ -1340,11 +1368,15 @@ impl<T: ProviderTransport + Send + Sync> HostInference<'_, T> {
 }
 
 impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_, T> {
-    async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError> {
+    async fn admit_dialogue(
+        &self,
+        data_use: Vec<ene_primitive::RawId>,
+    ) -> Result<Admission, InferenceTechnicalError> {
         self.admit(ene_inference::prepare_dialogue_admission(
             self.store,
             self.store,
             self.cred_store,
+            data_use,
         ))
         .await
     }
@@ -1431,6 +1463,10 @@ struct StreamGate<'a> {
     /// The Host transient erasure fence epoch this stream started under; a
     /// later epoch means the payload can no longer be published.
     fence_epoch: u64,
+    /// The ticket this stream's provider claim runs under: a deletion
+    /// admission that associated the claim with an interval refuses every
+    /// later delta, even after the operation completed.
+    inference_claim: RawId,
 }
 
 impl StreamGate<'_> {
@@ -1462,6 +1498,20 @@ impl StreamGate<'_> {
         // stream opened: the remaining deltas can no longer prove they are
         // uncovered, so they fail closed instead of publishing.
         if self.handle.transient_fence_epoch() != self.fence_epoch {
+            return false;
+        }
+        // The durable old-claim provenance (lifecycle §11 R2): a deletion
+        // admission associated this provider claim with its interval, so the
+        // reply cannot be presented even after the operation completed and no
+        // current condition is readable. The read is per delta and an
+        // unreadable hold refuses, never presents.
+        if !matches!(
+            self.handle
+                .store
+                .inference_claim_held(self.inference_claim)
+                .await,
+            Ok(false)
+        ) {
             return false;
         }
         // A newer submit replaced this stream's round: the owner's

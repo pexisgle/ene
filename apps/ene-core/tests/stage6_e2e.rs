@@ -3777,3 +3777,302 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     );
     served.server.abort();
 }
+
+// ---------------------------------------------------------------------------
+// E2E 1 dialogue currentness (Stage 6 M2 / #1627)
+// ---------------------------------------------------------------------------
+
+/// The delayed reply's paraphrase: it never quotes the target, so only the
+/// durable old-claim provenance can refuse it.
+const DIALOGUE_RACE_PARAPHRASE: &str = "I still keep that detail in mind.";
+
+/// Drives bounded serving ticks until no unfinished deletion operation
+/// remains.
+///
+/// Used by a race leg whose foreground connection is parked on a provider
+/// barrier and cannot poll the status page: the tick outcome's `operations`
+/// count is the durable unfinished-set size, so `0` proves the completion
+/// commit ran. Held operations stay in the unfinished set, so a hold can
+/// never read as completion.
+async fn dialogue_race_drive_deletion_to_completed(handle: &HostHandle) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    loop {
+        let pass = handle
+            .run_targeted_deletion_tick()
+            .await
+            .expect("the serving tick must run");
+        if pass.operations == 0 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the deletion operation did not complete: {pass:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// E2E 1 race (design R2, post-completion): a dialogue provider call already
+/// claimed when the deletion condition commits must not publish or adopt its
+/// delayed paraphrase after the operation completed.
+///
+/// The dialogue prompt's read-set is the durable correspondence: admission
+/// associates the claim with the interval through the target-bearing History
+/// and Memory identities the prompt actually consumed, and the released
+/// result is refused even though the paraphrase has no literal target and no
+/// current condition is readable.
+#[tokio::test]
+async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase() {
+    use ene_companion::{
+        AppendHistoryCommand, CompanionRepository as _, HistoryRepository as _, HistoryRole,
+    };
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_presence::PresenceRepository as _;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let second = String::from("what do you remember about that?");
+    let fresh = format!("a fresh note about {TARGET}");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(&second),
+                Call::text(DIALOGUE_RACE_PARAPHRASE),
+            ),
+            (on_latest_owner(&fresh), Call::text("acknowledged")),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    // Quiesce the serving Host and seed the target-bearing canonical context
+    // directly through the production repository boundaries: one Owner History
+    // message and one Memory. Nothing target-bearing was ever handed to the
+    // Client, so its parked connection is not a required local-erasure
+    // participant and the operation can reach the sealed global completion
+    // while the pre-deletion provider call is still held by the barrier.
+    served.stop().await;
+    {
+        let store = ene_store::Store::open(&dir.join("app.db"))
+            .await
+            .expect("the state database opens for seeding");
+        let companion = store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        match store
+            .append_message(AppendHistoryCommand {
+                companion,
+                round: RawId::new(),
+                role: HistoryRole::Owner,
+                text: format!("please remember {TARGET} for me"),
+                lang: String::from("en"),
+                at: WallClockWithTz::now(),
+                expected_generation: generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                expected_owner_message: None,
+                command_id: None,
+                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            })
+            .await
+            .expect("the History seed must commit")
+        {
+            ene_companion::HistoryAppendOutcome::CommittedAs { .. } => {}
+            other => panic!("the History seed must commit, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                store
+                    .commit_memory_change(MemoryChangeCommit {
+                        summary: None,
+                        secret_premise: None,
+                        claim: None,
+                        change: MemoryChange {
+                            target: MemoryTarget::New {
+                                id: MemoryId::generate(),
+                            },
+                            scope: LearningScope::companion(companion.as_raw()),
+                            content: format!("the owner mentioned {TARGET}"),
+                            importance: Importance::default(),
+                            temporal: TemporalMeaning::Enduring,
+                            change: ChangeKind::Initial,
+                            recall_suppressed: false,
+                            at: WallClockWithTz::now(),
+                        },
+                    })
+                    .await
+                    .expect("the Memory seed must answer"),
+                ene_learning::MemoryChangeOutcome::Committed { .. }
+            ),
+            "the Memory seed must commit"
+        );
+    }
+    // Stage the request before parking: the client is the only connection.
+    let mut client = served.serve().await;
+    // Stage the request before parking: the client is the only connection.
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    // The second turn's provider call parks after its claim; its prompt read
+    // the target-bearing History rows and the target-bearing Memory.
+    transport.block_input(on_latest_owner(&second));
+    let handle = Arc::clone(&served.handle);
+    let barrier = Arc::clone(&transport);
+    let mut parked = Box::pin(send_round_raw(&mut client, &second));
+    tokio::select! {
+        result = parked.as_mut() => panic!("the parked round cannot finish before completion: {result:?}"),
+        () = barrier.wait_parked(1) => {}
+    }
+    // Condition + erase/verify + global completion while the provider call is
+    // still held by the barrier.
+    confirm_deletion(&handle).await;
+    dialogue_race_drive_deletion_to_completed(&handle).await;
+    // The parked result is released only after completion: the durable
+    // old-claim hold refuses presentation and adoption. The transport records
+    // the request text when it answers, so the fixture premise (the prompt
+    // read the target-bearing sources before the condition committed) is
+    // asserted from the captured pre-deletion request.
+    barrier.release_blocked();
+    let (_round2, _stream2, raced_text, close) = parked.await.expect("the raced round must answer");
+    assert!(
+        transport.input_texts().iter().any(|input| {
+            input.ends_with(&format!("\nOwner: {second}")) && input.contains(TARGET)
+        }),
+        "the fixture must show the prompt read the target-bearing sources"
+    );
+    assert_eq!(
+        close,
+        ene_api::v1::round::StreamClose::Interrupted,
+        "a reply whose claim belongs to the deletion interval never completes"
+    );
+    assert!(
+        !raced_text.contains(DIALOGUE_RACE_PARAPHRASE),
+        "the delayed paraphrase must not be presented: {raced_text}"
+    );
+    assert!(
+        !raced_text.contains(TARGET),
+        "no covered delta may be presented: {raced_text}"
+    );
+    let history = history_texts(&mut client).await;
+    assert!(
+        !history
+            .iter()
+            .any(|text| text.contains(DIALOGUE_RACE_PARAPHRASE)),
+        "the delayed paraphrase must never be adopted into History"
+    );
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "no table may keep the target after completion"
+    );
+    // The completed operation is not a permanent ban: a fresh Owner origin
+    // after completion is accepted as a new History row.
+    let (round, stream, reply) = send_round(&mut client, &fresh)
+        .await
+        .expect("a fresh origin must be accepted");
+    assert!(reply.contains("acknowledged"), "{reply}");
+    confirm_round(&mut client, &round, stream).await;
+    assert!(
+        history_texts(&mut client)
+            .await
+            .iter()
+            .any(|text| text.contains(TARGET)),
+        "the fresh origin is appended as new History"
+    );
+    served.server.abort();
+}
+
+/// E2E 1 race (read-side gate): while a deletion condition is current, a
+/// dialogue turn's recent-History and Memory reads must not hand the covered
+/// rows to the provider. The turn still serves the uncovered remainder, so
+/// the withheld context is proven by the provider input rather than by a
+/// refused turn.
+#[tokio::test]
+async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let second = String::from("what do you remember about that?");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (on_learning_formation(true), Call::text(formation_create())),
+            (
+                on_latest_owner(&first),
+                Call::text(format!("I will keep {TARGET} in mind.")),
+            ),
+            (on_latest_owner(&second), Call::text("a clean answer")),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let (round, stream, reply) = send_round(served.client(), &first)
+        .await
+        .expect("the first round must complete");
+    assert!(reply.contains(TARGET));
+    confirm_round(served.client(), &round, stream).await;
+    wait_for_memory_revision_at_least(served.client(), 1).await;
+    // Condition first: the confirmation commits the erasure condition and
+    // its bounded fan-out, and the operation stays unfinished (the delivered
+    // Client incarnation is an un-answered local-erasure participant), so the
+    // condition is provably current when the next dialogue turn starts.
+    let outcome = request_deletion(served.client(), TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    confirm_deletion(&served.handle).await;
+    let sends_before = transport.sends();
+    let (round, stream, reply) = send_round(served.client(), &second)
+        .await
+        .expect("a turn with uncovered context must still serve");
+    assert!(reply.contains("a clean answer"), "{reply}");
+    confirm_round(served.client(), &round, stream).await;
+    assert!(
+        transport.sends() > sends_before,
+        "the filtered turn reaches the provider"
+    );
+    let second_inputs: Vec<String> = transport
+        .input_texts()
+        .into_iter()
+        .filter(|input| input.ends_with(&format!("\nOwner: {second}")))
+        .collect();
+    assert!(
+        !second_inputs.is_empty(),
+        "the fixture must reach the second provider call"
+    );
+    assert_absent_all("dialogue provider input", &second_inputs, TARGET);
+    // The operation completes and the completed surface stays clean.
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "no table may keep the target after completion"
+    );
+    served.server.abort();
+}

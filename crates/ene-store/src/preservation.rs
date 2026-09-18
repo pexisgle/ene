@@ -311,6 +311,93 @@ pub(crate) enum TextCoverage {
     Unreadable,
 }
 
+/// The exact-target premise of one bounded read pass (lifecycle §7/§11).
+///
+/// This is the page-shaped companion of [`covering_text`]: one canonical read
+/// of the unfinished operations' protected mechanical targets, reused for
+/// every row of one read. The premise is read from the canonical store inside
+/// the caller's transaction, so an empty target set across every current
+/// condition is the authoritative "not covered" (no sentinel, no cached
+/// verdict). A completed operation is excluded by the canonical
+/// `phase`/`closed_at` invariant: its condition stopped covering text (§7:
+/// completion is not a permanent keyword ban). Unfinished operations are the
+/// bounded candidate set: they are Owner-confirmed and validated here, so an
+/// operation whose structural rows are torn fails the read closed instead of
+/// being read as "not covering".
+///
+/// [`Self::covers`] is the same mechanical predicate the A3 owner sweeps apply
+/// — an exact substring match of a protected target. A current condition whose
+/// protected material was already wiped (finalizing, §12 steps 2-3) leaves no
+/// readable target at all, so the premise is unreadable and every body is
+/// covered (fail closed) rather than served as uncovered.
+pub(crate) struct TextCoveragePremise {
+    /// `None` when a current condition's protected material is unreadable.
+    targets: Option<Vec<String>>,
+}
+
+impl TextCoveragePremise {
+    pub(crate) fn read(conn: &Connection) -> Result<Self, PreservationTechnicalError> {
+        let orphan: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM erasure_condition c
+                     LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+                     WHERE o.operation_id IS NULL)",
+                (),
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if orphan {
+            return Err(corrupt());
+        }
+        let mut statement = conn
+            .prepare(
+                "SELECT operation_id FROM deletion_operation
+                 WHERE phase!='completed' ORDER BY operation_id",
+            )
+            .map_err(storage)?;
+        let ids: Vec<String> = statement
+            .query_map((), |row| row.get(0))
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?;
+        drop(statement);
+        let mut targets = Vec::with_capacity(ids.len());
+        for id in ids {
+            validate(conn, &id)?;
+            let exact: Option<String> = conn
+                .query_row(
+                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            // The material row exists for every unfinished operation except a
+            // finalizing one whose protected wipe already ran (§12 steps 2-3);
+            // that operation's condition is still current, so no readable
+            // comparison exists and the premise must cover every body.
+            let Some(target) = exact else {
+                return Ok(Self { targets: None });
+            };
+            if !target.is_empty() {
+                targets.push(target);
+            }
+        }
+        Ok(Self {
+            targets: Some(targets),
+        })
+    }
+
+    /// Whether `text` carries a current condition's exact target. An
+    /// unreadable premise covers every body.
+    pub(crate) fn covers(&self, text: &str) -> bool {
+        let Some(targets) = self.targets.as_ref() else {
+            return true;
+        };
+        targets.iter().any(|target| text.contains(target.as_str()))
+    }
+}
+
 /// Mechanical coverage of one incoming body by the canonical current erasure
 /// conditions (lifecycle §7/§11).
 ///
@@ -318,65 +405,20 @@ pub(crate) enum TextCoverage {
 /// match of each unfinished operation's protected mechanical target — read
 /// from the canonical store inside the caller's transaction, so an empty
 /// result across every current condition is the authoritative "not covered"
-/// (no sentinel, no cached verdict). A completed operation is excluded by the
-/// canonical `phase`/`closed_at` invariant: its condition stopped covering
-/// text (§7: completion is not a permanent keyword ban). Unfinished
-/// operations are the bounded candidate set: they are Owner-confirmed and
-/// validated here, so an operation whose structural rows are torn fails the
-/// check closed instead of being read as "not covering". An orphan condition
-/// row without its operation is unreadable canonical state and also fails
-/// closed.
+/// (no sentinel, no cached verdict).
 pub(crate) fn covering_text(
     conn: &Connection,
     text: &str,
 ) -> Result<Option<TextCoverage>, PreservationTechnicalError> {
-    let orphan: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM erasure_condition c
-                 LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
-                 WHERE o.operation_id IS NULL)",
-            (),
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if orphan {
-        return Err(corrupt());
-    }
-    let mut statement = conn
-        .prepare(
-            "SELECT operation_id FROM deletion_operation
-             WHERE phase!='completed' ORDER BY operation_id",
-        )
-        .map_err(storage)?;
-    let ids: Vec<String> = statement
-        .query_map((), |row| row.get(0))
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
-    drop(statement);
-    for id in ids {
-        validate(conn, &id)?;
-        let exact: Option<String> = conn
-            .query_row(
-                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        // The material row exists for every unfinished operation except a
-        // finalizing one whose protected wipe already ran (§12 steps 2-3);
-        // that operation's condition is still current, so the body is
-        // covered with no readable target.
-        match exact {
-            None => return Ok(Some(TextCoverage::Unreadable)),
-            Some(target) if !target.is_empty() && text.contains(&target) => {
-                return Ok(Some(TextCoverage::Target(target)));
-            }
-            Some(_) => {}
-        }
-    }
-    Ok(None)
+    let premise = TextCoveragePremise::read(conn)?;
+    let Some(targets) = premise.targets.as_ref() else {
+        return Ok(Some(TextCoverage::Unreadable));
+    };
+    Ok(targets
+        .iter()
+        .find(|target| text.contains(target.as_str()))
+        .cloned()
+        .map(TextCoverage::Target))
 }
 
 /// Source-correlation coverage of one logical input (lifecycle §7/§11): the
@@ -925,6 +967,51 @@ pub(crate) fn held_use(
         |row| row.get(0),
     )
     .map_err(storage)
+}
+
+impl Store {
+    /// Whether one claimed inference attempt was associated with a deletion
+    /// interval (lifecycle §11 R2).
+    ///
+    /// This is the durable-correspondence read the late-arrival boundaries use
+    /// when no current condition can decide: the hold deliberately outlives
+    /// completion, so a reply from a pre-deletion claim is still recognized as
+    /// stale for erasure after `closed_at` is set. A read failure is a
+    /// technical error; the caller refuses the delayed body (fail closed)
+    /// rather than reading it as unheld.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold table
+    /// cannot be read.
+    pub async fn inference_claim_held(
+        &self,
+        claim: RawId,
+    ) -> Result<bool, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            held_use(&guard, USE_KIND_INFERENCE_ATTEMPT, claim)
+        })
+        .await
+    }
+
+    /// Synchronous [`Self::inference_claim_held`] for a publication predicate
+    /// that must decide without awaiting (CCT §10.4). It reads the same
+    /// statement; a read failure is a technical error the caller must fail
+    /// closed on.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold table
+    /// cannot be read.
+    pub fn inference_claim_held_sync(
+        &self,
+        claim: RawId,
+    ) -> Result<bool, PreservationTechnicalError> {
+        let guard = lock_shared(&self.conn);
+        held_use(&guard, USE_KIND_INFERENCE_ATTEMPT, claim)
+    }
 }
 
 /// The attempt-side hold enumeration of [`mark_inflight_uses`].

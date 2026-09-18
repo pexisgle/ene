@@ -828,6 +828,7 @@ async fn append_registered(
                 local_id: None,
             },
             true,
+            None,
         )
         .await
         .expect("the append must commit");

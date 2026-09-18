@@ -238,7 +238,7 @@ async fn append_reply_with_body(
     let mut command = history_command(companion, generation, text);
     command.role = HistoryRole::Companion;
     store
-        .append_reply_with_undelivered(command, register_unpresented)
+        .append_reply_with_undelivered(command, register_unpresented, None)
         .await
         .expect("the reply append must answer")
 }
@@ -357,7 +357,7 @@ async fn append_first_then_condition_refuses_the_delayed_reply() {
     reply.role = HistoryRole::Companion;
     reply.expected_owner_message = Some(owner);
     let (outcome, registered) = store
-        .append_reply_with_undelivered(reply, true)
+        .append_reply_with_undelivered(reply, true, None)
         .await
         .expect("the reply append must answer");
     assert_eq!(outcome, HistoryAppendOutcome::HeldForErasure);
@@ -369,7 +369,7 @@ async fn append_first_then_condition_refuses_the_delayed_reply() {
     reply.role = HistoryRole::Companion;
     reply.expected_owner_message = Some(owner);
     let (outcome, _) = store
-        .append_reply_with_undelivered(reply, true)
+        .append_reply_with_undelivered(reply, true, None)
         .await
         .expect("the reply append must answer");
     assert_eq!(outcome, HistoryAppendOutcome::HeldForErasure);
@@ -1312,5 +1312,238 @@ async fn torn_or_unreadable_current_state_fails_closed_at_the_boundary() {
             .unwrap(),
         HistoryAppendOutcome::HeldForErasure,
         "an unreadable target covers every body"
+    );
+}
+
+// --- Dialogue prompt read-set correlation and read-side withholding ---
+
+/// Commits one dialogue consent row so a dialogue claim can run through the
+/// production inference claim path.
+async fn seed_dialogue_claim_consent(store: &Store) {
+    let saved = save_consent(
+        store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-dialogue"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(
+        matches!(saved, ConsentCommitOutcome::Committed { .. }),
+        "the dialogue consent must seed, got {saved:?}"
+    );
+}
+
+/// Claims one dialogue attempt through the production repository boundary,
+/// carrying the assembled prompt's ordered read-set.
+async fn claim_dialogue(
+    store: &Store,
+    ticket: InferenceTicketId,
+    data_use: Vec<RawId>,
+) -> AttemptBeginOutcome {
+    store
+        .begin_inference_attempt(InferenceAttempt {
+            ticket,
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            expected_consent: (
+                String::from("consent-dialogue"),
+                ConsentRevision::from_u64(1),
+            ),
+            expected_credential_set: CredentialSetRevision::initial(),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            task_agent: None,
+            data_use,
+            pricing: None,
+            usage_estimate: None,
+        })
+        .await
+        .expect("the dialogue claim must answer")
+}
+
+#[tokio::test]
+async fn a_dialogue_claim_records_its_ordered_read_set_and_is_held_by_a_covered_source() {
+    let store = open_memory().await.unwrap();
+    seed_dialogue_claim_consent(&store).await;
+    let first = RawId::new();
+    let second = RawId::new();
+    let ticket = InferenceTicketId(RawId::new());
+    // Order and duplicates are the durable correlation: the prompt read the
+    // first Memory twice and the second once.
+    assert_eq!(
+        claim_dialogue(&store, ticket, vec![first, second, first]).await,
+        AttemptBeginOutcome::Started
+    );
+    let record = store
+        .load_inference_attempt(ticket)
+        .await
+        .unwrap()
+        .expect("the dialogue attempt must read");
+    assert_eq!(record.task_agent, None);
+    assert_eq!(
+        record.data_use,
+        vec![first, second, first],
+        "the ordered read-set survives the claim and the read-back"
+    );
+
+    // A condition covering one read source holds a later dialogue claim
+    // before any attempt row exists.
+    let current = admit(&store, "the private key", vec![first], Vec::new()).await;
+    assert_eq!(
+        claim_dialogue(&store, InferenceTicketId(RawId::new()), vec![first]).await,
+        AttemptBeginOutcome::DataUseHeld,
+        "the same gate now sees the covering condition through the read-set"
+    );
+    // The already-claimed turn is associated with the interval through the
+    // same source correlation the admission probe joins on.
+    assert!(
+        store.inference_claim_held(ticket.0).await.unwrap(),
+        "the dialogue claim belongs to the deletion interval"
+    );
+    assert!(
+        !store.inference_claim_held(RawId::new()).await.unwrap(),
+        "an unrelated claim is not held"
+    );
+    assert!(
+        current_conditions(&store)
+            .await
+            .contains(&current.condition())
+    );
+}
+
+#[tokio::test]
+async fn a_dialogue_claim_held_before_completion_refuses_its_delayed_reply_after_it() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = companion_with_generation(&store).await;
+    seed_dialogue_claim_consent(&store).await;
+    let owner = match append_owner(&store, companion, generation, "an ordinary question").await {
+        HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the Owner append must commit, got {other:?}"),
+    };
+    // R2 use-first: the dialogue provider claim (with the prompt read-set)
+    // commits before the deletion condition.
+    let source = RawId::new();
+    let ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
+        claim_dialogue(&store, ticket, vec![source]).await,
+        AttemptBeginOutcome::Started
+    );
+    let current = admit(&store, "the private key", vec![source], Vec::new()).await;
+    // The operation completes while the provider work is still in flight.
+    complete_via_a5(&store, current).await;
+    assert!(current_conditions(&store).await.is_empty());
+
+    // The delayed reply is a clean paraphrase: no literal target, no current
+    // condition, yet the durable claim hold refuses adoption.
+    let mut reply = history_command(companion, generation, "the answer avoids the exact words");
+    reply.role = HistoryRole::Companion;
+    reply.expected_owner_message = Some(owner);
+    let (outcome, registered) = store
+        .append_reply_with_undelivered(reply, true, Some(ticket.0))
+        .await
+        .expect("the delayed reply must answer");
+    assert_eq!(
+        outcome,
+        HistoryAppendOutcome::HeldForErasure,
+        "a claim from before the interval is stale for erasure after completion"
+    );
+    assert!(registered.is_none());
+    assert_eq!(history_rows(&store, companion), 1);
+
+    // A fresh claim after completion is a new origin: the hold names the
+    // claim, never the text.
+    let fresh_ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
+        claim_dialogue(&store, fresh_ticket, Vec::new()).await,
+        AttemptBeginOutcome::Started
+    );
+    let mut fresh = history_command(companion, generation, "a fresh answer");
+    fresh.role = HistoryRole::Companion;
+    fresh.expected_owner_message = Some(owner);
+    let (outcome, registered) = store
+        .append_reply_with_undelivered(fresh, true, Some(fresh_ticket.0))
+        .await
+        .expect("the fresh reply must answer");
+    assert!(
+        matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
+        "a post-completion claim is not held, got {outcome:?}"
+    );
+    assert!(registered.is_some());
+}
+
+#[tokio::test]
+async fn dialogue_context_reads_withhold_covered_history_and_memory() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = companion_with_generation(&store).await;
+    let tainted =
+        match append_owner(&store, companion, generation, "the private key lives here").await {
+            HistoryAppendOutcome::CommittedAs { message } => message,
+            other => panic!("the tainted append must commit, got {other:?}"),
+        };
+    let clean = match append_owner(&store, companion, generation, "an unrelated note").await {
+        HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the clean append must commit, got {other:?}"),
+    };
+    let companion_raw = companion.as_raw();
+    let record = summary(
+        companion_raw,
+        "the private key was mentioned",
+        RawId::new(),
+        RawId::new(),
+    );
+    let memory = MemoryId::generate();
+    assert!(matches!(
+        commit(
+            &store,
+            change(
+                &record,
+                MemoryTarget::New { id: memory },
+                "recall the private key",
+                ChangeKind::Initial
+            ),
+        )
+        .await,
+        MemoryChangeOutcome::Committed { .. }
+    ));
+
+    // Before the condition both reads hand the target-bearing rows over.
+    let before = store
+        .load_recent_timeline(companion, 8)
+        .await
+        .expect("the recent window must read");
+    assert!(before.iter().any(|item| item.id == tainted));
+    assert!(before.iter().any(|item| item.id == clean));
+    let terms = vec![String::from("private")];
+    let recalled = store
+        .recall_candidates(companion_raw, &terms, 10)
+        .await
+        .expect("recall must answer");
+    assert!(recalled.iter().any(|candidate| candidate.id == memory));
+
+    admit(&store, "the private key", Vec::new(), Vec::new()).await;
+
+    // While the condition is current the dialogue context reads withhold the
+    // covered rows and keep the unrelated ones: no covered body reaches a
+    // provider input.
+    let filtered = store
+        .load_recent_timeline(companion, 8)
+        .await
+        .expect("the filtered window must read");
+    assert!(filtered.iter().all(|item| item.id != tainted));
+    assert!(filtered.iter().any(|item| item.id == clean));
+    let recalled = store
+        .recall_candidates(companion_raw, &terms, 10)
+        .await
+        .expect("filtered recall must answer");
+    assert!(
+        recalled.iter().all(|candidate| candidate.id != memory),
+        "a covered Memory is never offered to a context read"
     );
 }
