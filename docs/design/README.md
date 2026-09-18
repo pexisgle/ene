@@ -41,6 +41,7 @@
 - **クライアント接続・画面と音声・観測**:
   - [パートナーの存在場所とクライアント遷移 (Presence Transition)](critical-areas/client-presence-transition.md)
   - [画面・音声入出力と観測サブシステム](subsystems/client-presence-io-observation.md)
+  - [First-party desktop の実行構成 (Host / GUI / Body)](concrete/first-party-desktop.md)
 - **キャラクターパッケージ**:
   - [キャラクター構成と配布サブシステム](subsystems/character-distribution.md)
 - **クレート分割・インターフェース**:
