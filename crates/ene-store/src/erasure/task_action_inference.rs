@@ -43,10 +43,11 @@
 //! Owner surfaces:
 //!
 //! * Task: the in-force purpose text, every revision snapshot purpose, the
-//!   recorded result body, and the internal workspace / delegation scope path
-//!   copies. Correlation columns (`task_context_entry`, the delegation and
-//!   association identities) are retained: they are body-free identities, not
-//!   copies.
+//!   recorded result body, the observation occurrence path correlation, and
+//!   the internal workspace / delegation scope path copies. Correlation
+//!   columns (`task_context_entry`, the observation identities, the delegation
+//!   and association identities) are retained: they are body-free identities,
+//!   not copies.
 //! * Action: the attempt's resolved target path. Certainty and grounds are
 //!   never rewritten; an already-observed external effect stays a fact, and
 //!   only the stored target text is redacted.
@@ -127,6 +128,17 @@ const TASK_BODY: ErasureColumn = ErasureColumn {
     shape: ErasureShape::Text,
 };
 
+/// The occurrence ledger's resolved workspace path correlation. It is a
+/// locator copy (the same canonical AU5 target the Action owner records), so
+/// it must keep the canonical absolute-path shape after a redaction exactly
+/// like `action_attempt.real_target`. The occurrence identity, delegation /
+/// task correlation, producing attempt identity, and body-observed marker are
+/// facts and are never rewritten.
+const OBSERVATION_PATH: ErasureColumn = ErasureColumn {
+    name: "path",
+    shape: ErasureShape::AbsolutePath,
+};
+
 const WORKSPACE_FOLDER: ErasureColumn = ErasureColumn {
     name: "folder",
     shape: ErasureShape::Text,
@@ -168,6 +180,10 @@ const TASK_STAGES: &[ErasureStage] = &[
     ErasureStage {
         table: "task_result",
         columns: &[TASK_BODY],
+    },
+    ErasureStage {
+        table: "task_agent_observation",
+        columns: &[OBSERVATION_PATH],
     },
     ErasureStage {
         table: "workspace_assoc",

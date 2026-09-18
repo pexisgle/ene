@@ -38,16 +38,16 @@ use ene_task::{
     AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
     DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness,
     PAST_FACTS_ENTRY_CAP, PastExecutedFact, PastExecutedFactsPage, REPORT_PAGE_MAX,
-    ResumeInstructionSource, Task, TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival,
-    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
-    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome,
-    TaskCreationPremise, TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId,
-    TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow,
-    TaskReportRowCursor, TaskReportRowKind, TaskReportSourcePage, TaskReportSourceRef,
-    TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
-    TaskResumeCommitPremise, TaskResumeHold, TaskResumeOutcome, TaskRevision, TaskRevisionRecord,
-    TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation,
-    WorkspaceFolderRef,
+    ResumeInstructionSource, Task, TaskAgentEphemeralId, TaskAgentObservationId,
+    TaskAgentObservationPremise, TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskCreationPremise,
+    TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId, TaskProgress, TaskPurpose,
+    TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow, TaskReportRowCursor, TaskReportRowKind,
+    TaskReportSourcePage, TaskReportSourceRef, TaskRepository, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskResumeCommitPremise,
+    TaskResumeHold, TaskResumeOutcome, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
+    UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation, WorkspaceFolderRef,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -132,6 +132,16 @@ const SQL_SELECT_RESULT_BY_DELEGATION: &str = "SELECT result_id, task_id, task_r
 /// The durable start marker of one delegated execution: the first attempt
 /// committed under the delegation, whichever owner rows it.
 const SQL_DELEGATION_HAS_STARTED_WORK: &str = "SELECT EXISTS(SELECT 1 FROM inference_attempt WHERE delegation_id = ?1 UNION ALL SELECT 1 FROM action_attempt WHERE delegation_id = ?1)";
+
+/// One observation occurrence row, read for the idempotent retry compare.
+const SQL_SELECT_OBSERVATION: &str = "SELECT delegation_id, task_id, task_revision, workspace_assoc_id, action_attempt_id, path, body_observed, observed_at FROM task_agent_observation WHERE observation_id = ?1";
+
+const SQL_INSERT_OBSERVATION: &str = "INSERT INTO task_agent_observation (observation_id, delegation_id, task_id, task_revision, workspace_assoc_id, action_attempt_id, path, body_observed, observed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)";
+
+/// The producing attempt's copied correlation and resolved target: the
+/// observation row copies the target path from the attempt and must agree
+/// with every correlation column before the row is written.
+const SQL_SELECT_OBSERVATION_ATTEMPT: &str = "SELECT delegation_id, task_id, task_revision, workspace_assoc_id, real_target, operation FROM action_attempt WHERE attempt_id = ?1";
 
 const SQL_INSERT_RESULT: &str = "INSERT INTO task_result (result_id, task_id, task_revision, delegation_id, body, adopted_revision, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
@@ -1935,6 +1945,240 @@ fn load_task_result_sync(
         .transpose()
 }
 
+/// Records one execution-local observation occurrence (Stage 6 A4).
+///
+/// One short `Immediate` transaction: a same-identity retry is compared
+/// field-by-field against the stored row and replayed idempotently; the
+/// delegation correspondence supplies the copied `(task, revision)`; a
+/// producing Action attempt is resolved by identity and its copied
+/// `(delegation, task, revision, workspace)` plus its resolved target path
+/// become the row's correlation. A body-observed occurrence must name a
+/// `read`/`list` attempt: the observation reproduced workspace content, so
+/// the ledger records that its source is surveyable. The transient observed
+/// body is then compared against the canonical current erasure conditions in
+/// this same transaction — a covered body publishes the occurrence identity
+/// as a durable covered source and associates the delegation with the
+/// operation — and is never stored. The observation identity, occurrence
+/// correlation, path, and body-observed marker are objective facts; only the
+/// path is a mechanical-erasure column.
+fn record_task_agent_observation_sync(
+    conn: &Mutex<Connection>,
+    premise: TaskAgentObservationPremise,
+) -> Result<TaskAgentObservationId, TaskTechnicalError> {
+    let observation_text = encode_id(premise.observation.as_raw());
+    let delegation_text = encode_id(premise.delegation.as_raw());
+    let observed_at = premise.observed_at.to_rfc3339();
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(task_unavailable)?;
+    let correlation = observation_correlation(&tx, &premise)?;
+    let existing: Option<RawObservation> = tx
+        .query_row(
+            SQL_SELECT_OBSERVATION,
+            params![observation_text],
+            raw_observation_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    if let Some(raw) = existing {
+        let same = raw.delegation == delegation_text
+            && raw.task == correlation.task
+            && raw.task_revision == correlation.task_revision
+            && raw.workspace == correlation.workspace
+            && raw.attempt == correlation.attempt
+            && raw.path == correlation.path
+            && raw.body_observed == correlation.body_observed
+            && raw.observed_at == observed_at;
+        if !same {
+            return Err(task_unavailable(
+                "task observation identity reused with different correlation",
+            ));
+        }
+        tx.commit().map_err(task_unavailable)?;
+        return Ok(premise.observation);
+    }
+    tx.execute(
+        SQL_INSERT_OBSERVATION,
+        params![
+            observation_text,
+            delegation_text,
+            correlation.task,
+            correlation.task_revision,
+            correlation.workspace,
+            correlation.attempt,
+            correlation.path,
+            correlation.body_observed,
+            observed_at,
+        ],
+    )
+    .map_err(task_unavailable)?;
+    // The A4 receiving boundary: an observation body reproduced under a
+    // current condition is covered at the moment it is recorded, so the
+    // execution's delayed result is associated with the operation before the
+    // execution can produce it. The resolved target path is checked the same
+    // way: it is a mechanical-erasure column (the admission survey checks it
+    // on the producing attempt), and an observation recorded after admission
+    // must not escape that survey only because its row did not exist when the
+    // survey ran. The check and the association share this transaction with
+    // the row write.
+    let covered = match &premise.observed {
+        Some(observed) => crate::preservation::covering_text_condition(&tx, observed)
+            .map_err(|error| task_unavailable(error.to_string()))?,
+        None => None,
+    };
+    let covered = match covered {
+        Some(hit) => Some(hit),
+        None => match correlation.path.as_deref() {
+            Some(path) => crate::preservation::covering_text_condition(&tx, path)
+                .map_err(|error| task_unavailable(error.to_string()))?,
+            None => None,
+        },
+    };
+    if let Some((condition, _coverage)) = covered {
+        crate::preservation::publish_observation_source(
+            &tx,
+            condition,
+            premise.observation.as_raw(),
+        )
+        .map_err(|error| task_unavailable(error.to_string()))?;
+        crate::preservation::hold_delegation(
+            &tx,
+            condition,
+            premise.delegation.as_raw(),
+            &observed_at,
+        )
+        .map_err(|error| task_unavailable(error.to_string()))?;
+    }
+    tx.commit().map_err(task_unavailable)?;
+    Ok(premise.observation)
+}
+
+/// The verified correlation one observation row is written with.
+struct ObservationCorrelation {
+    task: String,
+    task_revision: i64,
+    workspace: Option<String>,
+    attempt: Option<String>,
+    path: Option<String>,
+    body_observed: bool,
+}
+
+/// Derives and verifies the correlation of one observation premise.
+///
+/// The delegation correspondence is required (a missing row is an
+/// inconsistent unit, like the result-arrival path). A refusal premise must
+/// carry no attempt and no observed body. An Action-derived premise must name
+/// an existing attempt whose copied `(delegation, task, revision, workspace)`
+/// agrees with the delegation correspondence; a disagreement is a technical
+/// error, never a composed row. A body-observed occurrence must come from a
+/// `read`/`list` attempt — the only operations whose observation reproduces
+/// workspace content in the current product surface — so the ledger never
+/// claims a source class the survey cannot cover.
+fn observation_correlation(
+    tx: &rusqlite::Transaction<'_>,
+    premise: &TaskAgentObservationPremise,
+) -> Result<ObservationCorrelation, TaskTechnicalError> {
+    let delegation_text = encode_id(premise.delegation.as_raw());
+    let correspondence: Option<(String, i64)> = tx
+        .query_row(
+            SQL_SELECT_DELEGATION_CORRESPONDENCE,
+            params![delegation_text],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some((task, task_revision)) = correspondence else {
+        return Err(task_unavailable(
+            "delegation correspondence missing for observation record",
+        ));
+    };
+    let Some(attempt) = &premise.attempt else {
+        if premise.observed.is_some() {
+            return Err(task_unavailable(
+                "refusal observation carries an observed body",
+            ));
+        }
+        return Ok(ObservationCorrelation {
+            task,
+            task_revision,
+            workspace: None,
+            attempt: None,
+            path: None,
+            body_observed: false,
+        });
+    };
+    let attempt_text = encode_id(*attempt);
+    let stored: Option<(String, String, i64, String, String, String)> = tx
+        .query_row(
+            SQL_SELECT_OBSERVATION_ATTEMPT,
+            params![attempt_text],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some((delegation, stored_task, stored_revision, workspace, real_target, operation)) =
+        stored
+    else {
+        return Err(task_unavailable(
+            "producing action attempt missing for observation record",
+        ));
+    };
+    if delegation != delegation_text || stored_task != task || stored_revision != task_revision {
+        return Err(task_unavailable(
+            "producing action attempt disagrees with the delegation correspondence",
+        ));
+    }
+    let body_observed = premise.observed.is_some();
+    if body_observed && !matches!(operation.as_str(), "read" | "list") {
+        return Err(task_unavailable(
+            "observed body names a non-body action operation",
+        ));
+    }
+    Ok(ObservationCorrelation {
+        task,
+        task_revision,
+        workspace: Some(workspace),
+        attempt: Some(attempt_text),
+        path: Some(real_target),
+        body_observed,
+    })
+}
+
+/// One stored observation row's idempotency comparison fields.
+struct RawObservation {
+    delegation: String,
+    task: String,
+    task_revision: i64,
+    workspace: Option<String>,
+    attempt: Option<String>,
+    path: Option<String>,
+    body_observed: bool,
+    observed_at: String,
+}
+
+fn raw_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawObservation> {
+    Ok(RawObservation {
+        delegation: row.get(0)?,
+        task: row.get(1)?,
+        task_revision: row.get(2)?,
+        workspace: row.get(3)?,
+        attempt: row.get(4)?,
+        path: row.get(5)?,
+        body_observed: row.get(6)?,
+        observed_at: row.get(7)?,
+    })
+}
+
 fn delegation_has_started_work_sync(
     conn: &Mutex<Connection>,
     delegation: DelegationId,
@@ -3387,6 +3631,14 @@ impl TaskRepository for Store {
     ) -> Result<bool, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || delegation_has_started_work_sync(&conn, delegation)).await
+    }
+
+    async fn record_task_agent_observation(
+        &self,
+        premise: TaskAgentObservationPremise,
+    ) -> Result<TaskAgentObservationId, TaskTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || record_task_agent_observation_sync(&conn, premise)).await
     }
 
     async fn adopt_result(

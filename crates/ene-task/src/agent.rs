@@ -31,6 +31,7 @@ use ene_primitive::RawId;
 use crate::context::{TaskContextEntryId, TaskContextItem, TaskContextOriginKind};
 use crate::delegation::{DelegationId, DelegationRef};
 use crate::instruction::{TaskInstructionRole, TaskInstructionSource};
+use crate::observation::TaskAgentObservationId;
 use crate::repository::{TaskRepository, TaskTechnicalError};
 use crate::task::{TaskId, TaskProgress, TaskRecord, TaskRef};
 
@@ -55,10 +56,11 @@ pub struct TaskAgentTurnPremise {
 /// `prompt` is only ever the injected scrubber's output; the harness never
 /// assembles a `ScrubbedText` itself. `data_use` is the canonical source
 /// correlation of the logical input in input order (opaque [`RawId`]s, never
-/// bodies or hashes): the in-force adopted-purpose entry's `origin.source`
-/// today, extended to every adopted-instruction entry with the slice that
-/// sends instruction bodies. [`core::fmt::Debug`] redacts the prompt so
-/// diagnostic output cannot leak its text.
+/// bodies or hashes): the in-force adopted-purpose entry's `origin.source`,
+/// every adopted-instruction entry's `origin.source`, every past-executed
+/// fact's source, and every kept Action exchange's durable observation
+/// occurrence identity. [`core::fmt::Debug`] redacts the prompt so diagnostic
+/// output cannot leak its text.
 #[derive(Clone)]
 pub struct TaskAgentInferencePremise {
     /// The delegation correspondence this turn runs under.
@@ -120,22 +122,35 @@ impl core::fmt::Debug for TaskAgentOutput {
 ///
 /// The text is composed by the Host from the Action owner's observed effect
 /// (or from the refusal class) and is never persisted: the only durable
-/// result body is the final `task_result` row. [`core::fmt::Debug`] redacts
-/// the text because it can carry file content.
+/// result body is the final `task_result` row. The occurrence identity is the
+/// durable ledger identity minted at observation time; it joins the ordered
+/// `data_use` of every later turn that replays this observation, so deletion
+/// can name what the turn consumed without keeping the body.
+/// [`core::fmt::Debug`] redacts the text because it can carry file content.
 #[derive(Clone, PartialEq, Eq)]
-pub struct TaskAgentObservation(String);
+pub struct TaskAgentObservation {
+    occurrence: TaskAgentObservationId,
+    text: String,
+}
 
 impl TaskAgentObservation {
-    /// Builds the observation text the next turn replays.
+    /// Builds one observation from its durable occurrence identity and the
+    /// text the next turn replays.
     #[must_use]
-    pub fn new(text: String) -> Self {
-        Self(text)
+    pub fn new(occurrence: TaskAgentObservationId, text: String) -> Self {
+        Self { occurrence, text }
+    }
+
+    /// The durable occurrence identity of this observation.
+    #[must_use]
+    pub fn occurrence(&self) -> TaskAgentObservationId {
+        self.occurrence
     }
 
     /// The observation text.
     #[must_use]
     pub fn text(&self) -> &str {
-        &self.0
+        &self.text
     }
 }
 
@@ -390,10 +405,12 @@ pub enum TaskAgentTurnOutcome {
 ///
 /// The logical input's canonical source correlation (`data_use`) is the
 /// purpose entry's `origin.source` followed by every adopted instruction's
-/// `origin.source` and then every past-executed fact's source, in the same
-/// order, duplicates retained. The Action
-/// exchange transcript is execution-local and carries no canonical source, so
-/// it adds no `data_use` entry. It travels to
+/// `origin.source`, then every past-executed fact's source, and finally the
+/// durable occurrence identity of every kept Action exchange observation, in
+/// the same order, duplicates retained. The Action exchange transcript is
+/// execution-local, so the observation occurrence identity — minted and made
+/// durable at observation time — is what carries its provenance; the exchange
+/// request text itself adds no entry. It travels to
 /// the claim, which compares it against the canonical current
 /// erasure-condition store in the same transaction as the task premise; a
 /// covered source yields [`TaskAgentTurnOutcome::NotSent`] with
@@ -552,6 +569,16 @@ pub async fn orchestrate_task_agent_turn(
         &premise.exchanges,
         inference.input_budget(),
     );
+    // The kept transcript's observation occurrences join the ordered
+    // correlation after the canonical sources, in the same order they appear
+    // in the logical input. The occurrence identity is the durable ledger
+    // identity minted at observation time: it lets the claim gate and the
+    // deletion admission association name what this turn consumed without any
+    // body, hash, or matcher being stored. A dropped exchange is not in the
+    // input, so it adds no correlation.
+    for exchange in kept_exchanges {
+        data_use.push(exchange.observation.occurrence().as_raw());
+    }
     let raw_input = assemble_logical_input(
         purpose_text,
         &instruction_texts,

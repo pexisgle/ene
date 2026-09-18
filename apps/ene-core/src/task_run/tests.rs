@@ -18,7 +18,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ene_action::{ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, OperationKind};
+use ene_action::{ActionAttemptRepository as _, ActionCertainty, OperationKind};
 use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
@@ -33,9 +33,9 @@ use ene_task::{
 };
 
 use super::{
-    CompletedFollowUp, DEFAULT_MAX_TURNS, TaskAgentDirective, TaskAgentProtocolViolation,
-    TaskAgentRunOutcome, TaskAgentRunRefusal, TaskExecutionRegistry, completed_follow_up,
-    parse_directive, run_task_agent_execution,
+    DEFAULT_MAX_TURNS, TaskAgentDirective, TaskAgentProtocolViolation, TaskAgentRunOutcome,
+    TaskAgentRunRefusal, TaskExecutionRegistry, completed_observation, observed_workspace_body,
+    parse_directive, run_task_agent_execution, unconfirmed_effect,
 };
 
 /// One Task with a real workspace association and one delegation.
@@ -916,41 +916,26 @@ fn registry_signals_every_running_execution_of_the_task_only() {
 fn an_unconfirmable_effect_stops_and_is_never_replayed() {
     use ene_action::{ActionOutput, EffectGrounds, ObservedEffect};
 
-    let attempt = ActionAttemptId::generate();
+    // An unresolved effect is the stop decision; it is never rendered as a
+    // replayable observation.
     let unknown = ObservedEffect {
         certainty: ActionCertainty::Unknown,
         grounds: EffectGrounds::OutcomeUnverified,
         output: None,
     };
-    match completed_follow_up(
-        TaskAgentOutput::new(String::from("{}")),
-        attempt,
-        &unknown,
-        true,
-    ) {
-        CompletedFollowUp::Stop(TaskAgentRunOutcome::EffectUnresolved { attempt: stopped }) => {
-            assert_eq!(stopped, attempt);
-        }
-        other => panic!("an unknown effect must stop the loop, got {other:?}"),
-    }
+    assert!(unconfirmed_effect(&unknown));
 
-    // A confirmed pre-effect refusal continues with a fixed-class observation.
+    // A confirmed pre-effect refusal continues with a fixed-class observation
+    // and never claims a workspace body source.
     let refused = ObservedEffect {
         certainty: ActionCertainty::ConfirmedFailure,
         grounds: EffectGrounds::RefusedBeforeEffect,
         output: None,
     };
-    match completed_follow_up(
-        TaskAgentOutput::new(String::from("{}")),
-        attempt,
-        &refused,
-        true,
-    ) {
-        CompletedFollowUp::Continue(exchange) => {
-            assert!(exchange.observation.text().contains("refused"));
-        }
-        other => panic!("a confirmed refusal is replayable, got {other:?}"),
-    }
+    assert!(!unconfirmed_effect(&refused));
+    let text = completed_observation(&refused, true);
+    assert!(text.contains("refused"));
+    assert!(!observed_workspace_body(&refused));
 
     // A confirmed success whose fact could not be recorded still continues,
     // but the observation states the durable record is unverified.
@@ -959,18 +944,26 @@ fn an_unconfirmable_effect_stops_and_is_never_replayed() {
         grounds: EffectGrounds::ObservedAtTarget,
         output: Some(ActionOutput::Updated),
     };
-    match completed_follow_up(
-        TaskAgentOutput::new(String::from("{}")),
-        attempt,
-        &confirmed,
-        false,
-    ) {
-        CompletedFollowUp::Continue(exchange) => {
-            assert!(exchange.observation.text().contains("edit ok"));
-            assert!(exchange.observation.text().contains("could not be stored"));
-        }
-        other => panic!("a confirmed success continues, got {other:?}"),
-    }
+    assert!(!unconfirmed_effect(&confirmed));
+    let text = completed_observation(&confirmed, false);
+    assert!(text.contains("edit ok"));
+    assert!(text.contains("could not be stored"));
+    assert!(!observed_workspace_body(&confirmed));
+
+    // A read body or a listing is the workspace-content class the deletion
+    // survey must mechanically read; a write confirmation is not.
+    let read = ObservedEffect {
+        certainty: ActionCertainty::ConfirmedSuccess,
+        grounds: EffectGrounds::ObservedAtTarget,
+        output: Some(ActionOutput::Bytes(b"content".to_vec())),
+    };
+    assert!(observed_workspace_body(&read));
+    let listing = ObservedEffect {
+        certainty: ActionCertainty::ConfirmedSuccess,
+        grounds: EffectGrounds::ObservedAtTarget,
+        output: Some(ActionOutput::Listing(Vec::new())),
+    };
+    assert!(observed_workspace_body(&listing));
 }
 
 #[test]

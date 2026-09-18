@@ -16,8 +16,11 @@
 //!    (`orchestrate_result_arrival`, AU15a) and then adoption
 //!    ([`TaskRepository::adopt_result`](ene_task::TaskRepository::adopt_result), AU15b).
 //! 3. Action observations are replayed into the next turn as execution-local
-//!    transcript. They are never persisted: the only durable result body is
-//!    the `task_result` row.
+//!    transcript. The observation body is never persisted; each occurrence's
+//!    durable, body-free provenance row (identity, delegation/execution
+//!    correlation, producing attempt, workspace path) is recorded before the
+//!    occurrence is replayed, and its identity joins the consuming turn's
+//!    `data_use`. The only durable result body is the `task_result` row.
 //!
 //! The loop is bounded ([`DEFAULT_MAX_TURNS`]) and never treats a provider
 //! output as final unless the model says so with the final directive, so an
@@ -54,16 +57,16 @@
 //! (the design's execution lifetime), and a cancelled Task is re-executed
 //! only as a new Task.
 
-use ene_action::{ActionCertainty, ActionNotStarted, ObservedEffect, OperationKind};
+use ene_action::{ActionCertainty, ActionNotStarted, ActionOutput, ObservedEffect, OperationKind};
 use ene_credential::SecretScrubber;
 use ene_inference::{DispatchAbort, ProviderTransport};
-use ene_primitive::RawId;
+use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 use ene_task::{
     TaskAgentActionExchange, TaskAgentInference, TaskAgentNotSent, TaskAgentObservation,
-    TaskAgentOutput, TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskInstructionSource,
-    TaskProgress, TaskRef, TaskRepository as _, TaskResultRecord, orchestrate_result_arrival,
-    orchestrate_task_agent_turn,
+    TaskAgentObservationId, TaskAgentObservationPremise, TaskAgentOutput, TaskAgentTurnOutcome,
+    TaskAgentTurnPremise, TaskInstructionSource, TaskProgress, TaskRef, TaskRepository as _,
+    TaskResultRecord, orchestrate_result_arrival, orchestrate_task_agent_turn,
 };
 use std::sync::Arc;
 
@@ -638,17 +641,42 @@ pub async fn run_task_agent_execution(
                         fact_recorded,
                     } => {
                         attempt_refs.push(attempt.as_raw());
-                        match completed_follow_up(produced.output, attempt, &effect, fact_recorded)
-                        {
-                            CompletedFollowUp::Continue(exchange) => exchanges.push(exchange),
-                            CompletedFollowUp::Stop(outcome) => return Ok(outcome),
+                        // An unresolved effect stops the loop and is never
+                        // replayed: the unknown stays the Action owner's fact.
+                        if unconfirmed_effect(&effect) {
+                            return Ok(TaskAgentRunOutcome::EffectUnresolved { attempt });
                         }
+                        // The observation is durable before it is replayed:
+                        // the occurrence identity and its correlation must be
+                        // recorded, or the turn that would consume it never
+                        // starts. A body-observed occurrence (read bytes /
+                        // list listing) carries the transient body into the
+                        // receiving-boundary check inside the same write.
+                        let text = completed_observation(&effect, fact_recorded);
+                        let observed = observed_workspace_body(&effect).then(|| text.clone());
+                        let occurrence = record_task_observation(
+                            store,
+                            delegation,
+                            Some(attempt.as_raw()),
+                            observed,
+                        )
+                        .await?;
+                        exchanges.push(TaskAgentActionExchange {
+                            request: produced.output,
+                            observation: TaskAgentObservation::new(occurrence, text),
+                        });
                     }
                     WorkspaceActionHostOutcome::NotStarted(reason) => {
                         let text = not_started_observation(&reason);
+                        // A refusal observation carries no source body and no
+                        // producing attempt, but it still becomes prompt
+                        // context: its occurrence is recorded body-free with
+                        // the execution correlation only.
+                        let occurrence =
+                            record_task_observation(store, delegation, None, None).await?;
                         exchanges.push(TaskAgentActionExchange {
                             request: produced.output,
-                            observation: TaskAgentObservation::new(text),
+                            observation: TaskAgentObservation::new(occurrence, text),
                         });
                     }
                     WorkspaceActionHostOutcome::MissingDelegation { delegation } => {
@@ -721,34 +749,52 @@ async fn execution_already_started(
     Ok(store.delegation_has_started_work(delegation).await?)
 }
 
-/// The follow-up of one completed Action.
-#[derive(Debug)]
-enum CompletedFollowUp {
-    /// The effect resolved; replay the observation.
-    Continue(TaskAgentActionExchange),
-    /// The effect could not be confirmed; stop without replaying anything.
-    Stop(TaskAgentRunOutcome),
+/// Whether one observed effect could not be confirmed.
+///
+/// Such an effect stops the loop: the unknown stays the Action owner's durable
+/// fact, the same effect is never re-executed automatically, and the
+/// execution stays unsealed for the user to judge. Confirmed success and
+/// confirmed failure both continue with the fixed-class observation.
+fn unconfirmed_effect(effect: &ObservedEffect) -> bool {
+    effect.certainty == ActionCertainty::Unknown
 }
 
-/// Decides whether one completed Action lets the loop continue.
+/// Records one execution-local observation occurrence before it is replayed.
 ///
-/// An unverified effect stops the loop: the unknown stays as the Action
-/// owner's durable fact, the same effect is never re-executed automatically,
-/// and the execution stays unsealed for the user to judge. Confirmed success
-/// and confirmed failure both continue with the fixed-class observation.
-fn completed_follow_up(
-    request: TaskAgentOutput,
-    attempt: ene_action::ActionAttemptId,
-    effect: &ObservedEffect,
-    fact_recorded: bool,
-) -> CompletedFollowUp {
-    if effect.certainty == ActionCertainty::Unknown {
-        return CompletedFollowUp::Stop(TaskAgentRunOutcome::EffectUnresolved { attempt });
-    }
-    CompletedFollowUp::Continue(TaskAgentActionExchange {
-        request,
-        observation: TaskAgentObservation::new(completed_observation(effect, fact_recorded)),
-    })
+/// The occurrence identity is minted here, at observation time; the store
+/// copies and verifies the delegation/execution correlation and the producing
+/// attempt, and performs the receiving-boundary erasure check on the transient
+/// body. A failed record aborts the execution as a technical error: the turn
+/// that would consume an unrecorded observation never starts.
+async fn record_task_observation(
+    store: &Store,
+    delegation: ene_task::DelegationId,
+    attempt: Option<RawId>,
+    observed: Option<String>,
+) -> Result<TaskAgentObservationId, TaskAgentRunError> {
+    Ok(store
+        .record_task_agent_observation(TaskAgentObservationPremise {
+            observation: TaskAgentObservationId::generate(),
+            delegation,
+            attempt,
+            observed,
+            observed_at: WallClockWithTz::now(),
+        })
+        .await?)
+}
+
+/// Whether one observed effect reproduced workspace body content.
+///
+/// Only `read` bytes and a `list` listing reproduce source content into the
+/// observation text; a write confirmation or a refusal does not. The
+/// distinction decides whether the deletion survey must read the workspace
+/// source (a body-observed occurrence whose source cannot be read fails
+/// closed).
+fn observed_workspace_body(effect: &ObservedEffect) -> bool {
+    matches!(
+        effect.output,
+        Some(ActionOutput::Bytes(_) | ActionOutput::Listing(_))
+    )
 }
 
 /// Renders the executor's own observation for the next turn.

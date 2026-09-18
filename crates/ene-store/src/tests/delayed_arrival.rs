@@ -1547,3 +1547,568 @@ async fn dialogue_context_reads_withhold_covered_history_and_memory() {
         "a covered Memory is never offered to a context read"
     );
 }
+
+// --- Task Agent execution-local observation provenance (Stage 6 A4) ---
+//
+// A Task Agent execution observes Action results as execution-local text and
+// replays them into later turns. The occurrence ledger records identity and
+// correlation only; these tests pin the deletion behavior of that ledger: an
+// observed workspace source that carries the target (or cannot be surveyed)
+// associates the delegation durably, a covered occurrence joins the ordered
+// claim `data_use` coverage, and a provably clean delegation keeps adopting.
+
+use ene_task::{TaskAgentObservationId, TaskAgentObservationPremise};
+
+use ene_action::ActionCertainty;
+
+/// Records one read observation through the production repository path,
+/// returning its occurrence identity.
+async fn record_observation(
+    store: &Store,
+    delegation: DelegationId,
+    attempt: Option<RawId>,
+    observed: Option<&str>,
+) -> TaskAgentObservationId {
+    let observation = TaskAgentObservationId::generate();
+    store
+        .record_task_agent_observation(TaskAgentObservationPremise {
+            observation,
+            delegation,
+            attempt,
+            observed: observed.map(str::to_owned),
+            observed_at: fixture_clock(),
+        })
+        .await
+        .expect("the observation must record");
+    observation
+}
+
+/// Claims one AU5 read attempt at `target` through the production start path.
+async fn claim_read_attempt(
+    store: &Store,
+    task: TaskRef,
+    delegation: DelegationId,
+    target: &str,
+) -> RawId {
+    let assoc = {
+        let key = crate::codec::encode_id(task.task.as_raw());
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT assoc_id FROM workspace_assoc WHERE task_id=?1",
+            [&key],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("the committed association must read")
+    };
+    let assoc = WorkspaceAssocId::from_raw(crate::codec::decode_id(&assoc).unwrap());
+    let attempt = ActionAttemptId::generate();
+    let outcome = store
+        .insert_attempt_if_current(AttemptCommitPremise {
+            attempt,
+            delegation: delegation.as_raw(),
+            task: task.task.as_raw(),
+            task_revision: RevisionInner::from_u64(task.revision.as_u64()),
+            workspace: assoc.as_raw(),
+            real_target: RealTargetRef::from_canonical_path(target.to_owned()),
+            operation: OperationKind::Read,
+            relied_evaluation: RawId::new(),
+        })
+        .await
+        .expect("the attempt insert must answer");
+    assert_eq!(outcome, ActionStartOutcome::Started, "the read must claim");
+    attempt.as_raw()
+}
+
+fn delegation_hold_rows(store: &Store, delegation: DelegationId) -> i64 {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind='task_delegation' AND use_id=?1",
+        [crate::codec::encode_id(delegation.as_raw())],
+        |row| row.get(0),
+    )
+    .expect("the hold probe must read")
+}
+
+fn observation_source_rows(store: &Store, observation: TaskAgentObservationId) -> i64 {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM erasure_condition_source WHERE source=?1",
+        [crate::codec::encode_id(observation.as_raw())],
+        |row| row.get(0),
+    )
+    .expect("the source probe must read")
+}
+
+fn observation_path(store: &Store, observation: TaskAgentObservationId) -> Option<String> {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT path FROM task_agent_observation WHERE observation_id=?1",
+        [crate::codec::encode_id(observation.as_raw())],
+        |row| row.get(0),
+    )
+    .expect("the observation row must read")
+}
+
+/// Writes one workspace source carrying `content` and returns its path.
+fn workspace_source(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, content).expect("the workspace source writes");
+    path.to_string_lossy().into_owned()
+}
+
+/// Completes the Task participant's real sweep for the current condition.
+async fn sweep_task_participant(store: &Store, current: DeletionOperationRef) {
+    let participant = crate::TaskErasureParticipant::new(store.clone());
+    drive_with_sources(
+        &participant,
+        current.condition(),
+        ParticipantOwnerRef::Task,
+        "the private key",
+        Vec::new(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_observation_of_a_covered_workspace_source_holds_its_delayed_result() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "the private key is here");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nthe private key is here"),
+    )
+    .await;
+
+    // The admission survey reads the observed workspace source mechanically:
+    // the external file carries the target, so the occurrence is published as
+    // a covered source and the execution is associated with the operation.
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    assert_eq!(delegation_hold_rows(&store, delegation), 1);
+    assert_eq!(observation_source_rows(&store, observation), 1);
+
+    // The objective ledger row survives the operation and keeps its
+    // correlation: identity, delegation, producing attempt, and path.
+    assert_eq!(
+        observation_path(&store, observation).as_deref(),
+        Some(source.as_str())
+    );
+    complete_via_a5(&store, current).await;
+    assert!(current_conditions(&store).await.is_empty());
+
+    // The delayed final result is a clean paraphrase: the exact-text
+    // redaction cannot catch it, so only the durable occurrence
+    // correspondence can. The body is collected to the fixed body-free form
+    // and the execution still seals.
+    let arrival = result_arrival(
+        delegation,
+        "the report summarizes confidential material without quoting it",
+    );
+    let record = store
+        .record_task_result_arrival(arrival.clone())
+        .await
+        .expect("the delayed arrival must record its fact");
+    assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
+    assert_eq!(
+        task_result_body(&store, arrival.result),
+        crate::erasure::ERASED_MARKER
+    );
+    assert!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_some(),
+        "the execution seal survives the collected body"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_observation_source_fails_closed_into_a_hold() {
+    let store = open_memory().await.unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    // The producing attempt exists, but its source file does not: the
+    // observed body cannot be mechanically surveyed at admission, so the
+    // occurrence fails closed instead of being assumed clean.
+    let missing = std::env::temp_dir()
+        .join("ene-stage6-observation-missing/source.txt")
+        .to_string_lossy()
+        .into_owned();
+    let attempt = claim_read_attempt(&store, task, delegation, &missing).await;
+    let _observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nsomething was observed here"),
+    )
+    .await;
+
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        1,
+        "an unsurveyable observed source associates the execution"
+    );
+    complete_via_a5(&store, current).await;
+
+    let arrival = result_arrival(delegation, "a clean paraphrase of unknown provenance");
+    let record = store
+        .record_task_result_arrival(arrival)
+        .await
+        .expect("the delayed arrival must record its fact");
+    assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
+}
+
+#[tokio::test]
+async fn a_provably_clean_observation_leaves_the_delegation_adoptable() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "ordinary notes");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nordinary notes"),
+    )
+    .await;
+    assert_eq!(observation_source_rows(&store, observation), 0);
+
+    // An unrelated deletion target does not associate this execution: the
+    // surveyed source is readable and provably clean.
+    admit(&store, "another private secret", Vec::new(), Vec::new()).await;
+    assert_eq!(delegation_hold_rows(&store, delegation), 0);
+
+    // The execution still completes normally: the resolved effect is settled
+    // and the clean result is adopted as completion.
+    assert_eq!(
+        store
+            .compare_and_set_certainty(
+                ActionAttemptId::from_raw(attempt),
+                ActionCertainty::Unknown,
+                ActionCertainty::ConfirmedSuccess,
+                ene_action::EffectGrounds::ObservedAtTarget,
+            )
+            .await
+            .unwrap(),
+        ene_action::CertaintyUpdateOutcome::Updated
+    );
+    let arrival = result_arrival(delegation, "the ordinary report");
+    let recorded = store
+        .record_task_result_arrival(arrival)
+        .await
+        .expect("the clean arrival must record");
+    let acceptance = store
+        .adopt_result(ene_task::TaskResultAdoptionClaim {
+            result: recorded.result,
+            attempt_refs: vec![attempt],
+        })
+        .await
+        .expect("the clean adoption must answer");
+    assert_eq!(
+        acceptance,
+        ene_task::TaskResultAcceptance::AdoptedAsCompletion(task),
+        "a provably clean delegation still completes"
+    );
+}
+
+#[tokio::test]
+async fn an_observation_body_covered_at_mint_is_published_and_held() {
+    let store = open_memory().await.unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    // A clean source path: neither the purpose nor the attempt target
+    // carries the target, so only the receiving-boundary body check can
+    // associate the execution.
+    let source = std::env::temp_dir()
+        .join("ene-stage6-observation-clean/source.txt")
+        .to_string_lossy()
+        .into_owned();
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    assert_eq!(delegation_hold_rows(&store, delegation), 0);
+
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nthe private key appeared after the condition started"),
+    )
+    .await;
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        1,
+        "the receiving boundary associates a body observed under the current condition"
+    );
+    assert_eq!(observation_source_rows(&store, observation), 1);
+    complete_via_a5(&store, current).await;
+
+    let arrival = result_arrival(delegation, "a later paraphrase of what was read");
+    let record = store
+        .record_task_result_arrival(arrival)
+        .await
+        .expect("the delayed arrival must record its fact");
+    assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
+}
+
+#[tokio::test]
+async fn a_covered_observation_source_refuses_a_later_task_agent_claim() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "the private key is here");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nthe private key is here"),
+    )
+    .await;
+    admit(&store, "the private key", Vec::new(), Vec::new()).await;
+
+    // The production claim path (AU14) compares the ordered `data_use`
+    // against the published covered sources: an observation occurrence that
+    // consumed the covered source refuses the send before any attempt row,
+    // even though the prompt itself is not compared.
+    let saved = save_consent(&store, None, consent_record("consent-observation", 1)).await;
+    assert!(matches!(saved, ConsentCommitOutcome::Committed { .. }));
+    let ticket = InferenceTicketId(RawId::new());
+    let outcome = store
+        .begin_inference_attempt(InferenceAttempt {
+            ticket,
+            consumer: ConsumerKind::TaskAgent,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::TaskAgentTurn,
+            expected_consent: (
+                String::from("consent-observation"),
+                ConsentRevision::from_u64(1),
+            ),
+            expected_credential_set: CredentialSetRevision::initial(),
+            provider: String::from("acme"),
+            model: String::from("dialogue-1"),
+            task_agent: Some(TaskAgentAttemptPremise {
+                delegation: delegation.as_raw(),
+                task: task.task.as_raw(),
+                task_revision: RevisionInner::from_u64(task.revision.as_u64()),
+                data_use: vec![observation.as_raw()],
+            }),
+            data_use: vec![observation.as_raw()],
+            pricing: None,
+            usage_estimate: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AttemptBeginOutcome::DataUseHeld,
+        "the claim gate sees the covered observation occurrence"
+    );
+    assert!(
+        store
+            .load_inference_attempt(ticket)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn reopening_the_store_keeps_the_observation_hold_and_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observation-restart.db");
+    let store = Store::open(&path).await.unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "the private key is here");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nthe private key is here"),
+    )
+    .await;
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    assert_eq!(delegation_hold_rows(&store, delegation), 1);
+    drop(store);
+
+    // The hold, the source publication, and the occurrence ledger are durable:
+    // a restart neither loses the correspondence nor completes the operation.
+    let reopened = Store::open(&path).await.unwrap();
+    assert_eq!(delegation_hold_rows(&reopened, delegation), 1);
+    assert_eq!(observation_source_rows(&reopened, observation), 1);
+    assert!(
+        current_conditions(&reopened)
+            .await
+            .contains(&current.condition())
+    );
+
+    // Re-recording the same occurrence identity with the same correlation is
+    // an idempotent replay, never a second row.
+    reopened
+        .record_task_agent_observation(TaskAgentObservationPremise {
+            observation,
+            delegation,
+            attempt: Some(attempt),
+            observed: Some(String::from("read ok:\nthe private key is here")),
+            observed_at: fixture_clock(),
+        })
+        .await
+        .expect("the same-identity replay is idempotent");
+    assert_eq!(observation_source_rows(&reopened, observation), 1);
+
+    complete_via_a5(&reopened, current).await;
+    let arrival = result_arrival(delegation, "a paraphrase that omits the exact words");
+    let record = reopened
+        .record_task_result_arrival(arrival)
+        .await
+        .expect("the delayed arrival must record its fact");
+    assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
+}
+
+#[tokio::test]
+async fn the_task_participant_sweeps_the_observation_path_copy() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    // The resolved target path itself carries the target: it is a mechanical
+    // body column of the observation ledger, exactly like the Action owner's
+    // `real_target` copy.
+    let source = workspace_source(&files, "the private key.txt", "ordinary notes");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nordinary notes"),
+    )
+    .await;
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+
+    sweep_task_participant(&store, current).await;
+    let swept = observation_path(&store, observation).expect("the row survives the sweep");
+    assert!(
+        !swept.contains("the private key"),
+        "the Task owner sweep redacts the occurrence path copy, got {swept}"
+    );
+    assert!(
+        std::path::Path::new(&swept).is_absolute(),
+        "the swept path stays a readable canonical locator"
+    );
+}
+
+#[tokio::test]
+async fn an_observation_path_covered_after_admission_is_published_and_held() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    // The producing attempt's resolved target path carries the target, but
+    // the occurrence row does not exist when admission runs: the admission
+    // survey cannot see it. The receiving boundary must still check the
+    // recorded path, or the consuming turn's claim would pass the data-use
+    // gate and a delayed paraphrase could be persisted after completion.
+    let source = workspace_source(&files, "the private key.txt", "ordinary notes");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        0,
+        "the admission survey cannot see a row that does not exist yet"
+    );
+
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nordinary notes"),
+    )
+    .await;
+    assert_eq!(
+        observation_source_rows(&store, observation),
+        1,
+        "the covered resolved path is published under the occurrence identity"
+    );
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        1,
+        "the covered resolved path associates the execution"
+    );
+    // The Task owner sweep redacts the observation path copy and the Action
+    // owner sweep redacts the attempt's resolved target copy before
+    // completion; the system-wide remainder probe would otherwise collect
+    // both as remainders.
+    sweep_task_participant(&store, current).await;
+    let action_participant = crate::ActionErasureParticipant::new(store.clone());
+    drive_with_sources(
+        &action_participant,
+        current.condition(),
+        ParticipantOwnerRef::Action,
+        "the private key",
+        Vec::new(),
+    )
+    .await;
+    complete_via_a5(&store, current).await;
+
+    let arrival = result_arrival(
+        delegation,
+        "a clean paraphrase that omits the path and the exact words",
+    );
+    let record = store
+        .record_task_result_arrival(arrival)
+        .await
+        .expect("the delayed arrival must record its fact");
+    assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
+}

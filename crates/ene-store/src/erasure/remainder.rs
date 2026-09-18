@@ -42,8 +42,9 @@ const PROBE_PAGE_ROWS: u32 = 64;
 ///
 /// * Companion: History bodies, activity-record bodies.
 /// * Learning: Summary content, Memory content, revision content.
-/// * Task: the in-force purpose, every revision purpose, result bodies, and
-///   the internal workspace / delegation path copies.
+/// * Task: the in-force purpose, every revision purpose, result bodies, the
+///   observation occurrence path correlation, and the internal workspace /
+///   delegation path copies.
 /// * Action: the attempt's resolved target path.
 /// * Permission: the intent journal's subject and quoted rationale, and the
 ///   consent route fields.
@@ -60,6 +61,7 @@ const SYSTEM_CONTENT: &[(&str, &str)] = &[
     ("task", "purpose_text"),
     ("task_revision", "purpose_text"),
     ("task_result", "body"),
+    ("task_agent_observation", "path"),
     ("workspace_assoc", "folder"),
     ("workspace_assoc", "save_target"),
     ("delegation", "scope_folder"),

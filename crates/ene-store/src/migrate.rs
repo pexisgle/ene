@@ -487,6 +487,33 @@ CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, stat
 CREATE INDEX idx_usage_reservation_opened ON usage_reservation (opened_at);
 CREATE INDEX idx_usage_reservation_provider_opened ON usage_reservation (provider, opened_at);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
+-- Body-free occurrence ledger of Task Agent execution-local observations
+-- (Stage 6 A4). The execution mints one occurrence identity at observation
+-- time and the row carries the delegation/execution correlation, the
+-- producing AU5 action attempt where one exists, and the workspace/path
+-- correlation. `body_observed` means the observation reproduced workspace
+-- content (read bytes or a list listing); such an occurrence's source is
+-- mechanically surveyed at deletion admission and fails closed when it cannot
+-- be read. The table deliberately stores no observation body, no body hash or
+-- fingerprint, no reversible encoding, and no presentation copy: the
+-- observation text stays execution-local and only this correlation ledger is
+-- durable. `path` is the resolved AU5 target and is a mechanical-erasure
+-- column of the Task owner, exactly like `action_attempt.real_target`.
+CREATE TABLE task_agent_observation (
+observation_id TEXT PRIMARY KEY,
+delegation_id TEXT NOT NULL,
+task_id TEXT NOT NULL,
+task_revision INTEGER NOT NULL,
+workspace_assoc_id TEXT NULL,
+action_attempt_id TEXT NULL,
+path TEXT NULL,
+body_observed INTEGER NOT NULL CHECK (body_observed IN (0, 1)),
+observed_at TEXT NOT NULL,
+CHECK ((path IS NULL) = (workspace_assoc_id IS NULL)),
+CHECK ((workspace_assoc_id IS NULL) = (action_attempt_id IS NULL)),
+CHECK (body_observed = 0 OR action_attempt_id IS NOT NULL)
+);
+CREATE INDEX idx_task_agent_observation_delegation ON task_agent_observation (delegation_id);
 INSERT INTO credential_set (id, rev) VALUES (1, 0);
 -- Durable, body-free Client body-delivery evidence (lifecycle §8.1). One row
 -- per Host-minted Client incarnation the Host actually handed body-bearing

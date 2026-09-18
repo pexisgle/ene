@@ -4347,3 +4347,160 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
         "a post-completion origin is accepted"
     );
 }
+
+/// E2E 1 race (design R2, post-completion): a Task Agent execution observed a
+/// target-bearing workspace source as execution-local tool output (no
+/// canonical source identity), the following provider claim consumed that
+/// observation, the deletion started and completed while the final turn was
+/// parked, and the delayed final answer is a clean paraphrase. The
+/// observation occurrence ledger associates the delegation with the operation
+/// at admission (the workspace source is surveyed mechanically), so the
+/// delayed body is collected into the fixed body-free form and the completed
+/// execution still seals, adopts, and completes. The completed surface keeps
+/// zero target bodies and the durable correspondence exists.
+#[tokio::test]
+async fn stage6_task_transient_observation_after_completion_is_collected() {
+    const LEG_TARGET: &str = TARGET;
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    // The final answer never restates the target: only the durable
+    // observation correspondence can collect it (the exact-text redaction
+    // would not match a clean paraphrase).
+    let paraphrase = "The input file describes confidential material; I did not copy its contents.";
+    let proposal = task_reply(serde_json::json!({
+        "kind": "propose_task",
+        "purpose": "write a report about the workspace input",
+    }));
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_task_agent_turn(0),
+                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
+            ),
+            (
+                on_latest_owner("please read input.txt and write report.md"),
+                Call::text(proposal),
+            ),
+        ],
+        &[],
+    ));
+    // The final turn parks after its durable claim; the deletion runs to
+    // completion while the provider work is still in flight.
+    transport.block_input(on_task_agent_turn(1));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    std::fs::write(
+        workspace.join("input.txt"),
+        format!("confidential: {LEG_TARGET}"),
+    )
+    .expect("the workspace source writes");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    let (round, stream, reply) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    assert!(
+        reply.contains("Task accepted"),
+        "the task proposal must be accepted: {reply}"
+    );
+    confirm_round(served.client(), &round, stream).await;
+    transport.wait_parked(1).await;
+
+    let db = served.dir.join("app.db");
+    // The observation occurrence is durable before the claim that consumed it:
+    // the ledger row and its producing-attempt correlation exist while the
+    // final turn is parked.
+    assert_eq!(
+        transient_observation_rows(&db),
+        1,
+        "the execution-local observation occurrence is durable before deletion"
+    );
+
+    let outcome = request_deletion(served.client(), LEG_TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = Arc::clone(&served.handle);
+    confirm_deletion(&handle).await;
+    // Admission surveys the observed workspace source, finds the target, and
+    // associates the execution durably (the hold survives completion).
+    assert_eq!(
+        transient_task_delegation_holds(&db),
+        1,
+        "the observed covered source associates the delegation at admission"
+    );
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete while the final turn is parked");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+
+    // The parked final answer arrives after completion with a clean
+    // paraphrase: the durable observation correspondence collects it into the
+    // body-free form, and the execution still seals, adopts, and completes.
+    transport.release_blocked();
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the task completes on the collected result");
+    assert_eq!(
+        transient_sole_result_body(&db),
+        "[erased]",
+        "the delayed paraphrase is never stored raw"
+    );
+    assert_eq!(served.canonical_remainder(LEG_TARGET).await, 0);
+    assert!(
+        db_target_hits(&db, LEG_TARGET).is_empty(),
+        "the completed surface keeps no target body: {:?}",
+        db_target_hits(&db, LEG_TARGET)
+    );
+    served.server.abort();
+}
+
+/// Observation occurrence ledger rows in the state database, read over an
+/// independent connection.
+fn transient_observation_rows(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).expect("the state database opens");
+    conn.busy_timeout(Duration::from_secs(30))
+        .expect("a busy timeout must set");
+    conn.query_row("SELECT COUNT(*) FROM task_agent_observation", [], |row| {
+        row.get(0)
+    })
+    .expect("the observation probe must run")
+}
+
+/// Durable `task_delegation` holds in the state database.
+fn transient_task_delegation_holds(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).expect("the state database opens");
+    conn.busy_timeout(Duration::from_secs(30))
+        .expect("a busy timeout must set");
+    conn.query_row(
+        "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind = 'task_delegation'",
+        [],
+        |row| row.get(0),
+    )
+    .expect("the hold probe must run")
+}
+
+/// The body of the task's single result, read over an independent connection.
+fn transient_sole_result_body(db: &Path) -> String {
+    let conn = rusqlite::Connection::open(db).expect("the state database opens");
+    conn.busy_timeout(Duration::from_secs(30))
+        .expect("a busy timeout must set");
+    conn.query_row(
+        "SELECT body FROM task_result ORDER BY rowid DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .expect("the result body must read")
+}

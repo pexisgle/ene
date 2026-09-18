@@ -8,6 +8,7 @@ use crate::delegation::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
 };
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
+use crate::observation::{TaskAgentObservationId, TaskAgentObservationPremise};
 use crate::report::{
     PastExecutedFactsPage, TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage,
     TaskReportSourceRef,
@@ -280,6 +281,26 @@ pub trait TaskRepository: Send + Sync {
         &self,
         delegation: DelegationId,
     ) -> Result<bool, TaskTechnicalError>;
+
+    /// Records one execution-local Task Agent observation occurrence
+    /// (Stage 6 A4).
+    ///
+    /// The caller mints the occurrence identity at observation time. Inside
+    /// one short `Immediate` transaction the repository copies the
+    /// delegation's `(task, revision)` correlation, verifies the producing
+    /// Action attempt (delegation, task, revision, and workspace agreement,
+    /// and that a body-observed occurrence came from a `read`/`list` effect),
+    /// and writes the body-free ledger row. The premise's transient
+    /// `observed` body — when the occurrence reproduced workspace content —
+    /// is compared against the canonical current erasure conditions in the
+    /// same transaction: a covered body publishes the occurrence identity as
+    /// a covered source and associates the delegation with the operation, and
+    /// is never stored. A same-identity retry with the stored correlation is
+    /// an idempotent replay; a disagreement is a fail-closed technical error.
+    async fn record_task_agent_observation(
+        &self,
+        premise: TaskAgentObservationPremise,
+    ) -> Result<TaskAgentObservationId, TaskTechnicalError>;
 
     /// Attempts to adopt one recorded final result into its Task (AU15b).
     ///
