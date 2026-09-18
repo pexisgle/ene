@@ -29,24 +29,24 @@ Stage 7 は Stage 0〜6 の domain authority と安全性契約を再設計し�
 
 - Host が durable domain state と最終 authority を持ち、Client の表示状態を master にしない。
 - connection / incarnation / presence / presentation を同一視しない。
-- credential raw value を通常の Host↔Client payload、DB、ログ、エラーへ流さない。
-- high-privilege の最終確認を remote input、LLM、tool、plugin が代理しない。
+- credential raw value を通常の Host↔Client payload、DB、ログ、エラーへ流さない。秘密寿命を通常 DTO・Debug・Targeted Deletion に依存させない。
+- high-privilege の最終確認を remote input、LLM、tool、plugin、Computer Use、通常の Client、同一 OS ユーザーであるだけの local process が代理しない。
 - UI / renderer の障害で Host-only Task や text / management の利用を壊さない。
 - usage / cost / cap、Targeted Deletion、Task recovery 等は既存 semantic owner の query / command / currentness を使う。
 - GUI 専用の authoritative DB、permission registry、presence registry、accounting registry を作らない。
 - acceptance と performance gate を実装都合で弱めない。
 
-## 3. A0 結論（design 確定。production Rust はまだ書かない）
+## 3. A0 結論（design。production Rust はまだ書かない）
 
-A0 の成果物は [First-party desktop](../../design/concrete/first-party-desktop.md) と、それを指す CM / IPC / IB の更新です。`.old/` の `ene-stage` は移植しない。
+A0 の成果物は [First-party desktop](../../design/concrete/first-party-desktop.md) と、それを指す CM / IPC / IB の更新です。`.old/` の `ene-stage` は移植しない。未検証 crate を恒久 contract として固定しない。
 
-### 3.1 Process / 名前
+### 3.1 Process / 名前（確定）
 
-- **Host**: `apps/ene-core`。GUI / wgpu を持たない。serving 中に control listener を持つ。
-- **text GUI**: `apps/ene-desktop`（Slint、通常ウィンドウ）。Client channel と control を話す。Body の親。
-- **VRM overlay**: `apps/ene-body`（`vrm-runtime` + wgpu）。Host にも Client protocol にも接続しない。GUI の任意 child。
+- **Host**: `apps/ene-core`。GUI / wgpu を持たない。serving 中に control listener と `ConfirmationSession` の minter を持つ。
+- **text GUI**: `apps/ene-desktop`。Client channel と control を話す。Body の親。first-party 確認面。
+- **VRM overlay**: `apps/ene-body`。Host にも Client protocol にも接続しない。GUI の任意 child。
 - **CLI**: `apps/ene-ctl`。Client channel のみ。control は話さない。
-- **共有**: `crates/ene-client`（A1 で `ene-ctl` から抽出）、`crates/ene-local-control`（`ene-api` に載せない）。
+- **共有**: `crates/ene-client`（A1 で `ene-ctl` から抽出）、`crates/ene-local-control`（`ene-api` に載せない。秘密フィールドは redacted。確認完了は session 束縛）。
 
 作らない: `ene-stage`, `ene-stage-ui`, `ene-vrm`, `ene-tray-linux`。
 
@@ -54,26 +54,34 @@ A0 の成果物は [First-party desktop](../../design/concrete/first-party-deskt
 
 同一 process に avatar を入れる案、Body を第2の paired Client にする案、Body を Host に入れる案は不採用。根拠は first-party-desktop 第3節。
 
-### 3.2 採用 / 不採用の依存
+### 3.2 依存（確定する不採用と provisional）
 
-| 領域 | 採用 | 不採用 |
+| 領域 | 状態 | 内容 |
 |---|---|---|
-| Text GUI | Slint（winit、Royalty-free Desktop + AboutSlint） | egui/eframe（自由度不足）、GTK/relm4（Windows が第二級）、Tauri/webview（常駐過大）。iced は Slint probe 失敗時の fallback のみ |
-| VRM | `vrm-runtime` + 自前 wgpu。SpringBone は落とさない | gltf extras 手書き、Bevy / bevy_vrm、`ene-vrm` 名 |
-| Overlay | Windows: winit + layered/DWM。KDE Wayland: `zwlr_layer_shell_v1` + input region | winit AlwaysOnTop on Wayland、Slint への overlay 合成 |
-| Secrets | `keyring`（OS store） | 製品 GUI 経路の `EnvCredentialStore` 正本化 |
+| Text GUI | provisional preferred: Slint（winit、Royalty-free Desktop + AboutSlint） | 確定不採用: egui/eframe、GTK/relm4、Tauri/webview。iced は Slint 技術成立 probe 失敗時の fallback 候補のみ |
+| VRM | provisional preferred: `vrm-runtime` + 自前 wgpu。SpringBone は落とさない | 確定不採用: Bevy / bevy_vrm、`ene-vrm` 名。gltf extras 手書きは probe 失敗後の再選定 |
+| Overlay | Body の wgpu は確定。OS 手段は provisional: Windows layered/DWM、KDE `zwlr_layer_shell_v1` + input region | 確定不採用: winit AlwaysOnTop on Wayland、text GUI への overlay 合成 |
+| Secrets | OS 保護ストア抽象は確定。`keyring` crate は provisional adapter | 製品 GUI 経路の `EnvCredentialStore` 正本化は不採用 |
 
-### 3.3 Trust
+### 3.3 Trust / credential（確定）
 
-Client channel（`ene-api`）では high-priv 最終確定を成立させない。control channel が setup / credential `put` / pairing 承認 / deletion・reset の最終確認を担う。SameMachine だけでは足りない、の意味は Client protocol では足りない、である。同一 UID で data dir を読める攻撃者は Owner と同一視する。区別するのは remote / LLM / tool / plugin / Computer Use。
+Client channel（`ene-api`）では high-priv 最終確定を成立させない。control channel は request / 秘密 intake / `ConfirmationSession` 完了返送に使うが、**十分ではない**。同一 OS ユーザー、data dir を読めること、control socket を開けたことは Owner 本人の確認ではない。最終確認は Host 発行の one-shot session と first-party 確認面での Owner 明示ジェスチャに束縛する。通常の Client、`ene-ctl`、任意の local process、LLM、tool、plugin、Computer Use は最終確認を直接成立させられない。
 
-### 3.4 Probe（未実施。合格したとは書かない）
+credential 生値の区間と破棄は first-party-desktop 第5.2節（C1 widget → C2 control frame → C3 `ene-credential` → C4 OS store → C5 scoped use）。通常 DTO の Debug、log、`app.db`、GUI 永続 state、Targeted Deletion に秘密寿命を依存させない。widget を erasure participant に見立てない。
 
-この Cloud Agent 環境は Windows 11 desktop も NixOS 26.11 KDE Wayland session も持たない。必須 probe は first-party-desktop 第9節。A1 の Host/control/`ene-client` は Stage 6 完了後に積んでよい。B と D の production は該当 probe が潰れてから。
+### 3.4 Probe と acceptance の分離（未実施。合格したとは書かない）
 
-**A0 design gate（本 PR）**: 名前と境界が要件から説明できる。依存の採用/不採用が記録されている。trust / renderer failure / 性能の分母が design にある。current design と異なる箇所は production より先に更新されている。
+NixOS 26.11 は Support Matrix の Linux 対象だが、この時点では正式リリース前である。公式 26.11 が無いことを Stage 7 全体の停止理由にしない。正本は first-party-desktop 第9節。
 
-**A0 probe gate（残）**: 対象 OS の IME / overlay / `vrm-runtime`+SpringBone / crash isolation / 測り方。未実施。blocker として残し、記録しただけで潰したことにしない。
+**今実施する技術成立 probe**: 今使える KDE Wayland（実際の nixpkgs / Plasma を記録。26.11 の代用ではない）と、用意できた Windows 11。IME / overlay / VRM runtime+SpringBone / OS store adapter / crash isolation / 測り方。B/D の production だけが該当 probe を待つ。
+
+**A1**: GUI / overlay probe を待たない。Stage 6 完了後の統合 base に積んでよい。
+
+**後日の最終 acceptance**: slice F。Windows 11 と正式リリースされた NixOS 26.11 KDE Wayland。今の KDE Wayland probe 成功を 26.11 合格と書かない。26.11 が F 時点で未リリースなら Linux 最終 acceptance は open のまま残す。
+
+**A0 design gate（本 PR）**: 名前と境界が要件から説明できる。同一 UID を Owner 確認に弱めていない。credential 区間が書かれている。未検証依存が provisional である。probe と最終 acceptance が分離されている。current design と異なる箇所は production より先に更新されている。
+
+**A0 技術成立 probe（残。Stage 7 全体の blocker ではない）**: 上記。記録しただけで潰したことにしない。
 
 ## 4. PR 分割と各 slice の gate
 
@@ -81,7 +89,7 @@ Client channel（`ene-api`）では high-priv 最終確定を成立させない�
 
 ### A1: Client 接続と serving 中 control
 
-[First-party desktop](../../design/concrete/first-party-desktop.md) に従い、GUI が必要とする Host 接続を `ene-client` に抜き、serving Host に control listener を足す。`ene-core approve-*` は serving 中 control を使い、未起動時だけ現行の offline lock を使う。
+[First-party desktop](../../design/concrete/first-party-desktop.md) に従い、GUI が必要とする Host 接続を `ene-client` に抜き、serving Host に control listener を足す。`ene-core approve-*` は serving 中 control を使い、未起動時だけ現行の offline lock を使う。Host は `ConfirmationSession` を発行し、live session 無しの `{ confirmed: true }` と Client 経路の自己申告を拒否する。GUI toolkit / overlay の production は含めない。
 
 - GUI event loop を接続待ち・provider 待ちで塞がない。
 - connection / incarnation / presence を混同しない。
@@ -89,19 +97,21 @@ Client channel（`ene-api`）では high-priv 最終確定を成立させない�
 - 再接続で未送信本文や mutation command を自動 replay しない。
 - bounded queue と cancellation を持ち、遅い Client が Host-only Task を止めない。
 - `ene-ctl` は control を話さない。既存 Client 回帰を維持する。
+- 同一 UID や control socket 開封だけでは高権限を成立させない。
+- credential 生値は `ene-api` に載せない。control の秘密フィールドは redacted。通常 DTO の Debug / log に出さない。
 
-**gate**: 実 socket / named pipe で既存 Client 回帰が維持され、GUI 側でも connection replacement、response correlation、slow consumer、待機中の deletion demand を検証できること。serving 中に control 経由の approve / credential `put` が通ること。
+**gate**: 実 socket / named pipe で既存 Client 回帰が維持され、GUI 側でも connection replacement、response correlation、slow consumer、待機中の deletion demand を検証できること。serving 中に control 経由の approve / credential `put` が、Host 発行 session に束縛されて通ること。session 無し・Client `confirmed=true`・`ene-ctl` からの control は拒否されること。
 
 ### B: 初回セットアップからテキスト会話までの縦断 GUI
 
-`ene-desktop` で、avatar に依存せず最初の製品経路を通します。Slint IME / 通常ウィンドウの probe が潰れてから入る。
+`ene-desktop` で、avatar に依存せず最初の製品経路を通します。text GUI toolkit の技術成立 probe が潰れてから入る（既定候補 Slint。失敗時のみ iced を再 probe）。NixOS 26.11 公式 acceptance は待たない。
 
 1. 新規 data directory から、言語・同梱 `ene`・送信データと費用の説明・credential 登録・model 割り当てまでを案内する。Host の明示起動とローカル接続の準備も扱い、手動の環境変数設定や DB 編集を通常の完了手順にしない。
 2. credential 登録と provider 利用への同意・割り当てを分ける。登録だけでは provider 呼出しを行わず、初期設定の失敗や再起動で暗黙に同意を補わない。
 3. 一対一 timeline、入力、stream、履歴 page、接続・presence の表示を実装する。管理画面は Companion 停止中・provider 不通・avatar 不在でも開けるようにする。
 4. 日本語 IME の未確定入力を誤送信せず、日英のラベル・拒否理由を切り替えられるようにする。言語切り替えで会話本文や domain state を書き換えない。
 
-**gate**: acceptance §1 を新規環境から GUI で通し、キー登録直後の provider 呼出しゼロ、割り当て後の会話、Host 再起動後の履歴、日英切り替えを確認する。キーを通常本文・ログ・エラー・保存した GUI state に残さない。
+**gate**: acceptance §1 を新規環境から GUI で通し、キー登録直後の provider 呼出しゼロ、割り当て後の会話、Host 再起動後の履歴、日英切り替えを確認する。キーを通常本文・ログ・エラー・保存した GUI state に残さない。入力 widget は C1 の自己破棄を行い、Targeted Deletion に秘密寿命を預けない。高権限は first-party 確認面の Owner ジェスチャと Host session に束縛する。
 
 ### C1: Memory と由来の管理画面
 
@@ -125,7 +135,7 @@ Targeted Deletion は通常の忘却と分け、request → Host-local 最終確
 
 ### D: VRM desktop avatar と text fallback
 
-**範囲**: `ene-body` で同梱 `ene` を表示する。overlay / `vrm-runtime` / SpringBone の probe が潰れてから入る。まず透明表示・移動・resize・非表示/再表示を通し、次に既存の応答状態に従う待機/発話中の表情・仕草を接続します。新しい感情推論や Voice pipeline は作りません。
+**範囲**: `ene-body` で同梱 `ene` を表示する。overlay / VRM runtime / SpringBone の技術成立 probe が潰れてから入る（既定候補 `vrm-runtime`）。NixOS 26.11 公式 acceptance は待たない。まず透明表示・移動・resize・非表示/再表示を通し、次に既存の応答状態に従う待機/発話中の表情・仕草を接続します。新しい感情推論や Voice pipeline は作りません。
 
 renderer に渡す情報は必要なアセット参照と表示指示に限定し、会話本文、Memory、API key、management authority を渡しません。avatar の非表示・終了を Companion 停止や Task cancel と同一視せず、renderer 再起動で古い会話/操作を replay しません。
 
@@ -143,9 +153,9 @@ renderer に渡す情報は必要なアセット参照と表示指示に限定�
 
 ### F: Milestone 1 の実機 acceptance / performance と closeout
 
-**範囲**: §5 の全行を統合 tip の GUI から確認し、§6 の生データと結果を残します。測り方は [First-party desktop](../../design/concrete/first-party-desktop.md) 第8節。閾値は acceptance の Performance Gates。Body を除外しない。
+**範囲**: §5 の全行を統合 tip の GUI から確認し、§6 の生データと結果を残します。測り方は [First-party desktop](../../design/concrete/first-party-desktop.md) 第8節。閾値は acceptance の Performance Gates。Body を除外しない。Linux 最終合格は正式リリースされた NixOS 26.11 KDE Wayland。今の KDE Wayland 技術成立 probe で代替しない。
 
-**gate**: 両 OS・両言語の対象 scenario と性能基準を満たすこと。未実施、失敗、暫定回避は成功と区別します。完了後にだけ `PROGRESS.md` を Stage 8 へ進めます。
+**gate**: 両 OS・両言語の対象 scenario と性能基準を満たすこと。未実施、失敗、暫定回避は成功と区別します。26.11 が未リリースなら Linux 最終 acceptance は open のまま残し、他 slice の完了記録を偽らない。完了後にだけ `PROGRESS.md` を Stage 8 へ進めます。
 
 ## 5. 依存順と並列化
 
@@ -157,7 +167,7 @@ A0 architecture / technology decision
         └────────────→ D ──┘
 ```
 
-A0 の design は本 PR。A0 probe は B/D の blocker。A1 は Stage 6 完了後の統合 base に積む。
+A0 の design は本 PR。A0 の技術成立 probe は B/D の blocker であり、Stage 7 全体および A1 の blocker ではない。A1 は Stage 6 完了後の統合 base に積む。NixOS 26.11 公式 desktop は F の Linux 最終 acceptance であり、A1/B/D を止めない。
 
 C1 / C2 / C3 は異なる owner と画面に分け、共通 Client boundary・DTO・schema が確定した範囲だけ並列化します。
 
@@ -198,4 +208,4 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 | Issues / PRs | 個別不足、probe 結果、exact tip。pass / fail / 未実施を区別する |
 | `PROGRESS.md` | current / completed / blocker / next の短い index のみ。Stage 6 完了前に Stage 7 を current としない |
 
-次に実装する slice は **A1**（Stage 6 完了後）。B/D は A0 probe が Slint IME と Body overlay（`vrm-runtime` + SpringBone）を潰してから。
+次に実装する slice は **A1**（Stage 6 完了後）。B は text GUI の技術成立 probe の後。D は overlay / VRM runtime の技術成立 probe の後。NixOS 26.11 公式 acceptance は F まで待ってよい。

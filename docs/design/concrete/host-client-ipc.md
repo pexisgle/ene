@@ -40,7 +40,7 @@
 - ハートビートの間隔、キープアライブやタイムアウトの秒数、再試行回数、スケジューリングや画面キャプチャのアルゴリズム、利用枠（費用）の算定式。
 - 具体的な TCP ポート番号、mDNS の有無、NAT 越え、リレーサーバーの運用（そもそも中央リレーは非目標であり導入しません）。
 - 音声コーデックや画面キャプチャ画像形式の最終選定（満たすべき制約条件のみ第13・14節で固定）。
-- Client 側の UI レイアウト、画面の文言、具体的なデータ保持期間、監査ログの出力形式。first-party の process 分割・toolkit・control channel は [First-party desktop](first-party-desktop.md) が固定する。
+- Client 側の UI レイアウト、画面の文言、具体的なデータ保持期間、監査ログの出力形式。first-party の process 分割・control channel・Owner 確認は [First-party desktop](first-party-desktop.md) が固定する。toolkit / overlay backend / keyring crate は同文書第7節の provisional であり、probe 前に恒久 contract としない。
 
 ## 2. Remote-capable 選別 — 何を wire へ出すか
 
@@ -69,7 +69,7 @@ IB 第15節で定めた「ネットワーク越境可能なインターフェー
   - **理由**: 前提条件の比較とデータ更新を Host 側の単一 SQLite トランザクション内で不可分に実行するためです。DB トランザクションを Client 側へ露出させてはいけません。また、認証の秘密情報を通常の通信経路に乗せてはなりません。
 - 画面観測専用の LLM プロバイダー割り当て情報や、ルーティングのドメイン的な判断そのもの。Client に権威ある情報として公開しません。Client が見るのはキャプチャチケットと自分自身のキャプチャ結果だけです。
 - リポジトリの不可分な前提比較、利用枠の事前予約、バックアップ復元の本番切り替え。これらを通信電文に乗せてはなりません。
-- 高権限操作の最終確認（§18）。ネットワーク経由で届いた操作要求や「確認済み」という自己申告を、Host 側での正式な確認として扱ってはなりません。最終確認は [First-party desktop](first-party-desktop.md) の control channel（`ene-local-control`）であり、`ene-api` に載せません。
+- 高権限操作の最終確認（§18）。ネットワーク経由で届いた操作要求や「確認済み」という自己申告を、Host 側での正式な確認として扱ってはなりません。最終確認は [First-party desktop](first-party-desktop.md) 第5節の Host 発行 `ConfirmationSession` と first-party 確認面での Owner ジェスチャであり、`ene-api` に載せません。control channel（`ene-local-control`）はその request / 秘密 intake / session 完了返送に使い、socket 開封や同一 UID だけでは成立しません。
 
 ### 2.3 選別の帰結
 
@@ -355,7 +355,7 @@ Stage 5 の Windows は Tokio の named-pipe adapter を使い、`PIPE_REJECT_RE
 
 ### 10.3 Host-local control transport（Client channel ではない）
 
-高権限の最終確認と serving 中の credential `put` は、本節の Client transport（unix socket / named pipe の `ene-api`）とは別の control listener を使う。配置・ピア判定・DTO クレートは [First-party desktop](first-party-desktop.md) 第5節。control を remote WebSocket に出さない。`ene-ctl` は話さない。`ene-body` はどちらの channel にも接続しない。
+高権限操作の Host-local request、credential 生値の intake、および Host が発行した `ConfirmationSession` の完了返送は、本節の Client transport（unix socket / named pipe の `ene-api`）とは別の control listener を使う。配置・ピア判定・DTO クレートは [First-party desktop](first-party-desktop.md) 第5節。control を remote WebSocket に出さない。`ene-ctl` は話さない。`ene-body` はどちらの channel にも接続しない。peer UID / DACL は local transport の適格であり、Owner 本人の確認ではない。control socket を開けた同一 UID の process が `{ confirmed: true }` を送っても最終確認は成立しない。
 
 ### 10.2 transport adapter boundary
 
@@ -634,7 +634,7 @@ enum DeletionTargetWire {
 デバイスペアリングの承認など、システムの信頼の基点（Trust root）を変更する高権限操作の最終確認は、必ず **Host PC 上の信頼された第一者管理画面（trusted first-party management surface）** で直接実行します。リモートの Client 端末から変更要求（intent）を送信すること自体は許容されますが、リモート端末の操作だけで完結させてはなりません。
 
 - **対象となる操作**: デバイスのペアリング承認・再ペアリング、デバイスの信頼関係や機能許可の変更・失効（自身の端末を含む）、認証秘密（Credential）の登録・更新・差し替え・失効、バックアップ復元の実行確認と復元データの一括有効化、全データ削除（Full Reset）の確認。また、同一の信頼境界やアクセス制御を変更する操作（ローカル MCP のサンドボックス外実行の例外許可や重要変更など）も同一の厳格な確認を通します。操作種別の名前ではなく、実際の操作対象とシステムへの影響度に基づいて分類し、汎用設定のリセットなどを経由した迂回を決して許しません。
-- **Host PC 上の第一者管理画面の判定**: Host は、§10.1 の SameMachine および OS のピア認証情報に加え、§10.3 の control channel から届いた確認であることを検証する。単に同じマシン上で動いている別の Client や、ペアリング済みであること、Client wire の自己申告、画面上の説明文などは、この高権限の資格を与えません。`confirmed=true` を Client payload に載せても `DeniedByBoundary` です。単一ユーザー製品では、control socket を開ける同一 UID の process を Owner と同一視する。区別するのは remote Client、LLM、tool、plugin、Computer Use である。判定の具体は [First-party desktop](first-party-desktop.md) 第5節。初回のセットアップも、リモート通信に依存せず直接操作できるこの Host ローカルの管理画面（`ene-desktop` の control speaker）を使用します。
+- **Host PC 上の第一者管理画面の判定**: Host は、§10.1 の SameMachine および OS のピア認証情報に加え、§10.3 の control channel 上で、Host 自身が発行した one-shot `ConfirmationSession`（操作種別・対象・premise generation に束縛。再利用不可）が、first-party 確認面での Owner 明示ジェスチャによって完了したことを検証する。control channel は必要だが十分ではない。同一 OS ユーザー、data dir を読めること、control socket を開けたこと、SameMachine、ペアリング済み、Client wire の自己申告、画面上の説明文は、いずれも Owner 本人の確認ではない。`confirmed=true` を Client payload に載せても `DeniedByBoundary` です。通常の Client（`ene-desktop` の `ene-api` 経路を含む）、`ene-ctl`、任意の local process、LLM、tool、plugin、Computer Use は最終確認を直接成立させられない。判定の具体と credential 生値の区間は [First-party desktop](first-party-desktop.md) 第5節。初回のセットアップも、リモート通信に依存せず直接操作できるこの Host ローカルの管理画面（`ene-desktop` の first-party 確認面）を使用します。
 - **リモートからの要求の受入フロー**: リモート端末からの高権限操作の要求はリクエストとして受け付け、`NeedsClarification` とフィルタリングされた閲覧ビューを返し、Host PC 側での最終確認待ち状態であることを画面に表示します。「リモート側ですでに承認済みである」という申告や、リモートからの代行承認は `DeniedByBoundary` として拒否し、変更は適用しません。Host PC 上でユーザー自身が変更内容と影響を確認した事実があって初めて、Host 内部で現在の前提条件と紐付けられて各担当者へ手渡されます。この最終確認の電文をリモート通信に乗せることはなく、確認完了後に操作対象が変更された場合や前提世代が古くなった場合は、再確認を必須とします。確認結果の使い回しや包括的な流用は禁止します。
 - **自動化・外部入力による代理確認の禁止**: 第一者管理画面を、Computer Use、ツール実行、MCP Apps、プラグイン、LLM の出力、あるいはリモートからの代理入力によって操作しようとしても、ユーザー自身の最終確認としては決して受理しません。なお、管理画面の利用においてキャラクターが稼働中であることは必須ではなく、テキスト操作から直接アクセス可能であり、メイン LLM や長時間タスク、立ち絵描画、音声出力の成功を待つことなく確実に操作できます。
 - **通常操作との分離**: 通常のフィルタリングされた設定閲覧、キャラクターの停止、キャンセル、承認の拒否などは、既存のリモート通信経路から安全に実行できます。バックアップ作成や通常の会話削除を含む複合操作全体を一括して高権限扱いにするのではなく、上記に該当する危険な操作に対してのみ個別の確認条件を適用します。また、認証秘密の平文入力や保管は保護された Host ローカルの設定経路でのみ扱い、通信電文のペイロードに乗せることは決してありません。
@@ -944,7 +944,7 @@ struct ManagementViewWire {
 | `ene-api`（`ene-api::v1::*`） | 通信用DTOの定義のみ。バージョニングされたモジュール（`v1`）配下に、エンベロープ・ペイロード・機能申告・認証フレーム型・拒絶DTOを配置する。`CommandReplayRejectWire` は `v1::command` などのコマンド検証モジュールに配置 | **保持するもの**: serde対応DTO、バージョン定義型、メッセージ種別識別子、JSON表示用ヘルパー。<br>**保持してはならないもの**: ビジネスロジック、権限判定ロジック、ホスト内部のドメイン型、秘密情報、永続化データ行、ネットワークI/O処理。Ene内部の他クレートへの依存を持たない状態（外部のserde等のみに依存）を維持する |
 | ホスト側アダプター（`apps/ene-core` の `ipc_map` モジュール ＋ 各ドメインの前提受付） | DTOの入力検証、通信用参照（wire ref）からドメインの前提条件（premise）への変換、ドメインの事実からDTOへの投影、コネクション・化身・バージョン・機能申告の保持（永続化データは各担当ドメインが保持）、現在の送信者エポックにおけるコマンド再実行抑止マーカーの参照 | **保持するもの**: `validate()` 関数、各種マッピング関数、購読管理、ストリーム多重化（mux）、送信者の期限切れチェック、コマンドフィンガープリント照合。<br>**保持してはならないもの**: 採否・達成・許可・確信度の最終判断（これらは各ドメイン担当者が行う）。ドメイン層クレートに通信層への逆依存を持ち込んではならない |
 | クライアント側アダプター（`crates/ene-client` ＋ `apps/ene-desktop` / `apps/ene-ctl` 内の session / ipc モジュール） | 受信DTOから画面表示・デバイス操作への変換、デバイス側で生じた事実のDTO化、一時キャッシュの管理、個人データ削除参加時のローカルデータ完全消去、ホストからクライアントへの指示コマンドに対する再実行抑止マーカーの管理 | **保持するもの**: プレゼンテーション表示、画面・音声キャプチャ、音声出力のアダプター。<br>**保持してはならないもの**: ホスト側ドメインクレートへの依存、マスターデータの更新権限、マスターデータの保持。依存先は `ene-api`、`ene-primitive`、およびクライアント自身のアダプターのみに限定する。tray は Milestone 1 に無い |
-| `ene-local-control` | Host-local の高権限確認 DTO | **保持するもの**: control 用 serde DTO。<br>**保持してはならないもの**: `ene-api` への混在、remote Client からの到達、秘密生値の log 可能な返却 |
+| `ene-local-control` | Host-local の高権限確認 DTO | **保持するもの**: control 用 serde DTO（request、`ConfirmationSession` 完了、secret-bearing intake）。<br>**保持してはならないもの**: `ene-api` への混在、remote Client からの到達、live session 無しの `{ confirmed: true }` による確定、秘密生値の `Debug` / log / 永続化可能な返却。秘密寿命を通常 DTO や Targeted Deletion に依存させない |
 | `apps/ene-body` | overlay 描画。本プロトコルの参加者ではない | Host に接続しない。投影 IPC は desktop が渡す |
 
 マッピングの方向性（CM §4.3 および §9 の依存性逆転原則に従う）：

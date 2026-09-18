@@ -30,7 +30,7 @@
 - **プロセスの境界（Process Boundary）**: Host 側のマスターデータと Client 側の一時的な利用データとの寿命（ライフタイム）の違いを分離します。
 - **unsafe / ネイティブ依存（Unsafe / Native Dependency）**: `sqlite-vec`、`seccomp`、`wgpu` などのネイティブライブラリや unsafe コードを専用クレートへ隔離します。
 - **コンパイルの隔離（Compilation Isolation）**: コンパイルが重いネイティブライブラリや UI 依存を末端のクレートに追い出し、コアロジックのビルドを高速に保ちます。
-- **機能フラグ（Feature Dependency）**: 音声合成/認識、sqlite-vec、Slint 束縛などを Cargo feature や別クレートに閉じ込めます。first-party の text GUI と VRM overlay の process / 依存選定は [First-party desktop](first-party-desktop.md) が所有します。
+- **機能フラグ（Feature Dependency）**: 音声合成/認識、sqlite-vec、GUI 生成束縛などを Cargo feature や別クレートに閉じ込めます。first-party の text GUI と VRM overlay の process / 依存選定は [First-party desktop](first-party-desktop.md) が所有します。toolkit crate は同文書第7節の provisional です。
 - **テストのしやすさ（Testability）**: リポジトリ、プロバイダー、アクション、オブザーバー、認証情報ストアを、テスト用フェイク（Fake）に差し替えやすくします。
 - **独立した交換・アダプター境界（Independent Replacement / Adapter Boundary）**: LLM プロバイダーの通信プロトコル、MCP、プラグイン、OS ストアなどを柔軟に差し替えられるようにします。
 - **Host と Client の共有可能性**: Client 側が Host 側の内部ドメインクレートに直接依存せずに済むように設計します。
@@ -80,13 +80,13 @@ crates/
   ene-local-control/    # Host-local control DTO。ene-api に載せない
 apps/
   ene-core/             # Host 側の結合ルート（配線・ライフサイクル・ストレージ初期化・ルート登録・control listener）
-  ene-desktop/          # 製品版 text GUI（Slint。ene-api Client channel + control）
-  ene-body/             # VRM overlay process（vrm-runtime + wgpu。Host に接続しない）
+  ene-desktop/          # 製品版 text GUI（ene-api Client channel + control。toolkit は provisional）
+  ene-body/             # VRM overlay process（wgpu。Host に接続しない。VRM runtime は provisional）
   ene-ctl/              # CLI クライアント（ene-api 経由。control は話さない）
 plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由でのみ参加）
 ```
 
-`ene-stage` / `ene-stage-ui` / `ene-vrm` / `ene-tray-linux` は作らない。トレイは Milestone 1 に無い。Slint 生成束縛が workspace clippy と衝突する場合だけ、`ene-desktop` 隣の compile-isolation に閉じ、名前は `ene-stage-ui` に戻さない。process 寿命と toolkit 選定は [First-party desktop](first-party-desktop.md)。
+`ene-stage` / `ene-stage-ui` / `ene-vrm` / `ene-tray-linux` は作らない。トレイは Milestone 1 に無い。GUI 生成束縛が workspace clippy と衝突する場合だけ、`ene-desktop` 隣の compile-isolation に閉じ、名前は `ene-stage-ui` に戻さない。process 寿命と toolkit 選定（provisional 含む）は [First-party desktop](first-party-desktop.md)。
 
 上記のような粒度に分割しているのは、コードの見通し、コンパイル単位の分離、所有権の明確化、循環参照の防止、テストの容易性を確保するためであり、クレート数を最小化することや無闇に細分化すること自体を目的としているわけではありません。例えば、`ene-presentation` や `ene-observer` を `ene-presence` にまとめないのは、「帰属先（Companion ごとに排他）」「やり取りの実際（入出力の区切り）」「観測対象（Client 単位で共有）」のライフサイクルや制御単位が根本から異なり、これらを1つの状態変数や actor に押し込めると X-1〜X-10 の契約が崩れてしまうためです。また、`ene-permission` と `ene-credential` を分けるのは、説明やプロンプト文脈に含めてよい情報と、決して漏らしてはならない秘密情報の保護・失効・バックアップ除外の契約が本質的に異なり（DR-05）、同一クレート内では秘密の非露出をコンパイラレベルで強制できないためです。さらに、`ene-inference` と `ene-action` を分けるのは、推論の失敗と外部作用の成否不明とで、再試行や確定度、再生（リプレイ）に関する契約が大きく異なり（CCT §6・§8）、一緒にすると成否不明の外部作用を勝手に自動再実行してしまう危険があるためです。
 
@@ -114,8 +114,8 @@ plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由で�
 | `ene-api` | Host↔Client 間の中立な通信用 DTO（ネットワーク越し利用可能なもののみ。IB §15） | `round`（`SubmitClientInputCandidate` の通信用形式）、`presence`（`RequestMoveCommand` や `PresenceAttributionFact` の通信用形式）、`undelivered`（`UndeliveredSummaryFact` の通信用形式）、`character_asset`（表示アセットの参照情報のみ）、`management`（`ManagementOperationCommand` の通信用形式）、`erasure_client`（Client 側の一時データ削除参加用） | pub: serde によるシリアライズ可能な DTO のみ。`ene-companion` や `ene-task` 等の内部クレートへの依存は一切禁止。Host 内部の newtype、秘密情報、DB 行構造を漏洩させてはならない。また、内部マスターデータの主キーとして悪用できる形式で ID を渡さない |
 | `ene-plugin-ipc` / `ene-plugin-host` / `ene-provider-assets` / `ene-sandbox` | 通信 / ホスティング / カタログ / プロセス隔離（外部との境界） | 必要な最小限のアダプター実装（第7節参照） | pub: 通信フレーム、外部ホスティング、カタログ管理、プロセス隔離の API のみ。ドメインとしての意味を持たせない |
 | `ene-client` | Client 側の Host 接続ライブラリ（handshake、correlation、device identity、erasure participant）。ドメインの担当責任者ではない | `session`、`correlation`、`erasure` | pub: 接続・相関・local erasure の API。禁止: clap/stdio、Host ドメインクレート、`ene-store`、秘密生値、control DTO |
-| `ene-local-control` | Host-local の高権限確認 DTO。remote-capable ではない | `dto` | pub: control 用の serde DTO のみ。禁止: `ene-api` への混在、Host 内部 newtype、秘密生値を log 可能な形で返すこと |
-| `apps/ene-desktop` | 製品 text GUI。Client channel と control の speaker。Body の親 | `ui`（`.slint`）、`session`、`control`、`body_supervise`、`i18n`、`erasure` | ドメインのマスターデータや決定権限を持たせない。overlay / wgpu をこの process に入れない |
+| `ene-local-control` | Host-local の高権限確認 DTO。remote-capable ではない | `dto` | pub: control 用の serde DTO のみ（request、`ConfirmationSession` 完了、secret-bearing intake）。禁止: `ene-api` への混在、Host 内部 newtype、秘密生値を `Debug` / log / 永続化可能な形で返すこと、live session 無しの確定。秘密寿命を通常 DTO や Targeted Deletion に依存させない |
+| `apps/ene-desktop` | 製品 text GUI。Client channel と control の speaker。Body の親。first-party 確認面 | `ui`、`session`、`control`、`body_supervise`、`i18n`、`erasure` | ドメインのマスターデータや決定権限を持たせない。overlay / wgpu をこの process に入れない。同一 UID であることや socket 開封を Owner 確認にしない |
 | `apps/ene-body` | VRM overlay だけの child process | `window`、`vrm`、`render`、`ipc` | Host に接続しない。秘密・会話本文・Task を持たない。crate 名 `ene-vrm` は使わない |
 
 可視性は `pub(crate)` を基本とし、`pub` は上表の型、コマンド、結果型、trait に限定します。`allow_attributes` のワークスペース規約に従い、警告の抑制は狭いスコープでの `#[expect]` のみに留めます。また、`unsafe` コードは OS やネイティブライブラリを呼び出す最小限のアダプター境界内に閉じ込め、すべての `unsafe` ブロックの直前に健全性の根拠を説明する `// SAFETY:` コメントを必ず記載します（AGENTS.md 参照）。
@@ -236,9 +236,9 @@ Client が Host 側のドメインクレートに直接依存して、マスタ�
 | `ene-plugin-ipc` | ● | —（プラグインを Client 側に配置する場合のみ該当アダプターが利用） | 通信フレームのみ | ドメイン的な意味を持たせません |
 | `ene-plugin-host`、`ene-provider-assets`、`ene-sandbox` | ●（ホスティング・カタログ・プロセス隔離） | —（Client 側の拡張ポイントで必要な場合に限り該当アダプターが `ene-sandbox` を利用可） | — | 外部コードをマスターデータや権限の決定者にしてはなりません |
 | `ene-client` | ●（Host 側の対向） | ● | ●（handshake / correlation。ドメイン状態は持たない） | GUI と CLI が `ene-ctl` バイナリに依存しないための抽出。clap/stdio は CLI に残す |
-| `ene-local-control` | ● | ●（`ene-desktop` のみ） | —（remote / `ene-api` に載せない） | 高権限確認。`ene-ctl` は依存しない |
+| `ene-local-control` | ● | ●（`ene-desktop` のみ） | —（remote / `ene-api` に載せない） | Host 発行 session の完了返送と秘密 intake。同一 UID や socket 開封は Owner 確認ではない。`ene-ctl` は依存しない |
 | `apps/ene-core` | ●（Host 側の結合ルート） | — | — | ドメインとしての意味判断を持ちません。Client 側アダプターや `ene-body` には依存しません |
-| `apps/ene-desktop` | — | ●（text GUI、control speaker、Body の親） | — | `ene-api` + `ene-client` + `ene-local-control`。Host 内部ドメイン、`ene-store`、秘密生値には依存しません |
+| `apps/ene-desktop` | — | ●（text GUI、control speaker、Body の親、first-party 確認面） | — | `ene-api` + `ene-client` + `ene-local-control`。Host 内部ドメイン、`ene-store` には依存しません。生値は入力 widget と redacted control field の揮発区間に限り、通常 DTO に載せません |
 | `apps/ene-body` | — | ●（VRM overlay child） | — | Host に接続しない。`ene-api` / `ene-client` / 秘密に依存しない |
 | `apps/ene-ctl` | — | ●（CLI Client） | — | `ene-api` + `ene-client`。control は話さない |
 
@@ -267,8 +267,8 @@ Client が Host 側のドメインクレートに直接依存して、マスタ�
 | `apps/ene-core` | 上記の Host 側全クレート ＋ `ene-api`、`ene-local-control`、`ene-store`、`ene-config` | システム全体の組み立て役（配線・ライフサイクル管理・ストレージ初期化・ルート登録・control listener）。ドメインとしての意味判断は行いません。`ene-body` や desktop UI には依存しません |
 | `ene-client` | `ene-api`、`ene-config`、`ene-primitive`（必要な範囲） | Client 接続の共有。Host 内部ドメイン、`ene-store`、秘密生値、`ene-local-control` には依存しません |
 | `ene-local-control` | Ene プロジェクト内のクレート依存なし（外部の serde 等のみ。`ene-api` にも依存しない） | Host-local DTO。remote-capable と混ぜない |
-| `apps/ene-desktop` | `ene-api`、`ene-client`、`ene-local-control`、`ene-config`、Slint | `ene-api` の DTO 経由で Client channel を話す。control は `ene-local-control`。Host 側の内部ドメイン、`ene-store`、秘密生値、`ene-plugin-host` には依存しません |
-| `apps/ene-body` | `ene-config`（パス程度）、`vrm-runtime`、wgpu、OS overlay | Host に接続しない。`ene-api` / `ene-client` / 秘密に依存しません |
+| `apps/ene-desktop` | `ene-api`、`ene-client`、`ene-local-control`、`ene-config`、text GUI toolkit（provisional: Slint） | `ene-api` の DTO 経由で Client channel を話す。control は `ene-local-control`。Host 側の内部ドメイン、`ene-store`、`ene-plugin-host` には依存しません。生値は入力 widget と redacted control field の揮発区間に限り、通常 DTO / log / 永続 state に載せません |
+| `apps/ene-body` | `ene-config`（パス程度）、VRM runtime（provisional: `vrm-runtime`）、wgpu、OS overlay | Host に接続しない。`ene-api` / `ene-client` / 秘密に依存しません |
 | `apps/ene-ctl` | `ene-api`、`ene-client`、`ene-config` | Client channel のみ。control は話さない |
 | テスト（各 crate） | 対象クレート ＋ `tempfile` ＋ インメモリのフェイク実装（リポジトリ、プロバイダー、アクション、オブザーバー、認証情報） | 実際の SQLite、LLM プロバイダー、OS ストアを動かすことなく、リビジョン不一致（Stale）、処理保留（Hold）、遅延（Delayed）などの異常系を安全かつ高速に再現します。`unwrap` や `panic` の使用はテストコード内に限り、狭い範囲の `#[expect]` で許可します |
 
@@ -490,7 +490,7 @@ Host と Client のプロセス境界を越えるインターフェースの選�
 - ペアリングや初期セットアップにおける認証材料の具体的な形式、暗号保護、受け渡し方法、再起動後に元の Client へ再接続・待機する処理、切断検知、接続帰属の調停、安全なやり取りの区切り方、停止状態の伝達メカニズム。
 - ファイル探索、無効化、残存検証の実装詳細、バックアップの一貫性時点の取り方やファイル形式、リストアの切り替え・復旧手順、保存時の暗号化方式、検索トークンを保護する `SealedSearchToken` の実装。
 - 監査ログの出力フォーマット、診断・テレメトリの収集スタック、提示確認の受け取り方、要約の粒度、具体的なデータ保持期間、Client 側の UI レイアウト。
-- first-party desktop の process 名、toolkit、Body 隔離、control channel、性能の分母は [First-party desktop](first-party-desktop.md) が固定しており、ここでの Freedom ではない。
+- first-party desktop の process 名、Body 隔離、control channel、Owner 確認、性能の分母は [First-party desktop](first-party-desktop.md) が固定しており、ここでの Freedom ではない。toolkit / VRM runtime / overlay backend / `keyring` crate は同文書第7節の provisional であり、probe 前に恒久 contract としない。
 - Client 側のキャプチャ、音声、デバイスアダプターを別クレートに切り出すタイミング（初期はアプリ内モジュールとして開始可能。ただし論理的な境界は本書に従います）。
 - 過去のレガシーコード（`.old/`）を参考にするかどうか、参考にする場合の具体的な箇所。ただし、過去コードとの互換性維持や移行用コードの設置を理由にして、新しい設計の原則や依存ルールを曲げることは裁量に含まれません。
 - 上記の対応関係から、全体を束ねるような「統合コンテキスト層」「ポリシーエンジン」「マネージャー」「サービス」「コーディネーター」といった万能オブジェクトを新設してはいけません。本書で定めた12の責務、状態の担当責任者、Host / Client の配置、および信頼境界の枠組みの中で、最適な実現手法を選択してください。
