@@ -506,6 +506,28 @@ impl ErasureParticipant for HostTransientParticipant {
                     WallClockWithTz::now(),
                 );
             }
+            // The currentness re-check awaits. A producer enqueue or worker
+            // take in that window must not complete from the older snapshot:
+            // Verified is allowed only while the examined generation is still
+            // the live queue generation.
+            {
+                let queue = crate::lock_unpoison(&self.learning_queue);
+                if queue.mutation_generation() != generation {
+                    self.rebase_sweep(
+                        command.condition(),
+                        queue.mutation_generation(),
+                        queue.len(),
+                    );
+                    let remainder = queue.len() as u64 + u64::from(queue.taken().is_some());
+                    return ParticipantCompletionFact::more_work(
+                        command.condition(),
+                        ParticipantOwnerRef::HostTransient,
+                        dropped_presentation + dropped_learning,
+                        remainder.max(1),
+                        WallClockWithTz::now(),
+                    );
+                }
+            }
             ParticipantCompletionFact::verified(
                 command.condition(),
                 ParticipantOwnerRef::HostTransient,
