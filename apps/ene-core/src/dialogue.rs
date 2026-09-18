@@ -1325,14 +1325,14 @@ impl HostHandle {
                 .await
                 .unwrap_or(true);
             if refuse {
-                let _ = self.store.settle_learning_formation(formation).await;
+                drop(self.store.settle_learning_formation(formation).await);
                 continue;
             }
             let companion = CompanionId::from_raw(experience.companion);
             match self.store.load_lifecycle(companion).await {
                 Ok(Some(CompanionLifecycle::Running)) => {}
                 _ => {
-                    let _ = self.store.settle_learning_formation(formation).await;
+                    drop(self.store.settle_learning_formation(formation).await);
                     continue;
                 }
             }
@@ -1355,7 +1355,7 @@ impl HostHandle {
                 )
                 .await,
             );
-            let _ = self.store.settle_learning_formation(formation).await;
+            drop(self.store.settle_learning_formation(formation).await);
         }
     }
 }
