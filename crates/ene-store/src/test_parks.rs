@@ -65,4 +65,6 @@ pub(crate) struct TestParks {
     pub(crate) device_auth_file: TestPark,
     pub(crate) client_demand: TestPark,
     pub(crate) learning_formation: TestPark,
+    pub(crate) host_transient_queue: TestPark,
+    pub(crate) learning_take: TestPark,
 }

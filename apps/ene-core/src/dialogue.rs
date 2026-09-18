@@ -271,11 +271,6 @@ pub(crate) enum AttachOutcome {
     Superseded,
 }
 
-/// Caps the in-memory Learning formation queue. Overflow drops the oldest
-/// pending pass (Learning is best-effort); HostTransient still scans what
-/// remains and never treats an unscanned TARGET-bearing entry as clean.
-const LEARNING_FORMATION_QUEUE_CAP: usize = 256;
-
 impl HostHandle {
     pub(crate) fn open_wire_for(
         &self,
@@ -1257,11 +1252,7 @@ impl HostHandle {
     /// window and silently folds newer turns into an older pass. A full queue
     /// drops the oldest pending pass rather than growing without bound.
     fn queue_learning_formation(&self, experience: ExperienceCandidate) {
-        let mut queue = crate::lock_unpoison(&self.learning_queue);
-        while queue.len() >= LEARNING_FORMATION_QUEUE_CAP {
-            queue.pop_front();
-        }
-        queue.push_back(experience);
+        crate::lock_unpoison(&self.learning_queue).push_back(experience);
     }
 
     /// Whether a queued formation pass is waiting.
@@ -1309,6 +1300,11 @@ impl HostHandle {
             let Some(experience) = next else {
                 break;
             };
+            // The candidate is in `taken` and no formation identity exists
+            // yet. HostTransient must observe this generation change instead
+            // of verifying from a pre-take snapshot.
+            #[cfg(any(test, feature = "test-support"))]
+            self.store.pause_learning_take_if_armed_for_tests().await;
             let formation = match self
                 .store
                 .begin_learning_formation(experience.companion, experience.sources.clone())

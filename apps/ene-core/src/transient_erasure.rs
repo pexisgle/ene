@@ -169,9 +169,35 @@ impl TransientErasureFence {
 /// Remaining entries continue on a later demand via [`ParticipantCompletionStatus::MoreWork`].
 pub(crate) const HOST_TRANSIENT_LEARNING_QUEUE_PAGE: usize = 32;
 
+/// Caps the in-memory Learning formation queue. Overflow drops the oldest
+/// pending pass (Learning is best-effort). Overflow is a queue mutation, not
+/// a scanned-clean proof: the HostTransient sweep cursor rebases when the
+/// generation advances.
+pub(crate) const LEARNING_FORMATION_QUEUE_CAP: usize = 256;
+
+/// Process-local continuation of one HostTransient Learning-queue sweep.
+///
+/// This is not a canonical deletion registry. Restart loses it and the next
+/// demand starts a new cycle from the live pending queue. `remaining` is the
+/// number of pending entries still owed in the current stable generation,
+/// never `queue.len() > PAGE`.
+#[derive(Debug, Clone, Copy)]
+struct HostTransientLearningSweep {
+    condition: ErasureConditionRef,
+    queue_generation: u64,
+    remaining: usize,
+}
+
 /// In-memory Learning formation work: the pending queue plus at most one
 /// worker-owned candidate that has left the queue but does not yet have a
 /// canonical formation identity.
+///
+/// `mutation_generation` advances on every worker or producer ownership
+/// change (enqueue, overflow drop, pending→taken, taken clear). HostTransient
+/// may apply a snapshotted page only while this generation still matches, so
+/// a `pending → taken` race during the membership await cannot verify from
+/// the stale page. HostTransient's own covered drop / uncovered rotate does
+/// not advance the generation: that is the confirmed apply of the snapshot.
 ///
 /// HostTransient must not report Verified while `taken` still carries a
 /// covered transcript. The worker clears `taken` only after
@@ -182,15 +208,22 @@ pub(crate) const HOST_TRANSIENT_LEARNING_QUEUE_PAGE: usize = 32;
 pub(crate) struct LearningFormationQueue {
     pending: VecDeque<ExperienceCandidate>,
     taken: Option<ExperienceCandidate>,
+    mutation_generation: u64,
 }
 
 impl LearningFormationQueue {
-    pub(crate) fn push_back(&mut self, experience: ExperienceCandidate) {
-        self.pending.push_back(experience);
+    fn bump(&mut self) {
+        self.mutation_generation = self.mutation_generation.wrapping_add(1);
     }
 
-    pub(crate) fn pop_front(&mut self) -> Option<ExperienceCandidate> {
-        self.pending.pop_front()
+    /// Enqueues one candidate, dropping the oldest pending entry when the
+    /// queue is already at [`LEARNING_FORMATION_QUEUE_CAP`].
+    pub(crate) fn push_back(&mut self, experience: ExperienceCandidate) {
+        self.bump();
+        while self.pending.len() >= LEARNING_FORMATION_QUEUE_CAP {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(experience);
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -199,6 +232,10 @@ impl LearningFormationQueue {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
+    }
+
+    pub(crate) fn mutation_generation(&self) -> u64 {
+        self.mutation_generation
     }
 
     pub(crate) fn iter(&self) -> std::collections::vec_deque::Iter<'_, ExperienceCandidate> {
@@ -215,15 +252,43 @@ impl LearningFormationQueue {
     pub(crate) fn take_pending(&mut self) -> Option<ExperienceCandidate> {
         let next = self.pending.pop_front()?;
         self.taken = Some(next.clone());
+        self.bump();
         Some(next)
     }
 
     pub(crate) fn clear_taken(&mut self) {
-        self.taken = None;
+        if self.taken.take().is_some() {
+            self.bump();
+        }
     }
 
     pub(crate) fn taken(&self) -> Option<&ExperienceCandidate> {
         self.taken.as_ref()
+    }
+
+    /// Applies one already-examined pending page: covered premises drop,
+    /// uncovered ones rotate to the back. The caller must have confirmed that
+    /// [`Self::mutation_generation`] still matches the snapshot that produced
+    /// `identities` / `covered`. This does not bump the generation.
+    fn apply_examined_page(
+        &mut self,
+        page_len: usize,
+        exact: &str,
+        identities: &[RawId],
+        covered: &[bool],
+    ) -> u64 {
+        let mut dropped = 0u64;
+        for _ in 0..page_len {
+            let Some(experience) = self.pending.pop_front() else {
+                break;
+            };
+            if experience_covered(&experience, exact, covered, identities) {
+                dropped += 1;
+            } else {
+                self.pending.push_back(experience);
+            }
+        }
+        dropped
     }
 }
 
@@ -233,6 +298,13 @@ pub(crate) struct HostTransientParticipant {
     fence: Arc<TransientErasureFence>,
     presentations: Arc<std::sync::Mutex<PresentationState>>,
     learning_queue: Arc<std::sync::Mutex<LearningFormationQueue>>,
+    /// Serializes HostTransient demands. The queue `std` mutex is never held
+    /// across an await; this tokio lock only prevents two demands from
+    /// overlapping snapshot/apply on the same process-local cursor.
+    demand_lock: tokio::sync::Mutex<()>,
+    sweep: std::sync::Mutex<Option<HostTransientLearningSweep>>,
+    #[cfg(test)]
+    last_scanned: std::sync::atomic::AtomicUsize,
 }
 
 impl HostTransientParticipant {
@@ -248,35 +320,24 @@ impl HostTransientParticipant {
             fence,
             presentations,
             learning_queue,
+            demand_lock: tokio::sync::Mutex::new(()),
+            sweep: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            last_scanned: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// Examines one bounded page at the front of the formation queue: covered
-    /// premises are dropped and uncovered ones rotate to the back so a later
-    /// demand sees the unexamined remainder. `covered` is indexed membership
-    /// of `identities` for the page that was probed, not the whole sweep.
-    fn prune_learning_queue_page(
-        &self,
-        page_len: usize,
-        exact: &str,
-        identities: &[RawId],
-        covered: &[bool],
-    ) -> u64 {
-        let mut queue = crate::lock_unpoison(&self.learning_queue);
-        let mut dropped = 0u64;
-        let mut scanned = 0usize;
-        while scanned < page_len {
-            let Some(experience) = queue.pop_front() else {
-                break;
-            };
-            scanned += 1;
-            if experience_covered(&experience, exact, covered, identities) {
-                dropped += 1;
-            } else {
-                queue.push_back(experience);
-            }
-        }
-        dropped
+    #[cfg(test)]
+    fn last_scanned(&self) -> usize {
+        self.last_scanned.load(Ordering::SeqCst)
+    }
+
+    fn rebase_sweep(&self, condition: ErasureConditionRef, generation: u64, remaining: usize) {
+        *crate::lock_unpoison(&self.sweep) = Some(HostTransientLearningSweep {
+            condition,
+            queue_generation: generation,
+            remaining,
+        });
     }
 }
 
@@ -313,15 +374,34 @@ impl ErasureParticipant for HostTransientParticipant {
                     WallClockWithTz::now(),
                 );
             }
+            let _demand = self.demand_lock.lock().await;
             let exact = command
                 .scope()
                 .target()
                 .map(exact_text)
                 .unwrap_or_default()
                 .to_owned();
-            let (identities, page_len, more_unexamined, taken) = {
+            let (identities, page_len, generation) = {
                 let queue = crate::lock_unpoison(&self.learning_queue);
-                let page_len = queue.len().min(HOST_TRANSIENT_LEARNING_QUEUE_PAGE);
+                let generation = queue.mutation_generation();
+                let mut sweep = crate::lock_unpoison(&self.sweep);
+                let restart = !matches!(
+                    *sweep,
+                    Some(HostTransientLearningSweep {
+                        condition,
+                        queue_generation,
+                        ..
+                    }) if condition == command.condition() && queue_generation == generation
+                );
+                if restart {
+                    *sweep = Some(HostTransientLearningSweep {
+                        condition: command.condition(),
+                        queue_generation: generation,
+                        remaining: queue.len(),
+                    });
+                }
+                let remaining = sweep.as_ref().map_or(0, |item| item.remaining);
+                let page_len = remaining.min(HOST_TRANSIENT_LEARNING_QUEUE_PAGE);
                 let mut identities = queue
                     .iter()
                     .take(page_len)
@@ -330,13 +410,17 @@ impl ErasureParticipant for HostTransientParticipant {
                 if let Some(taken) = queue.taken() {
                     identities.extend(experience_identities(taken));
                 }
-                (
-                    identities,
-                    page_len,
-                    queue.len() > page_len,
-                    queue.taken().cloned(),
-                )
+                #[cfg(test)]
+                self.last_scanned.store(page_len, Ordering::SeqCst);
+                (identities, page_len, generation)
             };
+            // Snapshot is complete. The queue std mutex is not held across
+            // this await; a worker `take_pending` or producer enqueue bumps
+            // generation so the later apply refuses the stale page.
+            #[cfg(any(test, feature = "test-support"))]
+            self.store
+                .pause_host_transient_queue_if_armed_for_tests()
+                .await;
             let covered = match self
                 .store
                 .erasure_sources_covered(command.condition(), identities.clone())
@@ -359,8 +443,38 @@ impl ErasureParticipant for HostTransientParticipant {
             // invalidated. Future presentation re-reads the canonical source.
             let dropped_presentation =
                 crate::lock_unpoison(&self.presentations).invalidate_for_erasure();
-            let dropped_learning =
-                self.prune_learning_queue_page(page_len, &exact, &identities, &covered);
+            let (dropped_learning, unfinished, remainder) = {
+                let mut queue = crate::lock_unpoison(&self.learning_queue);
+                if queue.mutation_generation() != generation {
+                    // Worker/producer mutated the queue after the snapshot.
+                    // Discard the page; never drop from it and never Verified.
+                    self.rebase_sweep(
+                        command.condition(),
+                        queue.mutation_generation(),
+                        queue.len(),
+                    );
+                    let remainder = queue.len() as u64 + u64::from(queue.taken().is_some());
+                    (0, true, remainder.max(1))
+                } else {
+                    let dropped =
+                        queue.apply_examined_page(page_len, &exact, &identities, &covered);
+                    let remaining = {
+                        let mut sweep = crate::lock_unpoison(&self.sweep);
+                        if let Some(item) = sweep.as_mut() {
+                            item.remaining = item.remaining.saturating_sub(page_len);
+                        }
+                        sweep.as_ref().map_or(0, |item| item.remaining)
+                    };
+                    // `taken` is inspected from the live slot under the still-
+                    // matching generation. HostTransient never drops it.
+                    let taken_covered = queue.taken().is_some_and(|experience| {
+                        experience_covered(experience, &exact, &covered, &identities)
+                    });
+                    let unfinished = taken_covered || remaining > 0;
+                    let remainder = queue.len() as u64 + u64::from(queue.taken().is_some());
+                    (dropped, unfinished, remainder.max(1))
+                }
+            };
             // In-flight streams and assembled replies fail closed from here on;
             // nothing published before the fence is treated as proof of
             // completion (a durable reply is the History owner's to erase).
@@ -383,19 +497,12 @@ impl ErasureParticipant for HostTransientParticipant {
                     WallClockWithTz::now(),
                 );
             }
-            let taken_covered = taken.as_ref().is_some_and(|experience| {
-                experience_covered(experience, &exact, &covered, &identities)
-            });
-            if more_unexamined || taken_covered {
-                let remainder = {
-                    let queue = crate::lock_unpoison(&self.learning_queue);
-                    queue.len() as u64 + u64::from(queue.taken().is_some())
-                };
+            if unfinished {
                 return ParticipantCompletionFact::more_work(
                     command.condition(),
                     ParticipantOwnerRef::HostTransient,
                     dropped_presentation + dropped_learning,
-                    remainder.max(1),
+                    remainder,
                     WallClockWithTz::now(),
                 );
             }
@@ -1038,7 +1145,7 @@ mod tests {
     use ene_credential::MemoryCredentialStore;
     use ene_learning::{ExperienceRole, ExperienceSourceKind, ExperienceTurn, SourceRangeRef};
     use ene_preservation::{
-        DeletionPurpose, DeletionSearchMaterial, DemandLocalErasureCommand,
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, DemandLocalErasureCommand,
         ParticipantCompletionStatus, ParticipantErasureScope, PreservationRepository as _,
         StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
     };
@@ -1104,6 +1211,45 @@ mod tests {
         scope: ParticipantErasureScope,
     ) -> DemandLocalErasureCommand {
         DemandLocalErasureCommand::new(condition, owner, scope)
+    }
+
+    fn host_transient(handle: &HostHandle) -> HostTransientParticipant {
+        HostTransientParticipant::new(
+            handle.store.clone(),
+            Arc::clone(&handle.transient_fence),
+            Arc::clone(&handle.presentations),
+            Arc::clone(&handle.learning_queue),
+        )
+    }
+
+    fn pending_transcripts(handle: &HostHandle) -> Vec<String> {
+        crate::lock_unpoison(&handle.learning_queue)
+            .iter()
+            .map(|item| item.transcript[0].text.clone())
+            .collect()
+    }
+
+    fn sorted_texts(mut texts: Vec<String>) -> Vec<String> {
+        texts.sort();
+        texts
+    }
+
+    fn page_demand_bound(queued: usize) -> usize {
+        let page = super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE;
+        queued.div_ceil(page).max(1)
+    }
+
+    async fn demand_secret(
+        participant: &HostTransientParticipant,
+        condition: ErasureConditionRef,
+    ) -> ParticipantCompletionFact {
+        participant
+            .demand_local_erasure(command(
+                condition,
+                ParticipantOwnerRef::HostTransient,
+                ParticipantErasureScope::local(target("secret body"), Vec::new()),
+            ))
+            .await
     }
 
     struct ClientFixture {
@@ -1910,26 +2056,19 @@ mod tests {
         crate::lock_unpoison(&handle.learning_queue).push_back(experience("unrelated text"));
         crate::lock_unpoison(&handle.learning_queue).push_back(experience("also unrelated"));
         let queued_before = crate::lock_unpoison(&handle.learning_queue).len();
-        let participant = HostTransientParticipant::new(
-            handle.store.clone(),
-            Arc::clone(&handle.transient_fence),
-            Arc::clone(&handle.presentations),
-            Arc::clone(&handle.learning_queue),
-        );
+        let participant = host_transient(&handle);
         let current = admit(
             &handle,
             "secret body",
             vec![ParticipantOwnerRef::HostTransient],
         )
         .await;
-        let first = participant
-            .demand_local_erasure(command(
-                current.condition(),
-                ParticipantOwnerRef::HostTransient,
-                ParticipantErasureScope::local(target("secret body"), Vec::new()),
-            ))
-            .await;
+        let first = demand_secret(&participant, current.condition()).await;
         assert_eq!(first.status(), ParticipantCompletionStatus::MoreWork);
+        assert!(
+            participant.last_scanned() <= page,
+            "one demand must not scan more than the page"
+        );
         let remaining_after_first = crate::lock_unpoison(&handle.learning_queue).len();
         let dropped_from_queue = queued_before - remaining_after_first;
         assert!(
@@ -1941,18 +2080,20 @@ mod tests {
             "the first page must leave continuation work"
         );
 
+        let max_demands = page_demand_bound(queued_before);
         let mut last = first;
-        for _ in 0..8 {
-            if last.status() != ParticipantCompletionStatus::MoreWork {
-                break;
-            }
-            last = participant
-                .demand_local_erasure(command(
-                    current.condition(),
-                    ParticipantOwnerRef::HostTransient,
-                    ParticipantErasureScope::local(target("secret body"), Vec::new()),
-                ))
-                .await;
+        let mut demands = 1usize;
+        while last.status() == ParticipantCompletionStatus::MoreWork {
+            assert!(
+                demands < max_demands,
+                "a stable queue of {queued_before} must verify within {max_demands} demands"
+            );
+            last = demand_secret(&participant, current.condition()).await;
+            assert!(
+                participant.last_scanned() <= page,
+                "one demand must not scan more than the page"
+            );
+            demands += 1;
         }
         assert_eq!(last.status(), ParticipantCompletionStatus::Verified);
         let queue = crate::lock_unpoison(&handle.learning_queue);
@@ -2017,6 +2158,396 @@ mod tests {
             "HostTransient must not drop the worker-owned taken slot"
         );
         assert!(queue.is_empty());
+    }
+
+    /// P1: a TARGET-bearing candidate that moves pending→taken after the
+    /// queue snapshot cannot verify HostTransient from that stale page.
+    #[tokio::test]
+    async fn a_snapshot_then_take_cannot_verify_host_transient() {
+        use ene_inference::fake::FakeProviderTransport;
+
+        let (handle, dir) = memory_handle("a3c-host-transient-snapshot-take")
+            .await
+            .expect("the handle opens");
+        crate::lock_unpoison(&handle.learning_queue).push_back(experience("contains secret body"));
+        let handle = Arc::new(handle);
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        handle.store.arm_host_transient_queue_park_for_tests();
+        handle.store.arm_learning_take_park_for_tests();
+        handle.store.arm_learning_formation_park_for_tests();
+        let parked = {
+            let participant = host_transient(&handle);
+            let condition = current.condition();
+            tokio::spawn(async move { demand_secret(&participant, condition).await })
+        };
+        handle
+            .store
+            .wait_host_transient_queue_park_for_tests()
+            .await;
+        {
+            let queue = crate::lock_unpoison(&handle.learning_queue);
+            assert_eq!(queue.len(), 1, "the snapshot still saw the pending TARGET");
+            assert!(queue.taken().is_none());
+        }
+        let worker_handle = Arc::clone(&handle);
+        let worker = tokio::spawn(async move {
+            worker_handle
+                .run_pending_learning(&FakeProviderTransport::new(String::from("noted"), None))
+                .await;
+        });
+        handle.store.wait_learning_take_park_for_tests().await;
+        {
+            let queue = crate::lock_unpoison(&handle.learning_queue);
+            assert!(queue.is_empty(), "the worker emptied pending");
+            assert!(
+                queue
+                    .taken()
+                    .is_some_and(|item| item.transcript[0].text.contains("secret body")),
+                "the TARGET is in taken with no formation identity yet"
+            );
+        }
+        handle.store.release_host_transient_queue_park_for_tests();
+        let fact = parked.await.expect("the parked demand joins");
+        assert_eq!(
+            fact.status(),
+            ParticipantCompletionStatus::MoreWork,
+            "a stale snapshot must not verify while taken still holds the TARGET"
+        );
+
+        let drive = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 1))
+            .await
+            .expect("the fan-out must not fail");
+        assert!(
+            drive.unfinished > 0,
+            "the durable HostTransient row must stay unfinished"
+        );
+        let progress = handle
+            .store
+            .deletion_participants(current.operation, None, 100)
+            .await
+            .expect("participant rows read")
+            .into_iter()
+            .find(|record| record.participant.owner == ParticipantOwnerRef::HostTransient)
+            .expect("the HostTransient row exists")
+            .progress;
+        assert!(
+            !progress.is_verified(),
+            "deletion_participant must not be Verified while taken holds the TARGET, got {progress:?}"
+        );
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        assert_ne!(
+            phase,
+            DeletionOperationPhase::Completed,
+            "global completion is forbidden while TARGET-bearing taken remains"
+        );
+
+        handle.store.release_learning_take_park_for_tests();
+        handle.store.wait_learning_formation_park_for_tests().await;
+        assert!(
+            crate::lock_unpoison(&handle.learning_queue)
+                .taken()
+                .is_none(),
+            "formation publish clears taken"
+        );
+        let db = dir.path().join("app.db");
+        let formations: i64 = {
+            let conn = rusqlite::Connection::open(&db).expect("the state database opens");
+            conn.query_row("SELECT COUNT(*) FROM learning_formation", [], |row| {
+                row.get(0)
+            })
+            .expect("the formation count must read")
+        };
+        assert_eq!(
+            formations, 1,
+            "the worker publishes a body-free formation identity"
+        );
+        handle.store.release_learning_formation_park_for_tests();
+        worker.await.expect("the parked worker joins");
+
+        let mut settled = false;
+        for _ in 0..page_demand_bound(1) + 2 {
+            let outcome = handle
+                .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+                .await
+                .expect("the fan-out must not fail");
+            let phase = handle
+                .store
+                .deletion_status(None, 100)
+                .await
+                .expect("the status must read")
+                .into_iter()
+                .find(|record| record.current.operation == current.operation)
+                .expect("the operation must stay readable")
+                .phase;
+            if phase == DeletionOperationPhase::Completed
+                && outcome.held == 0
+                && outcome.unfinished == 0
+                && outcome.demands == 0
+                && outcome.reconciliation_pages == 0
+            {
+                settled = true;
+                break;
+            }
+        }
+        assert!(
+            settled,
+            "Targeted Deletion must converge after formation publish"
+        );
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        assert_eq!(phase, DeletionOperationPhase::Completed);
+    }
+
+    /// Unrelated-only queues longer than one page must still Verify in a
+    /// fixture-computable number of page-sized demands without dropping.
+    #[tokio::test]
+    async fn unrelated_learning_candidates_beyond_one_page_verify_in_finite_demands() {
+        let (handle, _dir) = memory_handle("a3c-host-transient-unrelated-only")
+            .await
+            .expect("the handle opens");
+        let page = super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE;
+        let queued = page * 3 + 5;
+        for i in 0..queued {
+            crate::lock_unpoison(&handle.learning_queue)
+                .push_back(experience(&format!("unrelated-{i}")));
+        }
+        let before = pending_transcripts(&handle);
+        let participant = host_transient(&handle);
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let max_demands = page_demand_bound(queued);
+        let mut last = demand_secret(&participant, current.condition()).await;
+        let mut demands = 1usize;
+        assert!(participant.last_scanned() <= page);
+        assert_eq!(
+            sorted_texts(pending_transcripts(&handle)),
+            sorted_texts(before.clone()),
+            "unrelated candidates must not be dropped"
+        );
+        while last.status() == ParticipantCompletionStatus::MoreWork {
+            assert!(
+                demands < max_demands,
+                "{queued} unrelated entries must verify within {max_demands} demands"
+            );
+            last = demand_secret(&participant, current.condition()).await;
+            assert!(participant.last_scanned() <= page);
+            assert_eq!(
+                sorted_texts(pending_transcripts(&handle)),
+                sorted_texts(before.clone()),
+                "unrelated candidates must not be dropped"
+            );
+            demands += 1;
+        }
+        assert_eq!(last.status(), ParticipantCompletionStatus::Verified);
+        assert_eq!(demands, max_demands);
+        assert_eq!(crate::lock_unpoison(&handle.learning_queue).len(), queued);
+        assert!(
+            crate::lock_unpoison(&handle.learning_queue)
+                .taken()
+                .is_none()
+        );
+    }
+
+    /// A mixed queue drops only the TARGET-bearing candidate and still
+    /// Verifies in a fixture-computable number of page-sized demands.
+    #[tokio::test]
+    async fn a_mixed_target_and_unrelated_queue_drops_only_the_target() {
+        let (handle, _dir) = memory_handle("a3c-host-transient-mixed")
+            .await
+            .expect("the handle opens");
+        let page = super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE;
+        let leading = page + 5;
+        let trailing = 5;
+        for i in 0..leading {
+            crate::lock_unpoison(&handle.learning_queue)
+                .push_back(experience(&format!("unrelated-lead-{i}")));
+        }
+        crate::lock_unpoison(&handle.learning_queue).push_back(experience("contains secret body"));
+        for i in 0..trailing {
+            crate::lock_unpoison(&handle.learning_queue)
+                .push_back(experience(&format!("unrelated-trail-{i}")));
+        }
+        let unrelated_before: Vec<String> = pending_transcripts(&handle)
+            .into_iter()
+            .filter(|text| !text.contains("secret body"))
+            .collect();
+        let queued = crate::lock_unpoison(&handle.learning_queue).len();
+        let participant = host_transient(&handle);
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let max_demands = page_demand_bound(queued);
+        let mut last = demand_secret(&participant, current.condition()).await;
+        let mut demands = 1usize;
+        assert!(participant.last_scanned() <= page);
+        while last.status() == ParticipantCompletionStatus::MoreWork {
+            assert!(
+                demands < max_demands,
+                "a mixed queue of {queued} must verify within {max_demands} demands"
+            );
+            last = demand_secret(&participant, current.condition()).await;
+            assert!(participant.last_scanned() <= page);
+            demands += 1;
+        }
+        assert_eq!(last.status(), ParticipantCompletionStatus::Verified);
+        let remaining = pending_transcripts(&handle);
+        assert_eq!(
+            sorted_texts(remaining.clone()),
+            sorted_texts(unrelated_before)
+        );
+        assert_eq!(remaining.len(), leading + trailing);
+        assert!(remaining.iter().all(|text| !text.contains("secret body")));
+        assert!(
+            crate::lock_unpoison(&handle.learning_queue)
+                .taken()
+                .is_none()
+        );
+    }
+
+    /// An enqueue after the page snapshot invalidates that snapshot: the
+    /// demand must not Verified, and a later pass still erases the new TARGET.
+    #[tokio::test]
+    async fn an_enqueue_during_host_transient_scan_invalidates_the_snapshot() {
+        let (handle, _dir) = memory_handle("a3c-host-transient-enqueue-during-scan")
+            .await
+            .expect("the handle opens");
+        crate::lock_unpoison(&handle.learning_queue).push_back(experience("unrelated-stable"));
+        let handle = Arc::new(handle);
+        let participant = host_transient(&handle);
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        handle.store.arm_host_transient_queue_park_for_tests();
+        let parked = {
+            let condition = current.condition();
+            tokio::spawn(async move { demand_secret(&participant, condition).await })
+        };
+        handle
+            .store
+            .wait_host_transient_queue_park_for_tests()
+            .await;
+        crate::lock_unpoison(&handle.learning_queue).push_back(experience("contains secret body"));
+        handle.store.release_host_transient_queue_park_for_tests();
+        let first = parked.await.expect("the parked demand joins");
+        assert_eq!(
+            first.status(),
+            ParticipantCompletionStatus::MoreWork,
+            "a concurrent enqueue must invalidate the snapshot"
+        );
+        assert_eq!(
+            crate::lock_unpoison(&handle.learning_queue).len(),
+            2,
+            "the stale snapshot must not drop either candidate"
+        );
+
+        let participant = host_transient(&handle);
+        let max_demands = page_demand_bound(2);
+        let mut last = first;
+        let mut demands = 1usize;
+        while last.status() == ParticipantCompletionStatus::MoreWork {
+            assert!(
+                demands < max_demands + 1,
+                "the new TARGET must be examined within a rebased cycle"
+            );
+            last = demand_secret(&participant, current.condition()).await;
+            assert!(participant.last_scanned() <= super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE);
+            demands += 1;
+        }
+        assert_eq!(last.status(), ParticipantCompletionStatus::Verified);
+        let remaining = pending_transcripts(&handle);
+        assert_eq!(remaining, vec![String::from("unrelated-stable")]);
+        assert!(remaining.iter().all(|text| !text.contains("secret body")));
+    }
+
+    /// Overflow drops the oldest pending body and advances generation, so the
+    /// sweep cursor cannot treat the dropped entry as scanned-clean.
+    #[tokio::test]
+    async fn queue_overflow_is_not_treated_as_a_scanned_clean_candidate() {
+        let (handle, _dir) = memory_handle("a3c-host-transient-overflow")
+            .await
+            .expect("the handle opens");
+        let page = super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE;
+        let cap = super::LEARNING_FORMATION_QUEUE_CAP;
+        for i in 0..cap {
+            crate::lock_unpoison(&handle.learning_queue)
+                .push_back(experience(&format!("unrelated-cap-{i}")));
+        }
+        let participant = host_transient(&handle);
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let first = demand_secret(&participant, current.condition()).await;
+        assert_eq!(first.status(), ParticipantCompletionStatus::MoreWork);
+        assert_eq!(participant.last_scanned(), page);
+        let generation_after_first =
+            crate::lock_unpoison(&handle.learning_queue).mutation_generation();
+        crate::lock_unpoison(&handle.learning_queue).push_back(experience("contains secret body"));
+        assert_ne!(
+            crate::lock_unpoison(&handle.learning_queue).mutation_generation(),
+            generation_after_first,
+            "overflow enqueue must advance the queue generation"
+        );
+        assert_eq!(crate::lock_unpoison(&handle.learning_queue).len(), cap);
+
+        let max_demands = 1 + page_demand_bound(cap);
+        let mut last = first;
+        let mut demands = 1usize;
+        while last.status() == ParticipantCompletionStatus::MoreWork {
+            assert!(
+                demands < max_demands,
+                "overflow must rebase the sweep and still verify within {max_demands} demands"
+            );
+            last = demand_secret(&participant, current.condition()).await;
+            assert!(participant.last_scanned() <= page);
+            demands += 1;
+        }
+        assert_eq!(last.status(), ParticipantCompletionStatus::Verified);
+        let remaining = pending_transcripts(&handle);
+        assert_eq!(
+            remaining.len(),
+            cap - 1,
+            "overflow dropped one unrelated body"
+        );
+        assert!(remaining.iter().all(|text| !text.contains("secret body")));
+        assert!(
+            remaining
+                .iter()
+                .all(|text| text.starts_with("unrelated-cap-"))
+        );
     }
 
     /// Blocker 3 remainder: a Client class-wipe demand parked after durable

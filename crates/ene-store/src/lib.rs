@@ -332,6 +332,50 @@ impl Store {
         self.test_parks.client_demand.release();
     }
 
+    /// Arms the first-waiter park after HostTransient snapshots the Learning
+    /// formation queue and before the covered-source membership probe.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_host_transient_queue_park_for_tests(&self) {
+        self.test_parks.host_transient_queue.arm();
+    }
+
+    /// Waits until the armed HostTransient queue-snapshot park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_host_transient_queue_park_for_tests(&self) {
+        self.test_parks.host_transient_queue.wait_entered().await;
+    }
+
+    /// Releases the parked HostTransient queue snapshot.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_host_transient_queue_park_for_tests(&self) {
+        self.test_parks.host_transient_queue.release();
+    }
+
+    /// Arms the first-waiter park after a Learning worker takes a candidate
+    /// off the pending queue and before `begin_learning_formation`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_learning_take_park_for_tests(&self) {
+        self.test_parks.learning_take.arm();
+    }
+
+    /// Waits until the armed Learning-take park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_learning_take_park_for_tests(&self) {
+        self.test_parks.learning_take.wait_entered().await;
+    }
+
+    /// Releases the parked Learning take.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_learning_take_park_for_tests(&self) {
+        self.test_parks.learning_take.release();
+    }
+
     /// Arms the first-waiter park after a Learning formation identity is
     /// published and before the inference claim is created.
     #[cfg(any(test, feature = "test-support"))]
@@ -367,6 +411,25 @@ impl Store {
     #[doc(hidden)]
     pub async fn pause_client_demand_if_armed_for_tests(&self) {
         self.test_parks.client_demand.pause_if_armed().await;
+    }
+
+    /// Pauses when the HostTransient queue-snapshot park is armed. Called
+    /// after the pending page and generation are snapshotted and before the
+    /// membership probe, so a test can mutate the queue without holding the
+    /// queue mutex across an await.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_host_transient_queue_if_armed_for_tests(&self) {
+        self.test_parks.host_transient_queue.pause_if_armed().await;
+    }
+
+    /// Pauses when the Learning-take park is armed. Called from the
+    /// production worker after `take_pending` and before
+    /// `begin_learning_formation`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_learning_take_if_armed_for_tests(&self) {
+        self.test_parks.learning_take.pause_if_armed().await;
     }
 
     /// Pauses when the Learning-formation park is armed. Called from the
