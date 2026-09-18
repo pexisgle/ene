@@ -159,10 +159,9 @@ impl ErasureParticipantRegistry {
     ) -> Result<ParticipantCompletionOutcome, ene_preservation::PreservationTechnicalError> {
         if fact.participant() == ParticipantOwnerRef::HostTransient
             && fact.status() == ParticipantCompletionStatus::Verified
+            && let Some(host) = &self.host_transient
         {
-            if let Some(host) = &self.host_transient {
-                return host.commit_verified(fact).await;
-            }
+            return host.commit_verified(fact).await;
         }
         store.record_participant_completion(fact).await
     }
