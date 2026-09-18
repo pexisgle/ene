@@ -547,13 +547,14 @@ fn run_pending_deletions(
 /// control inlet, then prints the operation identity the status view reports.
 ///
 /// The confirmation must run in the serving process. The required
-/// participant snapshot includes every Client incarnation the Host actually
-/// handed body-bearing material to, and that delivery evidence is
-/// Host-memory (lifecycle §8.1); an offline state open cannot name those
-/// incarnations, so this command never admits from an offline handle. It
-/// dials [`ene_core::host_control`] and reports the serving Host's typed
-/// outcome; when no Host is serving it fails with recovery guidance instead
-/// of confirming.
+/// participant snapshot includes every Client incarnation with durable
+/// body-delivery evidence, and only the serving process can reach those
+/// incarnations through its live connection table (lifecycle §8.1); an
+/// offline state open could name them but could never complete their local
+/// erasure, so this command never admits from an offline handle. It dials
+/// [`ene_core::host_control`] and reports the serving Host's typed outcome;
+/// when no Host is serving it fails with recovery guidance instead of
+/// confirming.
 ///
 /// An unknown request id fails with the pending id set (never their target
 /// text, which stays on the `pending-deletions` preview).

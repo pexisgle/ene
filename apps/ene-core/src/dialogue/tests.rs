@@ -4715,13 +4715,18 @@ async fn memory_view_withholds_covered_bodies_and_tracks_only_delivered_ones() {
         other => panic!("unexpected admission outcome: {other:?}"),
     }
 
-    let tracked = |handle: &HostHandle| {
+    async fn tracked(handle: &HostHandle) -> bool {
         handle
             .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read")
             .iter()
             .any(|owner| matches!(owner, ParticipantOwnerRef::ClientIncarnation(_)))
-    };
-    assert!(!tracked(&handle), "the fixture handed no body over yet");
+    }
+    assert!(
+        !tracked(&handle).await,
+        "the fixture handed no body over yet"
+    );
 
     // The current list keeps the row identity and cursor, withholds the
     // covered body, and records no delivery.
@@ -4739,7 +4744,7 @@ async fn memory_view_withholds_covered_bodies_and_tracks_only_delivered_ones() {
         "the covered current body is withheld: {body}"
     );
     assert!(
-        !tracked(&handle),
+        !tracked(&handle).await,
         "a covered-only response hands over no body"
     );
 
@@ -4763,7 +4768,7 @@ async fn memory_view_withholds_covered_bodies_and_tracks_only_delivered_ones() {
         "the covered revision content and grounds are withheld: {body}"
     );
     assert!(
-        !tracked(&handle),
+        !tracked(&handle).await,
         "a withheld revision and grounds hand over no body"
     );
 
@@ -4807,9 +4812,133 @@ async fn memory_view_withholds_covered_bodies_and_tracks_only_delivered_ones() {
         "the covered row stays withheld in a mixed page: {body}"
     );
     assert!(
-        tracked(&handle),
+        tracked(&handle).await,
         "the delivered Memory body records the Client incarnation"
     );
+}
+
+/// The delivery-evidence write is the handoff linearization point: a condition
+/// that commits between the display path's coverage premise read and the
+/// evidence write must not let the covered body leave. The admission snapshot
+/// legitimately predates the paused write, so only the post-evidence re-check
+/// can withhold the body (lifecycle §8.1; critical-areas §5.2/§6.1).
+#[tokio::test]
+async fn a_condition_committed_before_the_evidence_write_withholds_the_body() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-delivery-race");
+    assert!(
+        live.authority
+            .pin_incarnation_for_tests(&live.connection_id, 9, 10),
+        "the fixture connection must pin one incarnation"
+    );
+    let (handle, _dir) = memory_handle("dlg-delivery-race").await.unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let scope = LearningScope::companion(companion.as_raw());
+    assert!(matches!(
+        handle
+            .store
+            .commit_memory_change(MemoryChangeCommit {
+                summary: None,
+                secret_premise: None,
+                claim: None,
+                change: MemoryChange {
+                    target: MemoryTarget::New {
+                        id: MemoryId::generate(),
+                    },
+                    scope,
+                    content: String::from("the covered target body"),
+                    importance: Importance::default(),
+                    temporal: TemporalMeaning::Enduring,
+                    change: ChangeKind::Initial,
+                    recall_suppressed: false,
+                    at: WallClockWithTz::now(),
+                },
+            })
+            .await
+            .unwrap(),
+        ene_learning::MemoryChangeOutcome::Committed { .. }
+    ));
+
+    // The request renders the body under a clear premise and pauses at the
+    // evidence write.
+    let gate = handle.arm_delivery_evidence_gate();
+    let transport = ok_transport();
+    let mut request = Box::pin(handle.handle_frame(
+        view_request_frame(live.connection_id),
+        live.clone(),
+        &transport,
+    ));
+    tokio::select! {
+        _ = &mut request => panic!("the request must pause at the delivery gate"),
+        () = gate.wait_entered() => {}
+    }
+
+    // The condition commits in exactly that window: the admission transaction
+    // reads the evidence table before the paused write, so this incarnation is
+    // not part of the operation's durable snapshot.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("covered target"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    let current = match handle.store.start_targeted_deletion(command).await.unwrap() {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission outcome: {other:?}"),
+    };
+    assert!(
+        !handle
+            .store
+            .deletion_participants(current.operation, None, 100)
+            .await
+            .unwrap()
+            .iter()
+            .any(|record| matches!(
+                record.participant.owner,
+                ParticipantOwnerRef::ClientIncarnation(_)
+            )),
+        "the admission snapshot predates the paused evidence write"
+    );
+
+    // The write resumes, then the post-evidence re-check must withhold the
+    // body: it never leaves after the condition became current.
+    gate.release();
+    let requested = request.await;
+    let body = memory_body(&requested);
+    assert!(
+        !body.contains("covered target"),
+        "a condition committed before the evidence write withholds the body: {body}"
+    );
+    // The evidence row itself is conservative and keeps the incarnation
+    // nameable by a later admission.
+    assert!(
+        handle
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read")
+            .iter()
+            .any(|owner| matches!(owner, ParticipantOwnerRef::ClientIncarnation(_))),
+        "the evidence write still records the handoff attempt"
+    );
+    handle.disarm_delivery_evidence_gate();
 }
 
 /// A page cursor drives the read-only Memory view, and untrusted cursor text

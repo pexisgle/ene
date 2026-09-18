@@ -1017,6 +1017,30 @@ fn mark_inflight_uses(
     Ok(())
 }
 
+/// Every Client incarnation with durable uncleared body-delivery evidence,
+/// read inside the admission transaction.
+///
+/// This is the authoritative required-incarnation read: the caller's snapshot
+/// is a convenience, and the admission transaction must union the evidence it
+/// can see itself so a delivery that committed between the caller's read and
+/// this transaction is never omitted. A corrupt stored identity fails closed
+/// instead of dropping an incarnation from the snapshot.
+fn durable_client_incarnations(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<Vec<RawId>, PreservationTechnicalError> {
+    let mut statement = tx
+        .prepare("SELECT incarnation_id FROM client_delivery_evidence ORDER BY incarnation_id")
+        .map_err(storage)?;
+    let rows: Vec<String> = statement
+        .query_map((), |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    rows.into_iter()
+        .map(|text| decode_id(&text).map_err(|_| corrupt()))
+        .collect()
+}
+
 /// The canonical admission body: duplicate detection plus the
 /// durable-before-enforce insert of operation, protected material, initial
 /// condition, and source correlations (lifecycle §4.1).
@@ -1047,6 +1071,21 @@ fn admit_deletion(
     {
         return Err(PreservationTechnicalError::InvalidParticipantSet);
     }
+    // The caller's Client-incarnation list is a pre-transaction evidence read
+    // and is therefore not authoritative: a body handed over between that read
+    // and this transaction would be omitted from the durable snapshot, and its
+    // local copy could later read as erased. The admission transaction reads
+    // the same durable evidence itself and unions it here, so a delivery that
+    // committed first is always snapshotted; one that commits after the
+    // admission serialization sees the now-current condition at its own
+    // boundary instead (lifecycle §8/§8.1).
+    let mut participants = command.required_participants().to_vec();
+    for incarnation in durable_client_incarnations(tx)? {
+        let owner = ParticipantOwnerRef::ClientIncarnation(incarnation);
+        if !participants.contains(&owner) {
+            participants.push(owner);
+        }
+    }
     let MechanicalDeletionTarget::ExactText(material) = &command.target().mechanical;
     if let Some(record) = unfinished_by_exact_text(tx, material.expose_for_erasure())? {
         let covered = scope_covered(
@@ -1054,7 +1093,7 @@ fn admit_deletion(
             record.current,
             command.known_sources(),
             &command.target().semantic_hints,
-            command.required_participants(),
+            &participants,
         )?;
         return Ok(if covered {
             StartTargetedDeletionOutcome::AlreadyCoveredBy(record.current)
@@ -1121,7 +1160,7 @@ fn admit_deletion(
     // The required participant snapshot commits with the operation and the
     // condition: no participant effect can start before the operation that
     // needs it is durable (durable-before-enforce §4.1).
-    for owner in command.required_participants() {
+    for owner in &participants {
         tx.execute(
             "INSERT INTO deletion_participant (operation_id,participant_owner,state,sweep,erased_count,remainder_count) VALUES (?1,?2,'pending',1,0,0)",
             params![id, owner.storage_name()],

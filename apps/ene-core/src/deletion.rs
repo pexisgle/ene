@@ -25,10 +25,11 @@
 //!   confirmation, and it runs the canonical preservation producer. The Client
 //!   never learns a request identity, so it cannot name — let alone confirm —
 //!   one. The confirmation must execute in the serving process: the required
-//!   participant snapshot includes the Client incarnations the Host handed
-//!   body-bearing material to, and that tracking is Host-memory (lifecycle
-//!   §8.1). The serving composition exposes it through
-//!   [`crate::host_control`], and no offline path admits a confirmation.
+//!   participant snapshot includes every Client incarnation with durable
+//!   body-delivery evidence, and the fan-out resolves its reachability from
+//!   that process's connection table (lifecycle §8.1). The serving
+//!   composition exposes it through [`crate::host_control`], and no offline
+//!   path admits a confirmation.
 //!
 //! The management intent journal never stores the Owner's exact text: the
 //! deletion fingerprint names the family and purpose only, and the staged
@@ -288,13 +289,23 @@ impl HostHandle {
             Ok(StageTargetedDeletionRequestOutcome::Confirmed(request)) => {
                 // The Owner already confirmed this durable request (a crash
                 // between confirmation and admission). The intent adds no
-                // authority; it only lets the canonical admission finish.
+                // authority; it only lets the canonical admission finish. An
+                // unreadable evidence snapshot admits nothing: the intent
+                // records no outcome so a later retry can still admit.
+                let required = match self.required_deletion_participants().await {
+                    Ok(required) => required,
+                    Err(_) => {
+                        return vec![outcome_frame(
+                            frame,
+                            live,
+                            intent,
+                            ManagementOutcome::HeldByOperation,
+                        )];
+                    }
+                };
                 match self
                     .store
-                    .start_confirmed_targeted_deletion(
-                        request,
-                        self.required_deletion_participants(),
-                    )
+                    .start_confirmed_targeted_deletion(request, required)
                     .await
                 {
                     Ok(StartTargetedDeletionOutcome::Started(_)) => {
@@ -547,10 +558,13 @@ impl HostHandle {
     /// confirmation for one staged request and run the canonical admission.
     ///
     /// This is the only path from a request to a destructive operation, and
-    /// it must run in the serving composition: `required_deletion_participants`
-    /// snapshots the Client incarnations whose body-bearing delivery this
-    /// process observed, and an offline handle has no such evidence (lifecycle
-    /// §8.1). The Owner reaches it through [`crate::host_control`]; an offline
+    /// it must run in the serving composition: the Client-incarnation demand
+    /// resolves reachability from that process's connection table, and the
+    /// Host-local trusted inlet is the only path that may record the Owner's
+    /// confirmation (IPC §18.1). The delivery evidence the snapshot reads is
+    /// durable, so a restart still names every incarnation that may hold a
+    /// target-bearing copy (lifecycle §8.1). The Owner reaches it through
+    /// [`crate::host_control`]; an offline
     /// CLI refusal is deliberate, never a fallback. An unknown or malformed
     /// identity answers
     /// [`Missing`](ConfirmTargetedDeletionOutcome::Missing) and changes
@@ -570,9 +584,13 @@ impl HostHandle {
         let Some(request) = parse_request_id(request) else {
             return Ok(ConfirmTargetedDeletionOutcome::Missing);
         };
+        // An unreadable evidence snapshot fails the admission before any
+        // confirmation row is written: a destructive operation never starts
+        // with an incomplete required-participant set.
+        let required = self.required_deletion_participants().await?;
         let outcome = self
             .store
-            .confirm_targeted_deletion(request, self.required_deletion_participants())
+            .confirm_targeted_deletion(request, required)
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
         if matches!(outcome, ConfirmTargetedDeletionOutcome::Started(_)) {

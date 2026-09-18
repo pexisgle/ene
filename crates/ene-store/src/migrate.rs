@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 34;
+const CURRENT_VERSION: i64 = 35;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -488,6 +488,24 @@ CREATE INDEX idx_usage_reservation_opened ON usage_reservation (opened_at);
 CREATE INDEX idx_usage_reservation_provider_opened ON usage_reservation (provider, opened_at);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
 INSERT INTO credential_set (id, rev) VALUES (1, 0);
+-- Durable, body-free Client body-delivery evidence (lifecycle §8.1). One row
+-- per Host-minted Client incarnation the Host actually handed body-bearing
+-- material to. `delivery_seq` advances on every such delivery and is the CAS
+-- premise a verified local-erasure result clears on: a delivery that raced a
+-- wipe leaves a higher sequence and the row survives. The row keeps only the
+-- incarnation identity, the delivery sequence, and the delivery times --
+-- never a target body, a reversible encoding, a body hash/fingerprint, a
+-- deletion matcher/search token, a presentation copy, or a device secret.
+-- A row is created only from an authenticated connection's pinned
+-- incarnation, so the Host never invents an owner it cannot name. A Host
+-- restart never removes a row; only a verified full-class local-erasure
+-- result (clearing the exact observed sequence) may clear it.
+CREATE TABLE client_delivery_evidence (
+incarnation_id TEXT PRIMARY KEY,
+delivery_seq INTEGER NOT NULL CHECK (delivery_seq > 0),
+first_delivered_at TEXT NOT NULL,
+last_delivered_at TEXT NOT NULL
+);
 ";
 
 /// Initializes only an empty database. Existing databases must have the exact
@@ -542,7 +560,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

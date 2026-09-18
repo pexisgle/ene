@@ -3654,3 +3654,126 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
     );
     served.server.abort();
 }
+
+// ---------------------------------------------------------------------------
+// E2E 1 (M1): durable Client body-delivery evidence across a Host restart
+// ---------------------------------------------------------------------------
+
+/// M1: a Client that received a target-bearing copy before a Host restart must
+/// still be snapshotted as a required `ClientIncarnation` by a later
+/// serving-Host confirmation — the delivery evidence is durable, so the
+/// restart must not clear it. The unreachable old incarnation is an explicit
+/// hold, and only the same incarnation's reconnected, verified local erasure
+/// lets the sealed global completion commit; the verified wipe then clears the
+/// durable evidence.
+#[tokio::test]
+async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    // 1: the target-bearing copy reaches the Client in the first Host process.
+    deliver_target_copy(&mut served).await;
+
+    // 2: the Host restarts before any deletion exists. The in-memory delivery
+    // tracking is gone; only the durable evidence can survive.
+    let mut client = served.restart().await;
+
+    // 3: stage the request through the reconnected Client, then drop the
+    // connection so the confirmation meets the old incarnation unreachable.
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(
+        outcome,
+        ManagementOutcome::NeedsClarification,
+        "the Client intent only stages"
+    );
+    served.client = None;
+    drop(client);
+
+    // 4: the serving Host's trusted confirmation snapshots the durable
+    // evidence and names the incarnation that received the copy before the
+    // restart.
+    let current = confirm_deletion_via_serving_control(&mut served).await;
+    let page = local_deletion_page(&served.handle).await;
+    let participant = client_incarnation_participant(&page)
+        .expect("the pre-restart delivery must stay a required participant");
+    assert!(
+        participant.sweep >= current.sweep.as_u64(),
+        "the Client participant belongs to the current sweep: {participant:?}"
+    );
+
+    // 5: the unreachable incarnation is an explicit hold, never a completion.
+    let page = drive_until_local(&served.handle, DeletionPhaseWire::Held).await;
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "an unreachable Client must never be presumed erased"
+    );
+    let participant =
+        client_incarnation_participant(&page).expect("the snapshotted Client stays required");
+    assert_eq!(
+        participant.progress, "held:unavailable",
+        "a disconnected incarnation is an explicit unreachable hold"
+    );
+    assert_eq!(
+        served
+            .handle
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read")
+            .iter()
+            .filter(|owner| matches!(
+                owner,
+                ene_preservation::ParticipantOwnerRef::ClientIncarnation(_)
+            ))
+            .count(),
+        1,
+        "the restart keeps exactly the delivered incarnation's evidence"
+    );
+
+    // 6: the same Client boot incarnation reconnects (a new connection, same
+    // identity). Only its verified local erasure lets the operation reach the
+    // sealed global completion.
+    let mut client = connect(&served.dir).await;
+    let handle = Arc::clone(&served.handle);
+    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the reconnected Client must let the operation complete");
+    let participant = client_incarnation_participant(&page)
+        .expect("the completed operation still reports the Client participant");
+    assert_eq!(
+        participant.progress, "verified",
+        "the Client's own local erasure pass is the verification premise"
+    );
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    // The verified full-class wipe cleared the durable evidence: no later
+    // admission claims a copy that no longer exists. Read it over the same
+    // fresh store connection the canonical remainder probe uses.
+    let store = ene_store::Store::open(&served.dir.join("app.db"))
+        .await
+        .expect("the state database opens");
+    assert_eq!(
+        store
+            .client_delivery_evidence_incarnations(None, 100)
+            .await
+            .expect("the durable evidence must read"),
+        Vec::new(),
+        "a verified local erasure clears the delivery evidence"
+    );
+    served.server.abort();
+}

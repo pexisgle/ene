@@ -1373,13 +1373,32 @@ impl HostHandle {
             ));
         }
         // Handing the body to a Client creates a local copy outside Host
-        // control: record it as a possible target-bearing holder (lifecycle
-        // §8.1). An empty page registers nothing.
-        if loaded
+        // control: the durable evidence must be committed before the excerpts
+        // can be handed over (lifecycle §8.1). An empty page registers
+        // nothing; a failed evidence commit withholds the bodies instead of
+        // creating an unaccountable copy.
+        let serves_body = loaded
             .iter()
-            .any(|(_, _, _, excerpt, _)| !excerpt.is_empty())
-        {
-            self.note_client_body_delivery(live);
+            .any(|(_, _, _, excerpt, _)| !excerpt.is_empty());
+        if serves_body {
+            if !self.note_client_body_delivery(live).await {
+                for (_, _, _, excerpt, truncated) in &mut loaded {
+                    excerpt.clear();
+                    *truncated = false;
+                }
+            } else {
+                // The premise above was read before the evidence write and the
+                // handoff: a condition that committed in between is either
+                // already in the snapshot (evidence committed first) or must
+                // withhold the excerpt here (critical-areas §5.2/§6.1).
+                let fresh = self.current_coverage().await;
+                for (_, _, _, excerpt, truncated) in &mut loaded {
+                    if !excerpt.is_empty() && fresh.covers(excerpt) {
+                        excerpt.clear();
+                        *truncated = false;
+                    }
+                }
+            }
         }
         self.with_presentation_state(live, |state| {
             loaded
@@ -2049,9 +2068,31 @@ impl HostHandle {
             .await
         {
             Ok(Some(page)) if !coverage.covers(&page.text) => {
+                if !page.text.is_empty() && !self.note_client_body_delivery(live).await {
+                    // The body cannot leave the Host unaccountably: fail the
+                    // read closed exactly like an unbuildable page.
+                    return vec![outgoing_frame(
+                        frame,
+                        live,
+                        WirePayload::ReportSourceResponse(ReportSourceResponse::InputUnavailable),
+                    )];
+                }
                 if !page.text.is_empty() {
-                    // The body reaches the Client: record the local copy holder.
-                    self.note_client_body_delivery(live);
+                    // The premise above was read before the evidence write and
+                    // the handoff: a condition that committed in between is
+                    // either already in the snapshot (evidence committed
+                    // first) or must withhold the body here
+                    // (critical-areas §5.2/§6.1).
+                    let fresh = self.current_coverage().await;
+                    if fresh.covers(&page.text) {
+                        return vec![outgoing_frame(
+                            frame,
+                            live,
+                            WirePayload::ReportSourceResponse(
+                                ReportSourceResponse::InputUnavailable,
+                            ),
+                        )];
+                    }
                 }
                 vec![outgoing_frame(
                     frame,

@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 
 mod action;
+mod client_delivery;
 mod codec;
 mod companion;
 mod credential;

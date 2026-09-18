@@ -3,14 +3,14 @@
 //!
 //! The Owner's final Targeted Deletion confirmation must run inside the
 //! serving Host process. The Host decides which Client incarnations are
-//! required participants from what it actually handed to each live
-//! incarnation (`ClientTransientRegistry`): that
-//! evidence is Host-memory and only exists in the process that did the
-//! handing. An offline `HostHandle::open` sees an empty delivery history, so
-//! admitting a confirmation there can omit a Client that received a
-//! target-bearing copy and let global completion succeed without its local
-//! erasure (lifecycle §8.1; PR §6.4: a mutation while serving goes over IPC,
-//! never through a second offline writer).
+//! required participants from what it actually handed to each incarnation;
+//! that evidence is durable, but only the serving process can deliver the
+//! local-erasure demand and resolve the incarnation's current reachability
+//! from its connection table (lifecycle §8.1). An offline `HostHandle::open`
+//! has no connection table, so admitting a confirmation there would hold
+//! every Client participant without ever reaching one — and PR §6.4 requires
+//! a mutation while serving to go over IPC, never through a second offline
+//! writer.
 //!
 //! This module is that IPC boundary: a Host-local control endpoint
 //! (`host-control.sock` beside the device socket on Unix; a second named pipe
@@ -296,17 +296,18 @@ where
 ///
 /// This is the production confirmation path behind `ene-core
 /// confirm-deletion`. The confirmation is admitted by the serving process
-/// with its live Client-copy tracking; the typed outcome is the canonical
-/// [`ConfirmTargetedDeletionOutcome`], never a completion claim.
+/// with its durable delivery evidence and live connection table; the typed
+/// outcome is the canonical [`ConfirmTargetedDeletionOutcome`], never a
+/// completion claim.
 ///
 /// # Errors
 ///
 /// Returns [`CoreError::Deletion`] with recovery guidance when no serving
 /// Host answers the control endpoint (the offline fallback is deliberately
-/// absent: an offline handle cannot name the Clients that may hold a
-/// target-bearing copy), when the exchange cannot complete, or when the
-/// serving Host refuses the request technically (the typed `Unavailable`
-/// answer). A domain outcome such as
+/// absent: only the serving process can reach the Client incarnations that
+/// may hold a target-bearing copy), when the exchange cannot complete, or
+/// when the serving Host refuses the request technically (the typed
+/// `Unavailable` answer). A domain outcome such as
 /// `Missing` or `NeedsClarification` is a successful answer and is returned
 /// as itself.
 pub async fn confirm_targeted_deletion(
@@ -352,9 +353,8 @@ pub async fn confirm_targeted_deletion(
 fn control_failure(detail: &str) -> CoreError {
     CoreError::Deletion(format!(
         "the serving Host is not reachable on the Host-local control inlet \
-         ({detail}); start `ene-core serve` and retry — the Owner confirmation \
-         must run in the serving process so the required participant snapshot \
-         includes every Client that may hold a target-bearing copy"
+         ({detail}); start `ene-core serve` and retry — only the serving process \
+         can reach every Client that may hold a target-bearing copy"
     ))
 }
 

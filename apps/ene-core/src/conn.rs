@@ -1021,7 +1021,7 @@ where
     if !table.is_current_authenticated(connection) {
         return true;
     }
-    let Some(payload) = handle.take_client_demand(&live) else {
+    let Some(payload) = handle.take_client_demand(&live).await else {
         return true;
     };
     write_response(write_half, outgoing_frame(frame, &live, payload), terminal).await

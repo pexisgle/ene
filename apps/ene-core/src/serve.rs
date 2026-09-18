@@ -537,15 +537,16 @@ pub struct HostHandle {
     /// payload is uncovered and fails closed. Holds no deletion condition, so
     /// it is not a second currentness registry.
     pub(crate) transient_fence: Arc<crate::transient_erasure::TransientErasureFence>,
-    /// Client incarnations the Host handed body-bearing material to, plus the
-    /// in-flight local-erasure demand plumbing (A3c, lifecycle §8.1).
+    /// In-flight local-erasure demand plumbing for Client incarnations
+    /// (A3c, lifecycle §8.1).
     ///
-    /// Host-memory only: restart drops the tracking and every connection, so
-    /// an incarnation the Host cannot name is never claimed as required.
-    /// Admission therefore runs inside the serving process (the Owner
-    /// confirmation through [`crate::host_control`], intent recovery through
-    /// [`HostHandle::targeted_deletion_intent`]); an offline confirmation
-    /// would see empty evidence and is refused by construction.
+    /// The evidence itself is durable (`client_delivery_evidence`): the
+    /// serving composition writes it before a body leaves the Host, and
+    /// admission reads it, so a restart drops only the pending waiters while
+    /// every incarnation that may hold a target-bearing copy is still named.
+    /// Reachability still resolves through the connection table, so an
+    /// incarnation from an earlier Host process is an explicit unreachable
+    /// hold instead of a guessed delivery.
     pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
     /// Test-only deterministic gate for conversation task-control commands.
     #[cfg(test)]
@@ -567,6 +568,11 @@ pub struct HostHandle {
     /// Test-only pause after a confirmation read and before durable commit.
     #[cfg(test)]
     pub(crate) confirm_commit_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
+    /// Test-only pause between a body-display path's coverage premise read and
+    /// the durable delivery-evidence write, so a test can commit a condition
+    /// in that exact window.
+    #[cfg(test)]
+    pub(crate) delivery_evidence_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
     /// Test-only deterministic gate before a read query's connection-scoped
     /// ref/cursor mint.
     #[cfg(test)]
@@ -728,6 +734,8 @@ impl HostHandle {
             submit_publish_gate: StdMutex::new(None),
             #[cfg(test)]
             confirm_commit_gate: StdMutex::new(None),
+            #[cfg(test)]
+            delivery_evidence_gate: StdMutex::new(None),
             #[cfg(test)]
             ref_mint_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -913,33 +921,53 @@ impl HostHandle {
     }
 
     /// Required participant snapshot for a newly admitted operation: the
-    /// current product surface's semantic owners (lifecycle §8).
+    /// current product surface's semantic owners plus every Client incarnation
+    /// with durable uncleared body-delivery evidence (lifecycle §8).
     ///
     /// The set is snapshotted durably with the operation admission; later
     /// changes in the registered implementations never widen an admitted
-    /// operation, and an owner with no implementation is still required.
-    /// Client incarnations the Host handed body-bearing material to are
-    /// appended here, so a Client that may hold a target-bearing local copy is
-    /// snapshotted as required at admission and later driven (or held when
-    /// unreachable) — an incarnation the Host cannot name is never invented
-    /// (lifecycle §8.1).
+    /// operation, and an owner with no implementation is still required. The
+    /// Client part is read from the canonical `client_delivery_evidence`
+    /// table, not from process memory: a Host restart that emptied the
+    /// in-memory demand plumbing still names every incarnation that may hold a
+    /// target-bearing local copy, and a Client that only sent requests has no
+    /// row and is not claimed — an incarnation the Host cannot name is never
+    /// invented (lifecycle §8.1).
     ///
-    /// The Client list is Host-memory delivery evidence, so this snapshot is
-    /// only sound inside the serving process that did the handing. Admission
-    /// runs through that process (the intent recovery path and
-    /// [`crate::host_control`]); an offline composition must not admit a
-    /// confirmation from this method, because it cannot name the Clients that
-    /// may hold a copy (PR §6.4).
-    #[must_use]
-    pub fn required_deletion_participants(&self) -> Vec<ene_preservation::ParticipantOwnerRef> {
+    /// A failed evidence read fails the whole snapshot closed: an incomplete
+    /// required set must never be admitted as if it were authoritative.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when the durable delivery evidence cannot be read.
+    pub async fn required_deletion_participants(
+        &self,
+    ) -> Result<Vec<ene_preservation::ParticipantOwnerRef>, CoreError> {
         let mut owners = crate::targeted_deletion::current_product_surface_owners();
-        owners.extend(
-            self.client_transients
-                .tracked_incarnations()
-                .into_iter()
-                .map(ene_preservation::ParticipantOwnerRef::ClientIncarnation),
-        );
-        owners
+        let mut after = None;
+        loop {
+            // Pages bound each upstream read; admission walks to a short page
+            // rather than truncating, because a dropped incarnation would be a
+            // missing required participant.
+            let page = self
+                .store
+                .client_delivery_evidence_incarnations(after, 100)
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            if page.is_empty() {
+                break;
+            }
+            let short = page.len() < 100;
+            after = page.last().copied();
+            owners.extend(
+                page.into_iter()
+                    .map(ene_preservation::ParticipantOwnerRef::ClientIncarnation),
+            );
+            if short {
+                break;
+            }
+        }
+        Ok(owners)
     }
 
     /// Installs the serving composition's connection table as the authority
@@ -1499,7 +1527,7 @@ impl HostHandle {
                 // and changes nothing otherwise. No reply is emitted — a
                 // local-erasure result is itself the fact, and it is never
                 // global completion (lifecycle §10).
-                self.accept_client_erasure_result(&live, result);
+                self.accept_client_erasure_result(&live, result).await;
             }
             // Inbound rejects, stray acks, and future variants answer
             // nothing: only the Host rejects, and only in response.
@@ -1949,6 +1977,27 @@ impl HostHandle {
     #[cfg(test)]
     pub(crate) fn disarm_confirm_commit_gate(&self) {
         *crate::lock_unpoison(&self.confirm_commit_gate) = None;
+    }
+
+    /// Arms the body-delivery evidence gate: a display path pauses after its
+    /// coverage premise read and before the durable evidence write.
+    #[cfg(test)]
+    pub(crate) fn arm_delivery_evidence_gate(&self) -> std::sync::Arc<TestGate> {
+        let gate = std::sync::Arc::new(TestGate::default());
+        *crate::lock_unpoison(&self.delivery_evidence_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// Disarms the body-delivery evidence gate.
+    #[cfg(test)]
+    pub(crate) fn disarm_delivery_evidence_gate(&self) {
+        *crate::lock_unpoison(&self.delivery_evidence_gate) = None;
+    }
+
+    /// The armed body-delivery evidence gate, when a test installed one.
+    #[cfg(test)]
+    pub(crate) fn delivery_evidence_gate(&self) -> Option<std::sync::Arc<TestGate>> {
+        crate::lock_unpoison(&self.delivery_evidence_gate).clone()
     }
 
     /// Arms the test-only close-admission gate and returns it.

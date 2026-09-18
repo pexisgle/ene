@@ -1132,7 +1132,7 @@ impl HostHandle {
             // (critical-areas §5.2), and a body actually handed over is
             // recorded as a Client local copy (lifecycle §8.1).
             let coverage = self.current_coverage().await;
-            let (body, delivered) = self
+            let (mut body, delivered) = self
                 .render_memory_view(
                     memory_after,
                     memory_revisions_of,
@@ -1140,8 +1140,20 @@ impl HostHandle {
                     &coverage,
                 )
                 .await;
-            if delivered {
-                self.note_client_body_delivery(live);
+            if delivered && !self.note_client_body_delivery(live).await {
+                // No durable delivery evidence: withhold the rendered bodies
+                // rather than hand over a copy the Host cannot account for.
+                body.clear();
+            } else if delivered {
+                // The premise above was read before the evidence write and the
+                // handoff: a condition that committed in between is either
+                // already in the snapshot (evidence committed first) or must
+                // withhold the rendered bodies here
+                // (critical-areas §5.2/§6.1).
+                let fresh = self.current_coverage().await;
+                if fresh.covers(&body) {
+                    body.clear();
+                }
             }
             sections.push(ViewSection {
                 kind: String::from("memory"),

@@ -46,11 +46,10 @@ use crate::serve::CoreError;
 /// which is the only extension point needed.
 ///
 /// The Client transient holder is per incarnation rather than a fixed class:
-/// once the Client-transient slice tracks which incarnation may hold a
-/// target-bearing copy, it appends
-/// [`ParticipantOwnerRef::ClientIncarnation`] entries to the required set at
-/// admission. No incarnation is listed here while that tracking does not
-/// exist, so an operation never claims a Client copy it cannot identify.
+/// the composition appends one [`ParticipantOwnerRef::ClientIncarnation`] per
+/// incarnation with durable body-delivery evidence when it builds the
+/// admission snapshot (lifecycle §8.1). No incarnation is listed here: a
+/// Client that received no body is never claimed as a copy holder.
 #[must_use]
 pub fn current_product_surface_owners() -> Vec<ParticipantOwnerRef> {
     vec![
@@ -77,10 +76,10 @@ pub struct ErasureParticipantRegistry {
     participants: HashMap<ParticipantOwnerRef, Arc<dyn ErasureParticipant>>,
     /// The composition's Client-transient plumbing. A `ClientIncarnation` owner
     /// snapshotted by an operation must stay resolvable after a Host restart:
-    /// the in-memory delivery list does not survive it, but the owner identity
-    /// is the deterministic projection of the Client boot incarnation the
-    /// connection table is keyed by, so the participant can be reconstructed
-    /// for the exact durable owner (lifecycle §8.1, §14).
+    /// the demand plumbing does not survive it, but the owner identity is the
+    /// deterministic projection of the Client boot incarnation the connection
+    /// table is keyed by, so the participant can be reconstructed for the
+    /// exact durable owner (lifecycle §8.1, §14).
     client_transients: Option<Arc<crate::transient_erasure::ClientTransientRegistry>>,
 }
 
@@ -1411,7 +1410,10 @@ mod tests {
         let Some((handle, dir)) = memory_handle("targeted-deletion-snapshot").await else {
             panic!("the host must open");
         };
-        let required = handle.required_deletion_participants();
+        let required = handle
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read");
         assert!(
             !required.is_empty(),
             "the current product surface always requires participants"
@@ -1440,7 +1442,13 @@ mod tests {
             after, before,
             "the participant snapshot survives restart unchanged"
         );
-        assert_eq!(reopened.required_deletion_participants(), required);
+        assert_eq!(
+            reopened
+                .required_deletion_participants()
+                .await
+                .expect("the reopened snapshot must read"),
+            required
+        );
     }
 
     #[tokio::test]

@@ -7311,6 +7311,7 @@ async fn delegation_creation_faults_roll_back_every_write() {
 mod action;
 mod agent;
 mod cancel;
+mod client_delivery;
 mod completion;
 mod delayed_arrival;
 mod deletion_request;

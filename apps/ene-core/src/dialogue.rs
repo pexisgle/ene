@@ -1099,11 +1099,26 @@ impl HostHandle {
                     .filter(|item| !coverage.covers(&item.text))
                     .collect();
                 let serves_body = items.iter().any(|item| !item.text.is_empty());
-                if had_body && serves_body {
-                    // The body reaches the Client: record the local copy holder.
-                    self.note_client_body_delivery(live);
+                if had_body && serves_body && !self.note_client_body_delivery(live).await {
+                    // No durable delivery evidence: withhold the page rather
+                    // than hand over a copy the Host cannot account for.
+                    HistoryResponse::Unavailable
+                } else {
+                    // The premise above was read before the evidence write and
+                    // the handoff. Admission serializes with that write, so a
+                    // condition that committed in between is either already in
+                    // the snapshot (evidence committed first) or must withhold
+                    // the body here: without this re-read a covered page could
+                    // leave while its incarnation is absent from the
+                    // operation's snapshot (critical-areas §5.2/§6.1).
+                    let fresh = self.current_coverage().await;
+                    HistoryResponse::Items(
+                        items
+                            .into_iter()
+                            .filter(|item| !fresh.covers(&item.text))
+                            .collect(),
+                    )
                 }
-                HistoryResponse::Items(items)
             }
             other => other,
         };
@@ -1591,8 +1606,24 @@ impl DeltaSink for StreamGate<'_> {
             };
             // Re-check after the capacity wait: the premise may have gone
             // stale while parked, and a stale delta must never publish.
-            // `permit.send` is synchronous, so no await sits between this
-            // check and the publication.
+            if !self.current().await {
+                drop(permit);
+                return DeltaFlow::Abort("the presentation premise went stale");
+            }
+            // Write-ahead delivery evidence: the delta body may only leave the
+            // Host after this incarnation's durable evidence row is committed,
+            // so a crash between the send and the record cannot lose the copy
+            // (lifecycle §8.1). A failed commit aborts the stream instead of
+            // creating an unaccountable copy; the durable reply still reaches
+            // the Client through its presentation subscription.
+            if !self.handle.note_client_body_delivery(self.live).await {
+                drop(permit);
+                return DeltaFlow::Abort("the delivery evidence could not be committed");
+            }
+            // Final premise check after the durable write: the write awaited,
+            // so a condition, fence, or connection that moved meanwhile must
+            // still stop this delta before it is published. The evidence row,
+            // when written, is conservative and re-derived by a later demand.
             if !self.current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
@@ -1607,9 +1638,6 @@ impl DeltaSink for StreamGate<'_> {
             {
                 return DeltaFlow::Abort("the connection was replaced");
             }
-            // The delta body now reaches the Client: track the incarnation as
-            // a possible target-bearing local copy holder (lifecycle §8.1).
-            self.handle.note_client_body_delivery(self.live);
             self.seq += 1;
             DeltaFlow::Continue
         })

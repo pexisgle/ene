@@ -17,11 +17,20 @@
 //!   folded back into a [`ParticipantCompletionFact`], which is local
 //!   completion — never the system-wide one.
 //!
+//! The evidence that a Client incarnation may hold a target-bearing local copy
+//! is durable (`client_delivery_evidence` in the canonical store), written
+//! body-free before the body leaves the Host. Admission therefore names an
+//! incarnation that received material in an earlier Host process; a Host
+//! restart drops only the in-flight demand plumbing, never the evidence.
+//!
 //! Both participants are bounded work: the Host-transient demand drops the
 //! affected in-memory entries (never durable rows), the Client demand is one
 //! wire message with one bounded wait, and an unreachable, disconnecting, or
-//! silent Client is an explicit hold, never a completion. Disconnect and
-//! timeout prove nothing about the Client's local copy.
+//! silent Client is an explicit hold, never a completion. A demand the
+//! connection loop has not handed to the wire yet yields bounded more-work
+//! instead of stalling the pass behind a reachable Client. Disconnect and
+//! timeout prove nothing about the Client's local copy, and only a verified
+//! full-class local-erasure result supersedes the durable delivery evidence.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -47,12 +56,6 @@ use crate::conn::ConnectionTable;
 use crate::presentation::PresentationState;
 use crate::serve::HostHandle;
 
-/// Bound on tracked Client incarnations. One entry is a boot identity plus its
-/// Host-minted projection; the oldest entry drops first, and a dropped
-/// incarnation stops being appended to new required sets (an already admitted
-/// operation keeps its durable snapshot).
-const TRACKED_CLIENT_CAP: usize = 256;
-
 /// How long one Client local-erasure demand waits for its result before the
 /// participant holds. A wait bound is not a completion proof: a silent or
 /// unreachable Client stays a durable hold and a later pass re-demands the
@@ -69,6 +72,23 @@ fn current_client_targets() -> Vec<DeletionTargetWire> {
             class: ClientTempClass::InputDraft,
         },
     ]
+}
+
+/// Whether one Client report objectively supersedes the delivery evidence:
+/// every demanded class is reported wiped with no unverified remainder.
+///
+/// The completion fact itself accepts a narrower report (a local completion
+/// with a remainder keeps the operation unfinished instead), but clearing the
+/// durable evidence is deliberately stricter: anything less than the whole
+/// closed class set leaves the row, so a later pass still demands the copy.
+fn verified_full_class_wipe(result: &LocalErasureResult) -> bool {
+    if !result.unverified.is_empty() {
+        return false;
+    }
+    current_client_targets().iter().all(|target| {
+        let DeletionTargetWire::WipeClass { class } = target;
+        result.wiped.contains(class)
+    })
 }
 
 /// The protected exact mechanical text of one operation target.
@@ -207,12 +227,26 @@ struct PendingDemand {
     /// once per live connection; a connection end abandons the demand, so a
     /// later pass re-demands the same condition under a fresh demand id.
     delivered_to: Option<ConnectionWireId>,
+    /// Durable delivery-evidence sequence observed when this demand went on
+    /// the wire (`None` when no evidence row existed then). The verified
+    /// answer may clear the evidence only while the row still carries this
+    /// exact sequence: a delivery that raced the wipe advances it and the row
+    /// survives.
+    evidence_seq: Option<u64>,
     state: PendingState,
 }
 
 enum PendingState {
     Awaiting,
     Answered(LocalErasureResult),
+}
+
+/// One accepted Client result and the durable evidence premise it carries.
+struct AcceptedClientErasure {
+    /// The delivery-evidence sequence observed when the demand was handed to
+    /// the wire. `None` means no uncleared evidence existed at delivery time,
+    /// so a verified answer has nothing to clear.
+    evidence_seq: Option<u64>,
 }
 
 /// What one bounded wait observed. Every non-answer outcome is a hold.
@@ -223,14 +257,18 @@ enum ClientErasureWait {
     Abandoned,
 }
 
-/// Host-memory registry of Client incarnations that may hold a target-bearing
-/// local copy, plus the in-flight demand plumbing (lifecycle §8.1, IPC §17).
+/// In-flight local-erasure demand plumbing for Client incarnations that may
+/// hold a target-bearing local copy (lifecycle §8.1, IPC §17).
 ///
-/// Tracking evidence is delivery, not connection: an incarnation enters the
-/// registry only when the Host actually handed it body-bearing material
-/// (presentation excerpts, history items, Task report source bodies, or text
-/// stream deltas). A Client that only sent requests has no copy the Host
-/// could erase, and is not claimed as a required participant.
+/// The admission-time evidence itself is durable and lives in the canonical
+/// store (`client_delivery_evidence`); this registry holds only the demand
+/// bookkeeping, so a Host restart drops the pending waiters without touching
+/// the evidence. Tracking evidence is delivery, not connection: a row exists
+/// only after the Host actually handed body-bearing material to an
+/// authenticated incarnation (presentation excerpts, history items, Task
+/// report source bodies, or text stream deltas). A Client that only sent
+/// requests has no copy the Host could erase, and is not claimed as a
+/// required participant.
 #[derive(Default)]
 pub(crate) struct ClientTransientRegistry {
     inner: std::sync::Mutex<ClientTransientInner>,
@@ -249,11 +287,6 @@ pub(crate) struct ClientTransientRegistry {
 
 #[derive(Default)]
 struct ClientTransientInner {
-    /// Delivery order, oldest first. Membership is the admission-time
-    /// requirement evidence; reachability is resolved from the identity, not
-    /// from this in-memory list, so a durable participant snapshot still
-    /// resolves after a restart.
-    tracked: VecDeque<RawId>,
     /// At most one outstanding demand per incarnation.
     pending: HashMap<RawId, PendingDemand>,
 }
@@ -278,39 +311,13 @@ impl ClientTransientRegistry {
         RawId::from_uuid(Uuid::from_u64_pair(counter, random))
     }
 
-    /// Records that body-bearing material reached this incarnation. Returns
-    /// the identity when the incarnation was newly tracked, so the caller can
-    /// register the matching participant implementation exactly once.
-    pub(crate) fn note_body_delivery(&self, counter: u64, random: u64) -> Option<RawId> {
-        let identity = Self::identity_for(counter, random);
-        let mut inner = crate::lock_unpoison(&self.inner);
-        if inner.tracked.iter().any(|tracked| *tracked == identity) {
-            return None;
-        }
-        inner.tracked.push_back(identity);
-        while inner.tracked.len() > TRACKED_CLIENT_CAP {
-            inner.tracked.pop_front();
-        }
-        Some(identity)
-    }
-
-    /// Identities that may hold a target-bearing copy, in delivery order.
-    #[must_use]
-    pub(crate) fn tracked_incarnations(&self) -> Vec<RawId> {
-        crate::lock_unpoison(&self.inner)
-            .tracked
-            .iter()
-            .copied()
-            .collect()
-    }
-
     /// The current authenticated connection of one tracked incarnation.
     ///
     /// The boot incarnation is recovered from the identity itself, so a
     /// durable participant snapshot resolves after a Host restart even though
-    /// the in-memory delivery list did not survive it (`transient_erasure`
+    /// the in-flight demand plumbing did not survive it (`transient_erasure`
     /// module docs: identity is Host-minted deterministically from the boot
-    /// incarnation).
+    /// incarnation). A missing connection is an explicit unreachable hold.
     fn current_connection(&self, identity: RawId) -> Option<ConnectionWireId> {
         let (counter, random) = identity.as_uuid().as_u64_pair();
         let table = self.table.get()?;
@@ -322,27 +329,44 @@ impl ClientTransientRegistry {
         &self.delivery_wake
     }
 
-    /// Begins one bounded demand for an incarnation, replacing any older
-    /// outstanding demand for it. The older condition's waiter observes
-    /// [`ClientErasureWait::Abandoned`] instead of adopting a foreign answer.
+    /// Begins one bounded demand for an incarnation.
+    ///
+    /// A demand for the same `(condition, connection)` reuses the outstanding
+    /// one instead of minting a new id: a bounded pass that yielded before the
+    /// Client answered must still match the Client's answer, and a Client
+    /// answer is never orphaned by a later retry of the same condition. Any
+    /// older demand with a different condition (or a different connection) is
+    /// replaced, and its waiter observes [`ClientErasureWait::Abandoned`]
+    /// instead of adopting a foreign answer.
     fn begin(
         &self,
         identity: RawId,
         condition: ErasureConditionRef,
         connection: ConnectionWireId,
     ) -> String {
-        let id = Uuid::new_v4().as_hyphenated().to_string();
         let mut inner = crate::lock_unpoison(&self.inner);
-        inner.pending.insert(
-            identity,
-            PendingDemand {
-                id: id.clone(),
-                condition,
-                connection,
-                delivered_to: None,
-                state: PendingState::Awaiting,
-            },
-        );
+        let id = match inner.pending.get(&identity) {
+            Some(existing)
+                if existing.condition == condition && existing.connection == connection =>
+            {
+                existing.id.clone()
+            }
+            _ => {
+                let id = Uuid::new_v4().as_hyphenated().to_string();
+                inner.pending.insert(
+                    identity,
+                    PendingDemand {
+                        id: id.clone(),
+                        condition,
+                        connection,
+                        delivered_to: None,
+                        evidence_seq: None,
+                        state: PendingState::Awaiting,
+                    },
+                );
+                id
+            }
+        };
         drop(inner);
         // Every parked connection loop re-checks, and the stored permit keeps
         // a wakeup that arrived before a loop parked from being lost.
@@ -351,12 +375,36 @@ impl ClientTransientRegistry {
         id
     }
 
+    /// Whether the outstanding demand for this `(incarnation, condition)` was
+    /// already handed to this connection's wire.
+    ///
+    /// An undelivered demand is bounded-work yield material, never a hold: the
+    /// connection loop may simply be inside another frame, and a later pass
+    /// re-observes the same pending.
+    fn delivered(
+        &self,
+        identity: RawId,
+        condition: ErasureConditionRef,
+        connection: ConnectionWireId,
+    ) -> bool {
+        let inner = crate::lock_unpoison(&self.inner);
+        inner.pending.get(&identity).is_some_and(|pending| {
+            pending.condition == condition && pending.delivered_to == Some(connection)
+        })
+    }
+
     /// The demand this connection may carry now, marked delivered.
+    ///
+    /// `evidence_seq` is the durable delivery-evidence sequence the caller
+    /// read immediately before this handoff; storing it here is what makes the
+    /// later verified-answer clear a compare-and-delete against exactly the
+    /// evidence the wipe could cover.
     fn take_deliverable(
         &self,
         connection: ConnectionWireId,
         counter: u64,
         random: u64,
+        evidence_seq: Option<u64>,
     ) -> Option<DeletionDemand> {
         let identity = Self::identity_for(counter, random);
         let mut inner = crate::lock_unpoison(&self.inner);
@@ -371,6 +419,7 @@ impl ClientTransientRegistry {
             return None;
         }
         pending.delivered_to = Some(connection);
+        pending.evidence_seq = evidence_seq;
         Some(DeletionDemand {
             demand: DeletionDemandWireId(pending.id.clone()),
             operation: DeletionOperationWireRef(
@@ -387,24 +436,22 @@ impl ClientTransientRegistry {
         })
     }
 
-    /// Records one Client result. Returns whether it answered the outstanding
-    /// demand: a foreign demand id, an operation/sweep mismatch, or an
-    /// incarnation that is not the demanded one is refused without touching
-    /// the pending state.
+    /// Records one Client result. Returns the accepted evidence premise when
+    /// it answered the outstanding demand: a foreign demand id, an
+    /// operation/sweep mismatch, or an incarnation that is not the demanded
+    /// one is refused without touching the pending state.
     fn accept_result(
         &self,
         connection: ConnectionWireId,
         counter: u64,
         random: u64,
         result: LocalErasureResult,
-    ) -> bool {
+    ) -> Option<AcceptedClientErasure> {
         let identity = Self::identity_for(counter, random);
         let mut inner = crate::lock_unpoison(&self.inner);
-        let Some(pending) = inner.pending.get_mut(&identity) else {
-            return false;
-        };
+        let pending = inner.pending.get_mut(&identity)?;
         if pending.connection != connection || pending.id != result.demand.0 {
-            return false;
+            return None;
         }
         let demanded_operation = pending
             .condition
@@ -416,16 +463,19 @@ impl ClientTransientRegistry {
         if result.operation.0 != demanded_operation
             || result.sweep != pending.condition.sweep.as_u64()
         {
-            return false;
+            return None;
         }
         if matches!(pending.state, PendingState::Answered(_)) {
-            return false;
+            return None;
         }
+        let accepted = AcceptedClientErasure {
+            evidence_seq: pending.evidence_seq,
+        };
         pending.state = PendingState::Answered(result);
         drop(inner);
         self.result_wake.notify_waiters();
         self.result_wake.notify_one();
-        true
+        Some(accepted)
     }
 
     /// Ends one connection lifetime: any demand addressed to it is abandoned,
@@ -451,21 +501,31 @@ impl ClientTransientRegistry {
     }
 
     /// Waits for the result of one bounded demand for `(identity, condition)`.
+    ///
+    /// The adopted answer is removed with the pending demand, so it is
+    /// consumed exactly once: a later pass of the same sweep demands the
+    /// Client again (a new demand id) instead of replaying an old answer,
+    /// which matters for an unverified remainder that must be re-demanded.
     async fn wait(&self, identity: RawId, condition: ErasureConditionRef) -> ClientErasureWait {
         loop {
-            {
-                let inner = crate::lock_unpoison(&self.inner);
+            let ready = {
+                let mut inner = crate::lock_unpoison(&self.inner);
                 match inner.pending.get(&identity) {
                     Some(pending) if pending.condition == condition => match &pending.state {
-                        PendingState::Answered(result) => {
-                            return ClientErasureWait::Answered(result.clone());
-                        }
-                        PendingState::Awaiting => {}
+                        PendingState::Answered(_) => inner.pending.remove(&identity),
+                        PendingState::Awaiting => None,
                     },
                     // No pending demand for this condition: it was abandoned
                     // (connection ended) or replaced by a later condition.
                     Some(_) | None => return ClientErasureWait::Abandoned,
                 }
+            };
+            if let Some(PendingDemand {
+                state: PendingState::Answered(result),
+                ..
+            }) = ready
+            {
+                return ClientErasureWait::Answered(result);
             }
             self.result_wake.notified().await;
         }
@@ -556,6 +616,24 @@ impl ErasureParticipant for ClientIncarnationParticipant {
                 );
             };
             self.registry.begin(self.identity, condition, connection);
+            if !self
+                .registry
+                .delivered(self.identity, condition, connection)
+            {
+                // The connection loop may be inside another frame and has not
+                // handed the demand to the wire yet. Blocking the whole pass
+                // would stall every other participant behind a reachable
+                // Client, so the demand yields bounded more-work instead: it
+                // is neither completion nor hold, and a later pass re-observes
+                // the same pending (same demand id) or consumes the answer.
+                return ParticipantCompletionFact::more_work(
+                    condition,
+                    owner,
+                    0,
+                    0,
+                    WallClockWithTz::now(),
+                );
+            }
             #[cfg(test)]
             let limit = self.registry.wait_limit();
             #[cfg(not(test))]
@@ -587,29 +665,32 @@ impl ErasureParticipant for ClientIncarnationParticipant {
 }
 
 impl HostHandle {
-    /// Records that body-bearing material reached the incarnation of the
-    /// connection behind `live`, tracking it as a possible target-bearing copy
-    /// holder and registering its participant implementation once.
-    pub(crate) fn note_client_body_delivery(&self, live: &crate::serve::LiveInput) {
+    /// Write-ahead durable evidence that body-bearing material is reaching the
+    /// incarnation of the connection behind `live` (lifecycle §8.1).
+    ///
+    /// Returns whether the caller may hand the body over. The durable row must
+    /// exist before the body can leave the Host: a crash after the Client
+    /// received a target-bearing copy must not lose the knowledge that the
+    /// incarnation may hold it. `false` means the evidence could not be
+    /// committed, so the caller withholds the body instead of delivering a
+    /// copy the Host cannot account for.
+    ///
+    /// A delivery outside an authenticated, incarnation-pinned connection (a
+    /// transport-free seam) has no Client that could receive it and needs no
+    /// evidence; it is not an owner invention because no owner is recorded.
+    pub(crate) async fn note_client_body_delivery(&self, live: &crate::serve::LiveInput) -> bool {
         let Some((counter, random)) = live.authority.incarnation_of(&live.connection_id) else {
-            // No pinned incarnation (an unauthenticated frame, or a
-            // transport-free seam): nothing was handed to a known client.
-            return;
+            return true;
         };
-        let Some(identity) = self.client_transients.note_body_delivery(counter, random) else {
-            return;
-        };
-        let participant = Arc::new(ClientIncarnationParticipant::new(
-            identity,
-            Arc::clone(&self.client_transients),
-        ));
-        match crate::lock_unpoison(&self.targeted_deletion).register(participant) {
-            Ok(()) => {}
-            Err(_owner) => {
-                // One implementation per owner; a re-observed incarnation
-                // reuses the registered one.
-            }
+        let identity = ClientTransientRegistry::identity_for(counter, random);
+        #[cfg(test)]
+        if let Some(gate) = self.delivery_evidence_gate() {
+            gate.pause().await;
         }
+        self.store
+            .note_client_delivery_evidence(identity)
+            .await
+            .is_ok()
     }
 
     /// The wake handle the serving connection loop selects on to deliver a
@@ -622,15 +703,37 @@ impl HostHandle {
     /// The bounded local-erasure demand this connection should carry now, if
     /// any. Delivery is tracked per connection, so a reconnect of the same
     /// incarnation re-delivers rather than losing the demand.
-    pub(crate) fn take_client_demand(&self, live: &crate::serve::LiveInput) -> Option<WirePayload> {
+    ///
+    /// The durable evidence sequence is read before the demand is handed to
+    /// the wire and stored with the pending demand: a delivery that races the
+    /// Client's wipe advances the sequence, and the verified answer can then
+    /// no longer clear the evidence. A store read failure delivers no demand
+    /// (fail closed); a later pass re-demands.
+    pub(crate) async fn take_client_demand(
+        &self,
+        live: &crate::serve::LiveInput,
+    ) -> Option<WirePayload> {
         let (counter, random) = live.authority.incarnation_of(&live.connection_id)?;
+        let identity = ClientTransientRegistry::identity_for(counter, random);
+        let evidence_seq = self
+            .store
+            .client_delivery_evidence_seq(identity)
+            .await
+            .ok()?;
         self.client_transients
-            .take_deliverable(live.connection_id, counter, random)
+            .take_deliverable(live.connection_id, counter, random, evidence_seq)
             .map(WirePayload::DeletionDemand)
     }
 
     /// Records one Client local-erasure result against its outstanding demand.
-    pub(crate) fn accept_client_erasure_result(
+    ///
+    /// A valid verified full-class result supersedes the durable delivery
+    /// evidence, but only with the compare-and-delete sequence captured when
+    /// the demand went on the wire: a body delivered after that moment leaves
+    /// a higher sequence and the evidence survives. A partial, unverified,
+    /// stale, or foreign report changes nothing; a failed clear leaves the
+    /// evidence (and a later pass re-demands it).
+    pub(crate) async fn accept_client_erasure_result(
         &self,
         live: &crate::serve::LiveInput,
         result: &LocalErasureResult,
@@ -638,15 +741,30 @@ impl HostHandle {
         let Some((counter, random)) = live.authority.incarnation_of(&live.connection_id) else {
             return;
         };
-        // A true return means the demand was answered; the awaiting participant
-        // reads the recorded fact. A false return is a stale or foreign report
-        // and changes nothing (§17.2).
-        let _answered = self.client_transients.accept_result(
+        let identity = ClientTransientRegistry::identity_for(counter, random);
+        // An accepted result means the demand was answered; the awaiting
+        // participant reads the recorded fact. A refused report is stale or
+        // foreign and changes nothing (§17.2).
+        let Some(accepted) = self.client_transients.accept_result(
             live.connection_id,
             counter,
             random,
             result.clone(),
-        );
+        ) else {
+            return;
+        };
+        if !verified_full_class_wipe(result) {
+            return;
+        }
+        if let Some(expected) = accepted.evidence_seq {
+            // Ordering: the delete matches the exact sequence observed at
+            // delivery. Any later body delivery advanced it, so the row stays
+            // and still names the incarnation at the next admission.
+            let _cleared = self
+                .store
+                .clear_client_delivery_evidence(identity, expected)
+                .await;
+        }
     }
 }
 
@@ -753,9 +871,9 @@ mod tests {
         let live = table
             .snapshot(&connection)
             .expect("the connection snapshots");
-        // Body-bearing material reached this incarnation: the Host tracks it
-        // and registers its participant implementation.
-        handle.note_client_body_delivery(&live);
+        // Body-bearing material reached this incarnation: the Host records
+        // the durable delivery evidence.
+        assert!(handle.note_client_body_delivery(&live).await);
         let identity = ClientTransientRegistry::identity_for(41, 42);
         let current = admit(
             &handle,
@@ -794,6 +912,8 @@ mod tests {
         assert!(
             !handle
                 .required_deletion_participants()
+                .await
+                .expect("the required snapshot must read")
                 .iter()
                 .any(|owner| owner.is_incarnation()),
             "a handle with no delivery claims no Client incarnation"
@@ -806,9 +926,12 @@ mod tests {
         let live = table
             .snapshot(&connection)
             .expect("the connection snapshots");
-        handle.note_client_body_delivery(&live);
+        assert!(handle.note_client_body_delivery(&live).await);
         let identity = ClientTransientRegistry::identity_for(41, 42);
-        let required = handle.required_deletion_participants();
+        let required = handle
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read");
         assert!(
             required.contains(&ParticipantOwnerRef::ClientIncarnation(identity)),
             "the delivered incarnation is required: {required:?}"
@@ -891,12 +1014,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_undelivered_client_demand_yields_more_work_instead_of_blocking() {
+        let fixture = client_fixture("a3c-client-undelivered").await;
+        let participant = ClientIncarnationParticipant::new(
+            fixture.identity,
+            Arc::clone(&fixture.handle.client_transients),
+        );
+        // The connection loop has not handed the demand to the wire (it may be
+        // inside another frame): bounded work yields instead of stalling the
+        // pass behind a reachable Client.
+        let fact = participant
+            .demand_local_erasure(command(
+                fixture.condition,
+                ParticipantOwnerRef::ClientIncarnation(fixture.identity),
+                ParticipantErasureScope::correlation_only(Vec::new()),
+            ))
+            .await;
+        assert_eq!(
+            fact.status(),
+            ParticipantCompletionStatus::MoreWork,
+            "an undelivered demand is neither completion nor hold"
+        );
+    }
+
+    #[tokio::test]
     async fn an_in_flight_client_demand_is_abandoned_when_its_connection_ends() {
         let fixture = client_fixture("a3c-client-abandoned").await;
         let participant = ClientIncarnationParticipant::new(
             fixture.identity,
             Arc::clone(&fixture.handle.client_transients),
         );
+        // First bounded call yields; the wire handoff is what makes the next
+        // call park on the result.
+        let fact = participant
+            .demand_local_erasure(command(
+                fixture.condition,
+                ParticipantOwnerRef::ClientIncarnation(fixture.identity),
+                ParticipantErasureScope::correlation_only(Vec::new()),
+            ))
+            .await;
+        assert_eq!(fact.status(), ParticipantCompletionStatus::MoreWork);
+        let Some(WirePayload::DeletionDemand(_)) =
+            fixture.handle.take_client_demand(&fixture.live).await
+        else {
+            panic!("the pending demand must be deliverable");
+        };
         let mut demand = Box::pin(participant.demand_local_erasure(command(
             fixture.condition,
             ParticipantOwnerRef::ClientIncarnation(fixture.identity),
@@ -926,20 +1088,20 @@ mod tests {
             Arc::clone(&fixture.handle.client_transients),
         );
         let owner = ParticipantOwnerRef::ClientIncarnation(fixture.identity);
-        let mut demand = Box::pin(participant.demand_local_erasure(command(
-            fixture.condition,
-            owner,
-            ParticipantErasureScope::correlation_only(Vec::new()),
-        )));
-        // One turn lets the demand register and park on its result.
-        tokio::select! {
-            biased;
-            _ = &mut demand => panic!("the demand must not finish before its result"),
-            () = tokio::task::yield_now() => {}
-        }
+        // The first bounded call yields because the demand is not on the wire
+        // yet; the wire handoff then makes the retry park on the result.
+        let yielded = participant
+            .demand_local_erasure(command(
+                fixture.condition,
+                owner,
+                ParticipantErasureScope::correlation_only(Vec::new()),
+            ))
+            .await;
+        assert_eq!(yielded.status(), ParticipantCompletionStatus::MoreWork);
         let payload = fixture
             .handle
             .take_client_demand(&fixture.live)
+            .await
             .expect("the pending demand must be deliverable");
         let WirePayload::DeletionDemand(demand_payload) = payload else {
             panic!("the delivery is a DeletionDemand");
@@ -948,6 +1110,17 @@ mod tests {
             !format!("{demand_payload:?}").contains("secret body"),
             "the wire demand never carries the target body"
         );
+        let mut demand = Box::pin(participant.demand_local_erasure(command(
+            fixture.condition,
+            owner,
+            ParticipantErasureScope::correlation_only(Vec::new()),
+        )));
+        // One turn lets the retry register and park on its result.
+        tokio::select! {
+            biased;
+            _ = &mut demand => panic!("the demand must not finish before its result"),
+            () = tokio::task::yield_now() => {}
+        }
         let result = LocalErasureResult {
             demand: demand_payload.demand.clone(),
             operation: demand_payload.operation.clone(),
@@ -960,11 +1133,13 @@ mod tests {
         };
         fixture
             .handle
-            .accept_client_erasure_result(&fixture.live, &result);
+            .accept_client_erasure_result(&fixture.live, &result)
+            .await;
         // A duplicate report is refused: the demand was answered once.
         fixture
             .handle
-            .accept_client_erasure_result(&fixture.live, &result);
+            .accept_client_erasure_result(&fixture.live, &result)
+            .await;
         let fact = demand.await;
         assert_eq!(
             fact.status(),
@@ -992,6 +1167,19 @@ mod tests {
             Arc::clone(&fixture.handle.client_transients),
         );
         let owner = ParticipantOwnerRef::ClientIncarnation(fixture.identity);
+        let yielded = participant
+            .demand_local_erasure(command(
+                fixture.condition,
+                owner,
+                ParticipantErasureScope::correlation_only(Vec::new()),
+            ))
+            .await;
+        assert_eq!(yielded.status(), ParticipantCompletionStatus::MoreWork);
+        let Some(WirePayload::DeletionDemand(demand_payload)) =
+            fixture.handle.take_client_demand(&fixture.live).await
+        else {
+            panic!("the pending demand must be deliverable");
+        };
         let mut demand = Box::pin(participant.demand_local_erasure(command(
             fixture.condition,
             owner,
@@ -1002,11 +1190,6 @@ mod tests {
             _ = &mut demand => panic!("the demand must not finish before its result"),
             () = tokio::task::yield_now() => {}
         }
-        let Some(WirePayload::DeletionDemand(demand_payload)) =
-            fixture.handle.take_client_demand(&fixture.live)
-        else {
-            panic!("the pending demand must be deliverable");
-        };
         let result = LocalErasureResult {
             demand: demand_payload.demand.clone(),
             operation: demand_payload.operation.clone(),
@@ -1016,7 +1199,8 @@ mod tests {
         };
         fixture
             .handle
-            .accept_client_erasure_result(&fixture.live, &result);
+            .accept_client_erasure_result(&fixture.live, &result)
+            .await;
         let fact = demand.await;
         assert_eq!(
             fact.status(),
@@ -1027,7 +1211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_silent_client_demand_holds_after_the_wait_bound() {
+    async fn a_delivered_silent_client_demand_holds_after_the_wait_bound() {
         let fixture = client_fixture("a3c-client-timeout").await;
         fixture
             .handle
@@ -1037,6 +1221,21 @@ mod tests {
             fixture.identity,
             Arc::clone(&fixture.handle.client_transients),
         );
+        // The demand must be on the wire for silence to mean anything: an
+        // undelivered demand yields more work instead of a hold.
+        let yielded = participant
+            .demand_local_erasure(command(
+                fixture.condition,
+                ParticipantOwnerRef::ClientIncarnation(fixture.identity),
+                ParticipantErasureScope::correlation_only(Vec::new()),
+            ))
+            .await;
+        assert_eq!(yielded.status(), ParticipantCompletionStatus::MoreWork);
+        let Some(WirePayload::DeletionDemand(_)) =
+            fixture.handle.take_client_demand(&fixture.live).await
+        else {
+            panic!("the pending demand must be deliverable");
+        };
         let fact = participant
             .demand_local_erasure(command(
                 fixture.condition,
@@ -1047,7 +1246,7 @@ mod tests {
         assert_eq!(
             fact.status(),
             ParticipantCompletionStatus::Held(ParticipantHoldClass::Unavailable),
-            "silence is a hold, never a completion"
+            "a delivered-but-silent Client is a hold, never a completion"
         );
     }
 
@@ -1069,6 +1268,325 @@ mod tests {
             fact.status(),
             ParticipantCompletionStatus::Held(ParticipantHoldClass::Failed),
             "a body-bearing Client scope is a composition defect, never a success"
+        );
+    }
+
+    // --- M1: durable delivery evidence (lifecycle §8.1) ---------------------
+
+    /// One Client result for a wire demand, exactly as the first-party Client
+    /// builds it.
+    fn wipe_result(
+        payload: &DeletionDemand,
+        wiped: Vec<ClientTempClass>,
+        unverified: Vec<ClientTempClass>,
+    ) -> LocalErasureResult {
+        LocalErasureResult {
+            demand: payload.demand.clone(),
+            operation: payload.operation.clone(),
+            sweep: payload.sweep,
+            wiped,
+            unverified,
+        }
+    }
+
+    /// A verified report of the whole closed class set.
+    fn full_wipe(payload: &DeletionDemand) -> LocalErasureResult {
+        wipe_result(
+            payload,
+            vec![
+                ClientTempClass::PresentationBuffer,
+                ClientTempClass::InputDraft,
+            ],
+            Vec::new(),
+        )
+    }
+
+    /// Begins one demand, hands it to the wire, and returns the payload the
+    /// Client would answer. The durable evidence sequence is captured by the
+    /// handoff exactly as production does.
+    ///
+    /// The pending demand is ended first: a delivered demand is not re-handed
+    /// to the same connection, so a second cycle stands in for the reconnect
+    /// lifetime a real re-demand follows.
+    async fn demand_on_wire(fixture: &ClientFixture) -> DeletionDemand {
+        fixture
+            .handle
+            .client_transients
+            .note_connection_ended(&fixture.connection);
+        let _id = fixture.handle.client_transients.begin(
+            fixture.identity,
+            fixture.condition,
+            fixture.connection,
+        );
+        let Some(WirePayload::DeletionDemand(payload)) =
+            fixture.handle.take_client_demand(&fixture.live).await
+        else {
+            panic!("the pending demand must be deliverable");
+        };
+        payload
+    }
+
+    async fn evidence_seq(fixture: &ClientFixture) -> Option<u64> {
+        fixture
+            .handle
+            .store
+            .client_delivery_evidence_seq(fixture.identity)
+            .await
+            .expect("the durable evidence must read")
+    }
+
+    async fn required_includes(handle: &HostHandle, identity: RawId) -> bool {
+        handle
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read")
+            .contains(&ParticipantOwnerRef::ClientIncarnation(identity))
+    }
+
+    #[tokio::test]
+    async fn a_restarted_host_names_a_delivered_incarnation_and_holds_it_unreachable() {
+        let (handle, dir) = memory_handle("a3c-evidence-restart")
+            .await
+            .expect("the handle opens");
+        let table = Arc::new(ConnectionTable::new());
+        let connection = table.note_accept();
+        authenticate(&table, &connection, DEVICE);
+        assert!(table.pin_incarnation_for_tests(&connection, 71, 72));
+        handle.install_client_connection_table(Arc::clone(&table));
+        let live = table
+            .snapshot(&connection)
+            .expect("the connection snapshots");
+        assert!(handle.note_client_body_delivery(&live).await);
+        assert_eq!(
+            handle
+                .store
+                .client_delivery_evidence_seq(ClientTransientRegistry::identity_for(71, 72))
+                .await
+                .expect("the durable evidence must read"),
+            Some(1)
+        );
+        drop(handle);
+
+        // A fresh process over the same directory has no in-memory delivery
+        // tracking and no connection; the durable evidence still names the
+        // incarnation at admission.
+        let reopened = HostHandle::open_with_cred_store(
+            dir.path(),
+            CredStore::Memory(MemoryCredentialStore::new()),
+        )
+        .await
+        .expect("the restarted handle must open");
+        let identity = ClientTransientRegistry::identity_for(71, 72);
+        let required = reopened
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read");
+        assert!(
+            required.contains(&ParticipantOwnerRef::ClientIncarnation(identity)),
+            "the restarted Host must still name the delivered incarnation: {required:?}"
+        );
+        let current = admit(&reopened, "secret body", required).await;
+        let outcome = reopened
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .expect("the pass runs");
+        assert!(
+            outcome.held >= 1,
+            "an unreachable old incarnation is an explicit hold: {outcome:?}"
+        );
+        assert_eq!(
+            reopened
+                .store
+                .unfinished_deletions(None, 100)
+                .await
+                .expect("unfinished operations read")
+                .len(),
+            1,
+            "the Client hold keeps the operation retryable-incomplete"
+        );
+        let row = reopened
+            .store
+            .deletion_participants(current.operation, None, 100)
+            .await
+            .expect("participant rows read")
+            .into_iter()
+            .find(|record| {
+                record.participant.owner == ParticipantOwnerRef::ClientIncarnation(identity)
+            })
+            .expect("the durable snapshot names the restarted incarnation");
+        assert_eq!(
+            row.progress.hold_reason(),
+            Some(ParticipantHoldClass::Unavailable),
+            "the old incarnation resolves to an unreachable hold, never a composition default"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verified_full_class_wipe_clears_the_durable_evidence() {
+        let fixture = client_fixture("a3c-evidence-clear").await;
+        assert_eq!(evidence_seq(&fixture).await, Some(1));
+        let payload = demand_on_wire(&fixture).await;
+        fixture
+            .handle
+            .accept_client_erasure_result(&fixture.live, &full_wipe(&payload))
+            .await;
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            None,
+            "a verified full-class wipe supersedes the delivery evidence"
+        );
+        assert!(
+            !required_includes(&fixture.handle, fixture.identity).await,
+            "a cleared incarnation is no longer a required participant"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_after_the_demand_snapshot_keeps_the_evidence() {
+        let fixture = client_fixture("a3c-evidence-race").await;
+        let payload = demand_on_wire(&fixture).await;
+        // A body reaches the incarnation after the wipe went on the wire: the
+        // durable sequence advances and the verified answer must not clear it.
+        assert!(
+            fixture
+                .handle
+                .note_client_body_delivery(&fixture.live)
+                .await
+        );
+        fixture
+            .handle
+            .accept_client_erasure_result(&fixture.live, &full_wipe(&payload))
+            .await;
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            Some(2),
+            "evidence for a body delivered after the wipe survives the clear"
+        );
+        assert!(required_includes(&fixture.handle, fixture.identity).await);
+
+        // A later demand observes the new sequence and its verified answer
+        // clears exactly that evidence.
+        let payload = demand_on_wire(&fixture).await;
+        fixture
+            .handle
+            .accept_client_erasure_result(&fixture.live, &full_wipe(&payload))
+            .await;
+        assert_eq!(evidence_seq(&fixture).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_partial_or_unverified_wipe_never_clears_the_evidence() {
+        let fixture = client_fixture("a3c-evidence-partial").await;
+        let payload = demand_on_wire(&fixture).await;
+        // A full-class verified report is required; a narrower class list
+        // leaves the evidence even though the completion fact is verified.
+        fixture
+            .handle
+            .accept_client_erasure_result(
+                &fixture.live,
+                &wipe_result(&payload, vec![ClientTempClass::InputDraft], Vec::new()),
+            )
+            .await;
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            Some(1),
+            "a partial class list never clears the evidence"
+        );
+        let payload = demand_on_wire(&fixture).await;
+        fixture
+            .handle
+            .accept_client_erasure_result(
+                &fixture.live,
+                &wipe_result(
+                    &payload,
+                    vec![ClientTempClass::InputDraft],
+                    vec![ClientTempClass::PresentationBuffer],
+                ),
+            )
+            .await;
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            Some(1),
+            "an unverified remainder never clears the evidence"
+        );
+        assert!(required_includes(&fixture.handle, fixture.identity).await);
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_or_replacement_never_clears_the_evidence() {
+        let fixture = client_fixture("a3c-evidence-disconnect").await;
+        let _payload = demand_on_wire(&fixture).await;
+        // A replacement connection for the same device supersedes the demanded
+        // connection; the pending demand is abandoned and the incarnation is
+        // unreachable until it answers on a current connection.
+        let replacement = fixture.table.note_accept();
+        authenticate(&fixture.table, &replacement, DEVICE);
+        fixture.handle.on_connection_closed(&fixture.connection);
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            Some(1),
+            "disconnect and replacement alone never clear the delivery evidence"
+        );
+        let outcome = fixture
+            .handle
+            .drive_targeted_deletion(TargetedDeletionPass::default())
+            .await
+            .expect("the pass runs");
+        assert_eq!(outcome.verified, 0);
+        assert!(
+            outcome.held >= 1,
+            "an unreachable holder is never a completion"
+        );
+        assert_eq!(
+            evidence_seq(&fixture).await,
+            Some(1),
+            "a hold leaves the evidence in place for a later reachable demand"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_incarnation_never_inherits_another_incarnations_evidence() {
+        let (handle, _dir) = memory_handle("a3c-evidence-incarnation")
+            .await
+            .expect("the handle opens");
+        let table = Arc::new(ConnectionTable::new());
+        let first_connection = table.note_accept();
+        authenticate(&table, &first_connection, DEVICE);
+        assert!(table.pin_incarnation_for_tests(&first_connection, 81, 82));
+        let second_connection = table.note_accept();
+        authenticate(&table, &second_connection, DEVICE);
+        assert!(table.pin_incarnation_for_tests(&second_connection, 81, 83));
+        handle.install_client_connection_table(Arc::clone(&table));
+        let first = ClientTransientRegistry::identity_for(81, 82);
+        let second = ClientTransientRegistry::identity_for(81, 83);
+        for connection in [&first_connection, &second_connection] {
+            let live = table
+                .snapshot(connection)
+                .expect("the connection snapshots");
+            assert!(handle.note_client_body_delivery(&live).await);
+        }
+        assert!(required_includes(&handle, first).await);
+        assert!(required_includes(&handle, second).await);
+        assert!(
+            handle
+                .store
+                .clear_client_delivery_evidence(first, 1)
+                .await
+                .expect("the clear must commit"),
+            "the first incarnation's exact sequence clears"
+        );
+        assert!(!required_includes(&handle, first).await);
+        assert!(
+            required_includes(&handle, second).await,
+            "a different boot incarnation never inherits another's evidence"
+        );
+        assert_eq!(
+            handle
+                .store
+                .client_delivery_evidence_seq(second)
+                .await
+                .expect("the durable evidence must read"),
+            Some(1)
         );
     }
 
