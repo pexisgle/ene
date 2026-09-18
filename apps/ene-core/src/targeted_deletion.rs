@@ -24,9 +24,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ene_preservation::{
-    DeletionFinalizationOutcome, DeletionLifecycleChange, DeletionLifecycleOutcome,
-    DeletionMaterialOutcome, DeletionOperationId, DeletionOperationMaterial,
-    DeletionOperationPhase, DeletionOperationRef, DemandLocalErasureCommand, ErasureParticipant,
+    DELETION_RECONCILIATION_PAGE_SIZE, DeletionFinalizationOutcome, DeletionLifecycleChange,
+    DeletionLifecycleOutcome, DeletionMaterialOutcome, DeletionOperationId,
+    DeletionOperationMaterial, DeletionOperationPhase, DeletionOperationRef,
+    DeletionReconciliationOutcome, DemandLocalErasureCommand, ErasureParticipant,
     ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantCompletionStatus,
     ParticipantDemandOutcome, ParticipantErasureScope, ParticipantHoldClass, ParticipantOwnerRef,
     PreservationRepository as _,
@@ -214,6 +215,9 @@ pub struct TargetedDeletionPassOutcome {
     /// Operations that found collected target data in the §12 step-1
     /// re-check and returned to `Active` on a new sweep.
     pub remainder_sweeps: u32,
+    /// Bounded covered-source reconciliation pages published during this pass
+    /// (lifecycle §4.1 point 4). A page is work, never a completion decision.
+    pub reconciliation_pages: u32,
 }
 
 impl TargetedDeletionPassOutcome {
@@ -231,6 +235,7 @@ impl TargetedDeletionPassOutcome {
             || self.finalizing > 0
             || self.finalized > 0
             || self.remainder_sweeps > 0
+            || self.reconciliation_pages > 0
     }
 
     /// Folds another pass's counters into this one.
@@ -244,6 +249,9 @@ impl TargetedDeletionPassOutcome {
         self.finalizing = self.finalizing.saturating_add(other.finalizing);
         self.finalized = self.finalized.saturating_add(other.finalized);
         self.remainder_sweeps = self.remainder_sweeps.saturating_add(other.remainder_sweeps);
+        self.reconciliation_pages = self
+            .reconciliation_pages
+            .saturating_add(other.reconciliation_pages);
     }
 }
 
@@ -259,6 +267,17 @@ pub(crate) const BOUNDED_DRIVE_PASS_BUDGET: u32 = 8;
 /// Upper bound on the held-retry skip shift: the skip doubles per consecutive
 /// unanswered retry up to `2^3` ticks and then stays there.
 const HELD_RETRY_MAX_SKIP_SHIFT: u32 = 3;
+
+/// Bounded covered-source reconciliation pages one operation may publish in a
+/// single fan-out pass.
+///
+/// Reconciliation must finish before the operation's participants erase (the
+/// identity bodies are the evidence the in-flight-use correspondence is
+/// derived from) and before completion; the per-pass budget keeps one pass
+/// bounded while the durable cursor makes the walk resumable across passes,
+/// ticks, and restarts. The budget is work pacing only: it never decides
+/// completion, and a larger covered set simply takes more passes.
+const RECONCILIATION_PAGES_PER_PASS: u32 = 8;
 
 /// Whether the bounded pass parameters are inside their contract.
 fn valid_pass(pass: TargetedDeletionPass) -> bool {
@@ -390,9 +409,11 @@ async fn settle_finalizing(
             outcome.remainder_sweeps += 1;
             return Ok(());
         }
-        // Not every participant is verified yet, or the operation left
-        // `Active` meanwhile: nothing to finalize.
+        // Not every participant is verified yet, the current sweep's covered
+        // source walk is still incomplete, or the operation left `Active`
+        // meanwhile: nothing to finalize.
         DeletionFinalizationOutcome::NotVerified(_)
+        | DeletionFinalizationOutcome::ReconciliationIncomplete
         | DeletionFinalizationOutcome::NotFinalizing
         | DeletionFinalizationOutcome::Held(_)
         | DeletionFinalizationOutcome::Missing
@@ -410,6 +431,7 @@ async fn settle_finalizing(
         // The completion commit re-checks every premise; anything else leaves
         // the operation unfinished for a later pass.
         DeletionFinalizationOutcome::NotVerified(_)
+        | DeletionFinalizationOutcome::ReconciliationIncomplete
         | DeletionFinalizationOutcome::NotFinalizing
         | DeletionFinalizationOutcome::Held(_)
         | DeletionFinalizationOutcome::Missing
@@ -442,6 +464,42 @@ async fn drive_operation(
         // means completion started and this pass must not fan out erasure.
         DeletionMaterialOutcome::Missing | DeletionMaterialOutcome::Destroyed => return Ok(false),
     };
+    // Phase 1: exhaust the covered-source reconciliation before the first
+    // participant demand. The identity bodies carrying the target are the
+    // evidence the already-claimed in-flight-use correspondence is derived
+    // from, and the owner sweeps redact them; publishing and associating
+    // first is what keeps the correspondence complete regardless of how many
+    // covered identities exist. The page budget bounds one pass; the durable
+    // cursor resumes the walk on the next pass or after a restart.
+    let mut advanced_any = false;
+    let mut reconciled = false;
+    for _ in 0..RECONCILIATION_PAGES_PER_PASS {
+        match store
+            .reconcile_deletion_sources(current, DELETION_RECONCILIATION_PAGE_SIZE)
+            .await
+            .map_err(deletion_error)?
+        {
+            DeletionReconciliationOutcome::Advanced => {
+                outcome.reconciliation_pages += 1;
+                advanced_any = true;
+            }
+            DeletionReconciliationOutcome::Complete => {
+                reconciled = true;
+                break;
+            }
+            // A concurrent lifecycle advance moved the operation past the
+            // walk; this pass must not drive its participants.
+            DeletionReconciliationOutcome::Finalizing
+            | DeletionReconciliationOutcome::Completed => return Ok(advanced_any),
+            DeletionReconciliationOutcome::Missing | DeletionReconciliationOutcome::StaleSweep => {
+                outcome.stale_reports += 1;
+                return Ok(advanced_any);
+            }
+        }
+    }
+    if !reconciled {
+        return Ok(advanced_any);
+    }
     let mut held = false;
     let mut after = None;
     loop {
@@ -1119,7 +1177,12 @@ mod tests {
             total.finalizing += outcome.finalizing;
             total.finalized += outcome.finalized;
             total.remainder_sweeps += outcome.remainder_sweeps;
-            if outcome.held == 0 && outcome.unfinished == 0 && outcome.demands == 0 {
+            total.reconciliation_pages += outcome.reconciliation_pages;
+            if outcome.held == 0
+                && outcome.unfinished == 0
+                && outcome.demands == 0
+                && outcome.reconciliation_pages == 0
+            {
                 return total;
             }
         }
@@ -3529,6 +3592,387 @@ mod tests {
         assert_eq!(
             operation_record(&handle, current.operation).await.phase,
             DeletionOperationPhase::Completed
+        );
+    }
+
+    /// M3 driver regression: strictly more covered identities than one
+    /// reconciliation page, with the claim's source on the last page.
+    ///
+    /// The production fan-out must walk every page before demanding any
+    /// participant (the identity bodies are the evidence the correspondence
+    /// is derived from), refuse `Finalizing` while the walk is incomplete,
+    /// complete only after it, and then refuse the delayed result after
+    /// completion while accepting a fresh origin.
+    #[tokio::test]
+    async fn exhaustive_reconciliation_holds_the_last_source_before_completion() {
+        use ene_companion::{CompanionRepository as _, HistoryRole};
+        use ene_learning::{
+            ChangeKind, Importance, LearningClaimRef, LearningRepository as _, LearningScope,
+            MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+        };
+        use ene_permission::{ConsentRecord, ConsentRevision};
+        use ene_presence::PresenceRepository as _;
+        use ene_preservation::{
+            ConfirmTargetedDeletionOutcome, DeletionPurpose, DeletionSearchMaterial,
+            MechanicalDeletionTarget, StageTargetedDeletionRequestCommand,
+            StageTargetedDeletionRequestOutcome, TargetedDeletionTarget,
+        };
+
+        let Some((handle, dir)) = memory_handle("targeted-deletion-m3-reconcile").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "m3-driver-canary-beyond-the-admission-page";
+        // Strictly more than one reconciliation page of covered identities,
+        // all committed through the production append path.
+        let mut sources = Vec::new();
+        for index in 0..(DELETION_RECONCILIATION_PAGE_SIZE + 6) {
+            sources.push(
+                append_history(
+                    &handle,
+                    companion,
+                    generation,
+                    HistoryRole::Owner,
+                    &format!("note {index} carries {target}"),
+                )
+                .await,
+            );
+        }
+        // The canonical last identity is the lexical maximum of the encoded
+        // keys, which the encoded UUID order preserves.
+        let last = *sources
+            .iter()
+            .max_by_key(|source| source.as_uuid())
+            .expect("the fixture has sources");
+
+        // R2 use-first: the formation claim naming the last covered source
+        // commits before the deletion condition.
+        let fingerprint = IntentFingerprint {
+            intent_id: RawId::new().as_uuid().to_string(),
+            kind: String::from("assign"),
+            target: String::from("consent:test-seed"),
+            base: String::from("consent-test-seed"),
+            rationale_origin: String::from("management-surface"),
+            rationale_quote: None,
+        };
+        let saved = handle
+            .store
+            .assign_with_intent(
+                None,
+                ConsentRecord {
+                    capability: CapabilityKind::Learning,
+                    id: String::from("consent-learning"),
+                    rev: ConsentRevision::from_u64(1),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    credential_id: String::from("cred-1"),
+                },
+                fingerprint,
+            )
+            .await
+            .expect("the consent must answer");
+        assert!(
+            matches!(
+                saved,
+                IntentResolution::Decided(ConsentCommitOutcome::Committed { .. })
+            ),
+            "the Learning consent must commit: {saved:?}"
+        );
+        let ticket = InferenceTicketId(RawId::new());
+        let claimed = handle
+            .store
+            .begin_inference_attempt(InferenceAttempt {
+                ticket,
+                consumer: ConsumerKind::CompanionLearning,
+                capability: CapabilityKind::Learning,
+                purpose: PurposeKind::MemoryFormation,
+                expected_consent: (
+                    String::from("consent-learning"),
+                    ConsentRevision::from_u64(1),
+                ),
+                expected_credential_set: CredentialSetRevision::initial(),
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                task_agent: None,
+                data_use: vec![last],
+                pricing: None,
+                usage_estimate: None,
+            })
+            .await
+            .expect("the formation claim must answer");
+        assert_eq!(claimed, AttemptBeginOutcome::Started);
+
+        // First-party admission through the production request/confirmation
+        // path, so the bounded admission page publishes only the first page.
+        let staged = handle
+            .store
+            .stage_targeted_deletion(StageTargetedDeletionRequestCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+            ))
+            .await
+            .expect("staging must answer");
+        let request = match staged {
+            StageTargetedDeletionRequestOutcome::Staged(request) => request,
+            other => panic!("the scope must stage, got {other:?}"),
+        };
+        let current = match handle
+            .store
+            .confirm_targeted_deletion(request, current_product_surface_owners())
+            .await
+            .expect("the confirmation must answer")
+        {
+            ConfirmTargetedDeletionOutcome::Started(current) => current,
+            other => panic!("the confirmation must start, got {other:?}"),
+        };
+
+        // The production fan-out walks every reconciliation page before the
+        // participant sweeps, then completes.
+        let outcome = drive_until_settled(&handle).await;
+        assert!(
+            outcome.reconciliation_pages >= 1,
+            "the walk needed at least one continuation page: {outcome:?}"
+        );
+        assert_eq!(outcome.finalized, 1, "the operation completes once");
+        assert_eq!(
+            operation_record(&handle, current.operation).await.phase,
+            DeletionOperationPhase::Completed
+        );
+        assert_eq!(
+            handle
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0,
+            "no durable surface keeps the exact target"
+        );
+
+        // The durable hold for the claim exists even though its source fell
+        // past the admission page.
+        let ticket_text = ticket.0.as_uuid().as_hyphenated().to_string();
+        let held: i64 = {
+            let conn = rusqlite::Connection::open(dir.path().join("app.db"))
+                .expect("the state database opens for inspection");
+            conn.query_row(
+                "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind='inference_attempt' AND use_id=?1",
+                [&ticket_text],
+                |row| row.get(0),
+            )
+            .expect("the hold probe must answer")
+        };
+        assert_eq!(held, 1, "the claim is durably associated");
+
+        // The delayed formation arrives after completion and is refused by the
+        // claim correspondence, never by a permanent keyword ban.
+        let delayed = MemoryChangeCommit {
+            summary: Some(summary_of(
+                companion.as_raw(),
+                String::from("a clean paraphrase"),
+                RawId::new(),
+                RawId::new(),
+            )),
+            secret_premise: None,
+            claim: Some(LearningClaimRef::from_raw(ticket.0)),
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope: LearningScope::companion(companion.as_raw()),
+                content: String::from("a clean recall"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        };
+        assert_eq!(
+            handle
+                .store
+                .commit_memory_change(delayed)
+                .await
+                .expect("the delayed commit must answer"),
+            ene_learning::MemoryChangeOutcome::HeldForErasure
+        );
+
+        // A fresh claim from a fresh source after completion is a new origin.
+        let fresh_ticket = InferenceTicketId(RawId::new());
+        assert_eq!(
+            handle
+                .store
+                .begin_inference_attempt(InferenceAttempt {
+                    ticket: fresh_ticket,
+                    consumer: ConsumerKind::CompanionLearning,
+                    capability: CapabilityKind::Learning,
+                    purpose: PurposeKind::MemoryFormation,
+                    expected_consent: (
+                        String::from("consent-learning"),
+                        ConsentRevision::from_u64(1),
+                    ),
+                    expected_credential_set: CredentialSetRevision::initial(),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    task_agent: None,
+                    data_use: vec![RawId::new()],
+                    pricing: None,
+                    usage_estimate: None,
+                })
+                .await
+                .expect("the fresh claim must answer"),
+            AttemptBeginOutcome::Started
+        );
+        let fresh = MemoryChangeCommit {
+            summary: Some(summary_of(
+                companion.as_raw(),
+                String::from("a fresh note"),
+                RawId::new(),
+                RawId::new(),
+            )),
+            secret_premise: None,
+            claim: Some(LearningClaimRef::from_raw(fresh_ticket.0)),
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope: LearningScope::companion(companion.as_raw()),
+                content: String::from("a fresh recognition"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        };
+        assert!(
+            matches!(
+                handle
+                    .store
+                    .commit_memory_change(fresh)
+                    .await
+                    .expect("the fresh commit must answer"),
+                ene_learning::MemoryChangeOutcome::Committed { .. }
+            ),
+            "a post-completion origin is accepted"
+        );
+    }
+
+    /// M3 restart regression: the process stops with the covered-source walk
+    /// mid-flight; the reopened Host resumes from the durable cursor through
+    /// the production startup recovery, finishes the walk, and completes. No
+    /// page state lives in memory and no generation is reused.
+    #[tokio::test]
+    async fn restart_mid_reconciliation_resumes_the_walk_and_completes() {
+        use ene_companion::{CompanionRepository as _, HistoryRole};
+        use ene_presence::PresenceRepository as _;
+        use ene_preservation::{
+            ConfirmTargetedDeletionOutcome, DeletionPurpose, DeletionSearchMaterial,
+            MechanicalDeletionTarget, StageTargetedDeletionRequestCommand,
+            StageTargetedDeletionRequestOutcome, TargetedDeletionTarget,
+        };
+
+        let Some((handle, dir)) = memory_handle("targeted-deletion-m3-restart").await else {
+            panic!("the host must open");
+        };
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let target = "m3-restart-canary-beyond-the-admission-page";
+        for index in 0..(DELETION_RECONCILIATION_PAGE_SIZE + 6) {
+            append_history(
+                &handle,
+                companion,
+                generation,
+                HistoryRole::Owner,
+                &format!("note {index} carries {target}"),
+            )
+            .await;
+        }
+        let staged = handle
+            .store
+            .stage_targeted_deletion(StageTargetedDeletionRequestCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+            ))
+            .await
+            .expect("staging must answer");
+        let request = match staged {
+            StageTargetedDeletionRequestOutcome::Staged(request) => request,
+            other => panic!("the scope must stage, got {other:?}"),
+        };
+        let current = match handle
+            .store
+            .confirm_targeted_deletion(request, current_product_surface_owners())
+            .await
+            .expect("the confirmation must answer")
+        {
+            ConfirmTargetedDeletionOutcome::Started(current) => current,
+            other => panic!("the confirmation must start, got {other:?}"),
+        };
+        // One bounded continuation page commits, then the process stops with
+        // the walk still incomplete.
+        assert_eq!(
+            handle
+                .store
+                .reconcile_deletion_sources(current, DELETION_RECONCILIATION_PAGE_SIZE)
+                .await
+                .expect("the continuation page must answer"),
+            DeletionReconciliationOutcome::Advanced
+        );
+        drop(handle);
+
+        let reopened = reopen(dir.path()).await;
+        // The production restart path resumes and finishes the walk from the
+        // durable cursor; the completion is observable right after recovery.
+        reopened
+            .run_startup_mutations()
+            .await
+            .expect("the restart recovery must complete");
+        assert_eq!(
+            operation_record(&reopened, current.operation).await.phase,
+            DeletionOperationPhase::Completed,
+            "the startup recovery resumes the durable walk and completes"
+        );
+        assert_eq!(
+            reopened
+                .store
+                .count_exact_text_remainder_for_tests(target)
+                .await
+                .unwrap(),
+            0,
+            "the resumed operation erases every identity"
         );
     }
 }

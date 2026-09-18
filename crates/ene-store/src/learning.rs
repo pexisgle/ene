@@ -85,6 +85,11 @@ fn commit_change_sync(
         )
         .map_err(|error| learning_unavailable(error.to_string()))?
     {
+        // The direct-correlation fallback in `held_use` may have written the
+        // durable hold for an unreconciled operation; commit it even though
+        // the formation itself is refused, so the correspondence survives
+        // this arrival instead of rolling back with the refused try.
+        tx.commit().map_err(learning_unavailable)?;
         return Ok(MemoryChangeOutcome::HeldForErasure);
     }
     // The A4 delayed-arrival gate: the Summary evidence, the proposed

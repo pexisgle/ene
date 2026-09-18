@@ -105,6 +105,55 @@ pub enum DeletionFinalizationOutcome {
     /// system-wide mechanical remainder probe cannot run. Completion fails
     /// closed instead of guessing that target text is gone (§12).
     UnverifiableMaterial,
+    /// The current sweep's covered-source reconciliation has not finished
+    /// walking every known identity table, so the already-claimed in-flight
+    /// uses the completion must account for are not all durable yet. Entering
+    /// `Finalizing` is refused: the operation stays `Active` and the bounded
+    /// reconciliation pages must finish first (§4.1 point 4, §12 §18).
+    ReconciliationIncomplete,
+}
+
+/// Default page size of one bounded reconciliation step.
+///
+/// The bound is a work bound, never a correctness bound: a page that fills
+/// exactly is continued from its durable cursor, and the last page of a table
+/// is the one that found fewer covered identities than the page size. No
+/// covered identity is dropped because a table held more than one page.
+pub const DELETION_RECONCILIATION_PAGE_SIZE: u32 = 64;
+
+/// One bounded step of the exhaustive covered-source reconciliation
+/// (lifecycle §4.1 point 4, §12 step 1).
+///
+/// Admission publishes a first bounded page of the covered source
+/// correlations and initializes a durable per-identity-table cursor; the
+/// remaining pages are driven by bounded calls to
+/// [`crate::PreservationRepository::reconcile_deletion_sources`]. Correctness is the
+/// exhaustive walk, never the page bound: global completion requires the
+/// current sweep's reconciliation to be `Complete`, and a source identity is
+/// never dropped because it fell past a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionReconciliationOutcome {
+    /// One bounded page was published and associated. `Advanced` always means
+    /// work was done: the caller drives the next bounded step, which answers
+    /// [`Self::Complete`] when the durable cursors show the walk is over
+    /// (possibly a page that finished the last table — the completion is
+    /// observed from the cursors, never inferred from a page shape).
+    Advanced,
+    /// Every known identity table has been walked to its end for the current
+    /// sweep. The in-flight-use correspondence for the already-claimed uses is
+    /// durable, and the completion premise may be attempted.
+    Complete,
+    /// The operation is durably `Finalizing`: by invariant reconciliation was
+    /// complete before the marker was taken. Nothing changed.
+    Finalizing,
+    /// The operation already `Completed`. A completed operation is terminal
+    /// and never reconciled again.
+    Completed,
+    /// No such operation.
+    Missing,
+    /// The caller's expected operation ref is no longer the operation's
+    /// current generation: a stale step never advances reconciliation (§6).
+    StaleSweep,
 }
 
 /// Final audited status of one required participant (§13).

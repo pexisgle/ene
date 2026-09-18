@@ -4076,3 +4076,274 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
     );
     served.server.abort();
 }
+
+// ---------------------------------------------------------------------------
+// E2E 1 M3: exhaustive source reconciliation beyond the admission page
+// ---------------------------------------------------------------------------
+
+/// M3 regression over the real composition: strictly more covered source
+/// identities than one reconciliation page, with the already-committed
+/// inference claim naming the canonical last one.
+///
+/// The served Host must walk every page through the durable cursor before the
+/// participant sweeps redact the identity bodies, complete only after the
+/// walk, keep the claim durably held after completion, refuse the delayed
+/// result, and accept a fresh post-completion origin.
+#[tokio::test]
+async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+    use ene_inference::InferenceAttemptRepository as _;
+    use ene_learning::{
+        ChangeKind, ExperienceSourceKind, Importance, LearningClaimRef, LearningRepository as _,
+        LearningScope, MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, SourceRangeRef,
+        SummaryId, SummaryRecord, TemporalMeaning,
+    };
+    use ene_permission::{CapabilityKind, ConsentRepository as _};
+    use ene_presence::PresenceRepository as _;
+
+    /// Commits one Owner History message and returns its identity.
+    async fn seed_owner_message(
+        store: &ene_store::Store,
+        companion: ene_companion::CompanionId,
+        generation: ene_presence::PresenceGeneration,
+        text: &str,
+    ) -> RawId {
+        match store
+            .append_message(ene_companion::AppendHistoryCommand {
+                companion,
+                round: RawId::new(),
+                role: HistoryRole::Owner,
+                text: text.to_owned(),
+                lang: String::from("en"),
+                at: WallClockWithTz::now(),
+                expected_generation: generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                expected_owner_message: None,
+                command_id: None,
+                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            })
+            .await
+            .expect("the History append must commit")
+        {
+            ene_companion::HistoryAppendOutcome::CommittedAs { message } => message,
+            other => panic!("the History append must commit, got {other:?}"),
+        }
+    }
+
+    /// One clean delayed formation carrying the durable claim handle.
+    fn delayed_formation(
+        companion: RawId,
+        claim: ene_learning::LearningClaimRef,
+    ) -> MemoryChangeCommit {
+        let bound = RawId::new();
+        MemoryChangeCommit {
+            summary: Some(SummaryRecord {
+                id: SummaryId::generate(),
+                scope: LearningScope::companion(companion),
+                content: String::from("a clean paraphrase"),
+                source: SourceRangeRef {
+                    kind: ExperienceSourceKind::Dialogue,
+                    start: bound,
+                    end: bound,
+                },
+                formed_at: WallClockWithTz::now(),
+            }),
+            secret_premise: None,
+            claim: Some(claim),
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope: LearningScope::companion(companion),
+                content: String::from("a clean recall"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        }
+    }
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    // Quiesce the serving Host, then seed the fixture directly: more covered
+    // identities than one reconciliation page, and one already-committed
+    // Learning formation claim naming the canonical last identity.
+    served.stop().await;
+    let (ticket, companion_raw) = {
+        let store = ene_store::Store::open(&dir.join("app.db"))
+            .await
+            .expect("the state database opens for seeding");
+        let consent = store
+            .load_current(CapabilityKind::Learning)
+            .await
+            .expect("the Learning consent must read")
+            .expect("the setup flow assigns Learning");
+        let credential_set = store
+            .current_set_revision()
+            .await
+            .expect("the credential-set revision must read");
+        let companion = store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let mut sources = Vec::new();
+        for index in 0..(ene_preservation::DELETION_RECONCILIATION_PAGE_SIZE + 6) {
+            sources.push(
+                seed_owner_message(
+                    &store,
+                    companion,
+                    generation,
+                    &format!("note {index} carries {TARGET}"),
+                )
+                .await,
+            );
+        }
+        let last = *sources
+            .iter()
+            .max_by_key(|source| source.as_uuid())
+            .expect("the fixture has sources");
+        let ticket = ene_inference::InferenceTicketId(RawId::new());
+        let claimed = store
+            .begin_inference_attempt(ene_inference::InferenceAttempt {
+                ticket,
+                consumer: ene_permission::ConsumerKind::CompanionLearning,
+                capability: CapabilityKind::Learning,
+                purpose: ene_permission::PurposeKind::MemoryFormation,
+                expected_consent: (consent.id.clone(), consent.rev),
+                expected_credential_set: credential_set,
+                provider: consent.provider.clone(),
+                model: consent.model.clone(),
+                task_agent: None,
+                data_use: vec![last],
+                pricing: None,
+                usage_estimate: None,
+            })
+            .await
+            .expect("the formation claim must answer");
+        assert_eq!(
+            claimed,
+            ene_inference::AttemptBeginOutcome::Started,
+            "the pre-condition claim must start"
+        );
+        (ticket, companion.as_raw())
+    };
+
+    // The production first-party path: request, trusted confirmation, bounded
+    // fan-out. The walk must cover every page before completion.
+    let mut client = served.serve().await;
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = Arc::clone(&served.handle);
+    confirm_deletion(&handle).await;
+    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must reconcile every page and complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "no durable table keeps the target: {:?}",
+        db_target_hits(&served.dir.join("app.db"), TARGET)
+    );
+
+    // The durable correspondence names the claim whose source fell past the
+    // admission page.
+    served.stop().await;
+    let store = ene_store::Store::open(&dir.join("app.db"))
+        .await
+        .expect("the state database reopens for the delayed arrival");
+    let ticket_text = ticket.0.as_uuid().as_hyphenated().to_string();
+    let held: i64 = {
+        let conn = rusqlite::Connection::open(dir.join("app.db"))
+            .expect("the state database opens for inspection");
+        conn.query_row(
+            "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind='inference_attempt' AND use_id=?1",
+            [&ticket_text],
+            |row| row.get(0),
+        )
+        .expect("the hold probe must answer")
+    };
+    assert_eq!(held, 1, "the last-page claim is durably associated");
+
+    // The delayed result arrives after completion: refused by the durable
+    // correspondence even though no current condition is readable.
+    let delayed = delayed_formation(companion_raw, LearningClaimRef::from_raw(ticket.0));
+    assert_eq!(
+        store
+            .commit_memory_change(delayed)
+            .await
+            .expect("the delayed commit must answer"),
+        ene_learning::MemoryChangeOutcome::HeldForErasure,
+        "a formation claimed before the interval stays stale after completion"
+    );
+
+    // The completed operation is not a permanent ban: a fresh claim from a
+    // fresh source after completion is accepted as a new origin. The
+    // serving Host's startup normalization may have moved the credential-set
+    // revision since the fixture was seeded, so the fresh claim reads the
+    // current premise instead of reusing the seeding snapshot.
+    let fresh_consent = store
+        .load_current(CapabilityKind::Learning)
+        .await
+        .expect("the Learning consent must read")
+        .expect("the Learning consent stays assigned");
+    let fresh_credential_set = store
+        .current_set_revision()
+        .await
+        .expect("the credential-set revision must read");
+    let fresh_ticket = ene_inference::InferenceTicketId(RawId::new());
+    assert_eq!(
+        store
+            .begin_inference_attempt(ene_inference::InferenceAttempt {
+                ticket: fresh_ticket,
+                consumer: ene_permission::ConsumerKind::CompanionLearning,
+                capability: CapabilityKind::Learning,
+                purpose: ene_permission::PurposeKind::MemoryFormation,
+                expected_consent: (fresh_consent.id, fresh_consent.rev),
+                expected_credential_set: fresh_credential_set,
+                provider: String::from("openai"),
+                model: String::from(MODEL),
+                task_agent: None,
+                data_use: vec![RawId::new()],
+                pricing: None,
+                usage_estimate: None,
+            })
+            .await
+            .expect("the fresh claim must answer"),
+        ene_inference::AttemptBeginOutcome::Started
+    );
+    assert!(
+        matches!(
+            store
+                .commit_memory_change(delayed_formation(
+                    companion_raw,
+                    LearningClaimRef::from_raw(fresh_ticket.0)
+                ))
+                .await
+                .expect("the fresh commit must answer"),
+            ene_learning::MemoryChangeOutcome::Committed { .. }
+        ),
+        "a post-completion origin is accepted"
+    );
+}

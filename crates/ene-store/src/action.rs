@@ -280,6 +280,11 @@ fn insert_attempt_sync(
         )
         .map_err(|error| action_unavailable(error.to_string()))?
     {
+        // The direct-correlation fallback in `held_use` may have written the
+        // durable hold for an unreconciled operation; commit it even though
+        // the attempt itself is refused, so the correspondence survives this
+        // arrival instead of rolling back with the refused try.
+        tx.commit().map_err(action_unavailable)?;
         return Ok(ActionStartOutcome::HeldForErasure);
     }
     match tx.execute(

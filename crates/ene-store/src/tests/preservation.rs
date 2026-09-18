@@ -282,9 +282,15 @@ async fn generation_exhaustion_is_durable_and_cannot_resume() {
         )
         .unwrap();
         // The participant rows track the operation's current sweep, so the
-        // fixture moves them together with the operation.
+        // fixture moves them together with the operation; the reconciliation
+        // cursors are part of that same current-sweep state.
         conn.execute(
             "UPDATE deletion_participant SET sweep=?2 WHERE operation_id=?1",
+            params![id, i64::MAX],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE deletion_reconciliation SET sweep=?2 WHERE operation_id=?1",
             params![id, i64::MAX],
         )
         .unwrap();
@@ -495,14 +501,36 @@ async fn concurrent_duplicate_admissions_serialize_on_sqlite_master() {
     );
 }
 
+/// Drives the bounded covered-source reconciliation of one operation's
+/// current sweep to completion through the canonical API, exactly as the
+/// production fan-out would before demanding any participant.
+pub(super) async fn reconcile_to_complete(store: &Store, current: DeletionOperationRef) {
+    for _ in 0..64 {
+        match store
+            .reconcile_deletion_sources(current, DELETION_RECONCILIATION_PAGE_SIZE)
+            .await
+            .expect("a reconciliation step must answer")
+        {
+            DeletionReconciliationOutcome::Advanced => {}
+            DeletionReconciliationOutcome::Complete
+            | DeletionReconciliationOutcome::Finalizing
+            | DeletionReconciliationOutcome::Completed => return,
+            other => panic!("unexpected reconciliation step: {other:?}"),
+        }
+    }
+    panic!("the exhaustive walk must finish inside the fixture budget");
+}
+
 /// Completes one operation through the sealed A5 boundary.
 ///
-/// Every required participant is verified through the canonical completion
-/// API, then the finalizing transition and the completion commit run. The
-/// system-wide mechanical probe must be clean: a call site whose fixture still
-/// stores the target must drive that owner's real sweep first, exactly as the
-/// production fan-out would.
+/// The current sweep's exhaustive covered-source reconciliation is driven to
+/// completion first, then every required participant is verified through the
+/// canonical completion API, and the finalizing transition and the completion
+/// commit run. The system-wide mechanical probe must be clean: a call site
+/// whose fixture still stores the target must drive that owner's real sweep
+/// first, exactly as the production fan-out would.
 pub(super) async fn complete_via_a5(store: &Store, current: DeletionOperationRef) {
+    reconcile_to_complete(store, current).await;
     let mut after = None;
     loop {
         let page = store
@@ -1003,6 +1031,9 @@ async fn finalizing_next_sweep_returns_to_active_on_remainder_and_stays_finalizi
     assert_eq!(rows[0].phase, DeletionOperationPhase::Active);
     assert_eq!(rows[0].hold, None);
     {
+        // The new generation resets the walk; a finalizing fixture on it must
+        // re-establish the same durable premise the transition would.
+        reconcile_to_complete(&store, next).await;
         mark_all_verified(&store, next);
         let conn = store.conn.lock().unwrap();
         conn.execute(
@@ -1586,6 +1617,9 @@ async fn material_read_returns_the_protected_target_and_current_sweep_sources() 
     // A finalizing operation that already ran its material wipe reads as
     // Destroyed, never as corrupt and never as protected material.
     {
+        // The generation advance reset the walk; the fabricated finalizing
+        // shape must re-establish the whole durable premise.
+        reconcile_to_complete(&store, next).await;
         mark_all_verified(&store, next);
         let conn = store.conn.lock().unwrap();
         let id = crate::codec::encode_id(next.operation.as_raw());

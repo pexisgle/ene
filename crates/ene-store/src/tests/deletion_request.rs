@@ -495,6 +495,11 @@ fn complete_fixture(store: &Store, current: DeletionOperationRef) {
     )
     .unwrap();
     conn.execute(
+        "DELETE FROM deletion_reconciliation WHERE operation_id=?1",
+        [&id],
+    )
+    .unwrap();
+    conn.execute(
         "UPDATE erasure_condition SET closed_at='2026-09-17T01:00:00Z' WHERE operation_id=?1 AND sweep=?2",
         params![id, current.sweep.as_u64() as i64],
     )
@@ -829,16 +834,16 @@ async fn enumerated_source_holds_a_task_agent_claim_and_unrelated_source_does_no
 }
 
 #[tokio::test]
-async fn enumeration_is_bounded_per_identity_table_and_walks_identity_order() {
+async fn reconciliation_walks_every_covered_identity_across_bounded_pages() {
     let store = open_memory().await.unwrap();
     let target = "bounded private target";
-    let limit = crate::preservation::KNOWN_SOURCE_ENUMERATION_LIMIT as usize;
-    // Fixture SQL: the enumeration under test reads durable identities, and
-    // one more row than the per-table bound is what the bound is about.
+    let page = DELETION_RECONCILIATION_PAGE_SIZE as usize;
+    // Fixture SQL: the reconciliation under test reads durable identities, and
+    // more than one page of them is exactly what the walk must not truncate.
     let mut keys = Vec::new();
     {
         let guard = store.conn.lock().unwrap();
-        for _ in 0..limit + 1 {
+        for _ in 0..page + 3 {
             let message = RawId::new();
             guard
                 .execute(
@@ -866,22 +871,59 @@ async fn enumeration_is_bounded_per_identity_table_and_walks_identity_order() {
     let sources = source_rows(&store, current);
     assert_eq!(
         sources,
-        keys[..limit].to_vec(),
-        "the enumeration is bounded to the first {limit} canonical identities"
+        keys[..page].to_vec(),
+        "admission publishes one bounded page, never an exhaustive scan"
     );
+    let last = keys.last().cloned().expect("the fixture has a last key");
     assert!(
-        !sources.contains(&keys[limit]),
-        "identities beyond the per-table bound are not published as coverage; the sweep erases them instead"
+        !sources.contains(&last),
+        "an identity beyond the admission page starts unpublished"
     );
-    // The statement walks the identity order, so the LIMIT stops the walk
-    // instead of sorting a full result set first.
+    // The unpublished identity is still covered mechanically: enforcement
+    // never reads the page as the whole covered set.
+    assert_eq!(
+        crate::preservation::covering_condition(&store.conn.lock().unwrap(), &last).unwrap(),
+        Some(current.condition()),
+        "an unpublished covered source is still recognized while the walk runs"
+    );
+    // The durable cursor continues the walk; the page bound never drops a key.
+    let mut steps = 0;
+    loop {
+        steps += 1;
+        assert!(steps < 64, "the walk must finish inside its budget");
+        match store
+            .reconcile_deletion_sources(current, DELETION_RECONCILIATION_PAGE_SIZE)
+            .await
+            .unwrap()
+        {
+            DeletionReconciliationOutcome::Advanced => {}
+            DeletionReconciliationOutcome::Complete => break,
+            other => panic!("unexpected reconciliation step: {other:?}"),
+        }
+    }
+    assert_eq!(
+        source_rows(&store, current),
+        keys,
+        "the exhaustive walk publishes every covered identity"
+    );
+    // A retried step is idempotent and adds no second row.
+    assert_eq!(
+        store
+            .reconcile_deletion_sources(current, DELETION_RECONCILIATION_PAGE_SIZE)
+            .await
+            .unwrap(),
+        DeletionReconciliationOutcome::Complete
+    );
+    assert_eq!(source_rows(&store, current).len(), page + 3);
+    // The page statement walks the identity order from the cursor, so the
+    // LIMIT stops the walk instead of sorting a full result set first.
     for identity in crate::preservation::KNOWN_SOURCE_IDENTITIES {
-        let sql = crate::preservation::known_source_enumeration_sql(*identity);
+        let sql = crate::preservation::known_source_page_sql(*identity);
         let plan: Vec<String> = {
             let guard = store.conn.lock().unwrap();
             let mut explained = guard.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             explained
-                .query_map(params![target, limit as i64], |row| row.get(3))
+                .query_map(params!["", target, page as i64], |row| row.get(3))
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap()
@@ -889,7 +931,7 @@ async fn enumeration_is_bounded_per_identity_table_and_walks_identity_order() {
         assert!(!plan.is_empty(), "missing plan for {sql}");
         assert!(
             !plan.iter().any(|line| line.contains("TEMP B-TREE")),
-            "the bounded enumeration must not sort the full table: {plan:?}"
+            "the bounded page must not sort the full table: {plan:?}"
         );
     }
 }

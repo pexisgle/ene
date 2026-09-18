@@ -506,6 +506,28 @@ delivery_seq INTEGER NOT NULL CHECK (delivery_seq > 0),
 first_delivered_at TEXT NOT NULL,
 last_delivered_at TEXT NOT NULL
 );
+-- Exhaustive covered-source reconciliation state (lifecycle §4.1 point 4,
+-- §12 step 1). One durable keyset cursor per (operation, current sweep,
+-- known identity table): `cursor` is the last canonical identity published
+-- from that table, and `complete=1` means the ordered identity scan reached
+-- its end for this sweep. Admission writes the rows and publishes a first
+-- bounded page; bounded reconciliation steps continue from the cursor, so no
+-- page bound can drop a covered identity. A new sweep deletes the old rows and
+-- inserts fresh incomplete ones (a generation is never reused); the completion
+-- commit deletes them together with the rest of the operation-lifetime
+-- protected state. A completed operation keeps zero rows.
+CREATE TABLE deletion_reconciliation (
+ operation_id TEXT NOT NULL,
+ sweep INTEGER NOT NULL CHECK (sweep > 0),
+ identity_table TEXT NOT NULL,
+ cursor TEXT NOT NULL,
+ complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+ PRIMARY KEY (operation_id, sweep, identity_table)
+);
+-- A reconciliation page associates already-claimed uses whose Task context
+-- origin names one of the page's covered identities; this index drives that
+-- probe from the (bounded) page instead of scanning every context entry.
+CREATE INDEX idx_task_context_entry_origin_source ON task_context_entry (origin_source);
 ";
 
 /// Initializes only an empty database. Existing databases must have the exact

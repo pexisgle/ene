@@ -100,6 +100,17 @@ fn seed_condition(store: &Store, sweep: u64, sources: &[RawId]) {
             params![operation_text, sweep_raw],
         )
         .expect("the participant snapshot must seed");
+    // Every operation also carries its per-identity-table reconciliation
+    // cursors; a fixture that only tests the coverage gate commits them
+    // complete, the shape the direct admission path produces.
+    for identity in crate::preservation::KNOWN_SOURCE_IDENTITIES {
+        guard
+            .execute(
+                "INSERT INTO deletion_reconciliation (operation_id,sweep,identity_table,cursor,complete) VALUES (?1,?2,?3,'',1)",
+                params![operation_text, sweep_raw, identity.table],
+            )
+            .expect("the reconciliation cursor must seed");
+    }
     for source in sources {
         guard
             .execute(

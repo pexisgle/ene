@@ -8,7 +8,7 @@
 //! after the owner verified" is exactly what the A5 remainder probe must
 //! collect instead of completing over it.
 
-use super::preservation::{admit, complete_via_a5, mark_all_verified};
+use super::preservation::{admit, complete_via_a5, mark_all_verified, reconcile_to_complete};
 use super::*;
 
 use ene_preservation::{
@@ -292,6 +292,9 @@ async fn local_completion_and_a_remainder_never_finalize_and_the_new_sweep_does(
         ))
         .await
         .unwrap();
+    // The sweep advance reset the walk; the completion premise needs it
+    // complete before the finalizing transition is allowed.
+    reconcile_to_complete(&store, next).await;
     assert_eq!(
         store.begin_deletion_finalizing(next).await.unwrap(),
         DeletionFinalizationOutcome::Finalizing
@@ -712,6 +715,7 @@ async fn the_audit_erased_count_accumulates_across_sweeps() {
         panic!("the generation must advance");
     };
     verify_all(&store, next).await;
+    reconcile_to_complete(&store, next).await;
     assert_eq!(
         store.begin_deletion_finalizing(next).await.unwrap(),
         DeletionFinalizationOutcome::Finalizing

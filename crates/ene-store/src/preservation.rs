@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use ene_preservation::*;
 use ene_primitive::{RawId, WallClockWithTz};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 
 use crate::{
     Store,
@@ -128,6 +128,77 @@ fn candidate_page(
 /// material exists — the same exact mechanical text. A completed operation's
 /// material is gone by design, so only the purpose link is checked there.
 /// Bounded by the touching query's page, never a whole-store scan.
+/// Structural integrity of one operation's reconciliation cursor rows,
+/// scoped to the operation a query actually touches.
+///
+/// Invariant: an unfinished operation carries exactly one row per known
+/// identity table for its current sweep; a `Finalizing` operation has every
+/// row complete (the completion premise was re-read before the marker was
+/// taken); a completed operation keeps zero rows. Any other shape — a missing
+/// table, a foreign sweep, an unknown table name, or leftover rows after
+/// completion — is torn canonical state that fails closed, never a silently
+/// incomplete walk. Rows for an operation that does not exist are torn state
+/// for the same reason a condition without its operation is.
+fn validate_reconciliation(
+    conn: &Connection,
+    operation: &str,
+) -> Result<(), PreservationTechnicalError> {
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT phase,sweep FROM deletion_operation WHERE operation_id=?1",
+            [operation],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(storage)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT identity_table,sweep,complete FROM deletion_reconciliation
+             WHERE operation_id=?1",
+        )
+        .map_err(storage)?;
+    let rows: Vec<(String, i64, i64)> = statement
+        .query_map([operation], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    drop(statement);
+    let Some((phase, sweep)) = row else {
+        return if rows.is_empty() {
+            Ok(())
+        } else {
+            Err(corrupt())
+        };
+    };
+    if phase == "completed" {
+        return if rows.is_empty() {
+            Ok(())
+        } else {
+            Err(corrupt())
+        };
+    }
+    if rows.len() != KNOWN_SOURCE_IDENTITIES.len() {
+        return Err(corrupt());
+    }
+    for (table, row_sweep, complete) in &rows {
+        if *row_sweep != sweep || !(0..=1).contains(complete) {
+            return Err(corrupt());
+        }
+        if !KNOWN_SOURCE_IDENTITIES
+            .iter()
+            .any(|identity| identity.table == table)
+        {
+            return Err(corrupt());
+        }
+        if phase == "finalizing" && *complete != 1 {
+            return Err(corrupt());
+        }
+    }
+    Ok(())
+}
+
 fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechnicalError> {
     let broken: bool = conn
         .query_row(
@@ -199,7 +270,10 @@ fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechni
     if broken {
         return Err(corrupt());
     }
-    Ok(())
+    // The reconciliation cursor shape is part of the same structural
+    // invariant: the SQL above keeps the operation/source/condition history
+    // honest, and this keeps the exhaustive-walk premise from being torn.
+    validate_reconciliation(conn, operation)
 }
 
 /// Bounded covering-candidate read for [`covering_condition`]: the single
@@ -255,6 +329,69 @@ pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
          AND NOT EXISTS(SELECT 1 FROM erasure_condition c
              WHERE c.operation_id=o.operation_id AND c.sweep=o.sweep))";
 
+/// Direct mechanical coverage of one source identity by an operation whose
+/// current-sweep reconciliation is still walking.
+///
+/// The published current-sweep correlation is the fast path; while a sweep is
+/// incomplete, a covered identity may legitimately not be published yet. The
+/// identity's own stored body is durable evidence independent of any page
+/// bound, so it is compared directly against each unreconciled operation's
+/// protected target. This keeps a new send or adoption from starting on a
+/// covered source between the condition commit and the end of the walk; after
+/// the walk the published correlation answers the same way.
+fn directly_covered_source(
+    conn: &Connection,
+    source: &str,
+) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
+    // Fast skip: with no active/held operation mid-reconciliation, the
+    // published correlation set is already the exhaustive one.
+    let pending: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
+                 JOIN deletion_operation o ON o.operation_id=r.operation_id
+                 WHERE r.complete=0 AND r.sweep=o.sweep AND o.phase IN ('active','held'))",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if !pending {
+        return Ok(None);
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT o.operation_id,o.sweep FROM deletion_operation o
+             WHERE o.phase IN ('active','held') AND EXISTS
+                 (SELECT 1 FROM deletion_reconciliation r
+                  WHERE r.operation_id=o.operation_id AND r.complete=0)
+             ORDER BY o.operation_id",
+        )
+        .map_err(storage)?;
+    let candidates: Vec<(String, i64)> = statement
+        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    drop(statement);
+    for (id, sweep) in candidates {
+        validate(conn, &id)?;
+        let target: Option<String> = conn
+            .query_row(
+                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        // Active/held operations always keep protected material (`validate`);
+        // a missing row is torn state, never a "checked everything" default.
+        let target = target.ok_or_else(corrupt)?;
+        if source_identity_carries(conn, source, &target)? {
+            return Ok(Some(decode_ref(&id, sweep)?.condition()));
+        }
+    }
+    Ok(None)
+}
+
 /// One shared closure-aware coverage read for inference and Task resume.
 /// Historical `erasure_condition` rows stay inside the operation interval as
 /// lifecycle/history, but only the current sweep carries source rows and
@@ -272,6 +409,11 @@ pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
 /// it as "not covering". A genuine absence of coverage is the authoritative
 /// empty set (`Ok(None)`): there is no second registry and no cached
 /// NoDeletion sentinel.
+///
+/// The bounded publication is never the correctness set: while an operation's
+/// current sweep is still being reconciled, an unpublished source identity is
+/// checked directly ([`directly_covered_source`]), so a covered source cannot
+/// escape enforcement just because it fell past a reconciliation page.
 pub(crate) fn covering_condition(
     conn: &Connection,
     source: &str,
@@ -293,7 +435,7 @@ pub(crate) fn covering_condition(
     if torn {
         return Err(corrupt());
     }
-    Ok(None)
+    directly_covered_source(conn, source)
 }
 
 /// One mechanical text verdict against the canonical current conditions
@@ -804,50 +946,33 @@ fn scope_covered(
     Ok(covered)
 }
 
-/// Per-identity-table bound on the covered-source enumeration a first-party
-/// admission publishes (lifecycle §4.1 point 4).
-///
-/// The enumeration is the publication of the source correlations already
-/// known at admission, not the erase itself. It reads at most this many
-/// covered identities per identity table, ordered by canonical identity, so
-/// one admission publishes at most
-/// `KNOWN_SOURCE_IDENTITIES.len() * KNOWN_SOURCE_ENUMERATION_LIMIT` durable
-/// source rows inside its transaction.
-///
-/// When a table holds more covered identities than the bound, the remainder is
-/// deliberately not enumerated: the A3 owner sweeps still erase every
-/// target-bearing body mechanically (the enumeration never decides erasure),
-/// but an un-enumerated identity is not published as a durable source
-/// correlation, so a provider send or adoption boundary cannot hold on it by
-/// correlation once its body was redacted.
-///
-/// The bound caps the identities the statement returns, and therefore the
-/// decoded identities and durable rows. It cannot cap the walk itself: a
-/// substring predicate has no index, so the statement scans the table in
-/// identity order (never a temp sort) and stops at the bound once it has found
-/// that many matches; fewer matches than the bound means the walk reaches the
-/// table's end, the same traversal the A3 sweep performs in bounded pages. No
-/// body is decoded into the process beyond the returned identities.
-pub(crate) const KNOWN_SOURCE_ENUMERATION_LIMIT: u32 = 64;
-
 /// One durable identity table whose primary key can be named as a canonical
 /// source correlation, with the column that can carry the exact target text.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KnownSourceIdentity {
-    table: &'static str,
+    pub(crate) table: &'static str,
     key: &'static str,
     body: &'static str,
 }
 
-/// The exact statement the enumeration runs for one identity table.
+/// The exact bounded page statement one reconciliation step runs for one
+/// identity table.
 ///
 /// Exposed so tests can `EXPLAIN QUERY PLAN` the production SQL. Table, key,
 /// and body names are compile-time constants and never caller input; the
-/// target text only ever travels as a bound parameter.
-pub(crate) fn known_source_enumeration_sql(identity: KnownSourceIdentity) -> String {
+/// cursor, target text, and page size only ever travel as bound parameters.
+///
+/// The keyset predicate starts the scan at the durable cursor and `ORDER BY`
+/// the primary key lets SQLite walk the key index (never a temp sort), so the
+/// page reads at most `LIMIT` matching identities past the cursor; a page with
+/// fewer matches than the limit means the ordered scan reached the table's
+/// end. The substring predicate itself has no index, exactly like the A3
+/// owner sweeps, so the walk is one table traversal in bounded pages — never
+/// an unbounded single statement.
+pub(crate) fn known_source_page_sql(identity: KnownSourceIdentity) -> String {
     format!(
-        "SELECT {} FROM {} WHERE instr({}, ?1) > 0 ORDER BY {} LIMIT ?2",
-        identity.key, identity.table, identity.body, identity.key
+        "SELECT {} FROM {} WHERE {} > ?1 AND instr({}, ?2) > 0 ORDER BY {} LIMIT ?3",
+        identity.key, identity.table, identity.key, identity.body, identity.key
     )
 }
 
@@ -907,39 +1032,256 @@ pub(crate) const KNOWN_SOURCE_IDENTITIES: &[KnownSourceIdentity] = &[
     },
 ];
 
-/// Enumerates the durable source correlations already covered by `target` at
-/// admission time (lifecycle §4.1 point 4).
+/// Initializes the durable reconciliation cursors for one operation + sweep:
+/// exactly one row per known identity table.
 ///
-/// The enumeration is purely mechanical and owner-side: each identity table is
-/// queried for rows whose body column carries the exact target text (SQLite
-/// `instr`, the same exact-substring predicate the A3 owner sweeps and the A4
-/// acceptance boundaries use), ordered by canonical identity and bounded by
-/// [`KNOWN_SOURCE_ENUMERATION_LIMIT`] per table. No caller, wire payload, or
-/// model output names a source; the durable rows themselves are the evidence,
-/// and a staged Client target can only widen the search through the Host's
-/// confirmed exact text.
-///
-/// A malformed stored identity fails closed as corrupt state instead of being
-/// silently dropped from the correlation set.
-fn enumerate_known_sources(
+/// The first-party path starts incomplete and publishes its first bounded
+/// pages in the same admission transaction; the direct path names its whole
+/// source scope itself, so its cursors commit already complete. A row set that
+/// does not match the known table set is torn state and fails closed through
+/// [`validate`].
+fn insert_reconciliation_rows(
     tx: &rusqlite::Transaction<'_>,
-    target: &str,
-) -> Result<Vec<RawId>, PreservationTechnicalError> {
-    let limit = i64::from(KNOWN_SOURCE_ENUMERATION_LIMIT);
-    let mut sources = Vec::new();
+    operation: &str,
+    sweep: i64,
+    complete: bool,
+) -> Result<(), PreservationTechnicalError> {
+    let complete = i64::from(complete);
     for identity in KNOWN_SOURCE_IDENTITIES {
-        let sql = known_source_enumeration_sql(*identity);
-        let mut statement = tx.prepare(&sql).map_err(storage)?;
-        let keys = statement
-            .query_map(params![target, limit], |row| row.get::<_, String>(0))
-            .map_err(storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
-        for key in keys {
-            sources.push(decode_id(&key).map_err(|_| corrupt())?);
-        }
+        tx.execute(
+            "INSERT INTO deletion_reconciliation (operation_id,sweep,identity_table,cursor,complete) VALUES (?1,?2,?3,'',?4)",
+            params![operation, sweep, identity.table, complete],
+        )
+        .map_err(storage)?;
     }
-    Ok(sources)
+    Ok(())
+}
+
+/// The next incomplete identity table for one operation + sweep, in the
+/// canonical identity-table order, if any.
+fn next_incomplete_identity(
+    conn: &Connection,
+    operation: &str,
+    sweep: i64,
+) -> Result<Option<KnownSourceIdentity>, PreservationTechnicalError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT identity_table FROM deletion_reconciliation
+             WHERE operation_id=?1 AND sweep=?2 AND complete=0",
+        )
+        .map_err(storage)?;
+    let incomplete: Vec<String> = statement
+        .query_map(params![operation, sweep], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    Ok(KNOWN_SOURCE_IDENTITIES
+        .iter()
+        .copied()
+        .find(|identity| incomplete.iter().any(|table| table == identity.table)))
+}
+
+/// Whether every known identity table has been walked to its end for one
+/// operation's current sweep.
+///
+/// The answer is a read of the durable cursor rows, never a caller boolean.
+/// A row set that names another table, another sweep, or a missing table is
+/// not complete here and fails closed through [`validate`] on the operation.
+fn reconciliation_is_complete(
+    conn: &Connection,
+    operation: &str,
+    sweep: i64,
+) -> Result<bool, PreservationTechnicalError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT identity_table,sweep,complete FROM deletion_reconciliation WHERE operation_id=?1",
+        )
+        .map_err(storage)?;
+    let rows: Vec<(String, i64, i64)> = statement
+        .query_map([operation], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    if rows.len() != KNOWN_SOURCE_IDENTITIES.len() {
+        return Ok(false);
+    }
+    Ok(KNOWN_SOURCE_IDENTITIES.iter().all(|identity| {
+        rows.iter().any(|(table, row_sweep, complete)| {
+            table == identity.table && *row_sweep == sweep && *complete == 1
+        })
+    }))
+}
+
+/// One bounded reconciliation page for one identity table.
+///
+/// The page is read from the durable cursor, its covered identities are
+/// published as current-sweep source correlations, the already-claimed uses
+/// the page covers are associated, and the cursor (and, when the ordered scan
+/// reached the table's end, the complete marker) advance — all in the caller's
+/// transaction. Every write is a keyed `INSERT OR IGNORE` / idempotent
+/// `UPDATE`, so re-running the same page after a rollback or on a retried
+/// driver pass has no second semantic effect.
+///
+/// A page that found fewer identities than `page_size` proves the ordered scan
+/// reached the table's end; a full page does not, so the next call reads the
+/// next keyset range instead of assuming completion.
+fn reconcile_table_page(
+    tx: &rusqlite::Transaction<'_>,
+    operation: &str,
+    sweep: i64,
+    target: &str,
+    identity: KnownSourceIdentity,
+    page_size: u32,
+) -> Result<bool, PreservationTechnicalError> {
+    let (cursor, complete): (String, i64) = tx
+        .query_row(
+            "SELECT cursor,complete FROM deletion_reconciliation
+             WHERE operation_id=?1 AND sweep=?2 AND identity_table=?3",
+            params![operation, sweep, identity.table],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(storage)?
+        .ok_or_else(corrupt)?;
+    if complete == 1 {
+        return Ok(true);
+    }
+    let sql = known_source_page_sql(identity);
+    let mut statement = tx.prepare(&sql).map_err(storage)?;
+    let keys: Vec<String> = statement
+        .query_map(params![cursor, target, i64::from(page_size)], |row| {
+            row.get(0)
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    drop(statement);
+    let held_at = WallClockWithTz::now().to_rfc3339();
+    for key in &keys {
+        let raw = decode_id(key).map_err(|_| corrupt())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,?2,?3)",
+            params![operation, sweep, encode_id(raw)],
+        )
+        .map_err(storage)?;
+    }
+    if !keys.is_empty() {
+        associate_reconciled_page(tx, operation, &keys, &held_at)?;
+    }
+    let table_complete = u32::try_from(keys.len()).map_err(|_| corrupt())? < page_size;
+    let next_cursor = keys.last().map_or(cursor, Clone::clone);
+    tx.execute(
+        "UPDATE deletion_reconciliation SET cursor=?4,complete=?5
+         WHERE operation_id=?1 AND sweep=?2 AND identity_table=?3",
+        params![
+            operation,
+            sweep,
+            identity.table,
+            next_cursor,
+            i64::from(table_complete)
+        ],
+    )
+    .map_err(storage)?;
+    Ok(table_complete)
+}
+
+/// Publishes the first bounded page of every known identity table inside the
+/// admission transaction (lifecycle §4.1 point 4).
+///
+/// This is the same bounded work shape as one owner sweep pass — one page per
+/// table, in canonical order — not an exhaustive enumeration: the durable
+/// cursors carry the continuation to
+/// [`PreservationRepository::reconcile_deletion_sources`], and completion
+/// refuses until they all report complete.
+fn reconcile_admission_pages(
+    tx: &rusqlite::Transaction<'_>,
+    operation: &str,
+    sweep: i64,
+    target: &str,
+    page_size: u32,
+) -> Result<(), PreservationTechnicalError> {
+    for identity in KNOWN_SOURCE_IDENTITIES {
+        reconcile_table_page(tx, operation, sweep, target, *identity, page_size)?;
+    }
+    Ok(())
+}
+
+/// Associates the already-claimed uses one reconciliation page covers
+/// (lifecycle §11 R2).
+///
+/// The page's new sources drive the join through the correlation index:
+///
+/// - an inference attempt whose ordered `data_use` names a page source;
+/// - an unsealed task delegation under such an attempt;
+/// - an unsealed task delegation whose business context source is a page
+///   source (served by `idx_task_context_entry_origin_source`).
+///
+/// The target text is not needed here: the page has already decided which
+/// identities carry it. Writes are `INSERT OR IGNORE` keyed by use identity,
+/// so a retried page adds no second association.
+fn associate_reconciled_page(
+    tx: &rusqlite::Transaction<'_>,
+    operation: &str,
+    sources: &[String],
+    held_at: &str,
+) -> Result<(), PreservationTechnicalError> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    // Explicit positional numbering: `?1`/`?2` carry the operation and hold
+    // time and the page sources take `?3..`; SQLite assigns a bare `?` the
+    // next *unused* index after any explicit `?N`, so mixing forms would
+    // silently shift the parameter count.
+    let placeholders = (0..sources.len())
+        .map(|index| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    // Operation and hold time are bound first, then the page sources.
+    let bind = || {
+        [operation, held_at]
+            .into_iter()
+            .chain(sources.iter().map(String::as_str))
+    };
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+             SELECT '{USE_KIND_INFERENCE_ATTEMPT}', a.ticket, ?1, ?2
+             FROM inference_attempt_data_use u
+             JOIN inference_attempt a ON a.ticket=u.ticket
+             WHERE u.source IN ({placeholders})
+             GROUP BY a.ticket"
+        ),
+        params_from_iter(bind()),
+    )
+    .map_err(storage)?;
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+             SELECT '{USE_KIND_TASK_DELEGATION}', d.delegation_id, ?1, ?2
+             FROM delegation d
+             WHERE NOT EXISTS(SELECT 1 FROM task_result r WHERE r.delegation_id=d.delegation_id)
+               AND EXISTS(SELECT 1 FROM inference_attempt_data_use u
+                          JOIN inference_attempt a ON a.ticket=u.ticket
+                          WHERE u.source IN ({placeholders}) AND a.delegation_id=d.delegation_id)"
+        ),
+        params_from_iter(bind()),
+    )
+    .map_err(storage)?;
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+             SELECT '{USE_KIND_TASK_DELEGATION}', d.delegation_id, ?1, ?2
+             FROM delegation d
+             JOIN task_context_entry ce ON ce.task_id=d.task_id
+             WHERE NOT EXISTS(SELECT 1 FROM task_result r WHERE r.delegation_id=d.delegation_id)
+               AND ce.origin_source IN ({placeholders})"
+        ),
+        params_from_iter(bind()),
+    )
+    .map_err(storage)?;
+    Ok(())
 }
 
 /// Closed work-kind vocabulary of [`erasure_use_hold`]: one claimed inference
@@ -947,8 +1289,222 @@ fn enumerate_known_sources(
 pub(crate) const USE_KIND_INFERENCE_ATTEMPT: &str = "inference_attempt";
 pub(crate) const USE_KIND_TASK_DELEGATION: &str = "task_delegation";
 
+/// Whether one source identity's stored body carries `target`.
+///
+/// This is the direct mechanical check the bounded publication must never
+/// replace: the identity's primary key is an indexed lookup, and the body
+/// comparison is the same exact-substring predicate the owner sweeps and the
+/// acceptance boundaries use. It is how a source that has not reached a
+/// reconciliation page yet is still recognized as covered.
+fn source_identity_carries(
+    conn: &Connection,
+    source: &str,
+    target: &str,
+) -> Result<bool, PreservationTechnicalError> {
+    for identity in KNOWN_SOURCE_IDENTITIES {
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM {} WHERE {}=?1 AND instr({},?2)>0)",
+            identity.table, identity.key, identity.body
+        );
+        let found: bool = conn
+            .query_row(&sql, params![source, target], |row| row.get(0))
+            .map_err(storage)?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether one inference attempt's ordered `data_use` names an identity whose
+/// stored body carries `target`.
+fn claimed_attempt_covers(
+    conn: &Connection,
+    ticket: &str,
+    target: &str,
+) -> Result<bool, PreservationTechnicalError> {
+    let mut statement = conn
+        .prepare("SELECT source FROM inference_attempt_data_use WHERE ticket=?1 ORDER BY ordinal")
+        .map_err(storage)?;
+    let sources: Vec<String> = statement
+        .query_map([ticket], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    for source in sources {
+        if source_identity_carries(conn, &source, target)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether one unsealed task delegation's durable premise carries `target`.
+///
+/// Mirrors the admission association mechanically, but without the published
+/// source set: the relied revision / in-force purpose body, the delegated
+/// workspace scope, the business context origin identities, and any attempt
+/// already claimed under the delegation are each checked directly. A sealed
+/// execution is excluded exactly like the admission association: its recorded
+/// result cannot be produced again, and its stored body is the sweep's.
+fn claimed_delegation_covers(
+    conn: &Connection,
+    delegation: &str,
+    target: &str,
+) -> Result<bool, PreservationTechnicalError> {
+    let row: Option<(String, i64, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT task_id,task_revision,scope_folder,scope_save_target
+             FROM delegation WHERE delegation_id=?1",
+            [delegation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(storage)?;
+    let Some((task, revision, folder, save_target)) = row else {
+        return Ok(false);
+    };
+    let sealed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_result WHERE delegation_id=?1)",
+            [delegation],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if sealed {
+        return Ok(false);
+    }
+    let mut statement = conn
+        .prepare("SELECT ticket FROM inference_attempt WHERE delegation_id=?1")
+        .map_err(storage)?;
+    let tickets: Vec<String> = statement
+        .query_map([delegation], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    for ticket in tickets {
+        if claimed_attempt_covers(conn, &ticket, target)? {
+            return Ok(true);
+        }
+    }
+    let carries = |text: Option<String>| text.is_some_and(|text| text.contains(target));
+    if carries(
+        conn.query_row(
+            "SELECT purpose_text FROM task WHERE task_id=?1",
+            [&task],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?,
+    ) {
+        return Ok(true);
+    }
+    if carries(
+        conn.query_row(
+            "SELECT purpose_text FROM task_revision WHERE task_id=?1 AND revision=?2",
+            params![task, revision],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?,
+    ) {
+        return Ok(true);
+    }
+    if carries(folder) || carries(save_target) {
+        return Ok(true);
+    }
+    let mut statement = conn
+        .prepare("SELECT origin_source FROM task_context_entry WHERE task_id=?1")
+        .map_err(storage)?;
+    let origins: Vec<String> = statement
+        .query_map([&task], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    for origin in origins {
+        if source_identity_carries(conn, &origin, target)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Direct mechanical correspondence of one already-claimed use with the
+/// unfinished operations whose current-sweep reconciliation is still walking
+/// (lifecycle §11 R2).
+///
+/// While a reconciliation sweep is incomplete, a covered source may not be
+/// published yet, so the durable `erasure_use_hold` association may not exist
+/// either. The claim's own premise is durable and indexed, so it is compared
+/// directly against each unreconciled operation's protected target instead of
+/// reading the bounded publication as the whole covered set. Finalizing
+/// operations cannot be unreconciled (`validate` enforces the marker
+/// invariant), so every candidate here has readable protected material.
+fn directly_covered_use(
+    conn: &Connection,
+    use_kind: &str,
+    use_id: RawId,
+) -> Result<Option<String>, PreservationTechnicalError> {
+    // Fast skip: with no active/held operation mid-reconciliation, every
+    // covered use was already associated when its page committed.
+    let pending: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
+                 JOIN deletion_operation o ON o.operation_id=r.operation_id
+                 WHERE r.complete=0 AND r.sweep=o.sweep AND o.phase IN ('active','held'))",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if !pending {
+        return Ok(None);
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT o.operation_id FROM deletion_operation o
+             WHERE o.phase IN ('active','held') AND EXISTS
+                 (SELECT 1 FROM deletion_reconciliation r
+                  WHERE r.operation_id=o.operation_id AND r.complete=0)
+             ORDER BY o.operation_id",
+        )
+        .map_err(storage)?;
+    let candidates: Vec<String> = statement
+        .query_map((), |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    drop(statement);
+    for id in candidates {
+        validate(conn, &id)?;
+        let target: Option<String> = conn
+            .query_row(
+                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        // Active/held operations always keep protected material (`validate`);
+        // a missing row is torn state, never a "checked everything" default.
+        let target = target.ok_or_else(corrupt)?;
+        let covered = match use_kind {
+            USE_KIND_INFERENCE_ATTEMPT => {
+                claimed_attempt_covers(conn, &encode_id(use_id), &target)?
+            }
+            USE_KIND_TASK_DELEGATION => {
+                claimed_delegation_covers(conn, &encode_id(use_id), &target)?
+            }
+            _ => return Err(corrupt()),
+        };
+        if covered {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
 /// Whether one already-claimed use was associated with a deletion operation
-/// when the operation's condition committed (lifecycle §11 R2).
+/// whose condition committed before the claim settles (lifecycle §11 R2).
 ///
 /// The hold is the durable correspondence that a current-condition check
 /// cannot provide after the operation completed: it names the claim, not the
@@ -956,17 +1512,44 @@ pub(crate) const USE_KIND_TASK_DELEGATION: &str = "task_delegation";
 /// never becomes a keyword ban. Read inside the adopting boundary's own
 /// transaction; a claim without a row is a genuine "not held" answer (no
 /// sentinel, no cached verdict).
+///
+/// A missing row is not yet the answer while a sweep is still being
+/// reconciled: the claim's own correlation is then checked directly against
+/// the unreconciled operations' targets, and a match is written as the same
+/// keyed `erasure_use_hold` row in the caller's transaction. That closes the
+/// window between the condition commit and the end of the bounded
+/// enumeration without ever consulting a page bound for correctness. The
+/// direct check only considers unfinished operations, so a fresh origin after
+/// completion is never held by a closed operation.
 pub(crate) fn held_use(
     conn: &Connection,
     use_kind: &str,
     use_id: RawId,
 ) -> Result<bool, PreservationTechnicalError> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM erasure_use_hold WHERE use_kind=?1 AND use_id=?2)",
-        params![use_kind, encode_id(use_id)],
-        |row| row.get(0),
+    let held: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM erasure_use_hold WHERE use_kind=?1 AND use_id=?2)",
+            params![use_kind, encode_id(use_id)],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if held {
+        return Ok(true);
+    }
+    let Some(operation) = directly_covered_use(conn, use_kind, use_id)? else {
+        return Ok(false);
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at) VALUES (?1,?2,?3,?4)",
+        params![
+            use_kind,
+            encode_id(use_id),
+            operation,
+            WallClockWithTz::now().to_rfc3339()
+        ],
     )
-    .map_err(storage)
+    .map_err(storage)?;
+    Ok(true)
 }
 
 impl Store {
@@ -1188,16 +1771,6 @@ fn admit_deletion(
             StartTargetedDeletionOutcome::HeldByOperation(record.current)
         });
     }
-    // §4.1 point 4: the first-party path publishes the covered source
-    // correlations already known in this store, enumerated mechanically in
-    // this same transaction. The sealed direct path keeps its caller-provided
-    // list only, so a test seam that names its sources explicitly is never
-    // widened behind its back.
-    let enumerated = if request.is_some() {
-        enumerate_known_sources(tx, material.expose_for_erasure())?
-    } else {
-        Vec::new()
-    };
     let current = DeletionOperationRef {
         operation: DeletionOperationId::from_raw(RawId::new()),
         sweep: DeletionSweepGeneration::from_u64(1),
@@ -1228,10 +1801,26 @@ fn admit_deletion(
         params![id, at],
     )
     .map_err(storage)?;
-    // §4.1 point 4: the enumerated first-party correlations are published in
-    // this same transaction as the operation, the protected material, and the
-    // initial condition.
-    for source in command.known_sources().iter().chain(enumerated.iter()) {
+    // §4.1 point 4: the first-party path initializes the durable reconciliation
+    // cursors and publishes the first bounded page of every known identity
+    // table in this same transaction as the operation, the protected material,
+    // and the initial condition. The page is a work bound, not a correctness
+    // bound: the durable cursors carry the continuation, and completion
+    // refuses while any table is still incomplete. The direct path has no
+    // enumeration to do — its caller-provided sources are its whole scope — so
+    // its cursors commit already complete.
+    let enumerates = request.is_some();
+    insert_reconciliation_rows(tx, &id, 1, !enumerates)?;
+    if enumerates {
+        reconcile_admission_pages(
+            tx,
+            &id,
+            1,
+            material.expose_for_erasure(),
+            DELETION_RECONCILIATION_PAGE_SIZE,
+        )?;
+    }
+    for source in command.known_sources() {
         tx.execute(
             "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
             params![id, encode_id(*source)],
@@ -1317,6 +1906,13 @@ fn completion_summary(
 /// new generation — erasure or verification done for the old sweep never
 /// counts for the new one.
 ///
+/// The reconciliation cursors reset with the generation: the delayed arrivals
+/// that opened this sweep can carry identities the previous walk had already
+/// passed, so the exhaustive walk starts over for the current sweep. Deleting
+/// the old rows and inserting the fresh incomplete ones shares this
+/// transaction, so a crash can never leave a completeness marker attached to
+/// an unwalked generation.
+///
 /// Returns [`None`] when the generation space is exhausted, after marking the
 /// operation `Held(GenerationExhausted)`: an old generation is never reused.
 fn open_next_sweep(
@@ -1358,6 +1954,12 @@ fn open_next_sweep(
         params![id, sweep],
     )
     .map_err(storage)?;
+    tx.execute(
+        "DELETE FROM deletion_reconciliation WHERE operation_id=?1",
+        [id],
+    )
+    .map_err(storage)?;
+    insert_reconciliation_rows(tx, id, next, false)?;
     tx.execute(
         "UPDATE deletion_operation SET sweep=?2,phase='active',hold_reason=NULL WHERE operation_id=?1",
         params![id, next],
@@ -2298,6 +2900,76 @@ impl PreservationRepository for Store {
         .await
     }
 
+    async fn reconcile_deletion_sources(
+        &self,
+        expected: DeletionOperationRef,
+        page_size: u32,
+    ) -> Result<DeletionReconciliationOutcome, PreservationTechnicalError> {
+        if !(1..=100).contains(&page_size) {
+            return Err(PreservationTechnicalError::InvalidLimit);
+        }
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let id = encode_id(expected.operation.as_raw());
+            validate(&tx, &id)?;
+            let row: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(storage)?;
+            let Some((sweep, phase)) = row else {
+                return Ok(DeletionReconciliationOutcome::Missing);
+            };
+            let current = decode_ref(&id, sweep)?;
+            if current != expected {
+                return Ok(DeletionReconciliationOutcome::StaleSweep);
+            }
+            match phase.as_str() {
+                "completed" => return Ok(DeletionReconciliationOutcome::Completed),
+                // The finalizing marker implies a complete walk by invariant;
+                // a step on it has nothing to publish.
+                "finalizing" => return Ok(DeletionReconciliationOutcome::Finalizing),
+                "active" | "held" => {}
+                _ => return Err(corrupt()),
+            }
+            if reconciliation_is_complete(&tx, &id, sweep)? {
+                return Ok(DeletionReconciliationOutcome::Complete);
+            }
+            let exact: Option<String> = tx
+                .query_row(
+                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            // `validate` refuses an active/held operation without protected
+            // material, so the exact target is readable while the walk runs:
+            // reconciliation happens before completion destroys it.
+            let exact = exact.ok_or_else(corrupt)?;
+            let Some(identity) = next_incomplete_identity(&tx, &id, sweep)? else {
+                return Err(corrupt());
+            };
+            // A page was published: report the work, not a completion inferred
+            // from the page shape. The next call observes `Complete` (or the
+            // next page) from the durable cursors, so a caller never reads
+            // "one full page" as "the walk is over".
+            let _table_complete =
+                reconcile_table_page(&tx, &id, sweep, &exact, identity, page_size)?;
+            validate(&tx, &id)?;
+            tx.commit().map_err(storage)?;
+            Ok(DeletionReconciliationOutcome::Advanced)
+        })
+        .await
+    }
+
     async fn begin_deletion_finalizing(
         &self,
         expected: DeletionOperationRef,
@@ -2350,6 +3022,15 @@ impl PreservationRepository for Store {
             let summary = completion_summary(&tx, &id, sweep)?;
             if !summary.all_verified() {
                 return Ok(DeletionFinalizationOutcome::NotVerified(summary));
+            }
+            // The second completion premise is the current sweep's exhaustive
+            // covered-source reconciliation: while any known identity table is
+            // still being walked, the already-claimed in-flight uses are not
+            // all durably associated, so no completion candidate may be
+            // entered (§4.1 point 4, §18). Fail closed with the explicit
+            // outcome; a page bound never decides completion.
+            if !reconciliation_is_complete(&tx, &id, sweep)? {
+                return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
             }
             // `validate` refuses an active operation without protected
             // material, so the exact target is present while the sweep is
@@ -2446,6 +3127,12 @@ impl PreservationRepository for Store {
                 // target away (§12).
                 return Ok(DeletionFinalizationOutcome::UnverifiableMaterial);
             };
+            // The completion commit re-reads the exhaustive-walk premise even
+            // though the finalizing marker implies it: the completion premise
+            // is never taken from the marker alone.
+            if !reconciliation_is_complete(&tx, &id, sweep)? {
+                return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
+            }
             // §12 step 1, inside the commit transaction: the current
             // generation must not have grown a delayed arrival or remainder
             // after verification. A remainder returns the operation to
@@ -2483,6 +3170,14 @@ impl PreservationRepository for Store {
                 [&id],
             )
             .map_err(storage)?;
+            // The reconciliation cursors are operation-lifetime correlation
+            // state and share the completion wipe; the completed-operation
+            // invariant keeps zero rows.
+            tx.execute(
+                "DELETE FROM deletion_reconciliation WHERE operation_id=?1",
+                [&id],
+            )
+            .map_err(storage)?;
             // §12 step 3: the canonical rows must no longer be able to
             // reconstruct the target.
             let recoverable: bool = tx
@@ -2490,6 +3185,7 @@ impl PreservationRepository for Store {
                     "SELECT EXISTS(SELECT 1 FROM deletion_search_material WHERE operation_id=?1)
                          OR EXISTS(SELECT 1 FROM deletion_semantic_hint WHERE operation_id=?1)
                          OR EXISTS(SELECT 1 FROM erasure_condition_source WHERE operation_id=?1)
+                         OR EXISTS(SELECT 1 FROM deletion_reconciliation WHERE operation_id=?1)
                          OR EXISTS(SELECT 1 FROM deletion_request r WHERE r.request_id=?2 AND r.exact_text IS NOT NULL)",
                     params![id, request_id],
                     |r| r.get(0),
@@ -2689,10 +3385,11 @@ impl Store {
     ///
     /// Production reaches this shape exactly when the sweep counter cannot
     /// advance (`sweep.checked_add(1)` overflows), so the fixture moves the
-    /// operation, its current condition, its source correlations, and its
-    /// participant rows to the maximum sweep together and records the hold
-    /// class. The canonical store then refuses every lifecycle change for it
-    /// (`Resume` included), which is what fail-closed recovery must observe.
+    /// operation, its current condition, its source correlations, its
+    /// reconciliation cursors, and its participant rows to the maximum sweep
+    /// together and records the hold class. The canonical store then refuses
+    /// every lifecycle change for it (`Resume` included), which is what
+    /// fail-closed recovery must observe.
     ///
     /// # Errors
     ///
@@ -2729,6 +3426,11 @@ impl Store {
             .map_err(storage)?;
             tx.execute(
                 "UPDATE deletion_participant SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
+                params![id, i64::MAX, sweep],
+            )
+            .map_err(storage)?;
+            tx.execute(
+                "UPDATE deletion_reconciliation SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
                 params![id, i64::MAX, sweep],
             )
             .map_err(storage)?;
