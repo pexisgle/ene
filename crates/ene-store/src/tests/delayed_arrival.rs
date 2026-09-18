@@ -2116,15 +2116,20 @@ async fn an_observation_body_covered_at_mint_is_published_and_held() {
         .unwrap()
         .task;
     // A clean source path: neither the purpose nor the attempt target
-    // carries the target, so only the receiving-boundary body check can
-    // associate the execution.
+    // carries the target. Admission still associates the unsealed read/list
+    // execution; the receiving boundary then publishes the occurrence when
+    // the observed body itself is covered.
     let source = std::env::temp_dir()
         .join("ene-stage6-observation-clean/source.txt")
         .to_string_lossy()
         .into_owned();
     let attempt = claim_read_attempt(&store, task, delegation, &source).await;
     let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
-    assert_eq!(delegation_hold_rows(&store, delegation), 0);
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        1,
+        "an unsealed body-observing Action is associated at admission by execution identity"
+    );
 
     let observation = record_observation(
         &store,
@@ -2335,17 +2340,17 @@ async fn an_observation_path_covered_after_admission_is_published_and_held() {
         .unwrap()
         .task;
     // The producing attempt's resolved target path carries the target, but
-    // the occurrence row does not exist when admission runs: the admission
-    // survey cannot see it. The receiving boundary must still check the
-    // recorded path, or the consuming turn's claim would pass the data-use
-    // gate and a delayed paraphrase could be persisted after completion.
+    // the occurrence row does not exist when admission runs. The unsealed
+    // read/list Action is still associated by execution identity; the
+    // receiving boundary must also publish the recorded path so a consuming
+    // claim's data_use names a covered source.
     let source = workspace_source(&files, "the private key.txt", "ordinary notes");
     let attempt = claim_read_attempt(&store, task, delegation, &source).await;
     let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
     assert_eq!(
         delegation_hold_rows(&store, delegation),
-        0,
-        "the admission survey cannot see a row that does not exist yet"
+        1,
+        "an unsealed body-observing Action is associated at admission; the occurrence row is not required"
     );
 
     let observation = record_observation(

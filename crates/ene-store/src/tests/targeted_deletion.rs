@@ -142,6 +142,39 @@ async fn append_role(
     }
 }
 
+/// Inserts one History row without the production append gate. A current
+/// condition would otherwise hold a target-bearing Owner append; NextSweep
+/// cursor tests still need a late row to exist.
+fn insert_history_bypassing_erasure(
+    store: &Store,
+    companion: CompanionId,
+    generation: PresenceGeneration,
+    body: &str,
+) -> RawId {
+    let message = RawId::new();
+    let round = RawId::new();
+    let at = fixture_clock();
+    let guard = store.conn.lock().expect("store lock");
+    guard
+        .execute(
+            "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL, NULL, NULL, NULL)",
+            rusqlite::params![
+                crate::codec::encode_id(message),
+                crate::codec::encode_id(companion.as_raw()),
+                crate::codec::encode_id(round),
+                "owner",
+                body,
+                "en",
+                at.to_rfc3339(),
+                at.to_rfc3339_utc(),
+                i64::try_from(generation.as_u64()).expect("generation fits"),
+                round.as_uuid().as_hyphenated().to_string(),
+            ],
+        )
+        .expect("the unguarded History insert must commit");
+    message
+}
+
 async fn record_activity(store: &Store, companion: CompanionId, body: &str) -> ActivityId {
     let task = TaskId::generate();
     record_activity_id(
@@ -424,10 +457,12 @@ async fn learning_erasure_removes_every_revision_and_the_derived_index() {
         "the derived index must not answer with an erased recognition"
     );
     // The History source carrying the target is the Companion participant's
-    // scope; both participants together must leave no exact remainder.
+    // scope; both participants together must leave no exact remainder. The
+    // same current condition is reused: a second admission of the same text
+    // would be HeldByOperation while the first is unfinished.
     drive(
         &CompanionErasureParticipant::new(store.clone()),
-        admit_owner(&store, target, ParticipantOwnerRef::Companion).await,
+        condition,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -500,10 +535,11 @@ async fn a_memory_grounded_only_on_erased_evidence_is_erased_with_it() {
         "the current recognition is grounded only in erased evidence"
     );
     // Erasing the History source is the Companion participant's scope; the
-    // two participants together leave no exact remainder.
+    // two participants together leave no exact remainder. Reuse the current
+    // condition: a second admission of the same text is HeldByOperation.
     drive(
         &CompanionErasureParticipant::new(store.clone()),
-        admit_owner(&store, target, ParticipantOwnerRef::Companion).await,
+        condition,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -581,9 +617,10 @@ async fn a_summary_pinning_a_covered_source_is_erased_with_it() {
     // The operation's covered sources name the pinned History turn: the
     // durable correlation A4 populates. The mechanical target text does not
     // occur in either Summary.
+    let condition = admit_owner(&store, target, ParticipantOwnerRef::Learning).await;
     let fact = drive_with_sources(
         &participant,
-        admit_owner(&store, target, ParticipantOwnerRef::Learning).await,
+        condition,
         ParticipantOwnerRef::Learning,
         target,
         vec![pinned],
@@ -600,7 +637,7 @@ async fn a_summary_pinning_a_covered_source_is_erased_with_it() {
     // Erasing the pinned History turn is the Companion participant's scope.
     drive(
         &CompanionErasureParticipant::new(store.clone()),
-        admit_owner(&store, target, ParticipantOwnerRef::Companion).await,
+        condition,
         ParticipantOwnerRef::Companion,
         target,
     )
@@ -850,15 +887,15 @@ async fn a_new_sweep_re_walks_instead_of_inheriting_a_verified_claim() {
 
     // A delayed target-bearing row arrives after the sweep verified; a demand
     // for the next generation must walk from the head and erase it instead of
-    // reporting the previous sweep's verified state.
-    append_role(
+    // reporting the previous sweep's verified state. Production append would
+    // hold while the condition is current, so the fixture writes the row
+    // through the table the participant actually sweeps.
+    insert_history_bypassing_erasure(
         &store,
         companion,
         generation,
-        HistoryRole::Owner,
         &format!("late arrival {target}"),
-    )
-    .await;
+    );
     let second = drive(
         &participant,
         next_sweep(&store, first_condition).await,
@@ -1051,9 +1088,10 @@ async fn erased_body_bytes_do_not_survive_in_the_raw_database_file() {
     }
 
     let participant = CompanionErasureParticipant::new(store.clone());
+    let condition = admit_owner(&store, canary, ParticipantOwnerRef::Companion).await;
     let fact = drive(
         &participant,
-        admit_owner(&store, canary, ParticipantOwnerRef::Companion).await,
+        condition,
         ParticipantOwnerRef::Companion,
         canary,
     )
@@ -1063,6 +1101,14 @@ async fn erased_body_bytes_do_not_survive_in_the_raw_database_file() {
         ParticipantCompletionStatus::Verified,
         "the bounded erase pass must verify the canary is gone"
     );
+    super::preservation::complete_via_a5(
+        &store,
+        ene_preservation::DeletionOperationRef {
+            operation: condition.operation,
+            sweep: condition.sweep,
+        },
+    )
+    .await;
     assert!(
         !raw_file_contains(&path, canary),
         "an erased body must not survive in the raw database file"
