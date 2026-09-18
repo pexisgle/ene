@@ -675,6 +675,41 @@ impl ClientIncarnationParticipant {
             )
         }
     }
+
+    async fn await_client_result(
+        registry: &ClientTransientRegistry,
+        identity: RawId,
+        condition: ErasureConditionRef,
+        owner: ParticipantOwnerRef,
+        connection: ConnectionWireId,
+    ) -> ParticipantCompletionFact {
+        #[cfg(test)]
+        let limit = registry.wait_limit();
+        #[cfg(not(test))]
+        let limit = CLIENT_ERASURE_WAIT;
+        let wait = registry.wait(identity, condition);
+        let outcome = match tokio::time::timeout(limit, wait).await {
+            Ok(outcome) => outcome,
+            Err(_elapsed) => {
+                // The wait bound elapsed: drop the pending demand so a later
+                // answer is not adopted against a condition this pass no
+                // longer owns.
+                registry.note_connection_ended(&connection);
+                ClientErasureWait::Abandoned
+            }
+        };
+        match outcome {
+            ClientErasureWait::Answered(result) => Self::completion(condition, owner, &result),
+            // Disconnect, replacement, or silence is not a local-erasure
+            // proof: the participant stays held and re-drivable.
+            ClientErasureWait::Abandoned => ParticipantCompletionFact::held(
+                condition,
+                owner,
+                ParticipantHoldClass::Unavailable,
+                WallClockWithTz::now(),
+            ),
+        }
+    }
 }
 
 impl ErasureParticipant for ClientIncarnationParticipant {
@@ -707,6 +742,33 @@ impl ErasureParticipant for ClientIncarnationParticipant {
                 .store
                 .pause_client_demand_if_armed_for_tests()
                 .await;
+            let Some(connection) = self.registry.current_connection(self.identity) else {
+                // Unreachable: never presumed erased (§8.1).
+                return ParticipantCompletionFact::held(
+                    condition,
+                    owner,
+                    ParticipantHoldClass::Unavailable,
+                    WallClockWithTz::now(),
+                );
+            };
+            // A demand already on this connection's wire must reach `wait`
+            // without an intervening store await: the retry is the waiter for
+            // an already-issued side effect, and a connection end has to land
+            // as Abandoned rather than minting a replacement undelivered
+            // demand. Currentness is the mint gate, not the wait gate.
+            if self
+                .registry
+                .delivered(self.identity, condition, connection)
+            {
+                return Self::await_client_result(
+                    &self.registry,
+                    self.identity,
+                    condition,
+                    owner,
+                    connection,
+                )
+                .await;
+            }
             // The durable Running mark may already exist; the wire demand is
             // the non-rollbackable side effect. Re-read currentness after any
             // park and before minting the in-process/wire demand so a
@@ -727,15 +789,6 @@ impl ErasureParticipant for ClientIncarnationParticipant {
                     WallClockWithTz::now(),
                 );
             }
-            let Some(connection) = self.registry.current_connection(self.identity) else {
-                // Unreachable: never presumed erased (§8.1).
-                return ParticipantCompletionFact::held(
-                    condition,
-                    owner,
-                    ParticipantHoldClass::Unavailable,
-                    WallClockWithTz::now(),
-                );
-            };
             self.registry.begin(self.identity, condition, connection);
             if !self
                 .registry
@@ -755,32 +808,8 @@ impl ErasureParticipant for ClientIncarnationParticipant {
                     WallClockWithTz::now(),
                 );
             }
-            #[cfg(test)]
-            let limit = self.registry.wait_limit();
-            #[cfg(not(test))]
-            let limit = CLIENT_ERASURE_WAIT;
-            let wait = self.registry.wait(self.identity, condition);
-            let outcome = match tokio::time::timeout(limit, wait).await {
-                Ok(outcome) => outcome,
-                Err(_elapsed) => {
-                    // The wait bound elapsed: drop the pending demand so a later
-                    // answer is not adopted against a condition this pass no
-                    // longer owns.
-                    self.registry.note_connection_ended(&connection);
-                    ClientErasureWait::Abandoned
-                }
-            };
-            match outcome {
-                ClientErasureWait::Answered(result) => Self::completion(condition, owner, &result),
-                // Disconnect, replacement, or silence is not a local-erasure
-                // proof: the participant stays held and re-drivable.
-                ClientErasureWait::Abandoned => ParticipantCompletionFact::held(
-                    condition,
-                    owner,
-                    ParticipantHoldClass::Unavailable,
-                    WallClockWithTz::now(),
-                ),
-            }
+            Self::await_client_result(&self.registry, self.identity, condition, owner, connection)
+                .await
         })
     }
 }
