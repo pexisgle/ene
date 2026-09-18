@@ -4,6 +4,8 @@
 
 この文書は Stage 7 の**実装範囲、PR 分割、依存関係、検証 gate**を管理します。製品 behavior は [requirements](../../requirements/README.md)、受け入れ範囲は [acceptance](../../requirements/acceptance.md)、authority と状態の意味は [design](../../design/README.md) を優先します。計画の存在は着手・完了を意味しません。
 
+Stage 7 に向けて過去の設計文書に置かれた application / crate / module の名称、分割例、UI・windowing・rendering の技術候補は、要件そのものではありません。A0 では、それらを維持することを目的にせず、現在の要件と上位設計から必要な責務・障害境界・依存方向を再導出します。既存案が最小で適切なら維持し、不必要な分割・名前・依存・process は削り、より単純な構成が適切なら対応する design を実装前に更新します。
+
 ## 1. 目的と開始条件
 
 Stage 0〜6 の機能を、初回セットアップから日常の会話・管理・障害復旧まで使える first-party GUI に結び、Milestone 1 を完了します。CLI の一覧を画面へ貼り付けるだけでなく、実際の GUI 入力・提示・確認を通して既存の安全性を維持することが目的です。
@@ -21,54 +23,161 @@ Stage 0〜6 の機能を、初回セットアップから日常の会話・管�
 
 Stage 8 以降の schedule、backup / restore 本体、Host の OS 自動起動、Voice、Observation、group conversation、Global Memory、skill 自動生成、長期 emotion / relationship、remote Client、character editor / package distribution、multi-provider / automatic fallback は追加しません。同梱 `ene` の静的定義・表示アセットを使う最小経路は必要ですが、汎用の配布・編集基盤を先取りしません。
 
-## 2. 引き継ぐ境界と実装方針
+## 2. 固定する契約と、再評価する実装構造
 
-Stage 6 統合 base で次の接続点を再確認してから変更します。型の正確な形は source / rustdoc を読み、Stage 文書にコピーして固定しません。
+Stage 7 は Stage 0〜6 の domain authority と安全性契約を再設計しません。一方で、それを GUI へ接続するための**具体的な名前・crate 数・application 数・process 数・library 選択は A0 の結論が出るまで固定しません**。
 
-| 接続点 | Stage 7 で行うこと | 境界の参照先 |
-|---|---|---|
-| `apps/ene-ctl/src/{client,device,incarnation}` の接続・認証・相関処理 | CLI と GUI で必要な部分だけ共有化し、既存の lifecycle 回帰を維持する | [IPC](../../design/concrete/host-client-ipc.md)、[crate 分割](../../design/concrete/crate-module-decomposition.md) |
-| `ene-api` の会話、History、management、Task query / resume | GUI から同じ owner へ接続する。構造化項目が不足するときだけ owner query と DTO を追加する | IPC §18、[interface boundaries](../../design/concrete/interface-boundaries.md) |
-| usage query と cap command | Reported / Unknown / Reserved、価格 snapshot、cap revision をそのまま表示・比較する | [usage-cost-cap](../../design/concrete/usage-cost-cap.md) §16–§17 |
-| serving Host の削除確認、status、driver、Client erasure | GUI に確認・状態確認・再開と local erasure を接続する | [deletion lifecycle](../../design/concrete/targeted-deletion-lifecycle.md) §8–§15、IPC §17–§18 |
-| Host-local の setup / credential / pairing | CLI の秘密値手渡しを GUI の完成経路と見なさず、保護された初期設定経路を具体化する | IPC §18.1、interface boundaries K-C |
-| `apps/ene-stage`、`ene-stage-ui`、`ene-vrm` の配置案 | 実際に使う GUI と描画 adapter だけを追加する。空 crate 一式を作らない | crate 分割 §3、[runtime topology](../../design/architecture/runtime-topology.md) |
+### 固定するもの
 
-UI は Host の DB や domain crate を直接読まず、CLI の表示文や `ViewSection.body` を解析して制御状態を推測しません。Host 発行の view / revision / cursor は表示と照合の前提であり、Client の authority ではありません。GUI 専用 DB、長期的な会話・Memory cache、第二の permission / presence / accounting registry は作りません。
+- Host が durable domain state と最終 authority を持ち、Client の表示状態を master にしない。
+- connection / incarnation / presence / presentation を同一視しない。
+- credential raw value を通常の Host↔Client payload、DB、ログ、エラーへ流さない。
+- high-privilege の最終確認を remote input、LLM、tool、plugin が代理しない。
+- UI / renderer の障害で Host-only Task や text / management の利用を壊さない。
+- usage / cost / cap、Targeted Deletion、Task recovery 等は既存 semantic owner の query / command / currentness を使う。
+- GUI 専用の authoritative DB、permission registry、presence registry、accounting registry を作らない。
+- acceptance と performance gate を実装都合で弱めない。
+
+### A0 で再評価するもの
+
+- 製品版 Client application の名称と数。
+- library crate / adapter crate / module の境界と名称。新しい crate を作らない選択肢も含む。
+- text GUI と avatar renderer を同一 process にするか分離するか、その寿命と supervision。
+- UI toolkit、windowing、graphics、VRM load / animation、renderer-local IPC 等の依存ライブラリ。
+- current CLI の transport / auth / request-correlation 実装を共有・移動・再構成するか。
+- design の target workspace tree にある未実装 component 名が今も適切か。
+- platform-specific adapter を共通化する範囲と、Windows / KDE Wayland で分ける範囲。
+
+既存の source は動作済みの制約と回帰を理解するために読みますが、既存の名前やファイル境界を新構成へ保存すること自体は目的にしません。逆に、意味の変わらない既存実装を理由なく書き直すことも目的にしません。変更は、責務、依存、障害分離、検証可能性、保守性、build / runtime cost の改善で説明できる場合だけ行います。
 
 ## 3. PR 分割と各 slice の gate
 
-各 ID は実装作業の参照名であり、新しい要件 ID ではありません。1 slice が大きくなる場合も、producer → consumer → production-path test をレビュー可能な PR に分け、未配線のまま slice 完了にしません。
+各 ID は実装作業の参照名であり、新しい要件 ID ではありません。A0 で具体的な構成を確定した後は、その構成に合う名前で実装 PR を切ります。この文書の slice 名を Rust の crate / module / binary 名へ機械的に写しません。
 
-### A0: GUI 着手前の契約具体化と実機 probe
+### A0: Stage 7 実装アーキテクチャの再導出
 
-**成果物**: 下表の判断を対応する design に反映する docs-only PR と、両 OS の小さな実行可能 probe / 検証記録。調査結果だけで製品機能の実装済み扱いにはしません。
+**目的**: requirements と上位 design から Stage 7 に必要な責務を再導出し、既存の命名・分割・技術候補を含めて比較し直します。最終成果物は production code ではなく、選定根拠を反映した design docs と、技術的な不確実性を潰す小さな probe / 検証記録です。
 
-| 先に決めること | 判断・検証内容 | 反映先 |
-|---|---|---|
-| trusted Host-local setup / management | 未ペアリングから起動できる入口、Host が管理する第一者画面の識別、確認対象・前提への束縛、秘密入力から credential owner への経路を具体化する。同一 UID / SameMachine / paired / 自己申告の `trusted` flag だけで最終確認を許可しない。認証秘密の平文は保護された Host-local 設定経路内だけで扱い、通信電文の payload に載せない | IPC §18.1、interface boundaries K-C、必要な persistence 境界 |
-| UI と avatar の障害分離 | 推奨する実装案は、text / management 側とは別の optional renderer process。同じ実行ファイルの別 mode でもよい。起動・停止・異常終了、bounded な表示指示、戻りの故障通知、管理画面が GPU 初期化を待たない経路を具体化する。単なる別 thread や `catch_unwind` を process crash 隔離の証明にしない | runtime topology、[入出力・提示](../../design/subsystems/client-presence-io-observation.md)、crate 分割 |
-| UI / renderer backend | 既存の Slint UI / VRM adapter 案を出発点に、採用 version と backend を決める。日本語 IME、透過、drag / resize、非表示からの再表示、入力領域、focus を Windows / KDE Wayland で試す。native Wayland / XWayland のどちらを使ったか明記し、別 session の成功を KDE Wayland の証拠にしない | crate 分割の adapter 選定箇所と probe PR |
-| 同梱 `ene` と VRM | 静的定義、VRM 1.0 アセット、利用・同梱条件、必要な material / expression / animation 機能を確認する。不足は具体的な取得・作成作業として Issue 化し、一般モデルや placeholder の表示で `ene` 完了としない | [character distribution](../../design/subsystems/character-distribution.md) の静的供給境界と asset の所在 |
-| 測定と受け入れの実行環境 | §5–§6 のテスト割り当て、実機、CPU 百分率の分母、メモリ集計、計測区間を固定する。必要な依存・アセット・配布物の license とビルド再現性も確認する | test / probe PR、必要な設計箇所 |
+#### A0-1: 必要な runtime / ownership boundary
 
-特に一般的な window API の呼出しが OS ごとに同じ効果を持つとは仮定しません。例えば [winit 0.30.13 の `set_visible`](https://docs.rs/winit/0.30.13/winit/window/struct.Window.html#method.set_visible) は Wayland を unsupported としています。これは winit 採用の指定ではなく、画面機能を adapter と実機で確認する理由です。
+最初に framework や crate 名を選ばず、次を満たす最小構成を導出します。
 
-**gate**: setup の trust / secret 経路と UI の障害境界が design 上で説明でき、各採用 backend の probe 結果があること。未決の項目は依存する slice を止めますが、独立した Client 共通化やテスト準備まで止めません。契約の矛盾はこの段階で解消し、実装者のローカル判断へ持ち越しません。
+- fresh install から trusted first-party setup を開始できる。
+- text conversation / management は avatar rendering 失敗から独立して使える。
+- Host の domain authority を Client へ移さない。
+- credential の raw value を protected boundary 外へ不要に露出しない。
+- GUI event loop を Host I/O、provider wait、renderer I/O で block しない。
+- Client が Targeted Deletion の local participant として、自身が実際に保持する一時本文を消去できる。
+- process / component の再起動で古い command、presentation、conversation、Task effect を replay しない。
 
-### A1: 最小の共通 Client 接続基盤
+ここから必要な executable / process / library boundary を決めます。process を増やすことも減らすことも目的にしません。
 
-**範囲**: `ene-ctl` の transport / framing / authentication / incarnation / request correlation / erasure 応答のうち GUI と共有する実装を、小さな Client 側 library へ抽出します。配置は A0 で crate 分割へ反映し、CLI 引数処理や画面 rendering、Host の意味判断を混ぜません。
+#### A0-2: 命名と code ownership
 
-- GUI の event loop を接続待ち・provider 待ちで塞がず、応答と unsolicited fact / deletion demand を継続して受け取れるようにする。
-- connection / incarnation / presence を混同せず、古い connection の入力・receipt・cursor・選択状態を継承しない。再接続で未送信本文や変更 command を自動 replay しない。
-- bounded queue と cancellation を扱い、同じ有効区間での明示 retry だけが元の command identity を再利用する。読み取りと mutation の retry を一律に扱わない。
+採用する各 application / crate / module について、名前を先に決めず、以下を説明してから命名します。
 
-**gate**: 実 socket / named pipe で CLI 回帰が通り、GUI 用 adapter でも接続置換、応答相関、遅い受信側、待機中の erasure demand を検証できること。新規の汎用 session manager や第二の currentness owner は不要です。
+1. 何を owner とするか、または owner を持たない adapter / composition なのか。
+2. 寿命は何に結び付くか。
+3. どの依存方向を許可するか。
+4. 何が壊れても巻き込んではならないか。
+5. public boundary を独立させる価値があるか。
+6. 単一 module のままでは不足する理由があるか。
+
+既存 design の未実装 crate 名は候補であり、名前を維持するためだけに crate を作りません。逆に、単なるファイル整理を理由に新しい crate を増やしません。A0 の結論が current crate decomposition と異なる場合は、production code より先に design を修正します。
+
+#### A0-3: dependency / framework 選定
+
+UI、window、graphics、VRM、animation、process-local communication など、Stage 7 で新たに必要になる外部依存は白紙から比較します。現在または過去の実装で使われていた library を既定値にしません。
+
+最低限、各候補について次を比較します。
+
+- Milestone 1 の機能充足。特に transparent desktop body、drag / resize / hide / restore、focus、IME、HiDPI。
+- Windows 11 と KDE Wayland での実装可能性。API の存在ではなく、対象 backend 上の実挙動。
+- Rust integration と unsafe / native dependency の隔離。
+- binary size、compile cost、idle CPU / memory、rendering overhead。
+- crash / hang isolation を妨げないこと。
+- maintenance 状態、release cadence、platform support、license / distribution 条件。
+- testability と headless test / real-desktop test の分離。
+- 必要な機能だけを使えるか。巨大な framework を convenience のためだけに導入しないこと。
+- 独自実装を選ぶ場合、その保守コストが dependency 導入より本当に小さいか。
+
+候補を最低数揃えること自体は目的にしません。明らかに不適格な候補を数合わせで比較せず、必要なら現在の公式資料を調査して、最も単純で要件を満たす構成を選びます。選定結果には、採用理由だけでなく有力な不採用案と不採用理由を残します。
+
+#### A0-4: trusted Host-local setup / management
+
+未ペアリングの fresh install から、Host が管理する第一者 UI で setup / high-privilege confirmation / credential registration を行う境界を具体化します。
+
+- SameMachine、同一 UID、paired、Client の自己申告だけを trust の根拠にしない。
+- arbitrary local process が trusted surface を偽装できない。
+- remote Client、LLM、Computer Use、tool、plugin が final confirmation を代理できない。
+- raw credential は Owner input から credential owner の protected store までの必要最小区間だけに存在する。
+- setup wizard の page や boolean を domain authority にせず、各 owner の durable fact から setup readiness を導出する。
+- credential 登録だけでは provider call を開始せず、assignment / consent 等の既存前提を満たして初めて送信可能にする。
+
+既存の local control mechanism を再利用できるかは調査しますが、用途の異なる endpoint を名前の近さだけで万能 management channel に拡張しません。
+
+#### A0-5: avatar / text failure boundary
+
+acceptance が要求する「avatar が停止しても chat / settings が使える」を、実際の crash / hang / GPU initialization failure まで含めて満たす境界を決めます。
+
+- text / management 側が renderer の起動完了や返答を同期的に待たない。
+- renderer に conversation、Memory、Task body、credential、management authority を不要に渡さない。
+- renderer へは表示に必要な projection だけを渡す。
+- 頻繁な ephemeral update は bounded に扱い、古い update を捨てられるようにする。
+- renderer restart を domain replay の契機にしない。
+- avatar hide / renderer exit を Companion stop や Task cancel と同一視しない。
+- process 分離を採用しない場合でも、acceptance が要求する故障分離をどう証明するか明示する。
+
+#### A0-6: 実機 probe と測定前提
+
+production 実装前に、採用候補で不確実な platform behavior を最小 probe で確認します。
+
+対象:
+
+- Windows 11 x86-64
+- NixOS 26.11 x86-64 / KDE Wayland
+
+最低限確認するもの:
+
+- transparent window
+- drag / resize
+- hide / restore
+- focus / pointer / keyboard
+- 日本語 IME composition
+- HiDPI / scaling
+- VRM 1.0 load と transparent rendering
+- idle / speaking の最小 animation
+- renderer crash / hang / GPU initialization failure
+- renderer 不在時の chat / management / Task cancel / recovery
+
+Linux は実際に使用した session / backend を記録します。別 backend や別 session の成功を KDE Wayland の証拠にしません。library の API documentation だけで実機対応済みとは判定しません。
+
+**A0 gate**:
+
+- Stage 7 の application / process / crate / module boundary と命名が、要件から説明できる。
+- 新規外部依存の選定理由と主要な不採用案が記録されている。
+- trust / secret / renderer failure boundary が design に反映されている。
+- 対象 OS で、production 実装を左右する platform uncertainty の probe 結果がある。
+- current design と結論が異なる箇所は design が先に更新されている。
+- 未決事項を「実装しながら決める」として依存 slice へ押し出していない。
+
+### A1: Client 接続と event delivery の最小共有境界
+
+A0 で確定した構成に従い、GUI が必要とする Host 接続、認証、request / response correlation、unsolicited fact、Client local erasure を実装します。
+
+current CLI の実装は重要な回帰資料ですが、「CLI と GUI で共有 library を作る」ことを先に結論にしません。既存コードの抽出、内部 module の移動、adapter の分離、既存実装の保持のいずれが最小かを A0 の責務境界に照らして選びます。
+
+- GUI event loop を接続待ち・provider 待ちで塞がない。
+- connection / incarnation / presence を混同しない。
+- 古い connection の入力・receipt・cursor・選択状態を継承しない。
+- 再接続で未送信本文や mutation command を自動 replay しない。
+- bounded queue と cancellation を持ち、遅い Client が Host-only Task を止めない。
+
+**gate**: 実 socket / named pipe で既存 Client 回帰が維持され、GUI 側でも connection replacement、response correlation、slow consumer、待機中の deletion demand を検証できること。
 
 ### B: 初回セットアップからテキスト会話までの縦断 GUI
 
-**範囲**: `apps/ene-stage` と必要な UI adapter を追加し、avatar なしで操作できる最初の製品経路を通します。A0 の保護された入口と A1 を使用します。
+A0 で決めた first-party Client 構成で、avatar に依存せず最初の製品経路を通します。
 
 1. 新規 data directory から、言語・同梱 `ene`・送信データと費用の説明・credential 登録・model 割り当てまでを案内する。Host の明示起動とローカル接続の準備も扱い、手動の環境変数設定や DB 編集を通常の完了手順にしない。
 2. credential 登録と provider 利用への同意・割り当てを分ける。登録だけでは provider 呼出しを行わず、初期設定の失敗や再起動で暗黙に同意を補わない。
@@ -99,11 +208,11 @@ Targeted Deletion は通常の忘却と分け、request → Host-local 最終確
 
 ### D: VRM desktop avatar と text fallback
 
-**範囲**: A0 で確定した静的アセット供給と障害境界を使い、同梱 `ene` を表示します。まず透明表示・移動・resize・非表示/再表示を通し、次に既存の応答状態に従う待機/発話中の表情・仕草を接続します。新しい感情推論や Voice pipeline は作りません。
+**範囲**: A0 で選定した runtime / dependency / asset 境界を使い、同梱 `ene` を表示します。まず透明表示・移動・resize・非表示/再表示を通し、次に既存の応答状態に従う待機/発話中の表情・仕草を接続します。新しい感情推論や Voice pipeline は作りません。
 
 renderer に渡す情報は必要なアセット参照と表示指示に限定し、会話本文、Memory、API key、management authority を渡しません。avatar の非表示・終了を Companion 停止や Task cancel と同一視せず、renderer 再起動で古い会話/操作を replay しません。
 
-**gate**: acceptance §2 を両実 desktop で通すこと。renderer の異常終了・hang・初期化失敗を注入しても、text 入力、Task cancel、設定/復旧が利用できることを確認します。アバターの矩形や透明部分がデスクトップ入力を不必要に奪わず、操作に応じて移動・resize できることを実測します。CLI が生存しているだけでは GUI fallback の合格にしません。
+**gate**: acceptance §2 を両実 desktop で通すこと。renderer の異常終了・hang・初期化失敗を注入しても、text 入力、Task cancel、設定/復旧が利用できることを確認します。アバターの矩形や透明部分がデスクトップ入力を不必要に奪わず、操作に応じて移動・resize できることを実測します。別の Client surface が生存しているだけでは GUI fallback の合格にしません。
 
 ### E: GUI の提示・一時データ・障害経路の横断検証
 
@@ -125,21 +234,22 @@ renderer に渡す情報は必要なアセット参照と表示指示に限定�
 ## 4. 依存順と並列化
 
 ```text
-A0 の共通境界確定 → A1 → B → C1 ─┐
-                           ├→ C2 ─┼→ E → F
-                           └→ C3 ─┤
-A0 の描画/asset gate ────────→ D ──┘
+A0 architecture / technology decision
+        ├→ A1 → B → C1 ─┐
+        │          ├→ C2 ─┼→ E → F
+        │          └→ C3 ─┤
+        └────────────→ D ──┘
 ```
 
-A1 の純粋な抽出・既存テストは A0 と並行可能です。D の renderer 単体は A0 の描画 gate 後に進められますが、製品への応答状態接続は B の経路確定を待ちます。E / F の harness と計測準備は最初から並行し、完成済み slice から順に検証を追加します。
+A0 の調査中でも、既存 contract の回帰 test と acceptance / performance harness の準備は並行できます。ただし、新しい public boundary、crate、binary、framework を A0 の結論より先に既成事実として追加しません。
 
-C1 / C2 / C3 は異なる owner と画面に分け、共通 Client API・DTO・schema が確定した範囲だけ並列化します。同じ transport loop、Host-local trust boundary、schema version、共有 view を別 branch で同時に再設計しません。共通 prerequisite は先に取り込み、stack の base / head と担当範囲は PR 本文で管理します。
+C1 / C2 / C3 は異なる owner と画面に分け、共通 Client boundary・DTO・schema が確定した範囲だけ並列化します。同じ transport loop、Host-local trust boundary、schema version、共有 view を別 branch で同時に再設計しません。共通 prerequisite は先に取り込み、stack の base / head と担当範囲は PR 本文で管理します。
 
 ## 5. acceptance と証拠の対応
 
 | acceptance | 主担当 | Stage 7 で追加する first-party 証拠 |
 |---|---|---|
-| §1: セットアップと最初の会話 | B | 新規環境から GUI だけで同意・登録・割り当て・会話。登録のみでは送信ゼロ。日英切り替えと再起動後の履歴 |
+| §1: セットアップと最初の会話 | A0 / B | 新規環境から GUI だけで同意・登録・割り当て・会話。登録のみでは送信ゼロ。日英切り替えと再起動後の履歴 |
 | §2: Desktop Body | A0 / D | 実 desktop の同梱 `ene`、透過・移動・resize・非表示・待機/応答、renderer 故障中の text / management |
 | §3.1–§3.10: Memory | C1 | 会話由来の形成・訂正・状況変化・想起・統合・通常忘却と、scope / importance / 根拠 / revision の GUI 確認 |
 | §3.11–§3.12: Targeted Deletion | C3 / E | GUI での要求・信頼された確認・状態/復旧、GUI 一時コピーの消去、並行形成/遅延結果からの非復活 |
@@ -159,8 +269,8 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 
 | 項目 | gate と記録 |
 |---|---|
-| idle CPU | セットアップ後・推論なしの連続5分間で、全 ene process の平均 CPU 使用率が10%以下。Host、text GUI、renderer、起動した補助 process を計上し、process CPU time の生値と使用率の分母を記録する |
-| resident memory | 同じ待機区間で Host と全 Client process の合計が2 GiB以下。OS ごとの resident 指標、集計方法、時系列と最大値を記録し、renderer を除外しない |
+| idle CPU | セットアップ後・推論なしの連続5分間で、全 ene process の平均 CPU 使用率が10%以下。Host、Client、renderer 等の実際に起動した全構成要素を計上し、process CPU time の生値と使用率の分母を記録する |
+| resident memory | 同じ待機区間で Host と全 Client process の合計が2 GiB以下。OS ごとの resident 指標、集計方法、時系列と最大値を記録し、描画 process を分離した場合も除外しない |
 | avatar | 同梱 `ene` の通常表示で平均30 FPS以上。他のデスクトップ操作を1秒以上 block しない。実際の frame 提示時刻と操作遅延を測り、要求した redraw 回数を FPS と数えない |
 | 操作受付 | Milestone 1 に含まれる cancel 等は入力から1秒以内に受付状態を表示する。ローカルの「送信待ち」を Host 受付済みと偽らず、受付と完了を区別する |
 
@@ -172,12 +282,12 @@ A0 で各 OS の測定指標・CPU の正規化方法をレビューして固定
 
 | 場所 | 更新する内容 |
 |---|---|
-| この文書 | Stage 7 の範囲、slice、依存、検証対応。日々の実装ログや全 PR の列挙は加えない |
-| `docs/design/` の対応箇所 | A0 と後続で必要になる恒久的な trust / IPC / ownership / failure 契約。実装 PR より先に docs-only PR で確定する |
+| この文書 | Stage 7 の範囲、slice、依存、検証対応。具体的な crate / binary 名や dependency 選定は A0 の結論を design に反映した後にのみ確定する |
+| `docs/design/` の対応箇所 | A0 で再導出した application / crate / process / dependency boundary と、恒久的な trust / IPC / ownership / failure 契約。current design と異なるなら production code より先に更新する |
 | `docs/requirements/acceptance.md` | 原則変更しない。実装都合で scenario・OS・性能 gate を削らず、要件変更が必要なら別の明示的な判断にする |
-| Issues / PRs、実行可能 test / harness | 個別不足、実装範囲、exact tip、再現手順、テスト対応、実機の測定結果と証拠。結果は pass / fail / 未実施を区別する |
+| Issues / PRs、実行可能 test / harness | 個別不足、比較した選択肢、選定根拠、実装範囲、exact tip、再現手順、テスト対応、実機の測定結果と証拠。結果は pass / fail / 未実施を区別する |
 | `PROGRESS.md` | current / completed / blocker / next の短い index のみ。Stage 6 完了前に Stage 7 を current / completed とせず、Stage 7 内部の全 slice を転載しない |
 
-最初の実装作業は A0 の保護された setup と描画/asset probe、および A1 の既存 Client 抽出です。大型の管理画面や VRM renderer を先に作り込み、最後に trust boundary と対象 OS への適合を調整する順序にはしません。
+最初の作業は A0 の再設計です。既存の target workspace tree や過去 UI 実装から crate 名・framework・process topology を写して production code を始めません。A0 の結論と必要な実機 probe が揃った後に A1 / B / D を開始します。
 
 Stage 7 closeout では共通 quality gate に加え、§5 の全対象と§6 の実測、GUI の local erasure、text fallback、後続 Stage が利用する query / command の配線を確認します。Stage 6 を含む既存回帰を維持し、未解決の acceptance blocker がないことを確認してから、Stage 7 を completed index に1行追加し、Stage 8 の詳細計画へ進みます。
