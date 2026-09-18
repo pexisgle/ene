@@ -1345,7 +1345,9 @@ fn associate_reconciled_page(
 }
 
 /// Closed work-kind vocabulary of [`erasure_use_hold`]: one claimed inference
-/// attempt or one unsealed task delegation.
+/// attempt or one task delegation associated with an operation (an unsealed
+/// execution whose delayed result must be collected, or a sealed execution
+/// whose already-stored result body is observation-derived).
 pub(crate) const USE_KIND_INFERENCE_ATTEMPT: &str = "inference_attempt";
 pub(crate) const USE_KIND_TASK_DELEGATION: &str = "task_delegation";
 
@@ -1689,8 +1691,12 @@ pub(crate) const ASSOCIATE_ATTEMPTS_SQL: &str =
 /// - an unsealed task delegation under an attempt held above, whose relied
 ///   revision or in-force purpose body still carries the target, whose
 ///   business context source is covered, or whose delegated workspace scope
-///   carries the target. Sealed executions are excluded: a recorded final
-///   result cannot be produced again, and its stored body is the sweep's.
+///   carries the target. Purpose/context association still excludes sealed
+///   executions: a recorded final result cannot be produced again;
+/// - a task delegation that owns a covered observation occurrence, sealed or
+///   not. The occurrence identity is the durable name of a discarded
+///   observed body, so the already-stored result of a sealed execution is
+///   still the sweep's derived personal data.
 ///
 /// The target text travels only as a bound parameter and is never copied into
 /// a hold row.
@@ -1760,52 +1766,42 @@ fn mark_inflight_uses(
 /// `task_delegation` hold of the execution that replayed the occurrence.
 /// Driven from the operation's bounded covered-source set through the
 /// observation primary key, never by scanning the ledger. Sealed executions
-/// are excluded: a sealed delegation has its recorded result and admits no
-/// new provider work.
+/// are included: a recorded paraphrase of a discarded observation body is
+/// still derived personal data, and the hold is the observation→delegation
+/// correspondence the Task owner sweep uses to collect that already-stored
+/// body without rewriting the execution seal.
 pub(crate) const ASSOCIATE_OBSERVATION_DELEGATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
      SELECT ?3, o.delegation_id, ?1, ?4
      FROM erasure_condition_source s
      JOIN task_agent_observation o ON o.observation_id = s.source
      WHERE s.operation_id = ?1 AND s.sweep = ?2
-       AND NOT EXISTS
-           (SELECT 1 FROM task_result r WHERE r.delegation_id = o.delegation_id)
      GROUP BY o.delegation_id";
 
-/// Holds every unsealed delegation that owns at least one observation
-/// occurrence (the fail-closed overflow fallback of
-/// [`survey_task_observation_sources`]).
+/// Holds every delegation that owns at least one observation occurrence (the
+/// fail-closed overflow fallback of [`survey_task_observation_sources`]).
 ///
 /// When the bounded survey page cannot cover every occurrence, no occurrence
-/// may be assumed clean: the whole unsealed-with-observations set is
-/// associated instead of letting an unsurveyed delayed body through. The
+/// may be assumed clean: every execution that owns one is associated instead
+/// of letting an unsurveyed delayed or already-sealed body through. The
 /// statement scans the delegation table only on that overflow path; the
 /// bounded path never runs it.
 pub(crate) const HOLD_OBSERVING_DELEGATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
      SELECT ?3, d.delegation_id, ?1, ?4
      FROM delegation d
-     WHERE NOT EXISTS
-         (SELECT 1 FROM task_result r WHERE r.delegation_id = d.delegation_id)
-       AND EXISTS
+     WHERE EXISTS
          (SELECT 1 FROM task_agent_observation o WHERE o.delegation_id = d.delegation_id)";
 
 /// The per-sweep bound on the observed occurrences one admission surveys.
 ///
-/// The page bounds the SQL, the per-occurrence correlation checks, and the
-/// workspace source reads one admission performs. Overflow (more unsealed
-/// occurrences than the bound) fails closed: every unsealed delegation that
-/// owns an occurrence is associated with the operation instead of allowing an
-/// unsurveyed delayed body through.
+/// The page bounds the SQL and the per-occurrence correlation checks one
+/// admission performs. Overflow (more occurrences than the bound) fails
+/// closed: every delegation that owns an occurrence is associated with the
+/// operation instead of allowing an unsurveyed body through.
 pub(crate) const TASK_OBSERVATION_SURVEY_LIMIT: u32 = 256;
 
-/// The largest workspace source the admission survey reads to test the exact
-/// target. A larger source cannot be mechanically proven clean inside the
-/// admission bound, so it is treated as covered (fail closed) instead of
-/// being read whole.
-const TASK_OBSERVATION_SURVEY_MAX_BYTES: u64 = 8 * 1024 * 1024;
-
-/// One unsealed-delegation observation row read by the admission survey.
+/// One observation row read by the admission survey.
 struct SurveyedObservation {
     observation: RawId,
     delegation: String,
@@ -1833,11 +1829,12 @@ type RawSurveyedObservation = (
 
 /// The bounded survey page of one admission.
 ///
-/// `rows` re-reads the operation's unsealed-delegation occurrences in
-/// canonical identity order; `overflow` means more occurrences exist than
-/// [`TASK_OBSERVATION_SURVEY_LIMIT`] and the caller must hold every unsealed
-/// delegation that owns one. An occurrence whose delegation row is gone is
-/// torn ledger state and fails closed.
+/// `rows` re-reads the operation's observation occurrences in canonical
+/// identity order, including sealed executions: a recorded paraphrase of a
+/// discarded observation body is still derived personal data. `overflow`
+/// means more occurrences exist than [`TASK_OBSERVATION_SURVEY_LIMIT`] and
+/// the caller must hold every delegation that owns one. An occurrence whose
+/// delegation row is gone is torn ledger state and fails closed.
 fn survey_task_observation_sources(
     tx: &rusqlite::Transaction<'_>,
     target: &str,
@@ -1850,8 +1847,6 @@ fn survey_task_observation_sources(
                     d.delegation_id
              FROM task_agent_observation o
              LEFT JOIN delegation d ON d.delegation_id = o.delegation_id
-             WHERE NOT EXISTS
-                 (SELECT 1 FROM task_result r WHERE r.delegation_id = o.delegation_id)
              ORDER BY o.observation_id LIMIT ?1",
         )
         .map_err(storage)?;
@@ -1925,10 +1920,11 @@ fn survey_task_observation_sources(
 ///   unsurveyable and fails closed (covered);
 /// - the attempt's resolved target is compared mechanically (the same
 ///   `instr`-style exact-text predicate the owner sweeps use);
-/// - a body-observed occurrence additionally has its workspace source read
-///   (`read` bytes / `list` entry names) and compared mechanically. A source
-///   that cannot be read, is not the expected shape, or exceeds the bounded
-///   survey size is unsurveyable and fails closed (covered).
+/// - a body-observed occurrence reproduced workspace content at observation
+///   time. The ledger stores no body and no content-version identity, and a
+///   mutable workspace path is not that observed version: a later clean
+///   read of the current path cannot prove the discarded body was unrelated
+///   to the target, so the occurrence fails closed (covered).
 ///
 /// A covered determination publishes the occurrence identity, never the
 /// source body.
@@ -1948,9 +1944,9 @@ fn observation_source_covered(
         // without a producing attempt is torn state and fails closed.
         return Ok(observation.body_observed);
     };
-    let attempt: Option<(String, String, i64, String, String, String)> = tx
+    let attempt: Option<(String, String, i64, String, String)> = tx
         .query_row(
-            "SELECT delegation_id, task_id, task_revision, workspace_assoc_id, real_target, operation
+            "SELECT delegation_id, task_id, task_revision, workspace_assoc_id, real_target
              FROM action_attempt WHERE attempt_id = ?1",
             params![attempt_text],
             |row| {
@@ -1960,13 +1956,12 @@ fn observation_source_covered(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
-                    row.get(5)?,
                 ))
             },
         )
         .optional()
         .map_err(storage)?;
-    let Some((delegation, task, task_revision, workspace, real_target, operation)) = attempt else {
+    let Some((delegation, task, task_revision, workspace, real_target)) = attempt else {
         // The occurrence names an attempt that is gone: the source cannot be
         // surveyed, so the occurrence is treated as covered (fail closed).
         return Ok(true);
@@ -1991,52 +1986,13 @@ fn observation_source_covered(
         // source correlation.
         return Ok(false);
     }
-    match operation.as_str() {
-        "read" => Ok(file_source_covered(&real_target, target)),
-        "list" => Ok(listing_source_covered(&real_target, target)),
-        // A body-observed occurrence that names a write attempt is torn
-        // ledger state: the observation it claims cannot have reproduced
-        // workspace content from that attempt. Fail closed.
-        _ => Ok(true),
-    }
-}
-
-/// Whether one workspace file source carries the target.
-///
-/// A missing, non-file, oversized, or unreadable source cannot be mechanically
-/// proven clean and reports covered (fail closed). The read is bounded by
-/// [`TASK_OBSERVATION_SURVEY_MAX_BYTES`] before any byte is loaded.
-fn file_source_covered(path: &str, target: &str) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return true;
-    };
-    if !metadata.is_file() || metadata.len() > TASK_OBSERVATION_SURVEY_MAX_BYTES {
-        return true;
-    }
-    match std::fs::read(path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).contains(target),
-        Err(_) => true,
-    }
-}
-
-/// Whether one workspace listing source carries the target in any entry name.
-///
-/// The `list` observation body carries entry names only. A missing or
-/// unreadable directory cannot be proven clean and reports covered (fail
-/// closed).
-fn listing_source_covered(path: &str, target: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return true;
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return true;
-        };
-        if entry.file_name().to_string_lossy().contains(target) {
-            return true;
-        }
-    }
-    false
+    // A body-observed occurrence reproduced workspace content (`read` bytes
+    // or a `list` listing). The current path contents are not a witness of
+    // that observed version, and the ledger has no content-version identity
+    // that could prove the discarded body was unrelated to the target. Fail
+    // closed. A body-observed occurrence that names a write attempt is torn
+    // ledger state and is covered by the same rule.
+    Ok(true)
 }
 
 /// Publishes one covered occurrence identity as a durable source correlation
@@ -2180,13 +2136,13 @@ fn admit_deletion(
             StartTargetedDeletionOutcome::HeldByOperation(record.current)
         });
     }
-    // Stage 6 A4: every unsealed delegation's pre-condition observation
-    // occurrences are surveyed mechanically against the exact target in this
-    // same transaction. A covered occurrence is published under its own
-    // identity and associates its execution with the operation; an
-    // unsurveyable source (missing attempt, unreadable workspace source,
-    // bounded-overflow page) fails closed by producing a hold instead of
-    // allowing a delayed body through.
+    // Stage 6 A4: every pre-condition observation occurrence is surveyed
+    // mechanically against the exact target in this same transaction,
+    // including sealed executions. A covered occurrence is published under
+    // its own identity and associates its execution with the operation; a
+    // body-observed mutable workspace source, a missing attempt, or a
+    // bounded-overflow page fails closed by producing a hold instead of
+    // allowing a delayed or already-sealed derived body through.
     let (covered_observations, observation_overflow) =
         survey_task_observation_sources(tx, material.expose_for_erasure())?;
     let current = DeletionOperationRef {
@@ -2262,8 +2218,8 @@ fn admit_deletion(
     // still be recognized as stale for erasure.
     mark_inflight_uses(tx, &id, 1, material.expose_for_erasure(), &at)?;
     // The bounded survey page could not cover every occurrence: no
-    // unsurveyed occurrence is assumed clean, and every unsealed delegation
-    // that owns one is associated instead.
+    // unsurveyed occurrence is assumed clean, and every delegation that owns
+    // one is associated instead.
     if observation_overflow {
         tx.execute(
             HOLD_OBSERVING_DELEGATIONS_SQL,

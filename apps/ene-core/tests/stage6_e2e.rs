@@ -4358,13 +4358,13 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
 /// E2E 1 race (design R2, post-completion): a Task Agent execution observed a
 /// target-bearing workspace source as execution-local tool output (no
 /// canonical source identity), the following provider claim consumed that
-/// observation, the deletion started and completed while the final turn was
-/// parked, and the delayed final answer is a clean paraphrase. The
-/// observation occurrence ledger associates the delegation with the operation
-/// at admission (the workspace source is surveyed mechanically), so the
-/// delayed body is collected into the fixed body-free form and the completed
-/// execution still seals, adopts, and completes. The completed surface keeps
-/// zero target bodies and the durable correspondence exists.
+/// observation and parked, the mutable workspace path was then rewritten so
+/// the current file no longer carries the target, and Targeted Deletion
+/// started only after that rewrite. Re-reading the path at admission cannot
+/// prove the discarded observation body was unrelated to the target, so the
+/// occurrence stays deletion-relevant, the unsealed delegation is held, and
+/// the delayed clean paraphrase is collected. A fresh Owner origin after
+/// completion remains allowed.
 #[tokio::test]
 async fn stage6_task_transient_observation_after_completion_is_collected() {
     const LEG_TARGET: &str = TARGET;
@@ -4374,6 +4374,7 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     // observation correspondence can collect it (the exact-text redaction
     // would not match a clean paraphrase).
     let paraphrase = "The input file describes confidential material; I did not copy its contents.";
+    let fresh = format!("a fresh note about {LEG_TARGET}");
     let proposal = task_reply(serde_json::json!({
         "kind": "propose_task",
         "purpose": "write a report about the workspace input",
@@ -4392,11 +4393,13 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
                 on_latest_owner("please read input.txt and write report.md"),
                 Call::text(proposal),
             ),
+            (on_latest_owner(&fresh), Call::text("acknowledged")),
         ],
         &[],
     ));
-    // The final turn parks after its durable claim; the deletion runs to
-    // completion while the provider work is still in flight.
+    // The final turn parks after its durable claim; the workspace mutation
+    // and the deletion run to completion while the provider work is still in
+    // flight.
     transport.block_input(on_task_agent_turn(1));
     let mut served = serve_and_setup(
         dir.clone(),
@@ -4405,12 +4408,10 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     )
     .await;
     let workspace = dir.join("workspace");
+    let input = workspace.join("input.txt");
     std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
-    std::fs::write(
-        workspace.join("input.txt"),
-        format!("confidential: {LEG_TARGET}"),
-    )
-    .expect("the workspace source writes");
+    std::fs::write(&input, format!("confidential: {LEG_TARGET}"))
+        .expect("the workspace source writes");
     select_workspace(served.client(), &workspace)
         .await
         .expect("workspace must select");
@@ -4428,11 +4429,26 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     let db = served.dir.join("app.db");
     // The observation occurrence is durable before the claim that consumed it:
     // the ledger row and its producing-attempt correlation exist while the
-    // final turn is parked.
+    // final turn is parked. The body itself is not stored.
     assert_eq!(
         transient_observation_rows(&db),
         1,
         "the execution-local observation occurrence is durable before deletion"
+    );
+    assert!(
+        transient_observation_body_observed(&db),
+        "the occurrence reproduced a target-bearing body at observation time"
+    );
+
+    // Barrier-fixed TOCTOU: rewrite the mutable path so a current-content
+    // survey would miss the target, then start Targeted Deletion.
+    std::fs::write(&input, "ordinary notes after the observation")
+        .expect("the workspace source is rewritten clean");
+    assert!(
+        !std::fs::read_to_string(&input)
+            .expect("the rewritten source reads")
+            .contains(LEG_TARGET),
+        "deletion admission happens after the current workspace read is clean"
     );
 
     let outcome = request_deletion(served.client(), LEG_TARGET)
@@ -4441,8 +4457,8 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
     let handle = Arc::clone(&served.handle);
     confirm_deletion(&handle).await;
-    // Admission surveys the observed workspace source, finds the target, and
-    // associates the execution durably (the hold survives completion).
+    // Admission cannot prove the discarded body was unrelated to the target,
+    // so the occurrence stays deletion-relevant and the execution is held.
     assert_eq!(
         transient_task_delegation_holds(&db),
         1,
@@ -4460,16 +4476,169 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     wait_task_progress(served.client(), "completed", 1)
         .await
         .expect("the task completes on the collected result");
+    let body = transient_sole_result_body(&db);
     assert_eq!(
-        transient_sole_result_body(&db),
-        "[erased]",
+        body, "[erased]",
         "the delayed paraphrase is never stored raw"
+    );
+    assert!(
+        !body.contains(paraphrase),
+        "the stale paraphrase is not durably adopted"
     );
     assert_eq!(served.canonical_remainder(LEG_TARGET).await, 0);
     assert!(
         db_target_hits(&db, LEG_TARGET).is_empty(),
         "the completed surface keeps no target body: {:?}",
         db_target_hits(&db, LEG_TARGET)
+    );
+    let (_round, _stream, reply) = send_round(served.client(), &fresh)
+        .await
+        .expect("a fresh origin must be accepted");
+    assert!(reply.contains("acknowledged"), "{reply}");
+    assert!(
+        history_texts(served.client())
+            .await
+            .iter()
+            .any(|text| text.contains(LEG_TARGET)),
+        "a fresh post-completion Owner input remains allowed"
+    );
+    served.server.abort();
+}
+
+/// E2E 1 sealed-result provenance: a Task Agent already stored a paraphrased
+/// final result derived from a target-bearing transient workspace read. The
+/// workspace path is later rewritten clean, so mechanical search of the
+/// current file and of the sealed paraphrase both miss the target. Observation
+/// → delegation/result provenance still collects the sealed body; the
+/// execution seal and Action certainty survive, and a fresh Owner input after
+/// completion remains allowed.
+#[tokio::test]
+async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rewrite() {
+    const LEG_TARGET: &str = TARGET;
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let paraphrase = "The input file describes confidential material; I did not copy its contents.";
+    let fresh = format!("a fresh note about {LEG_TARGET}");
+    let proposal = task_reply(serde_json::json!({
+        "kind": "propose_task",
+        "purpose": "write a report about the workspace input",
+    }));
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_task_agent_turn(0),
+                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
+            ),
+            (
+                on_latest_owner("please read input.txt and write report.md"),
+                Call::text(proposal),
+            ),
+            (on_latest_owner(&fresh), Call::text("acknowledged")),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let workspace = dir.join("workspace");
+    let input = workspace.join("input.txt");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    std::fs::write(&input, format!("confidential: {LEG_TARGET}"))
+        .expect("the workspace source writes");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    let (round, stream, reply) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    assert!(
+        reply.contains("Task accepted"),
+        "the task proposal must be accepted: {reply}"
+    );
+    confirm_round(served.client(), &round, stream).await;
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the paraphrased result seals before deletion");
+
+    let db = served.dir.join("app.db");
+    assert_eq!(
+        transient_observation_rows(&db),
+        1,
+        "the execution-local observation occurrence is durable"
+    );
+    assert!(
+        transient_observation_body_observed(&db),
+        "the occurrence reproduced a target-bearing body"
+    );
+    assert_eq!(
+        transient_sole_result_body(&db),
+        paraphrase,
+        "the sealed paraphrase is stored before the workspace rewrite"
+    );
+    assert_eq!(
+        transient_action_success_rows(&db),
+        1,
+        "the producing Action attempt is already confirmed"
+    );
+
+    std::fs::write(&input, "ordinary notes after the observation")
+        .expect("the workspace source is rewritten clean");
+    assert!(
+        !std::fs::read_to_string(&input)
+            .expect("the rewritten source reads")
+            .contains(LEG_TARGET),
+        "deletion admission happens after the current workspace read is clean"
+    );
+
+    let outcome = request_deletion(served.client(), LEG_TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = Arc::clone(&served.handle);
+    confirm_deletion(&handle).await;
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+
+    let body = transient_sole_result_body(&db);
+    assert_eq!(
+        body, "[erased]",
+        "the sealed paraphrase cannot survive as undeleted derived personal data"
+    );
+    assert!(!body.contains(paraphrase));
+    assert_eq!(
+        transient_action_success_rows(&db),
+        1,
+        "Action certainty is an objective fact and is never rewritten"
+    );
+    assert_eq!(served.canonical_remainder(LEG_TARGET).await, 0);
+    assert!(
+        db_target_hits(&db, LEG_TARGET).is_empty(),
+        "the completed surface keeps no target body: {:?}",
+        db_target_hits(&db, LEG_TARGET)
+    );
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the sealed execution stays completed");
+    let (_round, _stream, reply) = send_round(served.client(), &fresh)
+        .await
+        .expect("a fresh origin must be accepted");
+    assert!(reply.contains("acknowledged"), "{reply}");
+    assert!(
+        history_texts(served.client())
+            .await
+            .iter()
+            .any(|text| text.contains(LEG_TARGET)),
+        "a fresh post-completion Owner input remains allowed"
     );
     served.server.abort();
 }
@@ -4484,6 +4653,32 @@ fn transient_observation_rows(db: &Path) -> i64 {
         row.get(0)
     })
     .expect("the observation probe must run")
+}
+
+/// Whether the sole observation occurrence reproduced a workspace body.
+fn transient_observation_body_observed(db: &Path) -> bool {
+    let conn = rusqlite::Connection::open(db).expect("the state database opens");
+    conn.busy_timeout(Duration::from_secs(30))
+        .expect("a busy timeout must set");
+    conn.query_row(
+        "SELECT body_observed FROM task_agent_observation",
+        [],
+        |row| row.get(0),
+    )
+    .expect("the observation body-observed probe must run")
+}
+
+/// Confirmed-success Action attempts in the state database.
+fn transient_action_success_rows(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).expect("the state database opens");
+    conn.busy_timeout(Duration::from_secs(30))
+        .expect("a busy timeout must set");
+    conn.query_row(
+        "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'confirmed_success'",
+        [],
+        |row| row.get(0),
+    )
+    .expect("the certainty probe must run")
 }
 
 /// Durable `task_delegation` holds in the state database.

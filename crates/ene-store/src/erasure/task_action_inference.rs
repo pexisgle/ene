@@ -31,21 +31,28 @@
 //!
 //! The participant never decides deletion semantics: it receives the
 //! protected exact-text material with the condition identity and reports the
-//! fact. The covered source-correlation identities are not consulted here:
-//! these owners' rows carry no reliable per-row source identity for a body
-//! copy, so the exact text is the mechanical handle — and the same text is
-//! what the bounded remainder pass verifies. A stale condition can only
-//! produce a fact the canonical store refuses (`StaleSweep`), so an older
-//! generation never advances the current sweep; a demand without protected
-//! material or with a target the owner cannot represent is an explicit hold,
-//! never a silent success.
+//! fact. Covered source-correlation identities are not a second deletion
+//! registry here: Task result collection of observation-derived paraphrases
+//! reuses the durable `erasure_use_hold` association already published at
+//! admission. Other owner rows still use the exact text as the mechanical
+//! handle — and the same text is what the bounded remainder pass verifies.
+//! A stale condition can only produce a fact the canonical store refuses
+//! (`StaleSweep`), so an older generation never advances the current sweep;
+//! a demand without protected material or with a target the owner cannot
+//! represent is an explicit hold, never a silent success.
 //!
 //! Owner surfaces:
 //!
 //! * Task: the in-force purpose text, every revision snapshot purpose, the
 //!   recorded result body, the observation occurrence path correlation, and
-//!   the internal workspace / delegation scope path copies. Correlation
-//!   columns (`task_context_entry`, the observation identities, the delegation
+//!   the internal workspace / delegation scope path copies. A result body
+//!   that does not contain the exact target is still collected when its
+//!   owning delegation is associated with the demanded operation
+//!   (`erasure_use_hold`): that hold is the observation→delegation
+//!   correspondence published at admission for a discarded body-observed
+//!   source, so a paraphrase of already-started work cannot survive as
+//!   undeleted derived personal data. Correlation columns
+//!   (`task_context_entry`, the observation identities, the delegation
 //!   and association identities) are retained: they are body-free identities,
 //!   not copies.
 //! * Action: the attempt's resolved target path. Certainty and grounds are
@@ -62,14 +69,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use ene_preservation::{
-    DemandLocalErasureCommand, ErasureParticipant, MechanicalDeletionTarget,
+    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, MechanicalDeletionTarget,
     ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef,
 };
 use ene_primitive::WallClockWithTz;
 use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::Store;
-use crate::codec::lock_shared;
+use crate::codec::{encode_id, lock_shared};
 use crate::run_blocking;
 
 use super::redact_exact;
@@ -328,7 +335,7 @@ impl ErasureCore {
         let key = (condition.operation, condition.sweep);
         let mut sweeps = self.sweeps.lock().await;
         let progress = sweeps.entry(key).or_default();
-        match self.advance(progress, &target).await {
+        match self.advance(progress, &target, condition).await {
             Ok(Chunk::EraseComplete { erased }) => ParticipantCompletionFact::local_complete(
                 condition,
                 self.owner,
@@ -367,6 +374,7 @@ impl ErasureCore {
         &self,
         progress: &mut SweepProgress,
         target: &str,
+        condition: ErasureConditionRef,
     ) -> Result<Chunk, ErasurePageError> {
         let mut examined = 0u32;
         loop {
@@ -412,7 +420,15 @@ impl ErasureCore {
             }
             let stage = &self.stages[progress.stage];
             let limit = PAGE_ROWS.min(ROWS_PER_DEMAND - examined);
-            let page = erase_page(&self.store, stage, target, progress.after_rowid, limit).await?;
+            let page = erase_page(
+                &self.store,
+                stage,
+                target,
+                condition,
+                progress.after_rowid,
+                limit,
+            )
+            .await?;
             if page.examined == 0 {
                 progress.stage += 1;
                 progress.after_rowid = 0;
@@ -448,18 +464,22 @@ async fn erase_page(
     store: &Store,
     stage: &'static ErasureStage,
     target: &str,
+    condition: ErasureConditionRef,
     after_rowid: i64,
     limit: u32,
 ) -> Result<ErasePage, ErasurePageError> {
     let conn = Arc::clone(&store.conn);
     let target = target.to_owned();
-    run_blocking(move || erase_page_sync(&conn, stage, &target, after_rowid, limit)).await
+    let operation = encode_id(condition.operation.as_raw());
+    run_blocking(move || erase_page_sync(&conn, stage, &target, &operation, after_rowid, limit))
+        .await
 }
 
 fn erase_page_sync(
     conn: &Mutex<Connection>,
     stage: &ErasureStage,
     target: &str,
+    operation: &str,
     after_rowid: i64,
     limit: u32,
 ) -> Result<ErasePage, ErasurePageError> {
@@ -492,7 +512,9 @@ fn erase_page_sync(
     for row in &rows {
         examined += 1;
         last_rowid = row.rowid;
-        for value in plan_redactions(stage, row, target)? {
+        let provenance_linked = stage.table == "task_result"
+            && result_delegation_held_for_operation(&tx, row.rowid, operation)?;
+        for value in plan_redactions(stage, row, target, provenance_linked)? {
             let sql = format!(
                 "UPDATE {} SET {} = ?1 WHERE rowid = ?2",
                 stage.table, value.column
@@ -508,6 +530,32 @@ fn erase_page_sync(
         examined,
         redacted,
     })
+}
+
+/// Whether one `task_result` row's owning delegation is associated with the
+/// demanded operation (`erasure_use_hold`, `task_delegation`).
+///
+/// That hold is the observation→delegation correspondence published at
+/// admission: a discarded body-observed source cannot be proven unrelated to
+/// the target, so the already-stored result body is collected even when
+/// mechanical search of the paraphrase misses. The execution seal, adoption
+/// pointer, and Action certainty are facts and are not consulted here.
+fn result_delegation_held_for_operation(
+    tx: &rusqlite::Transaction<'_>,
+    rowid: i64,
+    operation: &str,
+) -> Result<bool, ErasurePageError> {
+    tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM task_result r
+             JOIN erasure_use_hold h
+               ON h.use_kind = 'task_delegation' AND h.use_id = r.delegation_id
+             WHERE r.rowid = ?1 AND h.operation_id = ?2
+         )",
+        params![rowid, operation],
+        |row| row.get(0),
+    )
+    .map_err(|_| ErasurePageError::Storage)
 }
 
 /// One stored row of one stage: its rowid cursor plus the stage's columns in
@@ -533,16 +581,34 @@ fn page_sql(stage: &ErasureStage) -> String {
 /// Plans the redactions of one row. Nothing is written until the whole page
 /// has been read and planned, so an unrepresentable value fails the page
 /// closed instead of leaving it half-swept.
+///
+/// `provenance_linked` is the observation-hold path for `task_result`: the
+/// whole body is replaced by the body-free marker because a paraphrase of a
+/// discarded observation cannot be proven unrelated to the target by
+/// mechanical search. An already-collected marker is left untouched so the
+/// verify pass stays a clean pass. The execution seal itself is the row's
+/// existence and is never rewritten.
 fn plan_redactions(
     stage: &ErasureStage,
     row: &RawErasureRow,
     target: &str,
+    provenance_linked: bool,
 ) -> Result<Vec<ValueRedaction>, ErasurePageError> {
     let mut planned = Vec::new();
     for (column, value) in stage.columns.iter().zip(&row.values) {
         let Some(text) = value.as_deref() else {
             continue;
         };
+        if provenance_linked && column.name == "body" {
+            if text != super::ERASED_MARKER {
+                planned.push(ValueRedaction {
+                    column: column.name,
+                    value: String::from(super::ERASED_MARKER),
+                    removed: 1,
+                });
+            }
+            continue;
+        }
         let erased = match column.shape {
             ErasureShape::Text => erase_exact(text, target),
             ErasureShape::AbsolutePath => erase_path(text, target)?,

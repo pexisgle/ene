@@ -1574,10 +1574,12 @@ async fn dialogue_context_reads_withhold_covered_history_and_memory() {
 //
 // A Task Agent execution observes Action results as execution-local text and
 // replays them into later turns. The occurrence ledger records identity and
-// correlation only; these tests pin the deletion behavior of that ledger: an
-// observed workspace source that carries the target (or cannot be surveyed)
-// associates the delegation durably, a covered occurrence joins the ordered
-// claim `data_use` coverage, and a provably clean delegation keeps adopting.
+// correlation only; these tests pin the deletion behavior of that ledger: a
+// body-observed workspace source (or an unsurveyable source) associates the
+// delegation durably even after the mutable path is rewritten, a covered
+// occurrence joins the ordered claim `data_use` coverage, a sealed paraphrase
+// of that occurrence is collected by the Task owner sweep, and a body-free
+// write confirmation of a clean path keeps adopting.
 
 use ene_task::{TaskAgentObservationId, TaskAgentObservationPremise};
 
@@ -1605,12 +1607,13 @@ async fn record_observation(
     observation
 }
 
-/// Claims one AU5 read attempt at `target` through the production start path.
-async fn claim_read_attempt(
+/// Claims one AU5 attempt at `target` through the production start path.
+async fn claim_attempt(
     store: &Store,
     task: TaskRef,
     delegation: DelegationId,
     target: &str,
+    operation: OperationKind,
 ) -> RawId {
     let assoc = {
         let key = crate::codec::encode_id(task.task.as_raw());
@@ -1632,13 +1635,27 @@ async fn claim_read_attempt(
             task_revision: RevisionInner::from_u64(task.revision.as_u64()),
             workspace: assoc.as_raw(),
             real_target: RealTargetRef::from_canonical_path(target.to_owned()),
-            operation: OperationKind::Read,
+            operation,
             relied_evaluation: RawId::new(),
         })
         .await
         .expect("the attempt insert must answer");
-    assert_eq!(outcome, ActionStartOutcome::Started, "the read must claim");
+    assert_eq!(
+        outcome,
+        ActionStartOutcome::Started,
+        "the {operation:?} attempt must claim"
+    );
     attempt.as_raw()
+}
+
+/// Claims one AU5 read attempt at `target` through the production start path.
+async fn claim_read_attempt(
+    store: &Store,
+    task: TaskRef,
+    delegation: DelegationId,
+    target: &str,
+) -> RawId {
+    claim_attempt(store, task, delegation, target, OperationKind::Read).await
 }
 
 fn delegation_hold_rows(store: &Store, delegation: DelegationId) -> i64 {
@@ -1669,6 +1686,26 @@ fn observation_path(store: &Store, observation: TaskAgentObservationId) -> Optio
         |row| row.get(0),
     )
     .expect("the observation row must read")
+}
+
+fn observation_body_observed(store: &Store, observation: TaskAgentObservationId) -> bool {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT body_observed FROM task_agent_observation WHERE observation_id=?1",
+        [crate::codec::encode_id(observation.as_raw())],
+        |row| row.get(0),
+    )
+    .expect("the observation row must read")
+}
+
+fn action_certainty(store: &Store, attempt: RawId) -> String {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT certainty FROM action_attempt WHERE attempt_id=?1",
+        [crate::codec::encode_id(attempt)],
+        |row| row.get(0),
+    )
+    .expect("the attempt row must read")
 }
 
 /// Writes one workspace source carrying `content` and returns its path.
@@ -1712,9 +1749,11 @@ async fn an_observation_of_a_covered_workspace_source_holds_its_delayed_result()
     )
     .await;
 
-    // The admission survey reads the observed workspace source mechanically:
-    // the external file carries the target, so the occurrence is published as
-    // a covered source and the execution is associated with the operation.
+    // The admission survey cannot re-read the discarded observation body.
+    // The workspace source still carries the target at admission in this
+    // fixture, and a body-observed occurrence fails closed either way, so
+    // the occurrence is published as a covered source and the execution is
+    // associated with the operation.
     let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
     assert_eq!(delegation_hold_rows(&store, delegation), 1);
     assert_eq!(observation_source_rows(&store, observation), 1);
@@ -1760,6 +1799,207 @@ async fn an_observation_of_a_covered_workspace_source_holds_its_delayed_result()
 }
 
 #[tokio::test]
+async fn an_observation_of_a_workspace_source_rewritten_clean_still_holds_its_delayed_result() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "the private key is here");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nthe private key is here"),
+    )
+    .await;
+    assert!(
+        observation_body_observed(&store, observation),
+        "the occurrence reproduced a target-bearing body"
+    );
+
+    // The observed body is discarded; only path/provenance stays durable.
+    // Rewriting the mutable path before admission must not let the survey
+    // treat the occurrence as clean: current content is not the observed
+    // version.
+    std::fs::write(&source, "ordinary notes").expect("the workspace source is rewritten clean");
+    assert!(
+        !std::fs::read_to_string(&source)
+            .expect("the rewritten source reads")
+            .contains("the private key"),
+        "the current workspace read is clean"
+    );
+
+    let current = admit(&store, "the private key", Vec::new(), Vec::new()).await;
+    assert_eq!(
+        observation_source_rows(&store, observation),
+        1,
+        "the body-observed occurrence stays a deletion-relevant source"
+    );
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        1,
+        "the owning unsealed delegation is associated despite the clean path"
+    );
+    complete_via_a5(&store, current).await;
+    assert!(current_conditions(&store).await.is_empty());
+
+    let arrival = result_arrival(
+        &store,
+        delegation,
+        "the report summarizes confidential material without quoting it",
+    )
+    .await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the delayed arrival must record its fact"),
+    );
+    assert_eq!(record.body.text(), crate::erasure::ERASED_MARKER);
+    assert_eq!(
+        task_result_body(&store, record.result),
+        crate::erasure::ERASED_MARKER
+    );
+
+    // A fresh execution after completion is not a permanent ban.
+    let (_fresh_task, fresh_delegation) =
+        seed_workspace_execution(&store, "write a later report").await;
+    let fresh = expect_recorded(
+        store
+            .record_task_result_arrival(
+                result_arrival(&store, fresh_delegation, "a later ordinary report").await,
+            )
+            .await
+            .expect("a post-completion execution may still record"),
+    );
+    assert_eq!(fresh.body.text(), "a later ordinary report");
+}
+
+#[tokio::test]
+async fn a_sealed_paraphrase_of_an_observed_workspace_source_is_erased_after_the_source_is_rewritten_clean()
+ {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let source = workspace_source(&files, "input.txt", "the private key is here");
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some("read ok:\nthe private key is here"),
+    )
+    .await;
+    assert_eq!(
+        store
+            .compare_and_set_certainty(
+                ActionAttemptId::from_raw(attempt),
+                ActionCertainty::Unknown,
+                ActionCertainty::ConfirmedSuccess,
+                ene_action::EffectGrounds::ObservedAtTarget,
+            )
+            .await
+            .unwrap(),
+        ene_action::CertaintyUpdateOutcome::Updated
+    );
+    let paraphrase = "the report summarizes confidential material without quoting it";
+    let arrival = result_arrival(&store, delegation, paraphrase).await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the paraphrase must seal the execution"),
+    );
+    assert_eq!(record.body.text(), paraphrase);
+    assert!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_some(),
+        "the execution is already sealed"
+    );
+
+    std::fs::write(&source, "ordinary notes").expect("the workspace source is rewritten clean");
+    assert!(
+        !std::fs::read_to_string(&source)
+            .expect("the rewritten source reads")
+            .contains("the private key"),
+        "the current workspace read is clean"
+    );
+
+    let current = admit(
+        &store,
+        "the private key",
+        Vec::new(),
+        vec![ParticipantOwnerRef::Task],
+    )
+    .await;
+    assert_eq!(
+        observation_source_rows(&store, observation),
+        1,
+        "the sealed execution's body-observed occurrence is still a covered source"
+    );
+    assert_eq!(
+        delegation_hold_rows(&store, delegation),
+        1,
+        "observation provenance associates the sealed execution"
+    );
+
+    sweep_task_participant(&store, current).await;
+    assert_eq!(
+        task_result_body(&store, record.result),
+        crate::erasure::ERASED_MARKER,
+        "the target-derived paraphrase cannot survive as undeleted personal data"
+    );
+    assert_eq!(
+        action_certainty(&store, attempt),
+        "confirmed_success",
+        "Action certainty is an objective fact and is never rewritten"
+    );
+    assert!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_some(),
+        "the execution seal survives the collected body"
+    );
+
+    complete_via_a5(&store, current).await;
+    let remainder = {
+        let guard = crate::codec::lock_shared(&store.conn);
+        crate::erasure::exact_remainder_probe(&guard, "the private key")
+            .expect("the remainder probe must answer")
+    };
+    assert_eq!(remainder, 0);
+
+    let (_fresh_task, fresh_delegation) =
+        seed_workspace_execution(&store, "write a later report").await;
+    let fresh = expect_recorded(
+        store
+            .record_task_result_arrival(
+                result_arrival(&store, fresh_delegation, "a later ordinary report").await,
+            )
+            .await
+            .expect("a post-completion execution may still record"),
+    );
+    assert_eq!(fresh.body.text(), "a later ordinary report");
+}
+
+#[tokio::test]
 async fn an_unreadable_observation_source_fails_closed_into_a_hold() {
     let store = open_memory().await.unwrap();
     let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
@@ -1769,9 +2009,10 @@ async fn an_unreadable_observation_source_fails_closed_into_a_hold() {
         .unwrap()
         .unwrap()
         .task;
-    // The producing attempt exists, but its source file does not: the
-    // observed body cannot be mechanically surveyed at admission, so the
-    // occurrence fails closed instead of being assumed clean.
+    // The producing attempt exists, but its source file does not: a
+    // body-observed occurrence cannot prove the discarded body was unrelated
+    // to the target, so the occurrence fails closed instead of being assumed
+    // clean.
     let missing = std::env::temp_dir()
         .join("ene-stage6-observation-missing/source.txt")
         .to_string_lossy()
@@ -1809,7 +2050,7 @@ async fn an_unreadable_observation_source_fails_closed_into_a_hold() {
 }
 
 #[tokio::test]
-async fn a_provably_clean_observation_leaves_the_delegation_adoptable() {
+async fn a_write_confirmation_observation_of_a_clean_path_leaves_the_delegation_adoptable() {
     let store = open_memory().await.unwrap();
     let files = tempfile::tempdir().unwrap();
     let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
@@ -1819,24 +2060,18 @@ async fn a_provably_clean_observation_leaves_the_delegation_adoptable() {
         .unwrap()
         .unwrap()
         .task;
-    let source = workspace_source(&files, "input.txt", "ordinary notes");
-    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
-    let observation = record_observation(
-        &store,
-        delegation,
-        Some(attempt),
-        Some("read ok:\nordinary notes"),
-    )
-    .await;
+    let source = workspace_source(&files, "output.txt", "ordinary notes");
+    let attempt = claim_attempt(&store, task, delegation, &source, OperationKind::Create).await;
+    // A write confirmation reproduces no workspace content: the occurrence
+    // has no observed body, so a currently-clean path can still be proven
+    // unrelated to the target.
+    let observation = record_observation(&store, delegation, Some(attempt), None).await;
+    assert!(!observation_body_observed(&store, observation));
     assert_eq!(observation_source_rows(&store, observation), 0);
 
-    // An unrelated deletion target does not associate this execution: the
-    // surveyed source is readable and provably clean.
     admit(&store, "another private secret", Vec::new(), Vec::new()).await;
     assert_eq!(delegation_hold_rows(&store, delegation), 0);
 
-    // The execution still completes normally: the resolved effect is settled
-    // and the clean result is adopted as completion.
     assert_eq!(
         store
             .compare_and_set_certainty(
@@ -1866,7 +2101,7 @@ async fn a_provably_clean_observation_leaves_the_delegation_adoptable() {
     assert_eq!(
         acceptance,
         ene_task::TaskResultAcceptance::AdoptedAsCompletion(task),
-        "a provably clean delegation still completes"
+        "a body-free write confirmation of a clean path still completes"
     );
 }
 

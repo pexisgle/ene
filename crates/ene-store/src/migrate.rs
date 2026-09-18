@@ -492,13 +492,15 @@ CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
 -- time and the row carries the delegation/execution correlation, the
 -- producing AU5 action attempt where one exists, and the workspace/path
 -- correlation. `body_observed` means the observation reproduced workspace
--- content (read bytes or a list listing); such an occurrence's source is
--- mechanically surveyed at deletion admission and fails closed when it cannot
--- be read. The table deliberately stores no observation body, no body hash or
--- fingerprint, no reversible encoding, and no presentation copy: the
--- observation text stays execution-local and only this correlation ledger is
--- durable. `path` is the resolved AU5 target and is a mechanical-erasure
--- column of the Task owner, exactly like `action_attempt.real_target`.
+-- content (read bytes or a list listing). The ledger stores no body and no
+-- content-version identity, so a later clean read of the mutable path cannot
+-- prove the discarded body was unrelated to a deletion target: admission
+-- treats such an occurrence as covered (fail closed). The table deliberately
+-- stores no observation body, no body hash or fingerprint, no reversible
+-- encoding, and no presentation copy: the observation text stays
+-- execution-local and only this correlation ledger is durable. `path` is the
+-- resolved AU5 target and is a mechanical-erasure column of the Task owner,
+-- exactly like `action_attempt.real_target`.
 CREATE TABLE task_agent_observation (
 observation_id TEXT PRIMARY KEY,
 delegation_id TEXT NOT NULL,
