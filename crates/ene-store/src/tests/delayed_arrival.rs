@@ -1659,13 +1659,36 @@ async fn claim_read_attempt(
 }
 
 fn delegation_hold_rows(store: &Store, delegation: DelegationId) -> i64 {
+    use_hold_rows(store, "task_delegation", delegation.as_raw())
+}
+
+fn use_hold_rows(store: &Store, kind: &str, use_id: RawId) -> i64 {
     let conn = store.conn.lock().unwrap();
     conn.query_row(
-        "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind='task_delegation' AND use_id=?1",
-        [crate::codec::encode_id(delegation.as_raw())],
+        "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind=?1 AND use_id=?2",
+        rusqlite::params![kind, crate::codec::encode_id(use_id)],
         |row| row.get(0),
     )
     .expect("the hold probe must read")
+}
+
+fn use_hold_rows_for_operation(
+    store: &Store,
+    kind: &str,
+    use_id: RawId,
+    operation: ene_preservation::DeletionOperationId,
+) -> i64 {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind=?1 AND use_id=?2 AND operation_id=?3",
+        rusqlite::params![
+            kind,
+            crate::codec::encode_id(use_id),
+            crate::codec::encode_id(operation.as_raw())
+        ],
+        |row| row.get(0),
+    )
+    .expect("the operation-specific hold probe must read")
 }
 
 fn observation_source_rows(store: &Store, observation: TaskAgentObservationId) -> i64 {
@@ -1717,12 +1740,16 @@ fn workspace_source(dir: &tempfile::TempDir, name: &str, content: &str) -> Strin
 
 /// Completes the Task participant's real sweep for the current condition.
 async fn sweep_task_participant(store: &Store, current: DeletionOperationRef) {
+    sweep_task_participant_for(store, current, "the private key").await;
+}
+
+async fn sweep_task_participant_for(store: &Store, current: DeletionOperationRef, text: &str) {
     let participant = crate::TaskErasureParticipant::new(store.clone());
     drive_with_sources(
         &participant,
         current.condition(),
         ParticipantOwnerRef::Task,
-        "the private key",
+        text,
         Vec::new(),
     )
     .await;
@@ -2675,4 +2702,322 @@ async fn a_read_started_after_finalizing_completion_is_a_fresh_origin() {
             .expect("the hold must read"),
         "the closed operation must not hold a post-completion start"
     );
+}
+
+/// P1-2: one sealed paraphrase of a body that carried two exact targets must
+/// correspond to both unfinished operations, so driving only B still collects
+/// the result. A retry of the same operation must not duplicate the row.
+#[tokio::test]
+async fn one_delegation_corresponds_to_two_unfinished_operations() {
+    let store = open_memory().await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let (_task, delegation) = seed_workspace_execution(&store, "write the report").await;
+    let task = store
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .unwrap()
+        .task;
+    let target_a = "alpha-deletion-token";
+    let target_b = "beta-deletion-token";
+    let source = workspace_source(
+        &files,
+        "input.txt",
+        &format!("{target_a} and {target_b} live in this file"),
+    );
+    let attempt = claim_read_attempt(&store, task, delegation, &source).await;
+    let _observation = record_observation(
+        &store,
+        delegation,
+        Some(attempt),
+        Some(&format!(
+            "read ok:\n{target_a} and {target_b} live in this file"
+        )),
+    )
+    .await;
+    let paraphrase = "the report restates both confidential items without quoting either";
+    let arrival = result_arrival(&store, delegation, paraphrase).await;
+    let record = expect_recorded(
+        store
+            .record_task_result_arrival(arrival)
+            .await
+            .expect("the paraphrase must seal the execution"),
+    );
+    assert_eq!(record.body.text(), paraphrase);
+    assert!(
+        !record.body.text().contains(target_a) && !record.body.text().contains(target_b),
+        "the sealed result must omit both exact texts"
+    );
+
+    let op_a = admit(
+        &store,
+        target_a,
+        Vec::new(),
+        vec![ParticipantOwnerRef::Task],
+    )
+    .await;
+    let op_b = admit(
+        &store,
+        target_b,
+        Vec::new(),
+        vec![ParticipantOwnerRef::Task],
+    )
+    .await;
+    assert_eq!(
+        use_hold_rows(&store, "task_delegation", delegation.as_raw()),
+        2,
+        "the same delegation corresponds to both operations"
+    );
+    assert_eq!(
+        use_hold_rows_for_operation(
+            &store,
+            "task_delegation",
+            delegation.as_raw(),
+            op_a.operation
+        ),
+        1
+    );
+    assert_eq!(
+        use_hold_rows_for_operation(
+            &store,
+            "task_delegation",
+            delegation.as_raw(),
+            op_b.operation
+        ),
+        1
+    );
+    {
+        let guard = crate::codec::lock_shared(&store.conn);
+        assert!(
+            crate::preservation::held_use_for_operation(
+                &guard,
+                crate::preservation::USE_KIND_TASK_DELEGATION,
+                delegation.as_raw(),
+                &crate::codec::encode_id(op_b.operation.as_raw()),
+            )
+            .expect("the operation-specific hold must read"),
+            "operation-specific lookup finds B independently of A"
+        );
+    }
+
+    sweep_task_participant_for(&store, op_b, target_b).await;
+    assert_eq!(
+        task_result_body(&store, record.result),
+        crate::erasure::ERASED_MARKER,
+        "driving only B still collects the semantically derived result"
+    );
+
+    complete_via_a5(&store, op_b).await;
+    assert_eq!(
+        use_hold_rows_for_operation(
+            &store,
+            "task_delegation",
+            delegation.as_raw(),
+            op_a.operation
+        ),
+        1,
+        "B's completion must not drop A's association"
+    );
+    assert_eq!(
+        use_hold_rows_for_operation(
+            &store,
+            "task_delegation",
+            delegation.as_raw(),
+            op_b.operation
+        ),
+        1,
+        "the hold outlives B's completion"
+    );
+
+    // A retry of the same operation's association must not duplicate the row.
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+             VALUES ('task_delegation', ?1, ?2, ?3)",
+            rusqlite::params![
+                crate::codec::encode_id(delegation.as_raw()),
+                crate::codec::encode_id(op_b.operation.as_raw()),
+                fixture_clock().to_rfc3339()
+            ],
+        )
+        .expect("a retried association insert must run");
+    }
+    assert_eq!(
+        use_hold_rows_for_operation(
+            &store,
+            "task_delegation",
+            delegation.as_raw(),
+            op_b.operation
+        ),
+        1,
+        "retrying the same operation must not duplicate the correspondence"
+    );
+
+    complete_via_a5(&store, op_a).await;
+    assert_eq!(
+        use_hold_rows(&store, "task_delegation", delegation.as_raw()),
+        2,
+        "A's completion must not drop B's historical association"
+    );
+}
+
+/// P1-2 remainder: one inference claim whose data_use covers two targets is
+/// associated with both operations.
+#[tokio::test]
+async fn one_inference_claim_corresponds_to_two_unfinished_operations() {
+    let store = open_memory().await.unwrap();
+    seed_learning_consent(&store).await;
+    let (companion, generation) = companion_with_generation(&store).await;
+    let target_a = "claim-alpha-token";
+    let target_b = "claim-beta-token";
+    let source_a = match append_owner(&store, companion, generation, target_a).await {
+        HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the first source must commit, got {other:?}"),
+    };
+    let source_b = match append_owner(&store, companion, generation, target_b).await {
+        HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the second source must commit, got {other:?}"),
+    };
+    let ticket = InferenceTicketId(RawId::new());
+    claim_formation(&store, ticket, vec![source_a, source_b]).await;
+
+    let op_a = admit(&store, target_a, vec![source_a], Vec::new()).await;
+    let op_b = admit(&store, target_b, vec![source_b], Vec::new()).await;
+    assert_eq!(
+        use_hold_rows(&store, "inference_attempt", ticket.0),
+        2,
+        "the same claim corresponds to both operations"
+    );
+    assert_eq!(
+        use_hold_rows_for_operation(&store, "inference_attempt", ticket.0, op_a.operation),
+        1
+    );
+    assert_eq!(
+        use_hold_rows_for_operation(&store, "inference_attempt", ticket.0, op_b.operation),
+        1
+    );
+    assert!(
+        store
+            .inference_claim_held(ticket.0)
+            .await
+            .expect("the boolean hold must read"),
+        "held_use is true when any operation corresponds"
+    );
+}
+
+/// P1-1 store path: a formation identity published before the Learning claim
+/// stays old-origin after the covering History is swept and the operation
+/// completes. A genuine post-completion source of the same string is not held.
+#[tokio::test]
+async fn a_learning_formation_taken_off_the_queue_stays_old_origin_after_completion() {
+    let store = open_memory().await.unwrap();
+    seed_learning_consent(&store).await;
+    let (companion, generation) = companion_with_generation(&store).await;
+    let target = "queued-formation-canary";
+    let source = match append_owner(
+        &store,
+        companion,
+        generation,
+        &format!("please remember {target}"),
+    )
+    .await
+    {
+        HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the source must commit, got {other:?}"),
+    };
+
+    let formation = store
+        .begin_learning_formation(companion.as_raw(), vec![source])
+        .await
+        .expect("the formation identity must publish");
+    let attempts: i64 = {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM inference_attempt", [], |row| {
+            row.get(0)
+        })
+        .expect("the attempt count must read")
+    };
+    assert_eq!(attempts, 0, "the Learning claim must not exist yet");
+
+    let current = admit(&store, target, vec![source], Vec::new()).await;
+    assert_eq!(
+        use_hold_rows(&store, "learning_formation", formation),
+        1,
+        "admission associates the in-flight formation"
+    );
+
+    let companion_participant = crate::CompanionErasureParticipant::new(store.clone());
+    drive_with_sources(
+        &companion_participant,
+        current.condition(),
+        ParticipantOwnerRef::Companion,
+        target,
+        Vec::new(),
+    )
+    .await;
+    complete_via_a5(&store, current).await;
+    assert!(current_conditions(&store).await.is_empty());
+    assert!(
+        store
+            .learning_formation_must_refuse(formation)
+            .await
+            .expect("the refuse check must read"),
+        "the hold outlives completion so the stale transcript stays old-origin"
+    );
+
+    let stale_ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
+        store
+            .begin_inference_attempt(InferenceAttempt {
+                ticket: stale_ticket,
+                consumer: ConsumerKind::CompanionLearning,
+                capability: CapabilityKind::Learning,
+                purpose: PurposeKind::MemoryFormation,
+                expected_consent: (
+                    String::from("consent-learning"),
+                    ConsentRevision::from_u64(1),
+                ),
+                expected_credential_set: CredentialSetRevision::initial(),
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                task_agent: None,
+                data_use: vec![source],
+                pricing: None,
+                usage_estimate: None,
+            })
+            .await
+            .expect("the stale claim must answer"),
+        AttemptBeginOutcome::DataUseHeld,
+        "a delayed claim from the popped candidate must not start"
+    );
+
+    store
+        .settle_learning_formation(formation)
+        .await
+        .expect("the stale identity settles");
+
+    let fresh = match append_owner(
+        &store,
+        companion,
+        generation,
+        &format!("please remember {target} again"),
+    )
+    .await
+    {
+        HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the fresh origin must commit, got {other:?}"),
+    };
+    let fresh_formation = store
+        .begin_learning_formation(companion.as_raw(), vec![fresh])
+        .await
+        .expect("the fresh formation identity must publish");
+    assert!(
+        !store
+            .learning_formation_must_refuse(fresh_formation)
+            .await
+            .expect("the fresh refuse check must read"),
+        "a post-completion Owner origin is a new formation, not a ban"
+    );
+    claim_formation(&store, InferenceTicketId(RawId::new()), vec![fresh]).await;
 }

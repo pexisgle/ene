@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 35;
+const CURRENT_VERSION: i64 = 36;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -153,25 +153,48 @@ PRIMARY KEY (operation_id, sweep, source)
 -- Durable correspondence between an already-claimed use and the deletion
 -- operation whose condition committed after the claim (lifecycle §11 R2).
 -- Written inside the admission transaction for every in-flight inference
--- attempt / unsealed task delegation whose durable provenance intersects the
--- operation's covered sources; the work kinds are the closed set of claims
--- that can produce a delayed target-bearing body. Unlike the
--- operation-lifetime search material, a hold deliberately outlives
--- completion: a delayed result from a use that started before the condition
--- must still be refused after the operation completed and `closed_at` is set.
--- A hold is objective metadata only -- the claim identity, the operation
--- identity, and the hold time -- never a target body, a reversible encoding,
--- a target hash/fingerprint, or a search token, so it can never become a
--- keyword ban, a reusable matcher, or a work item's permanent text blacklist;
--- a claim is single-use, so the row loses its force once that claim settles.
+-- attempt / unsealed task delegation / in-flight Learning formation whose
+-- durable provenance intersects the operation's covered sources; the work
+-- kinds are the closed set of claims that can produce a delayed
+-- target-bearing body. One use may correspond to several operations: two
+-- unfinished Targeted Deletion operations on different exact targets can
+-- share one delegation or one claim, and each association must survive.
+-- Unlike the operation-lifetime search material, a hold deliberately
+-- outlives completion: a delayed result from a use that started before the
+-- condition must still be refused after the operation completed and
+-- `closed_at` is set. A hold is objective metadata only -- the claim
+-- identity, the operation identity, and the hold time -- never a target
+-- body, a reversible encoding, a target hash/fingerprint, or a search
+-- token, so it can never become a keyword ban, a reusable matcher, or a
+-- work item's permanent text blacklist; a claim is single-use, so the row
+-- loses its force once that claim settles.
 
 CREATE TABLE erasure_use_hold (
-use_kind TEXT NOT NULL CHECK (use_kind IN ('inference_attempt', 'task_delegation')),
+use_kind TEXT NOT NULL CHECK (use_kind IN ('inference_attempt', 'task_delegation', 'learning_formation')),
 use_id TEXT NOT NULL,
 operation_id TEXT NOT NULL,
 held_at TEXT NOT NULL,
-PRIMARY KEY (use_kind, use_id)
+PRIMARY KEY (use_kind, use_id, operation_id)
 );
+-- Body-free in-flight Learning formation identity. Published when a
+-- Host-transient ExperienceCandidate is taken off the formation queue,
+-- before the Learning inference claim exists. Never stores transcript
+-- text, a target body, a hash, or a fingerprint. Source rows name the
+-- same History identities the later claim's data_use will carry, so
+-- admission can associate this execution with a deletion interval. The
+-- identity is settled when the pass converts to a claim or is dropped;
+-- correspondence rows in erasure_use_hold outlive that settle.
+CREATE TABLE learning_formation (
+formation_id TEXT PRIMARY KEY,
+companion_id TEXT NOT NULL,
+started_at TEXT NOT NULL
+);
+CREATE TABLE learning_formation_source (
+formation_id TEXT NOT NULL,
+source TEXT NOT NULL,
+PRIMARY KEY (formation_id, source)
+);
+CREATE INDEX idx_learning_formation_source_source ON learning_formation_source (source);
 -- Body-free completion audit (lifecycle §13). Written exactly once, in the
 -- same transaction that destroys the operation's protected material and closes
 -- the current condition; the rows carry only objective metadata -- the
@@ -611,7 +634,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

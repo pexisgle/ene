@@ -271,6 +271,11 @@ pub(crate) enum AttachOutcome {
     Superseded,
 }
 
+/// Caps the in-memory Learning formation queue. Overflow drops the oldest
+/// pending pass (Learning is best-effort); HostTransient still scans what
+/// remains and never treats an unscanned TARGET-bearing entry as clean.
+const LEARNING_FORMATION_QUEUE_CAP: usize = 256;
+
 impl HostHandle {
     pub(crate) fn open_wire_for(
         &self,
@@ -1249,9 +1254,14 @@ impl HostHandle {
     /// durable reply append, so a formation decline or failure never rewrites
     /// it. Each item carries its own source range and transcript, so the
     /// worker judges exactly that Experience; it never reads a later History
-    /// window and silently folds newer turns into an older pass.
+    /// window and silently folds newer turns into an older pass. A full queue
+    /// drops the oldest pending pass rather than growing without bound.
     fn queue_learning_formation(&self, experience: ExperienceCandidate) {
-        crate::lock_unpoison(&self.learning_queue).push_back(experience);
+        let mut queue = crate::lock_unpoison(&self.learning_queue);
+        while queue.len() >= LEARNING_FORMATION_QUEUE_CAP {
+            queue.pop_front();
+        }
+        queue.push_back(experience);
     }
 
     /// Whether a queued formation pass is waiting.
@@ -1281,6 +1291,12 @@ impl HostHandle {
     /// keeps a genuine overlap from overwriting newer recognition. Stopped
     /// companions are skipped because stopping must not start new internal
     /// activity. A pass failure drops its item, so there is no retry storm.
+    ///
+    /// Taking a candidate off the queue publishes a body-free formation
+    /// identity into the canonical store before any further await. HostTransient
+    /// can no longer see the transcript; deletion correspondence can, so a
+    /// deletion that completes before the Learning claim still refuses the
+    /// stale origin at the provider gate.
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
         let _serialized = self.learning_worker.lock().await;
         loop {
@@ -1291,10 +1307,34 @@ impl HostHandle {
             let Some(experience) = next else {
                 break;
             };
+            let formation = match self
+                .store
+                .begin_learning_formation(experience.companion, experience.sources.clone())
+                .await
+            {
+                Ok(formation) => formation,
+                Err(_) => continue,
+            };
+            #[cfg(any(test, feature = "test-support"))]
+            self.store
+                .pause_learning_formation_if_armed_for_tests()
+                .await;
+            let refuse = self
+                .store
+                .learning_formation_must_refuse(formation)
+                .await
+                .unwrap_or(true);
+            if refuse {
+                let _ = self.store.settle_learning_formation(formation).await;
+                continue;
+            }
             let companion = CompanionId::from_raw(experience.companion);
             match self.store.load_lifecycle(companion).await {
                 Ok(Some(CompanionLifecycle::Running)) => {}
-                _ => continue,
+                _ => {
+                    let _ = self.store.settle_learning_formation(formation).await;
+                    continue;
+                }
             }
             let executor = HostInference {
                 store: &self.store,
@@ -1315,6 +1355,7 @@ impl HostHandle {
                 )
                 .await,
             );
+            let _ = self.store.settle_learning_formation(formation).await;
         }
     }
 }

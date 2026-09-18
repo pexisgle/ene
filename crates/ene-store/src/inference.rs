@@ -162,6 +162,11 @@ impl InferenceAttemptRepository for Store {
                     return Ok(AttemptBeginOutcome::DataUseHeld);
                 }
             }
+            if crate::preservation::inflight_learning_formation_held(&tx, &correlation.data_use)
+                .map_err(|error| inference_unavailable(error.to_string()))?
+            {
+                return Ok(AttemptBeginOutcome::DataUseHeld);
+            }
             let data_use_count =
                 encode_u64(correlation.data_use.len() as u64).map_err(inference_unavailable)?;
             // The reviewed pricing snapshot is published and bound in the

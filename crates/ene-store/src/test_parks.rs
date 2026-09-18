@@ -64,4 +64,5 @@ pub(crate) struct TestParks {
     pub(crate) erasure_mutation: TestPark,
     pub(crate) device_auth_file: TestPark,
     pub(crate) client_demand: TestPark,
+    pub(crate) learning_formation: TestPark,
 }

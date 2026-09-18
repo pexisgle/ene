@@ -3479,6 +3479,212 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     assert!(summary.content.contains("jasmine tea"), "grounds are kept");
 }
 
+/// P1-1: a TARGET-bearing ExperienceCandidate popped from the Learning queue
+/// before the inference claim is still old-origin after Targeted Deletion
+/// completes. The stale transcript must not reach the provider; a genuine
+/// post-completion Owner origin of the same string may still form.
+#[tokio::test]
+async fn a_popped_learning_candidate_is_refused_after_deletion_completes() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::LearningRepository as _;
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "inflight-learning-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes inflight-learning-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes inflight-learning-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-inflight-learning");
+    let setup = round_test_handle("dlg-inflight-learning", &live, transport.as_ref()).await;
+    let (handle, dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-inflight-learning",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let responses = handle
+        .handle_frame(frame, live.clone(), transport.as_ref())
+        .await;
+    assert_stream_completed(&responses);
+    assert!(
+        handle.has_pending_learning(),
+        "the completed reply must queue the TARGET-bearing candidate"
+    );
+
+    let handle = Arc::new(handle);
+    handle.store.arm_learning_formation_park_for_tests();
+    let worker_handle = Arc::clone(&handle);
+    let worker_transport = Arc::clone(&transport);
+    let worker = tokio::spawn(async move {
+        worker_handle
+            .run_pending_learning(worker_transport.as_ref())
+            .await;
+    });
+    handle.store.wait_learning_formation_park_for_tests().await;
+    assert!(
+        !handle.has_pending_learning(),
+        "the worker has already taken the candidate off the queue"
+    );
+    let db = dir.path().join("app.db");
+    let sqlite_count = |sql: &str| -> i64 {
+        let conn = rusqlite::Connection::open(&db).expect("the state database opens");
+        conn.query_row(sql, [], |row| row.get(0))
+            .expect("the probe must answer")
+    };
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM inference_attempt WHERE capability = 'learning'"),
+        0,
+        "the Learning inference claim must not exist yet"
+    );
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM learning_formation"),
+        1,
+        "taking the candidate publishes a body-free formation identity"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        if outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            break;
+        }
+    }
+    let phase = handle
+        .store
+        .deletion_status(None, 100)
+        .await
+        .expect("the status must read")
+        .into_iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the operation must stay readable")
+        .phase;
+    assert_eq!(phase, DeletionOperationPhase::Completed);
+    assert_eq!(
+        handle
+            .store
+            .count_exact_text_remainder_for_tests(target)
+            .await
+            .unwrap(),
+        0
+    );
+
+    handle.store.release_learning_formation_park_for_tests();
+    worker.await.expect("the parked worker joins");
+
+    let learning_bytes: usize = transport
+        .inputs()
+        .iter()
+        .filter(|input| input.contains("learning formation pass"))
+        .map(String::len)
+        .sum();
+    assert_eq!(
+        learning_bytes, 0,
+        "the stale candidate must not send one byte to the provider"
+    );
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM inference_attempt WHERE capability = 'learning'"),
+        0,
+        "the stale pass must not create a Learning claim"
+    );
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert!(
+        memories.is_empty(),
+        "old-origin derived Memory must not form, got {memories:?}"
+    );
+    assert_eq!(sqlite_count("SELECT COUNT(*) FROM learning_summary"), 0);
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM learning_memory_revision"),
+        0
+    );
+    assert_eq!(
+        handle
+            .store
+            .count_exact_text_remainder_for_tests(target)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let fresh = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "local-inflight-learning-fresh",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let fresh_responses = handle
+        .handle_frame(fresh, live.clone(), transport.as_ref())
+        .await;
+    assert_stream_completed(&fresh_responses);
+    handle.run_pending_learning(transport.as_ref()).await;
+    let fresh_memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh_memories.len(),
+        1,
+        "a genuine post-completion dialogue must still form, got {fresh_memories:?}"
+    );
+    assert!(
+        fresh_memories[0].content.contains(target),
+        "the fresh Memory keeps the Owner's new origin"
+    );
+}
+
 /// A provider or transport failure in the Learning pass is a technical
 /// failure, not a semantic decline: an experience the model never judged must
 /// not be reported as "nothing worth keeping".

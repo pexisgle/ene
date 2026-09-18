@@ -1305,8 +1305,10 @@ fn reconcile_admission_pages(
 ///   source (served by `idx_task_context_entry_origin_source`).
 ///
 /// The target text is not needed here: the page has already decided which
-/// identities carry it. Writes are `INSERT OR IGNORE` keyed by use identity,
-/// so a retried page adds no second association.
+/// identities carry it. Writes are `INSERT OR IGNORE` keyed by
+/// `(use_kind, use_id, operation_id)`, so a retried page adds no second
+/// association for the same operation while a second operation still gets
+/// its own row.
 fn associate_reconciled_page(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
@@ -1367,15 +1369,28 @@ fn associate_reconciled_page(
         params_from_iter(bind()),
     )
     .map_err(storage)?;
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+             SELECT '{USE_KIND_LEARNING_FORMATION}', fs.formation_id, ?1, ?2
+             FROM learning_formation_source fs
+             WHERE fs.source IN ({placeholders})
+             GROUP BY fs.formation_id"
+        ),
+        params_from_iter(bind()),
+    )
+    .map_err(storage)?;
     Ok(())
 }
 
 /// Closed work-kind vocabulary of [`erasure_use_hold`]: one claimed inference
-/// attempt or one task delegation associated with an operation (an unsealed
-/// execution whose delayed result must be collected, or a sealed execution
-/// whose already-stored result body is observation-derived).
+/// attempt, one task delegation, or one in-flight Learning formation
+/// associated with an operation. A single use may correspond to several
+/// operations; [`held_use`] is the boolean "any operation" read, and
+/// operation-specific queries name one `operation_id`.
 pub(crate) const USE_KIND_INFERENCE_ATTEMPT: &str = "inference_attempt";
 pub(crate) const USE_KIND_TASK_DELEGATION: &str = "task_delegation";
+pub(crate) const USE_KIND_LEARNING_FORMATION: &str = "learning_formation";
 
 /// Whether one source identity's stored body carries `target`.
 ///
@@ -1517,6 +1532,58 @@ fn claimed_delegation_covers(
     Ok(false)
 }
 
+/// Whether one identity exists in a known source table, regardless of body.
+fn source_identity_exists(
+    conn: &Connection,
+    source: &str,
+) -> Result<bool, PreservationTechnicalError> {
+    for identity in KNOWN_SOURCE_IDENTITIES {
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM {} WHERE {}=?1)",
+            identity.table, identity.key
+        );
+        let found: bool = conn
+            .query_row(&sql, params![source], |row| row.get(0))
+            .map_err(storage)?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether one in-flight Learning formation's source identities carry `target`.
+///
+/// Empty provenance cannot prove the queued transcript unrelated to the
+/// target, so it fails closed. A source identity that has already disappeared
+/// from every known table was swept; that is also covered.
+fn claimed_formation_covers(
+    conn: &Connection,
+    formation: &str,
+    target: &str,
+) -> Result<bool, PreservationTechnicalError> {
+    let mut statement = conn
+        .prepare("SELECT source FROM learning_formation_source WHERE formation_id=?1")
+        .map_err(storage)?;
+    let sources: Vec<String> = statement
+        .query_map([formation], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    if sources.is_empty() {
+        return Ok(true);
+    }
+    for source in sources {
+        if source_identity_carries(conn, &source, target)? {
+            return Ok(true);
+        }
+        if !source_identity_exists(conn, &source)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Direct mechanical correspondence of one already-claimed use with the
 /// unfinished operations whose current-sweep reconciliation is still walking
 /// (lifecycle §11 R2).
@@ -1528,11 +1595,14 @@ fn claimed_delegation_covers(
 /// reading the bounded publication as the whole covered set. Finalizing
 /// operations cannot be unreconciled (`validate` enforces the marker
 /// invariant), so every candidate here has readable protected material.
-fn directly_covered_use(
+///
+/// Returns every matching unfinished operation: one use can belong to several
+/// concurrent Targeted Deletion intervals.
+fn directly_covered_uses(
     conn: &Connection,
     use_kind: &str,
     use_id: RawId,
-) -> Result<Option<String>, PreservationTechnicalError> {
+) -> Result<Vec<String>, PreservationTechnicalError> {
     // Fast skip: with no active/held operation mid-reconciliation, every
     // covered use was already associated when its page committed.
     let pending: bool = conn
@@ -1545,7 +1615,7 @@ fn directly_covered_use(
         )
         .map_err(storage)?;
     if !pending {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let mut statement = conn
         .prepare(
@@ -1562,6 +1632,7 @@ fn directly_covered_use(
         .collect::<Result<_, _>>()
         .map_err(storage)?;
     drop(statement);
+    let mut matched = Vec::new();
     for id in candidates {
         validate(conn, &id)?;
         let target: Option<String> = conn
@@ -1582,16 +1653,19 @@ fn directly_covered_use(
             USE_KIND_TASK_DELEGATION => {
                 claimed_delegation_covers(conn, &encode_id(use_id), &target)?
             }
+            USE_KIND_LEARNING_FORMATION => {
+                claimed_formation_covers(conn, &encode_id(use_id), &target)?
+            }
             _ => return Err(corrupt()),
         };
         if covered {
-            return Ok(Some(id));
+            matched.push(id);
         }
     }
-    Ok(None)
+    Ok(matched)
 }
 
-/// Whether one already-claimed use was associated with a deletion operation
+/// Whether one already-claimed use was associated with any deletion operation
 /// whose condition committed before the claim settles (lifecycle §11 R2).
 ///
 /// The hold is the durable correspondence that a current-condition check
@@ -1599,16 +1673,18 @@ fn directly_covered_use(
 /// target, so it refuses only that claim's delayed target-bearing body and
 /// never becomes a keyword ban. Read inside the adopting boundary's own
 /// transaction; a claim without a row is a genuine "not held" answer (no
-/// sentinel, no cached verdict).
+/// sentinel, no cached verdict). This boolean is "any operation": a use may
+/// have several `erasure_use_hold` rows, one per operation.
 ///
 /// A missing row is not yet the answer while a sweep is still being
 /// reconciled: the claim's own correlation is then checked directly against
-/// the unreconciled operations' targets, and a match is written as the same
-/// keyed `erasure_use_hold` row in the caller's transaction. That closes the
-/// window between the condition commit and the end of the bounded
+/// the unreconciled operations' targets, and every match is written as the
+/// same keyed `erasure_use_hold` row in the caller's transaction. That closes
+/// the window between the condition commit and the end of the bounded
 /// enumeration without ever consulting a page bound for correctness. The
 /// direct check only considers unfinished operations, so a fresh origin after
-/// completion is never held by a closed operation.
+/// completion is never held by a closed operation. An already-held use still
+/// runs the direct check so a second unreconciled operation is not dropped.
 pub(crate) fn held_use(
     conn: &Connection,
     use_kind: &str,
@@ -1621,23 +1697,168 @@ pub(crate) fn held_use(
             |row| row.get(0),
         )
         .map_err(storage)?;
-    if held {
-        return Ok(true);
+    let operations = directly_covered_uses(conn, use_kind, use_id)?;
+    let held_at = WallClockWithTz::now().to_rfc3339();
+    for operation in &operations {
+        conn.execute(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at) VALUES (?1,?2,?3,?4)",
+            params![use_kind, encode_id(use_id), operation, held_at],
+        )
+        .map_err(storage)?;
     }
-    let Some(operation) = directly_covered_use(conn, use_kind, use_id)? else {
-        return Ok(false);
-    };
-    conn.execute(
-        "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at) VALUES (?1,?2,?3,?4)",
-        params![
-            use_kind,
-            encode_id(use_id),
-            operation,
-            WallClockWithTz::now().to_rfc3339()
-        ],
+    Ok(held || !operations.is_empty())
+}
+
+/// Whether one already-claimed use is associated with one specific operation.
+#[cfg(test)]
+pub(crate) fn held_use_for_operation(
+    conn: &Connection,
+    use_kind: &str,
+    use_id: RawId,
+    operation: &str,
+) -> Result<bool, PreservationTechnicalError> {
+    // Fill any still-unreconciled correspondence first so this read cannot
+    // miss a second operation the boolean [`held_use`] already knows about.
+    let _ = held_use(conn, use_kind, use_id)?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM erasure_use_hold
+             WHERE use_kind=?1 AND use_id=?2 AND operation_id=?3)",
+        params![use_kind, encode_id(use_id), operation],
+        |row| row.get(0),
+    )
+    .map_err(storage)
+}
+
+/// Publishes one body-free Learning formation identity and associates it with
+/// every unfinished operation whose covered sources intersect the pinned
+/// identities. Empty provenance cannot prove the queued transcript unrelated
+/// to any in-flight target, so it is associated with every unfinished
+/// operation.
+fn publish_learning_formation(
+    tx: &rusqlite::Transaction<'_>,
+    companion: RawId,
+    sources: &[RawId],
+) -> Result<RawId, PreservationTechnicalError> {
+    let formation = RawId::new();
+    let formation_text = encode_id(formation);
+    let started_at = WallClockWithTz::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO learning_formation (formation_id,companion_id,started_at) VALUES (?1,?2,?3)",
+        params![formation_text, encode_id(companion), started_at],
     )
     .map_err(storage)?;
-    Ok(true)
+    for source in sources {
+        tx.execute(
+            "INSERT OR IGNORE INTO learning_formation_source (formation_id,source) VALUES (?1,?2)",
+            params![formation_text, encode_id(*source)],
+        )
+        .map_err(storage)?;
+    }
+    if sources.is_empty() {
+        tx.execute(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+             SELECT ?1, ?2, operation_id, ?3
+             FROM deletion_operation
+             WHERE phase IN ('active', 'held', 'finalizing')",
+            params![USE_KIND_LEARNING_FORMATION, formation_text, started_at],
+        )
+        .map_err(storage)?;
+    } else {
+        tx.execute(
+            "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+             SELECT ?1, ?2, o.operation_id, ?3
+             FROM deletion_operation o
+             JOIN erasure_condition_source s
+               ON s.operation_id = o.operation_id AND s.sweep = o.sweep
+             JOIN learning_formation_source fs
+               ON fs.source = s.source AND fs.formation_id = ?2
+             WHERE o.phase IN ('active', 'held', 'finalizing')
+             GROUP BY o.operation_id",
+            params![USE_KIND_LEARNING_FORMATION, formation_text, started_at],
+        )
+        .map_err(storage)?;
+    }
+    // Unreconciled operations may not have published sources yet; the same
+    // direct-correlation fallback [`held_use`] uses fills those rows.
+    let _ = held_use(tx, USE_KIND_LEARNING_FORMATION, formation)?;
+    Ok(formation)
+}
+
+fn settle_learning_formation_sync(
+    tx: &rusqlite::Transaction<'_>,
+    formation: RawId,
+) -> Result<(), PreservationTechnicalError> {
+    let formation_text = encode_id(formation);
+    tx.execute(
+        "DELETE FROM learning_formation_source WHERE formation_id=?1",
+        params![formation_text],
+    )
+    .map_err(storage)?;
+    tx.execute(
+        "DELETE FROM learning_formation WHERE formation_id=?1",
+        params![formation_text],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+fn formation_sources_missing(
+    conn: &Connection,
+    formation: RawId,
+) -> Result<bool, PreservationTechnicalError> {
+    let mut statement = conn
+        .prepare("SELECT source FROM learning_formation_source WHERE formation_id=?1")
+        .map_err(storage)?;
+    let sources: Vec<String> = statement
+        .query_map([encode_id(formation)], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    for source in sources {
+        if !source_identity_exists(conn, &source)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn learning_formation_must_refuse_sync(
+    conn: &Connection,
+    formation: RawId,
+) -> Result<bool, PreservationTechnicalError> {
+    if held_use(conn, USE_KIND_LEARNING_FORMATION, formation)? {
+        return Ok(true);
+    }
+    formation_sources_missing(conn, formation)
+}
+
+/// Whether any in-flight Learning formation intersecting `sources` is held.
+///
+/// Used at the inference claim gate so a popped candidate cannot start a
+/// provider attempt after its formation was associated with a deletion
+/// interval, including after that operation completed.
+pub(crate) fn inflight_learning_formation_held(
+    conn: &Connection,
+    sources: &[String],
+) -> Result<bool, PreservationTechnicalError> {
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    let placeholders = (0..sources.len())
+        .map(|index| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT EXISTS(
+             SELECT 1 FROM erasure_use_hold h
+             JOIN learning_formation_source fs ON fs.formation_id = h.use_id
+             WHERE h.use_kind = ?1 AND fs.source IN ({placeholders})
+         )"
+    );
+    let bind =
+        std::iter::once(USE_KIND_LEARNING_FORMATION).chain(sources.iter().map(String::as_str));
+    conn.query_row(&sql, params_from_iter(bind), |row| row.get(0))
+        .map_err(storage)
 }
 
 impl Store {
@@ -1754,6 +1975,86 @@ impl Store {
         })
         .await
     }
+
+    /// Publishes a body-free Learning formation identity for one candidate
+    /// taken off the Host-transient queue.
+    ///
+    /// The Immediate writer serializes this against admission and completion:
+    /// a formation that commits first is visible to `mark_inflight_uses`, and
+    /// unfinished operations whose covered sources intersect the pinned
+    /// identities are associated here. The transcript itself is never stored.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError::StorageUnavailable`] when the identity
+    /// cannot be written.
+    pub async fn begin_learning_formation(
+        &self,
+        companion: RawId,
+        sources: Vec<RawId>,
+    ) -> Result<RawId, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let formation = publish_learning_formation(&tx, companion, &sources)?;
+            tx.commit().map_err(storage)?;
+            Ok(formation)
+        })
+        .await
+    }
+
+    /// Drops the in-flight Learning formation identity after the pass settles.
+    ///
+    /// Correspondence rows in `erasure_use_hold` are left in place so a
+    /// delayed retry of the same identity stays old-origin. The transcript
+    /// was never stored.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError::StorageUnavailable`] when the identity
+    /// cannot be deleted.
+    pub async fn settle_learning_formation(
+        &self,
+        formation: RawId,
+    ) -> Result<(), PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            settle_learning_formation_sync(&tx, formation)?;
+            tx.commit().map_err(storage)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Whether one in-flight Learning formation is old-origin for erasure.
+    ///
+    /// True when the formation is associated with any deletion interval, or
+    /// when one of its pinned source identities has already disappeared
+    /// (History swept while the transcript was still in process memory). A
+    /// read failure is a technical error the caller must fail closed on.
+    ///
+    /// # Errors
+    ///
+    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold or
+    /// source tables cannot be read.
+    pub async fn learning_formation_must_refuse(
+        &self,
+        formation: RawId,
+    ) -> Result<bool, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            learning_formation_must_refuse_sync(&guard, formation)
+        })
+        .await
+    }
 }
 
 /// The attempt-side hold enumeration of [`mark_inflight_uses`].
@@ -1770,6 +2071,20 @@ pub(crate) const ASSOCIATE_ATTEMPTS_SQL: &str =
      JOIN inference_attempt a ON a.ticket = u.ticket
      WHERE s.operation_id = ?1 AND s.sweep = ?2
      GROUP BY a.ticket";
+
+/// The Learning-formation hold enumeration of [`mark_inflight_uses`].
+///
+/// Driven from the operation's bounded covered sources through
+/// `idx_learning_formation_source_source`. The formation identity is
+/// body-free: only History (or other source) identities, never transcript
+/// text.
+pub(crate) const ASSOCIATE_FORMATIONS_SQL: &str =
+    "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
+     SELECT ?3, fs.formation_id, ?1, ?4
+     FROM erasure_condition_source s
+     JOIN learning_formation_source fs ON fs.source = s.source
+     WHERE s.operation_id = ?1 AND s.sweep = ?2
+     GROUP BY fs.formation_id";
 
 /// Associates every already-claimed use whose durable provenance intersects
 /// the operation's published source correlations with the operation
@@ -1798,7 +2113,10 @@ pub(crate) const ASSOCIATE_ATTEMPTS_SQL: &str =
 ///   has started while the occurrence row is not yet durable. The in-memory
 ///   observation body is not a canonical source; associating the execution
 ///   here is what keeps that work "old origin" if Targeted Deletion runs
-///   before the occurrence write.
+///   before the occurrence write;
+/// - an in-flight Learning formation whose pinned History (or other source)
+///   identities intersect the covered set. The formation identity is what
+///   keeps a popped, not-yet-claimed ExperienceCandidate old-origin.
 ///
 /// The target text travels only as a bound parameter and is never copied into
 /// a hold row.
@@ -1860,6 +2178,11 @@ fn mark_inflight_uses(
     tx.execute(
         ASSOCIATE_INFLIGHT_BODY_OBSERVING_DELEGATIONS_SQL,
         params![operation, USE_KIND_TASK_DELEGATION, held_at],
+    )
+    .map_err(storage)?;
+    tx.execute(
+        ASSOCIATE_FORMATIONS_SQL,
+        params![operation, sweep, USE_KIND_LEARNING_FORMATION, held_at],
     )
     .map_err(storage)?;
     Ok(())

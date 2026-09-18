@@ -332,6 +332,28 @@ impl Store {
         self.test_parks.client_demand.release();
     }
 
+    /// Arms the first-waiter park after a Learning formation identity is
+    /// published and before the inference claim is created.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_learning_formation_park_for_tests(&self) {
+        self.test_parks.learning_formation.arm();
+    }
+
+    /// Waits until the armed Learning-formation park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_learning_formation_park_for_tests(&self) {
+        self.test_parks.learning_formation.wait_entered().await;
+    }
+
+    /// Releases the parked Learning formation pass.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_learning_formation_park_for_tests(&self) {
+        self.test_parks.learning_formation.release();
+    }
+
     /// Pauses when the erasure-mutation park is armed. Called from
     /// production participant paths that live outside this crate.
     #[cfg(any(test, feature = "test-support"))]
@@ -345,6 +367,15 @@ impl Store {
     #[doc(hidden)]
     pub async fn pause_client_demand_if_armed_for_tests(&self) {
         self.test_parks.client_demand.pause_if_armed().await;
+    }
+
+    /// Pauses when the Learning-formation park is armed. Called from the
+    /// production worker after the body-free formation identity is published
+    /// and before the Learning inference claim.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn pause_learning_formation_if_armed_for_tests(&self) {
+        self.test_parks.learning_formation.pause_if_armed().await;
     }
 
     /// Pauses when the device-auth file park is armed.

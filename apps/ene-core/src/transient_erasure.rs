@@ -165,6 +165,10 @@ impl TransientErasureFence {
     }
 }
 
+/// Caps the Host-transient Learning-queue scan for one demand (lifecycle §9).
+/// Remaining entries continue on a later demand via [`ParticipantCompletionStatus::MoreWork`].
+pub(crate) const HOST_TRANSIENT_LEARNING_QUEUE_PAGE: usize = 32;
+
 /// Host-process transient erasure participant (lifecycle §8, SO §4.17).
 pub(crate) struct HostTransientParticipant {
     store: Store,
@@ -189,14 +193,32 @@ impl HostTransientParticipant {
         }
     }
 
-    /// Drops every queued formation premise that can carry the target and
-    /// returns how many were dropped. `covered` is indexed membership of
-    /// `identities`, not a materialization of the whole sweep.
-    fn prune_learning_queue(&self, exact: &str, identities: &[RawId], covered: &[bool]) -> u64 {
+    /// Examines one bounded page at the front of the formation queue: covered
+    /// premises are dropped and uncovered ones rotate to the back so a later
+    /// demand sees the unexamined remainder. `covered` is indexed membership
+    /// of `identities` for the page that was probed, not the whole sweep.
+    fn prune_learning_queue_page(
+        &self,
+        page_len: usize,
+        exact: &str,
+        identities: &[RawId],
+        covered: &[bool],
+    ) -> u64 {
         let mut queue = crate::lock_unpoison(&self.learning_queue);
-        let before = queue.len();
-        queue.retain(|experience| !experience_covered(experience, exact, covered, identities));
-        (before - queue.len()) as u64
+        let mut dropped = 0u64;
+        let mut scanned = 0usize;
+        while scanned < page_len {
+            let Some(experience) = queue.pop_front() else {
+                break;
+            };
+            scanned += 1;
+            if experience_covered(&experience, exact, covered, identities) {
+                dropped += 1;
+            } else {
+                queue.push_back(experience);
+            }
+        }
+        dropped
     }
 }
 
@@ -239,12 +261,15 @@ impl ErasureParticipant for HostTransientParticipant {
                 .map(exact_text)
                 .unwrap_or_default()
                 .to_owned();
-            let identities = {
+            let (identities, page_len, more_unexamined) = {
                 let queue = crate::lock_unpoison(&self.learning_queue);
-                queue
+                let page_len = queue.len().min(HOST_TRANSIENT_LEARNING_QUEUE_PAGE);
+                let identities = queue
                     .iter()
+                    .take(page_len)
                     .flat_map(experience_identities)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (identities, page_len, queue.len() > page_len)
             };
             let covered = match self
                 .store
@@ -268,7 +293,8 @@ impl ErasureParticipant for HostTransientParticipant {
             // invalidated. Future presentation re-reads the canonical source.
             let dropped_presentation =
                 crate::lock_unpoison(&self.presentations).invalidate_for_erasure();
-            let dropped_learning = self.prune_learning_queue(&exact, &identities, &covered);
+            let dropped_learning =
+                self.prune_learning_queue_page(page_len, &exact, &identities, &covered);
             // In-flight streams and assembled replies fail closed from here on;
             // nothing published before the fence is treated as proof of
             // completion (a durable reply is the History owner's to erase).
@@ -288,6 +314,16 @@ impl ErasureParticipant for HostTransientParticipant {
                     ParticipantOwnerRef::HostTransient,
                     0,
                     0,
+                    WallClockWithTz::now(),
+                );
+            }
+            if more_unexamined {
+                let remainder = crate::lock_unpoison(&self.learning_queue).len() as u64;
+                return ParticipantCompletionFact::more_work(
+                    command.condition(),
+                    ParticipantOwnerRef::HostTransient,
+                    dropped_presentation + dropped_learning,
+                    remainder.max(1),
                     WallClockWithTz::now(),
                 );
             }
@@ -1776,6 +1812,83 @@ mod tests {
         assert!(
             handle.transient_fence_epoch() > epoch,
             "in-flight streams and assembled replies fail closed after the demand"
+        );
+    }
+
+    /// Lifecycle §9: one HostTransient demand examines a bounded Learning-queue
+    /// page and continues via MoreWork until every TARGET-bearing entry is
+    /// gone. Unrelated premises remain.
+    #[tokio::test]
+    async fn the_host_transient_learning_queue_demand_is_bounded_and_continues() {
+        let (handle, _dir) = memory_handle("a3c-host-transient-bounded")
+            .await
+            .expect("the handle opens");
+        let page = super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE;
+        for _ in 0..(page + 5) {
+            crate::lock_unpoison(&handle.learning_queue)
+                .push_back(experience("contains secret body"));
+        }
+        crate::lock_unpoison(&handle.learning_queue).push_back(experience("unrelated text"));
+        crate::lock_unpoison(&handle.learning_queue).push_back(experience("also unrelated"));
+        let queued_before = crate::lock_unpoison(&handle.learning_queue).len();
+        let participant = HostTransientParticipant::new(
+            handle.store.clone(),
+            Arc::clone(&handle.transient_fence),
+            Arc::clone(&handle.presentations),
+            Arc::clone(&handle.learning_queue),
+        );
+        let current = admit(
+            &handle,
+            "secret body",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let first = participant
+            .demand_local_erasure(command(
+                current.condition(),
+                ParticipantOwnerRef::HostTransient,
+                ParticipantErasureScope::local(target("secret body"), Vec::new()),
+            ))
+            .await;
+        assert_eq!(first.status(), ParticipantCompletionStatus::MoreWork);
+        let remaining_after_first = crate::lock_unpoison(&handle.learning_queue).len();
+        let dropped_from_queue = queued_before - remaining_after_first;
+        assert!(
+            dropped_from_queue <= page,
+            "one demand must not drop more than the page: dropped {dropped_from_queue}"
+        );
+        assert!(
+            remaining_after_first > 2,
+            "the first page must leave continuation work"
+        );
+
+        let mut last = first;
+        for _ in 0..8 {
+            if last.status() != ParticipantCompletionStatus::MoreWork {
+                break;
+            }
+            last = participant
+                .demand_local_erasure(command(
+                    current.condition(),
+                    ParticipantOwnerRef::HostTransient,
+                    ParticipantErasureScope::local(target("secret body"), Vec::new()),
+                ))
+                .await;
+        }
+        assert_eq!(last.status(), ParticipantCompletionStatus::Verified);
+        let queue = crate::lock_unpoison(&handle.learning_queue);
+        assert_eq!(queue.len(), 2, "unrelated premises remain");
+        assert!(
+            queue
+                .iter()
+                .all(|item| item.transcript[0].text.contains("unrelated")),
+            "TARGET-bearing queue entries must all be gone"
+        );
+        assert!(
+            queue
+                .iter()
+                .all(|item| !item.transcript[0].text.contains("secret body")),
+            "no remaining entry may carry the target"
         );
     }
 
