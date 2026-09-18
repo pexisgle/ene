@@ -30,6 +30,15 @@ fn condition(sweep: u64) -> ErasureConditionRef {
 }
 
 async fn admit_owner(store: &Store, text: &str, owner: ParticipantOwnerRef) -> ErasureConditionRef {
+    admit_owner_with_sources(store, text, owner, Vec::new()).await
+}
+
+async fn admit_owner_with_sources(
+    store: &Store,
+    text: &str,
+    owner: ParticipantOwnerRef,
+    sources: Vec<RawId>,
+) -> ErasureConditionRef {
     match store
         .start_targeted_deletion(
             StartTargetedDeletionCommand::new(
@@ -41,7 +50,7 @@ async fn admit_owner(store: &Store, text: &str, owner: ParticipantOwnerRef) -> E
                 },
                 DeletionPurpose::Privacy,
                 fixture_clock(),
-                Vec::new(),
+                sources,
                 vec![owner],
             )
             .confirmed_for_tests(),
@@ -616,14 +625,15 @@ async fn a_summary_pinning_a_covered_source_is_erased_with_it() {
     let participant = LearningErasureParticipant::new(store.clone());
     // The operation's covered sources name the pinned History turn: the
     // durable correlation A4 populates. The mechanical target text does not
-    // occur in either Summary.
-    let condition = admit_owner(&store, target, ParticipantOwnerRef::Learning).await;
-    let fact = drive_with_sources(
+    // occur in either Summary. Membership is the indexed table, not a
+    // command-side copy of the sweep.
+    let condition =
+        admit_owner_with_sources(&store, target, ParticipantOwnerRef::Learning, vec![pinned]).await;
+    let fact = drive(
         &participant,
         condition,
         ParticipantOwnerRef::Learning,
         target,
-        vec![pinned],
     )
     .await;
     assert_eq!(fact.status(), ParticipantCompletionStatus::Verified);
@@ -710,7 +720,9 @@ async fn a_covered_source_correlates_a_summary_after_the_history_row_is_erased()
     // The fan-out drives Companion before Learning, so the pinned turn is
     // already gone when the Learning sweep correlates. The operation's
     // covered source correlation is the durable link that still resolves.
-    let sweep = admit_owner(&store, target, ParticipantOwnerRef::Companion).await;
+    let sweep =
+        admit_owner_with_sources(&store, target, ParticipantOwnerRef::Companion, vec![pinned])
+            .await;
     let history = drive(
         &CompanionErasureParticipant::new(store.clone()),
         sweep,
@@ -722,14 +734,7 @@ async fn a_covered_source_correlates_a_summary_after_the_history_row_is_erased()
     assert!(store.load_message(pinned).await.unwrap().is_none());
 
     let learning = LearningErasureParticipant::new(store.clone());
-    let fact = drive_with_sources(
-        &learning,
-        sweep,
-        ParticipantOwnerRef::Learning,
-        target,
-        vec![pinned],
-    )
-    .await;
+    let fact = drive(&learning, sweep, ParticipantOwnerRef::Learning, target).await;
     assert_eq!(fact.status(), ParticipantCompletionStatus::Verified);
     let memories = store
         .list_current_memories(companion.as_raw(), None, 100)
