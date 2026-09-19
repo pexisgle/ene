@@ -328,10 +328,7 @@ impl DesktopRuntime {
             } = self;
             let seat = control.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
             if deletion_confirm {
-                complete_pending_pumping(
-                    seat,
-                    client.as_mut(),
-                    deletion,
+                let mut copies = GuiOwned {
                     timeline,
                     history,
                     composer,
@@ -339,10 +336,10 @@ impl DesktopRuntime {
                     memory,
                     tasks,
                     usage,
+                    deletion,
                     chat_receipt,
-                    last_erasure,
-                )
-                .await?
+                };
+                complete_pending_pumping(seat, client.as_mut(), &mut copies, last_erasure).await?
             } else {
                 seat.complete_pending().await?
             }
@@ -949,20 +946,18 @@ impl DesktopRuntime {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        apply_pending_erasure(
-            client,
-            &mut self.timeline,
-            &mut self.history,
-            &mut self.composer,
-            &mut self.search_draft,
-            &mut self.memory,
-            &mut self.tasks,
-            &mut self.usage,
-            &mut self.deletion,
-            &mut self.chat_receipt,
-            &mut self.last_erasure,
-        )
-        .await;
+        let mut copies = GuiOwned {
+            timeline: &mut self.timeline,
+            history: &mut self.history,
+            composer: &mut self.composer,
+            search_draft: &mut self.search_draft,
+            memory: &mut self.memory,
+            tasks: &mut self.tasks,
+            usage: &mut self.usage,
+            deletion: &mut self.deletion,
+            chat_receipt: &mut self.chat_receipt,
+        };
+        apply_pending_erasure(client, &mut copies, &mut self.last_erasure).await;
     }
 
     fn ensure_client(&self) -> Result<(), DesktopError> {
@@ -1005,35 +1000,14 @@ async fn request(client: &mut Client, payload: WirePayload) -> Result<WirePayloa
 
 async fn apply_pending_erasure(
     client: &mut Client,
-    timeline: &mut Vec<String>,
-    history: &mut Vec<HistoryItem>,
-    composer: &mut Composer,
-    search_draft: &mut String,
-    memory: &mut MemoryPage,
-    tasks: &mut TaskPanel,
-    usage: &mut UsagePanel,
-    deletion: &mut DeletionPanel,
-    chat_receipt: &mut Option<(String, Option<StreamWireId>)>,
+    copies: &mut GuiOwned<'_>,
     last_erasure: &mut Option<LocalErasureResult>,
 ) {
     loop {
         let Some(demand) = client.take_pending_erasure() else {
             return;
         };
-        let result = erasure::apply_demand(
-            &demand,
-            GuiOwned {
-                timeline,
-                history,
-                composer,
-                search_draft,
-                memory,
-                tasks,
-                usage,
-                deletion,
-                chat_receipt,
-            },
-        );
+        let result = erasure::apply_demand(&demand, copies);
         *last_erasure = Some(result.clone());
         match client.report_local_erasure(result).await {
             Ok(()) | Err(_) => {}
@@ -1044,15 +1018,7 @@ async fn apply_pending_erasure(
 async fn complete_pending_pumping(
     seat: &mut ControlSeat,
     client: Option<&mut Client>,
-    deletion: &mut DeletionPanel,
-    timeline: &mut Vec<String>,
-    history: &mut Vec<HistoryItem>,
-    composer: &mut Composer,
-    search_draft: &mut String,
-    memory: &mut MemoryPage,
-    tasks: &mut TaskPanel,
-    usage: &mut UsagePanel,
-    chat_receipt: &mut Option<(String, Option<StreamWireId>)>,
+    copies: &mut GuiOwned<'_>,
     last_erasure: &mut Option<LocalErasureResult>,
 ) -> Result<FromHost, DesktopError> {
     let Some(client) = client else {
@@ -1064,23 +1030,10 @@ async fn complete_pending_pumping(
         tokio::select! {
             result = &mut complete => return result,
             () = tokio::time::sleep(Duration::from_millis(20)) => {
-                match deletion.refresh(client).await {
+                match copies.deletion.refresh(client).await {
                     Ok(()) | Err(_) => {}
                 }
-                apply_pending_erasure(
-                    client,
-                    timeline,
-                    history,
-                    composer,
-                    search_draft,
-                    memory,
-                    tasks,
-                    usage,
-                    deletion,
-                    chat_receipt,
-                    last_erasure,
-                )
-                .await;
+                apply_pending_erasure(client, copies, last_erasure).await;
             }
         }
     }

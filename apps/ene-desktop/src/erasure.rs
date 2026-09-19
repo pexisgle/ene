@@ -34,7 +34,10 @@ pub(crate) struct GuiOwned<'a> {
 
 /// Wipes GUI copies named by a Host deletion demand. Returns `wiped` only
 /// for copies this process actually cleared and confirmed empty.
-pub(crate) fn apply_demand(demand: &DeletionDemand, copies: GuiOwned<'_>) -> LocalErasureResult {
+pub(crate) fn apply_demand(
+    demand: &DeletionDemand,
+    copies: &mut GuiOwned<'_>,
+) -> LocalErasureResult {
     let mut wiped = Vec::new();
     let mut unverified = Vec::new();
     for target in &demand.targets {
@@ -60,7 +63,7 @@ pub(crate) fn apply_demand(demand: &DeletionDemand, copies: GuiOwned<'_>) -> Loc
                 copies.usage.wipe_body();
                 copies.deletion.wipe_exact_text();
                 *copies.chat_receipt = None;
-                if presentation_gone(&copies) {
+                if presentation_gone(copies) {
                     wiped.push(ClientTempClass::PresentationBuffer);
                 } else {
                     unverified.push(ClientTempClass::PresentationBuffer);
@@ -109,27 +112,31 @@ mod tests {
     };
     use ene_api::v1::refs::DeletionOperationWireRef;
 
-    fn empty_copies<'a>(
-        timeline: &'a mut Vec<String>,
-        history: &'a mut Vec<ene_api::v1::round::HistoryItem>,
-        composer: &'a mut Composer,
-        search_draft: &'a mut String,
-        memory: &'a mut MemoryPage,
-        tasks: &'a mut TaskPanel,
-        usage: &'a mut UsagePanel,
-        deletion: &'a mut DeletionPanel,
-        chat_receipt: &'a mut Option<(String, Option<ene_api::v1::refs::StreamWireId>)>,
-    ) -> GuiOwned<'a> {
-        GuiOwned {
-            timeline,
-            history,
-            composer,
-            search_draft,
-            memory,
-            tasks,
-            usage,
-            deletion,
-            chat_receipt,
+    struct Fixture {
+        timeline: Vec<String>,
+        history: Vec<ene_api::v1::round::HistoryItem>,
+        composer: Composer,
+        search_draft: String,
+        memory: MemoryPage,
+        tasks: TaskPanel,
+        usage: UsagePanel,
+        deletion: DeletionPanel,
+        chat_receipt: Option<(String, Option<ene_api::v1::refs::StreamWireId>)>,
+    }
+
+    impl Fixture {
+        fn copies(&mut self) -> GuiOwned<'_> {
+            GuiOwned {
+                timeline: &mut self.timeline,
+                history: &mut self.history,
+                composer: &mut self.composer,
+                search_draft: &mut self.search_draft,
+                memory: &mut self.memory,
+                tasks: &mut self.tasks,
+                usage: &mut self.usage,
+                deletion: &mut self.deletion,
+                chat_receipt: &mut self.chat_receipt,
+            }
         }
     }
 
@@ -143,36 +150,28 @@ mod tests {
                 class: ClientTempClass::InputDraft,
             }],
         };
-        let mut timeline = vec![String::from("hello")];
-        let mut history = Vec::new();
-        let mut composer = Composer::default();
-        composer.set_draft(String::from("draft text"));
-        let mut search_draft = String::from("search");
-        let mut memory = MemoryPage::default();
-        let mut tasks = TaskPanel::default();
-        let mut usage = UsagePanel::default();
-        let mut deletion = DeletionPanel::default();
-        let mut chat_receipt = None;
-        let result = apply_demand(
-            &demand,
-            empty_copies(
-                &mut timeline,
-                &mut history,
-                &mut composer,
-                &mut search_draft,
-                &mut memory,
-                &mut tasks,
-                &mut usage,
-                &mut deletion,
-                &mut chat_receipt,
-            ),
-        );
+        let mut fixture = Fixture {
+            timeline: vec![String::from("hello")],
+            history: Vec::new(),
+            composer: Composer::default(),
+            search_draft: String::from("search"),
+            memory: MemoryPage::default(),
+            tasks: TaskPanel::default(),
+            usage: UsagePanel::default(),
+            deletion: DeletionPanel::default(),
+            chat_receipt: None,
+        };
+        fixture.composer.set_draft(String::from("draft text"));
+        let result = {
+            let mut copies = fixture.copies();
+            apply_demand(&demand, &mut copies)
+        };
         assert!(result.wiped.contains(&ClientTempClass::InputDraft));
         assert!(result.unverified.is_empty());
-        assert!(composer.draft().is_empty());
-        assert_eq!(composer.undo_len(), 0);
-        assert!(search_draft.is_empty());
-        assert_eq!(timeline, vec![String::from("hello")]);
+        assert!(fixture.composer.draft().is_empty());
+        assert_eq!(fixture.composer.undo_len(), 0);
+        assert!(fixture.search_draft.is_empty());
+        assert_eq!(fixture.timeline, vec![String::from("hello")]);
     }
 
     #[test]
@@ -185,32 +184,24 @@ mod tests {
                 class: ClientTempClass::PresentationBuffer,
             }],
         };
-        let mut timeline = vec![String::from("keep-this-keyword")];
-        let mut history = Vec::new();
-        let mut composer = Composer::default();
-        let mut search_draft = String::new();
-        let mut memory = MemoryPage::default();
-        let mut tasks = TaskPanel::default();
-        let mut usage = UsagePanel::default();
-        let mut deletion = DeletionPanel::default();
-        let mut chat_receipt = Some((String::from("round-old"), None));
-        let result = apply_demand(
-            &demand,
-            empty_copies(
-                &mut timeline,
-                &mut history,
-                &mut composer,
-                &mut search_draft,
-                &mut memory,
-                &mut tasks,
-                &mut usage,
-                &mut deletion,
-                &mut chat_receipt,
-            ),
-        );
+        let mut fixture = Fixture {
+            timeline: vec![String::from("keep-this-keyword")],
+            history: Vec::new(),
+            composer: Composer::default(),
+            search_draft: String::new(),
+            memory: MemoryPage::default(),
+            tasks: TaskPanel::default(),
+            usage: UsagePanel::default(),
+            deletion: DeletionPanel::default(),
+            chat_receipt: Some((String::from("round-old"), None)),
+        };
+        let result = {
+            let mut copies = fixture.copies();
+            apply_demand(&demand, &mut copies)
+        };
         assert!(result.wiped.contains(&ClientTempClass::PresentationBuffer));
         assert!(result.unverified.is_empty());
-        assert!(timeline.is_empty());
-        assert!(chat_receipt.is_none());
+        assert!(fixture.timeline.is_empty());
+        assert!(fixture.chat_receipt.is_none());
     }
 }

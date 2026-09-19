@@ -102,15 +102,10 @@ impl BodySupervisor {
                                 Ok(0) => break,
                                 Ok(n) => {
                                     buf.extend_from_slice(&chunk[..n]);
-                                    loop {
-                                        match decode_body(&buf) {
-                                            Ok((message, used)) => {
-                                                buf.drain(..used);
-                                                if tx.send(message).is_err() {
-                                                    return;
-                                                }
-                                            }
-                                            Err(_) => break,
+                                    while let Ok((message, used)) = decode_body(&buf) {
+                                        buf.drain(..used);
+                                        if tx.send(message).is_err() {
+                                            return;
                                         }
                                     }
                                 }
