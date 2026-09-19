@@ -1,29 +1,29 @@
 //! Preservation owner boundary: canonical erasure-condition state.
 //!
-//! This crate is the semantic owner of the erasure identities other owners
-//! must not invent for themselves. It holds only what the Stage 4
-//! erasure-currentness foundation needs: the identity of one deletion
-//! operation, its sweep generation, and the condition the two identify. The
-//! durable canonical store is Group J `erasure_condition` /
-//! `erasure_condition_source`, implemented by `ene-store`; consumers of a
-//! refusal (inference, task) carry only their own receiver-owned opaque
-//! `RawId` correlation and never import these newtypes.
+//! Owns deletion admission, unfinished lifecycle, the first-party request /
+//! confirmation surface, the erasure identities consumed by the canonical
+//! Group J store in `ene-store`, and the required participant snapshot with
+//! its completion vocabulary. Active, held and finalizing operations keep
+//! their current condition effective across restart. An empty current set is
+//! a database result, never a sentinel or cached gate.
 //!
-//! Stage 4 has no user-facing deletion-operation producer, so the canonical
-//! store is normally empty. "No covering condition" is the result of reading
-//! that store — an authoritative empty set — never a sentinel such as
-//! `none()`, sweep `0`, or an "always current" default. Full Targeted
-//! Deletion (request intake, operation lifecycle, sweep, participant
-//! coordination, local erasure, delayed-arrival collection, remainder
-//! verification, finalizing, global completion, audit, backup/restore,
-//! retention) stays in Stage 6 and extends the same canonical tables; it does
-//! not create a second currentness registry.
-//!
-//! The validity interval of an [`ErasureConditionRef`] is not represented
-//! yet: the operation lifecycle that opens and closes it arrives with the
-//! Stage 6 producer, so every durable condition row is currently active.
-//! Stage 6 adds the interval/closure columns to the same canonical tables
-//! and narrows the read there.
+//! The wire intent stages a request only; the trusted Host-local confirmation
+//! (IPC §18.1) is the sole production mint site of
+//! [`TrustedOwnerConfirmationRef`], and it needs the durable staged request
+//! plus its durable confirmation fact. Participant-local erasure
+//! implementations, delayed-arrival collection, and verified global completion
+//! belong to other slices and crates. This boundary cannot close a condition
+//! or declare global completion, and it never depends on a concrete
+//! participant crate: the Host composition registers [`ErasureParticipant`]
+//! implementations and performs the fan-out.
+
+mod operation;
+mod request;
+pub use operation::*;
+pub use request::*;
+
+mod participant;
+pub use participant::*;
 
 use ene_primitive::RawId;
 
@@ -101,6 +101,44 @@ mod tests {
         assert_ne!(
             first, second,
             "a later sweep is a different condition of the same operation"
+        );
+    }
+
+    /// The participant boundary must stay cross-cutting: this crate owns the
+    /// vocabulary and the trait, the composition registers concrete
+    /// implementations, and `ene-preservation` never depends on a participant
+    /// crate (lifecycle §9, crate-module-decomposition §5).
+    #[test]
+    fn preservation_depends_on_no_participant_crate() {
+        let manifest = include_str!("../Cargo.toml");
+        let dependencies = manifest
+            .split("[dependencies]")
+            .nth(1)
+            .expect("the manifest has a dependencies section")
+            .split('[')
+            .next()
+            .expect("the dependencies section has a body");
+        for crate_name in [
+            "ene-store",
+            "ene-companion",
+            "ene-learning",
+            "ene-task",
+            "ene-action",
+            "ene-inference",
+            "ene-presence",
+            "ene-presentation",
+            "ene-permission",
+            "ene-credential",
+            "ene-core",
+        ] {
+            assert!(
+                !dependencies.contains(crate_name),
+                "ene-preservation must not depend on {crate_name}"
+            );
+        }
+        assert!(
+            dependencies.contains("ene-primitive"),
+            "the shared identity primitive stays the one domain dependency"
         );
     }
 }

@@ -298,7 +298,7 @@ impl LearningInference for ScriptedInference {
         self.prompts
             .lock()
             .expect("fake prompt lock")
-            .push(prompt.text);
+            .push(prompt.into_text());
         self.answers
             .lock()
             .expect("fake answer lock")
@@ -308,29 +308,49 @@ impl LearningInference for ScriptedInference {
 }
 
 pub(crate) struct ReplacingScrubber {
-    pub(crate) from: String,
-    pub(crate) to: String,
+    store: ene_credential::MemoryCredentialStore,
 }
 
 impl ReplacingScrubber {
     pub(crate) fn new(from: &str, to: &str) -> Self {
-        Self {
-            from: from.to_owned(),
-            to: to.to_owned(),
-        }
+        assert_eq!(to, ene_credential::REDACTED_CREDENTIAL);
+        let store = ene_credential::MemoryCredentialStore::new();
+        store.insert(
+            ene_credential::CredentialRef::new("test", "secret").expect("valid ref"),
+            from,
+        );
+        Self { store }
     }
 }
 
-#[expect(
-    clippy::unused_async_trait_impl,
-    reason = "in-test fake; async matches the scrubber contract"
-)]
+impl ene_credential::CredentialRefRepository for ReplacingScrubber {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn list_refs(
+        &self,
+    ) -> Result<Vec<ene_credential::CredentialRef>, ene_credential::CredentialTechnicalError> {
+        Ok(vec![
+            ene_credential::CredentialRef::new("test", "secret").expect("valid ref"),
+        ])
+    }
+}
+
+impl ene_credential::CredentialSetRepository for ReplacingScrubber {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn current_set_revision(
+        &self,
+    ) -> Result<CredentialSetRevision, ene_credential::CredentialTechnicalError> {
+        Ok(CredentialSetRevision::initial())
+    }
+}
+
 impl SecretScrubber for ReplacingScrubber {
     async fn scrub(&self, text: &str) -> Result<ScrubbedText, crate::SecretScrubError> {
-        Ok(ScrubbedText {
-            text: text.replace(&self.from, &self.to),
-            credential_set: CredentialSetRevision::initial(),
-        })
+        ene_credential::CredentialScrubber {
+            refs: self,
+            store: &self.store,
+        }
+        .scrub(text)
+        .await
     }
 }
 

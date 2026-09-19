@@ -3,6 +3,10 @@ use std::sync::Arc;
 use super::{CredStore, CurrentConnection, HostHandle, LiveInput, device_client};
 use crate::conn::{ConnectionPhase, ConnectionTable, LiveDecision};
 use crate::test_support::{authenticate, live_input, memory_handle};
+use ene_api::v1::deletion::{
+    DeletionParticipantReportWire, DeletionPhaseWire, DeletionPurposeWire, DeletionStatusPage,
+    DeletionStatusRequest, DeletionStatusResponse, deletion_target,
+};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{
     AuthProof, AuthResult, CapabilityAdvertise, NegotiatedConnection, PairingRequest, PairingResult,
@@ -12,8 +16,8 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
-    BaseViewMark, ClientIncarnationId, ConnectionWireId, DeviceWireId, ManagementTargetWire,
-    WireMessageType,
+    BaseViewMark, ClientIncarnationId, ConnectionWireId, DeletionStatusCursorWire, DeviceWireId,
+    ManagementTargetWire, WireMessageType,
 };
 use ene_api::v1::refs::{ClientLocalId, CommandWireId, CompanionWireRef, TextLangWire};
 use ene_api::v1::reject::RejectKind;
@@ -192,6 +196,27 @@ fn management_intent_frame(
     target: &str,
     intent_id: CommandWireId,
 ) -> super::WireFrame {
+    management_intent_frame_full(
+        live,
+        kind,
+        target,
+        "mark",
+        RationaleOrigin::ManagementSurface,
+        None,
+        intent_id,
+    )
+}
+
+/// The same frame with an explicit base-view mark, rationale, and id.
+fn management_intent_frame_full(
+    live: &LiveInput,
+    kind: ManagementIntentKind,
+    target: &str,
+    base_view: &str,
+    origin: RationaleOrigin,
+    quote: Option<&str>,
+    intent_id: CommandWireId,
+) -> super::WireFrame {
     stamped(
         super::WireFrame {
             envelope: new_outgoing_envelope(
@@ -203,15 +228,108 @@ fn management_intent_frame(
                 intent_id,
                 kind,
                 target: ManagementTargetWire(target.to_string()),
-                base_view: BaseViewMark(String::from("mark")),
+                base_view: BaseViewMark(base_view.to_string()),
                 rationale: IntentRationaleWire {
-                    origin: RationaleOrigin::ManagementSurface,
-                    quote: None,
+                    origin,
+                    quote: quote.map(str::to_owned),
                 },
             }),
         },
         live,
     )
+}
+
+/// One Targeted Deletion request frame: the typed wire grammar plus the mark
+/// the Client read from the status page.
+fn deletion_intent_frame(
+    live: &LiveInput,
+    exact_text: &str,
+    base_view: &str,
+    origin: RationaleOrigin,
+    quote: Option<&str>,
+    intent_id: CommandWireId,
+) -> super::WireFrame {
+    deletion_intent_frame_raw(
+        live,
+        &deletion_target(DeletionPurposeWire::Privacy, exact_text).0,
+        base_view,
+        origin,
+        quote,
+        intent_id,
+    )
+}
+
+/// The same frame with a raw target string, for grammar/leak regressions.
+fn deletion_intent_frame_raw(
+    live: &LiveInput,
+    target: &str,
+    base_view: &str,
+    origin: RationaleOrigin,
+    quote: Option<&str>,
+    intent_id: CommandWireId,
+) -> super::WireFrame {
+    management_intent_frame_full(
+        live,
+        ManagementIntentKind::RequestDeletionBackupRestoreReset,
+        target,
+        base_view,
+        origin,
+        quote,
+        intent_id,
+    )
+}
+
+fn deletion_status_frame(
+    live: &LiveInput,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> super::WireFrame {
+    stamped(
+        super::WireFrame {
+            envelope: new_outgoing_envelope(
+                ProtocolVersion::V1,
+                sender(),
+                WireMessageType(String::from("DeletionStatusRequest")),
+            ),
+            payload: WirePayload::DeletionStatusRequest(DeletionStatusRequest {
+                cursor: cursor.map(|cursor| DeletionStatusCursorWire(cursor.to_string())),
+                limit,
+            }),
+        },
+        live,
+    )
+}
+
+/// The typed status page of one status answer; any other answer fails the
+/// test with the payload it carried.
+async fn read_deletion_page(
+    handle: &HostHandle,
+    live: &LiveInput,
+    transport: &FakeProviderTransport,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> DeletionStatusPage {
+    let responses = handle
+        .handle_frame(
+            deletion_status_frame(live, cursor, limit),
+            live.clone(),
+            transport,
+        )
+        .await;
+    let Some(WirePayload::DeletionStatusResponse(DeletionStatusResponse::Page(page))) =
+        responses.first().map(|frame| &frame.payload)
+    else {
+        panic!("the status read must answer a page, got {responses:?}");
+    };
+    page.clone()
+}
+
+/// The domain outcome of one intent answer.
+fn outcome_of(responses: &[super::WireFrame]) -> ManagementOutcome {
+    match responses.first().map(|frame| &frame.payload) {
+        Some(WirePayload::ManagementOutcome(outcome)) => outcome.clone(),
+        other => panic!("the intent must answer an outcome, got {other:?}"),
+    }
 }
 
 /// Premises for a connection that never paired (and so cannot be authed).
@@ -2845,5 +2963,514 @@ async fn supersession_drops_the_replaced_connections_presentation_state() {
         handle.presentation_counts_for_test(&c2),
         c2_before,
         "C2's state is untouched"
+    );
+}
+
+/// Stage 6 A1b production path: a Client intent only stages a Targeted
+/// Deletion request, the Owner confirms on the Host-local trusted inlet, the
+/// canonical operation starts, and the bounded status view reports it.
+#[tokio::test]
+async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
+    use ene_preservation::{
+        ConfirmTargetedDeletionOutcome, DeletionPurpose, PreservationRepository as _,
+    };
+    use ene_primitive::RawId;
+
+    let Some((handle, _dir)) = memory_handle("management-deletion").await else {
+        panic!("the handle must open");
+    };
+    let live = paired_input("management-deletion");
+    let transport = fake_transport();
+
+    // The Client learns the live surface mark from the bounded status read.
+    let initial = read_deletion_page(&handle, &live, &transport, None, None).await;
+    assert!(
+        initial.operations.is_empty(),
+        "a fresh surface has no operations"
+    );
+    let mark = initial.mark.0;
+
+    // The intent only stages. The request body never renders through Debug.
+    let intent_id = CommandWireId(RawId::new().as_uuid());
+    let frame = deletion_intent_frame(
+        &live,
+        "leaked key",
+        &mark,
+        RationaleOrigin::ManagementSurface,
+        Some("please remove the leaked key from everywhere"),
+        intent_id,
+    );
+    let rendered = format!("{:?}", frame.payload);
+    assert!(
+        !rendered.contains("leaked key"),
+        "the deletion request body never renders: {rendered}"
+    );
+    let responses = handle
+        .handle_frame(frame.clone(), live.clone(), &transport)
+        .await;
+    assert_eq!(
+        outcome_of(&responses),
+        ManagementOutcome::NeedsClarification,
+        "awaiting the Host PC confirmation"
+    );
+    assert!(
+        handle
+            .store
+            .current_erasure_conditions(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the wire intent must publish no erasure condition"
+    );
+    assert!(
+        handle
+            .store
+            .deletion_status(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the wire intent must create no operation"
+    );
+
+    // The Host-local preview shows the exact target; the Client never sees it.
+    let pending = handle.pending_targeted_deletions(None, 50).await.unwrap();
+    assert_eq!(pending.len(), 1, "one staged request");
+    assert_eq!(pending[0].purpose(), DeletionPurpose::Privacy);
+    assert_eq!(pending[0].owner_review_text(), "leaked key");
+    let request = pending[0].request();
+
+    // An exact retry replays the stored answer without a second request.
+    let replay = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert_eq!(outcome_of(&replay), ManagementOutcome::NeedsClarification);
+    assert_eq!(
+        handle
+            .pending_targeted_deletions(None, 50)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The Host-local trusted confirmation is the only destructive path.
+    let request_text = request.as_raw().as_uuid().as_hyphenated().to_string();
+    let ConfirmTargetedDeletionOutcome::Started(current) = handle
+        .confirm_targeted_deletion(&request_text)
+        .await
+        .unwrap()
+    else {
+        panic!("the Owner confirmation must start the canonical operation");
+    };
+    assert_eq!(
+        handle
+            .store
+            .current_erasure_conditions(None, 10)
+            .await
+            .unwrap()[0]
+            .condition,
+        current.condition(),
+        "the current erasure condition is the operation's"
+    );
+    assert!(
+        handle
+            .pending_targeted_deletions(None, 50)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a confirmed request leaves the pending set"
+    );
+
+    // The bounded status view reports the active operation without any body.
+    let page = read_deletion_page(&handle, &live, &transport, None, None).await;
+    assert_eq!(page.operations.len(), 1);
+    let view = &page.operations[0];
+    assert_eq!(view.phase, DeletionPhaseWire::Active);
+    assert_eq!(view.sweep, 1);
+    assert_eq!(view.purpose, DeletionPurposeWire::Privacy);
+    // The durable snapshot is reported: every required owner is pending for
+    // the current sweep, and the view never claims a completion it has none of.
+    let DeletionParticipantReportWire::Reported(participants) = &view.participants else {
+        panic!("a fresh operation must report its durable participant snapshot");
+    };
+    assert!(
+        !participants.is_empty(),
+        "the required snapshot is non-empty from admission"
+    );
+    assert!(
+        participants
+            .iter()
+            .all(|participant| participant.progress == "pending" && participant.sweep == 1),
+        "a freshly admitted operation has every participant pending: {participants:?}"
+    );
+    assert!(
+        !format!("{view:?}").contains("leaked key"),
+        "the status view never carries the target"
+    );
+
+    // A fresh duplicate intent observing the live surface is held by the
+    // running operation; no second operation exists.
+    let fresh = handle
+        .handle_frame(
+            deletion_intent_frame(
+                &live,
+                "leaked key",
+                &page.mark.0,
+                RationaleOrigin::ManagementSurface,
+                None,
+                CommandWireId(RawId::new().as_uuid()),
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(outcome_of(&fresh), ManagementOutcome::HeldByOperation);
+    assert_eq!(
+        handle.store.deletion_status(None, 10).await.unwrap().len(),
+        1
+    );
+
+    // A duplicate confirmation observes the same single operation.
+    assert_eq!(
+        handle
+            .confirm_targeted_deletion(&request_text)
+            .await
+            .unwrap(),
+        ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current)
+    );
+    assert_eq!(
+        handle
+            .store
+            .current_erasure_conditions(None, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// The wire alone never reaches the destructive confirmation: conversation
+/// wording, LLM-style rationale, and repeated fresh intents only stage.
+#[tokio::test]
+async fn targeted_deletion_is_unreachable_from_untrusted_client_wire_alone() {
+    use ene_preservation::PreservationRepository as _;
+    use ene_primitive::RawId;
+
+    let Some((handle, _dir)) = memory_handle("management-deletion-untrusted").await else {
+        panic!("the handle must open");
+    };
+    let live = paired_input("management-deletion-untrusted");
+    let transport = fake_transport();
+
+    for (index, text) in ["leaked key", "customer name", "private note"]
+        .into_iter()
+        .enumerate()
+    {
+        // Re-read the mark every time: the previous stage moved it.
+        let page = read_deletion_page(&handle, &live, &transport, None, None).await;
+        let responses = handle
+            .handle_frame(
+                deletion_intent_frame(
+                    &live,
+                    text,
+                    &page.mark.0,
+                    RationaleOrigin::Conversation,
+                    Some("the model suggested deleting this"),
+                    CommandWireId(RawId::new().as_uuid()),
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert_eq!(
+            outcome_of(&responses),
+            ManagementOutcome::NeedsClarification,
+            "request {index} only stages"
+        );
+    }
+    assert_eq!(
+        handle
+            .pending_targeted_deletions(None, 50)
+            .await
+            .unwrap()
+            .len(),
+        3,
+        "every advisory request is staged"
+    );
+    assert!(
+        handle
+            .store
+            .deletion_status(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no untrusted request starts an operation"
+    );
+    assert!(
+        handle
+            .store
+            .current_erasure_conditions(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no untrusted request publishes a condition"
+    );
+}
+
+/// Stale premised, malformed, and non-deletion targets change nothing, and the
+/// management journal never keeps the Owner's exact text.
+#[tokio::test]
+async fn targeted_deletion_stale_and_foreign_targets_leave_no_trace() {
+    use ene_preservation::PreservationRepository as _;
+    use ene_primitive::RawId;
+
+    let Some((handle, dir)) = memory_handle("management-deletion-stale").await else {
+        panic!("the handle must open");
+    };
+    let live = paired_input("management-deletion-stale");
+    let transport = fake_transport();
+
+    // A stale base view decides nothing and is not recorded, so the Client can
+    // re-read and retry with the same intent id.
+    let stale = handle
+        .handle_frame(
+            deletion_intent_frame(
+                &live,
+                "stale secret",
+                "deletion-view/99/-/99/-",
+                RationaleOrigin::ManagementSurface,
+                None,
+                CommandWireId(RawId::new().as_uuid()),
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let ManagementOutcome::StaleBaseView { current } = outcome_of(&stale) else {
+        panic!("a stale mark must answer StaleBaseView, got {stale:?}");
+    };
+    let page = read_deletion_page(&handle, &live, &transport, None, None).await;
+    assert_eq!(current.0, page.mark.0, "the answer names the live mark");
+    assert!(
+        handle
+            .pending_targeted_deletions(None, 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        handle
+            .store
+            .deletion_status(None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Malformed deletion targets and the deferred backup / restore / reset
+    // families clarify; none of them stages anything. A refused target may
+    // still carry the Owner's text, so the journal probe below covers these
+    // too.
+    for target in [
+        "deletion:privacy:",
+        "deletion:unknown:journal secret",
+        "deletion:privacy",
+        "deletion:",
+        "backup:daily:journal secret",
+        "restore:backup-1",
+        "reset:all",
+    ] {
+        let responses = handle
+            .handle_frame(
+                deletion_intent_frame_raw(
+                    &live,
+                    target,
+                    "deletion-view/99/-/99/-",
+                    RationaleOrigin::ManagementSurface,
+                    Some("journal secret in the rationale too"),
+                    CommandWireId(RawId::new().as_uuid()),
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert_eq!(
+            outcome_of(&responses),
+            ManagementOutcome::NeedsClarification,
+            "target {target:?} clarifies"
+        );
+    }
+    assert!(
+        handle
+            .pending_targeted_deletions(None, 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        handle
+            .store
+            .deletion_status(None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // One admissible request, then the durable journal probe: the management
+    // intent journal stores the family and purpose only, never the body.
+    let page = read_deletion_page(&handle, &live, &transport, None, None).await;
+    let responses = handle
+        .handle_frame(
+            deletion_intent_frame(
+                &live,
+                "journal secret",
+                &page.mark.0,
+                RationaleOrigin::ManagementSurface,
+                Some("journal secret in the rationale too"),
+                CommandWireId(RawId::new().as_uuid()),
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(
+        outcome_of(&responses),
+        ManagementOutcome::NeedsClarification
+    );
+    let conn = rusqlite::Connection::open(dir.path().join("app.db"))
+        .expect("the journal must open for the probe");
+    let leaked: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM management_intent WHERE target LIKE '%journal secret%' OR COALESCE(rationale_quote,'') LIKE '%journal secret%'",
+            (),
+            |row| row.get(0),
+        )
+        .expect("the journal probe must run");
+    assert_eq!(leaked, 0, "the intent journal never keeps the exact text");
+}
+
+/// The status read is bounded and typed: limit and cursor misuse are typed
+/// rejections, and paging walks operations once.
+#[tokio::test]
+async fn deletion_status_pages_are_bounded_and_reject_malformed_queries() {
+    use ene_preservation::{PreservationRepository as _, TargetedDeletionRequest};
+    use ene_primitive::RawId;
+
+    let Some((handle, _dir)) = memory_handle("management-deletion-status").await else {
+        panic!("the handle must open");
+    };
+    let live = paired_input("management-deletion-status");
+    let transport = fake_transport();
+
+    // Two operations from the production path (two distinct scopes).
+    for text in ["first secret", "second secret"] {
+        let page = read_deletion_page(&handle, &live, &transport, None, None).await;
+        let responses = handle
+            .handle_frame(
+                deletion_intent_frame(
+                    &live,
+                    text,
+                    &page.mark.0,
+                    RationaleOrigin::ManagementSurface,
+                    None,
+                    CommandWireId(RawId::new().as_uuid()),
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert_eq!(
+            outcome_of(&responses),
+            ManagementOutcome::NeedsClarification
+        );
+        let pending: Vec<TargetedDeletionRequest> =
+            handle.pending_targeted_deletions(None, 50).await.unwrap();
+        let request = pending
+            .iter()
+            .find(|request| request.owner_review_text() == text)
+            .expect("the staged request must be listed")
+            .request();
+        handle
+            .confirm_targeted_deletion(&request.as_raw().as_uuid().as_hyphenated().to_string())
+            .await
+            .unwrap();
+    }
+
+    // A page is limit-bounded and hands out a Host-issued cursor for the next.
+    let first = read_deletion_page(&handle, &live, &transport, None, Some(1)).await;
+    assert_eq!(first.operations.len(), 1);
+    let cursor = first
+        .next_cursor
+        .as_ref()
+        .expect("a full page hands out the next cursor");
+    let second = read_deletion_page(&handle, &live, &transport, Some(&cursor.0), Some(1)).await;
+    assert_eq!(second.operations.len(), 1);
+    assert_ne!(
+        first.operations[0].operation.0, second.operations[0].operation.0,
+        "the pages cover distinct operations"
+    );
+    // The full-page convention (IPC §18.2) may hand out one more cursor after a
+    // page that happened to be full; the following page is empty, never a
+    // fabricated row.
+    if let Some(next) = second.next_cursor.as_ref() {
+        let third = read_deletion_page(&handle, &live, &transport, Some(&next.0), Some(1)).await;
+        assert!(third.operations.is_empty());
+        assert!(third.next_cursor.is_none());
+    }
+
+    // Malformed limits and cursors are typed rejections, never empty pages.
+    for (cursor, limit) in [
+        (None, Some(0)),
+        (None, Some(51)),
+        (Some("not-a-cursor"), None),
+        (Some("deletion-status:not-a-uuid"), None),
+    ] {
+        let responses = handle
+            .handle_frame(
+                deletion_status_frame(&live, cursor, limit),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert!(
+            responses.first().is_some_and(|frame| matches!(
+                &frame.payload,
+                WirePayload::Reject(notice) if notice.kind == RejectKind::UnsupportedFieldValue
+            )),
+            "({cursor:?}, {limit:?}) must reject, got {responses:?}"
+        );
+    }
+
+    // A held operation stays visible with its hold class (lifecycle §5.1).
+    let operations = handle.store.deletion_status(None, 10).await.unwrap();
+    let held = handle
+        .store
+        .change_deletion_lifecycle(
+            operations[0].current,
+            ene_preservation::DeletionLifecycleChange::Hold,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        held,
+        ene_preservation::DeletionLifecycleOutcome::Applied(_)
+    ));
+    let page = read_deletion_page(&handle, &live, &transport, None, None).await;
+    let view = page
+        .operations
+        .iter()
+        .find(|view| {
+            view.operation.0
+                == operations[0]
+                    .current
+                    .operation
+                    .as_raw()
+                    .as_uuid()
+                    .as_hyphenated()
+                    .to_string()
+        })
+        .expect("the held operation stays visible");
+    assert_eq!(view.phase, DeletionPhaseWire::Held);
+    assert_eq!(
+        view.hold,
+        Some(ene_api::v1::deletion::DeletionHoldWire::Unavailable)
     );
 }

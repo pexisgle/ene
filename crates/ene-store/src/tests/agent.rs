@@ -30,6 +30,7 @@ fn task_agent_claim(
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
         task_agent: Some(premise),
+        pricing: None,
     }
 }
 
@@ -120,6 +121,7 @@ async fn task_agent_claim_records_the_durable_correlation() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             input_tokens: Some(7),
+            cached_input_tokens: Some(1),
             output_tokens: Some(3),
             source: UsageSource::Reported,
         })
@@ -146,6 +148,7 @@ async fn dialogue_attempt_reads_back_without_task_correlation() {
                 provider: String::from("openai"),
                 model: String::from("dialogue-1"),
                 task_agent: None,
+                pricing: None,
             })
             .await,
         Ok(AttemptBeginOutcome::Started)
@@ -471,6 +474,7 @@ async fn multiple_delegations_keep_distinct_attempt_correlations() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             input_tokens: Some(1),
+            cached_input_tokens: Some(1),
             output_tokens: Some(1),
             source: UsageSource::Reported,
         })
@@ -482,6 +486,7 @@ async fn multiple_delegations_keep_distinct_attempt_correlations() {
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
             input_tokens: Some(2),
+            cached_input_tokens: Some(1),
             output_tokens: Some(2),
             source: UsageSource::Reported,
         })
@@ -569,7 +574,7 @@ async fn inference_attempt_delegation_index_is_created_for_fresh_databases() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("delegation-index.db");
     let store = Store::open(&path).await.expect("a fresh store must open");
-    assert_eq!(read_schema_version(&path), Some(27));
+    assert_eq!(read_schema_version(&path), Some(30));
     drop(store);
     let index = |path: &std::path::Path| -> Option<String> {
         let conn = rusqlite::Connection::open(path).expect("the store file must open");

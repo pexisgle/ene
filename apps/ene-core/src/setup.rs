@@ -47,6 +47,13 @@
 //!   existing directory; a valid path becomes the trusted first-party premise
 //!   (never provider output) that a conversation Task proposal may use, and
 //!   an invalid path clarifies with zero premise change.
+//! - `(RequestDeletionBackupRestoreReset, "deletion:{purpose}:{exact-text}")`
+//!   is the Targeted Deletion request inlet (`Stage 6` A1b; see
+//!   [`crate::deletion`]): it can only stage a durable request awaiting the
+//!   Host-local trusted confirmation, never start an operation. Every other
+//!   target under this kind (backup / restore / reset families) clarifies.
+//!   The management journal never keeps the exact text: the deletion
+//!   fingerprint is body-redacted.
 //!
 //! Target parsing uses the shared `ene-api` setup grammar
 //! ([`parse_credential_target`],
@@ -109,7 +116,7 @@ use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing
 
 /// The outcome is the ack of the intent saga, so the envelope carries the
 /// intent id as `command_id` alongside the `reply_to` link.
-fn outcome_frame(
+pub(crate) fn outcome_frame(
     frame: &WireFrame,
     live: &LiveInput,
     intent: &ManagementIntent,
@@ -159,6 +166,12 @@ impl HostHandle {
             ManagementIntentKind::SelectWorkspace => {
                 self.select_workspace_intent(frame, intent, live).await
             }
+            // Targeted Deletion request inlet (Stage 6 A1b): the intent is
+            // advisory and can only stage a request; the destructive final
+            // confirmation is Host-local (IPC §18.1). See [`crate::deletion`].
+            ManagementIntentKind::RequestDeletionBackupRestoreReset => {
+                self.targeted_deletion_intent(frame, intent, live).await
+            }
             // Deferred scope answers clarify, recorded like any other decided
             // outcome so a retried id observes one answer.
             _ => {
@@ -167,8 +180,7 @@ impl HostHandle {
                     live,
                     intent,
                     self.record_decided(
-                        intent,
-                        Self::intent_kind_name(intent.kind),
+                        Self::intent_fingerprint(intent, Self::intent_kind_name(intent.kind)),
                         IntentOutcome::NeedsClarification,
                     )
                     .await,
@@ -216,7 +228,12 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         if let Some(answer) = self
-            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_CANCEL_TASK)
+            .replay_or_hold(
+                frame,
+                live,
+                intent,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_CANCEL_TASK),
+            )
             .await
         {
             return answer;
@@ -230,8 +247,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_CANCEL_TASK,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_CANCEL_TASK),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -247,8 +263,7 @@ impl HostHandle {
                     live,
                     intent,
                     self.record_decided(
-                        intent,
-                        Self::INTENT_KIND_CANCEL_TASK,
+                        Self::intent_fingerprint(intent, Self::INTENT_KIND_CANCEL_TASK),
                         IntentOutcome::AppliedAsOneTime,
                     )
                     .await,
@@ -270,8 +285,7 @@ impl HostHandle {
                     live,
                     intent,
                     self.record_decided(
-                        intent,
-                        Self::INTENT_KIND_CANCEL_TASK,
+                        Self::intent_fingerprint(intent, Self::INTENT_KIND_CANCEL_TASK),
                         IntentOutcome::NeedsClarification,
                     )
                     .await,
@@ -310,7 +324,12 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         if let Some(answer) = self
-            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_RESUME_TASK)
+            .replay_or_hold(
+                frame,
+                live,
+                intent,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_RESUME_TASK),
+            )
             .await
         {
             return answer;
@@ -324,8 +343,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_RESUME_TASK,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_RESUME_TASK),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -342,8 +360,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_RESUME_TASK,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_RESUME_TASK),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -364,8 +381,7 @@ impl HostHandle {
                     live,
                     intent,
                     self.record_decided(
-                        intent,
-                        Self::INTENT_KIND_RESUME_TASK,
+                        Self::intent_fingerprint(intent, Self::INTENT_KIND_RESUME_TASK),
                         IntentOutcome::NeedsClarification,
                     )
                     .await,
@@ -416,8 +432,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_RESUME_TASK,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_RESUME_TASK),
                     IntentOutcome::AppliedAsOneTime,
                 )
                 .await,
@@ -431,8 +446,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_RESUME_TASK,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_RESUME_TASK),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -462,7 +476,12 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         if let Some(answer) = self
-            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_SELECT_WORKSPACE)
+            .replay_or_hold(
+                frame,
+                live,
+                intent,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_SELECT_WORKSPACE),
+            )
             .await
         {
             return answer;
@@ -478,8 +497,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_SELECT_WORKSPACE,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_SELECT_WORKSPACE),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -491,8 +509,7 @@ impl HostHandle {
             live,
             intent,
             self.record_decided(
-                intent,
-                Self::INTENT_KIND_SELECT_WORKSPACE,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_SELECT_WORKSPACE),
                 IntentOutcome::AppliedAsOneTime,
             )
             .await,
@@ -516,8 +533,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_REGISTER,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_REGISTER),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -525,7 +541,12 @@ impl HostHandle {
         };
         // Durable replay first: an exact retry replays its stored snapshot.
         if let Some(answer) = self
-            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_REGISTER)
+            .replay_or_hold(
+                frame,
+                live,
+                intent,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_REGISTER),
+            )
             .await
         {
             return answer;
@@ -606,31 +627,37 @@ impl HostHandle {
     const INTENT_KIND_RESUME_TASK: &str = "resume-task";
     const INTENT_KIND_SELECT_WORKSPACE: &str = "select-workspace";
 
-    fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {
+    /// One rationale origin token, shared by every fingerprint composition.
+    pub(crate) fn rationale_origin_name(origin: RationaleOrigin) -> &'static str {
+        match origin {
+            RationaleOrigin::Conversation => "conversation",
+            RationaleOrigin::ManagementSurface => "management-surface",
+        }
+    }
+
+    pub(crate) fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {
         IntentFingerprint {
             intent_id: intent.intent_id.0.as_hyphenated().to_string(),
             kind: kind.to_string(),
             target: intent.target.0.clone(),
             base: intent.base_view.0.clone(),
-            rationale_origin: match intent.rationale.origin {
-                RationaleOrigin::Conversation => String::from("conversation"),
-                RationaleOrigin::ManagementSurface => String::from("management-surface"),
-            },
+            rationale_origin: Self::rationale_origin_name(intent.rationale.origin).to_string(),
             rationale_quote: intent.rationale.quote.clone(),
         }
     }
 
     /// Identity is the fingerprint only; the recorded outcome is irrelevant.
-    fn intent_matches(stored: &IntentOutcomeRecord, intent: &ManagementIntent, kind: &str) -> bool {
-        stored.fingerprint.kind == kind
-            && stored.fingerprint.target == intent.target.0
-            && stored.fingerprint.base == intent.base_view.0
-            && stored.fingerprint.rationale_origin
-                == match intent.rationale.origin {
-                    RationaleOrigin::Conversation => "conversation",
-                    RationaleOrigin::ManagementSurface => "management-surface",
-                }
-            && stored.fingerprint.rationale_quote == intent.rationale.quote
+    ///
+    /// The comparison runs on the *computed* fingerprint, never on the raw
+    /// intent: the Targeted Deletion fingerprint is body-redacted (see
+    /// [`crate::deletion`]), so a journal row can never become a place where
+    /// the Owner's exact text is compared — or stored.
+    fn fingerprint_matches(stored: &IntentFingerprint, incoming: &IntentFingerprint) -> bool {
+        stored.kind == incoming.kind
+            && stored.target == incoming.target
+            && stored.base == incoming.base
+            && stored.rationale_origin == incoming.rationale_origin
+            && stored.rationale_quote == incoming.rationale_quote
     }
 
     fn replayed_outcome(snapshot: &IntentOutcome) -> ManagementOutcome {
@@ -660,14 +687,14 @@ impl HostHandle {
     /// a hit with different content clarifies instead of adopting the new
     /// meaning; an unreadable journal holds. A miss returns [`None`] so the
     /// caller falls through to the owner-side execution.
-    async fn replay_or_hold(
+    pub(crate) async fn replay_or_hold(
         &self,
         frame: &WireFrame,
         live: &LiveInput,
         intent: &ManagementIntent,
-        kind: &str,
+        fingerprint: IntentFingerprint,
     ) -> Option<Vec<WireFrame>> {
-        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
+        let intent_key = fingerprint.intent_id.clone();
         match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => Some(vec![outcome_frame(
                 frame,
@@ -675,7 +702,7 @@ impl HostHandle {
                 intent,
                 ManagementOutcome::HeldByOperation,
             )]),
-            Ok(Some(stored)) if Self::intent_matches(&stored, intent, kind) => {
+            Ok(Some(stored)) if Self::fingerprint_matches(&stored.fingerprint, &fingerprint) => {
                 Some(vec![outcome_frame(
                     frame,
                     live,
@@ -719,8 +746,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_ASSIGN,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -734,8 +760,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_ASSIGN,
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -756,15 +781,14 @@ impl HostHandle {
     /// its retry cannot reproduce. A lost write race answers the winner
     /// (replay) or clarifies (conflict) — never the locally decided
     /// outcome.
-    async fn record_decided(
+    pub(crate) async fn record_decided(
         &self,
-        intent: &ManagementIntent,
-        kind: &str,
+        fingerprint: IntentFingerprint,
         outcome: IntentOutcome,
     ) -> ManagementOutcome {
         let answer = Self::replayed_outcome(&outcome);
         let record = IntentOutcomeRecord {
-            fingerprint: Self::intent_fingerprint(intent, kind),
+            fingerprint,
             outcome,
         };
         match self.store.record_intent_outcome(record).await {
@@ -795,7 +819,12 @@ impl HostHandle {
         // reaches its prior outcome; a miss falls through to the owner-side
         // assignment.
         if let Some(answer) = self
-            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_ASSIGN)
+            .replay_or_hold(
+                frame,
+                live,
+                intent,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
+            )
             .await
         {
             return answer;
@@ -867,7 +896,12 @@ impl HostHandle {
         // Durable replay first: the stored snapshot precedes any currentness
         // check, so an exact retry replays its prior outcome.
         if let Some(answer) = self
-            .replay_or_hold(frame, live, intent, Self::INTENT_KIND_COMPLETE)
+            .replay_or_hold(
+                frame,
+                live,
+                intent,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_COMPLETE),
+            )
             .await
         {
             return answer;

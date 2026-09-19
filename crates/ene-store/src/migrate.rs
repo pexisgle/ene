@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 27;
+const CURRENT_VERSION: i64 = 30;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -66,14 +66,85 @@ scope_assoc TEXT NULL,
 scope_folder TEXT NULL,
 scope_save_target TEXT NULL
 );
+CREATE TABLE deletion_operation (
+operation_id TEXT PRIMARY KEY,
+request_id TEXT NULL UNIQUE,
+sweep INTEGER NOT NULL CHECK (sweep > 0),
+phase TEXT NOT NULL CHECK (phase IN ('active', 'held', 'finalizing', 'completed')),
+purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
+started_at TEXT NOT NULL,
+hold_reason TEXT NULL CHECK (hold_reason IN ('unavailable', 'generation_exhausted')),
+CHECK ((phase = 'held') = (hold_reason IS NOT NULL))
+);
+-- Staged Targeted Deletion requests awaiting the Host-local trusted
+-- confirmation (IPC §18.1). Staging publishes no erasure condition and no
+-- operation: the row is inert until the confirmation inlet records the
+-- matching deletion_confirmation row and the canonical admission commits.
+-- `exact_text` is protected operation-lifetime material and is destroyed with
+-- the operation's material, never copied into audit rows or views.
+CREATE TABLE deletion_request (
+request_id TEXT PRIMARY KEY,
+purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
+exact_text TEXT NOT NULL CHECK (length(exact_text) > 0),
+requested_at TEXT NOT NULL
+);
+-- Durable Owner confirmation facts, written only by the Host-local trusted
+-- first-party inlet. A confirmation names its request identity: it can never
+-- be replayed onto another target or purpose, and a request starts at most
+-- one operation (deletion_operation.request_id is UNIQUE).
+CREATE TABLE deletion_confirmation (
+request_id TEXT PRIMARY KEY,
+confirmed_at TEXT NOT NULL
+);
+CREATE TABLE deletion_search_material (
+operation_id TEXT PRIMARY KEY,
+exact_text TEXT NOT NULL CHECK (length(exact_text) > 0)
+);
+-- Required participant snapshot plus current progress (lifecycle §8-§10).
+-- Every operation carries a non-empty set from admission; every row tracks the
+-- operation's current sweep (NextSweep resets progress to pending in the same
+-- transaction that advances the generation); a completed operation has every
+-- row verified for the final sweep. Progress is keyed by the stable owner name
+-- (a semantic owner class or `client_incarnation:<uuid>`), so a replacement
+-- Client incarnation never inherits another incarnation's status.
+CREATE TABLE deletion_participant (
+operation_id TEXT NOT NULL,
+participant_owner TEXT NOT NULL,
+state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'local_complete', 'verified', 'held')),
+sweep INTEGER NOT NULL CHECK (sweep > 0),
+hold_class TEXT NULL CHECK (hold_class IN ('unavailable', 'unsupported', 'failed')),
+erased_count INTEGER NOT NULL CHECK (erased_count >= 0),
+remainder_count INTEGER NOT NULL CHECK (remainder_count >= 0),
+reported_at TEXT NULL,
+PRIMARY KEY (operation_id, participant_owner),
+CHECK ((state = 'held') = (hold_class IS NOT NULL)),
+CHECK (state != 'verified' OR remainder_count = 0),
+CHECK ((state = 'pending') = (reported_at IS NULL))
+);
+CREATE TABLE deletion_semantic_hint (
+operation_id TEXT NOT NULL,
+ordinal INTEGER NOT NULL,
+material TEXT NOT NULL,
+PRIMARY KEY (operation_id, ordinal)
+);
 CREATE TABLE erasure_condition (
 operation_id TEXT NOT NULL,
-sweep INTEGER NOT NULL,
+sweep INTEGER NOT NULL CHECK (sweep > 0),
+opened_at TEXT NOT NULL,
+closed_at TEXT NULL,
 PRIMARY KEY (operation_id, sweep)
 );
+-- Current-sweep canonical source correlation for the erasure-currentness hot
+-- path (AU14 / Task resume). Unfinished operations keep source rows only in
+-- their current sweep: NextSweep copies the current sweep forward and then
+-- deletes the old sweep in the same transaction. Historical erasure_condition
+-- rows remain as lifecycle/history but carry no source rows. Completed
+-- operations keep zero source rows: the completion boundary (A5; A1 has no
+-- completion authority) must delete them, and any remaining row fails closed.
+-- No second copy is kept for audit/history.
 CREATE TABLE erasure_condition_source (
 operation_id TEXT NOT NULL,
-sweep INTEGER NOT NULL,
+sweep INTEGER NOT NULL CHECK (sweep > 0),
 source TEXT NOT NULL,
 PRIMARY KEY (operation_id, sweep, source)
 );
@@ -109,7 +180,8 @@ credential_set_rev INTEGER NULL,
 delegation_id TEXT NULL,
 task_id TEXT NULL,
 task_revision INTEGER NULL,
-data_use_count INTEGER NULL
+data_use_count INTEGER NULL,
+pricing_snapshot TEXT NULL
 );
 CREATE TABLE inference_attempt_data_use (
 ticket TEXT NOT NULL,
@@ -177,6 +249,23 @@ pending_id TEXT PRIMARY KEY,
 descriptor TEXT NOT NULL,
 requested_at TEXT NOT NULL,
 origin_connection TEXT NOT NULL
+);
+-- Reviewed provider rates, immutable per (provider, model, revision). The id
+-- is derived from the reviewed content, so the same revision resolves to the
+-- same durable identity in every process; a row that disagrees with the
+-- revision it was published under fails closed instead of repricing history.
+-- Rates are exact micro-currency units per 1,000,000 tokens.
+CREATE TABLE pricing_snapshot (
+id TEXT PRIMARY KEY,
+provider TEXT NOT NULL,
+model TEXT NOT NULL,
+currency TEXT NOT NULL,
+input_rate INTEGER NOT NULL CHECK (input_rate >= 0),
+cached_input_rate INTEGER NOT NULL CHECK (cached_input_rate >= 0),
+output_rate INTEGER NOT NULL CHECK (output_rate >= 0),
+effective_at TEXT NOT NULL,
+source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+UNIQUE (provider, model, source_revision)
 );
 CREATE TABLE presence_attribution (
 companion_id TEXT PRIMARY KEY,
@@ -257,8 +346,17 @@ ticket TEXT PRIMARY KEY,
 provider TEXT NOT NULL,
 model TEXT NOT NULL,
 input_tokens INTEGER,
+cached_input_tokens INTEGER,
 output_tokens INTEGER,
-source TEXT NOT NULL
+source TEXT NOT NULL,
+pricing_snapshot TEXT NULL,
+CHECK (
+    (source = 'unknown' AND input_tokens IS NULL AND cached_input_tokens IS NULL AND output_tokens IS NULL)
+    OR
+    (source = 'reported' AND input_tokens IS NOT NULL AND cached_input_tokens IS NOT NULL AND output_tokens IS NOT NULL
+        AND input_tokens >= 0 AND cached_input_tokens >= 0 AND output_tokens >= 0
+        AND cached_input_tokens <= input_tokens)
+)
 );
 CREATE TABLE workspace_assoc (
 assoc_id TEXT PRIMARY KEY,
@@ -341,7 +439,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 28] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 31] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

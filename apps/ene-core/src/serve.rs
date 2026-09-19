@@ -103,9 +103,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::conn::{ConnectionPhase, ConnectionTable};
-use crate::dialogue::{CredentialScrubber, HostInference};
+use crate::dialogue::HostInference;
 use crate::task_agent::{OwnerInstructionSource, TaskAgentInferenceAdapter};
 use crate::task_run::{TaskAgentRunError, TaskAgentRunOutcome, TaskAgentRunRefusal};
+use ene_credential::CredentialScrubber;
 
 mod frames;
 mod handshake;
@@ -142,6 +143,13 @@ pub enum CoreError {
     /// retry with the exact value; the message carries display strings only.
     #[error("device approval failed: {0}")]
     Approve(String),
+    /// Targeted Deletion composition failure: an invalid fan-out pass, a
+    /// duplicate participant registration, or a canonical preservation
+    /// refusal. Also carries Host-local inlet failures (malformed status
+    /// cursor or limit, unreadable status). Never a global-completion claim
+    /// and never a participant fact; messages carry no target body.
+    #[error("targeted deletion failed: {0}")]
+    Deletion(String),
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(&'static str),
 }
@@ -504,6 +512,14 @@ pub struct HostHandle {
     /// A handle without an installed launcher (unit tests) accepts Task
     /// creation but starts no execution; production always installs one.
     pub(crate) task_launcher: OnceLock<std::sync::Arc<dyn crate::task_run::TaskAgentLauncher>>,
+    /// Host-composition erasure participants keyed by owner (lifecycle §9).
+    ///
+    /// Holds implementations only; an owner without one is driven as an
+    /// explicit unsupported participant. In-memory and never authority: the
+    /// durable `deletion_participant` snapshot persists across restart while a
+    /// reopening composition re-registers its implementations before driving,
+    /// so a restart can never turn a missing implementation into completion.
+    pub(crate) targeted_deletion: StdMutex<crate::targeted_deletion::ErasureParticipantRegistry>,
     /// Test-only deterministic gate for conversation task-control commands.
     #[cfg(test)]
     pub(crate) task_control_gate:
@@ -628,7 +644,7 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))?;
         let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(Self {
+        let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
             open_rounds: StdMutex::new(HashMap::new()),
@@ -646,6 +662,9 @@ impl HostHandle {
             presentation_lock: AsyncMutex::new(()),
             trusted_task_premises: crate::task_control::TrustedTaskPremises::default(),
             task_launcher: OnceLock::new(),
+            targeted_deletion: StdMutex::new(
+                crate::targeted_deletion::ErasureParticipantRegistry::new(),
+            ),
             #[cfg(test)]
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -668,7 +687,22 @@ impl HostHandle {
             presentation_commit_gate: StdMutex::new(None),
             #[cfg(all(test, unix))]
             receipt_expiry_runs: std::sync::atomic::AtomicUsize::new(0),
-        })
+        };
+        // The composition registers the built-in local-erasure implementations
+        // for the owners the store serves (lifecycle §9): a reopening
+        // composition re-registers before any drive, so a restart can never
+        // turn a missing implementation into completion.
+        handle
+            .register_deletion_participant(Arc::new(ene_store::CompanionErasureParticipant::new(
+                handle.store.clone(),
+            )))
+            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        handle
+            .register_deletion_participant(Arc::new(ene_store::LearningErasureParticipant::new(
+                handle.store.clone(),
+            )))
+            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        Ok(handle)
     }
 
     /// Startup credential boundary: sweeps every registered pinned value out
@@ -756,6 +790,79 @@ impl HostHandle {
         launcher: std::sync::Arc<dyn crate::task_run::TaskAgentLauncher>,
     ) -> bool {
         self.task_launcher.set(launcher).is_ok()
+    }
+
+    /// Registers one erasure participant implementation and the owner it
+    /// serves (lifecycle §9).
+    ///
+    /// This is the composition seam A3 slices use: `ene-preservation` owns the
+    /// trait and never depends on a concrete participant crate, so the Host
+    /// composition is the only place that learns them. Registering a second
+    /// implementation for one owner is refused: a nondeterministic fan-out
+    /// could record a fact that does not describe the demanded owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Deletion`] when the owner already has one.
+    pub fn register_deletion_participant(
+        &self,
+        participant: std::sync::Arc<dyn ene_preservation::ErasureParticipant>,
+    ) -> Result<(), CoreError> {
+        crate::lock_unpoison(&self.targeted_deletion)
+            .register(participant)
+            .map_err(|owner| {
+                CoreError::Deletion(format!(
+                    "duplicate deletion participant for owner class {}",
+                    owner.class_name()
+                ))
+            })
+    }
+
+    /// Required participant snapshot for a newly admitted operation: the
+    /// current product surface's semantic owners (lifecycle §8).
+    ///
+    /// The set is snapshotted durably with the operation admission; later
+    /// changes in the registered implementations never widen an admitted
+    /// operation, and an owner with no implementation is still required.
+    /// Client-incarnation owners are appended by the Client-transient slice
+    /// once it can identify which incarnation may hold a target-bearing copy.
+    #[must_use]
+    pub fn required_deletion_participants(&self) -> Vec<ene_preservation::ParticipantOwnerRef> {
+        crate::targeted_deletion::current_product_surface_owners()
+    }
+
+    /// Test-only: empties the erasure-participant registry.
+    ///
+    /// The built-in composition registers one implementation per served
+    /// owner; a fan-out test that needs the unsupported-hold path, or a
+    /// scripted implementation for a served owner, clears the registry first.
+    /// Production code has no path that removes an implementation.
+    #[cfg(test)]
+    pub(crate) fn reset_deletion_participants_for_tests(&self) {
+        *crate::lock_unpoison(&self.targeted_deletion) =
+            crate::targeted_deletion::ErasureParticipantRegistry::new();
+    }
+
+    /// Runs one bounded Targeted Deletion fan-out pass over the durable
+    /// unfinished operations.
+    ///
+    /// Only active operations are driven: held operations wait for an explicit
+    /// resume decision and finalizing operations belong to the completion
+    /// boundary. Participants already verified for the current sweep are never
+    /// demanded again, so a crash mid-fan-out continues with only the
+    /// unfinished participants (§14); the durable snapshot and the operation
+    /// identity are never regenerated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Deletion`] for invalid pass parameters or when the
+    /// canonical store refuses (torn participant state fails closed).
+    pub async fn drive_targeted_deletion(
+        &self,
+        pass: crate::targeted_deletion::TargetedDeletionPass,
+    ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
+        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
+        crate::targeted_deletion::drive_targeted_deletion(&self.store, &registry, pass).await
     }
 
     pub(crate) fn task_launcher(
@@ -1057,6 +1164,18 @@ impl HostHandle {
                     return emit_end(sink, refusal);
                 }
                 for response in self.answer_view(&frame, request, &live).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::DeletionStatusRequest(query) => {
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "deletion status on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
+                }
+                for response in self.deletion_status_wire(&frame, &live, query).await {
                     if sink.emit(response).is_err() {
                         break;
                     }

@@ -170,7 +170,28 @@ pub enum ManagementIntentKind {
     /// Credential configuration intent (values travel the protected
     /// Host-local path only, never this payload).
     ConfigureCredentialIntent,
+    /// Targeted Deletion request inlet (Stage 6 A1b; lifecycle §4, §15). The
+    /// target grammar is `deletion:{purpose}:{exact-text}` (see
+    /// [`super::deletion`]), the exact text is the Owner body, and the intent
+    /// only ever stages a request: the destructive final confirmation is
+    /// established on the Host-local trusted first-party surface (IPC §18.1)
+    /// and never travels this payload. The same kind also names the deferred
+    /// backup / restore / reset families, which have no producer yet and
+    /// clarify instead of borrowing this one's authority.
     RequestDeletionBackupRestoreReset,
+}
+
+impl ManagementIntentKind {
+    /// Whether this kind's target grammar may carry an Owner body.
+    ///
+    /// Only the Targeted Deletion target does (`deletion:{purpose}:{exact
+    /// text}`): [`ManagementIntent`]'s `Debug` redacts that target so no log
+    /// or panic message reproduces the Owner's text. The kind names the
+    /// grammar, never a trust class.
+    #[must_use]
+    pub fn target_carries_owner_body(self) -> bool {
+        matches!(self, Self::RequestDeletionBackupRestoreReset)
+    }
 }
 
 /// One management intent: idempotent by key, advisory by nature. The Host
@@ -189,11 +210,16 @@ pub struct ManagementIntent {
 
 impl core::fmt::Debug for ManagementIntent {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("ManagementIntent")
+        let mut builder = formatter.debug_struct("ManagementIntent");
+        builder
             .field("intent_id", &self.intent_id)
-            .field("kind", &self.kind)
-            .field("target", &self.target)
+            .field("kind", &self.kind);
+        if self.kind.target_carries_owner_body() {
+            builder.field("target", &"[redacted]");
+        } else {
+            builder.field("target", &self.target);
+        }
+        builder
             .field("base_view", &self.base_view)
             .field("rationale", &"[redacted]")
             .finish()
@@ -338,6 +364,31 @@ mod tests {
         assert!(
             rendered.contains("mark-1"),
             "marks stay visible: {rendered}"
+        );
+    }
+
+    #[test]
+    fn deletion_intent_debug_redacts_the_owner_body_target() {
+        let mut intent = intent();
+        intent.kind = ManagementIntentKind::RequestDeletionBackupRestoreReset;
+        intent.target = ManagementTargetWire(String::from("deletion:privacy:raw secret body"));
+        let rendered = format!("{intent:?}");
+        assert!(
+            !rendered.contains("raw secret body"),
+            "the deletion target body is redacted: {rendered}"
+        );
+        assert!(
+            rendered.contains("deletion-backup-restore-reset")
+                || rendered.contains("RequestDeletion"),
+            "the kind stays visible: {rendered}"
+        );
+        assert!(
+            ManagementIntentKind::RequestDeletionBackupRestoreReset.target_carries_owner_body(),
+            "the deletion grammar carries an Owner body"
+        );
+        assert!(
+            !ManagementIntentKind::ManageSchedule.target_carries_owner_body(),
+            "other kinds keep their readable targets"
         );
     }
 

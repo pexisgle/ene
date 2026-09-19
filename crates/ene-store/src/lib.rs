@@ -24,16 +24,19 @@ mod action;
 mod codec;
 mod companion;
 mod credential;
+mod erasure;
 mod inference;
 mod learning;
 mod migrate;
 mod permission;
 mod presence;
+mod preservation;
 mod task;
 #[cfg(test)]
 mod tests;
 
 pub use companion::UndeliveredExcerpt;
+pub use erasure::{CompanionErasureParticipant, ERASURE_SCAN_ROWS, LearningErasureParticipant};
 
 /// Messages carry the short backend cause only. Paths are non-secret but are
 /// kept out of messages for operational brevity.
@@ -161,6 +164,36 @@ impl Store {
             conn: Arc::new(Mutex::new(conn)),
             undelivered: UndeliveredSignal::new(),
         })
+    }
+
+    /// Mechanical exact-text remainder probe over every durable content
+    /// column the Companion and Learning erasure participants sweep, plus
+    /// the derived token index and the undelivered references whose canonical
+    /// source is gone.
+    ///
+    /// Test-support only: tests assert `0` after a local erasure instead of
+    /// re-implementing the column list. The list is shared with the
+    /// participants (`erasure::COMPANION_CONTENT`,
+    /// `erasure::LEARNING_CONTENT`), so a probe cannot check a different
+    /// column set than the sweep covers.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::OpenFailed`] when the connection cannot be locked.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn count_exact_text_remainder_for_tests(
+        &self,
+        text: &str,
+    ) -> Result<u64, StoreError> {
+        let conn = Arc::clone(&self.conn);
+        let text = text.to_owned();
+        run_blocking(move || {
+            let guard = crate::codec::lock_shared(&conn);
+            erasure::exact_remainder_probe(&guard, &text)
+                .map_err(|error| StoreError::OpenFailed(error.to_string()))
+        })
+        .await
     }
 
     /// Subscribes to the coalesced undelivered-registration hint (CCT §10.5).

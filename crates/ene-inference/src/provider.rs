@@ -353,7 +353,7 @@ struct ResponsesBody {
     #[serde(default)]
     output: Vec<OutputItem>,
     #[serde(default)]
-    usage: Option<UsageObj>,
+    usage: Option<serde_json::Value>,
     #[serde(default)]
     incomplete_details: Option<IncompleteDetails>,
 }
@@ -384,19 +384,28 @@ struct UsageObj {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct InputTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 impl UsageObj {
-    /// Both counts or none: partial usage is [`None`] (unknown), never a
-    /// zero-as-unknown fact.
+    /// Only a complete, valid report is known. Absent cache detail is not
+    /// evidence of zero cache hits, even when input and output are present.
     fn into_raw(self) -> Option<RawUsage> {
-        match (self.input_tokens, self.output_tokens) {
-            (Some(input_tokens), Some(output_tokens)) => Some(RawUsage {
-                input_tokens,
-                output_tokens,
-            }),
-            _ => None,
-        }
+        let input_tokens = self.input_tokens?;
+        let output_tokens = self.output_tokens?;
+        let cached_input_tokens = self.input_tokens_details?.cached_tokens?;
+        (cached_input_tokens <= input_tokens).then_some(RawUsage {
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+        })
     }
 }
 
@@ -481,7 +490,10 @@ fn parse_response(
             }
         }
     }
-    let usage = decoded.usage.and_then(UsageObj::into_raw);
+    let usage = decoded
+        .usage
+        .and_then(|usage| serde_json::from_value::<UsageObj>(usage).ok())
+        .and_then(UsageObj::into_raw);
     Ok(ProviderResponse { text, usage })
 }
 
@@ -527,7 +539,7 @@ mod tests {
                     "content": [{"type": "output_text", "text": " Again."}],
                 },
             ],
-            "usage": {"input_tokens": 12, "output_tokens": 5},
+            "usage": {"input_tokens": 12, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 1}},
         });
         let result = parse_response(200, body);
         let response = result.unwrap();
@@ -536,6 +548,7 @@ mod tests {
             response.usage,
             Some(RawUsage {
                 input_tokens: 12,
+                cached_input_tokens: 1,
                 output_tokens: 5,
             })
         );
@@ -677,6 +690,78 @@ mod tests {
     }
 
     #[test]
+    fn missing_cache_detail_is_unknown_not_zero() {
+        let body = serde_json::json!({
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 7, "output_tokens": 3},
+        });
+        let result = parse_response(200, body);
+        let response = result.unwrap();
+        assert_eq!(response.text, "");
+        assert_eq!(
+            response.usage, None,
+            "cache detail absence is not evidence of zero cache hits"
+        );
+    }
+
+    #[test]
+    fn cache_detail_absent_and_empty_both_stay_unknown() {
+        // Explicit null and an empty details object carry no cached count.
+        for usage in [
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3, "input_tokens_details": null}),
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3, "input_tokens_details": {}}),
+        ] {
+            let body = serde_json::json!({
+                "status": "completed",
+                "output": [],
+                "usage": usage,
+            });
+            let result = parse_response(200, body);
+            let response = result.unwrap();
+            assert_eq!(
+                response.usage, None,
+                "a cache detail without cached_tokens is not a zero cache"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_count_above_input_is_rejected_as_unknown() {
+        let body = serde_json::json!({
+            "status": "completed",
+            "output": [],
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 6},
+            },
+        });
+        let result = parse_response(200, body);
+        let response = result.unwrap();
+        assert_eq!(
+            response.usage, None,
+            "cached subset larger than input is not a correct usage report"
+        );
+    }
+
+    #[test]
+    fn malformed_usage_json_keeps_the_valid_response_unknown() {
+        let body = serde_json::json!({
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+            "usage": {"input_tokens": "lots"},
+        });
+        let result = parse_response(200, body);
+        let response = result.expect("the response envelope itself is valid");
+        assert_eq!(response.text, "hi");
+        assert_eq!(
+            response.usage, None,
+            "an undecodable usage report settles Unknown, not a failed call"
+        );
+    }
+
+    #[test]
     fn unauthorized_maps_to_transport_failure() {
         let result = parse_response(401, error_shape());
         assert!(matches!(
@@ -748,6 +833,23 @@ mod tests {
     }
 
     #[test]
+    fn stream_assembler_missing_cache_detail_reports_unknown_usage() {
+        let mut assembler = super::StreamAssembler::default();
+        for line in [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
+        ] {
+            assembler.feed_line(line).expect("a known event must parse");
+        }
+        let response = assembler.finish().expect("a completed stream answers");
+        assert_eq!(response.text, "hi");
+        assert_eq!(
+            response.usage, None,
+            "SSE completion without cache detail settles Unknown, never zero"
+        );
+    }
+
+    #[test]
     fn streaming_body_requests_incremental_output() {
         let body = super::responses_body("gpt-test", "hello", true);
         assert_eq!(
@@ -766,7 +868,7 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}",
             "event: response.output_text.delta",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":1}}}}",
         ] {
             let fed = assembler.feed_line(line).expect("a known event must parse");
             deltas.extend(fed);
@@ -778,6 +880,7 @@ mod tests {
             response.usage,
             Some(crate::RawUsage {
                 input_tokens: 7,
+                cached_input_tokens: 1,
                 output_tokens: 3,
             })
         );
@@ -855,5 +958,235 @@ mod tests {
         let rendered = format!("{transport:?}");
         assert!(!rendered.contains("sk-probe-bearer-material"));
         assert!(!rendered.contains("Bearer"));
+    }
+
+    /// Models the pinned credential set the real Host wires into the
+    /// scrubber: the ref list and the pinned value agree on one pair.
+    struct FixtureRefs {
+        refs: Vec<CredentialRef>,
+        revision: ene_credential::CredentialSetRevision,
+    }
+
+    impl ene_credential::CredentialRefRepository for FixtureRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn list_refs(
+            &self,
+        ) -> Result<Vec<CredentialRef>, ene_credential::CredentialTechnicalError> {
+            Ok(self.refs.clone())
+        }
+    }
+
+    impl ene_credential::CredentialSetRepository for FixtureRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn current_set_revision(
+            &self,
+        ) -> Result<ene_credential::CredentialSetRevision, ene_credential::CredentialTechnicalError>
+        {
+            Ok(self.revision)
+        }
+    }
+
+    /// Serves one HTTP/1.1 response with `status` and `payload`, recording the
+    /// exact request bytes (head and body) the production transport emitted.
+    async fn spawn_capturing_responses(
+        status: u16,
+        payload: String,
+    ) -> Option<(
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    )> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&captured);
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if head.len() > 16_384 {
+                    return;
+                }
+                match stream.read(&mut byte).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => head.push(byte[0]),
+                }
+            }
+            let head_text = String::from_utf8_lossy(&head).into_owned();
+            let mut content_length = 0_usize;
+            for line in head_text.lines().skip(1) {
+                let Some((name, value)) = line.split_once(':') else {
+                    continue;
+                };
+                if name.trim().eq_ignore_ascii_case("content-length")
+                    && let Ok(parsed) = value.trim().parse::<usize>()
+                {
+                    content_length = parsed;
+                }
+            }
+            let mut body = vec![0_u8; content_length.min(1_048_576)];
+            let mut filled = 0_usize;
+            while filled < body.len() {
+                match stream.read(&mut body[filled..]).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => filled += read,
+                }
+            }
+            record
+                .lock()
+                .expect("capture lock")
+                .push((head_text, String::from_utf8_lossy(&body).into_owned()));
+            let reason = if status == 200 {
+                "OK"
+            } else {
+                "Internal Server Error"
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{payload}",
+                payload.len()
+            );
+            drop(stream.write_all(response.as_bytes()).await);
+            drop(stream.shutdown().await);
+        });
+        Some((addr, handle, captured))
+    }
+
+    /// The HTTP authorization boundary is the only place the pinned bearer may
+    /// appear: the body carries the scrubbed input, and no debug rendering of
+    /// the transport or the request carries the value.
+    #[tokio::test]
+    async fn bearer_stays_at_the_http_authorization_boundary() {
+        use crate::ProviderTransport as _;
+        use ene_credential::{CredentialScrubber, CredentialSetRevision, SecretScrubber as _};
+
+        let secret = "sk-transport-boundary-probe";
+        let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
+        let concrete = MemoryCredentialStore::new();
+        concrete.insert(credential.clone(), secret);
+        let refs = FixtureRefs {
+            refs: vec![credential.clone()],
+            revision: CredentialSetRevision::from_u64(4),
+        };
+        let proof = CredentialScrubber {
+            refs: &refs,
+            store: &concrete,
+        }
+        .scrub(&format!("the owner key is {secret}"))
+        .await
+        .expect("the fixture registry is readable");
+        assert!(
+            !proof.text().contains(secret),
+            "the proof must not carry the registered value"
+        );
+        assert!(proof.text().contains("[credential]"));
+
+        let completed = r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}"#;
+        let (addr, server, captured) = spawn_capturing_responses(200, completed.to_owned())
+            .await
+            .expect("the local listener must bind");
+        let transport =
+            OpenAiResponsesTransport::new(format!("http://{addr}"), concrete).expect("client");
+        let request = crate::ProviderRequest {
+            model: String::from("gpt-test"),
+            credential,
+            input: proof.into_text(),
+        };
+        assert!(
+            !format!("{request:?}").contains(secret),
+            "request debug must not carry the bearer"
+        );
+        let response = transport
+            .complete(request)
+            .await
+            .expect("the completion must answer");
+        assert_eq!(response.text, "ok");
+        assert!(
+            !format!("{transport:?}").contains(secret),
+            "transport debug must not carry the bearer"
+        );
+        server.abort();
+
+        let requests = captured.lock().expect("capture lock").clone();
+        assert_eq!(requests.len(), 1, "exactly one request must be observed");
+        let (head, body) = &requests[0];
+        let auth_lines: Vec<&str> = head
+            .lines()
+            .filter(|line| {
+                line.split_once(':')
+                    .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+            })
+            .collect();
+        assert_eq!(auth_lines.len(), 1, "the bearer travels in one auth header");
+        assert!(
+            auth_lines[0].contains(secret),
+            "the positive control: the pinned bearer is the header value"
+        );
+        let head_without_auth = head
+            .lines()
+            .filter(|line| !auth_lines.contains(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !head_without_auth.contains(secret),
+            "no header other than authorization may carry the bearer: {head_without_auth}"
+        );
+        assert!(
+            !body.contains(secret),
+            "the body must carry only the scrubbed input: {body}"
+        );
+        assert!(
+            body.contains("[credential]"),
+            "the body carries the redacted position: {body}"
+        );
+        assert!(
+            body.contains("\"store\":false"),
+            "the request keeps server-side storage disabled: {body}"
+        );
+
+        // A provider failure that echoes the value in its error body and a
+        // transport failure at a closed port both render their class only.
+        let failing_store = MemoryCredentialStore::new();
+        failing_store.insert(
+            CredentialRef::new("openai", "main").expect("valid test fixture"),
+            secret,
+        );
+        let error_body = format!(r#"{{"error":{{"message":"the key {secret} is invalid"}}}}"#);
+        let (error_addr, error_server, _) = spawn_capturing_responses(500, error_body)
+            .await
+            .expect("the local listener must bind");
+        let failing = OpenAiResponsesTransport::new(format!("http://{error_addr}"), failing_store)
+            .expect("client");
+        let error = failing
+            .complete(crate::ProviderRequest {
+                model: String::from("gpt-test"),
+                credential: CredentialRef::new("openai", "main").expect("valid test fixture"),
+                input: String::from("the owner key is [credential]"),
+            })
+            .await
+            .expect_err("a 500 must fail");
+        assert!(
+            !error.to_string().contains(secret) && !format!("{error:?}").contains(secret),
+            "a provider error must not echo the body value: {error:?}"
+        );
+        error_server.abort();
+
+        let unreachable =
+            OpenAiResponsesTransport::new("http://127.0.0.1:1", MemoryCredentialStore::new())
+                .expect("client");
+        let error = unreachable
+            .complete(crate::ProviderRequest {
+                model: String::from("gpt-test"),
+                credential: CredentialRef::new("openai", "main").expect("valid test fixture"),
+                input: String::from("the owner key is [credential]"),
+            })
+            .await
+            .expect_err("a closed port must fail");
+        assert!(
+            !error.to_string().contains(secret) && !format!("{error:?}").contains(secret),
+            "a transport failure must not carry the bearer: {error:?}"
+        );
     }
 }

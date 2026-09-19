@@ -134,12 +134,23 @@ impl Store {
 /// is replaced as a whole string, while tokens hold its fragments, so a
 /// replace would leave credential-derived pieces behind. Token rows are
 /// rebuilt from the swept canonical text instead (see below).
+///
+/// Task and activity bodies are included because they are canonical sources
+/// for the Task report, the management view, and undelivered excerpts: a
+/// purpose, instruction activity, or final result recorded while the value
+/// was still ordinary text must be redacted by the same boundary, or the
+/// report/presentation would keep reading the raw value out of the owner row
+/// after the value became a registered credential.
 const SWEEP_TARGETS: &[(&str, &str)] = &[
+    ("activity_record", "body"),
     ("history_message", "body"),
     ("learning_summary", "content"),
     ("learning_memory", "content"),
     ("learning_memory_revision", "content"),
     ("management_intent", "rationale_quote"),
+    ("task", "purpose_text"),
+    ("task_revision", "purpose_text"),
+    ("task_result", "body"),
 ];
 
 /// Sweeps `bearer` out of durable content inside the caller's transaction.

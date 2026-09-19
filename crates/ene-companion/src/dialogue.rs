@@ -648,9 +648,9 @@ pub async fn finish_turn(
             let presentation = holder.finalize().await;
             let (reply_text, reply_credential_set) = match presentation {
                 ControlPresentation::LateMarker => return DialogueOutcome::Interrupted,
-                ControlPresentation::Ordinary => (text.text.clone(), text.credential_set),
+                ControlPresentation::Ordinary => (text.text().to_owned(), text.credential_set()),
                 ControlPresentation::Directive => {
-                    let tail = match interpret_task_control(&text.text) {
+                    let tail = match interpret_task_control(text.text()) {
                         DialogueTaskInterpretation::Command { command } => {
                             match task_control.apply(command, message).await {
                                 DialogueTaskControlReply::Answered(tail) => tail,
@@ -675,10 +675,10 @@ pub async fn finish_turn(
                     let Ok(scrubbed) = scrubber.scrub(&tail).await else {
                         return DialogueOutcome::Interrupted;
                     };
-                    if let DeltaFlow::Abort(_) = holder.present(&scrubbed.text).await {
+                    if let DeltaFlow::Abort(_) = holder.present(scrubbed.text()).await {
                         return DialogueOutcome::Interrupted;
                     }
-                    (scrubbed.text, scrubbed.credential_set)
+                    (scrubbed.text().to_owned(), scrubbed.credential_set())
                 }
             };
             let reply = AppendHistoryCommand {
@@ -809,10 +809,10 @@ async fn assemble_dialogue_input(
     // fold, so the returned set is total without a fallback branch. The
     // scrubbed length is what the budget counts: redaction changes size.
     let input = scrubber.scrub(input_text).await?;
-    let mut credential_set = input.credential_set;
+    let mut credential_set = input.credential_set();
     let current_time = WallClockWithTz::now().to_rfc3339();
     let mut budget = ene_inference::MAX_INPUT_CHARS.saturating_sub(
-        fixed_prompt_chars(&current_time).saturating_add(input.text.chars().count()),
+        fixed_prompt_chars(&current_time).saturating_add(input.text().chars().count()),
     );
 
     // Recent History first, newest to oldest: a fitting older message is
@@ -826,14 +826,14 @@ async fn assemble_dialogue_input(
         .rev()
     {
         let text = scrubber.scrub(&item.text).await?;
-        credential_set = credential_set.min(text.credential_set);
+        credential_set = credential_set.min(text.credential_set());
         let role = match item.role {
             HistoryRole::Owner => "Owner",
             HistoryRole::Companion => "Companion",
         };
         // The source message's own offset-qualified time stays attached:
         // "tomorrow" in a past message is not re-anchored to now.
-        let line = format!("{role} [{}]: {}\n", item.at.to_rfc3339(), text.text);
+        let line = format!("{role} [{}]: {}\n", item.at.to_rfc3339(), text.text());
         let header_cost = if history_header {
             0
         } else {
@@ -854,8 +854,8 @@ async fn assemble_dialogue_input(
     let mut memories_header = false;
     for memory in &recalled {
         let content = scrubber.scrub(&memory.content).await?;
-        credential_set = credential_set.min(content.credential_set);
-        let line = format!("- {}\n", content.text);
+        credential_set = credential_set.min(content.credential_set());
+        let line = format!("- {}\n", content.text());
         let header_cost = if memories_header {
             0
         } else {
@@ -888,11 +888,13 @@ async fn assemble_dialogue_input(
         }
     }
     prompt.push_str(OWNER_LABEL);
-    prompt.push_str(&input.text);
-    Ok(ScrubbedText {
-        text: prompt,
-        credential_set,
-    })
+    prompt.push_str(input.text());
+    // Scrub formatting and fragment joins too, without refreshing away the
+    // oldest preparation premise if credentials changed during assembly.
+    Ok(scrubber
+        .scrub(&prompt)
+        .await?
+        .with_oldest_premise(credential_set))
 }
 
 /// Recent History messages read into one Experience source.
@@ -1688,3 +1690,9 @@ mod task_control_tests {
         assert!(!rendered.contains("private instruction"), "{rendered}");
     }
 }
+
+/// The recalled-memory fixture resolves through the real `recall` ranking
+/// path via `recall_candidates`, so the final boundary pass actually covers
+/// memory content instead of a fixture that swallowed it.
+#[cfg(test)]
+mod assembly_tests;

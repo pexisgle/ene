@@ -349,7 +349,7 @@ fn hold_name(hold: TaskResumeHold) -> &'static str {
     }
 }
 
-fn limit_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+pub(crate) fn limit_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(
         frame,
         live,
@@ -358,7 +358,7 @@ fn limit_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame 
     )
 }
 
-fn checked_limit(limit: Option<u32>) -> Option<u32> {
+pub(crate) fn checked_limit(limit: Option<u32>) -> Option<u32> {
     match limit {
         None => Some(DEFAULT_PAGE_LIMIT),
         Some(value) if (1..=MAX_PAGE_LIMIT).contains(&value) => Some(value),

@@ -27,8 +27,13 @@
 //! Body text is redacted from [`core::fmt::Debug`]: [`ProviderRequest`]
 //! hides `input`, and [`InferenceResultArrival`] hides `output_text`.
 //! Usage token counts are [`Option`]s with [`UsageSource::Unknown`], never
-//! zero, when the provider reports nothing.
+//! zero, when the provider reports nothing. Cost is derived from those counts
+//! and the immutable pricing snapshot bound to the ticket at admission
+//! ([`cost::project_cost`]); a missing rate or unknown counts settle as
+//! [`cost::UsageCostFact::Unknown`], never a zero amount.
 
+pub mod cost;
+pub mod pricing;
 pub mod provider;
 
 use std::future::Future;
@@ -42,7 +47,8 @@ use ene_permission::{
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
     PermissionEvaluationId, PurposeKind, check_live_authorization,
 };
-use ene_primitive::{RawId, RevisionInner};
+use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
+use pricing::{PricingCatalog, PricingResolution, PricingSnapshot};
 use thiserror::Error;
 
 /// Maximum accepted input length in Unicode scalar values.
@@ -147,6 +153,9 @@ pub struct UsageFact {
     pub model: String,
     /// Input tokens, or [`None`] when unknown (never zero-as-unknown).
     pub input_tokens: Option<u64>,
+    /// Cached input is a subset of input. All three counts are present for
+    /// Reported, or all absent for Unknown; missing cache detail is not zero.
+    pub cached_input_tokens: Option<u64>,
     /// Output tokens, or [`None`] when unknown (never zero-as-unknown).
     pub output_tokens: Option<u64>,
     pub source: UsageSource,
@@ -172,6 +181,19 @@ pub enum InferenceTechnicalError {
     /// The provider may have run the call but the response was lost.
     #[error("provider response lost")]
     ResponseLost,
+    /// The reviewed first-party pricing catalog could not be constructed (a
+    /// first-party data defect, never a provider or user failure). Detected
+    /// before the attempt claim, so no provider byte is sent.
+    #[error("pricing catalog unavailable")]
+    PricingCatalogUnavailable,
+    /// A durable cost fact cannot be projected: the stored usage and pricing
+    /// rows disagree, or the amount is not representable. Distinct from
+    /// storage unavailability and never resolved to a zero or guessed cost.
+    #[error("usage cost projection failed: {reason}")]
+    CostProjectionFailed {
+        /// Bounded cause class, without body text or secrets.
+        reason: String,
+    },
     #[error("inference storage unavailable: {reason}")]
     StorageUnavailable {
         /// Backend-supplied cause, without body text or secrets.
@@ -219,6 +241,8 @@ impl core::fmt::Debug for ProviderResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RawUsage {
     pub input_tokens: u64,
+    /// Included in input tokens, not an additional count.
+    pub cached_input_tokens: u64,
     pub output_tokens: u64,
 }
 
@@ -308,7 +332,31 @@ impl DeltaSink for DiscardSink {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait UsageRepository: Send + Sync {
+    /// Persist the first complete settlement for a claimed ticket. Duplicate
+    /// arrivals are idempotent; an Unknown settlement is not revised later.
+    /// Reject orphan tickets, route mismatches, and inconsistent token facts.
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
+
+    /// Projects the durable cost fact of a settled ticket.
+    ///
+    /// `Ok(None)` means no token settlement exists for the ticket yet (the
+    /// attempt may still be in flight); it is not a zero-cost fact. A settled
+    /// fact whose stored rows disagree or whose amount does not fit the money
+    /// representation is a technical error, never a guessed or truncated
+    /// cost. This read performs no pricing refresh and rewrites nothing.
+    async fn load_usage_cost(
+        &self,
+        ticket: InferenceTicketId,
+    ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError>;
+}
+
+/// One settled ticket's durable token and cost facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageCostRecord {
+    /// Token usage exactly as settled (Reported counts or Unknown).
+    pub usage: UsageFact,
+    /// Cost projected from the pricing snapshot bound at the attempt claim.
+    pub cost: cost::UsageCostFact,
 }
 
 /// One claimed inference attempt: the ticket plus the consent premise and
@@ -341,6 +389,13 @@ pub struct InferenceAttempt {
     /// claim verifies it against the delegation row and the current Task in
     /// the same transaction.
     pub task_agent: Option<TaskAgentAttemptPremise>,
+    /// Reviewed pricing snapshot resolved for this route immediately before
+    /// the claim (`usage-cost-cap` §9), or `None` when the first-party
+    /// catalog has no reviewed rate for the route. The claim publishes the
+    /// snapshot durably and binds its reference to the attempt, so the cost
+    /// fact of this ticket can never be repriced by a later catalog revision.
+    /// `None` settles the cost as Unknown, never as zero.
+    pub pricing: Option<PricingSnapshot>,
 }
 
 /// One claimed attempt as read back for attribution and restart.
@@ -778,20 +833,28 @@ pub trait InferenceExecutor: Send + Sync {
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
-/// Dispatches one authorized use: input validation, attempt claim, provider
-/// call, adoption re-check, and usage recording.
+/// Dispatches one authorized use: input validation, pricing resolution,
+/// attempt claim, provider call, adoption re-check, and usage recording.
 ///
 /// The input cap is checked here, before the durable attempt claim: an
 /// over-limit request is a never-sent refusal and must not leave an attempt
-/// row behind. The prompt's credential-set premise is compared in the same
-/// claim transaction, so a prompt scrubbed before a credential became
-/// registered is never sent. From the successful claim onward, every path
-/// either records usage (uncertain or reported) or reports stale before any
-/// provider I/O. A technical provider failure records an unknown-usage fact
-/// before propagating: the attempt may have run. A completed call records
-/// its reported counts whether or not the reply is adopted; an adoption read
-/// failure still records the reported counts before propagating the storage
-/// error.
+/// row behind. The reviewed pricing snapshot for the route is resolved
+/// immediately before the claim and travels with the attempt, so the ticket's
+/// cost fact is bound to the rate the call ran under and a later catalog
+/// revision cannot reprice it; an unreviewed route claims without a rate and
+/// settles its cost as Unknown. The prompt's credential-set premise is
+/// compared in the same claim transaction, so a prompt scrubbed before a
+/// credential became registered is never sent. From the successful claim
+/// onward, every path either records usage (uncertain or reported) or reports
+/// stale before any provider I/O. A technical provider failure records an
+/// unknown-usage fact before propagating: the attempt may have run. A
+/// completed call records its reported counts whether or not the reply is
+/// adopted; an adoption read failure still records the reported counts before
+/// propagating the storage error. A reported fact requires all three counts
+/// with cached input a subset of input; any missing, malformed, or
+/// inconsistent provider usage settles as [`UsageSource::Unknown`] with all
+/// counts absent, never zero. The settlement is the first complete fact for
+/// the ticket and cannot be revised by a later duplicate.
 ///
 /// `abort` is the caller's local best-effort stop signal, when one exists.
 /// A signal already raised before the claim refuses without claiming
@@ -818,7 +881,7 @@ pub async fn dispatch_authorized(
     if abort.is_some_and(DispatchAbort::is_aborted) {
         return Ok(InferenceDispatchOutcome::Aborted);
     }
-    if prompt.text.chars().count() > MAX_INPUT_CHARS {
+    if prompt.text().chars().count() > MAX_INPUT_CHARS {
         return Ok(InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit));
     }
     let ticket = authorized.ticket;
@@ -827,9 +890,21 @@ pub async fn dispatch_authorized(
     let purpose = authorized.candidate.purpose;
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
     let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
-    let credential_set = prompt.credential_set;
+    let credential_set = prompt.credential_set();
     let credential = authorized.credential;
     let task_agent = authorized.task_agent;
+    // The pricing snapshot is resolved right before the claim (usage-cost-cap
+    // §9): the rate this call runs under is fixed for the ticket and a later
+    // catalog revision only affects calls admitted after it. An unpriced
+    // route claims without a snapshot; its cost fact settles Unknown instead
+    // of guessing a rate, and a catalog defect refuses before any claim.
+    let pricing = match PricingCatalog::first_party()
+        .map_err(|_| InferenceTechnicalError::PricingCatalogUnavailable)?
+        .resolve(&provider, &model, WallClockWithTz::now())
+    {
+        PricingResolution::Priced(snapshot) => Some(snapshot),
+        PricingResolution::Unpriced => None,
+    };
     // The claim is the linearization point: it reads, compares, and inserts
     // in one short transaction, so a stale consent, a stale credential-set
     // premise, or a moved Task Agent delegation/task premise fails here
@@ -846,6 +921,7 @@ pub async fn dispatch_authorized(
             provider: provider.clone(),
             model: model.clone(),
             task_agent,
+            pricing,
         })
         .await
     {
@@ -870,7 +946,7 @@ pub async fn dispatch_authorized(
     let request = ProviderRequest {
         model: model.clone(),
         credential,
-        input: prompt.text,
+        input: prompt.into_text(),
     };
     let response = if let Some(abort) = abort {
         tokio::select! {
@@ -897,16 +973,22 @@ pub async fn dispatch_authorized(
         Err(error) => {
             // The attempt is claimed, so the call may have run: record the
             // uncertain usage before propagating the technical failure.
-            record_usage_decision(usage, unknown_usage(ticket, &provider, &model)).await;
+            usage
+                .record_usage(unknown_usage(ticket, &provider, &model))
+                .await?;
             return Err(error);
         }
     };
-    let fact = match response.usage {
+    let fact = match response
+        .usage
+        .filter(|raw| raw.cached_input_tokens <= raw.input_tokens)
+    {
         Some(raw) => UsageFact {
             ticket,
             provider: provider.clone(),
             model: model.clone(),
             input_tokens: Some(raw.input_tokens),
+            cached_input_tokens: Some(raw.cached_input_tokens),
             output_tokens: Some(raw.output_tokens),
             source: UsageSource::Reported,
         },
@@ -915,6 +997,7 @@ pub async fn dispatch_authorized(
             provider,
             model,
             input_tokens: None,
+            cached_input_tokens: None,
             output_tokens: None,
             source: UsageSource::Unknown,
         },
@@ -927,7 +1010,7 @@ pub async fn dispatch_authorized(
     // Accounting follows the attempt, so the reported fact is recorded
     // before the adoption read: an adoption read failure must not discard
     // what the provider already spent.
-    record_usage_decision(usage, arrival.usage.clone()).await;
+    usage.record_usage(arrival.usage.clone()).await?;
     let adopted = consent_matches(consent, capability, &consent_id, consent_rev).await?;
     Ok(InferenceDispatchOutcome::Completed { arrival, adopted })
 }
@@ -961,19 +1044,9 @@ fn unknown_usage(ticket: InferenceTicketId, provider: &str, model: &str) -> Usag
         provider: provider.to_string(),
         model: model.to_string(),
         input_tokens: None,
+        cached_input_tokens: None,
         output_tokens: None,
         source: UsageSource::Unknown,
-    }
-}
-
-/// Records one decided usage fact best-effort.
-///
-/// The caller's stream outcome is authoritative; a usage persistence
-/// failure is the documented later-stage retry gap, never a reason to
-/// rewrite what already happened.
-async fn record_usage_decision(usage: &impl UsageRepository, fact: UsageFact) {
-    if usage.record_usage(fact).await.is_err() {
-        // Best-effort: the stream close stays authoritative.
     }
 }
 
@@ -1063,8 +1136,8 @@ mod dispatch_tests {
         InferenceAttemptRecord, InferenceAttemptRepository, InferenceDispatchOutcome,
         InferenceResultArrival, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
         NotSentReason, PermissionEvaluationId, ProviderRequest, ProviderResponse,
-        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageFact, UsageRepository,
-        UsageSource, dispatch_authorized,
+        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageCostRecord, UsageFact,
+        UsageRepository, UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -1299,7 +1372,7 @@ mod dispatch_tests {
     }
 
     /// Usage repository that fails every write, modelling a storage failure
-    /// right after a claimed abort.
+    /// at settlement time.
     struct FailingUsage;
 
     impl UsageRepository for FailingUsage {
@@ -1308,6 +1381,19 @@ mod dispatch_tests {
             reason = "in-test fake; async matches the repository contract"
         )]
         async fn record_usage(&self, _fact: UsageFact) -> Result<(), InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_cost(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
             Err(InferenceTechnicalError::StorageUnavailable {
                 reason: String::from("usage store down"),
             })
@@ -1388,13 +1474,56 @@ mod dispatch_tests {
             self.0.lock().expect("usage capture lock").push(fact);
             Ok(())
         }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_cost(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
     }
 
-    fn prompt(text: impl Into<String>) -> ScrubbedText {
-        ScrubbedText {
-            text: text.into(),
-            credential_set: CredentialSetRevision::initial(),
+    struct ScrubRefs(ene_credential::CredentialSetRevision);
+
+    impl ene_credential::CredentialRefRepository for ScrubRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn list_refs(
+            &self,
+        ) -> Result<Vec<ene_credential::CredentialRef>, ene_credential::CredentialTechnicalError>
+        {
+            Ok(Vec::new())
         }
+    }
+
+    impl ene_credential::CredentialSetRepository for ScrubRefs {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn current_set_revision(
+            &self,
+        ) -> Result<ene_credential::CredentialSetRevision, ene_credential::CredentialTechnicalError>
+        {
+            Ok(self.0)
+        }
+    }
+
+    async fn scrub_fixture(
+        text: &str,
+        revision: ene_credential::CredentialSetRevision,
+    ) -> ScrubbedText {
+        use ene_credential::SecretScrubber as _;
+        ene_credential::CredentialScrubber {
+            refs: &ScrubRefs(revision),
+            store: &ene_credential::MemoryCredentialStore::new(),
+        }
+        .scrub(text)
+        .await
+        .expect("fixture registry is readable")
+    }
+    async fn prompt(text: impl Into<String>) -> ScrubbedText {
+        scrub_fixture(&text.into(), CredentialSetRevision::initial()).await
     }
 
     fn authorized() -> AuthorizedInference {
@@ -1446,6 +1575,76 @@ mod dispatch_tests {
         }
     }
 
+    /// The same authorized premise for an explicit route, so dispatch pricing
+    /// is exercised for reviewed and unreviewed provider/model pairs.
+    fn authorized_route(provider: &str, model: &str) -> AuthorizedInference {
+        let mut authorized = authorized();
+        authorized.provider = provider.to_owned();
+        authorized.model = model.to_owned();
+        authorized
+    }
+
+    #[tokio::test]
+    async fn priced_route_claims_with_the_reviewed_snapshot() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        dispatch_authorized(
+            authorized_route("openai", "gpt-4o"),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        let pricing = claimed[0]
+            .pricing
+            .as_ref()
+            .expect("a reviewed route claims under its snapshot");
+        assert_eq!(pricing.provider, "openai");
+        assert_eq!(pricing.model, "gpt-4o");
+        assert_eq!(pricing.input_rate.micros_per_million(), 2_500_000);
+        assert_eq!(pricing.cached_input_rate.micros_per_million(), 1_250_000);
+        assert_eq!(pricing.output_rate.micros_per_million(), 10_000_000);
+        assert_eq!(
+            pricing.source_revision,
+            crate::pricing::FIRST_PARTY_REVISION
+        );
+    }
+
+    #[tokio::test]
+    async fn unpriced_route_claims_without_a_guessed_rate() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert!(
+            claimed[0].pricing.is_none(),
+            "an unreviewed route must claim with no rate, never another model's"
+        );
+    }
+
     #[tokio::test]
     async fn transport_failure_records_unknown_counts() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
@@ -1453,7 +1652,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
         let result = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1467,7 +1666,70 @@ mod dispatch_tests {
         assert_eq!(facts.len(), 1, "an uncertain attempt records one fact");
         assert_eq!(facts[0].source, UsageSource::Unknown);
         assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn usage_failure_on_completed_call_propagates_not_a_clean_success() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(
+            String::from("hi there"),
+            Some(RawUsage {
+                input_tokens: 4,
+                cached_input_tokens: 1,
+                output_tokens: 2,
+            }),
+        );
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a claimed call whose settlement fails must not answer Completed"
+        );
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "the storage failure propagates: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_failure_on_transport_error_propagates_not_a_clean_technical_error() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        )
+        .await;
+        // The transport error already proves the call may have run, so losing
+        // its accounting too would report a technical failure with no durable
+        // fact; the settlement failure takes precedence.
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "the usage failure must not be swallowed by the transport error: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -1478,7 +1740,7 @@ mod dispatch_tests {
         let attempts = RecordingAttempts(Mutex::new(0));
         let result = dispatch_authorized(
             authorized(),
-            prompt("x".repeat(MAX_INPUT_CHARS + 1)),
+            prompt("x".repeat(MAX_INPUT_CHARS + 1)).await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1510,7 +1772,7 @@ mod dispatch_tests {
         let consent = FixedConsent(Some(record(1)));
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("the key is sk-new"),
+            prompt("the key is sk-new").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1542,12 +1804,13 @@ mod dispatch_tests {
             String::from("hi there"),
             Some(RawUsage {
                 input_tokens: 4,
+                cached_input_tokens: 1,
                 output_tokens: 2,
             }),
         );
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1566,6 +1829,7 @@ mod dispatch_tests {
         let facts = usage.0.lock().expect("usage capture lock");
         assert_eq!(facts.len(), 1, "the reported fact is kept");
         assert_eq!(facts[0].input_tokens, Some(4));
+        assert_eq!(facts[0].cached_input_tokens, Some(1));
         assert_eq!(facts[0].output_tokens, Some(2));
     }
 
@@ -1576,7 +1840,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::new(String::from("hi there"), None);
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1591,8 +1855,42 @@ mod dispatch_tests {
         };
         assert_eq!(arrival.output_text, "hi there");
         assert_eq!(arrival.usage.input_tokens, None);
+        assert_eq!(arrival.usage.cached_input_tokens, None);
         assert_eq!(arrival.usage.output_tokens, None);
         assert_eq!(arrival.usage.source, UsageSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn explicit_zero_cached_tokens_stays_reported() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        // A provider that decodes cache detail and reports zero hits yields a
+        // legitimate reported fact: zero here is evidence, not a filler.
+        let transport = FakeProviderTransport::new(
+            String::from("hi there"),
+            Some(RawUsage {
+                input_tokens: 7,
+                cached_input_tokens: 0,
+                output_tokens: 3,
+            }),
+        );
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let InferenceDispatchOutcome::Completed { arrival, .. } = outcome else {
+            panic!("a provider success completes");
+        };
+        assert_eq!(arrival.usage.source, UsageSource::Reported);
+        assert_eq!(arrival.usage.cached_input_tokens, Some(0));
     }
 
     #[tokio::test]
@@ -1602,7 +1900,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
         let result = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1612,11 +1910,16 @@ mod dispatch_tests {
         )
         .await;
         assert!(matches!(result, Err(InferenceTechnicalError::ResponseLost)));
+        let facts = usage.0.lock().expect("usage capture lock");
         assert_eq!(
-            usage.0.lock().expect("usage capture lock").len(),
+            facts.len(),
             1,
             "a lost response may have run, so it records an unknown fact"
         );
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+        assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
+        assert_eq!(facts[0].output_tokens, None);
     }
 
     #[tokio::test]
@@ -1627,7 +1930,7 @@ mod dispatch_tests {
         let consent = FixedConsent(Some(record(1)));
         let outcome = dispatch_authorized(
             authorized_task_agent(task_agent_premise()),
-            prompt("delegated work"),
+            prompt("delegated work").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1658,7 +1961,7 @@ mod dispatch_tests {
         let consent = FixedConsent(Some(record(1)));
         let outcome = dispatch_authorized(
             authorized_task_agent(task_agent_premise()),
-            prompt("delegated work"),
+            prompt("delegated work").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1690,7 +1993,7 @@ mod dispatch_tests {
         let premise = task_agent_premise();
         let outcome = dispatch_authorized(
             authorized_task_agent(premise.clone()),
-            prompt("delegated work"),
+            prompt("delegated work").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1723,6 +2026,7 @@ mod dispatch_tests {
             "a provider without reported counts records unknown, never zero"
         );
         assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
     }
 
@@ -1734,7 +2038,7 @@ mod dispatch_tests {
         let transport = FakeProviderTransport::new(String::from("ok"), None);
         dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             None,
             &consent,
@@ -1761,7 +2065,7 @@ mod dispatch_tests {
 
         let outcome = dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             Some(&abort),
             &consent,
@@ -1803,7 +2107,7 @@ mod dispatch_tests {
 
         let mut dispatch = Box::pin(dispatch_authorized(
             authorized,
-            prompt("hello"),
+            prompt("hello").await,
             &mut sink,
             Some(&abort),
             &consent,
@@ -1834,6 +2138,7 @@ mod dispatch_tests {
         assert_eq!(facts[0].ticket, ticket);
         assert_eq!(facts[0].source, UsageSource::Unknown);
         assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
     }
 
@@ -1850,7 +2155,7 @@ mod dispatch_tests {
 
         let outcome = dispatch_authorized(
             authorized,
-            prompt("hello"),
+            prompt("hello").await,
             &mut DiscardSink,
             Some(&abort),
             &consent,
@@ -1888,7 +2193,7 @@ mod dispatch_tests {
 
         let mut dispatch = Box::pin(dispatch_authorized(
             authorized(),
-            prompt("hello"),
+            prompt("hello").await,
             &mut sink,
             Some(&abort),
             &consent,
@@ -1929,6 +2234,7 @@ mod dispatch_tests {
                 provider: String::from("acme"),
                 model: String::from("dialogue-1"),
                 input_tokens: None,
+                cached_input_tokens: None,
                 output_tokens: None,
                 source: UsageSource::Unknown,
             },

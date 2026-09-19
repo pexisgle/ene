@@ -15,6 +15,9 @@
 //!   [`serve::serve`] entry point.
 //! - [`dialogue`] holds the one-to-one text round trip.
 //! - [`setup`] holds the `Stage 2` setup management inlet.
+//! - [`deletion`] holds the Stage 6 Targeted Deletion management surface:
+//!   advisory wire requests, the Host-local trusted confirmation inlet, and
+//!   the bounded body-free status view.
 //! - [`task_agent`] adapts the Task-owned Task Agent inference port to the
 //!   Host inference boundary.
 //! - [`action`] adapts the Task-owned delegation/workspace correspondence to
@@ -38,11 +41,13 @@ pub mod action;
 pub mod conn;
 #[cfg(windows)]
 pub mod conn_pipe;
+pub mod deletion;
 pub mod dialogue;
 pub mod host_lock;
 pub mod presentation;
 pub mod serve;
 pub mod setup;
+pub mod targeted_deletion;
 pub mod task_agent;
 pub mod task_control;
 pub mod task_run;

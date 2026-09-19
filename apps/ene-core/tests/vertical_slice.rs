@@ -61,9 +61,107 @@ fn fake_transport() -> FakeProviderTransport {
         String::from(FAKE_TEXT),
         Some(RawUsage {
             input_tokens: 7,
+            cached_input_tokens: 1,
             output_tokens: 3,
         }),
     )
+}
+
+/// One durable usage fact read straight from the Host database:
+/// `(source, input, cached, output)`.
+type UsageFactRow = (String, Option<i64>, Option<i64>, Option<i64>);
+
+/// Durable token accounting read straight from the Host database.
+fn usage_fact_rows(dir: &std::path::Path) -> Vec<UsageFactRow> {
+    let conn = rusqlite::Connection::open(dir.join("app.db"))
+        .expect("the store file must open for the probe");
+    let mut statement = conn
+        .prepare("SELECT source, input_tokens, cached_input_tokens, output_tokens FROM usage_fact ORDER BY ticket")
+        .expect("the usage probe statement must prepare");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .expect("the usage probe must run");
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("the usage probe rows must decode")
+}
+
+#[tokio::test]
+async fn dialogue_and_learning_calls_share_one_ticket_accounting_path() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let handle = open_host(&dir).await.unwrap();
+    let transport = Arc::new(Stage3Transport::new(FAKE_TEXT));
+    let server = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
+
+    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(
+        matches!(pending, Err(CliError::ServerOutcome(_))),
+        "first pairing must pend"
+    );
+    let approver = open_host(&dir).await.unwrap();
+    let provisioned = approve_and_provision(&dir, &approver).await;
+    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
+    let mut client = stage3_client(&dir).await;
+    let setup = setup_flow(&mut client, &approver).await;
+    assert!(setup.is_ok(), "setup must complete: {setup:?}");
+    drop(client);
+    let assigned = stage3_assign_learning(&dir).await;
+    assert!(
+        assigned.is_ok(),
+        "learning assignment must store: {assigned:?}"
+    );
+
+    // One dialogue turn plus its formation pass: both go through the shared
+    // dispatch, so both settle exactly one durable usage fact per ticket.
+    transport.push_learning(
+        r#"{"summary": "The owner prefers jasmine tea in the morning.", "memories": [{"action": "create", "content": "The owner prefers jasmine tea in the morning.", "importance": 4, "temporal": "enduring"}]}"#,
+    );
+    let sent = stage3_send(&dir, "remember that I prefer jasmine tea in the morning").await;
+    assert!(sent.is_ok(), "the memory turn must complete: {sent:?}");
+    transport.wait_learning().await;
+    stage3_wait_for_memory(&dir, "The owner prefers jasmine tea in the morning.").await;
+
+    let rows = usage_fact_rows(&dir);
+    assert_eq!(
+        rows.len(),
+        2,
+        "one dialogue call and one learning call, one fact each: {rows:?}"
+    );
+    for (source, input, cached, output) in &rows {
+        assert_eq!(source, "reported", "the transport reports complete counts");
+        assert_eq!((*input, *cached, *output), (Some(7), Some(1), Some(3)));
+        assert!(*cached <= *input, "cached input stays a subset of input");
+    }
+
+    // Restart must not re-account or lose the durable facts.
+    server.abort();
+    tokio::task::yield_now().await;
+    drop(std::fs::remove_file(dir.join("ene.sock")));
+    let handle = open_host(&dir).await.unwrap();
+    let server = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    assert!(wait_for_socket(&dir).await, "listener must rebind");
+    assert_eq!(
+        usage_fact_rows(&dir),
+        rows,
+        "the accounting rows survive restart unchanged"
+    );
+    server.abort();
 }
 
 async fn open_host(dir: &std::path::Path) -> Option<Arc<HostHandle>> {
@@ -1014,7 +1112,7 @@ async fn spawn_fake_responses(
                     ));
                 }
                 payload.push_str(
-                    "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":9}}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":2}}}}\n\n",
                 );
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
@@ -1452,6 +1550,18 @@ async fn binaries_drive_send_stream_history_and_restart() {
         matches!(&memory, Some((0, out, _)) if out.contains("memory: Memory")),
         "the real binaries must render the memory read model, got {memory:?}"
     );
+    // Every production send settled exactly one usage fact with the cached
+    // subset decoded from the provider's SSE completion, and restart kept
+    // the first settlement terminal.
+    let rows = usage_fact_rows(&dir);
+    assert_eq!(rows.len(), 2, "two sends, two durable facts: {rows:?}");
+    for (source, input, cached, output) in &rows {
+        assert_eq!(
+            (source.as_str(), *input, *cached, *output),
+            ("reported", Some(7), Some(2), Some(9)),
+            "the production SSE completion carries input, cached subset, and output: {rows:?}"
+        );
+    }
     drop(server);
     fake.abort();
 }
@@ -1548,7 +1658,16 @@ impl ene_inference::ProviderTransport for Stage3Transport {
         } else {
             self.reply.clone()
         };
-        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+        Box::pin(async move {
+            Ok(ene_inference::ProviderResponse {
+                text,
+                usage: Some(ene_inference::RawUsage {
+                    input_tokens: 7,
+                    cached_input_tokens: 1,
+                    output_tokens: 3,
+                }),
+            })
+        })
     }
 }
 

@@ -167,6 +167,7 @@ impl ProviderTransport for GatedTransport {
 struct UsageRow {
     source: String,
     input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
     output_tokens: Option<i64>,
 }
 
@@ -174,14 +175,15 @@ fn usage_rows(data_dir: &std::path::Path) -> Vec<UsageRow> {
     let conn = rusqlite::Connection::open(data_dir.join("app.db"))
         .expect("the store file must open for the probe");
     let mut statement = conn
-        .prepare("SELECT source, input_tokens, output_tokens FROM usage_fact ORDER BY ticket")
+        .prepare("SELECT source, input_tokens, cached_input_tokens, output_tokens FROM usage_fact ORDER BY ticket")
         .expect("the usage probe statement must prepare");
     let rows = statement
         .query_map([], |row| {
             Ok(UsageRow {
                 source: row.get(0)?,
                 input_tokens: row.get(1)?,
-                output_tokens: row.get(2)?,
+                cached_input_tokens: row.get(2)?,
+                output_tokens: row.get(3)?,
             })
         })
         .expect("the usage probe must run");
@@ -621,6 +623,7 @@ async fn stage4_cancel_stops_the_loop_and_a_late_result_stays_original_only() {
         vec![UsageRow {
             source: String::from("unknown"),
             input_tokens: None,
+            cached_input_tokens: None,
             output_tokens: None,
         }],
         "the claimed attempt records Unknown usage before the cancel returns"
