@@ -636,6 +636,8 @@ impl Served {
     /// serving.
     async fn stop(&mut self) {
         self.server.abort();
+        let aborted = std::mem::replace(&mut self.server, tokio::spawn(async {}));
+        let _ = aborted.await;
         self.client = None;
         tokio::task::yield_now().await;
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
@@ -650,10 +652,25 @@ impl Served {
     /// is retried until it stays up.
     async fn serve(&mut self) -> Client {
         let handle = open_host(&self.dir).await;
-        handle
-            .run_startup_mutations()
-            .await
-            .expect("restart startup must complete");
+        // A process restart drops the previous SQLite connection before the
+        // successor mutates. Two HostHandles on one Windows `app.db` fail
+        // Immediate transactions with SQLITE_BUSY.
+        let predecessor = std::mem::replace(&mut self.handle, Arc::clone(&handle));
+        drop(predecessor);
+        tokio::task::yield_now().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match handle.run_startup_mutations().await {
+                Ok(()) => break,
+                Err(error)
+                    if error.to_string().contains("database is locked")
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("restart startup must complete: {error}"),
+            }
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let mut server = tokio::spawn(conn::run(
