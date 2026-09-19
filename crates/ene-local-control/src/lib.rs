@@ -124,6 +124,13 @@ pub enum ControlOutcome {
         provider: String,
         label: String,
     },
+    /// The value reached the OS store, but the approval sweep and the usable
+    /// reference did not commit. Neither `CredentialStored` nor "nothing
+    /// happened": recovery inspects the pending pair before another attempt.
+    CredentialUncommitted {
+        provider: String,
+        label: String,
+    },
     CredentialRefused {
         provider: String,
         label: String,

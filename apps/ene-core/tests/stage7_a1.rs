@@ -643,14 +643,24 @@ async fn serving_time_control_approve_and_credential_put() {
         "pairing secret is for Host-local display"
     );
 
+    // A serving-time put with no staged registration is not a stored
+    // credential: the OS item exists, but the approval sweep and the usable
+    // reference did not commit, so the inlet reports that state instead of
+    // success. The value is not silently discarded either.
+    let uncommitted = host_control::put_credential(dir.path(), "openai", "rotated", PUT_SECRET)
+        .await
+        .expect_err("a put without a staged registration must not report stored");
     assert!(
-        host_control::put_credential(dir.path(), "openai", "rotated", PUT_SECRET)
-            .await
-            .expect("serving-time put must speak control")
+        uncommitted.to_string().contains("did not commit"),
+        "the refusal must name the missing commit: {uncommitted}"
     );
     assert!(
         handle.credential_contains_for_tests("openai", "rotated"),
-        "put must land in the serving store"
+        "the value must still have reached the serving store"
+    );
+    assert!(
+        !uncommitted.to_string().contains(PUT_SECRET),
+        "the refusal must not echo the secret: {uncommitted}"
     );
     let stored = ControlOutcome::CredentialStored {
         provider: String::from("openai"),

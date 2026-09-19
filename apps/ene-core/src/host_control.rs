@@ -537,12 +537,18 @@ async fn execute_pending(handle: &HostHandle, pending: PendingOp) -> FromHost {
             .await
         {
             Ok(true) => {
-                // Sweep/usable-ref commit is best-effort after a successful
-                // put; a missing pending pair still stored the secret.
+                // The OS item exists, but registration is complete only once
+                // the approval sweep and the usable reference commit together.
+                // A commit that did not happen is reported as its own state:
+                // neither a stored credential nor an untouched one.
                 match handle.approve_credential(&provider, &label).await {
-                    Ok(_) | Err(_) => {}
+                    Ok(true) => {
+                        FromHost::Outcome(ControlOutcome::CredentialStored { provider, label })
+                    }
+                    Ok(false) | Err(_) => {
+                        FromHost::Outcome(ControlOutcome::CredentialUncommitted { provider, label })
+                    }
                 }
-                FromHost::Outcome(ControlOutcome::CredentialStored { provider, label })
             }
             Ok(false) | Err(_) => {
                 FromHost::Outcome(ControlOutcome::CredentialRefused { provider, label })
@@ -720,6 +726,13 @@ pub async fn put_credential(
         {
             FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => Ok(true),
             FromHost::Outcome(ControlOutcome::CredentialRefused { .. }) => Ok(false),
+            FromHost::Outcome(ControlOutcome::CredentialUncommitted { .. }) => {
+                Err(CoreError::Approve(String::from(
+                    "the value reached the OS store, but the approval sweep and the usable \
+                     reference did not commit; inspect the pending pair before retrying — do \
+                     not re-send the secret",
+                )))
+            }
             FromHost::SeatOccupied => Err(CoreError::SeatOccupied),
             FromHost::Unavailable => Err(control_failure(
                 "the serving Host could not answer credential put",

@@ -736,6 +736,11 @@ fn control_notice(ja: bool, result: &ene_local_control::FromHost) -> String {
             "既存の削除処理に含まれています。",
             "Covered by an existing deletion.",
         ),
+        FromHost::Outcome(ControlOutcome::CredentialUncommitted { .. }) => local(
+            ja,
+            "値は保護ストアに届きましたが、登録の確定が完了していません。保留状態を確認してください。",
+            "The value reached the protected store, but registration did not commit; check the pending state.",
+        ),
         FromHost::Outcome(ControlOutcome::DeletionHeldByOperation { .. }) => local(
             ja,
             "別の操作により保留中です。",

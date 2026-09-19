@@ -408,7 +408,9 @@ impl DesktopRuntime {
                 self.page = Page::Wizard;
             }
             FromHost::Outcome(
-                ControlOutcome::CredentialRefused { .. } | ControlOutcome::DeviceUnknown { .. },
+                ControlOutcome::CredentialRefused { .. }
+                | ControlOutcome::CredentialUncommitted { .. }
+                | ControlOutcome::DeviceUnknown { .. },
             )
             | FromHost::Unavailable => {
                 self.deny_reason = i18n::control_deny(self.locale, &reply);

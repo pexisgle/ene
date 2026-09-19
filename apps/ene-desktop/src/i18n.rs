@@ -204,6 +204,16 @@ pub fn control_deny(locale: Locale, from: &FromHost) -> String {
         (Locale::En, FromHost::Outcome(ControlOutcome::CredentialRefused { .. })) => String::from(
             "The credential was not stored. The OS protected store is unavailable or refused the put.",
         ),
+        (Locale::Ja, FromHost::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
+            String::from(
+                "値は保護ストアに届きましたが、登録の確定が完了していません。再試行する前に保留状態を確認してください。",
+            )
+        }
+        (Locale::En, FromHost::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
+            String::from(
+                "The value reached the protected store, but registration did not commit. Check the pending state before retrying.",
+            )
+        }
         (Locale::Ja, FromHost::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
             String::from("このペアリング要求は Host にありません。")
         }
