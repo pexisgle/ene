@@ -1,0 +1,118 @@
+import { Button, VerticalBox, HorizontalBox, LineEdit, ListView, AboutSlint, ScrollView, TextEdit } from "std-widgets.slint";
+
+export enum UiPage { wizard, chat, history, settings, about, confirm }
+
+export component AppWindow inherits Window {
+    title: "ene";
+    preferred-width: 720px;
+    preferred-height: 540px;
+
+    in-out property <UiPage> page: UiPage.wizard;
+    in-out property <string> locale: "ja";
+    in-out property <string> heading: "";
+    in-out property <string> body: "";
+    in-out property <string> status: "";
+    in-out property <string> timeline: "";
+    in-out property <string> history: "";
+    in-out property <string> draft: "";
+    in-out property <bool> composing: false;
+    in-out property <string> secret-buffer: "";
+    in-out property <bool> secret-visible: false;
+    in-out property <string> challenge-target: "";
+    in-out property <string> about-title: "ene";
+
+    callback send();
+    callback wizard-next();
+    callback wizard-back();
+    callback open-chat();
+    callback open-history();
+    callback open-settings();
+    callback open-about();
+    callback confirm-owner();
+    callback cancel-owner();
+    callback switch-ja();
+    callback switch-en();
+    callback secret-changed(string);
+    callback draft-changed(string);
+    callback composition-started();
+    callback composition-finished();
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            Button { text: "Chat"; clicked => { root.open-chat(); } }
+            Button { text: "History"; clicked => { root.open-history(); } }
+            Button { text: "Settings"; clicked => { root.open-settings(); } }
+            Button { text: "About"; clicked => { root.open-about(); } }
+            Button { text: "JA"; clicked => { root.switch-ja(); } }
+            Button { text: "EN"; clicked => { root.switch-en(); } }
+        }
+
+        Text { text: heading; font-size: 18px; }
+        Text { text: status; wrap: word-wrap; }
+
+        if page == UiPage.wizard: VerticalBox {
+            Text { text: body; wrap: word-wrap; }
+            if secret-visible: LineEdit {
+                input-type: password;
+                placeholder-text: "API key";
+                edited(text) => { root.secret-changed(text); }
+            }
+            HorizontalBox {
+                Button { text: "Back"; clicked => { root.wizard-back(); } }
+                Button { text: "Next"; clicked => { root.wizard-next(); } }
+            }
+        }
+
+        if page == UiPage.chat: VerticalBox {
+            ScrollView {
+                vertical-stretch: 1;
+                Text { text: timeline; wrap: word-wrap; }
+            }
+            LineEdit {
+                text: draft;
+                placeholder-text: "Message";
+                edited(text) => {
+                    root.draft-changed(text);
+                }
+                accepted => {
+                    if (!root.composing) {
+                        root.send();
+                    }
+                }
+            }
+            Button {
+                text: "Send";
+                clicked => {
+                    if (!root.composing) {
+                        root.send();
+                    }
+                }
+            }
+        }
+
+        if page == UiPage.history: ScrollView {
+            Text { text: history; wrap: word-wrap; }
+        }
+
+        if page == UiPage.settings: ScrollView {
+            Text { text: body; wrap: word-wrap; }
+        }
+
+        if page == UiPage.about: VerticalBox {
+            Text { text: about-title; font-size: 18px; }
+            AboutSlint { }
+        }
+
+        if page == UiPage.confirm: VerticalBox {
+            Text { text: challenge-target; wrap: word-wrap; }
+            HorizontalBox {
+                Button { text: "Confirm"; clicked => { root.confirm-owner(); } }
+                Button { text: "Cancel"; clicked => { root.cancel-owner(); } }
+            }
+        }
+    }
+}

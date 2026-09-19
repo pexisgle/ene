@@ -1,0 +1,38 @@
+[package]
+name = "ene-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "First-party text GUI: Client channel plus seated Host-local control"
+
+[[bin]]
+name = "ene-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "ene_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+ene-api = { path = "../../crates/ene-api" }
+ene-client = { path = "../../crates/ene-client" }
+ene-config = { path = "../../crates/ene-config" }
+ene-local-control = { path = "../../crates/ene-local-control" }
+ene-desktop-ui = { path = "../ene-desktop-ui" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+slint = { workspace = true }
+
+[dev-dependencies]
+ene-core = { path = "../ene-core" }
+ene-credential = { path = "../../crates/ene-credential" }
+ene-inference = { path = "../../crates/ene-inference" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

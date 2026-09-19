@@ -4,10 +4,11 @@
 
 ## 現在進行中のステージ (Current Milestone)
 
-- **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、production 実装は A1 から**
+- **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、A1 は PR、B (`ene-desktop`) 実装中**
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
-  - 次の production slice は **A1: `ene-client` 抽出と serving 中 control**（GUI toolkit は含めない）。
-  - GUI・秘密入力・OS 保護ストア・overlay / VRM の技術成立 probe は未実施。A1 は probe を待たない。slice F まで Stage 7 を完了としない。
+  - 次の production slice は **B: 初回セットアップからテキスト会話までの縦断 GUI**。C1/C2/C3 と D は B の後。
+  - GUI・秘密入力・OS 保護ストア・overlay / VRM の技術成立 probe は未実施。slice F まで Stage 7 を完了としない。
+  - 公式同梱 `ene` VRM は未投入（[#1651](https://github.com/pexisgle/ene/issues/1651)）。placeholder を製品キャラクターとして扱わない。
 
 ## 完了したステージ (Completed)
 
