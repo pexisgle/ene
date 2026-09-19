@@ -148,7 +148,7 @@ async fn pair_and_seat(desktop: &mut DesktopRuntime) {
         .await
         .expect("empty seat occupancy is accident prevention, not authenticity");
     desktop
-        .begin_pairing()
+        .connect_or_begin_pairing()
         .await
         .expect("pairing must challenge");
     match desktop.confirm_owner().await.expect("owner confirm pairs") {
@@ -550,7 +550,7 @@ async fn closed_confirmation_cannot_be_reused() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), transport);
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    desktop.begin_pairing().await.expect("pair");
+    desktop.connect_or_begin_pairing().await.expect("pair");
     let key = desktop
         .surface_snapshot()
         .confirmation

@@ -567,13 +567,12 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::Startup => {
             d.ensure_host(None)?;
             d.try_spawn_body(&d.bundled_ene_asset());
-            d.occupy_seat().await?;
-            d.begin_pairing().await?;
+            d.connect_or_begin_pairing().await?;
             None
         }
         Command::Refresh(page) => {
             match page {
-                6 if !d.surface_snapshot().connected => d.begin_pairing().await?,
+                6 if !d.surface_snapshot().connected => d.connect_or_begin_pairing().await?,
                 2 => d.refresh_memory().await?,
                 3 => d.refresh_usage().await?,
                 4 => d.refresh_deletion_requests().await?,

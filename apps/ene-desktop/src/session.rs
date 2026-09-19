@@ -91,18 +91,53 @@ pub async fn connect(
     .await
 }
 
-pub async fn connect_until_pending(
+/// One GUI connect attempt: an established session, or a pairing that is
+/// still waiting for the Owner.
+///
+/// A stored device authenticates and returns [`Paired`](Self::Paired); only a
+/// first run (or a run whose device file is gone) pends. The two are never
+/// conflated: a successful connect is not an error, and a pending pairing is
+/// not a connection the GUI may keep.
+pub enum DesktopConnect {
+    Paired(Box<Client>),
+    PendingOwnerConfirmation(String),
+}
+
+/// Connects the GUI as a Client, or reports the pending pairing that still
+/// needs the Owner.
+///
+/// The Host may be starting, so transport failures retry with a bounded
+/// budget before surfacing. A degraded device file, a denied pairing, or a
+/// rejected proof stays an explicit error: the first-run provisioning path is
+/// never taken for state the Host already refused.
+pub async fn connect_or_pending(
     data_dir: &Path,
     descriptor: &str,
-) -> Result<String, DesktopError> {
-    match connect(data_dir, descriptor, None).await {
-        Ok(_) => Err(DesktopError::Protocol(String::from(
-            "pairing was expected to pend",
-        ))),
-        Err(ClientError::ServerOutcome(_)) => device::load_pending_id(data_dir).ok_or_else(|| {
-            DesktopError::Protocol(String::from("pending id was not stored after pairing"))
-        }),
-        Err(error) => Err(DesktopError::Client(error)),
+) -> Result<DesktopConnect, DesktopError> {
+    let mut attempts = 0_u8;
+    loop {
+        match connect(data_dir, descriptor, None).await {
+            Ok(client) => return Ok(DesktopConnect::Paired(Box::new(client))),
+            Err(ClientError::Transport(error)) => {
+                attempts = attempts.saturating_add(1);
+                if attempts >= 80 {
+                    return Err(DesktopError::Client(ClientError::Transport(error)));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(ClientError::ServerOutcome(_)) => {
+                // A remembered pending id is the only ServerOutcome that
+                // means "pairing is waiting": a denial clears it, and a
+                // degraded device file never stored one.
+                return match device::load_pending_id(data_dir) {
+                    Some(pending) => Ok(DesktopConnect::PendingOwnerConfirmation(pending)),
+                    None => Err(DesktopError::Protocol(String::from(
+                        "pairing neither completed nor left a pending request",
+                    ))),
+                };
+            }
+            Err(error) => return Err(DesktopError::Client(error)),
+        }
     }
 }
 

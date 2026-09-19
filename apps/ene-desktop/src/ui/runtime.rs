@@ -267,18 +267,32 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    /// Start pairing; leaves a confirmation challenge for the seated owner.
-    pub async fn begin_pairing(&mut self) -> Result<(), DesktopError> {
+    /// Connects as a Client, or opens a first-run pairing.
+    ///
+    /// A stored device authenticates and the GUI keeps that connection. Only a
+    /// genuinely unpaired Client starts a pairing; the two paths never share a
+    /// result, so a restart of an already-paired GUI cannot be reported as a
+    /// pending pairing.
+    pub async fn connect_or_begin_pairing(&mut self) -> Result<(), DesktopError> {
         self.occupy_seat().await?;
         self.connection = i18n::label(self.locale, Label::Connecting);
-        let pending = session::connect_until_pending(&self.data_dir, DESKTOP_DESCRIPTOR).await?;
-        let seat = self
-            .control
-            .as_mut()
-            .ok_or(DesktopError::DeniedByBoundary)?;
-        seat.request_device_approve(&pending).await?;
-        self.page = Page::Confirm;
-        Ok(())
+        match session::connect_or_pending(&self.data_dir, DESKTOP_DESCRIPTOR).await? {
+            session::DesktopConnect::Paired(client) => {
+                self.adopt_client(*client);
+                self.deny_reason = String::new();
+                self.refresh_after_connect().await;
+                Ok(())
+            }
+            session::DesktopConnect::PendingOwnerConfirmation(pending) => {
+                let seat = self
+                    .control
+                    .as_mut()
+                    .ok_or(DesktopError::DeniedByBoundary)?;
+                seat.request_device_approve(&pending).await?;
+                self.page = Page::Confirm;
+                Ok(())
+            }
+        }
     }
 
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
@@ -994,6 +1008,25 @@ impl DesktopRuntime {
         self.client = Some(client);
         self.connection = i18n::label(self.locale, Label::Connected);
         self.pull_presence();
+    }
+
+    /// Presents the Host's current state after an established connection.
+    ///
+    /// Each refresh is best effort: a management or history read that fails
+    /// still leaves a connected GUI with its own failure text, never a GUI
+    /// that silently looks disconnected. An unpaired Host answers the setup
+    /// view, so the wizard continues from Host facts rather than a local flag.
+    async fn refresh_after_connect(&mut self) {
+        if self.refresh_setup().await.is_ok() && self.facts.setup_ready() {
+            self.setup_completed = true;
+            self.page = Page::Chat;
+        }
+        match self.refresh_history().await {
+            Ok(()) | Err(_) => {}
+        }
+        match self.refresh_tasks().await {
+            Ok(()) | Err(_) => {}
+        }
     }
 
     async fn flush_pending_erasure(&mut self) {
