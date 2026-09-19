@@ -3881,6 +3881,281 @@ async fn a_pinned_learning_candidate_cannot_be_skipped_before_queue() {
     );
 }
 
+/// Major: aborting handle_frame after the Learning pin is acquired must
+/// release occupancy. Without a Drop guard, `inflight_pins` stays 1 until
+/// Host restart and Targeted Deletion cannot converge.
+#[tokio::test]
+async fn a_cancelled_learning_pin_releases_occupancy_before_queue() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "cancel-pin-before-queue-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes cancel-pin-before-queue-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes cancel-pin-before-queue-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-cancel-pin-before-queue");
+    let setup = round_test_handle("dlg-cancel-pin-before-queue", &live, transport.as_ref()).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let handle = Arc::new(handle);
+    handle.store.arm_learning_pin_queue_park_for_tests();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-cancel-pin-before-queue",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let parked = {
+        let handle = Arc::clone(&handle);
+        let live = live.clone();
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { handle.handle_frame(frame, live, transport.as_ref()).await })
+    };
+    handle.store.wait_learning_pin_queue_park_for_tests().await;
+    assert_eq!(
+        handle.host_transient_arrival.inflight_pins(),
+        1,
+        "the production pin guard is occupied at the pre-queue park"
+    );
+    assert!(
+        !handle.has_pending_learning(),
+        "cancel-before-queue has no process-memory remainder yet"
+    );
+    assert!(
+        !handle.host_transient_arrival.has_unpublished(),
+        "unpublished publication is not owed before the queue push"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    let outcome = handle
+        .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+        .await
+        .expect("the fan-out must not fail");
+    let phase = handle
+        .store
+        .deletion_status(None, 100)
+        .await
+        .expect("the status must read")
+        .into_iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the operation must stay readable")
+        .phase;
+    assert_ne!(
+        phase,
+        DeletionOperationPhase::Completed,
+        "an inflight Learning pin is remainder, not Verified: {outcome:?}"
+    );
+
+    parked.abort();
+    let join = parked.await;
+    assert!(
+        join.expect_err("the cancelled dialogue must not succeed")
+            .is_cancelled()
+    );
+    assert_eq!(
+        handle.host_transient_arrival.inflight_pins(),
+        0,
+        "Drop of the pin guard must release occupancy"
+    );
+    assert!(
+        !handle.has_pending_learning(),
+        "the local candidate dies with the cancelled future"
+    );
+    assert!(
+        !handle.host_transient_arrival.has_unpublished(),
+        "pin Drop must not invent unpublished arrival state"
+    );
+
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        if phase == DeletionOperationPhase::Completed
+            && outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            return;
+        }
+    }
+    panic!("Targeted Deletion must converge after the cancelled pin is released");
+}
+
+/// After queue push and before canonical publish, aborting handle_frame
+/// releases occupancy but must keep unpublished bookkeeping so a later drive
+/// retries publication instead of Completing over the queued TARGET.
+#[tokio::test]
+async fn a_cancelled_queued_arrival_keeps_unpublished_after_pin_drop() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "cancel-queued-arrival-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes cancel-queued-arrival-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes cancel-queued-arrival-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-cancel-queued-arrival");
+    let setup = round_test_handle("dlg-cancel-queued-arrival", &live, transport.as_ref()).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let handle = Arc::new(handle);
+    handle
+        .store
+        .arm_host_transient_arrival_publish_park_for_tests();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-cancel-queued-arrival",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let parked = {
+        let handle = Arc::clone(&handle);
+        let live = live.clone();
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { handle.handle_frame(frame, live, transport.as_ref()).await })
+    };
+    handle
+        .store
+        .wait_host_transient_arrival_publish_park_for_tests()
+        .await;
+    assert_eq!(handle.host_transient_arrival.inflight_pins(), 1);
+    assert!(
+        handle.has_pending_learning(),
+        "the candidate is on the queue before canonical publish"
+    );
+    assert!(
+        handle.host_transient_arrival.has_unpublished(),
+        "queue push owes canonical publication"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+
+    parked.abort();
+    let join = parked.await;
+    assert!(
+        join.expect_err("the cancelled dialogue must not succeed")
+            .is_cancelled()
+    );
+    assert_eq!(handle.host_transient_arrival.inflight_pins(), 0);
+    assert!(
+        handle.has_pending_learning(),
+        "the queued candidate survives pin Drop"
+    );
+    assert!(
+        handle.host_transient_arrival.has_unpublished(),
+        "pin Drop must not clear unpublished arrival bookkeeping"
+    );
+
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        if phase == DeletionOperationPhase::Completed
+            && outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            return;
+        }
+    }
+    panic!("publication retry after pin Drop must let Targeted Deletion converge");
+}
+
 /// A provider or transport failure in the Learning pass is a technical
 /// failure, not a semantic decline: an experience the model never judged must
 /// not be reported as "nothing worth keeping".

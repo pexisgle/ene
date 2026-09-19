@@ -347,11 +347,25 @@ impl HostTransientArrival {
         self.gate.lock().await
     }
 
-    pub(crate) fn begin_pin(&self) {
+    /// Occupies HostTransient remainder for one Learning pin.
+    ///
+    /// The arrival gate is held only across the counter increment so pin
+    /// start linearizes against Finalizing. The guard then releases the
+    /// gate; Drop decrements the counter with no await and no Store I/O.
+    /// Cancellation, connection drop, and normal return all run Drop.
+    pub(crate) async fn acquire_pin(self: &Arc<Self>) -> LearningPinGuard {
+        let _gate = self.lock().await;
+        self.begin_pin();
+        LearningPinGuard {
+            arrival: Arc::clone(self),
+        }
+    }
+
+    fn begin_pin(&self) {
         self.inflight_pins.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub(crate) fn end_pin(&self) {
+    fn end_pin(&self) {
         self.inflight_pins.fetch_sub(1, Ordering::SeqCst);
     }
 
@@ -399,6 +413,30 @@ impl HostTransientArrival {
     }
 }
 
+/// Process-local Learning-pin occupancy. Drop releases `inflight_pins`
+/// even when the owning future is cancelled. It never touches unpublished
+/// arrival bookkeeping: occupancy and delayed-arrival publication are
+/// different remainders.
+///
+/// Cancellation windows after `acquire_pin`:
+/// - before `pin_experience` returns: no queue entry, no unpublished state
+/// - after a local candidate exists, before queue push: the body dies with
+///   the future; unpublished is not owed
+/// - after queue push, before canonical publish: `scan_incomplete` / `owed`
+///   stay; Finalizing cannot complete; a later drive retries publication
+/// - after canonical publication succeeds: durable next-sweep / invalidation
+///   is Store authority; Drop only clears occupancy
+#[must_use = "Learning pin occupancy is released when this guard is dropped"]
+pub(crate) struct LearningPinGuard {
+    arrival: Arc<HostTransientArrival>,
+}
+
+impl Drop for LearningPinGuard {
+    fn drop(&mut self) {
+        self.arrival.end_pin();
+    }
+}
+
 fn snapshot_learning_remainder(
     queue: &std::sync::Mutex<LearningFormationQueue>,
 ) -> (Vec<ExperienceCandidate>, u64) {
@@ -438,14 +476,20 @@ async fn experience_covers_operation(
 
 /// One bounded page of operation-specific delayed-arrival publication.
 ///
-/// The caller holds the arrival gate. A technical failure or a truncated
-/// unfinished-ops page leaves unpublished bookkeeping set so finalizing
-/// cannot treat the remainder as clean.
+/// The caller holds the arrival gate. A clean publish state is a no-op:
+/// leftover unrelated or already-published queue entries do not restart
+/// classification. A technical failure or a truncated unfinished-ops page
+/// leaves unpublished bookkeeping set so finalizing cannot treat the
+/// remainder as clean.
 pub(crate) async fn publish_owed_learning_arrivals(
     store: &Store,
     arrival: &HostTransientArrival,
     queue: &std::sync::Mutex<LearningFormationQueue>,
 ) {
+    if crate::lock_unpoison(&arrival.publish).is_clean() {
+        arrival.last_classified.store(0, Ordering::SeqCst);
+        return;
+    }
     arrival.last_classified.store(0, Ordering::SeqCst);
     let after = crate::lock_unpoison(&arrival.publish).after;
     let page = match store
@@ -3475,6 +3519,93 @@ mod tests {
             record_b.current.sweep, b.sweep,
             "completing A must still leave B's sweep untouched"
         );
+    }
+
+    /// A clean publish state must not restart unfinished-operation
+    /// classification on the next Targeted Deletion drive. Queue leftovers
+    /// that are unrelated or already published are not a new arrival.
+    #[tokio::test]
+    async fn a_clean_arrival_publish_state_is_a_drive_noop() {
+        let (handle, _dir) = memory_handle("a3c-arrival-clean-noop")
+            .await
+            .expect("the handle opens");
+        let ready = admit(
+            &handle,
+            "secret-clean",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        verify_host_transient(&handle, ready).await;
+        handle
+            .queue_learning_formation(experience("unrelated-clean-body"))
+            .await;
+        assert!(
+            !handle.host_transient_arrival.has_unpublished(),
+            "an unrelated leftover must finish classification as clean"
+        );
+        let mut extras = Vec::new();
+        for n in 1..=HOST_TRANSIENT_ARRIVAL_PAGE {
+            let extra = admit(
+                &handle,
+                &format!("unrelated-clean-page-{n}"),
+                vec![ParticipantOwnerRef::HostTransient],
+            )
+            .await;
+            verify_host_transient(&handle, extra).await;
+            extras.push((extra.operation, extra.sweep));
+        }
+        handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 1))
+            .await
+            .expect("the clean drive runs");
+        assert_eq!(
+            handle.host_transient_arrival.last_classified(),
+            0,
+            "a clean publish state must not classify unfinished operations"
+        );
+        assert!(
+            !handle.host_transient_arrival.has_unpublished(),
+            "a clean drive must not mark scan_incomplete"
+        );
+        for (operation, sweep) in extras {
+            let record = operation_record(&handle, operation).await;
+            assert_eq!(
+                record.current.sweep, sweep,
+                "unrelated extras must not open a new sweep"
+            );
+        }
+        drive_until_completed(&handle, ready.operation).await;
+
+        let late = admit(
+            &handle,
+            "secret-dirty",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        verify_host_transient(&handle, late).await;
+        handle
+            .queue_learning_formation(experience("contains secret-dirty"))
+            .await;
+        assert!(
+            handle.host_transient_arrival.last_classified() > 0,
+            "a new body-bearing arrival must restart bounded classification"
+        );
+        let mut passes = 0u32;
+        while host_transient_is_verified(&handle, late.operation).await {
+            passes += 1;
+            assert!(
+                passes <= 16,
+                "dirty classification must reach the related operation"
+            );
+            let _gate = handle.host_transient_arrival.lock().await;
+            super::publish_owed_learning_arrivals(
+                &handle.store,
+                &handle.host_transient_arrival,
+                &handle.learning_queue,
+            )
+            .await;
+        }
+        drive_until_completed(&handle, late.operation).await;
     }
 
     /// Blocker 3 remainder: a Client class-wipe demand parked after durable

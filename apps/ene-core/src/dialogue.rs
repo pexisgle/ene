@@ -973,16 +973,19 @@ impl HostHandle {
                         // body-bearing local candidate cannot exist outside
                         // HostTransient remainder. It starts after dispatch:
                         // an in-flight stream is the fence's remainder, not a
-                        // Learning pin, and must not block Verified.
-                        self.begin_learning_pin().await;
-                        if let Some(experience) = pin_experience(&input, &self.store).await {
-                            #[cfg(any(test, feature = "test-support"))]
-                            self.store
-                                .pause_learning_pin_queue_if_armed_for_tests()
-                                .await;
-                            self.queue_learning_formation(experience).await;
+                        // Learning pin, and must not block Verified. The
+                        // guard releases occupancy on cancel/drop, not only
+                        // on the success path.
+                        {
+                            let _pin = self.acquire_learning_pin().await;
+                            if let Some(experience) = pin_experience(&input, &self.store).await {
+                                #[cfg(any(test, feature = "test-support"))]
+                                self.store
+                                    .pause_learning_pin_queue_if_armed_for_tests()
+                                    .await;
+                                self.queue_learning_formation(experience).await;
+                            }
                         }
-                        self.end_learning_pin().await;
                         gate.finish().await;
                     }
                     DialogueOutcome::Interrupted => {
@@ -1276,14 +1279,8 @@ impl HostHandle {
         .await;
     }
 
-    async fn begin_learning_pin(&self) {
-        let _gate = self.host_transient_arrival.lock().await;
-        self.host_transient_arrival.begin_pin();
-    }
-
-    async fn end_learning_pin(&self) {
-        let _gate = self.host_transient_arrival.lock().await;
-        self.host_transient_arrival.end_pin();
+    async fn acquire_learning_pin(&self) -> crate::transient_erasure::LearningPinGuard {
+        self.host_transient_arrival.acquire_pin().await
     }
 
     /// Whether a queued formation pass is waiting.
