@@ -16,6 +16,16 @@ use ene_desktop_ui::AppWindow;
 use slint::{ComponentHandle as _, SharedString, Timer, TimerMode, Weak};
 use tokio::sync::Mutex;
 
+#[derive(Clone, Copy)]
+enum RefreshKind {
+    History,
+    Memory,
+    Settings,
+    Tasks,
+    Usage,
+    Deletion,
+}
+
 fn main() -> Result<(), DesktopError> {
     let config = Config::load(None).map_err(|error| DesktopError::Protocol(error.to_string()))?;
     let data_dir: PathBuf = resolve_data_dir(&config)
@@ -50,11 +60,18 @@ fn main() -> Result<(), DesktopError> {
         let runtime = Arc::clone(&tick_runtime);
         let pump = Arc::clone(&tick_pump);
         tokio::spawn(async move {
-            let (seq, snap) = {
+            let Some((seq, snap)) = ({
                 let mut desktop = runtime.lock().await;
+                let before = paint_projection(&desktop.snapshot());
                 desktop.tick();
                 let snap = desktop.snapshot();
-                (pump.stamp(), snap)
+                if paint_projection(&snap) == before {
+                    None
+                } else {
+                    Some((pump.stamp(), snap))
+                }
+            }) else {
+                return;
             };
             push_snapshot(ui, pump, seq, snap);
         });
@@ -114,16 +131,8 @@ fn bind_navigation(
             let runtime = Arc::clone(&runtime);
             let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let (seq, snap) = {
-                    let mut desktop = runtime.lock().await;
-                    desktop.open_page(Page::History);
-                    match desktop.refresh_history().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    let snap = desktop.snapshot();
-                    (pump.stamp(), snap)
-                };
-                push_snapshot(ui, pump, seq, snap);
+                open_page_then_refresh(ui, runtime, pump, Page::History, RefreshKind::History)
+                    .await;
             });
         }
     });
@@ -136,16 +145,7 @@ fn bind_navigation(
             let runtime = Arc::clone(&runtime);
             let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let (seq, snap) = {
-                    let mut desktop = runtime.lock().await;
-                    desktop.open_page(Page::Memory);
-                    match desktop.refresh_memory().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    let snap = desktop.snapshot();
-                    (pump.stamp(), snap)
-                };
-                push_snapshot(ui, pump, seq, snap);
+                open_page_then_refresh(ui, runtime, pump, Page::Memory, RefreshKind::Memory).await;
             });
         }
     });
@@ -158,16 +158,8 @@ fn bind_navigation(
             let runtime = Arc::clone(&runtime);
             let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let (seq, snap) = {
-                    let mut desktop = runtime.lock().await;
-                    desktop.open_page(Page::Settings);
-                    match desktop.refresh_management_without_body().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    let snap = desktop.snapshot();
-                    (pump.stamp(), snap)
-                };
-                push_snapshot(ui, pump, seq, snap);
+                open_page_then_refresh(ui, runtime, pump, Page::Settings, RefreshKind::Settings)
+                    .await;
             });
         }
     });
@@ -193,15 +185,7 @@ fn bind_navigation(
             let runtime = Arc::clone(&runtime);
             let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let (seq, snap) = {
-                    let mut desktop = runtime.lock().await;
-                    match desktop.open_tasks().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    let snap = desktop.snapshot();
-                    (pump.stamp(), snap)
-                };
-                push_snapshot(ui, pump, seq, snap);
+                open_page_then_refresh(ui, runtime, pump, Page::Tasks, RefreshKind::Tasks).await;
             });
         }
     });
@@ -325,16 +309,7 @@ fn bind_navigation(
             let runtime = Arc::clone(&runtime);
             let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let (seq, snap) = {
-                    let mut desktop = runtime.lock().await;
-                    desktop.open_page(Page::Usage);
-                    match desktop.refresh_usage().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    let snap = desktop.snapshot();
-                    (pump.stamp(), snap)
-                };
-                push_snapshot(ui, pump, seq, snap);
+                open_page_then_refresh(ui, runtime, pump, Page::Usage, RefreshKind::Usage).await;
             });
         }
     });
@@ -347,16 +322,8 @@ fn bind_navigation(
             let runtime = Arc::clone(&runtime);
             let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let (seq, snap) = {
-                    let mut desktop = runtime.lock().await;
-                    desktop.open_page(Page::Deletion);
-                    match desktop.refresh_deletion().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    let snap = desktop.snapshot();
-                    (pump.stamp(), snap)
-                };
-                push_snapshot(ui, pump, seq, snap);
+                open_page_then_refresh(ui, runtime, pump, Page::Deletion, RefreshKind::Deletion)
+                    .await;
             });
         }
     });
@@ -683,6 +650,52 @@ fn bind_confirm(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>, pump: A
             });
         }
     });
+}
+
+fn paint_projection(snap: &GuiSnapshot) -> GuiSnapshot {
+    let mut painted = snap.clone();
+    painted.ui_ticks = 0;
+    painted
+}
+
+async fn open_page_then_refresh(
+    ui: Weak<AppWindow>,
+    runtime: Arc<Mutex<DesktopRuntime>>,
+    pump: Arc<SnapshotPump>,
+    page: Page,
+    refresh: RefreshKind,
+) {
+    let (seq, snap) = {
+        let mut desktop = runtime.lock().await;
+        desktop.open_page(page);
+        (pump.stamp(), desktop.snapshot())
+    };
+    push_snapshot(ui.clone(), Arc::clone(&pump), seq, snap);
+    let (seq, snap) = {
+        let mut desktop = runtime.lock().await;
+        match refresh {
+            RefreshKind::History => match desktop.refresh_history().await {
+                Ok(()) | Err(_) => {}
+            },
+            RefreshKind::Memory => match desktop.refresh_memory().await {
+                Ok(()) | Err(_) => {}
+            },
+            RefreshKind::Settings => match desktop.refresh_management_without_body().await {
+                Ok(()) | Err(_) => {}
+            },
+            RefreshKind::Tasks => match desktop.refresh_tasks().await {
+                Ok(()) | Err(_) => {}
+            },
+            RefreshKind::Usage => match desktop.refresh_usage().await {
+                Ok(()) | Err(_) => {}
+            },
+            RefreshKind::Deletion => match desktop.refresh_deletion().await {
+                Ok(()) | Err(_) => {}
+            },
+        }
+        (pump.stamp(), desktop.snapshot())
+    };
+    push_snapshot(ui, pump, seq, snap);
 }
 
 fn spawn_page(
