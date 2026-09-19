@@ -24,6 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-on-failure: false
+          # Source-only PR updates otherwise spend over a minute uploading a
+          # fresh 600+ MB target cache after all required checks have passed.
+          cache-save-if: ${{ github.event_name != 'pull_request' }}
       - uses: taiki-e/install-action@nextest
       - name: Install desktop GUI native deps
         run: |
@@ -42,10 +47,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # Integration tests spawn `ene-ctl` / `ene-core` from `target/debug`.
-      # clippy and nextest do not link those product binaries.
-      - name: Build workspace binaries
-        run: cargo build --locked --workspace --bins
+      # Integration tests spawn these from `target/debug`. Do not also link
+      # the desktop product binary: its library is already covered below.
+      - name: Build test fixture binaries
+        run: cargo build --locked --bin ene-ctl --bin ene-core --bin ene-body
       - name: Run tests
         run: cargo nextest run --locked --workspace --no-fail-fast
       - name: Build docs
@@ -58,8 +63,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-      # nextest overlaps binaries enough to make Windows rename+read of the
-      # device file return Unreadable (ene-client concurrent_stores test).
-      # cargo test is the proven-green runner on this OS.
+        with:
+          cache-on-failure: false
+          cache-save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@nextest
+      # Integration tests spawn these from target/debug; nextest only links
+      # test harnesses itself. The desktop product binary is not a fixture.
+      - name: Build test fixture binaries
+        run: cargo build --locked --bin ene-ctl --bin ene-core --bin ene-body
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: cargo nextest run --locked --workspace --no-fail-fast
