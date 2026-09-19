@@ -139,11 +139,33 @@ async fn wait_for_control(dir: &Path) -> bool {
         }
         #[cfg(windows)]
         if ControlClient::connect(dir).await.is_ok() {
+            // A successful open consumes the current named-pipe instance.
+            // Yield so accept() can publish the next one before the test dials.
+            tokio::task::yield_now().await;
             return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     false
+}
+
+/// Dials control, retrying while the listener is between pipe instances.
+///
+/// Windows `ClientOptions::open` is synchronous. A probe or a just-dropped
+/// peer can leave no waiting server; one `.await` would then fail without
+/// polling accept(). Sleeping retries both wait and let the runtime run it.
+async fn dial_control(dir: &Path) -> ControlClient {
+    let mut last = None;
+    for _ in 0..200 {
+        match ControlClient::connect(dir).await {
+            Ok(client) => return client,
+            Err(error) => {
+                last = Some(error);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("control dial: {last:?}");
 }
 
 async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<WirePayload, String> {
@@ -497,9 +519,7 @@ async fn serve_control_only(dir: &Path) -> (Arc<HostHandle>, ServingTask) {
 async fn second_control_connection_is_seat_occupied() {
     let dir = tempfile::tempdir().expect("scratch");
     let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut first = ControlClient::connect(dir.path())
-        .await
-        .expect("first control dial");
+    let mut first = dial_control(dir.path()).await;
     assert!(
         matches!(
             first.exchange(&ToHost::SeatHello).await,
@@ -507,9 +527,7 @@ async fn second_control_connection_is_seat_occupied() {
         ),
         "empty-seat occupancy is accident prevention, not authenticity"
     );
-    let mut second = ControlClient::connect(dir.path())
-        .await
-        .expect("second control dial");
+    let mut second = dial_control(dir.path()).await;
     assert!(
         matches!(
             second.exchange(&ToHost::SeatHello).await,
@@ -519,9 +537,7 @@ async fn second_control_connection_is_seat_occupied() {
     );
     drop(first);
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut third = ControlClient::connect(dir.path())
-        .await
-        .expect("reconnect dial");
+    let mut third = dial_control(dir.path()).await;
     assert!(
         matches!(
             third.exchange(&ToHost::SeatHello).await,
@@ -536,7 +552,7 @@ async fn second_control_connection_is_seat_occupied() {
 async fn session_less_confirmed_true_and_stolen_nonce_are_denied() {
     let dir = tempfile::tempdir().expect("scratch");
     let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut first = ControlClient::connect(dir.path()).await.expect("dial");
+    let mut first = dial_control(dir.path()).await;
     assert!(matches!(
         first.exchange(&ToHost::ConfirmedTrue).await,
         Ok(FromHost::DeniedByBoundary)
@@ -558,7 +574,7 @@ async fn session_less_confirmed_true_and_stolen_nonce_are_denied() {
         panic!("device approve must mint a challenge, got {challenge:?}");
     };
 
-    let mut thief = ControlClient::connect(dir.path()).await.expect("thief");
+    let mut thief = dial_control(dir.path()).await;
     let stolen = thief
         .exchange(&ToHost::SessionComplete { session_id, nonce })
         .await
@@ -574,7 +590,7 @@ async fn session_less_confirmed_true_and_stolen_nonce_are_denied() {
 async fn reconnect_invalidates_outstanding_sessions() {
     let dir = tempfile::tempdir().expect("scratch");
     let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut first = ControlClient::connect(dir.path()).await.expect("dial");
+    let mut first = dial_control(dir.path()).await;
     first.exchange(&ToHost::SeatHello).await.expect("hello");
     let challenge = first
         .exchange(&ToHost::DeviceApprove {
@@ -590,7 +606,7 @@ async fn reconnect_invalidates_outstanding_sessions() {
     };
     drop(first);
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut second = ControlClient::connect(dir.path()).await.expect("reconnect");
+    let mut second = dial_control(dir.path()).await;
     assert!(matches!(
         second.exchange(&ToHost::SeatHello).await,
         Ok(FromHost::SeatGranted)
@@ -654,7 +670,7 @@ async fn serving_time_control_approve_and_credential_put() {
 async fn occupied_seat_fails_console_approve_without_client_fallback() {
     let dir = tempfile::tempdir().expect("scratch");
     let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut holder = ControlClient::connect(dir.path()).await.expect("holder");
+    let mut holder = dial_control(dir.path()).await;
     holder.exchange(&ToHost::SeatHello).await.expect("hello");
     let error = host_control::approve_device(dir.path(), "anything")
         .await
