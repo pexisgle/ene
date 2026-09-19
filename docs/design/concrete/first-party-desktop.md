@@ -4,7 +4,7 @@
 
 crate 名と依存方向の表は [Crate / Module 分解](crate-module-decomposition.md) が所有する。本書は **process 寿命、障害境界、Host-local control、Owner 確認、credential の区間と破棄、投影 IPC、性能の分母、provisional 依存、実機 probe と最終 acceptance の分離** を所有する。上位設計との優先順位は [設計文書 README](../README.md#設計文書の優先順位と信頼できる情報源) に従う。
 
-`.old/` の `ene-stage` 画面・3D 合成・`.slint` 資産は参考にも移植対象にもしない。text GUI toolkit を採るのは旧実装の継続ではなく、レイアウト自由度に対する独立選定である。未検証の crate / OS backend は第7節の **provisional** であり、probe 合格前に恒久 contract として固定しない。
+過去の実装の `ene-stage` 画面・3D 合成・`.slint` 資産は参考にも移植対象にもしない。text GUI toolkit を採るのは旧実装の継続ではなく、レイアウト自由度に対する独立選定である。未検証の crate / OS backend は第7節の **provisional** であり、probe 合格前に恒久 contract として固定しない。
 
 ## 1. 対象と非対象
 
