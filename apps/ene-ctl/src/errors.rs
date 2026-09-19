@@ -84,9 +84,9 @@ mod tests {
             ("main.rs", main),
         ] {
             assert!(
-                !source.contains("host-control")
+                !source.contains(concat!("host", "-control"))
                     && !source.contains("ene_local_control")
-                    && !source.contains("ene-local-control"),
+                    && !source.contains(concat!("ene", "-local-control")),
                 "product ene-ctl {name} must not open the control inlet"
             );
         }

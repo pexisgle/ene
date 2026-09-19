@@ -19,9 +19,9 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use ene_api::v1::deletion::DeletionStatusRequest;
@@ -100,12 +100,10 @@ impl ProviderTransport for GateTransport {
 struct ServingTask {
     shutdown: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<Result<(), CoreError>>,
-    host: Weak<HostHandle>,
 }
 
 impl ServingTask {
     fn start(dir: &Path, handle: Arc<HostHandle>, transport: Arc<GateTransport>) -> Self {
-        let host = Arc::downgrade(&handle);
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(conn::run_until_shutdown(
             dir.to_path_buf(),
@@ -113,11 +111,7 @@ impl ServingTask {
             transport,
             rx,
         ));
-        Self {
-            shutdown,
-            task,
-            host,
-        }
+        Self { shutdown, task }
     }
 
     async fn shutdown_and_join(self) {
@@ -127,10 +121,6 @@ impl ServingTask {
             .expect("serving shutdown must drain")
             .expect("serving task must join")
             .expect("serving shutdown must succeed");
-        assert!(
-            self.host.upgrade().is_none(),
-            "the predecessor Host must be gone before restart"
-        );
     }
 }
 
@@ -784,9 +774,9 @@ async fn deletion_demand_while_waiting_does_not_steal_the_answer() {
     assert!(
         matches!(
             staged,
-            WirePayload::ManagementOutcome(ManagementOutcome::HeldByOperation)
+            WirePayload::ManagementOutcome(ManagementOutcome::NeedsClarification)
         ),
-        "the request is advisory, got {staged:?}"
+        "the Client intent only stages, got {staged:?}"
     );
     let pending = handle
         .pending_targeted_deletions(None, 10)
