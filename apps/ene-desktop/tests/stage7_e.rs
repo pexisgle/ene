@@ -204,19 +204,39 @@ async fn drive_gui_until(desktop: &mut DesktopRuntime, handle: &HostHandle, need
         match desktop.refresh_deletion().await {
             Ok(()) | Err(_) => {}
         }
-        let body = desktop.snapshot().deletion_body;
-        if body.contains(needle) {
+        if desktop.snapshot().deletion_body.contains(needle) {
             return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "GUI deletion body never contained {needle}: {body}"
+            "GUI deletion body never contained {needle}: {}",
+            desktop.snapshot().deletion_body
         );
         handle.wake_deletion_driver_for_tests();
-        match handle.run_targeted_deletion_tick().await {
-            Ok(_) | Err(_) => {}
+        // Pump the Client while the tick waits: a sequential tick-then-refresh
+        // only ever answers an already-abandoned demand.
+        let mut drive = std::pin::pin!(handle.run_targeted_deletion_tick());
+        loop {
+            tokio::select! {
+                driven = &mut drive => {
+                    match driven {
+                        Ok(_) | Err(_) => {}
+                    }
+                    break;
+                }
+                () = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    match desktop.refresh_deletion().await {
+                        Ok(()) | Err(_) => {}
+                    }
+                    if desktop.snapshot().deletion_body.contains(needle) {
+                        return;
+                    }
+                }
+            }
         }
-        tokio::task::yield_now().await;
     }
 }
 

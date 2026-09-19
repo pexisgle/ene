@@ -1375,7 +1375,9 @@ async fn wait_for_summary_with(client: &mut Client, needle: &str) -> Undelivered
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         }
-        let _ = ack_summary(client, &summary).await;
+        if ack_summary(client, &summary).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
