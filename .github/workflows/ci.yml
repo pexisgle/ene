@@ -15,9 +15,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # rust-cache restores a completed target dir; incremental compilation on top
-  # of that is wasted work and a common source of stale-artifact misses.
-  CARGO_INCREMENTAL: "0"
 
 jobs:
   check:
@@ -27,14 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          # Keep a single rust-cache restore. The action caches by default
-          # and would otherwise extract the same key twice.
-          cache: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: false
-          save-if: true
       - uses: taiki-e/install-action@nextest
       - name: Install desktop GUI native deps
         run: |
@@ -69,16 +58,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          cache: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: false
-          save-if: true
-      # Linux and Windows cache keys are distinct. A failed Windows job does
-      # not populate this restore. nextest is not used here: overlapping
-      # binaries made Windows rename+read of the device file return
-      # Unreadable (ene-client concurrent_stores). cargo test is the
-      # proven-green runner on this OS.
+      # nextest overlaps binaries enough to make Windows rename+read of the
+      # device file return Unreadable (ene-client concurrent_stores test).
+      # cargo test is the proven-green runner on this OS.
       - name: Run tests
         run: cargo test --locked --workspace
