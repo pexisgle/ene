@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::pairing::pairing_proof_hex;
 use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
 #[cfg(any(unix, windows))]
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
@@ -9,13 +10,12 @@ use ene_api::v1::handshake::AuthChallenge;
 use ene_api::v1::payload::WirePayload;
 #[cfg(any(unix, windows))]
 use ene_api::v1::refs::WireMessageId;
-use ene_credential::pairing_proof_hex;
 #[cfg(any(unix, windows))]
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 
 #[cfg(any(unix, windows))]
 use crate::device;
-use crate::errors::CliError;
+use crate::error::ClientError;
 
 #[cfg(any(unix, windows))]
 use super::frames::{
@@ -98,20 +98,20 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`CliError::Transport`] when the socket cannot be reached, a
+    /// Returns [`ClientError::Transport`] when the socket cannot be reached, a
     /// frame cannot be moved, or the device file cannot be persisted;
-    /// [`CliError::Codec`] when a frame cannot be encoded or decoded;
-    /// [`CliError::ServerOutcome`] when pairing is still pending Owner
+    /// [`ClientError::Codec`] when a frame cannot be encoded or decoded;
+    /// [`ClientError::ServerOutcome`] when pairing is still pending Owner
     /// confirmation or was denied (exit code 2: approve on the Host-local
     /// trusted surface, provision the shown secret once, then re-run — no
-    /// auto-retry loop); and [`CliError::ServerRejected`] when the Host
+    /// auto-retry loop); and [`ClientError::ServerRejected`] when the Host
     /// negotiates an incompatible version or answers with an unexpected
     /// payload kind.
     pub async fn connect(
         data_dir: &Path,
         descriptor: &str,
         platform: &str,
-    ) -> Result<Self, CliError> {
+    ) -> Result<Self, ClientError> {
         let incarnation = crate::incarnation::boot_incarnation(data_dir)?;
         #[cfg(unix)]
         let mut stream = {
@@ -119,7 +119,7 @@ impl Client {
             tokio::net::UnixStream::connect(&path)
                 .await
                 .map_err(|error| {
-                    CliError::Transport(format!(
+                    ClientError::Transport(format!(
                         "connect to {} failed: {}",
                         path.display(),
                         error.kind()
@@ -132,7 +132,7 @@ impl Client {
             tokio::net::windows::named_pipe::ClientOptions::new()
                 .open(&pipe)
                 .map_err(|error| {
-                    CliError::Transport(format!("connect to {pipe} failed: {}", error.kind()))
+                    ClientError::Transport(format!("connect to {pipe} failed: {}", error.kind()))
                 })?
         };
         let file_state = device::load_stored_device(data_dir);
@@ -152,7 +152,7 @@ impl Client {
                 device::DeviceFileState::Unreadable | device::DeviceFileState::Malformed
             )
         {
-            return Err(CliError::ServerOutcome(unreadable_device_file_guidance()));
+            return Err(ClientError::ServerOutcome(unreadable_device_file_guidance()));
         }
         // Pairing runs only without a stored device: a first run (or a run
         // whose device file is gone) opens or polls a pending request by its
@@ -179,18 +179,18 @@ impl Client {
                             pending_id,
                         } => {
                             device::store_pending_id(data_dir, &pending_id)?;
-                            return Err(CliError::ServerOutcome(pending_guidance()));
+                            return Err(ClientError::ServerOutcome(pending_guidance()));
                         }
                         ene_api::v1::handshake::PairingResult::Denied { reason } => {
                             device::clear_pending_id(data_dir);
-                            return Err(CliError::ServerOutcome(format!(
+                            return Err(ClientError::ServerOutcome(format!(
                                 "pairing denied: {reason}; approve the pending ID on the \
                                  Host-local trusted surface, then re-run ene-ctl"
                             )));
                         }
                     },
                     unexpected => {
-                        return Err(CliError::ServerRejected(format!(
+                        return Err(ClientError::ServerRejected(format!(
                             "unexpected {} during pairing; expected PairingResult",
                             unexpected.message_type()
                         )));
@@ -215,14 +215,14 @@ impl Client {
         match read_frame(&mut stream).await?.payload {
             WirePayload::NegotiatedConnection(negotiated) => {
                 if !negotiated.version.shares_major_with(&ProtocolVersion::V1) {
-                    return Err(CliError::ServerRejected(format!(
+                    return Err(ClientError::ServerRejected(format!(
                         "negotiated incompatible version {}.{}; expected major 1",
                         negotiated.version.major, negotiated.version.minor
                     )));
                 }
             }
             unexpected => {
-                return Err(CliError::ServerRejected(format!(
+                return Err(ClientError::ServerRejected(format!(
                     "unexpected {} during capability negotiation; expected NegotiatedConnection",
                     unexpected.message_type()
                 )));
@@ -243,7 +243,7 @@ impl Client {
         };
         let challenge = read_frame(&mut session.stream).await?.payload;
         let WirePayload::AuthChallenge(challenge) = challenge else {
-            return Err(CliError::ServerRejected(format!(
+            return Err(ClientError::ServerRejected(format!(
                 "unexpected {} after negotiation; expected AuthChallenge",
                 challenge.message_type()
             )));
@@ -260,7 +260,7 @@ impl Client {
                     &device::StoredDevice::new(device_id, secret_value.to_owned()),
                 )?,
                 None => {
-                    return Err(CliError::Transport(String::from(
+                    return Err(ClientError::Transport(String::from(
                         "accepted authentication lost the client device secret",
                     )));
                 }
@@ -268,7 +268,7 @@ impl Client {
         }
         let fact = session.next_frame().await?;
         if !matches!(fact, WirePayload::PresenceAttribution(_)) {
-            return Err(CliError::ServerRejected(format!(
+            return Err(ClientError::ServerRejected(format!(
                 "unexpected {} after authentication; expected PresenceAttribution",
                 fact.message_type()
             )));
@@ -284,19 +284,19 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`CliError::Transport`] or [`CliError::Codec`] when the
-    /// exchange cannot be moved or framed; [`CliError::ServerOutcome`] when no
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
+    /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when no
     /// secret is provisioned (approve and provision, then re-run) or the Host
     /// rejects the proof (exit code 2: re-approve for a fresh secret and
-    /// retry); and [`CliError::ServerRejected`] when the Host answers with an
+    /// retry); and [`ClientError::ServerRejected`] when the Host answers with an
     /// unexpected payload kind.
-    pub async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), CliError> {
+    pub async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
         let Some(secret) = self.state.pairing_secret().map(str::to_string) else {
-            return Err(CliError::ServerOutcome(missing_secret_guidance()));
+            return Err(ClientError::ServerOutcome(missing_secret_guidance()));
         };
         let proof = pairing_proof_hex(&secret, &challenge.nonce);
         let Some(device) = self.sender.device_id else {
-            return Err(CliError::ServerRejected(String::from(
+            return Err(ClientError::ServerRejected(String::from(
                 "cannot prove ownership without a paired device",
             )));
         };
@@ -312,8 +312,8 @@ impl Client {
                 self.state.set_connection(connection_id);
                 Ok(())
             }
-            AuthDecision::Guidance { message } => Err(CliError::ServerOutcome(message)),
-            AuthDecision::Unexpected { message } => Err(CliError::ServerRejected(message)),
+            AuthDecision::Guidance { message } => Err(ClientError::ServerOutcome(message)),
+            AuthDecision::Unexpected { message } => Err(ClientError::ServerRejected(message)),
         }
     }
 
@@ -359,11 +359,14 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`CliError::Transport`] or [`CliError::Codec`] when the
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
     /// exchange cannot be moved or framed. Payload semantics are the caller's
     /// job: this helper never interprets the answer beyond the generation
     /// bookkeeping.
-    pub async fn execute(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, CliError> {
+    pub async fn execute(
+        &mut self,
+        prepared: &PreparedRequest,
+    ) -> Result<WirePayload, ClientError> {
         self.roundtrip(prepared.frame(self.sender, self.state.generation()))
             .await
     }
@@ -381,7 +384,7 @@ impl Client {
     /// # Errors
     ///
     /// Same as [`Client::execute`].
-    pub async fn retry(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, CliError> {
+    pub async fn retry(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, ClientError> {
         self.execute(prepared).await
     }
 
@@ -393,7 +396,7 @@ impl Client {
     /// # Errors
     ///
     /// Same as [`Client::execute`].
-    pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, CliError> {
+    pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, ClientError> {
         let prepared = self.prepare(payload);
         self.execute(&prepared).await
     }
@@ -410,7 +413,7 @@ impl Client {
         &mut self,
         payload: WirePayload,
         round: Option<ene_api::v1::refs::RoundWireId>,
-    ) -> Result<WirePayload, CliError> {
+    ) -> Result<WirePayload, ClientError> {
         use super::frames::observed_frame;
         use ene_api::v1::refs::RequestWireId;
 
@@ -420,7 +423,7 @@ impl Client {
         self.pump(frame, own_message_id).await
     }
 
-    async fn roundtrip(&mut self, frame: WireFrame) -> Result<WirePayload, CliError> {
+    async fn roundtrip(&mut self, frame: WireFrame) -> Result<WirePayload, ClientError> {
         let own_message_id = frame.envelope.message_id;
         self.pump(frame, own_message_id).await
     }
@@ -429,7 +432,7 @@ impl Client {
         &mut self,
         frame: WireFrame,
         own_message_id: WireMessageId,
-    ) -> Result<WirePayload, CliError> {
+    ) -> Result<WirePayload, ClientError> {
         write_frame(&mut self.stream, &frame).await?;
         if let Some(queued) = self.state.take_deferred_reply(own_message_id) {
             if let Some(current) = stale_generation_of(&queued) {
@@ -447,6 +450,7 @@ impl Client {
             }
             match decide_frame(own_message_id, &incoming) {
                 FrameDecision::AbsorbPresence(fact) => self.state.observe_presence(&fact),
+                FrameDecision::AbsorbBodyHint(_) => {}
                 FrameDecision::Answer(payload) => {
                     if let Some(current) = stale_generation_of(&payload) {
                         self.state.note_stale_generation(current);
@@ -468,7 +472,7 @@ impl Client {
     async fn answer_deletion_demand_if_any(
         &mut self,
         payload: &WirePayload,
-    ) -> Result<bool, CliError> {
+    ) -> Result<bool, ClientError> {
         let WirePayload::DeletionDemand(demand) = payload else {
             return Ok(false);
         };
@@ -498,9 +502,9 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`CliError::Transport`] or [`CliError::Codec`] when the frame
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the frame
     /// cannot be moved or encoded.
-    pub async fn notify(&mut self, payload: WirePayload) -> Result<(), CliError> {
+    pub async fn notify(&mut self, payload: WirePayload) -> Result<(), ClientError> {
         write_frame(&mut self.stream, &frame_for(payload, self.sender)).await
     }
 
@@ -512,9 +516,9 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`CliError::Transport`] or [`CliError::Codec`] when the next
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the next
     /// frame cannot be read or decoded.
-    pub async fn next_frame(&mut self) -> Result<WirePayload, CliError> {
+    pub async fn next_frame(&mut self) -> Result<WirePayload, ClientError> {
         loop {
             let payload = read_frame(&mut self.stream).await?.payload;
             if self.answer_deletion_demand_if_any(&payload).await? {
@@ -532,14 +536,13 @@ impl Client {
 async fn write_frame(
     stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     frame: &WireFrame,
-) -> Result<(), CliError> {
+) -> Result<(), ClientError> {
     use tokio::io::AsyncWriteExt as _;
     let bytes = encode_frame(frame)
-        .map_err(|error: CodecError| CliError::Codec(format!("encode failed: {error}")))?;
-    stream
-        .write_all(&bytes)
-        .await
-        .map_err(|error| CliError::Transport(format!("socket write failed: {}", error.kind())))?;
+        .map_err(|error: CodecError| ClientError::Codec(format!("encode failed: {error}")))?;
+    stream.write_all(&bytes).await.map_err(|error| {
+        ClientError::Transport(format!("socket write failed: {}", error.kind()))
+    })?;
     Ok(())
 }
 
@@ -550,16 +553,16 @@ async fn write_frame(
 #[cfg(any(unix, windows))]
 async fn read_frame(
     stream: &mut (impl tokio::io::AsyncRead + Unpin),
-) -> Result<WireFrame, CliError> {
+) -> Result<WireFrame, ClientError> {
     use tokio::io::AsyncReadExt as _;
     let mut prefix = [0_u8; 4];
     stream
         .read_exact(&mut prefix)
         .await
-        .map_err(|error| CliError::Transport(format!("socket read failed: {}", error.kind())))?;
+        .map_err(|error| ClientError::Transport(format!("socket read failed: {}", error.kind())))?;
     let claimed = u32::from_be_bytes(prefix) as usize;
     if claimed > MAX_FRAME_BYTES {
-        return Err(CliError::Codec(format!(
+        return Err(ClientError::Codec(format!(
             "frame body of {claimed} bytes exceeds the 256 KiB cap"
         )));
     }
@@ -567,17 +570,17 @@ async fn read_frame(
     stream
         .read_exact(&mut body)
         .await
-        .map_err(|error| CliError::Transport(format!("socket read failed: {}", error.kind())))?;
+        .map_err(|error| ClientError::Transport(format!("socket read failed: {}", error.kind())))?;
     let mut bytes = Vec::with_capacity(4 + claimed);
     bytes.extend_from_slice(&prefix);
     bytes.extend_from_slice(&body);
     decode_frame(&bytes)
         .map(|(frame, _consumed)| frame)
-        .map_err(|error: CodecError| CliError::Codec(format!("decode failed: {error}")))
+        .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))
 }
 
 /// Unsupported-platform placeholder: same surface, always unsupported.
-/// Every method returns [`CliError::UnsupportedPlatform`]: transport needs a
+/// Every method returns [`ClientError::UnsupportedPlatform`]: transport needs a
 /// Unix-domain socket or a Windows named pipe.
 #[cfg(not(any(unix, windows)))]
 pub struct Client {
@@ -590,31 +593,31 @@ impl Client {
         _data_dir: &Path,
         _descriptor: &str,
         _platform: &str,
-    ) -> Result<Self, CliError> {
-        Err(CliError::UnsupportedPlatform("no supported transport"))
+    ) -> Result<Self, ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
-    pub async fn request(&mut self, _payload: WirePayload) -> Result<WirePayload, CliError> {
-        Err(CliError::UnsupportedPlatform("no supported transport"))
+    pub async fn request(&mut self, _payload: WirePayload) -> Result<WirePayload, ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
-    pub async fn authenticate(&mut self, _challenge: &AuthChallenge) -> Result<(), CliError> {
-        Err(CliError::UnsupportedPlatform("no supported transport"))
+    pub async fn authenticate(&mut self, _challenge: &AuthChallenge) -> Result<(), ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
-    pub async fn next_frame(&mut self) -> Result<WirePayload, CliError> {
-        Err(CliError::UnsupportedPlatform("no supported transport"))
+    pub async fn next_frame(&mut self) -> Result<WirePayload, ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
-    pub async fn notify(&mut self, _payload: WirePayload) -> Result<(), CliError> {
-        Err(CliError::UnsupportedPlatform("no supported transport"))
+    pub async fn notify(&mut self, _payload: WirePayload) -> Result<(), ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
     /// No session ever observes presence on this platform, so every request
     /// carries the bootstrap fallback; the Host revalidates it rather than
     /// attributing through it.
     pub fn companion_ref(&self) -> String {
-        String::from(crate::cmds::DEFAULT_COMPANION_REF)
+        String::from(crate::DEFAULT_COMPANION_REF)
     }
 }
 

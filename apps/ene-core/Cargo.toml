@@ -25,6 +25,7 @@ ene-preservation = { path = "../../crates/ene-preservation" }
 ene-primitive = { path = "../../crates/ene-primitive" }
 ene-store = { path = "../../crates/ene-store" }
 ene-task = { path = "../../crates/ene-task" }
+ene-local-control = { path = "../../crates/ene-local-control" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true

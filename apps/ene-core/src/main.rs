@@ -423,76 +423,147 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
 /// trusted inlet, and nowhere else; the operator provisions it into the
 /// client's protected device file.
 ///
-/// This is an offline mutation, so it takes the single-writer
-/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store
-/// (PR §6.4): a running Host owns the mutation and the command is refused.
+/// This is an offline mutation when no Host is serving, so it takes the
+/// single-writer [`HostLock`](ene_core::host_lock::HostLock) before opening
+/// the store (PR §6.4). While a Host is serving, the command speaks the
+/// Host-local control inlet instead. An occupied seat fails; the command
+/// never falls through to the Client channel.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
-/// directory, [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened, and [`CoreError::Approve`] when the pending id is
-/// unknown (listing the pending ids) or the approval write fails.
+/// Returns [`CoreError::AlreadyRunning`] only when the lock is held and the
+/// control inlet is not this path's concern; serving occupancy is
+/// [`CoreError::SeatOccupied`]. [`CoreError::Store`] when the runtime cannot
+/// be built or the state cannot be opened, and [`CoreError::Approve`] when
+/// the pending id is unknown.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
-    use std::io::Write as _;
-
     use ene_core::host_lock::HostLock;
 
     block_on(async {
-        let _lock = HostLock::acquire(data_dir)?;
-        let handle = HostHandle::open(data_dir).await?;
-        if let Some((_, secret)) = handle.approve_device(pending_id).await? {
-            let mut stdout = std::io::stdout().lock();
-            writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
-                CoreError::Store(format!(
-                    "approved, but the secret could not be shown: {error}"
-                ))
-            })?;
-            stdout.flush().map_err(|error| {
-                CoreError::Store(format!(
-                    "approved, but the secret could not be shown: {error}"
-                ))
-            })?;
-            return Ok(());
+        match HostLock::acquire(data_dir) {
+            Ok(_lock) => approve_device_offline(data_dir, pending_id).await,
+            Err(CoreError::AlreadyRunning) => {
+                match ene_core::host_control::approve_device(data_dir, pending_id).await? {
+                    Some(secret) => write_pairing_secret(&secret),
+                    None => unknown_pending(data_dir, pending_id).await,
+                }
+            }
+            Err(error) => Err(error),
         }
-        let pending = handle.pending_devices().await?;
-        Err(CoreError::Approve(format!(
-            "unknown pending id {pending_id:?}; pending: [{pending}]",
-            pending = pending
-                .iter()
-                .map(|entry| entry.pending_id.as_str())
-                .collect::<Vec<&str>>()
-                .join(", ")
-        )))
     })
+}
+
+async fn approve_device_offline(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
+    let handle = HostHandle::open(data_dir).await?;
+    if let Some((_, secret)) = handle.approve_device(pending_id).await? {
+        return write_pairing_secret(&secret);
+    }
+    unknown_pending_from(&handle, pending_id).await
+}
+
+fn write_pairing_secret(secret: &str) -> Result<(), CoreError> {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
+        CoreError::Store(format!(
+            "approved, but the secret could not be shown: {error}"
+        ))
+    })?;
+    stdout.flush().map_err(|error| {
+        CoreError::Store(format!(
+            "approved, but the secret could not be shown: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+async fn unknown_pending(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
+    let handle = HostHandle::open(data_dir).await?;
+    unknown_pending_from(&handle, pending_id).await
+}
+
+async fn unknown_pending_from(handle: &HostHandle, pending_id: &str) -> Result<(), CoreError> {
+    let pending = handle.pending_devices().await?;
+    Err(CoreError::Approve(format!(
+        "unknown pending id {pending_id:?}; pending: [{pending}]",
+        pending = pending
+            .iter()
+            .map(|entry| entry.pending_id.as_str())
+            .collect::<Vec<&str>>()
+            .join(", ")
+    )))
 }
 
 /// Unknown pairs fail with the pending set so the Owner can retry exactly.
 ///
-/// Like `approve-device`, this offline mutation takes the single-writer
-/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store.
+/// Offline (no serving Host) this takes [`HostLock`] before opening the
+/// store. While serving, the command puts the bearer over the control inlet
+/// (`ENE_OPENAI_API_KEY`); an occupied seat fails and never falls through
+/// to the Client channel.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
-/// directory, [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened, and [`CoreError::Approve`] when the pair is
-/// unknown.
+/// [`CoreError::SeatOccupied`] when the control seat is held,
+/// [`CoreError::Store`] when the runtime cannot be built or the state cannot
+/// be opened, and [`CoreError::Approve`] when the pair is unknown or the
+/// serving-time secret is missing.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
     block_on(async {
-        let _lock = HostLock::acquire(data_dir)?;
-        let handle = HostHandle::open(data_dir).await?;
-        if handle.approve_credential(provider, label).await? {
-            return Ok(());
+        match HostLock::acquire(data_dir) {
+            Ok(_lock) => approve_credential_offline(data_dir, provider, label).await,
+            Err(CoreError::AlreadyRunning) => {
+                let secret = serving_credential_secret()?;
+                if ene_core::host_control::put_credential(data_dir, provider, label, &secret)
+                    .await?
+                {
+                    return Ok(());
+                }
+                unknown_credential(data_dir, provider, label).await
+            }
+            Err(error) => Err(error),
         }
-        let pending = handle.pending_credentials().await?;
-        Err(CoreError::Approve(format!(
-            "unknown credential {provider}:{label}; pending: [{pending}]",
-            pending = pending.join(", ")
-        )))
     })
+}
+
+fn serving_credential_secret() -> Result<String, CoreError> {
+    match std::env::var(ene_credential::ENV_API_KEY) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        _ => Err(CoreError::Approve(String::from(
+            "serving-time credential put requires ENE_OPENAI_API_KEY; \
+             do not fall through to the Client channel",
+        ))),
+    }
+}
+
+async fn approve_credential_offline(
+    data_dir: &Path,
+    provider: &str,
+    label: &str,
+) -> Result<(), CoreError> {
+    let handle = HostHandle::open(data_dir).await?;
+    if handle.approve_credential(provider, label).await? {
+        return Ok(());
+    }
+    unknown_credential_from(&handle, provider, label).await
+}
+
+async fn unknown_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
+    let handle = HostHandle::open(data_dir).await?;
+    unknown_credential_from(&handle, provider, label).await
+}
+
+async fn unknown_credential_from(
+    handle: &HostHandle,
+    provider: &str,
+    label: &str,
+) -> Result<(), CoreError> {
+    let pending = handle.pending_credentials().await?;
+    Err(CoreError::Approve(format!(
+        "unknown credential {provider}:{label}; pending: [{pending}]",
+        pending = pending.join(", ")
+    )))
 }
 
 /// Prints the Targeted Deletion requests awaiting the Owner's confirmation,

@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 
 use ene_api::v1::deletion::ClientTempClass;
 use ene_api::v1::handshake::AuthResult;
-use ene_api::v1::payload::WirePayload;
+use ene_api::v1::payload::{BodyStateHint, WirePayload};
 use ene_api::v1::presence::PresenceAttributionWire;
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
@@ -98,14 +98,13 @@ impl SessionState {
         self.companion = Some(fact.companion.0.clone());
     }
 
-    /// Falls back to the
-    /// [`DEFAULT_COMPANION_REF`](crate::cmds::DEFAULT_COMPANION_REF)
-    /// bootstrap until the first presence fact arrives; the Host revalidates
-    /// that fallback rather than attributing through it.
+    /// Falls back to [`crate::DEFAULT_COMPANION_REF`] until the first
+    /// presence fact arrives; the Host revalidates that fallback rather than
+    /// attributing through it.
     pub fn companion_ref(&self) -> String {
         self.companion
             .clone()
-            .unwrap_or_else(|| String::from(crate::cmds::DEFAULT_COMPANION_REF))
+            .unwrap_or_else(|| String::from(crate::DEFAULT_COMPANION_REF))
     }
 
     /// Normal-operation refresh from a stale-round answer, distinct from the
@@ -181,22 +180,24 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameDecision {
     AbsorbPresence(PresenceAttributionWire),
+    /// Host → Client activity hint (IPC M-21). Never an answer.
+    AbsorbBodyHint(BodyStateHint),
     Answer(WirePayload),
     Defer,
 }
 
 /// Total and pure: no I/O, no session access, so tests rule on the same
-/// function the socket loop uses. Only presence facts absorb — a future
-/// unsolicited fact kind needs a new arm here, and until then such frames
-/// defer instead of surfacing as answers.
+/// function the socket loop uses. Presence facts and Body activity hints
+/// absorb; other unsolicited frames defer instead of surfacing as answers.
 #[must_use]
 pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDecision {
-    if let WirePayload::PresenceAttribution(fact) = &frame.payload {
-        FrameDecision::AbsorbPresence(fact.clone())
-    } else if frame.envelope.correlation.reply_to == Some(own_message_id) {
-        FrameDecision::Answer(frame.payload.clone())
-    } else {
-        FrameDecision::Defer
+    match &frame.payload {
+        WirePayload::PresenceAttribution(fact) => FrameDecision::AbsorbPresence(fact.clone()),
+        WirePayload::BodyStateHint(hint) => FrameDecision::AbsorbBodyHint(hint.clone()),
+        _ if frame.envelope.correlation.reply_to == Some(own_message_id) => {
+            FrameDecision::Answer(frame.payload.clone())
+        }
+        _ => FrameDecision::Defer,
     }
 }
 

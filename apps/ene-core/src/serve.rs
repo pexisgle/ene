@@ -154,6 +154,10 @@ pub enum CoreError {
     Deletion(String),
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(&'static str),
+    /// Exclusive first-party control seat is held by another connection.
+    /// Callers must not fall through to the Client channel.
+    #[error("first-party control seat occupied; do not fall through to the Client channel")]
+    SeatOccupied,
 }
 
 /// Where Host responses go at the point they are decided.
@@ -224,10 +228,13 @@ impl FrameSink for tokio::sync::mpsc::Sender<WireFrame> {
 ///
 /// [`CredentialStore::with_bearer`] is generic over its closure return type,
 /// so the trait is not dyn-compatible and the handle holds this closed enum
-/// instead of a trait object. [`CredStore::Env`] is the production store for
-/// the `openai` provider (the bearer is read from the process environment
-/// once at Host startup and pinned in memory for the run, never re-read);
-/// [`CredStore::Memory`] is the test and local-development store.
+/// instead of a trait object. [`CredStore::Env`] is the test/dev environment
+/// adapter (the bearer is read from the process environment once at Host
+/// startup and pinned in memory for the run, never re-read). It is not a
+/// product source of truth: serving-time [`CredentialStore::put`] fail-closes.
+/// [`CredStore::Memory`] is the test and local-development store. Product
+/// durable storage is an OS protected store; a provisional adapter is not
+/// pinned here.
 #[derive(Debug)]
 pub enum CredStore {
     Env(EnvCredentialStore),
@@ -250,6 +257,13 @@ impl CredentialStore for CredStore {
         match self {
             Self::Env(inner) => inner.contains(cred),
             Self::Memory(inner) => inner.contains(cred),
+        }
+    }
+
+    fn put(&self, cred: &CredentialRef, secret: &str) -> Result<(), CredentialTechnicalError> {
+        match self {
+            Self::Env(inner) => inner.put(cred, secret),
+            Self::Memory(inner) => inner.put(cred, secret),
         }
     }
 }
@@ -446,6 +460,9 @@ pub struct HostHandle {
     pub(crate) open_rounds: StdMutex<HashMap<(String, String), OpenRound>>,
     pub(crate) rounds: Arc<StdMutex<HashMap<String, RoundId>>>,
     pub(crate) cred_store: CredStore,
+    /// Exclusive Host-local first-party control seat. At most one live
+    /// speaker; reconnect invalidates outstanding confirmation sessions.
+    pub(crate) control_seat: crate::host_control::FirstPartyControlSeat,
     /// File-backed pairing-secret store by device, opened on
     /// `<data_dir>/device-auth.json`.
     ///
@@ -751,6 +768,7 @@ impl HostHandle {
             open_rounds: StdMutex::new(HashMap::new()),
             rounds: Arc::new(StdMutex::new(HashMap::new())),
             cred_store,
+            control_seat: crate::host_control::FirstPartyControlSeat::default(),
             auth_store,
             learning_queue: Arc::clone(&learning_queue),
             host_transient_arrival: Arc::clone(&host_transient_arrival),
@@ -913,6 +931,16 @@ impl HostHandle {
     #[doc(hidden)]
     pub fn store_for_tests(&self) -> &Store {
         &self.store
+    }
+
+    /// Whether the serving credential store holds `(provider, label)`.
+    ///
+    /// Integration-test seam for Stage 7 A1 serving-time put. Never returns
+    /// secret material.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn credential_contains_for_tests(&self, provider: &str, label: &str) -> bool {
+        CredentialRef::new(provider, label).is_ok_and(|cred| self.cred_store.contains(&cred))
     }
 
     /// How many serving-composition Targeted Deletion drivers currently hold
@@ -1961,6 +1989,28 @@ impl HostHandle {
                 "credential bearer is not readable; provision the secret before approving",
             ))),
         }
+    }
+
+    /// Serving-time credential intake: stores `secret` through
+    /// [`CredentialStore::put`]. Usable-ref publication remains
+    /// [`HostHandle::approve_credential`]. Errors never carry the secret.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when the backend refuses the put.
+    pub async fn put_credential(
+        &self,
+        provider: &str,
+        label: &str,
+        secret: &str,
+    ) -> Result<bool, CoreError> {
+        let Ok(credential) = CredentialRef::new(provider, label) else {
+            return Ok(false);
+        };
+        self.cred_store
+            .put(&credential, secret)
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        Ok(true)
     }
 
     pub async fn pending_credentials(&self) -> Result<Vec<String>, CoreError> {

@@ -19,8 +19,9 @@
 //!   advisory wire requests, the Host-local trusted confirmation inlet, and
 //!   the bounded body-free status view.
 //! - [`host_control`] holds the Host-local first-party control inlet: the
-//!   serving process executes the Owner confirmation with its live Client
-//!   delivery tracking (lifecycle §8.1, PR §6.4).
+//!   exclusive control seat, confirmation sessions bound to mint-time
+//!   connection plus peer PID, and the serving-time path for `approve-*` /
+//!   `confirm-deletion`.
 //! - [`transient_erasure`] holds the Stage 6 A3c Host-transient and
 //!   first-party-Client erasure participants: Host transient payload
 //!   invalidation and the bounded Client local-erasure demand round trip.

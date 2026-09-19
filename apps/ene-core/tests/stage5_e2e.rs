@@ -47,10 +47,9 @@ use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::{
     CredentialRef, CredentialScrubber, MemoryCredentialStore, SecretScrubber as _,
 };
-use ene_ctl::client::Client;
+use ene_ctl::client::{Client, ClientError};
 use ene_ctl::cmds;
 use ene_ctl::device::{StoredDevice, store_device};
-use ene_ctl::errors::CliError;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_task::TaskRepository as _;
 
@@ -285,6 +284,7 @@ fn setup_complete_intent(target: &str, mark: &str) -> WirePayload {
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     })
 }
 
@@ -411,7 +411,7 @@ async fn serve_and_setup(
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await;
@@ -520,6 +520,7 @@ async fn select_workspace(client: &mut Client, path: &std::path::Path) -> Result
                 origin: RationaleOrigin::ManagementSurface,
                 quote: None,
             },
+            confirmed: false,
         }),
         "select-workspace",
     )
@@ -1822,6 +1823,7 @@ async fn s5_13_presence_states_across_restart() {
                 origin: RationaleOrigin::ManagementSurface,
                 quote: None,
             },
+            confirmed: false,
         }),
         "stop",
     )
@@ -2053,6 +2055,7 @@ async fn s5_16_explicit_resume_mints_r_plus_1_once_per_path() {
                 origin: RationaleOrigin::ManagementSurface,
                 quote: Some(String::from("finish the remaining report work")),
             },
+            confirmed: false,
         }),
         "resume-A",
     )
@@ -2381,6 +2384,7 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
                 origin: RationaleOrigin::ManagementSurface,
                 quote: None,
             },
+            confirmed: false,
         }),
         "cancel-r2",
     )

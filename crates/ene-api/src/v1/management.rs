@@ -316,6 +316,11 @@ pub struct ManagementIntent {
     /// never defaulted to unconstrained.
     pub base_view: BaseViewMark,
     pub rationale: IntentRationaleWire,
+    /// Self-declared confirmation is never Host confirmation (IPC §18).
+    /// `true` is [`ManagementOutcome::DeniedByBoundary`] and does not complete
+    /// a `ConfirmationSession`.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 impl core::fmt::Debug for ManagementIntent {
@@ -332,6 +337,7 @@ impl core::fmt::Debug for ManagementIntent {
         builder
             .field("base_view", &self.base_view)
             .field("rationale", &"[redacted]")
+            .field("confirmed", &self.confirmed)
             .finish()
     }
 }
@@ -458,6 +464,7 @@ mod tests {
                 origin: RationaleOrigin::ManagementSurface,
                 quote: Some(String::from("quoted private words")),
             },
+            confirmed: false,
         }
     }
 
@@ -475,6 +482,35 @@ mod tests {
         assert!(
             rendered.contains("mark-1"),
             "marks stay visible: {rendered}"
+        );
+        assert!(
+            rendered.contains("confirmed"),
+            "self-declared confirmation stays visible: {rendered}"
+        );
+    }
+
+    #[test]
+    fn omitted_confirmed_deserializes_false_and_true_is_never_host_confirmation() {
+        let baseline = intent();
+        let json = serde_json::to_value(&baseline).expect("intent serializes");
+        let serde_json::Value::Object(mut map) = json else {
+            panic!("intent JSON must be an object");
+        };
+        map.remove("confirmed");
+        let omitted: ManagementIntent =
+            serde_json::from_value(serde_json::Value::Object(map)).expect("omitted confirmed");
+        assert!(
+            !omitted.confirmed,
+            "missing confirmed must default to false"
+        );
+        let mut declared = intent();
+        declared.confirmed = true;
+        let back: ManagementIntent =
+            serde_json::from_str(&serde_json::to_string(&declared).expect("serializes"))
+                .expect("roundtrip");
+        assert!(
+            back.confirmed,
+            "the flag is a Client self-declaration the Host must refuse"
         );
     }
 

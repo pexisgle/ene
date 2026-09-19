@@ -25,7 +25,7 @@ use std::sync::{Mutex, OnceLock};
 
 use ene_api::v1::refs::ClientIncarnationId;
 
-use crate::errors::CliError;
+use crate::error::ClientError;
 
 pub const COUNTER_FILE_NAME: &str = "client-incarnation.counter";
 pub const LOCK_FILE_NAME: &str = "client-incarnation.lock";
@@ -57,10 +57,10 @@ pub fn lock_path(data_dir: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// Returns [`CliError::Transport`] when the directory cannot be prepared, the
+/// Returns [`ClientError::Transport`] when the directory cannot be prepared, the
 /// lock cannot be taken, the counter cannot be read/incremented/published, or
 /// randomness cannot be drawn. The caller aborts connection start.
-pub fn boot_incarnation(data_dir: &Path) -> Result<ClientIncarnationId, CliError> {
+pub fn boot_incarnation(data_dir: &Path) -> Result<ClientIncarnationId, ClientError> {
     let key = data_dir.to_path_buf();
     // Held across the file update so concurrent first boots in this process
     // advance exactly once; later boots hit the cache without I/O.
@@ -94,7 +94,7 @@ pub fn boot_incarnation(data_dir: &Path) -> Result<ClientIncarnationId, CliError
 ///
 /// Same as [`boot_incarnation`]; a missing file counts as `0`, while an
 /// existing-but-unreadable or corrupt file fails closed.
-pub fn advance_counter(data_dir: &Path) -> Result<u64, CliError> {
+pub fn advance_counter(data_dir: &Path) -> Result<u64, ClientError> {
     ensure_data_dir(data_dir)?;
     let lock_file = OpenOptions::new()
         .read(true)
@@ -103,16 +103,16 @@ pub fn advance_counter(data_dir: &Path) -> Result<u64, CliError> {
         .truncate(false)
         .open(lock_path(data_dir))
         .map_err(|error| {
-            CliError::Transport(format!("client incarnation lock failed: {}", error.kind()))
+            ClientError::Transport(format!("client incarnation lock failed: {}", error.kind()))
         })?;
     // Blocking exclusive: concurrent boots serialize here, never fail.
     lock_file.lock().map_err(|error| {
-        CliError::Transport(format!("client incarnation lock failed: {}", error.kind()))
+        ClientError::Transport(format!("client incarnation lock failed: {}", error.kind()))
     })?;
     let current = read_counter(data_dir)?;
-    let next = current
-        .checked_add(1)
-        .ok_or_else(|| CliError::Transport(String::from("client incarnation counter exhausted")))?;
+    let next = current.checked_add(1).ok_or_else(|| {
+        ClientError::Transport(String::from("client incarnation counter exhausted"))
+    })?;
     stage_and_replace(data_dir, next)?;
     // The OS lock releases when `lock_file` drops.
     Ok(next)
@@ -128,7 +128,7 @@ pub fn reset_for_tests() {
         .clear();
 }
 
-fn ensure_data_dir(data_dir: &Path) -> Result<(), CliError> {
+fn ensure_data_dir(data_dir: &Path) -> Result<(), ClientError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
@@ -137,11 +137,11 @@ fn ensure_data_dir(data_dir: &Path) -> Result<(), CliError> {
             .mode(0o700)
             .create(data_dir)
             .map_err(|error| {
-                CliError::Transport(format!("client incarnation dir failed: {}", error.kind()))
+                ClientError::Transport(format!("client incarnation dir failed: {}", error.kind()))
             })?;
         let mode = std::fs::metadata(data_dir)
             .map_err(|error| {
-                CliError::Transport(format!("client incarnation dir failed: {}", error.kind()))
+                ClientError::Transport(format!("client incarnation dir failed: {}", error.kind()))
             })?
             .permissions()
             .mode()
@@ -149,7 +149,10 @@ fn ensure_data_dir(data_dir: &Path) -> Result<(), CliError> {
         if mode & 0o077 != 0 {
             std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700)).map_err(
                 |error| {
-                    CliError::Transport(format!("client incarnation dir failed: {}", error.kind()))
+                    ClientError::Transport(format!(
+                        "client incarnation dir failed: {}",
+                        error.kind()
+                    ))
                 },
             )?;
         }
@@ -158,32 +161,32 @@ fn ensure_data_dir(data_dir: &Path) -> Result<(), CliError> {
     #[cfg(not(unix))]
     {
         std::fs::create_dir_all(data_dir).map_err(|error| {
-            CliError::Transport(format!("client incarnation dir failed: {}", error.kind()))
+            ClientError::Transport(format!("client incarnation dir failed: {}", error.kind()))
         })
     }
 }
 
 /// Reads the durable counter: absent means `0`; any existing-but-unreadable
 /// or corrupt content fails closed (never re-initialized).
-fn read_counter(data_dir: &Path) -> Result<u64, CliError> {
+fn read_counter(data_dir: &Path) -> Result<u64, ClientError> {
     let bytes = match std::fs::read(counter_path(data_dir)) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => {
-            return Err(CliError::Transport(format!(
+            return Err(ClientError::Transport(format!(
                 "client incarnation counter unreadable: {}",
                 error.kind()
             )));
         }
     };
     let text = core::str::from_utf8(&bytes)
-        .map_err(|_| CliError::Transport(String::from("client incarnation counter corrupt")))?;
+        .map_err(|_| ClientError::Transport(String::from("client incarnation counter corrupt")))?;
     text.trim()
         .parse::<u64>()
-        .map_err(|_| CliError::Transport(String::from("client incarnation counter corrupt")))
+        .map_err(|_| ClientError::Transport(String::from("client incarnation counter corrupt")))
 }
 
-fn stage_and_replace(data_dir: &Path, next: u64) -> Result<(), CliError> {
+fn stage_and_replace(data_dir: &Path, next: u64) -> Result<(), ClientError> {
     let staged = data_dir.join(format!(
         ".{}.{}.{}.tmp",
         COUNTER_FILE_NAME,
@@ -196,27 +199,27 @@ fn stage_and_replace(data_dir: &Path, next: u64) -> Result<(), CliError> {
             .create_new(true)
             .open(&staged)
             .map_err(|error| {
-                CliError::Transport(format!(
+                ClientError::Transport(format!(
                     "client incarnation counter store failed: {}",
                     error.kind()
                 ))
             })?;
         file.write_all(next.to_string().as_bytes())
             .map_err(|error| {
-                CliError::Transport(format!(
+                ClientError::Transport(format!(
                     "client incarnation counter store failed: {}",
                     error.kind()
                 ))
             })?;
         file.sync_all().map_err(|error| {
-            CliError::Transport(format!(
+            ClientError::Transport(format!(
                 "client incarnation counter store failed: {}",
                 error.kind()
             ))
         })?;
         drop(file);
         std::fs::rename(&staged, counter_path(data_dir)).map_err(|error| {
-            CliError::Transport(format!(
+            ClientError::Transport(format!(
                 "client incarnation counter store failed: {}",
                 error.kind()
             ))

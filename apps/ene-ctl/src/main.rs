@@ -755,16 +755,18 @@ async fn run_usage_cap(
         currency,
         limit_micros,
     );
-    let outcome = session
+    let outcome = match session
         .request(WirePayload::ManagementIntent(intent))
-        .await
-        .and_then(|payload| match payload {
-            WirePayload::ManagementOutcome(outcome) => Ok(outcome),
-            unexpected => Err(CliError::ServerRejected(format!(
+        .await?
+    {
+        WirePayload::ManagementOutcome(outcome) => outcome,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
                 "unexpected {} while applying an intent; expected ManagementOutcome",
                 unexpected.message_type()
-            ))),
-        })?;
+            )));
+        }
+    };
     match cmds::describe_management(&outcome) {
         cmds::ManagementAction::Applied { detail } => emit(&detail),
         cmds::ManagementAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
@@ -802,16 +804,18 @@ async fn run_deletion(
         purpose,
         text,
     );
-    let outcome = session
+    let outcome = match session
         .request(WirePayload::ManagementIntent(intent))
-        .await
-        .and_then(|payload| match payload {
-            WirePayload::ManagementOutcome(outcome) => Ok(outcome),
-            unexpected => Err(CliError::ServerRejected(format!(
+        .await?
+    {
+        WirePayload::ManagementOutcome(outcome) => outcome,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
                 "unexpected {} while applying an intent; expected ManagementOutcome",
                 unexpected.message_type()
-            ))),
-        })?;
+            )));
+        }
+    };
     match cmds::describe_management(&outcome) {
         cmds::ManagementAction::Applied { detail } => emit(&format!(
             "{detail}; confirm it on the Host PC (`ene-core pending-deletions`)"

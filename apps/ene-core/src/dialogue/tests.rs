@@ -121,6 +121,7 @@ fn intent_frame_with_id(
                 origin: RationaleOrigin::ManagementSurface,
                 quote: None,
             },
+            confirmed: false,
         }),
     };
     stamped(frame, connection)

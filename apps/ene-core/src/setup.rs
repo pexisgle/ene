@@ -171,6 +171,16 @@ impl HostHandle {
         intent: &ManagementIntent,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
+        if intent.confirmed {
+            // Self-declared confirmation is never Host confirmation (IPC §18).
+            // This is a protocol denial, not a decided intent snapshot.
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::DeniedByBoundary,
+            )];
+        }
         match intent.kind {
             ManagementIntentKind::ConfigureCredentialIntent => {
                 self.register_credential(frame, intent, live).await

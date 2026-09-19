@@ -233,6 +233,7 @@ fn management_intent_frame_full(
                     origin,
                     quote: quote.map(str::to_owned),
                 },
+                confirmed: false,
             }),
         },
         live,

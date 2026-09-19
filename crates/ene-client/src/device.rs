@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use ene_api::v1::refs::DeviceWireId;
 use serde::{Deserialize, Serialize};
 
-use crate::errors::CliError;
+use crate::error::ClientError;
 
 pub const DEVICE_FILE_NAME: &str = "client-device.json";
 
@@ -57,7 +57,7 @@ pub const BOOTSTRAP_SECRET_ENV: &str = "ENE_PAIRING_SECRET";
 /// as `{device_id: <uuid>, pairing_secret: <hex>}`.
 ///
 /// The secret is deliberately a plain string in memory (session-lifetime
-/// only, see `SessionState` in [`crate::client`]): it must be usable for
+/// only, see `SessionState` in the session module): it must be usable for
 /// proof derivation on demand, and the file permission (`0600` on Unix) is
 /// the at-rest protection. `Debug` is custom and redacts the secret (the
 /// device key stays visible for operator correlation): never log or format
@@ -130,8 +130,8 @@ pub fn load_pending_id(data_dir: &Path) -> Option<String> {
 ///
 /// # Errors
 ///
-/// Returns [`CliError::Transport`] when the staged write cannot be published.
-pub fn store_pending_id(data_dir: &Path, pending_id: &str) -> Result<(), CliError> {
+/// Returns [`ClientError::Transport`] when the staged write cannot be published.
+pub fn store_pending_id(data_dir: &Path, pending_id: &str) -> Result<(), ClientError> {
     let path = pending_file_path(data_dir);
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -165,8 +165,8 @@ pub fn store_pending_id(data_dir: &Path, pending_id: &str) -> Result<(), CliErro
     staged_result
 }
 
-fn pending_store_error(error: std::io::Error) -> CliError {
-    CliError::Transport(format!("client pending store failed: {}", error.kind()))
+fn pending_store_error(error: std::io::Error) -> ClientError {
+    ClientError::Transport(format!("client pending store failed: {}", error.kind()))
 }
 
 /// Forgets the open pending identity; best effort, never fails the connect.
@@ -259,10 +259,10 @@ pub(crate) fn must_persist_after_acceptance(
 ///
 /// Callers persist only after the Host accepted the ownership proof, so a
 /// failed bootstrap attempt never replaces a working file.
-pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), CliError> {
+pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), ClientError> {
     let path = device_file_path(data_dir);
     let bytes = serde_json::to_vec(device)
-        .map_err(|error| CliError::Transport(format!("client device encode failed: {error}")))?;
+        .map_err(|error| ClientError::Transport(format!("client device encode failed: {error}")))?;
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         Some(_) | None => PathBuf::from("."),
@@ -294,7 +294,7 @@ pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), CliErr
 /// Unix creates the staging temp owner-only so secret bytes are never
 /// briefly readable by other users; `sync_all` keeps a crash from leaving a
 /// truncated temp that a later rename could publish.
-fn stage_and_replace(staged: &Path, target: &Path, bytes: &[u8]) -> Result<(), CliError> {
+fn stage_and_replace(staged: &Path, target: &Path, bytes: &[u8]) -> Result<(), ClientError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -309,8 +309,8 @@ fn stage_and_replace(staged: &Path, target: &Path, bytes: &[u8]) -> Result<(), C
     std::fs::rename(staged, target).map_err(|error| store_error(&error))
 }
 
-fn store_error(error: &std::io::Error) -> CliError {
-    CliError::Transport(format!("client device store failed: {}", error.kind()))
+fn store_error(error: &std::io::Error) -> ClientError {
+    ClientError::Transport(format!("client device store failed: {}", error.kind()))
 }
 
 /// How [`resolve_device_secret`] derived the effective pairing secret; the
@@ -383,7 +383,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "ene-ctl-device-{}-{}-{name}",
             std::process::id(),
-            crate::client::platform_display(),
+            crate::platform_display(),
         ));
         let created = std::fs::create_dir_all(&dir);
         assert!(created.is_ok(), "scratch dir must create: {created:?}");

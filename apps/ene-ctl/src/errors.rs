@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+use ene_client::ClientError;
 use ene_config::typed::ConfigError;
 
 /// Message rule: variants carry operations, payload-kind names, refs,
@@ -31,6 +32,18 @@ pub enum CliError {
     UnsupportedPlatform(&'static str),
 }
 
+impl From<ClientError> for CliError {
+    fn from(error: ClientError) -> Self {
+        match error {
+            ClientError::Transport(message) => Self::Transport(message),
+            ClientError::Codec(message) => Self::Codec(message),
+            ClientError::ServerRejected(message) => Self::ServerRejected(message),
+            ClientError::ServerOutcome(message) => Self::ServerOutcome(message),
+            ClientError::UnsupportedPlatform(message) => Self::UnsupportedPlatform(message),
+        }
+    }
+}
+
 impl CliError {
     /// Retryable server-side domain outcomes exit `2`; everything else exits
     /// `1`.
@@ -43,6 +56,39 @@ impl CliError {
             | Self::Codec(_)
             | Self::ServerRejected(_)
             | Self::UnsupportedPlatform(_) => ExitCode::FAILURE,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ene_ctl_manifest_does_not_depend_on_ene_local_control() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(
+            !manifest.contains("ene-local-control"),
+            "product ene-ctl must not speak control: {manifest}"
+        );
+    }
+
+    #[test]
+    fn ene_ctl_sources_do_not_open_host_control() {
+        let lib = include_str!("lib.rs");
+        let errors = include_str!("errors.rs");
+        let cmds = include_str!("cmds.rs");
+        let main = include_str!("main.rs");
+        for (name, source) in [
+            ("lib.rs", lib),
+            ("errors.rs", errors),
+            ("cmds.rs", cmds),
+            ("main.rs", main),
+        ] {
+            assert!(
+                !source.contains("host-control")
+                    && !source.contains("ene_local_control")
+                    && !source.contains("ene-local-control"),
+                "product ene-ctl {name} must not open the control inlet"
+            );
         }
     }
 }

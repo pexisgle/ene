@@ -35,10 +35,9 @@ use ene_companion::{CompanionRepository, UndeliveredRepository};
 use ene_core::conn;
 use ene_core::serve::{CredStore, HostHandle};
 use ene_credential::{CredentialRef, MemoryCredentialStore};
-use ene_ctl::client::Client;
+use ene_ctl::client::{Client, ClientError};
 use ene_ctl::cmds;
 use ene_ctl::device::{StoredDevice, store_device};
-use ene_ctl::errors::CliError;
 use ene_inference::RawUsage;
 use ene_inference::fake::FakeProviderTransport;
 use ene_store::Store;
@@ -107,7 +106,7 @@ async fn dialogue_and_learning_calls_share_one_ticket_accounting_path() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -216,6 +215,7 @@ fn complete_intent(target: &str, mark: &str) -> WirePayload {
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     })
 }
 
@@ -491,7 +491,7 @@ async fn production_path_setup_to_restart() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -971,7 +971,7 @@ async fn tampered_secret_cannot_authenticate() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -989,7 +989,7 @@ async fn tampered_secret_cannot_authenticate() {
     assert!(stored.is_ok(), "test device file must store");
     let tampered = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(tampered, Err(CliError::ServerOutcome(_))),
+        matches!(tampered, Err(ClientError::ServerOutcome(_))),
         "tampered secret must not authenticate"
     );
     server.abort();
@@ -1010,7 +1010,7 @@ async fn rotation_requires_reprovisioning() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -1030,7 +1030,7 @@ async fn rotation_requires_reprovisioning() {
     );
     let stale_file = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(stale_file, Err(CliError::ServerOutcome(_))),
+        matches!(stale_file, Err(ClientError::ServerOutcome(_))),
         "rotated secret must invalidate the old file"
     );
     server.abort();
@@ -1869,7 +1869,7 @@ async fn stage3_conversation_formation_restart_and_recall() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -2101,7 +2101,7 @@ async fn stage3_management_view_reaches_memories_beyond_the_first_page() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();

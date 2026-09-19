@@ -29,6 +29,16 @@ use super::undelivered::{
 };
 use super::usage::{UsageSummaryRequest, UsageSummaryResponse};
 
+/// Host → Client activity hint for the Body overlay (IPC M-21).
+///
+/// Asset reference and pose hint only. Never chat body, Memory, Task
+/// commands, pairing material, or secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BodyStateHint {
+    pub asset_ref: String,
+    pub pose_hint: String,
+}
+
 /// Externally tagged; unknown variants are rejected at deserialization,
 /// never defaulted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +84,7 @@ pub enum WirePayload {
     ResumeTaskOutcome(ResumeTaskOutcomeWire),
     UsageSummaryRequest(UsageSummaryRequest),
     UsageSummaryResponse(UsageSummaryResponse),
+    BodyStateHint(BodyStateHint),
     Reject(RejectNotice),
 }
 
@@ -125,6 +136,7 @@ impl WirePayload {
             Self::ResumeTaskOutcome(_) => "ResumeTaskOutcome",
             Self::UsageSummaryRequest(_) => "UsageSummaryRequest",
             Self::UsageSummaryResponse(_) => "UsageSummaryResponse",
+            Self::BodyStateHint(_) => "BodyStateHint",
             Self::Reject(_) => "Reject",
         }
     }

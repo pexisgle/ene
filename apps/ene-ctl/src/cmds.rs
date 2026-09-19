@@ -474,6 +474,7 @@ pub fn credential_intent(
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     }
 }
 
@@ -496,6 +497,7 @@ pub fn assignment_intent(
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     }
 }
 
@@ -522,6 +524,7 @@ pub fn deletion_intent(
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     }
 }
 
@@ -607,6 +610,7 @@ pub fn usage_cap_intent(
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     }
 }
 

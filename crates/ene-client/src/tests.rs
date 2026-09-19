@@ -3,10 +3,16 @@
 
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthResult;
-use ene_api::v1::payload::WirePayload;
+use ene_api::v1::management::{
+    IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin, credential_target,
+};
+use ene_api::v1::payload::{BodyStateHint, WirePayload};
 use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
 use ene_api::v1::refs::{BaseViewMark, CommandWireId, WireMessageId};
-use ene_api::v1::refs::{ClientIncarnationId, CompanionWireRef, RoundWireId};
+use ene_api::v1::refs::{
+    ClientIncarnationId, ClientLocalId, CompanionWireRef, RoundWireId, TextLangWire,
+};
+use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
 use ene_plugin_ipc::WireFrame;
 
 use super::frames::{
@@ -21,6 +27,52 @@ fn incarnation() -> ClientIncarnationId {
     ClientIncarnationId {
         counter: 0,
         random: 7,
+    }
+}
+
+fn history_request(companion: &str, limit: u64) -> HistoryRequest {
+    HistoryRequest {
+        companion: CompanionWireRef(companion.to_string()),
+        since: None,
+        limit,
+        round: None,
+    }
+}
+
+fn submit_input(
+    companion: &str,
+    round: Option<String>,
+    fresh: bool,
+    text: String,
+    lang: String,
+) -> SubmitTextInput {
+    SubmitTextInput {
+        companion: CompanionWireRef(companion.to_string()),
+        round: round.map(RoundWireId),
+        fresh,
+        local_id: ClientLocalId(String::from("local-1")),
+        body: TextBodyWire {
+            text,
+            lang: TextLangWire(lang),
+        },
+    }
+}
+
+fn credential_intent(
+    intent_id: CommandWireId,
+    base: &BaseViewMark,
+    provider: &str,
+) -> ManagementIntent {
+    ManagementIntent {
+        intent_id,
+        kind: ManagementIntentKind::ConfigureCredentialIntent,
+        target: credential_target(provider, "main"),
+        base_view: base.clone(),
+        rationale: IntentRationaleWire {
+            origin: RationaleOrigin::ManagementSurface,
+            quote: None,
+        },
+        confirmed: false,
     }
 }
 
@@ -103,7 +155,7 @@ fn message_type_names_the_variant() {
         connection_id: None,
     };
     let frame = frame_for(
-        WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 3)),
+        WirePayload::HistoryRequest(history_request("companion-1", 3)),
         sender,
     );
     assert!(
@@ -172,7 +224,7 @@ fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
     };
 
     let mut session = SessionState::default();
-    session.push_deferred(crate::client::frames::frame_for(
+    session.push_deferred(crate::frames::frame_for(
         WirePayload::PresenceAttribution(presence_fact(1)),
         WireSender {
             device_id: None,
@@ -234,7 +286,7 @@ fn stale_generation_of_reads_only_stale_answers() {
         stale_generation_of(&accepted).is_none(),
         "a non-stale answer yields nothing"
     );
-    let history = WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1));
+    let history = WirePayload::HistoryRequest(history_request("companion-1", 1));
     assert!(
         stale_generation_of(&history).is_none(),
         "an unrelated payload yields nothing"
@@ -248,7 +300,7 @@ fn session_frames_stamp_only_text_inputs() {
         incarnation_id: incarnation(),
         connection_id: None,
     };
-    let input = WirePayload::SubmitTextInput(crate::cmds::submit_input(
+    let input = WirePayload::SubmitTextInput(submit_input(
         "companion-1",
         None,
         false,
@@ -261,7 +313,7 @@ fn session_frames_stamp_only_text_inputs() {
         "text input carries the session generation"
     );
     let bootstrap = frame_for_session(
-        WirePayload::SubmitTextInput(crate::cmds::submit_input(
+        WirePayload::SubmitTextInput(submit_input(
             "companion-1",
             None,
             false,
@@ -280,7 +332,7 @@ fn session_frames_stamp_only_text_inputs() {
         "pre-fact bootstrap stamps None (NeedsRevalidation is correct)"
     );
     let history = frame_for_session(
-        WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1)),
+        WirePayload::HistoryRequest(history_request("companion-1", 1)),
         sender,
         Some(6),
     );
@@ -488,7 +540,7 @@ fn message_id(value: u128) -> WireMessageId {
 
 /// The payload kind never matters to correlation.
 fn answer_payload() -> WirePayload {
-    WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1))
+    WirePayload::HistoryRequest(history_request("companion-1", 1))
 }
 
 #[test]
@@ -512,8 +564,7 @@ fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), 
     // A management intent keeps one canonical identity: the envelope reuses
     // the payload's `intent_id`, never a second minted command ID.
     let intent_id = CommandWireId(uuid::Uuid::new_v4());
-    let intent =
-        crate::cmds::credential_intent(intent_id, &BaseViewMark(String::from("mark-1")), "openai");
+    let intent = credential_intent(intent_id, &BaseViewMark(String::from("mark-1")), "openai");
     let prepared_intent = PreparedRequest::new(WirePayload::ManagementIntent(intent));
     let intent_frame = prepared_intent.frame(sender, None);
     assert_eq!(
@@ -530,7 +581,7 @@ fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), 
     );
     // A text input mints a fresh command ID per prepared send.
     let submit = || {
-        WirePayload::SubmitTextInput(crate::cmds::submit_input(
+        WirePayload::SubmitTextInput(submit_input(
             "companion-1",
             None,
             false,
@@ -564,7 +615,7 @@ fn session_echoes_the_learned_companion_projection() {
     let mut state = SessionState::default();
     assert_eq!(
         state.companion_ref(),
-        String::from(crate::cmds::DEFAULT_COMPANION_REF),
+        String::from(crate::DEFAULT_COMPANION_REF),
         "bootstrap echoes the fallback until the first fact"
     );
     let mut fact = presence_fact(3);
@@ -590,7 +641,7 @@ fn prepared_retry_reuses_command_with_fresh_transport_ids() {
         connection_id: None,
     };
     let input = || {
-        WirePayload::SubmitTextInput(crate::cmds::submit_input(
+        WirePayload::SubmitTextInput(submit_input(
             "companion-1",
             None,
             false,
@@ -660,11 +711,23 @@ fn decide_frame_classifies_facts_answers_and_deferrals() {
         decide_frame(own, &stranger) == FrameDecision::Defer,
         "anything else defers"
     );
+    let hint = script_frame(
+        WirePayload::BodyStateHint(BodyStateHint {
+            asset_ref: String::from("bundled:ene"),
+            pose_hint: String::from("idle"),
+        }),
+        message_id(5),
+        Some(own),
+    );
+    assert!(
+        matches!(decide_frame(own, &hint), FrameDecision::AbsorbBodyHint(_)),
+        "BodyStateHint is a fact, never an answer, even with matching reply_to"
+    );
 }
 
 /// Carries `limit` so out-of-order answers stay distinguishable by payload.
 fn history_answer(limit: u64) -> WirePayload {
-    WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", limit))
+    WirePayload::HistoryRequest(history_request("companion-1", limit))
 }
 
 #[test]
@@ -756,17 +819,17 @@ fn proof_frame_names_the_paired_device() -> Result<(), String> {
 #[test]
 fn proof_derives_from_the_secret_and_the_single_use_nonce() -> Result<(), String> {
     use ene_api::v1::refs::DeviceWireId;
-    let proof = ene_credential::pairing_proof_hex("pairing-secret", "nonce-1");
+    let proof = crate::pairing::pairing_proof_hex("pairing-secret", "nonce-1");
     let frame = proof_frame(&proof, incarnation(), DeviceWireId(uuid::Uuid::new_v4()));
     let WirePayload::AuthProof(carried) = &frame.payload else {
         return Err(String::from("proof builder must emit AuthProof"));
     };
     assert!(
-        ene_credential::verify_pairing_proof("pairing-secret", "nonce-1", &carried.proof),
+        crate::pairing::verify_pairing_proof("pairing-secret", "nonce-1", &carried.proof),
         "the carried proof must verify against the secret and nonce"
     );
     assert!(
-        !ene_credential::verify_pairing_proof("pairing-secret", "nonce-2", &carried.proof),
+        !crate::pairing::verify_pairing_proof("pairing-secret", "nonce-2", &carried.proof),
         "the proof must not verify against another nonce (single-use)"
     );
     Ok(())
@@ -845,4 +908,15 @@ fn session_deferred_queue_takes_only_the_matching_reply() {
         session.take_deferred_reply(second) == Some(history_answer(2)),
         "the hit removes only its frame, so the remaining reply is still queued"
     );
+}
+
+#[test]
+fn ene_client_manifest_stays_a_client_library() {
+    let manifest = include_str!("../Cargo.toml");
+    for forbidden in ["ene-local-control", "ene-store", "ene-credential", "clap"] {
+        assert!(
+            !manifest.contains(forbidden),
+            "ene-client must not depend on {forbidden}: {manifest}"
+        );
+    }
 }

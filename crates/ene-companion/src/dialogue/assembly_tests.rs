@@ -145,6 +145,13 @@ impl CredentialStore for FixtureStore {
     fn contains(&self, cred: &CredentialRef) -> bool {
         cred == &self.alpha || cred == &self.late
     }
+
+    fn put(&self, cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
+        let id = cred.id();
+        Err(CredentialTechnicalError::StorageUnavailable {
+            reason: format!("{id}: fixture store does not accept serving-time put"),
+        })
+    }
 }
 
 fn history_item(text: &str) -> HistoryMessage {

@@ -1,65 +1,211 @@
-//! Host-local first-party control inlet for Targeted Deletion (Stage 6,
-//! lifecycle §8.1/§15; PR §6.4).
+//! Host-local first-party control inlet (Stage 7 A1).
 //!
-//! The Owner's final Targeted Deletion confirmation must run inside the
-//! serving Host process. The Host decides which Client incarnations are
-//! required participants from what it actually handed to each incarnation;
-//! that evidence is durable, but only the serving process can deliver the
-//! local-erasure demand and resolve the incarnation's current reachability
-//! from its connection table (lifecycle §8.1). An offline `HostHandle::open`
-//! has no connection table, so admitting a confirmation there would hold
-//! every Client participant without ever reaching one — and PR §6.4 requires
-//! a mutation while serving to go over IPC, never through a second offline
-//! writer.
+//! A separate listener from the Client `ene.sock` / named pipe. Linux: data
+//! directory + `SO_PEERCRED` same UID. Windows: narrower DACL named pipe +
+//! client PID. The exclusive [`FirstPartyControlSeat`] admits at most one
+//! speaker; a second connection is [`FromHost::SeatOccupied`]. Completion
+//! requires the mint-time connection and the same peer PID. Reconnect
+//! invalidates outstanding sessions.
 //!
-//! This module is that IPC boundary: a Host-local control endpoint
-//! (`host-control.sock` beside the device socket on Unix; a second named pipe
-//! beside the device pipe on Windows) reachable only by the same OS user
-//! (protected `0700` data directory plus the same peer-credential check the
-//! device transport runs). The `ene-core confirm-deletion` console dials it
-//! and the serving Host executes `HostHandle::confirm_targeted_deletion`
-//! against its live registry and connection table. No Client payload, LLM
-//! output, or Task Agent can reach this inlet, and the wire request carries
-//! only the Host-minted request identity — never the target body or search
-//! material.
+//! Nonce is freshness only. Empty-seat first-come occupancy is accident
+//! prevention, not official GUI authenticity. Peer PID is not attestation.
 //!
-//! The endpoint is deliberately narrow: it forwards the one Host-local
-//! mutation that cannot be replayed soundly offline. Read-only preview and
-//! status stay direct store reads in the console. A missing endpoint (no
-//! serving Host) is an explicit refusal, never a fallback to an offline
-//! admission.
+//! `ene-core approve-*` / `confirm-deletion` speak this inlet while the Host
+//! is serving. Occupied seat is a hard fail — never a Client-channel
+//! fallback. Targeted Deletion still refuses offline admission (lifecycle
+//! §8.1). Device/credential approval with no serving Host keeps the existing
+//! [`crate::host_lock::HostLock`] path.
+//!
+//! Frames are [`ene_local_control`] JSON, not `ene-api`. Secrets use
+//! [`RedactedSecret`]: `Debug` never prints the raw value.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex as StdMutex;
 
-use ene_preservation::ConfirmTargetedDeletionOutcome;
+use ene_local_control::{ControlOp, ControlOutcome, FromHost, RedactedSecret, ToHost};
+use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
+use ene_primitive::RawId;
+use uuid::Uuid;
 
+use crate::lock_unpoison;
 use crate::serve::CoreError;
+#[cfg(any(unix, windows))]
+use crate::serve::HostHandle;
 #[cfg(any(unix, windows))]
 use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
-#[cfg(any(unix, windows))]
-use {crate::serve::HostHandle, ene_preservation::DeletionOperationRef, ene_primitive::RawId};
 
-/// Upper bound on one control frame. A confirmation request is a request
-/// UUID plus a small JSON envelope; anything larger is not this protocol.
+/// Upper bound on one control frame. Credential put carries one secret;
+/// anything larger is not this protocol.
 #[cfg(any(unix, windows))]
 const MAX_CONTROL_FRAME_BYTES: u32 = 16 * 1024;
 
-/// Bound on reading one request from a control peer. A console writes its
-/// request immediately; a silent or dead peer is dropped instead of pinning
-/// a task.
+/// Bound on the first (hello) read from a control peer.
 #[cfg(any(unix, windows))]
-const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Unix control socket file name inside the `0700` data directory.
 #[cfg(unix)]
 const CONTROL_SOCKET_NAME: &str = "host-control.sock";
 
+/// One pending high-privilege operation waiting for session complete.
+enum PendingOp {
+    DeviceApprove {
+        pending_id: String,
+    },
+    CredentialPut {
+        provider: String,
+        label: String,
+        secret: RedactedSecret,
+    },
+    DeletionConfirm {
+        request_id: String,
+    },
+}
+
+struct SeatOccupant {
+    connection: u64,
+    peer_pid: u32,
+}
+
+struct ConfirmationSession {
+    nonce: String,
+    connection: u64,
+    peer_pid: u32,
+    pending: PendingOp,
+}
+
+struct SeatInner {
+    holder: Option<SeatOccupant>,
+    next_connection: u64,
+    generation: u64,
+    sessions: HashMap<Uuid, ConfirmationSession>,
+}
+
+/// Exclusive first-party control seat owned by one serving Host.
+///
+/// Occupancy is process-local. Empty-seat first-come is not authenticity.
+pub(crate) struct FirstPartyControlSeat {
+    inner: StdMutex<SeatInner>,
+}
+
+impl Default for FirstPartyControlSeat {
+    fn default() -> Self {
+        Self {
+            inner: StdMutex::new(SeatInner {
+                holder: None,
+                next_connection: 0,
+                generation: 0,
+                sessions: HashMap::new(),
+            }),
+        }
+    }
+}
+
+impl FirstPartyControlSeat {
+    pub(crate) fn allocate_connection(&self) -> u64 {
+        let mut inner = lock_unpoison(&self.inner);
+        inner.next_connection = inner.next_connection.saturating_add(1);
+        inner.next_connection
+    }
+
+    fn try_acquire(&self, connection: u64, peer_pid: u32) -> bool {
+        let mut inner = lock_unpoison(&self.inner);
+        match inner.holder {
+            Some(SeatOccupant {
+                connection: held_connection,
+                peer_pid: held_pid,
+            }) if held_connection == connection && held_pid == peer_pid => true,
+            Some(_) => false,
+            None => {
+                inner.generation = inner.generation.saturating_add(1);
+                inner.holder = Some(SeatOccupant {
+                    connection,
+                    peer_pid,
+                });
+                true
+            }
+        }
+    }
+
+    fn release(&self, connection: u64) {
+        let mut inner = lock_unpoison(&self.inner);
+        if inner
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.connection == connection)
+        {
+            inner.holder = None;
+            inner.sessions.clear();
+        }
+    }
+
+    fn mint(
+        &self,
+        connection: u64,
+        peer_pid: u32,
+        op: ControlOp,
+        target: String,
+        pending: PendingOp,
+    ) -> FromHost {
+        let mut inner = lock_unpoison(&self.inner);
+        let seated = inner
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.connection == connection && holder.peer_pid == peer_pid);
+        if !seated {
+            return FromHost::DeniedByBoundary;
+        }
+        let session_id = Uuid::new_v4();
+        let nonce = Uuid::new_v4().as_hyphenated().to_string();
+        let premise_generation = inner.generation;
+        inner.sessions.insert(
+            session_id,
+            ConfirmationSession {
+                nonce: nonce.clone(),
+                connection,
+                peer_pid,
+                pending,
+            },
+        );
+        FromHost::ConfirmationChallenge {
+            session_id,
+            op,
+            target,
+            premise_generation,
+            nonce,
+        }
+    }
+
+    fn take(
+        &self,
+        connection: u64,
+        peer_pid: u32,
+        session_id: Uuid,
+        nonce: &str,
+    ) -> Option<PendingOp> {
+        let mut inner = lock_unpoison(&self.inner);
+        let matches = inner.sessions.get(&session_id).is_some_and(|session| {
+            session.connection == connection
+                && session.peer_pid == peer_pid
+                && session.nonce == nonce
+        });
+        if !matches {
+            return None;
+        }
+        inner
+            .sessions
+            .remove(&session_id)
+            .map(|session| session.pending)
+    }
+}
+
 /// The Host-local control endpoint of one data directory.
 #[cfg(unix)]
 #[must_use]
-fn control_socket_path(data_dir: &Path) -> std::path::PathBuf {
+pub fn control_socket_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join(CONTROL_SOCKET_NAME)
 }
 
@@ -68,99 +214,49 @@ fn control_socket_path(data_dir: &Path) -> std::path::PathBuf {
 /// derivation and DACL machinery.
 #[cfg(windows)]
 #[must_use]
-fn control_pipe_name(data_dir: &Path) -> String {
+pub fn control_pipe_name(data_dir: &Path) -> String {
     format!("{}-control", crate::conn_pipe::pipe_name(data_dir))
 }
 
-/// One request the first-party console may send.
-#[cfg(any(unix, windows))]
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum HostControlRequest {
-    /// Record the Owner's confirmation for one staged request and admit it.
-    /// The string is the Host-minted request identity, never target text.
-    ConfirmTargetedDeletion { request: String },
+/// Console / test speaker for the Host-local control inlet.
+#[cfg(unix)]
+pub struct ControlClient {
+    stream: tokio::net::UnixStream,
 }
 
-/// One typed answer.
-#[cfg(any(unix, windows))]
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum HostControlResponse {
-    Confirmed(HostControlConfirmation),
-    /// The serving Host could not answer (technical failure or an
-    /// unreadable store). Never a completion claim and never a fallback.
-    Unavailable,
-}
-
-/// The canonical confirmation outcome, in transport-neutral form.
-#[cfg(any(unix, windows))]
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum HostControlConfirmation {
-    Started { operation: String, sweep: u64 },
-    AlreadyCoveredBy { operation: String, sweep: u64 },
-    HeldByOperation { operation: String, sweep: u64 },
-    NeedsClarification,
-    Missing,
+/// Console / test speaker for the Host-local control inlet.
+#[cfg(windows)]
+pub struct ControlClient {
+    stream: tokio::net::windows::named_pipe::NamedPipeClient,
 }
 
 #[cfg(any(unix, windows))]
-impl From<ConfirmTargetedDeletionOutcome> for HostControlConfirmation {
-    fn from(outcome: ConfirmTargetedDeletionOutcome) -> Self {
-        let operation = |current: DeletionOperationRef| {
-            (
-                current
-                    .operation
-                    .as_raw()
-                    .as_uuid()
-                    .as_hyphenated()
-                    .to_string(),
-                current.sweep.as_u64(),
-            )
-        };
-        match outcome {
-            ConfirmTargetedDeletionOutcome::Started(current) => {
-                let (operation, sweep) = operation(current);
-                Self::Started { operation, sweep }
-            }
-            ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current) => {
-                let (operation, sweep) = operation(current);
-                Self::AlreadyCoveredBy { operation, sweep }
-            }
-            ConfirmTargetedDeletionOutcome::HeldByOperation(current) => {
-                let (operation, sweep) = operation(current);
-                Self::HeldByOperation { operation, sweep }
-            }
-            ConfirmTargetedDeletionOutcome::NeedsClarification => Self::NeedsClarification,
-            ConfirmTargetedDeletionOutcome::Missing => Self::Missing,
-        }
-    }
-}
-
-#[cfg(any(unix, windows))]
-impl HostControlConfirmation {
-    /// Rebuilds the canonical outcome, or [`None`] when a rendered operation
-    /// identity is not a canonical UUID (a malformed answer is refused, never
-    /// guessed).
-    fn into_outcome(self) -> Option<ConfirmTargetedDeletionOutcome> {
-        fn parse(operation: &str, sweep: u64) -> Option<DeletionOperationRef> {
-            let uuid = uuid::Uuid::parse_str(operation).ok()?;
-            Some(DeletionOperationRef {
-                operation: ene_preservation::DeletionOperationId::from_raw(RawId::from_uuid(uuid)),
-                sweep: ene_preservation::DeletionSweepGeneration::from_u64(sweep),
-            })
-        }
-        Some(match self {
-            Self::Started { operation, sweep } => {
-                ConfirmTargetedDeletionOutcome::Started(parse(&operation, sweep)?)
-            }
-            Self::AlreadyCoveredBy { operation, sweep } => {
-                ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(parse(&operation, sweep)?)
-            }
-            Self::HeldByOperation { operation, sweep } => {
-                ConfirmTargetedDeletionOutcome::HeldByOperation(parse(&operation, sweep)?)
-            }
-            Self::NeedsClarification => ConfirmTargetedDeletionOutcome::NeedsClarification,
-            Self::Missing => ConfirmTargetedDeletionOutcome::Missing,
+impl ControlClient {
+    /// Dials the serving Host's control endpoint.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Deletion`] when no serving Host answers (the same
+    /// recovery guidance Targeted Deletion already used).
+    pub async fn connect(data_dir: &Path) -> Result<Self, CoreError> {
+        Ok(Self {
+            stream: connect(data_dir).await?,
         })
+    }
+
+    /// Writes one frame and reads one answer.
+    ///
+    /// # Errors
+    ///
+    /// Transport or decode failures. Domain outcomes arrive as [`FromHost`].
+    pub async fn exchange(&mut self, message: &ToHost) -> Result<FromHost, CoreError> {
+        write_message(&mut self.stream, message)
+            .await
+            .map_err(|error| control_failure(&format!("send failed: {error}")))?;
+        read_message::<_, FromHost>(&mut self.stream)
+            .await
+            .map_err(|error| control_failure(&format!("answer failed: {error}")))?
+            .ok_or_else(|| control_failure("the serving Host closed without an answer"))
     }
 }
 
@@ -191,21 +287,24 @@ impl ControlListener {
     }
 
     /// Accepts at most one control connection, checks the peer credential,
-    /// and returns it for the serving loop to own. An unprovable peer is
-    /// dropped without a byte.
-    pub(crate) async fn accept(&self) -> Result<Option<tokio::net::UnixStream>, CoreError> {
+    /// and returns it with the OS peer pid. An unprovable peer is dropped
+    /// without a byte.
+    pub(crate) async fn accept(&self) -> Result<Option<(tokio::net::UnixStream, u32)>, CoreError> {
         let (stream, _) = self
             .listener
             .accept()
             .await
             .map_err(|error| CoreError::Bind(format!("accept control socket: {error}")))?;
-        if !stream
-            .peer_cred()
-            .is_ok_and(|credential| credential.uid() == self.owner_uid)
-        {
+        let Ok(credential) = stream.peer_cred() else {
+            return Ok(None);
+        };
+        if credential.uid() != self.owner_uid {
             return Ok(None);
         }
-        Ok(Some(stream))
+        let Some(pid) = credential.pid().filter(|pid| *pid > 0) else {
+            return Ok(None);
+        };
+        Ok(Some((stream, pid as u32)))
     }
 }
 
@@ -228,7 +327,7 @@ impl ControlListener {
 
     pub(crate) async fn accept(
         &mut self,
-    ) -> Result<Option<tokio::net::windows::named_pipe::NamedPipeServer>, CoreError> {
+    ) -> Result<Option<(tokio::net::windows::named_pipe::NamedPipeServer, u32)>, CoreError> {
         use std::os::windows::io::AsRawHandle as _;
 
         if self.server.connect().await.is_err() {
@@ -239,62 +338,362 @@ impl ControlListener {
         }
         let next = crate::conn_pipe::create_next_server(&self.pipe)?;
         let current = std::mem::replace(&mut self.server, next);
-        if !crate::conn_pipe::peer_same_user(current.as_raw_handle()) {
+        let handle = current.as_raw_handle();
+        if !crate::conn_pipe::peer_same_user(handle) {
             return Ok(None);
         }
-        Ok(Some(current))
+        let Some(pid) = crate::conn_pipe::peer_process_id(handle) else {
+            return Ok(None);
+        };
+        Ok(Some((current, pid)))
     }
 }
 
-/// Serves one control connection: at most one bounded request, the
-/// canonical confirmation executed in this process, and the typed answer.
+/// Serves one control connection as a persistent exclusive-seat speaker.
 ///
-/// A silent peer, a malformed frame, or a write failure changes no durable
-/// state beyond what the confirmation itself committed; the console learns
-/// the transport failure and can retry the same request identity
-/// idempotently.
-///
-/// Shutdown cancels only transport I/O. Once admitted past the request read,
-/// confirmation runs to completion; the serving loop must join this handler
-/// before releasing the Host's single-writer authority.
+/// Shutdown cancels only transport I/O. Once a [`ToHost::SessionComplete`]
+/// is admitted, the bound operation runs to completion; the serving loop
+/// must join this handler before releasing the Host's single-writer
+/// authority.
 #[cfg(any(unix, windows))]
 pub(crate) async fn serve_connection<S>(
     mut stream: S,
     handle: Arc<HostHandle>,
+    peer_pid: u32,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let request = tokio::select! {
-        biased;
-        () = crate::conn::wait_for_shutdown(&mut shutdown) => return,
-        result = tokio::time::timeout(
-            CONTROL_READ_TIMEOUT,
-            read_message::<_, HostControlRequest>(&mut stream),
-        ) => match result {
-            Ok(Ok(Some(request))) => request,
-            // EOF, malformed frame, or a silent peer: nothing honest to answer.
-            Ok(Ok(None) | Err(_)) | Err(_) => return,
+    let connection = handle.control_seat.allocate_connection();
+    let mut seated = false;
+    loop {
+        let request = if seated {
+            tokio::select! {
+                biased;
+                () = crate::conn::wait_for_shutdown(&mut shutdown) => break,
+                result = read_message::<_, ToHost>(&mut stream) => match result {
+                    Ok(Some(request)) => request,
+                    Ok(None) | Err(_) => break,
+                },
+            }
+        } else {
+            tokio::select! {
+                biased;
+                () = crate::conn::wait_for_shutdown(&mut shutdown) => break,
+                result = tokio::time::timeout(
+                    CONTROL_HELLO_TIMEOUT,
+                    read_message::<_, ToHost>(&mut stream),
+                ) => match result {
+                    Ok(Ok(Some(request))) => request,
+                    Ok(Ok(None) | Err(_)) | Err(_) => break,
+                },
+            }
+        };
+        let reply = if seated {
+            dispatch_seated(&handle, connection, peer_pid, request).await
+        } else {
+            match request {
+                ToHost::SeatHello => {
+                    if handle.control_seat.try_acquire(connection, peer_pid) {
+                        seated = true;
+                        FromHost::SeatGranted
+                    } else {
+                        FromHost::SeatOccupied
+                    }
+                }
+                ToHost::ConfirmedTrue => FromHost::DeniedByBoundary,
+                _ => FromHost::DeniedByBoundary,
+            }
+        };
+        let occupied = matches!(reply, FromHost::SeatOccupied);
+        if write_message(&mut stream, &reply).await.is_err() {
+            break;
+        }
+        if occupied {
+            break;
+        }
+    }
+    if seated {
+        handle.control_seat.release(connection);
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn dispatch_seated(
+    handle: &HostHandle,
+    connection: u64,
+    peer_pid: u32,
+    request: ToHost,
+) -> FromHost {
+    match request {
+        ToHost::SeatHello => {
+            if handle.control_seat.try_acquire(connection, peer_pid) {
+                FromHost::SeatGranted
+            } else {
+                FromHost::SeatOccupied
+            }
+        }
+        ToHost::ConfirmedTrue => FromHost::DeniedByBoundary,
+        ToHost::DeviceApprove { pending_id } => handle.control_seat.mint(
+            connection,
+            peer_pid,
+            ControlOp::DeviceApprove,
+            pending_id.clone(),
+            PendingOp::DeviceApprove { pending_id },
+        ),
+        ToHost::CredentialPut {
+            provider,
+            label,
+            secret,
+        } => handle.control_seat.mint(
+            connection,
+            peer_pid,
+            ControlOp::CredentialPut,
+            format!("{provider}:{label}"),
+            PendingOp::CredentialPut {
+                provider,
+                label,
+                secret,
+            },
+        ),
+        ToHost::DeletionConfirm { request_id } => handle.control_seat.mint(
+            connection,
+            peer_pid,
+            ControlOp::DeletionConfirm,
+            request_id.clone(),
+            PendingOp::DeletionConfirm { request_id },
+        ),
+        ToHost::SessionComplete { session_id, nonce } => {
+            match handle
+                .control_seat
+                .take(connection, peer_pid, session_id, &nonce)
+            {
+                Some(pending) => execute_pending(handle, pending).await,
+                None => FromHost::DeniedByBoundary,
+            }
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn execute_pending(handle: &HostHandle, pending: PendingOp) -> FromHost {
+    match pending {
+        PendingOp::DeviceApprove { pending_id } => match handle.approve_device(&pending_id).await {
+            Ok(Some((_, secret))) => FromHost::Outcome(ControlOutcome::DeviceApproved {
+                pending_id,
+                pairing_secret: RedactedSecret::new(secret),
+            }),
+            Ok(None) => FromHost::Outcome(ControlOutcome::DeviceUnknown { pending_id }),
+            Err(_) => FromHost::Unavailable,
         },
-    };
-    let response = match request {
-        HostControlRequest::ConfirmTargetedDeletion { request } => {
+        PendingOp::CredentialPut {
+            provider,
+            label,
+            secret,
+        } => match handle
+            .put_credential(&provider, &label, secret.expose())
+            .await
+        {
+            Ok(true) => {
+                // Sweep/usable-ref commit is best-effort after a successful
+                // put; a missing pending pair still stored the secret.
+                match handle.approve_credential(&provider, &label).await {
+                    Ok(_) | Err(_) => {}
+                }
+                FromHost::Outcome(ControlOutcome::CredentialStored { provider, label })
+            }
+            Ok(false) | Err(_) => {
+                FromHost::Outcome(ControlOutcome::CredentialRefused { provider, label })
+            }
+        },
+        PendingOp::DeletionConfirm { request_id } => {
             #[cfg(test)]
             if let Some(gate) = handle.host_control_confirm_gate() {
                 gate.pause().await;
             }
-            match handle.confirm_targeted_deletion(&request).await {
-                Ok(outcome) => HostControlResponse::Confirmed(outcome.into()),
-                Err(_) => HostControlResponse::Unavailable,
+            match handle.confirm_targeted_deletion(&request_id).await {
+                Ok(outcome) => FromHost::Outcome(control_from_deletion(outcome)),
+                Err(_) => FromHost::Unavailable,
             }
         }
+    }
+}
+
+fn control_from_deletion(outcome: ConfirmTargetedDeletionOutcome) -> ControlOutcome {
+    let operation = |current: DeletionOperationRef| {
+        (
+            current
+                .operation
+                .as_raw()
+                .as_uuid()
+                .as_hyphenated()
+                .to_string(),
+            current.sweep.as_u64(),
+        )
     };
-    // The durable confirmation state already committed; a lost answer only
-    // means the console reports the transport failure.
-    tokio::select! {
-        biased;
-        () = crate::conn::wait_for_shutdown(&mut shutdown) => {}
-        result = write_message(&mut stream, &response) => drop(result),
+    match outcome {
+        ConfirmTargetedDeletionOutcome::Started(current) => {
+            let (operation, sweep) = operation(current);
+            ControlOutcome::DeletionStarted { operation, sweep }
+        }
+        ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current) => {
+            let (operation, sweep) = operation(current);
+            ControlOutcome::DeletionAlreadyCoveredBy { operation, sweep }
+        }
+        ConfirmTargetedDeletionOutcome::HeldByOperation(current) => {
+            let (operation, sweep) = operation(current);
+            ControlOutcome::DeletionHeldByOperation { operation, sweep }
+        }
+        ConfirmTargetedDeletionOutcome::NeedsClarification => {
+            ControlOutcome::DeletionNeedsClarification
+        }
+        ConfirmTargetedDeletionOutcome::Missing => ControlOutcome::DeletionMissing,
+    }
+}
+
+fn deletion_from_control(outcome: ControlOutcome) -> Option<ConfirmTargetedDeletionOutcome> {
+    fn parse(operation: &str, sweep: u64) -> Option<DeletionOperationRef> {
+        let uuid = uuid::Uuid::parse_str(operation).ok()?;
+        Some(DeletionOperationRef {
+            operation: ene_preservation::DeletionOperationId::from_raw(RawId::from_uuid(uuid)),
+            sweep: ene_preservation::DeletionSweepGeneration::from_u64(sweep),
+        })
+    }
+    Some(match outcome {
+        ControlOutcome::DeletionStarted { operation, sweep } => {
+            ConfirmTargetedDeletionOutcome::Started(parse(&operation, sweep)?)
+        }
+        ControlOutcome::DeletionAlreadyCoveredBy { operation, sweep } => {
+            ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(parse(&operation, sweep)?)
+        }
+        ControlOutcome::DeletionHeldByOperation { operation, sweep } => {
+            ConfirmTargetedDeletionOutcome::HeldByOperation(parse(&operation, sweep)?)
+        }
+        ControlOutcome::DeletionNeedsClarification => {
+            ConfirmTargetedDeletionOutcome::NeedsClarification
+        }
+        ControlOutcome::DeletionMissing => ConfirmTargetedDeletionOutcome::Missing,
+        _ => return None,
+    })
+}
+
+/// Runs `request` under a seated session: hello, challenge, complete.
+#[cfg(any(unix, windows))]
+async fn seated_complete(data_dir: &Path, request: ToHost) -> Result<FromHost, CoreError> {
+    let mut client = ControlClient::connect(data_dir).await?;
+    match client.exchange(&ToHost::SeatHello).await? {
+        FromHost::SeatGranted => {}
+        FromHost::SeatOccupied => return Err(CoreError::SeatOccupied),
+        FromHost::DeniedByBoundary => {
+            return Err(control_failure("hello denied by boundary"));
+        }
+        other => {
+            return Err(control_failure(&format!(
+                "unexpected hello answer {}",
+                from_host_kind(&other)
+            )));
+        }
+    }
+    let challenge = client.exchange(&request).await?;
+    let FromHost::ConfirmationChallenge {
+        session_id, nonce, ..
+    } = challenge
+    else {
+        return Ok(challenge);
+    };
+    client
+        .exchange(&ToHost::SessionComplete { session_id, nonce })
+        .await
+}
+
+/// Owner device approval over the serving control inlet.
+///
+/// Returns the one-time pairing secret for Host-local display, or [`None`]
+/// when the pending id is unknown.
+///
+/// # Errors
+///
+/// [`CoreError::SeatOccupied`] when another speaker holds the seat;
+/// [`CoreError::Approve`] / [`CoreError::Deletion`] when the inlet is
+/// unreachable or refuses technically.
+pub async fn approve_device(
+    data_dir: &Path,
+    pending_id: &str,
+) -> Result<Option<String>, CoreError> {
+    #[cfg(any(unix, windows))]
+    {
+        match seated_complete(
+            data_dir,
+            ToHost::DeviceApprove {
+                pending_id: pending_id.to_string(),
+            },
+        )
+        .await?
+        {
+            FromHost::Outcome(ControlOutcome::DeviceApproved { pairing_secret, .. }) => {
+                Ok(Some(pairing_secret.expose().to_string()))
+            }
+            FromHost::Outcome(ControlOutcome::DeviceUnknown { .. }) => Ok(None),
+            FromHost::SeatOccupied => Err(CoreError::SeatOccupied),
+            FromHost::Unavailable => Err(control_failure(
+                "the serving Host could not answer device approval",
+            )),
+            other => Err(control_failure(&format!(
+                "unexpected device-approval answer {}",
+                from_host_kind(&other)
+            ))),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (data_dir, pending_id);
+        Err(CoreError::UnsupportedPlatform(
+            "no Host-local control transport",
+        ))
+    }
+}
+
+/// Serving-time credential put over the control inlet.
+///
+/// # Errors
+///
+/// [`CoreError::SeatOccupied`] when another speaker holds the seat.
+pub async fn put_credential(
+    data_dir: &Path,
+    provider: &str,
+    label: &str,
+    secret: &str,
+) -> Result<bool, CoreError> {
+    #[cfg(any(unix, windows))]
+    {
+        match seated_complete(
+            data_dir,
+            ToHost::CredentialPut {
+                provider: provider.to_string(),
+                label: label.to_string(),
+                secret: RedactedSecret::new(secret),
+            },
+        )
+        .await?
+        {
+            FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => Ok(true),
+            FromHost::Outcome(ControlOutcome::CredentialRefused { .. }) => Ok(false),
+            FromHost::SeatOccupied => Err(CoreError::SeatOccupied),
+            FromHost::Unavailable => Err(control_failure(
+                "the serving Host could not answer credential put",
+            )),
+            other => Err(control_failure(&format!(
+                "unexpected credential-put answer {}",
+                from_host_kind(&other)
+            ))),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (data_dir, provider, label, secret);
+        Err(CoreError::UnsupportedPlatform(
+            "no Host-local control transport",
+        ))
     }
 }
 
@@ -311,38 +710,33 @@ pub(crate) async fn serve_connection<S>(
 ///
 /// Returns [`CoreError::Deletion`] with recovery guidance when no serving
 /// Host answers the control endpoint (the offline fallback is deliberately
-/// absent: only the serving process can reach the Client incarnations that
-/// may hold a target-bearing copy), when the exchange cannot complete, or
-/// when the serving Host refuses the request technically (the typed
-/// `Unavailable` answer). A domain outcome such as
-/// `Missing` or `NeedsClarification` is a successful answer and is returned
-/// as itself.
+/// absent), [`CoreError::SeatOccupied`] when another speaker holds the
+/// seat, or when the serving Host refuses technically. A domain outcome such
+/// as `Missing` or `NeedsClarification` is a successful answer.
 pub async fn confirm_targeted_deletion(
     data_dir: &Path,
     request: &str,
 ) -> Result<ConfirmTargetedDeletionOutcome, CoreError> {
     #[cfg(any(unix, windows))]
     {
-        let mut stream = connect(data_dir).await?;
-        write_message(
-            &mut stream,
-            &HostControlRequest::ConfirmTargetedDeletion {
-                request: request.to_string(),
+        match seated_complete(
+            data_dir,
+            ToHost::DeletionConfirm {
+                request_id: request.to_string(),
             },
         )
-        .await
-        .map_err(|error| control_failure(&format!("send failed: {error}")))?;
-        let response = read_message::<_, HostControlResponse>(&mut stream)
-            .await
-            .map_err(|error| control_failure(&format!("answer failed: {error}")))?
-            .ok_or_else(|| control_failure("the serving Host closed without an answer"))?;
-        match response {
-            HostControlResponse::Confirmed(confirmation) => confirmation
-                .into_outcome()
+        .await?
+        {
+            FromHost::Outcome(outcome) => deletion_from_control(outcome)
                 .ok_or_else(|| control_failure("the serving Host answered a malformed operation")),
-            HostControlResponse::Unavailable => Err(control_failure(
+            FromHost::SeatOccupied => Err(CoreError::SeatOccupied),
+            FromHost::Unavailable => Err(control_failure(
                 "the serving Host could not answer the confirmation",
             )),
+            other => Err(control_failure(&format!(
+                "unexpected confirmation answer {}",
+                from_host_kind(&other)
+            ))),
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -351,6 +745,17 @@ pub async fn confirm_targeted_deletion(
         Err(CoreError::UnsupportedPlatform(
             "no Host-local control transport",
         ))
+    }
+}
+
+fn from_host_kind(message: &FromHost) -> &'static str {
+    match message {
+        FromHost::SeatGranted => "SeatGranted",
+        FromHost::SeatOccupied => "SeatOccupied",
+        FromHost::DeniedByBoundary => "DeniedByBoundary",
+        FromHost::ConfirmationChallenge { .. } => "ConfirmationChallenge",
+        FromHost::Outcome(_) => "Outcome",
+        FromHost::Unavailable => "Unavailable",
     }
 }
 
@@ -441,13 +846,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_preservation::{DeletionOperationId, DeletionSweepGeneration};
 
     #[test]
-    fn confirmation_round_trips_every_canonical_outcome() {
+    fn deletion_outcomes_round_trip_through_control() {
         let current = DeletionOperationRef {
-            operation: DeletionOperationId::from_raw(RawId::new()),
-            sweep: DeletionSweepGeneration::from_u64(4),
+            operation: ene_preservation::DeletionOperationId::from_raw(RawId::new()),
+            sweep: ene_preservation::DeletionSweepGeneration::from_u64(4),
         };
         for outcome in [
             ConfirmTargetedDeletionOutcome::Started(current),
@@ -456,12 +860,9 @@ mod tests {
             ConfirmTargetedDeletionOutcome::NeedsClarification,
             ConfirmTargetedDeletionOutcome::Missing,
         ] {
-            let rendered = HostControlConfirmation::from(outcome.clone());
-            let json = serde_json::to_string(&rendered).expect("the answer must serialize");
-            let parsed: HostControlConfirmation =
-                serde_json::from_str(&json).expect("the answer must parse");
+            let rendered = control_from_deletion(outcome.clone());
             assert_eq!(
-                parsed.into_outcome(),
+                deletion_from_control(rendered),
                 Some(outcome),
                 "every canonical outcome must round-trip"
             );
@@ -470,11 +871,11 @@ mod tests {
 
     #[test]
     fn a_malformed_operation_identity_is_refused() {
-        let malformed = HostControlConfirmation::Started {
+        let malformed = ControlOutcome::DeletionStarted {
             operation: String::from("not-a-uuid"),
             sweep: 1,
         };
-        assert_eq!(malformed.into_outcome(), None);
+        assert_eq!(deletion_from_control(malformed), None);
     }
 
     /// The offline fallback is deliberately absent: with no serving Host the
@@ -490,6 +891,28 @@ mod tests {
         assert!(
             error.to_string().contains("serving Host"),
             "the refusal must carry recovery guidance: {error}"
+        );
+    }
+
+    #[test]
+    fn empty_seat_occupancy_is_not_authenticity() {
+        let seat = FirstPartyControlSeat::default();
+        let first = seat.allocate_connection();
+        assert!(
+            seat.try_acquire(first, 7),
+            "empty-seat first-come occupies for accident prevention"
+        );
+        let second = seat.allocate_connection();
+        assert!(
+            !seat.try_acquire(second, 7),
+            "a second connection is refused even with the same pid"
+        );
+        // Occupancy is exclusive. It is not evidence that the first speaker
+        // is the official GUI.
+        seat.release(first);
+        assert!(
+            seat.try_acquire(second, 9),
+            "release must admit a later speaker"
         );
     }
 }

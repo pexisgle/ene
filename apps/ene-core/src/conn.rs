@@ -1115,9 +1115,9 @@ where
             }
             accepted = control.accept() => {
                 match accepted {
-                    Ok(Some(stream)) => {
+                    Ok(Some((stream, pid))) => {
                         handlers.tasks.spawn(crate::host_control::serve_connection(
-                            stream, Arc::clone(&handle), handlers.stop.subscribe(),
+                            stream, Arc::clone(&handle), pid, handlers.stop.subscribe(),
                         ));
                     }
                     Ok(None) => {}
@@ -1726,9 +1726,9 @@ where
                     });
                 }
                 accepted = control.accept() => {
-                    if let Some(stream) = accepted? {
+                    if let Some((stream, pid)) = accepted? {
                         handlers.tasks.spawn(crate::host_control::serve_connection(
-                            stream, Arc::clone(&handle), handlers.stop.subscribe(),
+                            stream, Arc::clone(&handle), pid, handlers.stop.subscribe(),
                         ));
                     }
                 }

@@ -68,25 +68,35 @@
 //! Framing goes through `ene-plugin-ipc` only ([`ene_plugin_ipc::encode_frame`]/[`ene_plugin_ipc::decode_frame`]); this module
 //! owns the socket read/write loops. [`ene_plugin_ipc::CodecError`]
 //! displays carry lengths and decoder reasons only and never echo frame
-//! bytes, so mapping them into [`crate::errors::CliError::Codec`]
+//! bytes, so mapping them into [`crate::error::ClientError::Codec`]
 //! cannot leak conversation text. All other error messages carry operations,
 //! payload-kind names, refs, or generations — never bodies or secrets.
 //!
 //! Platforms without a supported transport get stubs returning
-//! [`crate::errors::CliError::UnsupportedPlatform`];
+//! [`crate::error::ClientError::UnsupportedPlatform`];
 //! the pure builders below stay shared.
 
 use std::path::{Path, PathBuf};
 
+pub mod device;
+pub mod error;
 pub mod frames;
+pub mod incarnation;
+mod pairing;
 pub mod session;
 mod transport;
 
+pub use error::ClientError;
 pub use frames::PreparedRequest;
+pub use pairing::{pairing_proof_hex, verify_pairing_proof};
 pub use transport::Client;
 
+/// Fallback companion projection until the first presence fact arrives.
+/// The Host revalidates this bootstrap rather than attributing through it.
+pub const DEFAULT_COMPANION_REF: &str = "default";
+
 /// Pure: the caller decides whether the directory or socket must exist;
-/// absence surfaces as [`crate::errors::CliError::Transport`] on dial.
+/// absence surfaces as [`crate::error::ClientError::Transport`] on dial.
 pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("ene.sock")
 }

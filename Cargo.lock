@@ -293,6 +293,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-client"
+version = "0.1.0"
+dependencies = [
+ "ene-api",
+ "ene-config",
+ "ene-plugin-ipc",
+ "ene-primitive",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ene-companion"
 version = "0.1.0"
 dependencies = [
@@ -333,6 +352,7 @@ dependencies = [
  "ene-ctl",
  "ene-inference",
  "ene-learning",
+ "ene-local-control",
  "ene-permission",
  "ene-plugin-ipc",
  "ene-presence",
@@ -374,9 +394,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ene-api",
+ "ene-client",
  "ene-config",
- "ene-credential",
- "ene-plugin-ipc",
  "serde",
  "serde_json",
  "thiserror",
@@ -410,6 +429,16 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "ene-local-control"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -52,6 +52,18 @@ pub trait CredentialStore: Send + Sync {
 
     /// Existence is non-secret metadata.
     fn contains(&self, cred: &CredentialRef) -> bool;
+
+    /// Serving-time intake: stores `secret` for `cred`.
+    ///
+    /// Product durable storage is an OS protected store; this method is the
+    /// port. [`EnvCredentialStore`] is test/dev only and fail-closes.
+    /// `secret` is never returned, logged, or included in the error.
+    ///
+    /// # Errors
+    ///
+    /// [`CredentialTechnicalError::StorageUnavailable`] when the backend
+    /// cannot accept the value (env store, locked OS store, or similar).
+    fn put(&self, cred: &CredentialRef, secret: &str) -> Result<(), CredentialTechnicalError>;
 }
 
 /// In-memory bearer store for tests and local development only.
@@ -136,6 +148,11 @@ impl CredentialStore for MemoryCredentialStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         entries.contains_key(cred)
+    }
+
+    fn put(&self, cred: &CredentialRef, secret: &str) -> Result<(), CredentialTechnicalError> {
+        self.insert(cred.clone(), secret);
+        Ok(())
     }
 }
 
@@ -235,5 +252,12 @@ impl CredentialStore for EnvCredentialStore {
 
     fn contains(&self, cred: &CredentialRef) -> bool {
         self.pinned(cred.provider()).is_some()
+    }
+
+    fn put(&self, cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
+        let id = cred.id();
+        Err(CredentialTechnicalError::StorageUnavailable {
+            reason: format!("{id}: env credential store is not a product source of truth"),
+        })
     }
 }
