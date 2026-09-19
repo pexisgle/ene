@@ -225,8 +225,9 @@ pub enum FromConfirmation {
         premise_generation: u64,
         nonce: String,
     },
-    /// Confirmation-channel outcome. Only this channel carries the pairing
-    /// secret, and only to the surface the Owner used.
+    /// Confirmation-channel outcome. Pairing completion carries only
+    /// non-secret approval facts; provision uses the originating Client
+    /// connection.
     Outcome(ControlOutcome),
     DeniedByBoundary,
     /// The confirmation surface cannot answer. Never a success.
@@ -235,14 +236,11 @@ pub enum FromConfirmation {
 
 /// Confirmation-channel completion facts.
 ///
-/// Pairing secrets for the Owner's own provisioning path use
-/// [`RedactedSecret`] so `Debug` cannot leak them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlOutcome {
     DeviceApproved {
         pending_id: String,
         device_id: String,
-        pairing_secret: RedactedSecret,
     },
     DeviceUnknown {
         pending_id: String,

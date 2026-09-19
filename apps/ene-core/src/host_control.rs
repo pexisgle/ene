@@ -669,11 +669,10 @@ async fn execute_pending(
 ) -> (FromConfirmation, Option<RequesterOutcome>) {
     match pending {
         PendingOp::DeviceApprove { pending_id } => match handle.approve_device(&pending_id).await {
-            Ok(Some((record, secret))) => (
+            Ok(Some(record)) => (
                 FromConfirmation::Outcome(ControlOutcome::DeviceApproved {
                     pending_id: pending_id.clone(),
                     device_id: record.wire.clone(),
-                    pairing_secret: RedactedSecret::new(secret),
                 }),
                 Some(RequesterOutcome::DeviceApproved {
                     pending_id,

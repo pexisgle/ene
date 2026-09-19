@@ -47,9 +47,8 @@ use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::{
     CredentialRef, CredentialScrubber, MemoryCredentialStore, SecretScrubber as _,
 };
-use ene_ctl::client::{Client, ClientError};
+use ene_ctl::client::{Client, ConnectProgress};
 use ene_ctl::cmds;
-use ene_ctl::device::{StoredDevice, store_device};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_task::TaskRepository as _;
 
@@ -231,34 +230,21 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
     }
 }
 
-async fn approve_and_provision(dir: &std::path::Path, approver: &HostHandle) -> Result<(), String> {
-    let pendings = approver
-        .pending_devices()
-        .await
-        .map_err(|error| format!("pendings must list: {error:?}"))?;
-    let pending = pendings
-        .first()
-        .ok_or_else(|| String::from("a pending must list"))?;
-    let approval = approver
-        .approve_device(&pending.pending_id)
+async fn approve_and_complete(
+    pending: ene_ctl::client::PendingPairingClient,
+    approver: &HostHandle,
+) -> Result<Client, String> {
+    let approved = approver
+        .approve_device(pending.pending_id())
         .await
         .map_err(|error| format!("approve failed: {error:?}"))?;
-    let Some((record, secret)) = approval else {
+    if approved.is_none() {
         return Err(String::from("approval must pair"));
-    };
-    store_device(
-        dir,
-        &StoredDevice::new(
-            record
-                .wire
-                .parse()
-                .map(ene_api::v1::refs::DeviceWireId)
-                .map_err(|error| format!("opaque wire must stay UUID text: {error:?}"))?,
-            secret,
-        ),
-    )
-    .map_err(|error| format!("device file must store: {error:?}"))?;
-    Ok(())
+    }
+    pending
+        .complete()
+        .await
+        .map_err(|error| format!("provision completion failed: {error:?}"))
 }
 
 async fn view_mark(client: &mut Client) -> Result<String, String> {
@@ -407,20 +393,18 @@ async fn serve_and_setup(
 ) -> (Weak<HostHandle>, ServingTask, Client) {
     let handle = open_host(&dir).await;
     let observer = Arc::downgrade(&handle);
-    let server = ServingTask::start(&dir, handle, transport);
+    let server = ServingTask::start(&dir, Arc::clone(&handle), transport);
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
-    let approver = open_host(&dir).await;
-    approve_and_provision(&dir, &approver)
+    let progress = Client::begin_connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("first connection must reach pairing");
+    let ConnectProgress::Pending(pending) = progress else {
+        panic!("first pairing must pend");
+    };
+    let mut client = approve_and_complete(pending, &handle)
         .await
         .expect("approval must pair");
-    let mut client = Client::connect(&dir, DESCRIPTOR, "test")
-        .await
-        .expect("second connect must succeed");
+    let approver = open_host(&dir).await;
     setup_flow(&mut client, &approver)
         .await
         .expect("setup must complete");

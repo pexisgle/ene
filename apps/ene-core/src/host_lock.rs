@@ -75,7 +75,7 @@ mod tests {
     async fn offline_approve(
         dir: &Path,
         pending_id: &str,
-    ) -> Result<Option<(ene_credential::DeviceRecord, String)>, CoreError> {
+    ) -> Result<Option<ene_credential::DeviceRecord>, CoreError> {
         let _lock = HostLock::acquire(dir)?;
         let handle =
             HostHandle::open_with_cred_store(dir, CredStore::Memory(MemoryCredentialStore::new()))
@@ -180,10 +180,9 @@ mod tests {
             &handle.store,
             String::from("laptop"),
             String::from("test-connection"),
-            None,
         )
         .await;
-        let Ok(ene_credential::DevicePairingStatus::Pending { pending }) = requested else {
+        let Ok(pending) = requested else {
             panic!("the fresh descriptor must pend, got {requested:?}");
         };
         let pending_id = pending.pending_id.clone();
@@ -209,13 +208,13 @@ mod tests {
 
         drop(winner);
         assert!(
-            matches!(offline_approve(dir.path(), &pending_id).await, Ok(Some(_))),
-            "the released lock must admit the mutation and approve the pending device"
+            matches!(offline_approve(dir.path(), &pending_id).await, Ok(None)),
+            "an offline handle has no originating delivery slot and must not approve"
         );
         let pending = handle.pending_devices().await.expect("pendings must list");
         assert!(
-            pending.is_empty(),
-            "the admitted command approves the pending device"
+            pending.iter().any(|entry| entry.pending_id == pending_id),
+            "the offline attempt leaves the pending request untouched"
         );
     }
 

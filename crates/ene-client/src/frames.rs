@@ -8,8 +8,6 @@ use ene_api::v1::refs::{
 };
 use ene_plugin_ipc::WireFrame;
 
-use crate::device;
-
 /// The proof is the pairing-secret HMAC over the single-use challenge nonce;
 /// the sender names the paired device and hides the connection id (still
 /// undisclosed pre-accept).
@@ -31,24 +29,8 @@ pub fn proof_frame(
 }
 
 #[must_use]
-pub fn pending_guidance() -> String {
-    format!(
-        "pairing is pending owner confirmation; approve the pending ID on the \
-         Host-local trusted surface (`approve-device` lists pending IDs), then \
-         re-run ene-ctl once with {} set to the shown secret (the device key \
-         is issued on the next run and stored to the 0600 client device file)",
-        device::BOOTSTRAP_SECRET_ENV,
-    )
-}
-
-#[must_use]
 pub fn missing_secret_guidance() -> String {
-    format!(
-        "no pairing secret stored for this device; approve the device on \
-         the Host-local trusted surface, then re-run ene-ctl once with {} \
-         set to the shown secret",
-        device::BOOTSTRAP_SECRET_ENV,
-    )
+    String::from("no pairing secret stored for this device; start a fresh pairing request")
 }
 
 /// The stored device file exists but is unusable. Distinct from
@@ -57,12 +39,8 @@ pub fn missing_secret_guidance() -> String {
 /// proven secret.
 #[must_use]
 pub fn unreadable_device_file_guidance() -> String {
-    format!(
-        "the stored client device file is unreadable or malformed; approve \
-         the device again on the Host-local trusted surface, then re-run \
-         ene-ctl once with {} set to the fresh secret (the file is replaced \
-         only after the proof succeeds)",
-        device::BOOTSTRAP_SECRET_ENV,
+    String::from(
+        "the stored client device file is unreadable or malformed; remove it and start a fresh pairing request",
     )
 }
 
@@ -71,10 +49,7 @@ pub fn unreadable_device_file_guidance() -> String {
 #[must_use]
 pub fn auth_rejected_guidance(reason: &str) -> String {
     format!(
-        "authentication rejected: {reason}; approve the device again on the \
-         Host-local trusted surface and re-run ene-ctl once with {} set to \
-         the fresh secret",
-        device::BOOTSTRAP_SECRET_ENV,
+        "authentication rejected: {reason}; remove the stored client device and start a fresh pairing request"
     )
 }
 
@@ -178,18 +153,12 @@ pub fn observed_frame(
     frame
 }
 
-/// Pre-pairing sender: the Host issues the device ID after Owner
-/// confirmation. `pending_id` polls a previously issued pending after
-/// approval; [`None`] opens a new request.
-pub fn pairing_frame(
-    descriptor: &str,
-    incarnation: ClientIncarnationId,
-    pending_id: Option<String>,
-) -> WireFrame {
+/// Pre-pairing sender: the Host issues the device ID and secret on this same
+/// connection after Owner confirmation.
+pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> WireFrame {
     frame_for(
         WirePayload::PairingRequest(PairingRequest {
             device_descriptor: String::from(descriptor),
-            pending_id,
         }),
         WireSender {
             device_id: None,

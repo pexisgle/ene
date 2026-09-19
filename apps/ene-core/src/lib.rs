@@ -52,6 +52,7 @@ pub mod deletion;
 pub mod dialogue;
 pub mod host_control;
 pub mod host_lock;
+mod pairing_delivery;
 pub mod presentation;
 pub mod serve;
 pub mod setup;

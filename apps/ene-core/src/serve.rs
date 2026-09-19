@@ -77,7 +77,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 
 use ene_api::v1::envelope::ProtocolVersion;
-use ene_api::v1::handshake::NegotiatedConnection;
+use ene_api::v1::handshake::{NegotiatedConnection, PairingProvision, PairingProvisionSecret};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ConnectionWireId, RoundWireId};
 use ene_api::v1::reject::RejectKind;
@@ -115,8 +115,8 @@ pub(crate) mod lifecycle;
 use lifecycle::ensure_data_dir;
 
 pub(crate) use frames::{
-    invalid_phase_reject, outgoing_envelope, outgoing_fact, outgoing_frame, reject_frame,
-    stale_reject, unpaired_close,
+    invalid_phase_reject, outgoing_envelope, outgoing_fact, outgoing_frame,
+    outgoing_frame_pre_auth, reject_frame, stale_reject, unpaired_close,
 };
 pub(crate) use handshake::attribution_to_wire;
 pub use lifecycle::serve;
@@ -575,6 +575,8 @@ pub struct HostHandle {
     /// [`FileDeviceAuthStore`] contract for custody, file protection, and the
     /// backup-exclusion rule.
     pub(crate) auth_store: FileDeviceAuthStore,
+    /// Capacity-one, connection-owned first-pairing provision slots.
+    pub(crate) pairing_deliveries: crate::pairing_delivery::PairingDeliveryRegistry,
     /// In-memory, best-effort queue of pinned Experience premises whose
     /// completed replies await a Learning formation pass.
     ///
@@ -941,6 +943,7 @@ impl HostHandle {
             gui_child: StdMutex::new(None),
             confirmation_tasks: StdMutex::new(Vec::new()),
             auth_store,
+            pairing_deliveries: crate::pairing_delivery::PairingDeliveryRegistry::default(),
             learning_queue: Arc::clone(&learning_queue),
             host_transient_arrival: Arc::clone(&host_transient_arrival),
             learning_worker: AsyncMutex::new(()),
@@ -2047,60 +2050,51 @@ impl HostHandle {
         RoundWireId(wire)
     }
 
-    /// Records one Owner pairing approval and mints its one-time secret.
+    /// Records one Owner pairing approval and queues its one-time provision for
+    /// the live connection that opened the pending request.
     ///
-    /// Host-local trusted inlet behind the `approve-device` subcommand: it
-    /// records the Owner decision through
-    /// [`approve_pending`](DevicePairingRepository::approve_pending) and never
-    /// decides whether pairing is allowed itself. The approval names the
-    /// opaque pending id plus the connection that sent the request (read back
-    /// from the stored pending row) and compare-and-swaps that row to Paired;
-    /// an unknown id, an already-consumed row, or a mismatched connection
-    /// yields `Ok(None)` (the caller lists [`HostHandle::pending_devices`]).
-    /// Descriptors are display-only and never the approval key (#1389).
-    ///
-    /// The returned secret string is for one-time display on this
-    /// Host-local trusted surface only: the caller shows it once and forgets
-    /// it. It is persisted through `auth_store` for later
-    /// [`ene_api::v1::handshake::AuthProof`] verification.
+    /// The delivery claim supplies the exact origin for the durable compare-and-swap.
+    /// Unknown, disconnected, and already-consumed ids return `Ok(None)`. The
+    /// secret is saved for proof verification and moved directly into the
+    /// authentication-only provision frame; no control outcome receives it.
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Store`] when the durable pairing tables are
-    /// unavailable or the device-auth file cannot be written.
+    /// Returns [`CoreError::Store`] when durable approval or Host secret
+    /// storage fails, and [`CoreError::Approve`] when approval committed but
+    /// the originating connection can no longer accept its provision.
     pub async fn approve_device(
         &self,
         pending_id: &str,
-    ) -> Result<Option<(DeviceRecord, String)>, CoreError> {
-        let origin = DevicePairingRepository::list_pending(&self.store)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?
-            .into_iter()
-            .find(|pending| pending.pending_id == pending_id)
-            .map(|pending| pending.origin_connection);
-        let Some(origin) = origin else {
-            // Unknown id here may still be an already-approved id whose
-            // pending row is gone but whose paired record survives (rotation):
-            // let the store decide from its paired table.
-            let approved = DevicePairingRepository::approve_pending(&self.store, pending_id, "")
-                .await
-                .map_err(|error| CoreError::Store(error.to_string()))?;
-            if let Some((record, secret)) = approved.as_ref() {
-                self.auth_store
-                    .save_secret(&record.id, &record.descriptor, secret)
-                    .map_err(|error| CoreError::Store(error.to_string()))?;
-            }
-            return Ok(approved);
+    ) -> Result<Option<DeviceRecord>, CoreError> {
+        let Some(claim) = self.pairing_deliveries.claim(pending_id) else {
+            return Ok(None);
         };
+        let origin = claim.connection.0.as_hyphenated().to_string();
         let approved = DevicePairingRepository::approve_pending(&self.store, pending_id, &origin)
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        if let Some((record, secret)) = approved.as_ref() {
-            self.auth_store
-                .save_secret(&record.id, &record.descriptor, secret)
-                .map_err(|error| CoreError::Store(error.to_string()))?;
-        }
-        Ok(approved)
+        let Some((record, secret)) = approved else {
+            return Ok(None);
+        };
+        self.auth_store
+            .save_secret(&record.id, &record.descriptor, secret.expose_secret())
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        let device_id = record
+            .wire
+            .parse()
+            .map(ene_api::v1::refs::DeviceWireId)
+            .map_err(|_| CoreError::Store(String::from("invalid paired device wire id")))?;
+        let provision = PairingProvision {
+            device_id,
+            pairing_secret: PairingProvisionSecret::new(secret.into_inner()),
+        };
+        claim.queue(provision).map_err(|_| {
+            CoreError::Approve(String::from(
+                "approval committed but the originating pairing connection is unavailable",
+            ))
+        })?;
+        Ok(Some(record))
     }
 
     /// Host-local trusted inlet surfacing the Owner-visible pending set so an
@@ -2410,6 +2404,14 @@ impl HostHandle {
         // already refused, so the lifecycle cleanup below cannot race a
         // resurrection (CCT §10.4).
         self.on_connection_closed(&connection);
+        let origin = connection.0.as_hyphenated().to_string();
+        if DevicePairingRepository::abandon_pending_by_origin(&self.store, &origin)
+            .await
+            .is_err()
+        {
+            // Close is already final in memory; startup cleanup will clear an
+            // unapproved durable row if this best-effort removal failed.
+        }
     }
 
     /// The single Host-memory lifecycle boundary for a superseded connection
@@ -2448,6 +2450,7 @@ impl HostHandle {
     /// dropped open round leaves its History rows readable through
     /// `HistoryRequest`.
     fn drop_connection_transient_state(&self, connection: &ConnectionWireId) {
+        self.pairing_deliveries.remove(connection);
         self.drop_presentation_connection_state(connection);
         self.drop_open_rounds_for(connection);
         self.conversation_tasks

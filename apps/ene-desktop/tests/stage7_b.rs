@@ -388,7 +388,7 @@ async fn gui_event_loop_is_not_blocked_on_connect_or_provider_wait() {
         let dir = dir.path().to_path_buf();
         async move {
             loop {
-                match session::connect(&dir, DESKTOP_DESCRIPTOR, None).await {
+                match session::connect(&dir, DESKTOP_DESCRIPTOR).await {
                     Ok(client) => return Ok(client),
                     Err(ene_client::error::ClientError::Transport(_)) => {
                         tokio::time::sleep(Duration::from_millis(20)).await;

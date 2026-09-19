@@ -73,7 +73,7 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
-    BaseViewMark, CommandWireId, DeviceWireId, ManagementTargetWire, RoundWireId, StreamWireId,
+    BaseViewMark, CommandWireId, ManagementTargetWire, RoundWireId, StreamWireId,
 };
 use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
@@ -83,10 +83,9 @@ use ene_api::v1::undelivered::{UndeliveredResponse, UndeliveredSummary};
 use ene_core::conn;
 use ene_core::conn_pipe;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::{CredentialRef, MemoryCredentialStore, PendingPairing};
-use ene_ctl::client::{Client, ClientError};
+use ene_credential::{CredentialRef, MemoryCredentialStore};
+use ene_ctl::client::{Client, ClientError, ConnectProgress, PendingPairingClient};
 use ene_ctl::cmds;
-use ene_ctl::device::{StoredDevice, load_pending_id, store_device};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use rusqlite::OptionalExtension as _;
 use tokio::net::windows::named_pipe::ClientOptions;
@@ -175,16 +174,16 @@ async fn open_host(dir: &Path) -> Arc<HostHandle> {
 /// A pipe instance is listening only between accepts, and exists only once the
 /// Host created it, so a failed dial is retried. The retry loop is a bounded
 /// availability wait, never an ordering device.
-async fn dial_until_pending(dir: &Path) -> Result<(), String> {
+async fn dial_until_pending(dir: &Path) -> Result<PendingPairingClient, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let attempt = tokio::time::timeout(
             Duration::from_secs(10),
-            Client::connect(dir, DESCRIPTOR, "test"),
+            Client::begin_connect(dir, DESCRIPTOR, "test"),
         )
         .await;
         match attempt {
-            Ok(Err(ClientError::ServerOutcome(_))) => return Ok(()),
+            Ok(Ok(ConnectProgress::Pending(pending))) => return Ok(pending),
             Ok(Err(ClientError::Transport(reason))) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(format!("the pipe never accepted a client: {reason}"));
@@ -192,7 +191,7 @@ async fn dial_until_pending(dir: &Path) -> Result<(), String> {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Ok(Err(other)) => return Err(format!("a first pairing must pend, got {other:?}")),
-            Ok(Ok(_)) => {
+            Ok(Ok(ConnectProgress::Connected(_))) => {
                 return Err(String::from(
                     "a first pairing must not authenticate before Owner approval",
                 ));
@@ -233,49 +232,21 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
     }
 }
 
-/// Host-local Owner approval of the pending device plus the one-time secret
-/// handover into the Client's device file, exactly as the trusted surface does
-/// it (the secret never travels a normal payload).
-///
-/// The pending the client remembers (its `client-pending.json` poll key) is
-/// approved last, so the device file always ends on the identity the next
-/// connect presents. A dial retried at the transport level can leave a second
-/// pending row behind, so the whole listed set is approved instead of only the
-/// row that happened to be listed first.
-async fn approve_and_provision(dir: &Path, approver: &HostHandle) -> Result<(), String> {
-    let pendings = approver
-        .pending_devices()
+async fn approve_and_complete(
+    pending: ene_ctl::client::PendingPairingClient,
+    approver: &HostHandle,
+) -> Result<Client, String> {
+    let approved = approver
+        .approve_device(pending.pending_id())
         .await
-        .map_err(|error| format!("pendings must list: {error:?}"))?;
-    let remembered = load_pending_id(dir);
-    let mut ordered: Vec<&PendingPairing> = pendings.iter().collect();
-    ordered.sort_by_key(|pending| remembered.as_deref() == Some(pending.pending_id.as_str()));
-    assert!(
-        !ordered.is_empty(),
-        "a pairing request must leave a pending for the Owner to approve"
-    );
-    for pending in ordered {
-        let approval = approver
-            .approve_device(&pending.pending_id)
-            .await
-            .map_err(|error| format!("approve failed: {error:?}"))?;
-        let Some((record, secret)) = approval else {
-            return Err(format!("approval of {} must pair", pending.pending_id));
-        };
-        store_device(
-            dir,
-            &StoredDevice::new(
-                record
-                    .wire
-                    .parse()
-                    .map(DeviceWireId)
-                    .map_err(|error| format!("opaque wire must stay UUID text: {error:?}"))?,
-                secret,
-            ),
-        )
-        .map_err(|error| format!("device file must store: {error:?}"))?;
+        .map_err(|error| format!("approve failed: {error:?}"))?;
+    if approved.is_none() {
+        return Err(String::from("approval must pair"));
     }
-    Ok(())
+    pending
+        .complete()
+        .await
+        .map_err(|error| format!("provision completion failed: {error:?}"))
 }
 
 async fn view_mark(client: &mut Client) -> Result<String, String> {
@@ -389,18 +360,13 @@ async fn serve_and_setup(
 ) {
     let handle = open_host(&dir).await;
     let server = tokio::spawn(conn::run(dir.clone(), Arc::clone(&handle), transport));
-    dial_until_pending(&dir)
+    let pending = dial_until_pending(&dir)
         .await
         .expect("the Host must bind the data directory's pipe and pend the pairing");
-    // An independent approval context sharing the file device-auth store,
-    // exactly like the Host-local trusted surface.
-    let approver = open_host(&dir).await;
-    approve_and_provision(&dir, &approver)
+    let mut client = approve_and_complete(pending, &handle)
         .await
         .expect("Owner approval must pair the device");
-    let mut client = connect(&dir)
-        .await
-        .expect("the approved device must authenticate over the pipe");
+    let approver = open_host(&dir).await;
     setup_flow(&mut client, &approver)
         .await
         .expect("setup must complete");

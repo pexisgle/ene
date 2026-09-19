@@ -81,7 +81,6 @@ const SYSTEM_CONTENT: &[(&str, &str)] = &[
     ("paired_device", "device_id"),
     ("paired_device", "descriptor"),
     ("paired_device", "wire"),
-    ("paired_device", "pending_id"),
     ("pairing_pending", "pending_id"),
     ("pairing_pending", "descriptor"),
     ("pairing_pending", "origin_connection"),

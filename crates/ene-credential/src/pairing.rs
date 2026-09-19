@@ -6,6 +6,7 @@ use ene_primitive::{RawId, WallClockWithTz};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::CredentialTechnicalError;
 
@@ -51,20 +52,30 @@ pub struct PendingPairing {
     pub origin_connection: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DevicePairingStatus {
-    /// The polled pending request was already approved; carries the paired
-    /// record, unchanged.
-    Paired {
-        /// Existing paired-device record, unchanged.
-        device: DeviceRecord,
-    },
-    /// The request is not yet approved; carries the pending request (newly
-    /// recorded, previously stored, or freshly re-issued after a stale poll).
-    Pending {
-        /// Pending request the Owner approves by its opaque id.
-        pending: PendingPairing,
-    },
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct PairingSecretMaterial(String);
+
+impl PairingSecretMaterial {
+    #[must_use]
+    pub fn new(secret: String) -> Self {
+        Self(secret)
+    }
+
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_inner(mut self) -> String {
+        core::mem::take(&mut self.0)
+    }
+}
+
+impl core::fmt::Debug for PairingSecretMaterial {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("[redacted]")
+    }
 }
 
 /// Persistence boundary for device pairing requests and approvals.
@@ -78,27 +89,13 @@ pub enum DevicePairingStatus {
 pub trait DevicePairingRepository: Send + Sync {
     /// Records a pairing request for `descriptor` from `origin_connection`.
     ///
-    /// Every call with `pending_id: None` mints a fresh opaque pending
-    /// identity: same-descriptor requests each get their own pending and
+    /// Every call mints a fresh opaque pending identity: same-descriptor
+    /// requests each get their own pending and
     /// their own Owner confirmation, and the descriptor is never an identity
     /// lookup key (#1389). A reconnect of an already-paired device never
     /// reaches here: it resolves its stored `DeviceWireId` through
     /// [`find_device_by_wire`](DevicePairingRepository::find_device_by_wire)
     /// at capability time instead.
-    ///
-    /// With `pending_id: Some(id)` the caller polls that pending after Owner
-    /// approval: an approved id answers [`DevicePairingStatus::Paired`] with
-    /// the unchanged record from any connection, a still-waiting id with a
-    /// matching descriptor answers [`DevicePairingStatus::Pending`] with the
-    /// stored entry only when polled on its origin connection, and an unknown
-    /// id (stale after a restart clear, or never issued) mints a fresh pending
-    /// so the client converges on the new identity. A waiting id polled from a
-    /// new connection likewise mints a fresh pending: the mapping is kept only
-    /// until the origin connection ends, so a new connection always opens a
-    /// new request while the stored row stays for the Owner decision. A poll
-    /// whose descriptor differs from the stored one is rejected: a request id
-    /// reused with a different body never resolves to another request's
-    /// pending.
     ///
     /// Blank-descriptor contract: Host ingress validates that the descriptor
     /// is non-blank before calling. Implementations perform no blank check
@@ -109,29 +106,21 @@ pub trait DevicePairingRepository: Send + Sync {
         &self,
         descriptor: String,
         origin_connection: String,
-        pending_id: Option<String>,
-    ) -> Result<DevicePairingStatus, CredentialTechnicalError>;
+    ) -> Result<PendingPairing, CredentialTechnicalError>;
 
     /// Approves the pending request `pending_id` issued on `origin_connection`,
     /// pairing the device and issuing its one-time pairing secret.
     ///
     /// The pending delete and the paired insert share one transaction keyed on
     /// both columns (compare-and-swap): only the row with this exact id and
-    /// origin pairs, so an unknown id, an already-approved id without a paired
-    /// record, or a wrong connection yields `Ok(None)`. An already-approved
-    /// id with a surviving paired record returns that record unchanged with a
-    /// freshly minted secret (rotation), exactly like the first approval's
-    /// secret custody. Re-approval never mints a second device for one
-    /// pending: distinct pendings (even with identical descriptors) pair
-    /// distinct devices (#1389).
+    /// origin pairs, so an unknown id, an already-approved id, or a wrong
+    /// connection yields `Ok(None)`. Re-approval never rotates a secret.
     ///
     /// Secret custody flow: the trait is secret-free in storage. The approve
     /// caller (Host composition) holds the returned secret in memory,
-    /// short-lived, transfers it once over a trusted inlet (approve-time
-    /// one-time display / protected client file), and provisions it into its
-    /// runtime secret map for later ownership-proof verification. The secret
-    /// is never logged, never rendered in `Debug`, and never travels the
-    /// wire — only the pairing proof derived from it leaves the device.
+    /// short-lived, provisions it into its runtime secret map, and transfers
+    /// it once through the authentication-only provision frame to the live
+    /// originating Client connection.
     ///
     /// Approval records an Owner decision transported from a trusted inlet;
     /// the repository never decides whether pairing is allowed, it records
@@ -140,7 +129,13 @@ pub trait DevicePairingRepository: Send + Sync {
         &self,
         pending_id: &str,
         origin_connection: &str,
-    ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError>;
+    ) -> Result<Option<(DeviceRecord, PairingSecretMaterial)>, CredentialTechnicalError>;
+
+    /// Removes unapproved requests owned by an ended connection.
+    async fn abandon_pending_by_origin(
+        &self,
+        origin_connection: &str,
+    ) -> Result<(), CredentialTechnicalError>;
 
     /// The only durable wire-to-domain resolution: callers holding an
     /// opaque wire string (proof verification, sender attribution) resolve
@@ -164,10 +159,8 @@ pub trait DevicePairingRepository: Send + Sync {
 /// Pairing ownership proof: HMAC-SHA256 over a single-use nonce, keyed by
 /// the pairing secret.
 ///
-/// The secret travels a trusted inlet only: it is shown once at approve time
-/// for one-time display, or written to a protected client file. It is never
-/// logged, never rendered in `Debug`, and never sent over the wire — only
-/// the proof hex leaves the device. The nonce is single-use by caller
+/// The secret is never logged or rendered in `Debug`; initial provisioning
+/// uses the authentication-only frame. The nonce is single-use by caller
 /// contract: the Host mints a fresh nonce per challenge and rejects reuse,
 /// so a captured proof cannot be replayed.
 #[must_use]

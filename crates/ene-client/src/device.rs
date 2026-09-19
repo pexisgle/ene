@@ -1,72 +1,33 @@
-//! Client device identity at rest: the device file and the bootstrap secret.
+//! Client device identity at rest.
 //!
-//! The client persists its pairing identity under the data directory as
-//! [`DEVICE_FILE_NAME`]. The Host issues the two halves at different times —
-//! the device key arrives in the pairing answer, the secret is shown once on
-//! the Host-local console by `approve-device` — so the file is written after
-//! pairing whenever this process holds a secret and read back on the next
-//! connect.
-//!
-//! The approve-time secret has exactly one inlet here: the
-//! [`BOOTSTRAP_SECRET_ENV`] (`ENE_PAIRING_SECRET`) process environment
-//! variable; see [`resolve_device_secret`] for the rotation decision.
-//! Accepting it from the process environment is a deliberate tradeoff:
-//! environment is visible to the same user (for example via `/proc`), so a
-//! co-user secret there is weaker than the file; that is accepted as a
-//! one-shot bootstrap because the pairing threat model is same-machine
-//! single-user console (the Host enforces same-user peers at the socket), and
-//! a keyring integration is deferred follow-up. The secret is never logged,
-//! never rendered in `Debug`, and never sent over the wire — only ownership
-//! proofs derived from it leave the device.
-//!
-//! [`read_bootstrap_secret`] is the single environment reader and has no unit
-//! test: the workspace `unsafe` ban keeps even `std::env::set_var` out of
-//! reach, and the pure [`resolve_device_secret`] carries the rotation matrix
-//! instead.
+//! The Host delivers the device key and secret together on the originating
+//! pairing connection. The file is written only after that connection proves
+//! ownership and receives `AuthResult::Accepted`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use ene_api::v1::handshake::PairingProvisionSecret;
 use ene_api::v1::refs::DeviceWireId;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::error::ClientError;
 
 pub const DEVICE_FILE_NAME: &str = "client-device.json";
 
-/// Transient pairing-progress file: the opaque pending identity the Host
-/// issued for this client's open request, so the run after Owner approval
-/// polls the same pending instead of opening a new one.
-///
-/// Unlike the device file this is a lookup key, never trust: a missing or
-/// unreadable file simply opens a new request, and an unknown id converges
-/// on a fresh pending Host-side. It is kept after success as the durable poll
-/// key for device-file repair, and dropped only on denial.
-pub const PENDING_FILE_NAME: &str = "client-pending.json";
-
-/// Per-process staging counter: a temp name must never collide with another
-/// write in this process, so concurrent stores each stage their own file.
 static STAGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Process environment variable carrying the one-shot approve-time secret,
-/// read only by [`read_bootstrap_secret`]. A set, non-blank value rotates
-/// (see [`resolve_device_secret`]).
-pub const BOOTSTRAP_SECRET_ENV: &str = "ENE_PAIRING_SECRET";
 
 /// The Host-issued device key plus the approve-time pairing secret, serialized
 /// as `{device_id: <uuid>, pairing_secret: <hex>}`.
 ///
-/// The secret is deliberately a plain string in memory (session-lifetime
-/// only, see `SessionState` in the session module): it must be usable for
-/// proof derivation on demand, and the file permission (`0600` on Unix) is
-/// the at-rest protection. `Debug` is custom and redacts the secret (the
-/// device key stays visible for operator correlation): never log or format
-/// this value beyond its `Debug`, and never render that `Debug` where the
-/// redaction marker itself would mislead.
+/// The secret uses a zeroize-on-drop wrapper in memory; the file permission
+/// (`0600` on Unix) is its at-rest protection. `Debug` is custom and redacts
+/// the secret while leaving the device key visible for operator correlation.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredDevice {
     pub device_id: DeviceWireId,
-    pub pairing_secret: String,
+    pub pairing_secret: PairingProvisionSecret,
 }
 
 impl core::fmt::Debug for StoredDevice {
@@ -84,7 +45,7 @@ impl StoredDevice {
     pub fn new(device_id: DeviceWireId, pairing_secret: String) -> Self {
         Self {
             device_id,
-            pairing_secret,
+            pairing_secret: PairingProvisionSecret::new(pairing_secret),
         }
     }
 
@@ -92,10 +53,10 @@ impl StoredDevice {
     /// it would only postpone the provisioning guidance to proof time.
     #[must_use]
     pub fn secret(&self) -> Option<&str> {
-        if self.pairing_secret.is_empty() {
+        if self.pairing_secret.expose_secret().is_empty() {
             None
         } else {
-            Some(self.pairing_secret.as_str())
+            Some(self.pairing_secret.expose_secret())
         }
     }
 }
@@ -105,85 +66,7 @@ pub fn device_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DEVICE_FILE_NAME)
 }
 
-#[must_use]
-pub fn pending_file_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(PENDING_FILE_NAME)
-}
-
-/// Reads the stored pending identity, if any.
-///
-/// A missing, unreadable, or blank file is no pending: the caller opens a
-/// new request. Any other content is returned verbatim as the poll id — an
-/// unknown id simply converges on a fresh pending Host-side, so no
-/// fail-closed degraded state exists for this transient lookup key (unlike
-/// the trust-bearing device file).
-#[must_use]
-pub fn load_pending_id(data_dir: &Path) -> Option<String> {
-    let bytes = std::fs::read(pending_file_path(data_dir)).ok()?;
-    let text = core::str::from_utf8(&bytes).ok()?.trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
-}
-
-/// Remembers the open pending identity atomically (stage + sync + rename, so
-/// a crash leaves the previous content whole). Failure aborts the connect:
-/// without the remembered id the next run would open a duplicate pending.
-///
-/// # Errors
-///
-/// Returns [`ClientError::Transport`] when the staged write cannot be published.
-pub fn store_pending_id(data_dir: &Path, pending_id: &str) -> Result<(), ClientError> {
-    let path = pending_file_path(data_dir);
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        Some(_) | None => PathBuf::from("."),
-    };
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
-    let seq = STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let staged = parent.join(format!(
-        ".{}.{}.{nanos}.{seq}.tmp",
-        PENDING_FILE_NAME,
-        std::process::id()
-    ));
-    let staged_result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)
-            .map_err(pending_store_error)?;
-        file.write_all(pending_id.as_bytes())
-            .map_err(pending_store_error)?;
-        file.sync_all().map_err(pending_store_error)?;
-        drop(file);
-        std::fs::rename(&staged, &path).map_err(pending_store_error)
-    })();
-    if staged_result.is_err() && std::fs::remove_file(&staged).is_err() {
-        // Best effort: the temp holds only the pending id, and the reported
-        // store failure stays authoritative.
-    }
-    staged_result
-}
-
-fn pending_store_error(error: std::io::Error) -> ClientError {
-    ClientError::Transport(format!("client pending store failed: {}", error.kind()))
-}
-
-/// Forgets the open pending identity; best effort, never fails the connect.
-/// Called on denials that invalidate the remembered id, so the next run
-/// opens a new request instead of re-polling a dead one.
-pub fn clear_pending_id(data_dir: &Path) {
-    if std::fs::remove_file(pending_file_path(data_dir)).is_err() {
-        // Absent is the expected case after pairing.
-    }
-}
-
 /// State of the client device file on disk.
-///
-/// [`Missing`](DeviceFileState::Missing) is a first run; the other failure
-/// kinds are degraded state that must not silently take the first-run path.
-/// Recovery may still overwrite the file after ownership proof, so callers
-/// keep the distinction only for guidance, never for trust.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceFileState {
     /// No file at all: first run, or after a full reset.
@@ -198,23 +81,12 @@ pub enum DeviceFileState {
     Loaded(StoredDevice),
 }
 
-impl DeviceFileState {
-    /// The stored device, when the file held a usable one.
-    #[must_use]
-    pub fn stored(&self) -> Option<&StoredDevice> {
-        match self {
-            Self::Loaded(stored) => Some(stored),
-            Self::Missing | Self::Unreadable | Self::Malformed => None,
-        }
-    }
-}
-
 /// Reads the device file, distinguishing a genuinely missing file from
 /// unreadable or malformed state. Failure messages carry no path or content.
 #[must_use]
 pub fn load_stored_device(data_dir: &Path) -> DeviceFileState {
     let bytes = match std::fs::read(device_file_path(data_dir)) {
-        Ok(bytes) => bytes,
+        Ok(bytes) => Zeroizing::new(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return DeviceFileState::Missing;
         }
@@ -229,27 +101,6 @@ pub fn load_stored_device(data_dir: &Path) -> DeviceFileState {
     DeviceFileState::Loaded(stored)
 }
 
-/// Whether `connect` must persist the effective secret after the ownership
-/// proof was accepted.
-///
-/// A `Rotated` secret is new and must replace the file once proven; a
-/// `Stored` secret only needs a write when the paired device identity
-/// changed (the Host forgot the device and issued a fresh key), so a normal
-/// reconnect never rewrites the file. `Missing` has nothing to persist.
-#[cfg(any(unix, windows, test))]
-#[must_use]
-pub(crate) fn must_persist_after_acceptance(
-    source: SecretSource,
-    stored_device: Option<DeviceWireId>,
-    paired_device: DeviceWireId,
-) -> bool {
-    match source {
-        SecretSource::Rotated => true,
-        SecretSource::Stored => stored_device != Some(paired_device),
-        SecretSource::Missing => false,
-    }
-}
-
 /// Atomically replaces the device file: the new document is staged to an
 /// owner-only temp in the same directory, synced, and renamed over the
 /// target, so a crash or write failure leaves either the old or the new
@@ -258,11 +109,12 @@ pub(crate) fn must_persist_after_acceptance(
 /// path.
 ///
 /// Callers persist only after the Host accepted the ownership proof, so a
-/// failed bootstrap attempt never replaces a working file.
+/// failed pairing attempt never replaces a working file.
 pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), ClientError> {
     let path = device_file_path(data_dir);
-    let bytes = serde_json::to_vec(device)
-        .map_err(|error| ClientError::Transport(format!("client device encode failed: {error}")))?;
+    let bytes = Zeroizing::new(serde_json::to_vec(device).map_err(|error| {
+        ClientError::Transport(format!("client device encode failed: {error}"))
+    })?);
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         Some(_) | None => PathBuf::from("."),
@@ -313,68 +165,12 @@ fn store_error(error: &std::io::Error) -> ClientError {
     ClientError::Transport(format!("client device store failed: {}", error.kind()))
 }
 
-/// How [`resolve_device_secret`] derived the effective pairing secret; the
-/// tri-state exists so callers know whether the file must be overwritten.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecretSource {
-    /// The stored file secret is effective (no environment bootstrap set).
-    Stored,
-    /// The environment bootstrap is effective (it differs from or the file
-    /// lacks a secret); the caller must persist it over the file.
-    Rotated,
-    /// Neither side holds a secret; provisioning guidance applies.
-    Missing,
-}
-
-/// A set, non-blank environment value rotates: it wins over a differing or
-/// absent file secret (`Rotated`, and the caller overwrites the file); an
-/// environment value equal to the file secret is not a rotation (`Stored`);
-/// with no environment value the file secret wins (`Stored`); with neither
-/// side holding a secret there is nothing to use (`Missing`).
-///
-/// Blank inputs count as absent on both sides (a blank key proves nothing).
-/// The caller reads the real environment through [`read_bootstrap_secret`]
-/// and passes the value in, keeping this decision pure and testable without
-/// environment mutation.
-#[must_use]
-pub fn resolve_device_secret(
-    file_secret: Option<String>,
-    env_secret: Option<String>,
-) -> (Option<String>, SecretSource) {
-    let file = file_secret.filter(|secret| !secret.is_empty());
-    let env = env_secret.filter(|secret| !secret.is_empty());
-    match (file, env) {
-        (Some(file_value), Some(env_value)) => {
-            if env_value == file_value {
-                (Some(file_value), SecretSource::Stored)
-            } else {
-                (Some(env_value), SecretSource::Rotated)
-            }
-        }
-        (Some(file_value), None) => (Some(file_value), SecretSource::Stored),
-        (None, Some(env_value)) => (Some(env_value), SecretSource::Rotated),
-        (None, None) => (None, SecretSource::Missing),
-    }
-}
-
-/// The single environment reader in the crate; callers pass the result into
-/// [`resolve_device_secret`]. Blank values count as absent, and the value is
-/// never logged.
-#[must_use]
-pub fn read_bootstrap_secret() -> Option<String> {
-    std::env::var(BOOTSTRAP_SECRET_ENV)
-        .ok()
-        .filter(|secret| !secret.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use ene_api::v1::refs::DeviceWireId;
 
     use super::{
-        DeviceFileState, SecretSource, StoredDevice, clear_pending_id, device_file_path,
-        load_pending_id, load_stored_device, must_persist_after_acceptance, resolve_device_secret,
-        store_device, store_pending_id,
+        DeviceFileState, StoredDevice, device_file_path, load_stored_device, store_device,
     };
 
     /// Unique per process and test, so parallel tests never share a device
@@ -487,32 +283,6 @@ mod tests {
             "a blank secret cannot prove anything and is degraded state"
         );
         remove_dir(&dir);
-    }
-
-    #[test]
-    fn rotations_and_identity_changes_need_a_post_acceptance_write() {
-        let paired = stored().device_id;
-        let other = DeviceWireId(uuid::Uuid::from_u128(2));
-        assert!(
-            must_persist_after_acceptance(SecretSource::Rotated, Some(paired), paired),
-            "a rotated secret must be persisted once proven"
-        );
-        assert!(
-            must_persist_after_acceptance(SecretSource::Rotated, None, paired),
-            "a first provision must be persisted once proven"
-        );
-        assert!(
-            !must_persist_after_acceptance(SecretSource::Stored, Some(paired), paired),
-            "a normal reconnect must not rewrite the file"
-        );
-        assert!(
-            must_persist_after_acceptance(SecretSource::Stored, Some(other), paired),
-            "a changed device identity must be persisted"
-        );
-        assert!(
-            !must_persist_after_acceptance(SecretSource::Missing, None, paired),
-            "nothing is persisted when no secret exists"
-        );
     }
 
     /// A staging failure (here: the parent directory refuses creation) must
@@ -635,125 +405,6 @@ mod tests {
         assert!(
             rendered.contains("StoredDevice"),
             "stored Debug must name the type: {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn pending_id_roundtrips_and_clears() {
-        let dir = scratch_dir("pending-roundtrip");
-        assert!(
-            load_pending_id(&dir).is_none(),
-            "no pending file means a new request"
-        );
-        let stored = store_pending_id(&dir, "pending-id-1");
-        assert!(stored.is_ok(), "storing must succeed: {stored:?}");
-        assert!(
-            load_pending_id(&dir) == Some(String::from("pending-id-1")),
-            "the poll id must load back for the post-approval run"
-        );
-        let replaced = store_pending_id(&dir, "pending-id-2");
-        assert!(replaced.is_ok(), "re-storing must succeed");
-        assert!(
-            load_pending_id(&dir) == Some(String::from("pending-id-2")),
-            "a stale poll converges on the fresh id"
-        );
-        clear_pending_id(&dir);
-        assert!(
-            load_pending_id(&dir).is_none(),
-            "a denial forgets the dead id so the next run opens a new request"
-        );
-        clear_pending_id(&dir);
-        remove_dir(&dir);
-    }
-
-    #[test]
-    fn pending_file_is_transient_never_degraded_state() {
-        let dir = scratch_dir("pending-transient");
-        // Unlike the trust-bearing device file, the pending progress file is
-        // a lookup key: anything unreadable simply opens a new request.
-        assert!(
-            load_pending_id(&dir).is_none(),
-            "a missing file is a new request"
-        );
-        let written = std::fs::write(super::pending_file_path(&dir), b"{not json");
-        assert!(written.is_ok(), "the fixture must write");
-        assert!(
-            load_pending_id(&dir) == Some(String::from("{not json")),
-            "an unknown id converges Host-side instead of failing closed"
-        );
-        let blanked = std::fs::write(super::pending_file_path(&dir), b"  \n");
-        assert!(blanked.is_ok(), "the blank fixture must write");
-        assert!(
-            load_pending_id(&dir).is_none(),
-            "a blank file is a new request"
-        );
-        remove_dir(&dir);
-    }
-
-    #[test]
-    fn resolver_keeps_the_file_without_env() {
-        assert!(
-            resolve_device_secret(Some(String::from("file-secret")), None)
-                == (Some(String::from("file-secret")), SecretSource::Stored),
-            "the file alone wins unchanged"
-        );
-        assert!(
-            resolve_device_secret(Some(String::from("file-secret")), Some(String::new()))
-                == (Some(String::from("file-secret")), SecretSource::Stored),
-            "a blank env never displaces the file"
-        );
-    }
-
-    #[test]
-    fn resolver_rotates_on_a_differing_env_secret() {
-        assert!(
-            resolve_device_secret(
-                Some(String::from("file-secret")),
-                Some(String::from("env-secret")),
-            ) == (Some(String::from("env-secret")), SecretSource::Rotated),
-            "a differing env value rotates over the file"
-        );
-        assert!(
-            resolve_device_secret(None, Some(String::from("env-secret")))
-                == (Some(String::from("env-secret")), SecretSource::Rotated),
-            "the env bootstrap applies when the file lacks a secret"
-        );
-        assert!(
-            resolve_device_secret(Some(String::new()), Some(String::from("env-secret")))
-                == (Some(String::from("env-secret")), SecretSource::Rotated),
-            "a blank file secret counts as lacking, so env rotates"
-        );
-    }
-
-    #[test]
-    fn resolver_treats_equal_secrets_as_stored() {
-        assert!(
-            resolve_device_secret(
-                Some(String::from("same-secret")),
-                Some(String::from("same-secret")),
-            ) == (Some(String::from("same-secret")), SecretSource::Stored),
-            "an equal env value is not a rotation"
-        );
-    }
-
-    #[test]
-    fn resolver_reports_missing_when_neither_side_holds_a_secret() {
-        assert!(
-            resolve_device_secret(None, None) == (None, SecretSource::Missing),
-            "no secret anywhere means the approve-and-provision path"
-        );
-        assert!(
-            resolve_device_secret(None, Some(String::new())) == (None, SecretSource::Missing),
-            "a blank env secret counts as absent"
-        );
-        assert!(
-            resolve_device_secret(Some(String::new()), None) == (None, SecretSource::Missing),
-            "a blank file secret counts as absent"
-        );
-        assert!(
-            resolve_device_secret(Some(String::new()), Some(String::new()))
-                == (None, SecretSource::Missing),
-            "blank on both sides is still missing"
         );
     }
 }

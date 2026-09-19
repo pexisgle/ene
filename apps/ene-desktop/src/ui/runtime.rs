@@ -8,9 +8,8 @@ use ene_api::v1::management::{ManagementOutcome, ManagementViewRequest};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
 use ene_api::v1::round::{HistoryItem, PresentationStatus};
-use ene_client::Client;
+use ene_client::{Client, PendingPairingClient};
 use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
-use zeroize::Zeroize as _;
 
 use crate::body_supervise::{BodyStatus, BodySupervisor};
 use crate::control::ConfirmationClient;
@@ -37,6 +36,7 @@ pub struct DesktopRuntime {
     composer: Composer,
     secret: SecretIntake,
     client: Option<Client>,
+    pending_pairing: Option<PendingPairingClient>,
     control: Option<ConfirmationClient>,
     timeline: Vec<super::presentation::Message>,
     surface_erasure: Option<super::presentation::SurfaceErasure>,
@@ -72,6 +72,7 @@ impl DesktopRuntime {
             composer: Composer::default(),
             secret: SecretIntake::new(),
             client: None,
+            pending_pairing: None,
             control: None,
             timeline: Vec::new(),
             surface_erasure: None,
@@ -292,8 +293,10 @@ impl DesktopRuntime {
                 Ok(())
             }
             session::DesktopConnect::PendingOwnerConfirmation(pending) => {
+                let pending_id = pending.pending_id().to_owned();
                 let seat = self.require_confirmation_mut()?;
-                seat.request_device_approve(&pending).await?;
+                seat.request_device_approve(&pending_id).await?;
+                self.pending_pairing = Some(pending);
                 self.page = Page::Confirm;
                 Ok(())
             }
@@ -422,22 +425,14 @@ impl DesktopRuntime {
         };
         self.secret.cancel();
         match &reply {
-            FromConfirmation::Outcome(ControlOutcome::DeviceApproved {
-                pairing_secret, ..
-            }) => {
-                let mut secret = pairing_secret.clone().into_inner();
-                match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR, Some(secret.clone()))
-                    .await
-                {
-                    Ok(client) => {
-                        self.adopt_client(client);
-                    }
-                    Err(error) => {
-                        secret.zeroize();
-                        return Err(DesktopError::Client(error));
-                    }
-                }
-                secret.zeroize();
+            FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {
+                let pending = self.pending_pairing.take().ok_or_else(|| {
+                    DesktopError::Protocol(String::from(
+                        "device approval has no live originating pairing connection",
+                    ))
+                })?;
+                let client = pending.complete().await.map_err(DesktopError::Client)?;
+                self.adopt_client(client);
                 self.page = Page::Wizard;
             }
             FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {
@@ -455,6 +450,7 @@ impl DesktopRuntime {
                 // Owner's surface continues to the completion that follows.
             }
             FromConfirmation::DeniedByBoundary => {
+                self.pending_pairing = None;
                 self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
@@ -465,6 +461,7 @@ impl DesktopRuntime {
                 | ControlOutcome::Rejected { .. },
             )
             | FromConfirmation::Unavailable => {
+                self.pending_pairing = None;
                 self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
@@ -605,7 +602,7 @@ impl DesktopRuntime {
         self.tasks.reset_connection_state();
         let mut attempts = 0_u8;
         let client = loop {
-            match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR, None).await {
+            match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR).await {
                 Ok(client) => break client,
                 Err(ene_client::error::ClientError::Transport(error)) => {
                     attempts = attempts.saturating_add(1);

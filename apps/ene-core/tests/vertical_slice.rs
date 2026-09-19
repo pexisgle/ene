@@ -4,8 +4,8 @@
 //! Host orchestration; only the provider HTTP transport is fake. Covers
 //! cross-process pairing approval (an INDEPENDENT approval context sharing
 //! the file device-auth store), the full challenge/proof handshake, setup,
-//! rounds with ordered streaming, restart without re-approval, rotation,
-//! tampering, and untrusted-peer denial.
+//! rounds with ordered streaming, restart without re-approval, lost-origin
+//! recovery, tampering, and untrusted-peer denial.
 //!
 //! Unix-only: these production-path tests drive the Unix socket listener.
 //! The Windows named-pipe listener shares the same handshake and phase path;
@@ -107,15 +107,11 @@ async fn dialogue_and_learning_calls_share_one_ticket_accounting_path() {
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
 
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
+    let pending = begin_pairing(&dir).await.expect("first pairing must pend");
+    let mut client = approve_and_complete(pending, &handle)
+        .await
+        .expect("approval must pair");
     let approver = open_host(&dir).await.unwrap();
-    let provisioned = approve_and_provision(&dir, &approver).await;
-    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
-    let mut client = stage3_client(&dir).await;
     let setup = setup_flow(&mut client, &approver).await;
     assert!(setup.is_ok(), "setup must complete: {setup:?}");
     drop(client);
@@ -239,42 +235,36 @@ async fn view_mark(client: &mut Client) -> Result<String, String> {
     Ok(view.mark.0.clone())
 }
 
-/// Approves through an INDEPENDENT handle (simulating the separate
-/// `approve-device` process) and provisions the device file from the
-/// one-time secret, like the operator channel would. Returns the approved
-/// pending id so callers can re-approve it (rotation).
-async fn approve_and_provision(
+async fn begin_pairing(
     dir: &std::path::Path,
-    approver: &HostHandle,
-) -> Result<String, String> {
-    let pendings = approver
-        .pending_devices()
+) -> Result<ene_ctl::client::PendingPairingClient, String> {
+    match Client::begin_connect(dir, DESCRIPTOR, "test")
         .await
-        .map_err(|error| format!("pendings must list: {error:?}"))?;
-    let pending = pendings
-        .first()
-        .ok_or_else(|| String::from("a pending must list"))?;
-    let pending_id = pending.pending_id.clone();
-    let approval = approver
+        .map_err(|error| format!("pairing connect failed: {error:?}"))?
+    {
+        ene_ctl::client::ConnectProgress::Pending(pending) => Ok(pending),
+        ene_ctl::client::ConnectProgress::Connected(_) => {
+            Err(String::from("first pairing unexpectedly authenticated"))
+        }
+    }
+}
+
+async fn approve_and_complete(
+    pending: ene_ctl::client::PendingPairingClient,
+    approver: &HostHandle,
+) -> Result<Client, String> {
+    let pending_id = pending.pending_id().to_owned();
+    let approved = approver
         .approve_device(&pending_id)
         .await
         .map_err(|error| format!("approve failed: {error:?}"))?;
-    let Some((record, secret)) = approval else {
+    if approved.is_none() {
         return Err(String::from("approval must pair"));
-    };
-    store_device(
-        dir,
-        &StoredDevice::new(
-            record
-                .wire
-                .parse()
-                .map(DeviceWireId)
-                .map_err(|error| format!("opaque wire must stay UUID text: {error:?}"))?,
-            secret,
-        ),
-    )
-    .map_err(|error| format!("device file must store: {error:?}"))?;
-    Ok(pending_id)
+    }
+    pending
+        .complete()
+        .await
+        .map_err(|error| format!("provision completion failed: {error:?}"))
 }
 
 async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), String> {
@@ -492,19 +482,11 @@ async fn production_path_setup_to_restart() {
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
 
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
+    let pending = begin_pairing(&dir).await.expect("first pairing must pend");
+    let mut client = approve_and_complete(pending, &handle)
+        .await
+        .expect("approval must pair");
     let approver = open_host(&dir).await.unwrap();
-    let provisioned = approve_and_provision(&dir, &approver).await;
-    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
-
-    let connected = Client::connect(&dir, DESCRIPTOR, "test").await;
-    let connected_ok = connected.is_ok();
-    assert!(connected_ok, "second connect must succeed");
-    let mut client = connected.unwrap();
 
     let sections = view_sections(&mut client).await;
     let sections = sections.unwrap();
@@ -730,36 +712,34 @@ async fn binaries_drive_pairing_setup_and_views() {
         "socket path must not double-append"
     );
 
-    let status = run_cli(
-        &ctl,
-        &["--config", &config, "status"],
-        &[],
-        Duration::from_secs(10),
-    )
-    .await;
-    assert!(
-        matches!(status, Some((2, _, _))),
-        "pre-pairing status must pend pairing, got {status:?}"
-    );
-
-    let mut list_pending = std::process::Command::new(&core);
-    list_pending.args(["approve-device", "--config", &config]);
-    list_pending.stdout(std::process::Stdio::piped());
-    list_pending.stderr(std::process::Stdio::null());
-    let listed = list_pending.output();
-    let listed = listed.unwrap();
-    assert!(listed.status.success(), "listing pendings must exit 0");
-    let pending_out = String::from_utf8_lossy(&listed.stdout).into_owned();
-    let pending_id = pending_out
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .and_then(|line| line.split_whitespace().next().map(str::to_string));
-    assert!(
-        pending_id.is_some(),
-        "one pending ID must list, got {pending_out:?}"
-    );
-    let pending_id = pending_id.unwrap();
+    let mut status_command = tokio::process::Command::new(&ctl);
+    status_command
+        .args(["--config", &config, "status"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let status_process = status_command.spawn().expect("status client must start");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let pending_id = loop {
+        let listed = std::process::Command::new(&core)
+            .args(["approve-device", "--config", &config])
+            .output()
+            .expect("listing pendings must run");
+        assert!(listed.status.success(), "listing pendings must exit 0");
+        let pending_out = String::from_utf8_lossy(&listed.stdout);
+        if let Some(id) = pending_out
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .and_then(|line| line.split_whitespace().next().map(str::to_string))
+        {
+            break id;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pending never listed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     // The console asks as a requester; the Owner confirms on the private
     // channel the Host issued to its GUI, and the one-time provision comes
     // back there rather than to the console. The list names opaque pending IDs
@@ -780,15 +760,10 @@ async fn binaries_drive_pairing_setup_and_views() {
     let (session_id, nonce) = read_challenge(&gui, ControlOp::DeviceApprove).await;
     owner_send(&gui, ToConfirmation::SessionComplete { session_id, nonce }).await;
     let reply = owner_recv(&gui).await;
-    let FromConfirmation::Outcome(ene_local_control::ControlOutcome::DeviceApproved {
-        pairing_secret,
-        ..
-    }) = reply
+    let FromConfirmation::Outcome(ene_local_control::ControlOutcome::DeviceApproved { .. }) = reply
     else {
         panic!("the Owner's confirmation must approve the pending, got {reply:?}");
     };
-    let secret = pairing_secret.expose().to_string();
-    assert!(!secret.trim().is_empty(), "secret must be non-blank");
     let approved = approve
         .wait_with_output()
         .await
@@ -799,18 +774,18 @@ async fn binaries_drive_pairing_setup_and_views() {
         String::from_utf8_lossy(&approved.stderr)
     );
     let shown = String::from_utf8_lossy(&approved.stdout).into_owned();
-    assert!(
-        !shown.contains(&secret),
-        "the requester's outcome must not carry the pairing secret: {shown:?}"
-    );
+    assert!(!shown.contains("pairing_secret"));
 
-    let status = run_cli(
-        &ctl,
-        &["--config", &config, "status"],
-        &[("ENE_PAIRING_SECRET", secret.as_str())],
-        Duration::from_secs(10),
-    )
-    .await;
+    let status_output =
+        tokio::time::timeout(Duration::from_secs(10), status_process.wait_with_output())
+            .await
+            .expect("originating status client must finish")
+            .expect("status output must collect");
+    let status = Some((
+        status_output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&status_output.stdout).into_owned(),
+        String::from_utf8_lossy(&status_output.stderr).into_owned(),
+    ));
     assert!(
         matches!(status, Some((0, _, _))),
         "paired status must exit 0, got {status:?}"
@@ -966,8 +941,7 @@ async fn binaries_drive_pairing_setup_and_views() {
 
 #[tokio::test]
 async fn tampered_secret_cannot_authenticate() {
-    let temp = tempfile::TempDir::new();
-    let temp = temp.unwrap();
+    let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let handle = open_host(&dir).await.unwrap();
     let server = tokio::spawn(conn::run(
@@ -977,36 +951,31 @@ async fn tampered_secret_cannot_authenticate() {
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind");
 
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
-    let approver = open_host(&dir).await.unwrap();
-    let approval = {
-        let pendings = approver.pending_devices().await.unwrap();
-        let pending = pendings.first().expect("a pending must list");
-        approver.approve_device(&pending.pending_id).await
+    let pending = begin_pairing(&dir).await.expect("first pairing must pend");
+    let client = approve_and_complete(pending, &handle)
+        .await
+        .expect("approval must authenticate");
+    drop(client);
+    let stored = ene_ctl::device::load_stored_device(&dir);
+    let ene_ctl::device::DeviceFileState::Loaded(stored) = stored else {
+        panic!("accepted pairing must persist a device file");
     };
-    let (record, _secret) = approval.unwrap().unwrap();
-    let wire = record.wire.parse().map(DeviceWireId).unwrap();
-    let stored = store_device(
+    store_device(
         &dir,
-        &StoredDevice::new(wire, String::from("wrong-secret-not-from-approve")),
-    );
-    assert!(stored.is_ok(), "test device file must store");
+        &StoredDevice::new(
+            stored.device_id,
+            String::from("wrong-secret-not-from-approve"),
+        ),
+    )
+    .expect("test device file must store");
     let tampered = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(tampered, Err(ClientError::ServerOutcome(_))),
-        "tampered secret must not authenticate"
-    );
+    assert!(matches!(tampered, Err(ClientError::ServerOutcome(_))));
     server.abort();
 }
 
 #[tokio::test]
-async fn rotation_requires_reprovisioning() {
-    let temp = tempfile::TempDir::new();
-    let temp = temp.unwrap();
+async fn lost_origin_is_not_redelivered_and_fresh_pairing_succeeds() {
+    let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let handle = open_host(&dir).await.unwrap();
     let server = tokio::spawn(conn::run(
@@ -1016,31 +985,34 @@ async fn rotation_requires_reprovisioning() {
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind");
 
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
-    let approver = open_host(&dir).await.unwrap();
-    let provisioned = approve_and_provision(&dir, &approver).await;
-    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
-    let pending_id = provisioned.unwrap();
-    let connected = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(connected.is_ok(), "provisioned connect must succeed");
-    drop(connected);
+    let lost = begin_pairing(&dir).await.expect("first pairing must pend");
+    let lost_id = lost.pending_id().to_owned();
+    drop(lost);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let still_pending = handle
+            .pending_devices()
+            .await
+            .unwrap()
+            .iter()
+            .any(|entry| entry.pending_id == lost_id);
+        if !still_pending {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "disconnect cleanup timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(handle.approve_device(&lost_id).await.unwrap().is_none());
 
-    // Re-approving the same pending rotates the secret but keeps the device:
-    // the old file no longer proves ownership.
-    let reapproved = approver.approve_device(&pending_id).await;
-    assert!(
-        reapproved.unwrap().is_some(),
-        "re-approval returns the existing record and a fresh secret"
-    );
-    let stale_file = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(stale_file, Err(ClientError::ServerOutcome(_))),
-        "rotated secret must invalidate the old file"
-    );
+    let fresh = begin_pairing(&dir).await.expect("fresh pairing must pend");
+    assert_ne!(fresh.pending_id(), lost_id);
+    let client = approve_and_complete(fresh, &handle)
+        .await
+        .expect("fresh origin must authenticate");
+    drop(client);
     server.abort();
 }
 
@@ -1291,47 +1263,40 @@ async fn pair_via_binaries(
     core: &std::path::Path,
     config: &str,
     serving: &ServingHost,
-) -> Option<String> {
-    let status = run_cli(
-        ctl,
-        &["--config", config, "status"],
-        &[],
-        Duration::from_secs(10),
-    )
-    .await;
-    assert!(
-        matches!(status, Some((2, _, _))),
-        "pre-pairing status must pend pairing, got {status:?}"
-    );
-    // The real client pairs under its platform descriptor, so approve
-    // whatever it actually requested (like the operator channel would): the
-    // list names the opaque pending ID first.
-    let listed = std::process::Command::new(core)
-        .args(["approve-device", "--config", config])
+) -> Option<()> {
+    let mut status_command = tokio::process::Command::new(ctl);
+    status_command
+        .args(["--config", config, "status"])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok();
-    let pending_id = listed
-        .as_ref()
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-        .and_then(|out| {
-            out.lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .and_then(|line| line.split_whitespace().next().map(str::to_string))
-        });
-    let pending_id = pending_id?;
-    // The console asks as a requester; the Owner confirms on the private
-    // channel the Host issued to its GUI, and the one-time provision comes
-    // back there rather than to the console.
+        .stderr(std::process::Stdio::piped());
+    let status_process = status_command.spawn().ok()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let pending_id = loop {
+        let listed = std::process::Command::new(core)
+            .args(["approve-device", "--config", config])
+            .output()
+            .ok()?;
+        let out = String::from_utf8_lossy(&listed.stdout);
+        if let Some(id) = out
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .and_then(|line| line.split_whitespace().next().map(str::to_string))
+        {
+            break id;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     let gui = host_control::seat_test_gui_for_tests(serving.handle()).ok()?;
     let mut approve = tokio::process::Command::new(core);
     approve
         .args([
             "approve-device",
             "--pending",
-            pending_id.as_str(),
+            &pending_id,
             "--config",
             config,
         ])
@@ -1341,38 +1306,22 @@ async fn pair_via_binaries(
     let (session_id, nonce) = read_challenge(&gui, ControlOp::DeviceApprove).await;
     owner_send(&gui, ToConfirmation::SessionComplete { session_id, nonce }).await;
     let reply = owner_recv(&gui).await;
-    let FromConfirmation::Outcome(ene_local_control::ControlOutcome::DeviceApproved {
-        pairing_secret,
-        ..
-    }) = reply
-    else {
-        panic!("the Owner's confirmation must approve the pending, got {reply:?}");
-    };
-    let secret = pairing_secret.expose().to_string();
-    assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    assert!(matches!(
+        reply,
+        FromConfirmation::Outcome(ene_local_control::ControlOutcome::DeviceApproved { .. })
+    ));
     let approved = approve.wait_with_output().await.ok()?;
+    assert!(approved.status.success());
+    assert!(!String::from_utf8_lossy(&approved.stdout).contains("pairing_secret"));
+    let status = tokio::time::timeout(Duration::from_secs(10), status_process.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
     assert!(
-        approved.status.success(),
-        "approve-device must exit 0: {}",
-        String::from_utf8_lossy(&approved.stderr)
+        status.status.success(),
+        "originating client must authenticate"
     );
-    let shown = String::from_utf8_lossy(&approved.stdout).into_owned();
-    assert!(
-        !shown.contains(&secret),
-        "the requester's outcome must not carry the pairing secret: {shown:?}"
-    );
-    let status = run_cli(
-        ctl,
-        &["--config", config, "status"],
-        &[("ENE_PAIRING_SECRET", secret.as_str())],
-        Duration::from_secs(10),
-    )
-    .await;
-    assert!(
-        matches!(status, Some((0, _, _))),
-        "paired status must exit 0, got {status:?}"
-    );
-    Some(secret)
+    Some(())
 }
 
 /// The client device file is commit-on-acceptance and atomically replaced:
@@ -1387,18 +1336,15 @@ async fn provision_paired_device(
     dir: &std::path::Path,
     descriptor: &str,
 ) -> (DeviceWireId, String) {
-    use ene_credential::{DevicePairingRepository as _, DevicePairingStatus, FileDeviceAuthStore};
+    use ene_credential::{DevicePairingRepository as _, FileDeviceAuthStore};
     let store = Store::open(&dir.join("app.db"))
         .await
         .expect("the store must open offline");
     let origin = String::from("fixture-origin");
     let pending = store
-        .request_pairing(descriptor.to_string(), origin.clone(), None)
+        .request_pairing(descriptor.to_string(), origin.clone())
         .await
         .expect("a pairing request must record");
-    let DevicePairingStatus::Pending { pending } = pending else {
-        panic!("a fresh request must pend");
-    };
     let (record, secret) = store
         .approve_pending(&pending.pending_id, &origin)
         .await
@@ -1406,9 +1352,10 @@ async fn provision_paired_device(
         .expect("the pending must pair");
     let auth = FileDeviceAuthStore::open(&dir.join("device-auth.json"))
         .expect("the device-auth store must open");
-    auth.save_secret(&record.id, &record.descriptor, &secret)
+    auth.save_secret(&record.id, &record.descriptor, secret.expose_secret())
         .expect("the pairing secret must be custodied");
     let wire = record.wire.parse().expect("the wire id must be UUID text");
+    let secret = secret.into_inner();
     store_device(dir, &StoredDevice::new(DeviceWireId(wire), secret.clone()))
         .expect("the client device file must store");
     (DeviceWireId(wire), secret)
@@ -1450,19 +1397,15 @@ async fn provision_credential(dir: &std::path::Path, provider: &str, label: &str
         "the approval makes the pair usable"
     );
 }
-/// a wrong bootstrap secret must not replace a working file, a malformed
-/// file is reported as degraded state instead of the first-run path, and a
-/// proven secret repairs it.
+/// A malformed credential file is never repaired through an out-of-band
+/// secret; deleting it and completing a fresh live pairing publishes a new
+/// file only after accepted authentication.
 #[tokio::test]
 async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
-    let temp = tempfile::TempDir::new();
-    let temp = temp.unwrap();
+    let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let binaries = (workspace_binary("ene-ctl"), workspace_binary("ene-core"));
-    assert!(
-        binaries.0.is_some() && binaries.1.is_some(),
-        "both binaries must be built"
-    );
+    assert!(binaries.0.is_some() && binaries.1.is_some());
     let (Some(ctl), Some(core)) = binaries else {
         return;
     };
@@ -1471,51 +1414,24 @@ async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
     };
     let mut serving = ServingHost::start(&dir, Arc::new(fake_transport())).await;
 
-    let Some(secret) = pair_via_binaries(&ctl, &core, &config, &serving).await else {
-        return;
-    };
+    assert!(
+        pair_via_binaries(&ctl, &core, &config, &serving)
+            .await
+            .is_some()
+    );
     let device_file = ene_ctl::device::device_file_path(&dir);
     let provisioned = std::fs::read(&device_file).unwrap_or_default();
-    assert!(
-        !provisioned.is_empty(),
-        "provisioning must write the device file"
-    );
-
-    // A wrong bootstrap secret is rejected at authentication, and the
-    // working file survives byte-for-byte.
-    let wrong = run_cli(
-        &ctl,
-        &["--config", &config, "status"],
-        &[("ENE_PAIRING_SECRET", "wrong-bootstrap-secret")],
-        Duration::from_secs(10),
-    )
-    .await;
-    assert!(
-        matches!(wrong, Some((2, _, _))),
-        "a rejected rotation must be a retryable outcome, got {wrong:?}"
-    );
-    assert!(
-        std::fs::read(&device_file).unwrap_or_default() == provisioned,
-        "a rejected bootstrap must not replace the working device file"
-    );
-
-    // The file still holds a usable secret.
-    let still_valid = run_cli(
+    assert!(!provisioned.is_empty());
+    let valid = run_cli(
         &ctl,
         &["--config", &config, "status"],
         &[],
         Duration::from_secs(10),
     )
     .await;
-    assert!(
-        matches!(still_valid, Some((0, _, _))),
-        "a rejected rotation must not poison the file, got {still_valid:?}"
-    );
+    assert!(matches!(valid, Some((0, _, _))));
 
-    // A malformed file is degraded state: the client reports recovery
-    // guidance instead of taking the first-run path silently.
-    let wrote = std::fs::write(&device_file, b"{not json");
-    assert!(wrote.is_ok(), "the malformed fixture must write");
+    std::fs::write(&device_file, b"{not json").expect("malformed fixture must write");
     let malformed = run_cli(
         &ctl,
         &["--config", &config, "status"],
@@ -1524,43 +1440,26 @@ async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
     )
     .await;
     let Some((2, _, stderr)) = malformed else {
-        panic!("a malformed device file must be a retryable outcome");
+        panic!("malformed file must fail");
     };
-    assert!(
-        stderr.contains("unreadable or malformed"),
-        "the degraded state must be named, got {stderr:?}"
-    );
-    assert!(
-        stderr.contains("ENE_PAIRING_SECRET"),
-        "the guidance must name the provisioning inlet, got {stderr:?}"
+    assert!(stderr.contains("unreadable or malformed"));
+    assert!(stderr.contains("fresh pairing request"));
+    assert_eq!(
+        std::fs::read(&device_file).unwrap_or_default(),
+        b"{not json"
     );
 
-    // A proven secret repairs the file only after acceptance.
-    let repaired = run_cli(
-        &ctl,
-        &["--config", &config, "status"],
-        &[("ENE_PAIRING_SECRET", secret.as_str())],
-        Duration::from_secs(10),
-    )
-    .await;
+    std::fs::remove_file(&device_file).expect("owner reset must remove degraded file");
     assert!(
-        matches!(repaired, Some((0, _, _))),
-        "a proven bootstrap must repair the file, got {repaired:?}"
+        pair_via_binaries(&ctl, &core, &config, &serving)
+            .await
+            .is_some()
     );
-    assert!(
-        std::fs::read(&device_file).unwrap_or_default() != b"{not json",
-        "repair must publish a complete document"
-    );
-    let after_repair = run_cli(
-        &ctl,
-        &["--config", &config, "status"],
-        &[],
-        Duration::from_secs(10),
-    )
-    .await;
-    assert!(
-        matches!(after_repair, Some((0, _, _))),
-        "the repaired file must authenticate, got {after_repair:?}"
+    let repaired = std::fs::read(&device_file).unwrap_or_default();
+    assert!(!repaired.is_empty());
+    assert_ne!(
+        repaired, provisioned,
+        "fresh pairing must publish new credentials"
     );
     serving.stop().await;
 }
@@ -2042,15 +1941,11 @@ async fn stage3_conversation_formation_restart_and_recall() {
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
 
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
+    let pending = begin_pairing(&dir).await.expect("first pairing must pend");
+    let mut client = approve_and_complete(pending, &handle)
+        .await
+        .expect("approval must pair");
     let approver = open_host(&dir).await.unwrap();
-    let provisioned = approve_and_provision(&dir, &approver).await;
-    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
-    let mut client = stage3_client(&dir).await;
     let setup = setup_flow(&mut client, &approver).await;
     assert!(setup.is_ok(), "setup must complete: {setup:?}");
     drop(client);
@@ -2274,15 +2169,11 @@ async fn stage3_management_view_reaches_memories_beyond_the_first_page() {
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
 
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
+    let pending = begin_pairing(&dir).await.expect("first pairing must pend");
+    let mut client = approve_and_complete(pending, &handle)
+        .await
+        .expect("approval must pair");
     let approver = open_host(&dir).await.unwrap();
-    let provisioned = approve_and_provision(&dir, &approver).await;
-    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
-    let mut client = stage3_client(&dir).await;
     let setup = setup_flow(&mut client, &approver).await;
     assert!(setup.is_ok(), "setup must complete: {setup:?}");
     drop(client);

@@ -36,9 +36,8 @@ use ene_core::conn;
 use ene_core::host_control::{self, ControlClient};
 use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::{CredentialRef, MemoryCredentialStore};
-use ene_ctl::client::{Client, ClientError};
+use ene_ctl::client::{Client, ConnectProgress};
 use ene_ctl::cmds;
-use ene_ctl::device::{StoredDevice, store_device};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{
     ControlOp, ControlOutcome, DeletionOutcome, FromConfirmation, FromHost, RedactedSecret,
@@ -244,36 +243,6 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
     }
 }
 
-async fn approve_and_provision(dir: &Path, approver: &HostHandle) -> Result<(), String> {
-    let pendings = approver
-        .pending_devices()
-        .await
-        .map_err(|error| format!("pendings must list: {error:?}"))?;
-    let pending = pendings
-        .first()
-        .ok_or_else(|| String::from("a pending must list"))?;
-    let approval = approver
-        .approve_device(&pending.pending_id)
-        .await
-        .map_err(|error| format!("approve failed: {error:?}"))?;
-    let Some((record, secret)) = approval else {
-        return Err(String::from("approval must pair"));
-    };
-    store_device(
-        dir,
-        &StoredDevice::new(
-            record
-                .wire
-                .parse()
-                .map(ene_api::v1::refs::DeviceWireId)
-                .map_err(|error| format!("opaque wire must stay UUID text: {error:?}"))?,
-            secret,
-        ),
-    )
-    .map_err(|error| format!("device file must store: {error:?}"))?;
-    Ok(())
-}
-
 async fn view_mark(client: &mut Client) -> Result<String, String> {
     let answer = ask(
         client,
@@ -371,18 +340,22 @@ async fn serve_and_setup(
     let handle = open_host(&dir).await;
     let server = ServingTask::start(&dir, Arc::clone(&handle), transport);
     assert!(wait_for_control(&dir).await, "control listener must bind");
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
+    let progress = Client::begin_connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("first connection must reach pairing");
+    let ConnectProgress::Pending(pending) = progress else {
+        panic!("first pairing must pend");
+    };
+    let approved = handle
+        .approve_device(pending.pending_id())
+        .await
+        .expect("approval must succeed");
+    assert!(approved.is_some(), "approval must pair");
+    let mut client = pending
+        .complete()
+        .await
+        .expect("provision must authenticate");
     let approver = open_host(&dir).await;
-    approve_and_provision(&dir, &approver)
-        .await
-        .expect("approval must pair");
-    let mut client = Client::connect(&dir, DESCRIPTOR, "test")
-        .await
-        .expect("second connect must succeed");
     setup_flow(&mut client, &approver)
         .await
         .expect("setup must complete");
@@ -694,13 +667,13 @@ async fn a_new_spawned_gui_invalidates_the_previous_seats_sessions() {
 async fn serving_time_control_approve_and_credential_put() {
     let dir = tempfile::tempdir().expect("scratch");
     let (handle, server) = serve_control_only(dir.path()).await;
-    let pending = Client::connect(dir.path(), DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "pairing must pend so approve has a target"
-    );
-    let pendings = handle.pending_devices().await.expect("pendings");
-    let pending_id = pendings[0].pending_id.clone();
+    let progress = Client::begin_connect(dir.path(), DESCRIPTOR, "test")
+        .await
+        .expect("pairing must start");
+    let ConnectProgress::Pending(pending) = progress else {
+        panic!("pairing must pend so approve has a target");
+    };
+    let pending_id = pending.pending_id().to_owned();
 
     // The Host's own GUI holds the seat; the requester asks, and the Owner's
     // surface confirms. The requester never receives the pairing secret: it
@@ -727,19 +700,15 @@ async fn serving_time_control_approve_and_credential_put() {
     .expect("join")
     .expect("read")
     .expect("answer");
-    let FromConfirmation::Outcome(ControlOutcome::DeviceApproved { pairing_secret, .. }) = &answer
-    else {
+    let FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) = &answer else {
         panic!("expected DeviceApproved, got {answer:?}");
     };
-    assert!(
-        !pairing_secret.expose().is_empty(),
-        "the Owner's surface receives the one-time provision"
-    );
     let rendered = format!("{answer:?}");
     assert!(
-        !rendered.contains(pairing_secret.expose()),
-        "control outcome Debug must not show the provision: {rendered}"
+        !rendered.contains("pairing_secret"),
+        "control outcome must not contain a provision field: {rendered}"
     );
+    let _client = pending.complete().await.expect("origin receives provision");
     let state = await_applied(&mut requester, &request_id).await;
     match state {
         FromHost::RequestStatus { state, .. } => match state {
