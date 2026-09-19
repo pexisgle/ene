@@ -60,11 +60,10 @@ fn main() -> Result<(), DesktopError> {
         let ui = window.as_weak();
         tokio_runtime.spawn(async move {
             let mut desktop = runtime.lock().await;
-            match desktop.occupy_seat().await {
-                Ok(()) => match desktop.begin_pairing().await {
+            if let Ok(()) = desktop.occupy_seat().await {
+                match desktop.begin_pairing().await {
                     Ok(()) | Err(_) => {}
-                },
-                Err(_) => {}
+                }
             }
             push_snapshot(ui, desktop.snapshot());
         });
