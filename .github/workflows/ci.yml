@@ -52,7 +52,7 @@ jobs:
       - name: Build test fixture binaries
         run: cargo build --locked --bin ene-ctl --bin ene-core --bin ene-body
       - name: Run tests
-        run: cargo nextest run --locked --workspace --no-fail-fast --test-threads 8
+        run: cargo nextest run --locked --workspace --no-fail-fast
       - name: Build docs
         run: cargo doc --locked --workspace --no-deps
 
@@ -72,4 +72,4 @@ jobs:
       - name: Build test fixture binaries
         run: cargo build --locked --bin ene-ctl --bin ene-core --bin ene-body
       - name: Run tests
-        run: cargo nextest run --locked --workspace --no-fail-fast --test-threads 8
+        run: cargo nextest run --locked --workspace --no-fail-fast
