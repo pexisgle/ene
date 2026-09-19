@@ -310,13 +310,16 @@ pub(crate) struct HostTransientArrival {
     verified_generation: AtomicU64,
     publish: std::sync::Mutex<ArrivalPublishState>,
     last_classified: AtomicUsize,
+    last_direct_classified: AtomicUsize,
 }
 
 /// Fail-closed execution state for one incomplete canonical arrival publish.
 #[derive(Debug, Default)]
 struct ArrivalPublishState {
-    /// Classification of unfinished operations has not finished a complete
-    /// page-chain for the live remainder.
+    /// The bounded global unfinished-ops walk has not finished a complete
+    /// page-chain for the live remainder. This is not "every unfinished
+    /// deletion may be related": relatedness is `owed` plus a direct
+    /// per-operation classification at Finalizing.
     scan_incomplete: bool,
     /// Operations known to be related whose canonical publish has not
     /// succeeded. Blocks only those operations' finalizing.
@@ -338,6 +341,7 @@ impl Default for HostTransientArrival {
             verified_generation: AtomicU64::new(0),
             publish: std::sync::Mutex::new(ArrivalPublishState::default()),
             last_classified: AtomicUsize::new(0),
+            last_direct_classified: AtomicUsize::new(0),
         }
     }
 }
@@ -411,6 +415,16 @@ impl HostTransientArrival {
     pub(crate) fn last_classified(&self) -> usize {
         self.last_classified.load(Ordering::SeqCst)
     }
+
+    #[cfg(test)]
+    pub(crate) fn last_direct_classified(&self) -> usize {
+        self.last_direct_classified.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scan_incomplete(&self) -> bool {
+        crate::lock_unpoison(&self.publish).scan_incomplete
+    }
 }
 
 /// Process-local Learning-pin occupancy. Drop releases `inflight_pins`
@@ -472,6 +486,28 @@ async fn experience_covers_operation(
         }
     }
     Ok(false)
+}
+
+/// Publishes a related arrival for one operation. Success drops that
+/// identity from `owed`; failure marks it owed so a later drive retries.
+/// The global walk cursor is left unchanged: this is not a page of
+/// unfinished operations.
+async fn publish_current_related_arrival(
+    store: &Store,
+    arrival: &HostTransientArrival,
+    operation: DeletionOperationId,
+) {
+    match store
+        .note_host_transient_learning_arrival(vec![operation])
+        .await
+    {
+        Ok(_) => {
+            crate::lock_unpoison(&arrival.publish)
+                .owed
+                .remove(&operation);
+        }
+        Err(_) => arrival.mark_owed(operation),
+    }
 }
 
 /// One bounded page of operation-specific delayed-arrival publication.
@@ -550,12 +586,15 @@ pub(crate) async fn publish_owed_learning_arrivals(
 }
 
 /// Whether this operation's sealed completion must wait: a body-bearing pin,
-/// a known unpublished related arrival, an incomplete classification that
-/// cannot prove this operation is unrelated to the live remainder, or a
-/// queue generation that no longer matches the durable HostTransient
-/// verification *and* this operation is related to the live remainder.
+/// a known unpublished related arrival, or a live remainder that this
+/// operation cannot be proven unrelated to.
+///
+/// `scan_incomplete` means only that the bounded global walk has not
+/// finished. It does not block every unfinished deletion. Finalizing
+/// classifies *this* operation against the live remainder and, when related,
+/// publishes the canonical delayed-arrival for that identity alone.
 /// Unrelated enqueue may bump `mutation_generation` without blocking this
-/// operation.
+/// operation. A technical classification failure fail-closes only `current`.
 pub(crate) async fn unpublished_blocks_finalizing(
     store: &Store,
     arrival: &HostTransientArrival,
@@ -566,18 +605,23 @@ pub(crate) async fn unpublished_blocks_finalizing(
         return true;
     }
     if arrival.owes(current.operation) {
+        publish_current_related_arrival(store, arrival, current.operation).await;
         return true;
     }
-    if crate::lock_unpoison(&arrival.publish).scan_incomplete {
-        return true;
-    }
+    let scan_incomplete = crate::lock_unpoison(&arrival.publish).scan_incomplete;
     let (experiences, live_generation) = snapshot_learning_remainder(queue);
-    if experiences.is_empty() || live_generation == arrival.verified_generation() {
+    if experiences.is_empty() {
         return false;
     }
+    if !scan_incomplete && live_generation == arrival.verified_generation() {
+        return false;
+    }
+    arrival
+        .last_direct_classified
+        .fetch_add(1, Ordering::SeqCst);
     match experience_covers_operation(store, current, &experiences).await {
         Ok(true) => {
-            arrival.mark_owed(current.operation);
+            publish_current_related_arrival(store, arrival, current.operation).await;
             true
         }
         Ok(false) => false,
@@ -1533,10 +1577,11 @@ mod tests {
     use ene_credential::MemoryCredentialStore;
     use ene_learning::{ExperienceRole, ExperienceSourceKind, ExperienceTurn, SourceRangeRef};
     use ene_preservation::{
-        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, DemandLocalErasureCommand,
-        ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantCompletionStatus,
-        ParticipantErasureScope, ParticipantProgress, StartTargetedDeletionCommand,
-        StartTargetedDeletionOutcome,
+        DELETION_RECONCILIATION_PAGE_SIZE, DeletionFinalizationOutcome, DeletionOperationPhase,
+        DeletionPurpose, DeletionReconciliationOutcome, DeletionSearchMaterial,
+        DemandLocalErasureCommand, ParticipantCompletionFact, ParticipantCompletionOutcome,
+        ParticipantCompletionStatus, ParticipantErasureScope, ParticipantProgress,
+        StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
     };
     use ene_primitive::WallClockWithTz;
     use ene_store::HOST_TRANSIENT_ARRIVAL_PAGE;
@@ -1701,6 +1746,97 @@ mod tests {
             }
         }
         panic!("Targeted Deletion must converge after the arrival is collected");
+    }
+
+    fn queued_contains(handle: &HostHandle, needle: &str) -> bool {
+        crate::lock_unpoison(&handle.learning_queue)
+            .iter()
+            .any(|item| item.transcript[0].text.contains(needle))
+    }
+
+    async fn reconcile_until_complete(
+        handle: &HostHandle,
+        current: ene_preservation::DeletionOperationRef,
+    ) {
+        for _ in 0..16 {
+            match handle
+                .store
+                .reconcile_deletion_sources(current, DELETION_RECONCILIATION_PAGE_SIZE)
+                .await
+                .expect("reconciliation must read")
+            {
+                DeletionReconciliationOutcome::Complete
+                | DeletionReconciliationOutcome::Finalizing
+                | DeletionReconciliationOutcome::Completed => return,
+                DeletionReconciliationOutcome::Advanced => continue,
+                other => panic!("unexpected reconciliation outcome: {other:?}"),
+            }
+        }
+        panic!("covered-source reconciliation must finish");
+    }
+
+    /// Finalizes one operation through the production arrival gate without
+    /// demanding sibling operations. A full fan-out would collect a related
+    /// TARGET while proving an unrelated sibling can Complete.
+    async fn try_finalize_one_operation(
+        handle: &HostHandle,
+        current: ene_preservation::DeletionOperationRef,
+    ) -> DeletionOperationPhase {
+        reconcile_until_complete(handle, current).await;
+        let _gate = handle.host_transient_arrival.lock().await;
+        super::publish_owed_learning_arrivals(
+            &handle.store,
+            &handle.host_transient_arrival,
+            &handle.learning_queue,
+        )
+        .await;
+        if super::unpublished_blocks_finalizing(
+            &handle.store,
+            &handle.host_transient_arrival,
+            &handle.learning_queue,
+            current,
+        )
+        .await
+        {
+            return deletion_phase(handle, current.operation).await;
+        }
+        match handle
+            .store
+            .begin_deletion_finalizing(current)
+            .await
+            .expect("begin finalizing must not fail technically")
+        {
+            DeletionFinalizationOutcome::Finalizing
+            | DeletionFinalizationOutcome::CompletedAlready => {}
+            other => panic!("begin finalizing must enter the sealed boundary: {other:?}"),
+        }
+        match handle
+            .store
+            .complete_deletion_finalizing(current)
+            .await
+            .expect("complete finalizing must not fail technically")
+        {
+            DeletionFinalizationOutcome::Completed
+            | DeletionFinalizationOutcome::CompletedAlready => {}
+            other => panic!("complete finalizing must commit or already be sealed: {other:?}"),
+        }
+        deletion_phase(handle, current.operation).await
+    }
+
+    async fn drive_until_operation_completed(
+        handle: &HostHandle,
+        current: ene_preservation::DeletionOperationRef,
+    ) {
+        for _ in 0..64 {
+            if try_finalize_one_operation(handle, current).await
+                == DeletionOperationPhase::Completed
+            {
+                return;
+            }
+        }
+        panic!(
+            "the unrelated operation must Complete without waiting on another classification failure"
+        );
     }
 
     async fn verify_host_transient(
@@ -3489,35 +3625,322 @@ mod tests {
             host_transient_is_verified(&handle, b.operation).await,
             "an unrelated operation must stay verified while classification is incomplete"
         );
-        handle
-            .drive_targeted_deletion(TargetedDeletionPass::new(100, 1))
-            .await
-            .expect("the incomplete retry must not error");
-        let queued_a = crate::lock_unpoison(&handle.learning_queue)
-            .iter()
-            .any(|item| item.transcript[0].text.contains("secret-a"));
-        if queued_a {
-            assert!(
-                handle.host_transient_arrival.has_unpublished(),
-                "a still-queued candidate with incomplete classification is unpublished"
-            );
-            assert_ne!(
-                deletion_phase(&handle, a.operation).await,
-                DeletionOperationPhase::Completed,
-                "must not Complete over a queued TARGET while classification is incomplete"
-            );
-        }
+        assert!(
+            handle.host_transient_arrival.scan_incomplete(),
+            "C's classification failure leaves the global walk unfinished"
+        );
+        drive_until_operation_completed(&handle, b).await;
+        assert_eq!(
+            deletion_phase(&handle, b.operation).await,
+            DeletionOperationPhase::Completed,
+            "B must Complete while C's classification is still failing"
+        );
         let record_b = operation_record(&handle, b.operation).await;
         assert_eq!(
             record_b.current.sweep, b.sweep,
             "B must not open a new sweep"
         );
+        assert!(
+            queued_contains(&handle, "secret-a"),
+            "completing B must not collect A's TARGET"
+        );
+        assert_ne!(
+            deletion_phase(&handle, a.operation).await,
+            DeletionOperationPhase::Completed,
+            "A must not Complete over a still-queued TARGET"
+        );
+        assert_ne!(
+            deletion_phase(&handle, c.operation).await,
+            DeletionOperationPhase::Completed,
+            "C must stay fail-closed on its own classification failure"
+        );
+        assert!(
+            handle.host_transient_arrival.scan_incomplete(),
+            "completing unrelated B must not pretend the global walk finished"
+        );
         handle.store.allow_deletion_operation_material_for_tests();
         drive_until_completed(&handle, a.operation).await;
+        assert_eq!(
+            deletion_phase(&handle, c.operation).await,
+            DeletionOperationPhase::Completed,
+            "A and C must converge after C's classification is readable"
+        );
         let record_b = operation_record(&handle, b.operation).await;
         assert_eq!(
             record_b.current.sweep, b.sweep,
             "completing A must still leave B's sweep untouched"
+        );
+    }
+
+    /// Major: Deletion C's classification failure must not stop unrelated
+    /// Deletion B from Completing, and must not Complete related A over a
+    /// still-queued TARGET.
+    #[tokio::test]
+    async fn an_unrelated_operation_completes_despite_another_classification_failure() {
+        let (handle, _dir) = memory_handle("a3c-scan-incomplete-opspec-b")
+            .await
+            .expect("the handle opens");
+        let a = admit(
+            &handle,
+            "secret-a",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let b = admit(
+            &handle,
+            "secret-b",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let c = admit(
+            &handle,
+            "secret-c",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        for current in [a, b, c] {
+            verify_host_transient(&handle, current).await;
+        }
+        handle
+            .store
+            .fail_deletion_operation_material_for_tests(c.operation);
+        handle
+            .queue_learning_formation(experience("contains secret-a only"))
+            .await;
+        let a_after = operation_record(&handle, a.operation).await;
+        if a_after.current.sweep != a.sweep {
+            assert!(
+                !host_transient_is_verified(&handle, a.operation).await,
+                "A arrival related: canonical publish opens the next sweep"
+            );
+        }
+        let record_b = operation_record(&handle, b.operation).await;
+        assert_eq!(record_b.current.sweep, b.sweep, "B is unrelated");
+        assert!(
+            host_transient_is_verified(&handle, b.operation).await,
+            "B HostTransient verification is maintained"
+        );
+        let record_c = operation_record(&handle, c.operation).await;
+        assert_eq!(
+            record_c.current.sweep, c.sweep,
+            "C's classification failure must not open a new sweep"
+        );
+        assert!(handle.host_transient_arrival.scan_incomplete());
+        assert!(
+            !super::unpublished_blocks_finalizing(
+                &handle.store,
+                &handle.host_transient_arrival,
+                &handle.learning_queue,
+                b,
+            )
+            .await,
+            "global scan_incomplete must not by itself block unrelated B"
+        );
+        drive_until_operation_completed(&handle, b).await;
+        assert_eq!(
+            deletion_phase(&handle, b.operation).await,
+            DeletionOperationPhase::Completed
+        );
+        assert!(queued_contains(&handle, "secret-a"));
+        assert_ne!(
+            deletion_phase(&handle, a.operation).await,
+            DeletionOperationPhase::Completed
+        );
+        assert_ne!(
+            deletion_phase(&handle, c.operation).await,
+            DeletionOperationPhase::Completed
+        );
+        assert!(handle.host_transient_arrival.scan_incomplete());
+    }
+
+    /// Major: a classification StorageUnavailable fail-closes only the
+    /// failing operation. Sibling sweeps are not rewritten by that failure.
+    #[tokio::test]
+    async fn a_classification_failure_blocks_only_the_failing_operation() {
+        let (handle, _dir) = memory_handle("a3c-scan-incomplete-opspec-c")
+            .await
+            .expect("the handle opens");
+        let a = admit(
+            &handle,
+            "secret-a",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let b = admit(
+            &handle,
+            "secret-b",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let c = admit(
+            &handle,
+            "secret-c",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        for current in [a, b, c] {
+            verify_host_transient(&handle, current).await;
+        }
+        handle
+            .store
+            .fail_deletion_operation_material_for_tests(c.operation);
+        handle
+            .queue_learning_formation(experience("contains secret-a only"))
+            .await;
+        let sweep_a = operation_record(&handle, a.operation).await.current.sweep;
+        let sweep_b = operation_record(&handle, b.operation).await.current.sweep;
+        assert!(
+            super::unpublished_blocks_finalizing(
+                &handle.store,
+                &handle.host_transient_arrival,
+                &handle.learning_queue,
+                c,
+            )
+            .await,
+            "C must fail closed on its own classification failure"
+        );
+        assert_ne!(
+            try_finalize_one_operation(&handle, c).await,
+            DeletionOperationPhase::Completed,
+            "C must not Complete"
+        );
+        assert_eq!(
+            operation_record(&handle, a.operation).await.current.sweep,
+            sweep_a,
+            "C's failure must not rewrite A's sweep"
+        );
+        assert_eq!(
+            operation_record(&handle, b.operation).await.current.sweep,
+            sweep_b,
+            "C's failure must not rewrite B's sweep"
+        );
+        drive_until_operation_completed(&handle, b).await;
+        assert_eq!(
+            deletion_phase(&handle, b.operation).await,
+            DeletionOperationPhase::Completed,
+            "B must still be able to progress"
+        );
+        assert_eq!(
+            operation_record(&handle, b.operation).await.current.sweep,
+            sweep_b
+        );
+        assert_ne!(
+            deletion_phase(&handle, c.operation).await,
+            DeletionOperationPhase::Completed
+        );
+    }
+
+    /// Major: the Finalizing fallback classifies only the current operation
+    /// and does not turn the producer walk unbounded.
+    #[tokio::test]
+    async fn a_finalizing_fallback_classifies_only_the_current_operation() {
+        let (handle, _dir) = memory_handle("a3c-scan-incomplete-opspec-page")
+            .await
+            .expect("the handle opens");
+        let extra_count = HOST_TRANSIENT_ARRIVAL_PAGE * 3 + 5;
+        let mut extras = Vec::new();
+        for n in 1..=extra_count {
+            let extra = admit(
+                &handle,
+                &format!("unrelated-fallback-{n}"),
+                vec![ParticipantOwnerRef::HostTransient],
+            )
+            .await;
+            verify_host_transient(&handle, extra).await;
+            extras.push(extra);
+        }
+        let related = admit(
+            &handle,
+            "secret-related-fallback",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        verify_host_transient(&handle, related).await;
+        handle
+            .queue_learning_formation(experience("contains secret-related-fallback"))
+            .await;
+        assert!(
+            handle.host_transient_arrival.last_classified() <= HOST_TRANSIENT_ARRIVAL_PAGE as usize,
+            "one normal publication call examines at most PAGE unfinished operations"
+        );
+        assert!(
+            handle.host_transient_arrival.scan_incomplete(),
+            "PAGE*3+5 unfinished operations cannot finish in one producer page"
+        );
+        let classified_after_producer = handle.host_transient_arrival.last_classified();
+        let first = handle
+            .store
+            .unfinished_deletions(None, HOST_TRANSIENT_ARRIVAL_PAGE)
+            .await
+            .expect("the first page reads");
+        let first_ids: std::collections::HashSet<_> = first
+            .iter()
+            .map(|record| record.current.operation)
+            .collect();
+        let unrelated = extras
+            .iter()
+            .copied()
+            .find(|extra| !first_ids.contains(&extra.operation))
+            .expect("some unrelated operation must sit past the first producer page");
+        let direct_before = handle.host_transient_arrival.last_direct_classified();
+        assert!(
+            !super::unpublished_blocks_finalizing(
+                &handle.store,
+                &handle.host_transient_arrival,
+                &handle.learning_queue,
+                unrelated,
+            )
+            .await,
+            "unrelated finalization is independent of the unfinished global walk"
+        );
+        assert_eq!(
+            handle.host_transient_arrival.last_direct_classified(),
+            direct_before + 1,
+            "Finalizing fallback examines only that one operation"
+        );
+        assert_eq!(
+            handle.host_transient_arrival.last_classified(),
+            classified_after_producer,
+            "Finalizing must not run the global unfinished-ops walk"
+        );
+        if host_transient_is_verified(&handle, related.operation).await {
+            let direct_before = handle.host_transient_arrival.last_direct_classified();
+            assert!(
+                super::unpublished_blocks_finalizing(
+                    &handle.store,
+                    &handle.host_transient_arrival,
+                    &handle.learning_queue,
+                    related,
+                )
+                .await,
+                "a related operation still on a later page is invalidated by the one-op fallback"
+            );
+            assert_eq!(
+                handle.host_transient_arrival.last_direct_classified(),
+                direct_before + 1
+            );
+            assert_eq!(
+                handle.host_transient_arrival.last_classified(),
+                classified_after_producer
+            );
+            assert!(
+                !host_transient_is_verified(&handle, related.operation).await,
+                "relevant operation is invalidated without a full global scan"
+            );
+        }
+        drive_until_operation_completed(&handle, unrelated).await;
+        assert_eq!(
+            deletion_phase(&handle, unrelated.operation).await,
+            DeletionOperationPhase::Completed
+        );
+        assert_ne!(
+            deletion_phase(&handle, related.operation).await,
+            DeletionOperationPhase::Completed,
+            "related finalization stays independent of the unrelated sibling"
+        );
+        assert!(
+            handle.host_transient_arrival.last_classified() <= HOST_TRANSIENT_ARRIVAL_PAGE as usize,
+            "producer continuation stays bounded by PAGE per call"
         );
     }
 

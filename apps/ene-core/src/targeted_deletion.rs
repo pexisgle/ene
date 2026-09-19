@@ -452,10 +452,12 @@ async fn settle_finalizing(
             return Ok(());
         }
         // Finalizing proceeds only when inflight_pins == 0, this operation
-        // does not owe an unpublished HostTransient arrival, classification
-        // of the live remainder has not failed closed, and a generation
-        // mismatch is unrelated to this operation. Unrelated enqueue may
-        // bump `mutation_generation` without resetting this participant.
+        // does not owe an unpublished HostTransient arrival, and either the
+        // bounded global walk is complete with a matching generation or a
+        // direct classification proves this operation is unrelated to the
+        // live remainder. An incomplete global walk does not block every
+        // unfinished deletion. Unrelated enqueue may bump
+        // `mutation_generation` without resetting this participant.
         Some(gate)
     } else {
         None
