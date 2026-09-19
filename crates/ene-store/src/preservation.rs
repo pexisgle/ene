@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, param
 use crate::{
     Store,
     codec::{decode_id, encode_id, lock_shared},
-    run_blocking,
+    run_blocking, run_deletion_blocking,
 };
 
 fn storage(_: rusqlite::Error) -> PreservationTechnicalError {
@@ -1965,7 +1965,7 @@ impl Store {
         candidates: Vec<RawId>,
     ) -> Result<Vec<bool>, PreservationTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
             let mut flags = Vec::with_capacity(candidates.len());
             for source in candidates {
@@ -2098,7 +2098,7 @@ impl Store {
             return Ok(HostTransientArrivalOutcome::Unchanged);
         }
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3357,7 +3357,7 @@ impl PreservationRepository for Store {
         change: DeletionLifecycleChange,
     ) -> Result<DeletionLifecycleOutcome, PreservationTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3477,7 +3477,7 @@ impl PreservationRepository for Store {
             return Err(PreservationTechnicalError::InvalidLimit);
         }
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
             // A read transaction gives validation and the bounded page the same snapshot.
             let tx = guard.unchecked_transaction().map_err(storage)?;
@@ -3562,7 +3562,7 @@ impl PreservationRepository for Store {
             return Err(PreservationTechnicalError::InvalidLimit);
         }
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
             // A read transaction gives validation and the bounded page the same snapshot.
             let tx = guard.unchecked_transaction().map_err(storage)?;
@@ -3603,7 +3603,7 @@ impl PreservationRepository for Store {
         operation: DeletionOperationId,
     ) -> Result<DeletionMaterialOutcome, PreservationTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let id = encode_id(operation.as_raw());
@@ -3686,7 +3686,7 @@ impl PreservationRepository for Store {
         participant: ParticipantOwnerRef,
     ) -> Result<ParticipantDemandOutcome, PreservationTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3747,7 +3747,7 @@ impl PreservationRepository for Store {
         let condition = fact.condition();
         let participant = fact.participant();
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3906,7 +3906,7 @@ impl PreservationRepository for Store {
             return Err(PreservationTechnicalError::InvalidLimit);
         }
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3972,7 +3972,7 @@ impl PreservationRepository for Store {
         expected: DeletionOperationRef,
     ) -> Result<DeletionFinalizationOutcome, PreservationTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -4067,7 +4067,7 @@ impl PreservationRepository for Store {
         expected: DeletionOperationRef,
     ) -> Result<DeletionFinalizationOutcome, PreservationTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
+        run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)

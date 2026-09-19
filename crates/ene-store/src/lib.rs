@@ -68,6 +68,49 @@ async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stat
     }
 }
 
+/// Targeted Deletion Store work the serving driver awaits.
+///
+/// Under test-support this counts the started `spawn_blocking` section and
+/// honours the blocking park *inside* that section, so aborting the awaiting
+/// async task cannot skip past already-started SQLite work. The serving
+/// tick joins this await chain; graceful shutdown therefore waits for a
+/// started section instead of aborting it.
+async fn run_deletion_blocking<T: Send + 'static>(
+    store: &Store,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let parks = Arc::clone(&store.test_parks);
+        run_blocking(move || {
+            parks
+                .deletion_blocking_live
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            struct Live {
+                parks: Arc<test_parks::TestParks>,
+            }
+            impl Drop for Live {
+                fn drop(&mut self) {
+                    self.parks
+                        .deletion_blocking_live
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _live = Live {
+                parks: Arc::clone(&parks),
+            };
+            parks.deletion_blocking.pause_blocking_if_armed();
+            work()
+        })
+        .await
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let _ = store;
+        run_blocking(work).await
+    }
+}
+
 /// Coalesced wakeup hint for the presentation subscription (CCT §10.5).
 ///
 /// The store bumps the epoch after any commit that may have inserted an
@@ -242,6 +285,39 @@ impl Store {
             self.undelivered.bump();
         }
         result
+    }
+
+    /// How many Targeted Deletion `spawn_blocking` sections are currently
+    /// inside the instrumented Store boundary. Observation only: production
+    /// correctness does not read this.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn live_deletion_blocking_sections_for_tests(&self) -> usize {
+        self.test_parks
+            .deletion_blocking_live
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Arms the first-waiter park *inside* a Targeted Deletion
+    /// `spawn_blocking` section.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_deletion_blocking_park_for_tests(&self) {
+        self.test_parks.deletion_blocking.arm();
+    }
+
+    /// Waits until the armed deletion-blocking park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_deletion_blocking_park_for_tests(&self) {
+        self.test_parks.deletion_blocking.wait_entered().await;
+    }
+
+    /// Releases the parked deletion `spawn_blocking` section.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_deletion_blocking_park_for_tests(&self) {
+        self.test_parks.deletion_blocking.release();
     }
 
     /// Arms the first-waiter park just before a Task Agent observation row is

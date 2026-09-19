@@ -548,10 +548,14 @@ pub struct HostHandle {
     /// cannot run after closure. A Host restart drops the in-flight work and
     /// resumes from durable store state.
     pub(crate) targeted_deletion_drive: AsyncMutex<()>,
-    /// Serving-composition Targeted Deletion drivers currently bound to this
-    /// handle. The listener owns at most one; aborting `conn::run` must drop
-    /// it so a successor Host is the only live driver.
+    /// Serving-composition Targeted Deletion *async* drivers currently bound
+    /// to this handle. The listener owns at most one. This is not started
+    /// `spawn_blocking` Store work; graceful restart joins that work before
+    /// dropping the predecessor handle.
     deletion_drivers: std::sync::atomic::AtomicUsize,
+    /// Test (and graceful-restart) wake for one bounded serving tick without
+    /// waiting for [`crate::conn`]'s 15s period.
+    pub(crate) deletion_driver_wake: tokio::sync::Notify,
     /// Invalidation fence for in-flight Host transient payloads (A3c).
     ///
     /// Bumped by the Host-transient erasure demand; a dialogue stream or
@@ -751,6 +755,7 @@ impl HostHandle {
             deletion_hold_retry: AsyncMutex::new(crate::targeted_deletion::HeldRetrySchedule::new()),
             targeted_deletion_drive: AsyncMutex::new(()),
             deletion_drivers: std::sync::atomic::AtomicUsize::new(0),
+            deletion_driver_wake: tokio::sync::Notify::new(),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
             #[cfg(test)]
@@ -894,11 +899,19 @@ impl HostHandle {
     }
 
     /// How many serving-composition Targeted Deletion drivers currently hold
-    /// this handle. Production keeps this at 0 or 1.
+    /// this handle. Production keeps this at 0 or 1. This is the async driver
+    /// future, not started `spawn_blocking` Store work.
     #[doc(hidden)]
     pub fn live_targeted_deletion_drivers_for_tests(&self) -> usize {
         self.deletion_drivers
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wakes the serving Targeted Deletion driver so tests can start one
+    /// bounded tick without waiting for the 15s period.
+    #[doc(hidden)]
+    pub fn wake_deletion_driver_for_tests(&self) {
+        self.deletion_driver_wake.notify_waiters();
     }
 
     /// Marks a serving-composition Targeted Deletion driver as live on this

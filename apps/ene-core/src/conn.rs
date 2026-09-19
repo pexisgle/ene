@@ -779,19 +779,39 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
 /// Cancels a Tokio task when dropped.
 ///
 /// `conn::run` keeps the Targeted Deletion driver JoinHandle in this guard
-/// for the accept-loop lifetime. Aborting or dropping the listener must
-/// abort the driver so it cannot keep a predecessor [`HostHandle`] alive
-/// after serving has ended.
+/// for the accept-loop lifetime. Unexpected drop or panic of the listener
+/// aborts the driver as a best-effort emergency stop. Graceful shutdown
+/// takes the handle out with [`AbortOnDrop::join`] so a running tick can
+/// finish its started Store work.
 #[must_use = "dropping this guard aborts the Targeted Deletion driver"]
 #[cfg(any(unix, windows))]
 struct AbortOnDrop<T> {
-    task: tokio::task::JoinHandle<T>,
+    task: Option<tokio::task::JoinHandle<T>>,
 }
 
 #[cfg(any(unix, windows))]
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl<T> AbortOnDrop<T> {
+    /// Awaits the task without aborting it. Used after a shutdown signal so
+    /// an already-started bounded tick (and its `spawn_blocking` Store work)
+    /// can finish.
+    async fn join(mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        match task.await {
+            Ok(_) => {}
+            Err(join) if join.is_cancelled() => {}
+            Err(join) => std::panic::resume_unwind(join.into_panic()),
+        }
     }
 }
 
@@ -825,8 +845,8 @@ impl Drop for DeletionDriverLive {
 /// Starts the serving-composition Targeted Deletion driver (lifecycle §14).
 ///
 /// The returned guard is the driver's lifetime: `conn::run` must keep it
-/// across the accept loop so a normal return, error, abort, or drop of the
-/// listener also cancels the driver and releases its [`HostHandle`]. Aborting
+/// across the accept loop. Graceful shutdown joins it so a running tick
+/// finishes; unexpected drop still aborts as an emergency stop. Aborting
 /// the driver does not cancel durable operations; a successor Host resumes
 /// them from SQLite through startup recovery.
 ///
@@ -841,7 +861,10 @@ impl Drop for DeletionDriverLive {
 /// authoritative, and the next period re-derives it.
 #[must_use = "the driver is cancelled when this guard is dropped; bind it for the listener lifetime"]
 #[cfg(any(unix, windows))]
-fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> AbortOnDrop<()> {
+fn spawn_targeted_deletion_driver(
+    handle: Arc<HostHandle>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> AbortOnDrop<()> {
     let task = tokio::spawn(async move {
         let _live = DeletionDriverLive::enter(Arc::clone(&handle));
         let mut period = tokio::time::interval_at(
@@ -850,15 +873,29 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> AbortOnDrop<()> {
         );
         period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            period.tick().await;
-            // The result is deliberately discarded: a failed tick is a
-            // technical condition whose only honest response is to keep the
-            // durable operation for the next tick (never a completion, never a
-            // fabricated success, and serving keeps running).
+            if *shutdown.borrow() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                () = handle.deletion_driver_wake.notified() => {}
+                _ = period.tick() => {}
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+            // Once this tick starts, graceful shutdown waits for it — including
+            // any `spawn_blocking` Store work it already entered.
             drop(handle.run_targeted_deletion_tick().await);
         }
     });
-    AbortOnDrop { task }
+    AbortOnDrop { task: Some(task) }
 }
 
 /// Serves the Unix socket listener until the process ends.
@@ -868,12 +905,13 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> AbortOnDrop<()> {
 /// connection, driving the fake-friendly [`HostHandle::handle_frame`] seam.
 /// The Host-local first-party control endpoint is bound in the same task and
 /// served by the same accept loop, so it lives and dies with this listener
-/// (one abort releases both). There is no shutdown signal in `Stage 2`: the
-/// future resolves only on bind failure; otherwise it runs until killed.
-/// Dropping or aborting this future also aborts the Targeted Deletion
-/// driver it owns: that driver must not outlive the serving composition.
-/// The handle is shared by reference (`Arc` with `&self` methods), so no
-/// handle-wide lock spans provider I/O.
+/// (one abort releases both). Production keeps an unsignalled shutdown
+/// sender, so the 15s Targeted Deletion driver keeps running until the
+/// process is killed. Dropping or aborting this future still aborts that
+/// driver as an emergency stop; graceful restart uses
+/// [`run_until_shutdown`] so a running tick can finish its started Store
+/// work. The handle is shared by reference (`Arc` with `&self` methods), so
+/// no handle-wide lock spans provider I/O.
 ///
 /// # Errors
 ///
@@ -884,6 +922,33 @@ pub async fn run<T>(
     data_dir: PathBuf,
     handle: Arc<HostHandle>,
     transport: Arc<T>,
+) -> Result<(), CoreError>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    let (_keep_alive, shutdown) = tokio::sync::watch::channel(false);
+    run_until_shutdown(data_dir, handle, transport, shutdown).await
+}
+
+/// Serves the Unix socket listener until `shutdown` is set to `true`.
+///
+/// Production [`run`] holds a sender that is never signalled, so the 15s
+/// Targeted Deletion driver keeps running. Tests signal this receiver to
+/// stop accepting and join the driver after the current bounded tick
+/// (including started Store `spawn_blocking` work) finishes. A shutdown
+/// request does not cancel a tick that already started; it only prevents
+/// the next one.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Bind`] when the socket cannot be bound (including a
+/// live peer) or the socket metadata cannot be read.
+#[cfg(unix)]
+pub async fn run_until_shutdown<T>(
+    data_dir: PathBuf,
+    handle: Arc<HostHandle>,
+    transport: Arc<T>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), CoreError>
 where
     T: ProviderTransport + Send + Sync + 'static,
@@ -914,11 +979,20 @@ where
     // connection table are alive (lifecycle §8.1, PR §6.4).
     let control =
         crate::host_control::ControlListener::bind(&data_dir, Arc::clone(&handle)).await?;
-    // Bound to this future: dropping or aborting `run` must abort the driver
-    // so a successor Host is the only process-local drive domain.
-    let _deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle));
-    loop {
+    // Bound to this future: graceful shutdown joins the driver after the
+    // current tick; unexpected drop still aborts as an emergency stop.
+    let deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle), shutdown.clone());
+    let result = loop {
+        if *shutdown.borrow() {
+            break Ok(());
+        }
         tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break Ok(());
+                }
+            }
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else {
                     continue;
@@ -940,7 +1014,9 @@ where
             }
             () = control.accept() => {}
         }
-    }
+    };
+    deletion_driver.join().await;
+    result
 }
 
 #[cfg(any(unix, windows))]
@@ -1337,11 +1413,12 @@ async fn serve_connection<S, T>(
 /// instances vanish with their process, so there is no stale path to unlink),
 /// proves each peer with the OS token check, and spawns one frame-loop task
 /// per authorized connection over the shared [`HostHandle::handle_frame`]
-/// seam. There is no shutdown signal in `Stage 2`: the future resolves only
-/// on creation failure; otherwise it runs until killed. Dropping or aborting
-/// this future also aborts the Targeted Deletion driver it owns, matching
-/// the Unix listener. Behavior beyond creation is Windows-unverified on this
-/// Linux host (see [`crate::conn_pipe`]).
+/// seam. Production keeps an unsignalled shutdown sender, matching Unix:
+/// the 15s Targeted Deletion driver keeps running until the process is
+/// killed. Dropping or aborting this future still aborts that driver as an
+/// emergency stop; graceful restart uses [`run_until_shutdown`] so a running
+/// tick can finish its started Store work. Behavior beyond creation is
+/// Windows-unverified on this Linux host (see [`crate::conn_pipe`]).
 ///
 /// # Errors
 ///
@@ -1352,6 +1429,30 @@ pub async fn run<T>(
     data_dir: PathBuf,
     handle: Arc<HostHandle>,
     transport: Arc<T>,
+) -> Result<(), CoreError>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    let (_keep_alive, shutdown) = tokio::sync::watch::channel(false);
+    run_until_shutdown(data_dir, handle, transport, shutdown).await
+}
+
+/// Serves the Windows named-pipe listener until `shutdown` is set to `true`.
+///
+/// Same Targeted Deletion driver lifetime as the Unix [`run_until_shutdown`]:
+/// a signal stops accepting and joins the current bounded tick, including
+/// started Store `spawn_blocking` work.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Bind`] when the first pipe instance cannot be created
+/// (including a live peer) or a follow-up instance cannot be created.
+#[cfg(windows)]
+pub async fn run_until_shutdown<T>(
+    data_dir: PathBuf,
+    handle: Arc<HostHandle>,
+    transport: Arc<T>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), CoreError>
 where
     T: ProviderTransport + Send + Sync + 'static,
@@ -1375,38 +1476,52 @@ where
     // must run in this serving process (lifecycle §8.1, PR §6.4).
     let mut control = crate::host_control::ControlListener::bind(&data_dir, Arc::clone(&handle))?;
     // Same serving-composition driver lifetime as the Unix listener.
-    let _deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle));
-    loop {
-        tokio::select! {
-            connected = server.connect() => {
-                if connected.is_err() {
-                    // A failed wait leaves this instance unusable; replace it
-                    // rather than serving half-open state.
-                    server = crate::conn_pipe::create_next_server(&pipe)?;
-                    continue;
-                }
-                // The OS peer token check runs before any frame is read: an
-                // unprovable peer is dropped without a byte, like the Unix
-                // uid-mismatch path.
-                let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
-                let next = crate::conn_pipe::create_next_server(&pipe)?;
-                let current = std::mem::replace(&mut server, next);
-                if !peer_ok {
-                    continue;
-                }
-                let connection = table.note_accept();
-                let handle = Arc::clone(&handle);
-                let transport = Arc::clone(&transport);
-                let table = Arc::clone(&table);
-                tokio::spawn(async move {
-                    serve_connection(current, connection, handle, transport, table).await;
-                });
+    let deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle), shutdown.clone());
+    let result: Result<(), CoreError> = async {
+        loop {
+            if *shutdown.borrow() {
+                return Ok(());
             }
-            accepted = control.accept() => {
-                accepted?;
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return Ok(());
+                    }
+                }
+                connected = server.connect() => {
+                    if connected.is_err() {
+                        // A failed wait leaves this instance unusable; replace it
+                        // rather than serving half-open state.
+                        server = crate::conn_pipe::create_next_server(&pipe)?;
+                        continue;
+                    }
+                    // The OS peer token check runs before any frame is read: an
+                    // unprovable peer is dropped without a byte, like the Unix
+                    // uid-mismatch path.
+                    let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
+                    let next = crate::conn_pipe::create_next_server(&pipe)?;
+                    let current = std::mem::replace(&mut server, next);
+                    if !peer_ok {
+                        continue;
+                    }
+                    let connection = table.note_accept();
+                    let handle = Arc::clone(&handle);
+                    let transport = Arc::clone(&transport);
+                    let table = Arc::clone(&table);
+                    tokio::spawn(async move {
+                        serve_connection(current, connection, handle, transport, table).await;
+                    });
+                }
+                accepted = control.accept() => {
+                    accepted?;
+                }
             }
         }
     }
+    .await;
+    deletion_driver.join().await;
+    result
 }
 
 /// Unsupported platforms have no listener.
@@ -1423,6 +1538,23 @@ pub async fn run(
     _data_dir: PathBuf,
     _handle: Arc<HostHandle>,
     _transport: Arc<impl ProviderTransport>,
+) -> Result<(), CoreError> {
+    Err(CoreError::UnsupportedPlatform("no supported listener"))
+}
+
+/// # Errors
+///
+/// Always returns [`CoreError::UnsupportedPlatform`].
+#[cfg(not(any(unix, windows)))]
+#[expect(
+    clippy::unused_async,
+    reason = "stub mirrors the async listener signature; no transport exists here"
+)]
+pub async fn run_until_shutdown(
+    _data_dir: PathBuf,
+    _handle: Arc<HostHandle>,
+    _transport: Arc<impl ProviderTransport>,
+    _shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), CoreError> {
     Err(CoreError::UnsupportedPlatform("no supported listener"))
 }

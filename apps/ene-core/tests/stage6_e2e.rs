@@ -605,6 +605,26 @@ async fn wait_until_deletion_drivers(handle: &HostHandle, expected: usize) {
     .await;
 }
 
+async fn wait_until_deletion_blocking(handle: &HostHandle, expected: usize) {
+    wait_until(
+        || {
+            handle
+                .store_for_tests()
+                .live_deletion_blocking_sections_for_tests()
+                == expected
+        },
+        || {
+            format!(
+                "deletion blocking sections stayed at {}, expected {expected}",
+                handle
+                    .store_for_tests()
+                    .live_deletion_blocking_sections_for_tests()
+            )
+        },
+    )
+    .await;
+}
+
 /// One served Host under test: the composition handle, the listener task, and
 /// a live first-party client.
 ///
@@ -616,6 +636,7 @@ struct Served {
     dir: PathBuf,
     handle: Option<Arc<HostHandle>>,
     server: tokio::task::JoinHandle<Result<(), CoreError>>,
+    shutdown: Option<tokio::sync::watch::Sender<bool>>,
     client: Option<Client>,
     transport: Arc<ScriptedTransport>,
 }
@@ -628,10 +649,12 @@ impl Served {
         capabilities: &[&str],
     ) -> Self {
         let handle = open_host_with(&dir, cred_store).await;
-        let server = tokio::spawn(conn::run(
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(conn::run_until_shutdown(
             dir.clone(),
             Arc::clone(&handle),
             Arc::clone(&transport),
+            shutdown,
         ));
         dial_until_pending(&dir)
             .await
@@ -649,6 +672,7 @@ impl Served {
             dir,
             handle: Some(handle),
             server,
+            shutdown: Some(stop),
             client: Some(client),
             transport,
         }
@@ -674,21 +698,45 @@ impl Served {
     /// open on the current handle, exactly like a Host process that stopped
     /// serving.
     ///
-    /// The client is dropped first so per-connection tasks release the
-    /// handle; then `conn::run` is aborted and awaited so its deletion-driver
-    /// guard drops; then this waits until that driver has unpublished itself.
+    /// Restart correctness uses graceful shutdown: the client is dropped
+    /// first so per-connection tasks release the handle, then the listener
+    /// is signalled to stop accepting and join the Targeted Deletion driver
+    /// after any already-started bounded tick (including its Store
+    /// `spawn_blocking` work) finishes.
     async fn stop(&mut self) {
         self.client = None;
         tokio::task::yield_now().await;
-        self.server.abort();
-        let aborted = std::mem::replace(
+        self.request_graceful_stop();
+        self.join_listener().await;
+        wait_until_deletion_drivers(self.handle(), 0).await;
+        wait_until_deletion_blocking(self.handle(), 0).await;
+        drop(std::fs::remove_file(conn::socket_path(&self.dir)));
+    }
+
+    fn request_graceful_stop(&self) {
+        if let Some(stop) = &self.shutdown {
+            stop.send_modify(|stop_requested| *stop_requested = true);
+        }
+    }
+
+    async fn join_listener(&mut self) {
+        let finished = std::mem::replace(
             &mut self.server,
             tokio::spawn(async { Ok::<(), CoreError>(()) }),
         );
-        match aborted.await {
+        match finished.await {
             Ok(Ok(())) | Err(_) => {}
-            Ok(Err(error)) => panic!("the aborted listener failed: {error}"),
+            Ok(Err(error)) => panic!("the listener failed: {error}"),
         }
+    }
+
+    /// Emergency abort of `conn::run` without joining a running tick. Used
+    /// only to prove AbortOnDrop still stops the async driver.
+    async fn abort_listener(&mut self) {
+        self.client = None;
+        tokio::task::yield_now().await;
+        self.server.abort();
+        self.join_listener().await;
         wait_until_deletion_drivers(self.handle(), 0).await;
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
@@ -696,8 +744,8 @@ impl Served {
     /// Opens the state again, runs the production startup mutations, and
     /// serves; returns a fresh authenticated client.
     ///
-    /// Restart order is the production one: the predecessor deletion driver
-    /// is gone, the predecessor `HostHandle` is dropped, then the successor
+    /// Restart order: predecessor driver and started deletion Store work are
+    /// gone, the predecessor `HostHandle` is dropped, then the successor
     /// opens the same database and runs startup mutations. The OS transport
     /// may still be releasing the previous connection's server instance (the
     /// Windows named-pipe listener owns the exclusive first instance for the
@@ -705,6 +753,7 @@ impl Served {
     /// stays up.
     async fn serve(&mut self) -> Client {
         wait_until_deletion_drivers(self.handle(), 0).await;
+        wait_until_deletion_blocking(self.handle(), 0).await;
         drop(self.handle.take());
         let handle = open_host(&self.dir).await;
         handle
@@ -713,10 +762,12 @@ impl Served {
             .expect("restart startup must complete");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
-            let mut server = tokio::spawn(conn::run(
+            let (stop, shutdown) = tokio::sync::watch::channel(false);
+            let mut server = tokio::spawn(conn::run_until_shutdown(
                 self.dir.clone(),
                 Arc::clone(&handle),
                 Arc::clone(&self.transport),
+                shutdown,
             ));
             // Bind is the listener's first await point: a task that exits
             // within this window could not bind (or lost the singleton race).
@@ -733,6 +784,7 @@ impl Served {
             wait_until_deletion_drivers(&handle, 1).await;
             self.handle = Some(handle);
             self.server = server;
+            self.shutdown = Some(stop);
             return connect(&self.dir).await;
         }
     }
@@ -2001,9 +2053,8 @@ async fn stage6_deletion_restart_during_active_resumes() {
     served.server.abort();
 }
 
-/// Aborting `conn::run` cancels the serving-composition Targeted Deletion
-/// driver. The predecessor handle reports zero live drivers after the
-/// listener JoinHandle completes, without waiting for a tick interval.
+/// Aborting `conn::run` still stops the async Targeted Deletion driver as an
+/// emergency path. Restart correctness uses graceful shutdown instead.
 #[tokio::test]
 async fn listener_abort_stops_the_deletion_driver() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2016,7 +2067,7 @@ async fn listener_abort_stops_the_deletion_driver() {
         1,
         "serving starts exactly one Targeted Deletion driver"
     );
-    served.stop().await;
+    served.abort_listener().await;
     assert_eq!(
         served.handle().live_targeted_deletion_drivers_for_tests(),
         0,
@@ -2024,9 +2075,9 @@ async fn listener_abort_stops_the_deletion_driver() {
     );
 }
 
-/// A Host restart leaves exactly one live Targeted Deletion driver: the
-/// successor's. The predecessor handle is gone, so it cannot keep a second
-/// process-local drive lock on the same database.
+/// A Host restart leaves exactly one quiescent Targeted Deletion drive
+/// domain: the successor's async driver, with no predecessor Store blocking
+/// work and no predecessor HostHandle.
 #[tokio::test]
 async fn restart_has_exactly_one_deletion_driver() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2035,7 +2086,21 @@ async fn restart_has_exactly_one_deletion_driver() {
     let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
     wait_until_deletion_drivers(served.handle(), 1).await;
     let predecessor = Arc::downgrade(&served.handle_arc());
-    let _client = served.restart().await;
+    served.stop().await;
+    assert_eq!(
+        served.handle().live_targeted_deletion_drivers_for_tests(),
+        0,
+        "graceful shutdown must join the predecessor async driver"
+    );
+    assert_eq!(
+        served
+            .handle()
+            .store_for_tests()
+            .live_deletion_blocking_sections_for_tests(),
+        0,
+        "graceful shutdown must join started deletion Store work"
+    );
+    let _client = served.serve().await;
     wait_until_deletion_drivers(served.handle(), 1).await;
     assert_eq!(
         served.handle().live_targeted_deletion_drivers_for_tests(),
@@ -2045,6 +2110,132 @@ async fn restart_has_exactly_one_deletion_driver() {
     assert!(
         predecessor.upgrade().is_none(),
         "the predecessor HostHandle must drop once its serving driver is gone"
+    );
+}
+
+/// Graceful shutdown must not return while a Targeted Deletion tick is inside
+/// a started Store `spawn_blocking` section. Successor startup waits until
+/// that section finishes.
+#[tokio::test]
+async fn shutdown_waits_for_started_deletion_store_work() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(dir.clone(), transport, &[cmds::CAPABILITY_DIALOGUE]).await;
+    let (_round, _stream, _reply) = send_round(served.client(), &first)
+        .await
+        .expect("the first round must complete");
+    let outcome = request_deletion(served.client(), TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    confirm_deletion(served.handle()).await;
+
+    served
+        .handle()
+        .store_for_tests()
+        .arm_deletion_blocking_park_for_tests();
+    served.handle().wake_deletion_driver_for_tests();
+    served
+        .handle()
+        .store_for_tests()
+        .wait_deletion_blocking_park_for_tests()
+        .await;
+    assert!(
+        served
+            .handle()
+            .store_for_tests()
+            .live_deletion_blocking_sections_for_tests()
+            >= 1,
+        "the driver tick must have entered Store spawn_blocking work"
+    );
+
+    served.client = None;
+    tokio::task::yield_now().await;
+    served.request_graceful_stop();
+    assert!(
+        served.handle.is_some(),
+        "successor Host must not replace the predecessor while Store work is parked"
+    );
+    let joining = std::mem::replace(
+        &mut served.server,
+        tokio::spawn(async { Ok::<(), CoreError>(()) }),
+    );
+    let mut joining = std::pin::pin!(joining);
+    for _ in 0..100_000 {
+        tokio::select! {
+            biased;
+            outcome = joining.as_mut() => {
+                panic!(
+                    "graceful shutdown joined while deletion Store work was parked: {outcome:?}"
+                );
+            }
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    assert!(
+        served.handle.is_some(),
+        "successor Host must not start while predecessor Store work is parked"
+    );
+    assert_eq!(
+        served.handle().live_targeted_deletion_drivers_for_tests(),
+        1,
+        "the async driver stays alive until the parked tick finishes"
+    );
+    assert!(
+        served
+            .handle()
+            .store_for_tests()
+            .live_deletion_blocking_sections_for_tests()
+            >= 1
+    );
+
+    served
+        .handle()
+        .store_for_tests()
+        .release_deletion_blocking_park_for_tests();
+    match joining.await {
+        Ok(Ok(())) | Err(_) => {}
+        Ok(Err(error)) => panic!("the listener failed: {error}"),
+    }
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    drop(served.handle.take());
+    let successor = open_host(&dir).await;
+    successor
+        .run_startup_mutations()
+        .await
+        .expect("successor startup must complete once predecessor Store work is gone");
+}
+
+/// After graceful shutdown returns, neither the async driver nor started
+/// deletion Store work from the predecessor remains.
+#[tokio::test]
+async fn graceful_shutdown_leaves_no_detached_deletion_work() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
+    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
+    wait_until_deletion_drivers(served.handle(), 1).await;
+    served.stop().await;
+    assert_eq!(
+        served.handle().live_targeted_deletion_drivers_for_tests(),
+        0
+    );
+    assert_eq!(
+        served
+            .handle()
+            .store_for_tests()
+            .live_deletion_blocking_sections_for_tests(),
+        0
     );
 }
 
