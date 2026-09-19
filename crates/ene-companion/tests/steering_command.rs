@@ -68,6 +68,14 @@ impl FakeTaskRepository {
 }
 
 impl TaskRepository for FakeTaskRepository {
+    async fn record_task_agent_observation(
+        &self,
+        _premise: ene_task::TaskAgentObservationPremise,
+    ) -> Result<ene_task::TaskAgentObservationId, ene_task::TaskTechnicalError> {
+        Err(ene_task::TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_agent_observation is outside this fixture's scope"),
+        })
+    }
     async fn create_task(
         &self,
         premise: TaskCreationPremise,
@@ -129,7 +137,7 @@ impl TaskRepository for FakeTaskRepository {
     async fn record_task_result_arrival(
         &self,
         _arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<ene_task::TaskResultArrivalOutcome, TaskTechnicalError> {
         Err(TaskTechnicalError::StorageUnavailable {
             reason: String::from("record_task_result_arrival is outside this fixture's scope"),
         })

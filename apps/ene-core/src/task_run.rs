@@ -16,8 +16,11 @@
 //!    (`orchestrate_result_arrival`, AU15a) and then adoption
 //!    ([`TaskRepository::adopt_result`](ene_task::TaskRepository::adopt_result), AU15b).
 //! 3. Action observations are replayed into the next turn as execution-local
-//!    transcript. They are never persisted: the only durable result body is
-//!    the `task_result` row.
+//!    transcript. The observation body is never persisted; each occurrence's
+//!    durable, body-free provenance row (identity, delegation/execution
+//!    correlation, producing attempt, workspace path) is recorded before the
+//!    occurrence is replayed, and its identity joins the consuming turn's
+//!    `data_use`. The only durable result body is the `task_result` row.
 //!
 //! The loop is bounded ([`DEFAULT_MAX_TURNS`]) and never treats a provider
 //! output as final unless the model says so with the final directive, so an
@@ -54,21 +57,22 @@
 //! (the design's execution lifetime), and a cancelled Task is re-executed
 //! only as a new Task.
 
-use ene_action::{ActionCertainty, ActionNotStarted, ObservedEffect, OperationKind};
-use ene_credential::SecretScrubber;
+use ene_action::{ActionCertainty, ActionNotStarted, ActionOutput, ObservedEffect, OperationKind};
+use ene_credential::{CredentialSetRevision, SecretScrubber};
 use ene_inference::{DispatchAbort, ProviderTransport};
-use ene_primitive::RawId;
+use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 use ene_task::{
     TaskAgentActionExchange, TaskAgentInference, TaskAgentNotSent, TaskAgentObservation,
-    TaskAgentOutput, TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskInstructionSource,
-    TaskProgress, TaskRef, TaskRepository as _, TaskResultRecord, orchestrate_result_arrival,
+    TaskAgentObservationId, TaskAgentObservationPremise, TaskAgentTurnOutcome,
+    TaskAgentTurnPremise, TaskInstructionSource, TaskProgress, TaskRef, TaskRepository as _,
+    TaskResultArrivalOutcome, TaskResultRecord, TaskResultScrubPremise, orchestrate_result_arrival,
     orchestrate_task_agent_turn,
 };
 use std::sync::Arc;
 
 use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_workspace_action};
-use crate::serve::HostHandle;
+use crate::serve::{CoreError, HostHandle};
 
 /// The default bound on inference turns per execution.
 ///
@@ -394,6 +398,14 @@ pub enum TaskAgentRunRefusal {
         entry: ene_task::TaskContextEntryId,
         source: RawId,
     },
+    /// The credential set kept advancing past every re-scrub of the final
+    /// answer, so no result body was recorded. Fail closed: the original
+    /// answer is never stored raw and a scrubbed body prepared under an old
+    /// revision is never committed.
+    StaleCredentialSet {
+        /// The most recently observed durable revision.
+        current: CredentialSetRevision,
+    },
 }
 
 /// The domain result of one delegated execution.
@@ -450,6 +462,12 @@ pub enum TaskAgentRunError {
     Action(#[from] WorkspaceActionHostError),
     #[error("task storage unavailable: {reason}")]
     StorageUnavailable { reason: String },
+    /// The final answer could not be proven free of registered credential
+    /// values, so no result body was recorded. Fail closed: an unprovable
+    /// scrub premise is never stored as if it were scrubbed, and the
+    /// carried reason is a fixed class that never quotes the body.
+    #[error("result body scrub unavailable: {reason}")]
+    ResultScrubUnavailable { reason: String },
 }
 
 impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
@@ -479,6 +497,14 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
 /// result record: the consent premise that admitted the send no longer holds,
 /// while the already-started attempt and its usage fact stay durable. An
 /// output refused before the send at all stays [`TaskAgentRunOutcome::NotSent`].
+///
+/// A final answer is scrubbed through the injected credential boundary and
+/// arrives with that scrub premise; the durable commit compares the premise
+/// inside its transaction. If the credential set advanced since the scrub,
+/// the commit refuses without writing and the answer is re-scrubbed under the
+/// observed revision (bounded by `FINAL_RESULT_SCRUB_ATTEMPTS`); an answer
+/// whose premise keeps going stale is never committed and ends as
+/// [`TaskAgentRunRefusal::StaleCredentialSet`].
 ///
 /// The execution's in-process identity and cooperative stop token come from
 /// `registration`: holding a [`TaskExecutionRegistration`] is what makes the
@@ -591,9 +617,22 @@ pub async fn run_task_agent_execution(
         match parse_directive(produced.output.text()) {
             Err(reason) => return Ok(TaskAgentRunOutcome::ProtocolViolation { turn, reason }),
             Ok(TaskAgentDirective::Finish { body }) => {
-                let result =
-                    orchestrate_result_arrival(store, delegation, TaskAgentOutput::new(body))
-                        .await?;
+                // The same credential boundary that admits every logical input
+                // covers the durable result body: a final answer that cannot
+                // be proven scrubbed is never recorded raw, and the durable
+                // arrival commit compares the scrub premise inside its own
+                // transaction. A stale refusal re-scrubs the original answer
+                // under the revision just observed; the stale text itself is
+                // never retried as it is.
+                let arrival = finalize_result_body(store, scrubber, delegation, &body).await?;
+                let result = match arrival {
+                    TaskResultArrivalOutcome::Recorded(result) => result,
+                    TaskResultArrivalOutcome::StaleCredentialSet { current } => {
+                        return Ok(TaskAgentRunOutcome::Refused(
+                            TaskAgentRunRefusal::StaleCredentialSet { current },
+                        ));
+                    }
+                };
                 let acceptance = store
                     .adopt_result(ene_task::TaskResultAdoptionClaim {
                         result: result.result,
@@ -621,17 +660,51 @@ pub async fn run_task_agent_execution(
                         fact_recorded,
                     } => {
                         attempt_refs.push(attempt.as_raw());
-                        match completed_follow_up(produced.output, attempt, &effect, fact_recorded)
-                        {
-                            CompletedFollowUp::Continue(exchange) => exchanges.push(exchange),
-                            CompletedFollowUp::Stop(outcome) => return Ok(outcome),
+                        // An unresolved effect stops the loop and is never
+                        // replayed: the unknown stays the Action owner's fact.
+                        if unconfirmed_effect(&effect) {
+                            return Ok(TaskAgentRunOutcome::EffectUnresolved { attempt });
                         }
+                        // The observation is durable before it is replayed:
+                        // the occurrence identity and its correlation must be
+                        // recorded, or the turn that would consume it never
+                        // starts. A body-observed occurrence (read bytes /
+                        // list listing) carries the transient body into the
+                        // receiving-boundary check inside the same write.
+                        let text = completed_observation(&effect, fact_recorded);
+                        let observed = observed_workspace_body(&effect).then(|| text.clone());
+                        let occurrence = record_task_observation(
+                            store,
+                            delegation,
+                            Some(attempt.as_raw()),
+                            observed,
+                        )
+                        .await?;
+                        // The occurrence is body-free. If this execution was
+                        // associated with a deletion interval — including one
+                        // that closed after the Action read and before the
+                        // occurrence write — the in-memory body is old-origin
+                        // and must not enter the next provider turn. The hold
+                        // names the execution, not the text, so a later fresh
+                        // Owner origin of the same string is unaffected.
+                        let text =
+                            replay_observation_text(store, delegation, &effect, text).await?;
+                        exchanges.push(TaskAgentActionExchange {
+                            request: produced.output,
+                            observation: TaskAgentObservation::new(occurrence, text),
+                        });
                     }
                     WorkspaceActionHostOutcome::NotStarted(reason) => {
                         let text = not_started_observation(&reason);
+                        // A refusal observation carries no source body and no
+                        // producing attempt, but it still becomes prompt
+                        // context: its occurrence is recorded body-free with
+                        // the execution correlation only.
+                        let occurrence =
+                            record_task_observation(store, delegation, None, None).await?;
                         exchanges.push(TaskAgentActionExchange {
                             request: produced.output,
-                            observation: TaskAgentObservation::new(text),
+                            observation: TaskAgentObservation::new(occurrence, text),
                         });
                     }
                     WorkspaceActionHostOutcome::MissingDelegation { delegation } => {
@@ -675,6 +748,57 @@ pub async fn run_task_agent_execution(
     }
 }
 
+/// The bounded number of scrubs of one final answer before the execution
+/// refuses the result.
+///
+/// Each stale refusal means the credential set advanced between the scrub and
+/// the durable arrival commit. The original answer is still in memory, so the
+/// execution re-scrubs it under the revision the commit just observed and
+/// arrives again; the bound keeps a continuously moving set from spinning
+/// forever, and the refusal that ends the bounded loop is a domain outcome
+/// with no result row.
+const FINAL_RESULT_SCRUB_ATTEMPTS: u32 = 3;
+
+/// Scrubs one final answer and arrives with the credential premise until the
+/// durable commit accepts it, or gives up with the last observed revision.
+///
+/// Only a credential-owned scrub proof is ever submitted: the raw answer is
+/// never passed to the repository, and a scrubbed body whose premise went
+/// stale is dropped uncommitted. Exhaustion returns
+/// [`TaskResultArrivalOutcome::StaleCredentialSet`] with zero writes.
+async fn finalize_result_body(
+    store: &Store,
+    scrubber: &impl SecretScrubber,
+    delegation: ene_task::DelegationId,
+    body: &str,
+) -> Result<TaskResultArrivalOutcome, TaskAgentRunError> {
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        let scrubbed =
+            scrubber
+                .scrub(body)
+                .await
+                .map_err(|_| TaskAgentRunError::ResultScrubUnavailable {
+                    reason: String::from("credential scrub failed"),
+                })?;
+        let arrival = orchestrate_result_arrival(
+            store,
+            delegation,
+            TaskResultScrubPremise::from_scrubbed(scrubbed),
+        )
+        .await?;
+        match arrival {
+            TaskResultArrivalOutcome::Recorded(_) => return Ok(arrival),
+            TaskResultArrivalOutcome::StaleCredentialSet { current } => {
+                if attempts == FINAL_RESULT_SCRUB_ATTEMPTS {
+                    return Ok(TaskResultArrivalOutcome::StaleCredentialSet { current });
+                }
+            }
+        }
+    }
+}
+
 /// Applies the execution-lifetime one-shot gate.
 ///
 /// The first durable attempt (an AU14 inference claim or an AU5 Action start)
@@ -704,34 +828,78 @@ async fn execution_already_started(
     Ok(store.delegation_has_started_work(delegation).await?)
 }
 
-/// The follow-up of one completed Action.
-#[derive(Debug)]
-enum CompletedFollowUp {
-    /// The effect resolved; replay the observation.
-    Continue(TaskAgentActionExchange),
-    /// The effect could not be confirmed; stop without replaying anything.
-    Stop(TaskAgentRunOutcome),
+/// Whether one observed effect could not be confirmed.
+///
+/// Such an effect stops the loop: the unknown stays the Action owner's durable
+/// fact, the same effect is never re-executed automatically, and the
+/// execution stays unsealed for the user to judge. Confirmed success and
+/// confirmed failure both continue with the fixed-class observation.
+fn unconfirmed_effect(effect: &ObservedEffect) -> bool {
+    effect.certainty == ActionCertainty::Unknown
 }
 
-/// Decides whether one completed Action lets the loop continue.
+/// Records one execution-local observation occurrence before it is replayed.
 ///
-/// An unverified effect stops the loop: the unknown stays as the Action
-/// owner's durable fact, the same effect is never re-executed automatically,
-/// and the execution stays unsealed for the user to judge. Confirmed success
-/// and confirmed failure both continue with the fixed-class observation.
-fn completed_follow_up(
-    request: TaskAgentOutput,
-    attempt: ene_action::ActionAttemptId,
+/// The occurrence identity is minted here, at observation time; the store
+/// copies and verifies the delegation/execution correlation and the producing
+/// attempt, and performs the receiving-boundary erasure check on the transient
+/// body. A failed record aborts the execution as a technical error: the turn
+/// that would consume an unrecorded observation never starts.
+async fn record_task_observation(
+    store: &Store,
+    delegation: ene_task::DelegationId,
+    attempt: Option<RawId>,
+    observed: Option<String>,
+) -> Result<TaskAgentObservationId, TaskAgentRunError> {
+    Ok(store
+        .record_task_agent_observation(TaskAgentObservationPremise {
+            observation: TaskAgentObservationId::generate(),
+            delegation,
+            attempt,
+            observed,
+            observed_at: WallClockWithTz::now(),
+        })
+        .await?)
+}
+
+/// Whether one observed effect reproduced workspace body content.
+///
+/// Only `read` bytes and a `list` listing reproduce source content into the
+/// observation text; a write confirmation or a refusal does not. The
+/// distinction decides whether the deletion survey must read the workspace
+/// source (a body-observed occurrence whose source cannot be read fails
+/// closed).
+fn observed_workspace_body(effect: &ObservedEffect) -> bool {
+    matches!(
+        effect.output,
+        Some(ActionOutput::Bytes(_) | ActionOutput::Listing(_))
+    )
+}
+
+/// Observation text replayed into the next provider turn.
+///
+/// A body-observing execution associated with a deletion interval is
+/// old-origin even when the current condition has already closed: the
+/// transient body must not become logical input. Fail closed if the hold
+/// cannot be read.
+async fn replay_observation_text(
+    store: &Store,
+    delegation: ene_task::DelegationId,
     effect: &ObservedEffect,
-    fact_recorded: bool,
-) -> CompletedFollowUp {
-    if effect.certainty == ActionCertainty::Unknown {
-        return CompletedFollowUp::Stop(TaskAgentRunOutcome::EffectUnresolved { attempt });
+    text: String,
+) -> Result<String, TaskAgentRunError> {
+    if !observed_workspace_body(effect) {
+        return Ok(text);
     }
-    CompletedFollowUp::Continue(TaskAgentActionExchange {
-        request,
-        observation: TaskAgentObservation::new(completed_observation(effect, fact_recorded)),
-    })
+    match store.task_delegation_held(delegation.as_raw()).await {
+        Ok(true) => Ok(String::from(
+            "the observed workspace content was discarded because its producing execution is associated with a deletion interval",
+        )),
+        Ok(false) => Ok(text),
+        Err(error) => Err(TaskAgentRunError::StorageUnavailable {
+            reason: error.to_string(),
+        }),
+    }
 }
 
 /// Renders the executor's own observation for the next turn.
@@ -791,6 +959,7 @@ fn not_started_observation(reason: &ActionNotStarted) -> String {
         ActionNotStarted::StalePremise => String::from("refused: the task premise moved"),
         ActionNotStarted::TaskTerminal => String::from("refused: the task is terminal"),
         ActionNotStarted::ExecutionSealed => String::from("refused: the execution is sealed"),
+        ActionNotStarted::DataUseHeld => String::from("refused: the target is under deletion"),
     }
 }
 
@@ -864,7 +1033,7 @@ pub fn parse_directive(text: &str) -> Result<TaskAgentDirective, TaskAgentProtoc
 /// Starts the existing Task Agent runner in the background for one committed
 /// delegation.
 ///
-/// The launcher only starts the existing runner; it owns no lifecycle, no
+/// The launcher only starts the existing runner; it owns no Task lifecycle, no
 /// durable running state, and no completion decision. The runner's own
 /// per-delegation registration and durable one-shot attempt facts make a
 /// second launch a domain refusal, and a technical runner failure stays a
@@ -880,11 +1049,15 @@ pub trait TaskAgentLauncher: Send + Sync {
 /// This is the production composition seam: `conn::run` owns both Arcs and
 /// installs one launcher on the handle, so a conversation-accepted Task Agent
 /// execution starts without any test-side runner call. The handle is held
-/// weakly: the launcher is stored on the handle itself, and a strong
-/// reference would form a cycle.
+/// weakly to avoid an idle ownership cycle. Running tasks hold strong Host
+/// references, so the serving owner's drop guard must call `abort`
+/// rather than relying on the last launcher Arc disappearing.
 pub struct BackgroundTaskAgent<T> {
     handle: std::sync::Weak<HostHandle>,
     transport: Arc<T>,
+    tasks: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+    shutdown: tokio::sync::Mutex<()>,
+    failure: std::sync::Mutex<Option<CoreError>>,
 }
 
 impl<T> BackgroundTaskAgent<T> {
@@ -893,7 +1066,95 @@ impl<T> BackgroundTaskAgent<T> {
         Self {
             handle: Arc::downgrade(&handle),
             transport,
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Emergency close-and-abort for the serving owner's drop guard. The
+    /// guard must call this even while other launcher Arcs remain: a running
+    /// task holds the Host, which itself owns the installed launcher.
+    /// Started blocking work may survive this call; only a graceful join
+    /// establishes quiescence.
+    pub(crate) fn abort(&self) {
+        let tasks = crate::lock_unpoison(&self.tasks).take();
+        drop(tasks);
+    }
+
+    /// Closes launch admission and joins every admitted runner, including its
+    /// awaited Store work. The serving owner calls this after draining the
+    /// handlers that can commit delegations; Client disconnect never calls it.
+    /// No Task cancellation or external-effect outcome is inferred here.
+    ///
+    /// Dropping the join future or the launcher drops its `JoinSet`, aborting
+    /// async runners as an emergency stop only: started blocking work is not
+    /// thereby proven quiescent. Concurrent callers wait for the same drain.
+    /// Do not call this after the emergency `abort` path as evidence of a
+    /// graceful drain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Serving`] for a panicked or cancelled runner,
+    /// after joining all remaining runners. Runner domain and technical
+    /// outcomes keep their existing semantics and are not join failures.
+    pub(crate) async fn shutdown_and_join(&self) -> Result<(), CoreError> {
+        let _shutdown = self.shutdown.lock().await;
+        let tasks = crate::lock_unpoison(&self.tasks).take();
+        let Some(mut tasks) = tasks else {
+            return Ok(());
+        };
+        let mut failure = crate::lock_unpoison(&self.failure).take();
+        while let Some(result) = tasks.join_next().await {
+            if result.is_err() {
+                failure.get_or_insert_with(task_agent_join_failure);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+fn task_agent_join_failure() -> CoreError {
+    // A panic payload may include task or provider content.
+    CoreError::Serving(String::from("Task Agent runner panicked or was cancelled"))
+}
+
+impl<T> BackgroundTaskAgent<T>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    /// Starts a runner under the serving owner's join set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskAgentRunRefusal::ExecutionUnavailable`] when serving has
+    /// closed admission or the Host is gone. A refused launch releases its
+    /// reservation without changing the durable delegation or retrying it.
+    fn try_launch(&self, delegation: ene_task::DelegationId) -> Result<(), TaskAgentRunRefusal> {
+        let mut tasks = crate::lock_unpoison(&self.tasks);
+        let Some(handle) = self.handle.upgrade() else {
+            return Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation });
+        };
+        let Some(tasks) = tasks.as_mut() else {
+            handle.task_executions.release(delegation);
+            return Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation });
+        };
+        // Reap completed runners so a long-lived Host does not retain one
+        // task allocation per delegation until shutdown.
+        while let Some(result) = tasks.try_join_next() {
+            if result.is_err() {
+                crate::lock_unpoison(&self.failure).get_or_insert_with(task_agent_join_failure);
+            }
+        }
+        let transport = Arc::clone(&self.transport);
+        tasks.spawn(async move {
+            // The runner owns every admission and outcome; a technical
+            // failure is dropped as technical and never becomes a Task
+            // failure. The dialogue never awaits execution; serving shutdown
+            // retains responsibility for joining it.
+            drop(handle.run_task_agent(transport.as_ref(), delegation).await);
+        });
+        Ok(())
     }
 }
 
@@ -902,20 +1163,226 @@ where
     T: ProviderTransport + Send + Sync + 'static,
 {
     fn launch(&self, delegation: ene_task::DelegationId) {
-        let Some(handle) = self.handle.upgrade() else {
-            // The serving process is shutting down; no execution starts.
-            return;
-        };
-        let transport = Arc::clone(&self.transport);
-        tokio::spawn(async move {
-            // The runner owns every admission and outcome; a technical
-            // failure is dropped as technical and never becomes a Task
-            // failure. The launch is fire-and-forget on purpose: the dialogue
-            // turn never awaits the execution.
-            drop(handle.run_task_agent(transport.as_ref(), delegation).await);
-        });
+        // This inlet has no response channel; try_launch releases a refused
+        // reservation, leaving the committed delegation unexecuted.
+        drop(self.try_launch(delegation));
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    struct NoProvider;
+
+    impl ProviderTransport for NoProvider {
+        fn complete(
+            &self,
+            _request: ene_inference::ProviderRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            ene_inference::ProviderResponse,
+                            ene_inference::InferenceTechnicalError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_started_blocking_work_and_closes_launch_admission() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                directory.path(),
+                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let launcher = Arc::new(BackgroundTaskAgent::new(
+            Arc::clone(&handle),
+            Arc::new(NoProvider),
+        ));
+        assert!(handle.install_task_launcher(launcher.clone()));
+        let weak = Arc::downgrade(&handle);
+        let task = ene_task::TaskId::generate();
+        let delegation = ene_task::DelegationId::generate();
+        assert!(handle.task_executions.reserve(delegation, task));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&handle);
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        crate::lock_unpoison(&launcher.tasks)
+            .as_mut()
+            .unwrap()
+            .spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    worker_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await
+                .unwrap();
+                drop(worker);
+            });
+        entered_rx.await.unwrap();
+        let mut joining = std::pin::pin!(launcher.shutdown_and_join());
+        std::future::poll_fn(|cx| {
+            assert!(joining.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            launcher.try_launch(delegation),
+            Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation })
+        );
+        assert!(!handle.task_executions.task_has_reservation_or_running(task));
+        let mut second_join = std::pin::pin!(launcher.shutdown_and_join());
+        std::future::poll_fn(|cx| {
+            assert!(second_join.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(handle);
+        assert!(weak.upgrade().is_some());
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        joining.await.unwrap();
+        second_join.await.unwrap();
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn admitted_launch_is_owned_until_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                directory.path(),
+                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let launcher = Arc::new(BackgroundTaskAgent::new(
+            Arc::clone(&handle),
+            Arc::new(NoProvider),
+        ));
+        assert!(handle.install_task_launcher(launcher.clone()));
+        let weak = Arc::downgrade(&handle);
+        launcher
+            .try_launch(ene_task::DelegationId::generate())
+            .unwrap();
+        assert_eq!(
+            crate::lock_unpoison(&launcher.tasks)
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(handle);
+        assert!(weak.upgrade().is_some());
+        launcher.shutdown_and_join().await.unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_launcher_aborts_owned_async_work() {
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+        };
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        crate::lock_unpoison(&launcher.tasks)
+            .as_mut()
+            .unwrap()
+            .spawn(async move {
+                std::future::pending::<()>().await;
+                drop(held);
+            });
+        drop(launcher);
+        assert!(released.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn emergency_abort_breaks_running_host_ownership_cycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                directory.path(),
+                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let launcher = Arc::new(BackgroundTaskAgent::new(
+            Arc::clone(&handle),
+            Arc::new(NoProvider),
+        ));
+        assert!(handle.install_task_launcher(launcher.clone()));
+        let weak = Arc::downgrade(&handle);
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        crate::lock_unpoison(&launcher.tasks)
+            .as_mut()
+            .unwrap()
+            .spawn(async move {
+                std::future::pending::<()>().await;
+                drop(handle);
+                drop(held);
+            });
+        assert!(weak.upgrade().is_some());
+        launcher.abort();
+        assert!(released.await.is_err());
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn join_failure_is_returned_only_after_remaining_children_finish() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+        };
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let (panicking, panicked) = tokio::sync::oneshot::channel::<()>();
+        {
+            let mut tasks = crate::lock_unpoison(&launcher.tasks);
+            let tasks = tasks.as_mut().unwrap();
+            tasks.spawn(async move {
+                let _panicking = panicking;
+                panic!("test runner panic");
+            });
+            tasks.spawn(async move { wait.await.unwrap() });
+        }
+        assert!(panicked.await.is_err());
+        let mut joining = std::pin::pin!(launcher.shutdown_and_join());
+        std::future::poll_fn(|cx| {
+            assert!(joining.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        assert!(matches!(joining.await, Err(CoreError::Serving(_))));
+    }
+}

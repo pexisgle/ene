@@ -72,6 +72,9 @@ use ene_companion::{
 };
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{ClientId, PresenceAttribution, PresenceRepository, PresenceState};
+use ene_preservation::{
+    DeletionMaterialOutcome, MechanicalDeletionTarget, PreservationRepository as _,
+};
 use ene_primitive::RawId;
 use ene_task::{
     SteeringPremiseRef, TaskHeadline, TaskId, TaskPurposeRef, TaskRef, TaskReportRowCursor,
@@ -97,7 +100,7 @@ fn conn_key(id: &ConnectionWireId) -> String {
 
 /// Stale refusal for a Client-dependent operation whose ownership section
 /// found the connection superseded, closed, or replaced (IPC §11.3).
-fn stale_operation(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+pub(crate) fn stale_operation(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     stale_reject(frame, live, detail)
 }
 
@@ -175,7 +178,7 @@ impl Receipt {
 
 /// A stored page cursor: its kind binds it to one query (and Task).
 #[derive(Debug, Clone)]
-enum StoredCursor {
+pub(crate) enum StoredCursor {
     TaskList {
         after: Option<TaskId>,
     },
@@ -188,6 +191,17 @@ enum StoredCursor {
         cursor: UndeliveredCursor,
         pending_only: bool,
         limit: u32,
+    },
+    /// One usage summary page position, bound to this connection, to the
+    /// exact filter premise that produced it, and to the effective period
+    /// bounds that walk keeps ([`crate::usage`]): changing any filter makes a
+    /// reused cursor stale instead of silently reading a different result
+    /// set, and a cursor page covers the same window as its first page.
+    UsageSummary {
+        premise: crate::usage::UsageQueryPremise,
+        from: ene_primitive::WallClockWithTz,
+        to: ene_primitive::WallClockWithTz,
+        after: Option<ene_inference::UsageSummaryCursor>,
     },
 }
 
@@ -260,6 +274,91 @@ impl Default for PresentationState {
 /// stale without growing memory with the connection count.
 const RETIRED_RECEIPT_CAP: usize = 64;
 
+impl PresentationState {
+    /// Retires one receipt id with its issuing connection: it stays
+    /// answerable as `StalePresentation` (or `StaleConnection` from a
+    /// foreign connection) instead of decaying into `UnknownRef`. Bounded;
+    /// never-known ids are unaffected.
+    pub(crate) fn retire(&mut self, id: &str, connection: &str) {
+        if self.retired.iter().any(|(known, _)| known == id) {
+            return;
+        }
+        self.retired
+            .push_back((id.to_string(), connection.to_string()));
+        while self.retired.len() > RETIRED_RECEIPT_CAP {
+            self.retired.pop_front();
+        }
+    }
+
+    /// Removes one live receipt, retiring its id.
+    pub(crate) fn remove_receipt(&mut self, companion_key: &str) {
+        if let Some(receipt) = self.receipts.remove(companion_key) {
+            self.receipt_ids.remove(&receipt.id);
+            self.retire(&receipt.id, &receipt.connection);
+        }
+    }
+
+    /// Invalidates the whole Host-memory presentation world for one Targeted
+    /// Deletion condition (Stage 6 A3c).
+    ///
+    /// Receipts, carried item refs, cursors, subscriptions, and resume slots
+    /// are reconstructible from canonical rows and none is provably body-free,
+    /// so all of it is dropped together: a stale receipt can no longer
+    /// re-emit, an ACK can no longer drive a covered row to `Presented`, and
+    /// the next presentation pass re-reads the canonical source under the
+    /// deletion condition. Live receipt ids still retire, so a late ACK is
+    /// answered as stale instead of unknown.
+    ///
+    /// Returns the number of live receipts and carried item refs dropped.
+    pub(crate) fn invalidate_for_erasure(&mut self) -> u64 {
+        let dropped = (self.receipts.len() + self.carried.len()) as u64;
+        let receipts: Vec<(String, String)> = self
+            .receipts
+            .values()
+            .map(|receipt| (receipt.id.clone(), receipt.connection.clone()))
+            .collect();
+        self.receipts.clear();
+        self.receipt_ids.clear();
+        for (id, connection) in receipts {
+            self.retire(&id, &connection);
+        }
+        self.subs.clear();
+        self.task_refs.clear();
+        self.carried.clear();
+        self.source_refs.clear();
+        self.cursors.clear();
+        self.resume.clear();
+        dropped
+    }
+
+    /// The stored page of one usage-summary cursor issued on this connection
+    /// for exactly `premise`: the effective period bounds that walk keeps and
+    /// the keyset position, if any.
+    ///
+    /// `None` means the cursor is unknown, was issued on another connection,
+    /// or was issued for a different filter premise: the caller answers
+    /// `StaleBaseView` and the Client restarts from the head.
+    pub(crate) fn usage_cursor_page(
+        &self,
+        conn: &str,
+        wire: &str,
+        premise: &crate::usage::UsageQueryPremise,
+    ) -> Option<crate::usage::UsageCursorPage> {
+        match self.cursors.get(&(conn.to_string(), wire.to_string())) {
+            Some(StoredCursor::UsageSummary {
+                premise: bound,
+                from,
+                to,
+                after,
+            }) if bound == premise => Some(crate::usage::UsageCursorPage {
+                from: *from,
+                to: *to,
+                after: *after,
+            }),
+            _ => None,
+        }
+    }
+}
 /// Opaque purpose identity echoed by the Client: `{task}:{adopted_revision}`.
 ///
 /// Takes the stored [`TaskPurposeRef`] itself, never a bare revision: the
@@ -349,7 +448,7 @@ fn hold_name(hold: TaskResumeHold) -> &'static str {
     }
 }
 
-pub(crate) fn limit_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
+pub(crate) fn field_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(
         frame,
         live,
@@ -366,11 +465,98 @@ pub(crate) fn checked_limit(limit: Option<u32>) -> Option<u32> {
     }
 }
 
+/// The mechanical coverage premise of one read pass (lifecycle §7).
+///
+/// [`Self::covers`] answers whether one body about to be materialized is
+/// mechanically covered by a current erasure condition. An unreadable premise
+/// is fail closed: every body is withheld rather than presented as uncovered.
+pub(crate) struct CurrentCoverage {
+    targets: Vec<String>,
+    readable: bool,
+}
+
+impl CurrentCoverage {
+    fn unreadable() -> Self {
+        Self {
+            targets: Vec::new(),
+            readable: false,
+        }
+    }
+
+    pub(crate) fn covers(&self, text: &str) -> bool {
+        if !self.readable {
+            return true;
+        }
+        self.targets
+            .iter()
+            .any(|target| !target.is_empty() && text.contains(target.as_str()))
+    }
+}
+
 impl HostHandle {
     /// Serializes begin/ack transitions (CCT §10.5). Held only across short
     /// store roundtrips, never across provider I/O.
     pub(crate) async fn presentation_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.presentation_lock.lock().await
+    }
+
+    /// The mechanical coverage premise of one read pass (lifecycle §7).
+    ///
+    /// Reads the canonical current conditions and their protected exact
+    /// targets through the existing bounded canonical API — never a cached
+    /// "no deletion" verdict. The read is per pass and dropped afterwards: the
+    /// target text is compared in place and never cached, logged, or copied
+    /// into a response. A failed read is not an empty coverage set: the caller
+    /// withholds the body instead of lying.
+    pub(crate) async fn current_coverage(&self) -> CurrentCoverage {
+        let mut targets = Vec::new();
+        let mut after = None;
+        loop {
+            let page = match self.store.current_erasure_conditions(after, 100).await {
+                Ok(page) => page,
+                Err(_) => return CurrentCoverage::unreadable(),
+            };
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for condition in &page {
+                after = Some(condition.condition.operation);
+                match self
+                    .store
+                    .deletion_operation_material(condition.condition.operation)
+                    .await
+                {
+                    Ok(DeletionMaterialOutcome::Material(material)) => {
+                        let MechanicalDeletionTarget::ExactText(exact) =
+                            &material.target().mechanical;
+                        let text = exact.expose_for_erasure();
+                        if !text.is_empty() {
+                            targets.push(text.to_string());
+                        }
+                    }
+                    // A current condition whose protected material was already
+                    // wiped (finalizing, §12 steps 2-3) has no readable target
+                    // left to compare against: the premise cannot prove any
+                    // body uncovered, so the pass fails closed and withholds
+                    // instead of presenting as if deletion had ended. A missing
+                    // operation cannot be returned as a current condition by
+                    // the canonical read; treating it the same way is the
+                    // conservative answer.
+                    Ok(DeletionMaterialOutcome::Destroyed | DeletionMaterialOutcome::Missing) => {
+                        return CurrentCoverage::unreadable();
+                    }
+                    Err(_) => return CurrentCoverage::unreadable(),
+                }
+            }
+            if page_len < 100 {
+                break;
+            }
+        }
+        CurrentCoverage {
+            targets,
+            readable: true,
+        }
     }
 
     /// Runs one short presentation-state mutation under the connection
@@ -382,7 +568,7 @@ impl HostHandle {
     /// Every connection-scoped ref, cursor, carried item, subscription,
     /// receipt, and retry-slot install goes through here, so a superseded or
     /// closed connection cannot recreate state after the lifecycle sweep.
-    fn with_presentation_state<R>(
+    pub(crate) fn with_presentation_state<R>(
         &self,
         live: &LiveInput,
         install: impl FnOnce(&mut PresentationState) -> R,
@@ -406,7 +592,7 @@ impl HostHandle {
         )
     }
 
-    fn mint_cursor(
+    pub(crate) fn mint_cursor(
         state: &mut PresentationState,
         conn: &str,
         cursor: StoredCursor,
@@ -438,22 +624,6 @@ impl HostHandle {
         ReportSourceWireRef(wire)
     }
 
-    /// Retires one receipt id with its issuing connection: it stays
-    /// answerable as `StalePresentation` (or `StaleConnection` from a
-    /// foreign connection) instead of decaying into `UnknownRef`. Bounded;
-    /// never-known ids are unaffected.
-    fn retire(state: &mut PresentationState, id: &str, connection: &str) {
-        if state.retired.iter().any(|(known, _)| known == id) {
-            return;
-        }
-        state
-            .retired
-            .push_back((id.to_string(), connection.to_string()));
-        while state.retired.len() > RETIRED_RECEIPT_CAP {
-            state.retired.pop_front();
-        }
-    }
-
     /// Drops one connection's carried item refs: every begin re-registers
     /// its own wires, so a polling connection cannot grow the map. Item refs
     /// are never echoed back for state changes (ACKs are receipt-scoped),
@@ -465,17 +635,9 @@ impl HostHandle {
     /// Consumes one single-use page cursor: forward-only paging never
     /// rewinds through an old cursor, and the map cannot grow with the page
     /// count.
-    fn take_cursor(state: &mut PresentationState, conn: &str, cursor: Option<&str>) {
+    pub(crate) fn take_cursor(state: &mut PresentationState, conn: &str, cursor: Option<&str>) {
         if let Some(wire) = cursor {
             state.cursors.remove(&(conn.to_string(), wire.to_string()));
-        }
-    }
-
-    /// Removes one live receipt, retiring its id.
-    fn remove_receipt(state: &mut PresentationState, companion_key: &str) {
-        if let Some(receipt) = state.receipts.remove(companion_key) {
-            state.receipt_ids.remove(&receipt.id);
-            Self::retire(state, &receipt.id, &receipt.connection);
         }
     }
 
@@ -487,7 +649,7 @@ impl HostHandle {
         request: &UndeliveredRequest,
     ) -> Vec<WireFrame> {
         let Some(limit) = checked_limit(request.limit) else {
-            return vec![limit_reject(frame, live, "query limit must be 1..=50")];
+            return vec![field_reject(frame, live, "query limit must be 1..=50")];
         };
         let response = self
             .present_page(
@@ -726,7 +888,7 @@ impl HostHandle {
             .get(&companion_key)
             .is_some_and(|live| live.id == receipt.id)
         {
-            Self::remove_receipt(&mut state, &companion_key);
+            state.remove_receipt(&companion_key);
         }
         UndeliveredResponse::StaleBaseView { current: None }
     }
@@ -782,7 +944,7 @@ impl HostHandle {
                 if let Some(receipt) = state.receipts.get(&ckey).cloned()
                     && (receipt.connection != conn || receipt.expired())
                 {
-                    Self::remove_receipt(state, &ckey);
+                    state.remove_receipt(&ckey);
                 }
                 let sub = state.subs.entry(conn.to_string()).or_insert(Subscription {
                     companion: companion.as_raw(),
@@ -1051,6 +1213,20 @@ impl HostHandle {
                             selected.push(entry.id);
                             carried.push(item);
                         }
+                        // A4: the item's canonical source is under a current
+                        // erasure condition, so the presentation start is not
+                        // claimed (no status write). The correlation stays
+                        // pageable — the same shape the read-time coverage
+                        // check produces — but the excerpt is withheld, so the
+                        // compare and the body hand-off cannot disagree with a
+                        // condition that committed after the read.
+                        Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
+                            let mut withheld = item;
+                            withheld.excerpt = String::new();
+                            withheld.truncated = false;
+                            selected.push(entry.id);
+                            carried.push(withheld);
+                        }
                         Ok(ene_companion::ReportStatusTransition::StaleSource) => {
                             dropped.push(item);
                         }
@@ -1097,7 +1273,7 @@ impl HostHandle {
                 // One receipt per Companion: installing supersedes any leftover.
                 if let Some(old) = state.receipts.insert(companion_key.clone(), receipt) {
                     state.receipt_ids.remove(&old.id);
-                    Self::retire(state, &old.id, &old.connection);
+                    state.retire(&old.id, &old.connection);
                 }
                 state.receipt_ids.insert(receipt_id.clone(), companion_key);
                 let (next_cursor, drained) = match fetched_next {
@@ -1154,8 +1330,14 @@ impl HostHandle {
 
     /// Builds carried items (with bounded excerpts) for entries in order,
     /// registering per-connection item refs under the ownership section.
-    /// Unreadable excerpts keep their correlation with an empty excerpt; the
-    /// body stays pageable and nothing is marked presented.
+    ///
+    /// Excerpts are read through the canonical source and checked against the
+    /// current erasure conditions in the same pass: a covered excerpt is
+    /// withheld (empty, not truncated), so a receipt created before a
+    /// condition became durable cannot re-materialize the target body and a
+    /// reconnect cannot reconstruct it. An unreadable excerpt or an unreadable
+    /// coverage premise keeps its correlation with an empty excerpt; the body
+    /// stays pageable and nothing is marked presented.
     ///
     /// Returns `None` when the connection was superseded before the refs
     /// were installed: no ref is registered for it.
@@ -1165,6 +1347,7 @@ impl HostHandle {
         conn: &str,
         entries: &[UndeliveredRef],
     ) -> Option<Vec<UndeliveredItemView>> {
+        let coverage = self.current_coverage().await;
         // Load the excerpts first (no state touched), then install every ref
         // in one ownership section.
         let mut loaded = Vec::with_capacity(entries.len());
@@ -1174,6 +1357,7 @@ impl HostHandle {
                 .load_undelivered_excerpt(entry.source, EXCERPT_MAX_BYTES)
                 .await
             {
+                Ok(Some(page)) if coverage.covers(&page.text) => (String::new(), false),
                 Ok(Some(page)) => {
                     let truncated = page.total_bytes > page.text.len() as u64;
                     (page.text, truncated)
@@ -1187,6 +1371,34 @@ impl HostHandle {
                 excerpt,
                 truncated,
             ));
+        }
+        // Handing the body to a Client creates a local copy outside Host
+        // control: the durable evidence must be committed before the excerpts
+        // can be handed over (lifecycle §8.1). An empty page registers
+        // nothing; a failed evidence commit withholds the bodies instead of
+        // creating an unaccountable copy.
+        let serves_body = loaded
+            .iter()
+            .any(|(_, _, _, excerpt, _)| !excerpt.is_empty());
+        if serves_body {
+            if !self.note_client_body_delivery(live).await {
+                for (_, _, _, excerpt, truncated) in &mut loaded {
+                    excerpt.clear();
+                    *truncated = false;
+                }
+            } else {
+                // The premise above was read before the evidence write and the
+                // handoff: a condition that committed in between is either
+                // already in the snapshot (evidence committed first) or must
+                // withhold the excerpt here (critical-areas §5.2/§6.1).
+                let fresh = self.current_coverage().await;
+                for (_, _, _, excerpt, truncated) in &mut loaded {
+                    if !excerpt.is_empty() && fresh.covers(excerpt) {
+                        excerpt.clear();
+                        *truncated = false;
+                    }
+                }
+            }
         }
         self.with_presentation_state(live, |state| {
             loaded
@@ -1464,7 +1676,7 @@ impl HostHandle {
                         return Verdict::Refuse(UndeliveredAckOutcome::UnknownRef);
                     };
                     if receipt.expired() {
-                        Self::remove_receipt(&mut state, &companion_key);
+                        state.remove_receipt(&companion_key);
                         Verdict::Refuse(UndeliveredAckOutcome::StalePresentation)
                     } else if receipt.connection != conn || receipt.incarnation != incarnation {
                         // The ACK never migrates across connections or incarnations.
@@ -1482,7 +1694,7 @@ impl HostHandle {
                     } else {
                         // Consumed: any ACK releases the receipt; the rows keep
                         // whatever the status below decided.
-                        Self::remove_receipt(&mut state, &companion_key);
+                        state.remove_receipt(&companion_key);
                         Verdict::Proceed(receipt)
                     }
                 })();
@@ -1497,20 +1709,30 @@ impl HostHandle {
                 match ack.status {
                     PresentationStatus::Presented => {
                         let mut presented = 0_u32;
+                        let mut held = 0_u32;
                         for id in &receipt.selected {
                             // Bounded to the carried id; later arrivals are never
                             // touched by this ACK.
-                            if let Ok(ene_companion::ReportStatusTransition::PendingToPresented) =
-                                store.compare_and_mark_reported_sync(
-                                    *id,
-                                    ReportStatus::PresentationUnknown,
-                                    mark,
-                                )
-                            {
-                                presented += 1;
+                            match store.compare_and_mark_reported_sync(
+                                *id,
+                                ReportStatus::PresentationUnknown,
+                                mark,
+                            ) {
+                                Ok(ene_companion::ReportStatusTransition::PendingToPresented) => {
+                                    presented += 1;
+                                }
+                                // A covered row is never confirmed presented:
+                                // the status stays un-presented and the row is
+                                // re-evaluated after the deletion settles.
+                                Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
+                                    held += 1;
+                                }
+                                _ => {}
                             }
                         }
-                        if presented > 0 {
+                        if held > 0 && presented == 0 {
+                            UndeliveredAckOutcome::HeldForErasure
+                        } else if presented > 0 {
                             UndeliveredAckOutcome::Presented { presented }
                         } else {
                             // Every carried row was already presented (a parallel
@@ -1549,7 +1771,7 @@ impl HostHandle {
         query: &ListTasks,
     ) -> Vec<WireFrame> {
         let Some(limit) = checked_limit(query.limit) else {
-            return vec![limit_reject(frame, live, "query limit must be 1..=50")];
+            return vec![field_reject(frame, live, "query limit must be 1..=50")];
         };
         let conn = conn_key(&live.connection_id);
         let after = match &query.cursor {
@@ -1642,7 +1864,7 @@ impl HostHandle {
         query: &GetTaskReport,
     ) -> Vec<WireFrame> {
         let Some(limit) = checked_limit(query.limit) else {
-            return vec![limit_reject(frame, live, "query limit must be 1..=50")];
+            return vec![field_reject(frame, live, "query limit must be 1..=50")];
         };
         let conn = conn_key(&live.connection_id);
         let task = {
@@ -1814,7 +2036,7 @@ impl HostHandle {
                 value
             }
             Some(_) => {
-                return vec![limit_reject(
+                return vec![field_reject(
                     frame,
                     live,
                     "source limit must be 4..=16384 bytes",
@@ -1839,23 +2061,54 @@ impl HostHandle {
                 }
             }
         };
+        let coverage = self.current_coverage().await;
         match self
             .store
             .load_report_source_bounded(source, query.cursor.unwrap_or(0), limit)
             .await
         {
-            Ok(Some(page)) => vec![outgoing_frame(
-                frame,
-                live,
-                WirePayload::ReportSourceResponse(ReportSourceResponse::Page(
-                    ReportSourcePageView {
-                        text: page.text,
-                        total_bytes: page.total_bytes,
-                        next: page.next,
-                    },
-                )),
-            )],
-            Ok(None) | Err(_) => vec![outgoing_frame(
+            Ok(Some(page)) if !coverage.covers(&page.text) => {
+                if !page.text.is_empty() && !self.note_client_body_delivery(live).await {
+                    // The body cannot leave the Host unaccountably: fail the
+                    // read closed exactly like an unbuildable page.
+                    return vec![outgoing_frame(
+                        frame,
+                        live,
+                        WirePayload::ReportSourceResponse(ReportSourceResponse::InputUnavailable),
+                    )];
+                }
+                if !page.text.is_empty() {
+                    // The premise above was read before the evidence write and
+                    // the handoff: a condition that committed in between is
+                    // either already in the snapshot (evidence committed
+                    // first) or must withhold the body here
+                    // (critical-areas §5.2/§6.1).
+                    let fresh = self.current_coverage().await;
+                    if fresh.covers(&page.text) {
+                        return vec![outgoing_frame(
+                            frame,
+                            live,
+                            WirePayload::ReportSourceResponse(
+                                ReportSourceResponse::InputUnavailable,
+                            ),
+                        )];
+                    }
+                }
+                vec![outgoing_frame(
+                    frame,
+                    live,
+                    WirePayload::ReportSourceResponse(ReportSourceResponse::Page(
+                        ReportSourcePageView {
+                            text: page.text,
+                            total_bytes: page.total_bytes,
+                            next: page.next,
+                        },
+                    )),
+                )]
+            }
+            // A covered source body is withheld exactly like an unbuildable
+            // one: the read is bounded and the Client learns no partial body.
+            Ok(Some(_)) | Ok(None) | Err(_) => vec![outgoing_frame(
                 frame,
                 live,
                 WirePayload::ReportSourceResponse(ReportSourceResponse::InputUnavailable),
@@ -2267,7 +2520,7 @@ impl HostHandle {
             .map(|(key, _)| key.clone())
             .collect();
         for key in receipts {
-            Self::remove_receipt(&mut state, &key);
+            state.remove_receipt(&key);
         }
     }
 
@@ -2292,7 +2545,7 @@ impl HostHandle {
             .map(|(key, _)| key.clone())
             .collect();
         for key in expired {
-            Self::remove_receipt(&mut state, &key);
+            state.remove_receipt(&key);
         }
     }
 

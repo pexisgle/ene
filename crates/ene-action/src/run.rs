@@ -84,6 +84,11 @@ pub enum ActionNotStarted {
     /// The delegation's execution already submitted its final result;
     /// nothing was claimed or executed, even while the Task is not terminal.
     ExecutionSealed,
+    /// A canonical current erasure condition covers the resolved target;
+    /// nothing was claimed and nothing was executed. The caller reports a
+    /// data-use hold; a completed operation is not a current condition, so a
+    /// fresh target after completion proceeds.
+    DataUseHeld,
     /// The requested path was refused before any claim.
     Rejected(TargetRejection),
     /// Create/edit arrived without content.
@@ -199,6 +204,9 @@ pub async fn orchestrate_workspace_action(
             return Ok(ActionRunOutcome::NotStarted(
                 ActionNotStarted::ExecutionSealed,
             ));
+        }
+        ActionStartOutcome::HeldForErasure => {
+            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::DataUseHeld));
         }
     }
     // The attempt is durable: execute outside every transaction, exactly the

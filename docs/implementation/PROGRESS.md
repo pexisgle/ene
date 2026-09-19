@@ -4,10 +4,10 @@
 
 ## 現在進行中のステージ (Current Milestone)
 
-- **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、production 実装は未着手**
+- **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、production 実装は A1 から**
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
-  - 直近の作業は **A1a: `ene-ctl` から共有 `ene-client` を抽出**し、GUI で利用する非同期 Client 接続の基盤を整えること。
-  - GUI・秘密入力・OS 保護ストア・overlay / VRM の技術成立 probe は未実施。各 slice の前提として検証し、A1a の開始は妨げない。
+  - 次の production slice は **A1: `ene-client` 抽出と serving 中 control**（GUI toolkit は含めない）。
+  - GUI・秘密入力・OS 保護ストア・overlay / VRM の技術成立 probe は未実施。A1 は probe を待たない。slice F まで Stage 7 を完了としない。
 
 ## 完了したステージ (Completed)
 
@@ -17,7 +17,7 @@
 - ✅ **Stage 3**: 経験の要約と記憶機能（Experience Summary、記憶の形成・検索・更新）
 - ✅ **Stage 4**: 作業用エージェント (Task Agent) とファイル操作タスク
 - ✅ **Stage 5**: クライアントのライフサイクルとホストでの作業継続
-- ✅ **Stage 6**: 指定データの完全削除、利用量・費用・上限管理、認証情報の非露出（[完了確認 #1597](https://github.com/pexisgle/ene/issues/1597)）
+- ✅ **Stage 6**: 指定データの完全削除 (Targeted Deletion) と利用量・機密安全（[完了確認 #1597](https://github.com/pexisgle/ene/issues/1597)）
 
 ## 未解決のブロッカー (Blockers)
 

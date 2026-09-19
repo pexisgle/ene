@@ -9,6 +9,7 @@ publish.workspace = true
 ene-primitive = { path = "../ene-primitive" }
 ene-permission = { path = "../ene-permission" }
 ene-credential = { path = "../ene-credential" }
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

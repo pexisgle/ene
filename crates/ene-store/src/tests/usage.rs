@@ -62,8 +62,10 @@ fn attempt_for(
         expected_credential_set: CredentialSetRevision::initial(),
         provider: provider.to_owned(),
         model: model.to_owned(),
+        data_use: Vec::new(),
         task_agent: None,
         pricing,
+        usage_estimate: None,
     }
 }
 

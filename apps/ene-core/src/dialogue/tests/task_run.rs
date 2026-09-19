@@ -35,7 +35,6 @@ use ene_task::{
     TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise,
     TaskProgress, TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance,
     WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
-    orchestrate_result_arrival,
 };
 
 use crate::serve::{CredStore, HostHandle, device_client};
@@ -631,13 +630,8 @@ async fn stage4_cancel_stops_the_loop_and_a_late_result_stays_original_only() {
 
     // A delayed final result from the same execution is still recorded and
     // sealed, but never adopted into the cancelled Task.
-    let recorded = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        ene_task::TaskAgentOutput::new(String::from("late final body")),
-    )
-    .await
-    .expect("the arrival record survives cancel");
+    let recorded =
+        crate::test_support::record_result(&handle.store, delegation, "late final body").await;
     let acceptance = handle
         .store
         .adopt_result(ene_task::TaskResultAdoptionClaim {

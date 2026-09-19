@@ -22,93 +22,11 @@ use thiserror::Error;
 
 use crate::UsageFact;
 use crate::pricing::{PricingSnapshot, PricingSnapshotRef};
+pub use ene_primitive::money::{CurrencyCode, Money};
 
 /// Rates are stated per this many tokens, so the stored ratio is exact
 /// integer arithmetic with no intermediate decimal expansion.
 const RATE_DENOMINATOR: u128 = 1_000_000;
-
-/// Currency of a money amount.
-///
-/// The reviewed first-party catalog is USD-only. Adding another currency is an
-/// explicit catalog change; amounts of different currencies are never
-/// combined or converted by a guess.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CurrencyCode {
-    Usd,
-}
-
-impl CurrencyCode {
-    /// The code this currency stores and renders as.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Usd => "USD",
-        }
-    }
-
-    /// Parses a stored code. An unknown code is `None`, never a default
-    /// currency.
-    #[must_use]
-    pub fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "USD" => Some(Self::Usd),
-            _ => None,
-        }
-    }
-}
-
-/// Exact money amount in micro-currency units (1e-6 of the currency unit).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Money {
-    currency: CurrencyCode,
-    micros: u64,
-}
-
-impl Money {
-    /// Builds an amount from an exact micro-currency count.
-    #[must_use]
-    pub const fn from_micros(currency: CurrencyCode, micros: u64) -> Self {
-        Self { currency, micros }
-    }
-
-    /// The zero amount of `currency`.
-    #[must_use]
-    pub const fn zero(currency: CurrencyCode) -> Self {
-        Self::from_micros(currency, 0)
-    }
-
-    /// The currency this amount is denominated in.
-    #[must_use]
-    pub const fn currency(self) -> CurrencyCode {
-        self.currency
-    }
-
-    /// The exact micro-currency count.
-    #[must_use]
-    pub const fn micros(self) -> u64 {
-        self.micros
-    }
-
-    /// Adds two amounts of the same currency. Different currencies and
-    /// amounts that do not fit [`u64`] micro-units answer `None`, never a
-    /// converted, wrapped, or saturated value.
-    #[must_use]
-    pub const fn checked_add(self, other: Self) -> Option<Self> {
-        if !matches!(
-            (self.currency, other.currency),
-            (CurrencyCode::Usd, CurrencyCode::Usd)
-        ) {
-            return None;
-        }
-        match self.micros.checked_add(other.micros) {
-            Some(micros) => Some(Self {
-                currency: self.currency,
-                micros,
-            }),
-            None => None,
-        }
-    }
-}
 
 /// Exact price of one token class: micro-currency units per 1,000,000 tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -144,6 +62,56 @@ impl TokenRate {
             .checked_div(RATE_DENOMINATOR)?;
         let micros = u64::try_from(rounded).ok()?;
         Some(Money::from_micros(currency, micros))
+    }
+}
+
+/// Conservative upper bound of the token usage one provider request can bill.
+///
+/// `usage-cost-cap` §8: the provider adapter resolves this before the attempt
+/// claim, and the cap admission converts it into a [`Money`] upper bound under
+/// the admission pricing snapshot. An estimate is not a prediction: every
+/// count must be a value the provider contract cannot exceed for this request
+/// (the request's explicit output maximum, and a tokenizer-safe input bound).
+/// An average or best guess is not an upper bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageEstimate {
+    /// Upper bound of tokens this request can bill as input.
+    pub input_tokens_upper_bound: u64,
+    /// Upper bound of tokens this request can bill as output. The provider
+    /// request carries this same value as its explicit maximum, so the
+    /// provider cannot produce more.
+    pub output_tokens_upper_bound: u64,
+}
+
+impl UsageEstimate {
+    /// The upper-bound cost of this estimate under `snapshot`, or `None` when
+    /// the amount is not representable.
+    ///
+    /// The input side charges every input token at the more expensive of the
+    /// snapshot's input and cached-input rates: a cache hit cannot be promised
+    /// before the call, so reserving at the cached rate alone could understate
+    /// the bill. Both components round up exactly like [`project_cost`], and
+    /// the input side carries one extra micro-unit: the settlement rounds the
+    /// non-cached and cached parts up *separately*, so their sum can exceed
+    /// the single rounded input bound by one micro-unit
+    /// (`ceil(a) + ceil(b) <= ceil(a + b) + 1`). Without that allowance the
+    /// reservation could fall one micro-unit below the settled amount for some
+    /// cache split, which `usage-cost-cap` §8 forbids.
+    #[must_use]
+    pub fn upper_bound_cost(self, snapshot: &PricingSnapshot) -> Option<Money> {
+        let input_rate = if snapshot.input_rate.micros_per_million()
+            >= snapshot.cached_input_rate.micros_per_million()
+        {
+            snapshot.input_rate
+        } else {
+            snapshot.cached_input_rate
+        };
+        let input = input_rate.checked_cost(snapshot.currency, self.input_tokens_upper_bound)?;
+        let input = input.checked_add(Money::from_micros(snapshot.currency, 1))?;
+        let output = snapshot
+            .output_rate
+            .checked_cost(snapshot.currency, self.output_tokens_upper_bound)?;
+        input.checked_add(output)
     }
 }
 
@@ -532,14 +500,113 @@ mod tests {
     }
 
     #[test]
-    fn money_addition_refuses_overflow_and_currency_mixing() {
-        assert_eq!(
-            Money::from_micros(CurrencyCode::Usd, u64::MAX)
-                .checked_add(Money::from_micros(CurrencyCode::Usd, 1)),
-            None
+    fn estimate_upper_bound_charges_the_more_expensive_input_rate() {
+        // The cached rate is intentionally the higher one here: reserving at
+        // the cheaper rate would understate a cache miss.
+        let pricing = snapshot(
+            "openai",
+            "gpt-test",
+            1,
+            TokenRate::from_micros_per_million(1_000_000),
+            TokenRate::from_micros_per_million(3_000_000),
+            TokenRate::from_micros_per_million(2_000_000),
         );
-        assert_eq!(Money::zero(CurrencyCode::Usd).currency().as_str(), "USD");
-        assert_eq!(CurrencyCode::from_code("USD"), Some(CurrencyCode::Usd));
-        assert_eq!(CurrencyCode::from_code("EUR"), None);
+        let estimate = super::UsageEstimate {
+            input_tokens_upper_bound: 10,
+            output_tokens_upper_bound: 4,
+        };
+        // max(input, cached) = 3.0 per token: 10 * 3 = 30, plus the one
+        // micro-unit that keeps the separately rounded settlement components
+        // below the bound; output 4 * 2 = 8.
+        assert_eq!(
+            estimate.upper_bound_cost(&pricing),
+            Some(Money::from_micros(CurrencyCode::Usd, 39))
+        );
+    }
+
+    #[test]
+    fn estimate_upper_bound_never_falls_below_the_settled_total() {
+        // Regression: the settlement rounds the non-cached and cached input
+        // parts up separately, so `ceil(a) + ceil(b)` can exceed
+        // `ceil(a + b)` by one micro-unit. The estimate must still dominate
+        // every cache split inside its bounds (`usage-cost-cap` §8).
+        let pricing = snapshot(
+            "openai",
+            "gpt-4o-mini",
+            1,
+            TokenRate::from_micros_per_million(150_000),
+            TokenRate::from_micros_per_million(75_000),
+            TokenRate::from_micros_per_million(600_000),
+        );
+        let estimate = super::UsageEstimate {
+            input_tokens_upper_bound: 1_000,
+            output_tokens_upper_bound: 4_096,
+        };
+        let bound = estimate
+            .upper_bound_cost(&pricing)
+            .expect("the bound is representable");
+        // Every cache split within the input bound settles at or below it.
+        for cached in [0, 1, 2, 999, 1_000] {
+            let fact = usage("openai", "gpt-4o-mini", Some((1_000, cached, 4_096)));
+            let UsageCostFact::Reported(cost) =
+                project_cost(&fact, Some(&pricing)).expect("the projection must succeed")
+            else {
+                panic!("a Reported usage with a rate must project Reported");
+            };
+            assert!(
+                cost.total.micros() <= bound.micros(),
+                "cached {cached}: settled {} must not exceed the reserved {}",
+                cost.total.micros(),
+                bound.micros()
+            );
+        }
+        // The exact split the per-component ceiling used to understate: the
+        // settled total is one micro-unit above the naive bound.
+        let split = usage("openai", "gpt-4o-mini", Some((1_000, 1, 4_096)));
+        let UsageCostFact::Reported(cost) =
+            project_cost(&split, Some(&pricing)).expect("the projection must succeed")
+        else {
+            panic!("a Reported usage with a rate must project Reported");
+        };
+        assert_eq!(cost.total.micros(), 2_609);
+        assert_eq!(bound.micros(), 2_609);
+    }
+
+    #[test]
+    fn estimate_upper_bound_rounds_up_and_fails_closed_on_overflow() {
+        let pricing = snapshot(
+            "openai",
+            "gpt-test",
+            1,
+            TokenRate::from_micros_per_million(2_500_000),
+            TokenRate::from_micros_per_million(2_500_000),
+            TokenRate::from_micros_per_million(2_500_000),
+        );
+        let estimate = super::UsageEstimate {
+            input_tokens_upper_bound: 2,
+            output_tokens_upper_bound: 2,
+        };
+        // Each component rounds up: 5 + 1 + 5 = 11.
+        assert_eq!(
+            estimate.upper_bound_cost(&pricing),
+            Some(Money::from_micros(CurrencyCode::Usd, 11))
+        );
+        let maxed = super::UsageEstimate {
+            input_tokens_upper_bound: u64::MAX,
+            output_tokens_upper_bound: u64::MAX,
+        };
+        let expensive = snapshot(
+            "openai",
+            "gpt-test",
+            1,
+            TokenRate::from_micros_per_million(u64::MAX),
+            TokenRate::from_micros_per_million(u64::MAX),
+            TokenRate::from_micros_per_million(u64::MAX),
+        );
+        assert_eq!(
+            maxed.upper_bound_cost(&expensive),
+            None,
+            "an unrepresentable bound must fail closed, never wrap or saturate"
+        );
     }
 }

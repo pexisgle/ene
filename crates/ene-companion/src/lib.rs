@@ -335,6 +335,22 @@ pub enum HistoryAppendOutcome {
     CommandConflict,
     /// Held by the companion lifecycle.
     HeldByLifecycle { lifecycle: CompanionLifecycle },
+    /// A canonical current erasure condition covers this body or the accepted
+    /// Owner input it derives from (lifecycle §7/§11). Nothing was written:
+    /// no History row, no undelivered registration, no round.
+    ///
+    /// This is the delayed-arrival boundary: a body produced before (or
+    /// during) a deletion operation is refused here instead of being
+    /// re-saved, whether it arrives as a fresh append, a transport retry, or
+    /// a reconnecting Client's local-copy replay. The outcome carries no
+    /// payload — not even which condition matched — so a rejection path can
+    /// never leak the target body or its correlation.
+    ///
+    /// It is a domain refusal, distinct from `StaleCredentialSet` (the
+    /// scrub premise moved) and `CommandConflict` (the replay fingerprint
+    /// disagreed): the body must not be re-created under a current deletion,
+    /// while a credential or command staleness would be answered differently.
+    HeldForErasure,
 }
 
 /// The immutable request semantics of one command-scoped history append:
@@ -561,6 +577,15 @@ pub enum ReportStatusTransition {
     FailedToPending,
     /// The `expected` status was not current, or the identity is unknown.
     StaleSource,
+    /// A canonical current erasure condition covers the row's source body
+    /// (lifecycle §7/§11). No status was written: neither a presentation
+    /// start nor a confirmation may claim an item under an active deletion.
+    ///
+    /// Distinct from [`Self::StaleSource`] (the status premise moved) and
+    /// [`Self::AlreadyPresented`] (an absorbing duplicate): the item itself
+    /// is under deletion, so the caller must not report it as presented and
+    /// must not retry the same transition while the condition holds.
+    HeldForErasure,
 }
 
 /// One bounded page of unpresented entries.
@@ -703,10 +728,20 @@ pub trait HistoryRepository {
     /// append atom (AU1a); Task- and Action-sourced registration shares the
     /// parent fact's own commit instead (AU1b). The returned [`Option`]
     /// carries the registered [`UndeliveredRef`] when registration happened.
+    ///
+    /// `inference_claim` is the durable provider claim this reply was
+    /// produced under, when the caller obtained one. The implementor compares
+    /// it inside the same transaction against the canonical deletion
+    /// correspondence: a claim a deletion admission already associated with
+    /// an interval is refused with [`HistoryAppendOutcome::HeldForErasure`]
+    /// even after the operation completed and no current condition is
+    /// readable (lifecycle §11 R2). [`None`] skips the check (non-provider
+    /// appends and direct test fixtures).
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
         register_unpresented: bool,
+        inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError>;
 
     /// Loads timeline items for one companion, oldest first.
@@ -731,6 +766,12 @@ pub trait HistoryRepository {
     /// This is the bounded recent-context query: callers that need the
     /// conversation near the present (dialogue context, Experience source)
     /// must not read the whole timeline to find it.
+    ///
+    /// Items under a current deletion condition are withheld from the
+    /// returned window (the implementor compares the canonical premise inside
+    /// the read), so a recent-context read never hands a covered body to a
+    /// consumer that would put it into a provider input. An unreadable
+    /// current condition withholds the whole window.
     async fn load_recent_timeline(
         &self,
         companion: CompanionId,
@@ -929,6 +970,21 @@ impl core::fmt::Debug for RecordResumeActivityCommand {
     }
 }
 
+/// Outcome of one resume-instruction activity record.
+///
+/// A canonical current erasure condition covering the instruction body is a
+/// domain hold, distinct from a store failure: the activity (and the resume it
+/// feeds) is refused rather than re-saving the covered body. A completed
+/// operation is not a current condition, so a fresh resume after completion
+/// records normally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeActivityOutcome {
+    /// The activity is durable under its command key.
+    Recorded(ActivityId),
+    /// The instruction body is under an active deletion; nothing was written.
+    HeldForErasure,
+}
+
 /// First-party management activity contract (owner: companion).
 ///
 /// The single-record bounded read ([`Self::load_activity`]) is what the
@@ -947,7 +1003,7 @@ pub trait ActivityRepository {
     async fn record_resume_activity(
         &self,
         cmd: RecordResumeActivityCommand,
-    ) -> Result<ActivityId, CompanionTechnicalError>;
+    ) -> Result<ResumeActivityOutcome, CompanionTechnicalError>;
 
     /// Loads one activity record by its primary key.
     ///

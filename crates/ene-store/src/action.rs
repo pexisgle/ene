@@ -260,6 +260,33 @@ fn insert_attempt_sync(
         return Ok(ActionStartOutcome::StalePremise);
     }
     let started_at = WallClockWithTz::now().to_rfc3339();
+    // The A4/R2 delayed-action gate: the resolved target is the attempt's only
+    // stored body. A target under a canonical current condition — or an
+    // Action started by a delegation already associated with a deletion
+    // interval at admission — refuses the attempt before any row exists, so no
+    // external effect starts on covered content and no target copy is saved.
+    // The hold names the execution, never the text, and it outlives the
+    // operation, so a delayed Action from a pre-deletion execution stays
+    // refused while a fresh execution after completion proceeds. The refusal
+    // is a domain outcome (distinct from premise staleness and the execution
+    // seal).
+    if crate::preservation::covering_text(&tx, premise.real_target.as_path())
+        .map_err(|error| action_unavailable(error.to_string()))?
+        .is_some()
+        || crate::preservation::held_use(
+            &tx,
+            crate::preservation::USE_KIND_TASK_DELEGATION,
+            premise.delegation,
+        )
+        .map_err(|error| action_unavailable(error.to_string()))?
+    {
+        // The direct-correlation fallback in `held_use` may have written the
+        // durable hold for an unreconciled operation; commit it even though
+        // the attempt itself is refused, so the correspondence survives this
+        // arrival instead of rolling back with the refused try.
+        tx.commit().map_err(action_unavailable)?;
+        return Ok(ActionStartOutcome::HeldForErasure);
+    }
     match tx.execute(
         SQL_INSERT_ATTEMPT,
         params![
@@ -296,6 +323,19 @@ fn insert_attempt_sync(
         premise.attempt.as_raw(),
         ActionCertaintyWire::Unknown,
     )?;
+    // A body-observing Action that starts while a deletion interval is open
+    // (Active / Held / Finalizing, lifecycle §11) cannot prove its
+    // yet-recorded observation body is unrelated to the protected text inside
+    // this transaction. The start fact is already written (certainty stays
+    // Unknown); associating the execution keeps that work old-origin if the
+    // observation write lands after completion. The Immediate writer is
+    // shared with the completion commit: whichever commits first wins, so a
+    // post-completion start is a free origin and a start that landed first
+    // stays held. No unfinished operation is a no-op.
+    if matches!(premise.operation, OperationKind::Read | OperationKind::List) {
+        crate::preservation::hold_body_observing_delegation(&tx, premise.delegation, &started_at)
+            .map_err(|error| action_unavailable(error.to_string()))?;
+    }
     tx.commit().map_err(action_unavailable)?;
     Ok(ActionStartOutcome::Started)
 }

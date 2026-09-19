@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 30;
+const CURRENT_VERSION: i64 = 36;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -74,18 +74,20 @@ phase TEXT NOT NULL CHECK (phase IN ('active', 'held', 'finalizing', 'completed'
 purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
 started_at TEXT NOT NULL,
 hold_reason TEXT NULL CHECK (hold_reason IN ('unavailable', 'generation_exhausted')),
+erased_total INTEGER NOT NULL DEFAULT 0 CHECK (erased_total >= 0),
 CHECK ((phase = 'held') = (hold_reason IS NOT NULL))
 );
 -- Staged Targeted Deletion requests awaiting the Host-local trusted
 -- confirmation (IPC §18.1). Staging publishes no erasure condition and no
 -- operation: the row is inert until the confirmation inlet records the
 -- matching deletion_confirmation row and the canonical admission commits.
--- `exact_text` is protected operation-lifetime material and is destroyed with
--- the operation's material, never copied into audit rows or views.
+-- `exact_text` is protected operation-lifetime material: it is destroyed (set
+-- NULL) by the A5 completion commit that admits the operation, and it is
+-- never copied into audit rows or views.
 CREATE TABLE deletion_request (
 request_id TEXT PRIMARY KEY,
 purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
-exact_text TEXT NOT NULL CHECK (length(exact_text) > 0),
+exact_text TEXT NULL CHECK (exact_text IS NULL OR length(exact_text) > 0),
 requested_at TEXT NOT NULL
 );
 -- Durable Owner confirmation facts, written only by the Host-local trusted
@@ -147,6 +149,81 @@ operation_id TEXT NOT NULL,
 sweep INTEGER NOT NULL CHECK (sweep > 0),
 source TEXT NOT NULL,
 PRIMARY KEY (operation_id, sweep, source)
+);
+-- Durable correspondence between an already-claimed use and the deletion
+-- operation whose condition committed after the claim (lifecycle §11 R2).
+-- Written inside the admission transaction for every in-flight inference
+-- attempt / unsealed task delegation / in-flight Learning formation whose
+-- durable provenance intersects the operation's covered sources; the work
+-- kinds are the closed set of claims that can produce a delayed
+-- target-bearing body. One use may correspond to several operations: two
+-- unfinished Targeted Deletion operations on different exact targets can
+-- share one delegation or one claim, and each association must survive.
+-- Unlike the operation-lifetime search material, a hold deliberately
+-- outlives completion: a delayed result from a use that started before the
+-- condition must still be refused after the operation completed and
+-- `closed_at` is set. A hold is objective metadata only -- the claim
+-- identity, the operation identity, and the hold time -- never a target
+-- body, a reversible encoding, a target hash/fingerprint, or a search
+-- token, so it can never become a keyword ban, a reusable matcher, or a
+-- work item's permanent text blacklist; a claim is single-use, so the row
+-- loses its force once that claim settles.
+
+CREATE TABLE erasure_use_hold (
+use_kind TEXT NOT NULL CHECK (use_kind IN ('inference_attempt', 'task_delegation', 'learning_formation')),
+use_id TEXT NOT NULL,
+operation_id TEXT NOT NULL,
+held_at TEXT NOT NULL,
+PRIMARY KEY (use_kind, use_id, operation_id)
+);
+-- Body-free in-flight Learning formation identity. Published when a
+-- Host-transient ExperienceCandidate is taken off the formation queue,
+-- before the Learning inference claim exists. Never stores transcript
+-- text, a target body, a hash, or a fingerprint. Source rows name the
+-- same History identities the later claim's data_use will carry, so
+-- admission can associate this execution with a deletion interval. The
+-- identity is settled when the pass converts to a claim or is dropped;
+-- correspondence rows in erasure_use_hold outlive that settle.
+CREATE TABLE learning_formation (
+formation_id TEXT PRIMARY KEY,
+companion_id TEXT NOT NULL,
+started_at TEXT NOT NULL
+);
+CREATE TABLE learning_formation_source (
+formation_id TEXT NOT NULL,
+source TEXT NOT NULL,
+PRIMARY KEY (formation_id, source)
+);
+CREATE INDEX idx_learning_formation_source_source ON learning_formation_source (source);
+-- Body-free completion audit (lifecycle §13). Written exactly once, in the
+-- same transaction that destroys the operation's protected material and closes
+-- the current condition; the rows carry only objective metadata -- the
+-- operation identity, purpose class, times, sweep count, and per-participant
+-- final status/counts -- and never the target body, a reversible encoding, a
+-- target hash/fingerprint, a search token, a credential value, or a
+-- prompt/output body. A completed operation has exactly one audit row; an
+-- unfinished operation has none (the completion commit is atomic).
+CREATE TABLE deletion_completion_audit (
+operation_id TEXT PRIMARY KEY,
+purpose TEXT NOT NULL CHECK (purpose IN ('privacy', 'security')),
+started_at TEXT NOT NULL,
+completed_at TEXT NOT NULL,
+sweep_count INTEGER NOT NULL CHECK (sweep_count > 0),
+participant_count INTEGER NOT NULL CHECK (participant_count > 0),
+verified_count INTEGER NOT NULL CHECK (verified_count >= 0),
+erased_count INTEGER NOT NULL CHECK (erased_count >= 0)
+);
+-- One audit entry per required participant of the durable snapshot at
+-- completion. `final_state` is `verified` only: a completed operation has no
+-- held or pending participant, so a hold can never be audited as success. A
+-- hold class is unfinished-status metadata and lives only in
+-- `deletion_participant`, where a completed operation keeps no row with one.
+CREATE TABLE deletion_audit_participant (
+operation_id TEXT NOT NULL,
+participant_owner TEXT NOT NULL,
+final_state TEXT NOT NULL CHECK (final_state = 'verified'),
+erased_count INTEGER NOT NULL CHECK (erased_count >= 0),
+PRIMARY KEY (operation_id, participant_owner)
 );
 CREATE TABLE history_message (
 message_id TEXT PRIMARY KEY,
@@ -358,6 +435,44 @@ CHECK (
         AND cached_input_tokens <= input_tokens)
 )
 );
+-- Provider / system cost caps (usage-cost-cap §6/§13). One row per
+-- (scope, window): `provider` is '' for the system scope and the exact
+-- provider name for a provider scope. `revision` is the currentness premise
+-- the compare-and-set update and the send admission serialize on; the limit
+-- is an exact micro-currency amount in `currency`.
+CREATE TABLE usage_cap (
+scope TEXT NOT NULL CHECK (scope IN ('system', 'provider')),
+provider TEXT NOT NULL,
+window TEXT NOT NULL CHECK (window IN ('daily_utc', 'monthly_utc')),
+revision INTEGER NOT NULL CHECK (revision >= 0),
+currency TEXT NOT NULL,
+limit_micros INTEGER NOT NULL CHECK (limit_micros > 0),
+PRIMARY KEY (scope, provider, window),
+CHECK ((scope = 'provider') = (length(provider) > 0))
+);
+-- One usage reservation per claimed provider call (usage-cost-cap §7/§8).
+-- The row is written inside the same Immediate transaction as the attempt
+-- claim and its cap compare, before any provider byte. `currency` +
+-- `upper_bound_micros` is the reserved cap amount: a `committed_reported` row
+-- replaces it with the actual cost, `committed_unknown` keeps the upper bound
+-- counted, and `released` counts nothing. `opened_at` is canonical UTC text;
+-- a cap window is the UTC period containing it, and settlement never moves
+-- the row between windows.
+CREATE TABLE usage_reservation (
+reservation_id TEXT PRIMARY KEY,
+ticket TEXT NOT NULL UNIQUE,
+provider TEXT NOT NULL CHECK (length(provider) > 0),
+model TEXT NOT NULL,
+pricing_snapshot TEXT NOT NULL,
+currency TEXT NOT NULL,
+upper_bound_micros INTEGER NOT NULL CHECK (upper_bound_micros >= 0),
+state TEXT NOT NULL CHECK (state IN ('reserved', 'committed_reported', 'committed_unknown', 'released')),
+committed_currency TEXT NULL,
+committed_micros INTEGER NULL CHECK (committed_micros IS NULL OR committed_micros >= 0),
+opened_at TEXT NOT NULL,
+CHECK ((state = 'committed_reported') = (committed_micros IS NOT NULL)),
+CHECK (committed_micros IS NULL OR committed_currency IS NOT NULL)
+);
 CREATE TABLE workspace_assoc (
 assoc_id TEXT PRIMARY KEY,
 task_id TEXT NOT NULL,
@@ -367,12 +482,21 @@ save_target TEXT
 CREATE INDEX idx_action_attempt_delegation ON action_attempt (delegation_id);
 CREATE INDEX idx_action_attempt_task ON action_attempt (task_id);
 CREATE INDEX idx_erasure_condition_source_source ON erasure_condition_source (source);
+-- Admission associates already-claimed uses by joining their ordered source
+-- correlation against the operation's covered sources; this index serves that
+-- probe from the (bounded) covered set instead of scanning every attempt's
+-- correlation rows.
+CREATE INDEX idx_inference_attempt_data_use_source ON inference_attempt_data_use (source);
 CREATE INDEX idx_history_message_companion ON history_message (companion_id);
 CREATE INDEX idx_history_message_companion_at ON history_message (companion_id, at_utc);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
 CREATE INDEX idx_history_message_companion_role ON history_message (companion_id, role);
 CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_inference_attempt_delegation ON inference_attempt (delegation_id);
+-- Bounded first-party usage summary (usage-cost-cap §16): the newest-first
+-- keyset page reads this index, so the SQL LIMIT bounds the rows read and no
+-- full scan or sort is needed for an unfiltered range.
+CREATE INDEX idx_inference_attempt_started ON inference_attempt (started_at, ticket);
 CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
 CREATE INDEX idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
@@ -383,8 +507,79 @@ CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revisio
 CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
 CREATE INDEX idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status, row_seq);
+CREATE INDEX idx_usage_reservation_opened ON usage_reservation (opened_at);
+CREATE INDEX idx_usage_reservation_provider_opened ON usage_reservation (provider, opened_at);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
+-- Body-free occurrence ledger of Task Agent execution-local observations
+-- (Stage 6 A4). The execution mints one occurrence identity at observation
+-- time and the row carries the delegation/execution correlation, the
+-- producing AU5 action attempt where one exists, and the workspace/path
+-- correlation. `body_observed` means the observation reproduced workspace
+-- content (read bytes or a list listing). The ledger stores no body and no
+-- content-version identity, so a later clean read of the mutable path cannot
+-- prove the discarded body was unrelated to a deletion target: admission
+-- treats such an occurrence as covered (fail closed). The table deliberately
+-- stores no observation body, no body hash or fingerprint, no reversible
+-- encoding, and no presentation copy: the observation text stays
+-- execution-local and only this correlation ledger is durable. `path` is the
+-- resolved AU5 target and is a mechanical-erasure column of the Task owner,
+-- exactly like `action_attempt.real_target`.
+CREATE TABLE task_agent_observation (
+observation_id TEXT PRIMARY KEY,
+delegation_id TEXT NOT NULL,
+task_id TEXT NOT NULL,
+task_revision INTEGER NOT NULL,
+workspace_assoc_id TEXT NULL,
+action_attempt_id TEXT NULL,
+path TEXT NULL,
+body_observed INTEGER NOT NULL CHECK (body_observed IN (0, 1)),
+observed_at TEXT NOT NULL,
+CHECK ((path IS NULL) = (workspace_assoc_id IS NULL)),
+CHECK ((workspace_assoc_id IS NULL) = (action_attempt_id IS NULL)),
+CHECK (body_observed = 0 OR action_attempt_id IS NOT NULL)
+);
+CREATE INDEX idx_task_agent_observation_delegation ON task_agent_observation (delegation_id);
 INSERT INTO credential_set (id, rev) VALUES (1, 0);
+-- Durable, body-free Client body-delivery evidence (lifecycle §8.1). One row
+-- per Host-minted Client incarnation the Host actually handed body-bearing
+-- material to. `delivery_seq` advances on every such delivery and is the CAS
+-- premise a verified local-erasure result clears on: a delivery that raced a
+-- wipe leaves a higher sequence and the row survives. The row keeps only the
+-- incarnation identity, the delivery sequence, and the delivery times --
+-- never a target body, a reversible encoding, a body hash/fingerprint, a
+-- deletion matcher/search token, a presentation copy, or a device secret.
+-- A row is created only from an authenticated connection's pinned
+-- incarnation, so the Host never invents an owner it cannot name. A Host
+-- restart never removes a row; only a verified full-class local-erasure
+-- result (clearing the exact observed sequence) may clear it.
+CREATE TABLE client_delivery_evidence (
+incarnation_id TEXT PRIMARY KEY,
+delivery_seq INTEGER NOT NULL CHECK (delivery_seq > 0),
+first_delivered_at TEXT NOT NULL,
+last_delivered_at TEXT NOT NULL
+);
+-- Exhaustive covered-source reconciliation state (lifecycle §4.1 point 4,
+-- §12 step 1). One durable keyset cursor per (operation, current sweep,
+-- known identity table): `cursor` is the last canonical identity published
+-- from that table, and `complete=1` means the ordered identity scan reached
+-- its end for this sweep. Admission writes the rows and publishes a first
+-- bounded page; bounded reconciliation steps continue from the cursor, so no
+-- page bound can drop a covered identity. A new sweep deletes the old rows and
+-- inserts fresh incomplete ones (a generation is never reused); the completion
+-- commit deletes them together with the rest of the operation-lifetime
+-- protected state. A completed operation keeps zero rows.
+CREATE TABLE deletion_reconciliation (
+ operation_id TEXT NOT NULL,
+ sweep INTEGER NOT NULL CHECK (sweep > 0),
+ identity_table TEXT NOT NULL,
+ cursor TEXT NOT NULL,
+ complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+ PRIMARY KEY (operation_id, sweep, identity_table)
+);
+-- A reconciliation page associates already-claimed uses whose Task context
+-- origin names one of the page's covered identities; this index drives that
+-- probe from the (bounded) page instead of scanning every context entry.
+CREATE INDEX idx_task_context_entry_origin_source ON task_context_entry (origin_source);
 ";
 
 /// Initializes only an empty database. Existing databases must have the exact
@@ -439,7 +634,7 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 31] {
+        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

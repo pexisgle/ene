@@ -1,9 +1,9 @@
 //! `OpenAI` Responses API transport for inference dispatch.
 //!
 //! [`OpenAiResponsesTransport`] posts one
-//! `{"model", "input", "stream": true, "store": false}` body per
-//! [`ProviderTransport::complete_streaming`] call and parses the server-sent
-//! event stream, forwarding text deltas as they arrive;
+//! `{"model", "input", "stream": true, "store": false, "max_output_tokens"}`
+//! body per [`ProviderTransport::complete_streaming`] call and parses the
+//! server-sent event stream, forwarding text deltas as they arrive;
 //! [`ProviderTransport::complete`] keeps the non-streaming JSON path.
 //! Key material never rests on the transport: each call borrows the bearer inside
 //! [`CredentialStore::with_bearer`] and only the owned [`reqwest::Request`]
@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use super::{
     DeltaFlow, DeltaSink, InferenceTechnicalError, ProviderRequest, ProviderResponse,
-    ProviderTransport, RawUsage,
+    ProviderTransport, RawUsage, UsageEstimate,
 };
 
 /// Base URL for the `OpenAI` API; tests inject a local URL instead.
@@ -32,6 +32,23 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Explicit output maximum sent with every Responses request.
+///
+/// `usage-cost-cap` §8 requires the output side of the reservation upper bound
+/// to be the request's own explicit maximum, not a prediction. The body and
+/// [`OpenAiResponsesTransport::usage_estimate`] share this constant, so the
+/// bound can never drift below what the provider is allowed to generate.
+pub const MAX_OUTPUT_TOKENS: u64 = 4_096;
+
+/// Protocol-framing allowance added to the request text's byte length for the
+/// input side of the reservation upper bound.
+///
+/// A BPE tokenizer never emits fewer than one token per byte for the text
+/// itself, so the UTF-8 byte length is already a tokenizer-safe bound for the
+/// input string; the allowance covers server-side framing (special tokens and
+/// request formatting) that the local body does not spell out.
+pub const INPUT_TOKENS_FRAMING_ALLOWANCE: u64 = 1_024;
 
 /// HTTPS transport for the `OpenAI` Responses API (`POST /v1/responses`).
 ///
@@ -98,6 +115,20 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>
     {
         Box::pin(self.complete_inner(req))
+    }
+
+    /// The safe upper bound of one Responses request.
+    ///
+    /// The input side is the request text's UTF-8 byte length plus
+    /// [`INPUT_TOKENS_FRAMING_ALLOWANCE`]; the output side is the explicit
+    /// [`MAX_OUTPUT_TOKENS`] the body carries. Both are contract bounds, not
+    /// estimates of what this prompt will use.
+    fn usage_estimate(&self, req: &ProviderRequest) -> Option<UsageEstimate> {
+        let input_bytes = u64::try_from(req.input.len()).ok()?;
+        Some(UsageEstimate {
+            input_tokens_upper_bound: input_bytes.checked_add(INPUT_TOKENS_FRAMING_ALLOWANCE)?,
+            output_tokens_upper_bound: MAX_OUTPUT_TOKENS,
+        })
     }
 
     /// Runs one Responses API completion with `"stream": true`, forwarding
@@ -322,13 +353,16 @@ impl StreamAssembler {
 /// response state; leaving `store` unset would default it to `true` and
 /// retain conversation text provider-side for no reason. This is a
 /// storage-scope boundary, not a no-logging promise: it disables the
-/// Responses application-state store, nothing more.
+/// Responses application-state store, nothing more. `max_output_tokens` is
+/// the explicit maximum the reservation upper bound uses, so the provider
+/// cannot generate more output than the bound covers.
 fn responses_body(model: &str, input: &str, stream: bool) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "input": input,
         "stream": stream,
         "store": false,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
     })
 }
 
@@ -580,6 +614,43 @@ mod tests {
             "history lives locally; the provider must not retain response state: {body}"
         );
         assert_eq!(body.get("stream"), Some(&serde_json::Value::Bool(false)));
+    }
+
+    #[test]
+    fn request_body_sets_the_explicit_output_maximum_the_estimate_uses() {
+        let body = super::responses_body("gpt-test", "hello", false);
+        assert_eq!(
+            body.get("max_output_tokens"),
+            Some(&serde_json::json!(super::MAX_OUTPUT_TOKENS)),
+            "the request itself must carry the explicit maximum the reservation bound covers"
+        );
+    }
+
+    #[test]
+    fn usage_estimate_bounds_input_by_bytes_plus_framing_and_output_by_the_request_maximum() {
+        let transport = OpenAiResponsesTransport::new(
+            super::DEFAULT_BASE_URL,
+            MemoryCredentialStore::default(),
+        )
+        .expect("the test transport builds");
+        let request = crate::ProviderRequest {
+            model: String::from("gpt-test"),
+            credential: CredentialRef::new(String::from("openai"), String::from("main"))
+                .expect("valid test fixture"),
+            input: String::from("hello"),
+        };
+        let estimate = crate::ProviderTransport::usage_estimate(&transport, &request)
+            .expect("the OpenAI adapter always has a finite bound");
+        assert_eq!(
+            estimate.input_tokens_upper_bound,
+            5 + super::INPUT_TOKENS_FRAMING_ALLOWANCE,
+            "the text's UTF-8 byte length is the tokenizer-safe lower bound, plus framing"
+        );
+        assert_eq!(
+            estimate.output_tokens_upper_bound,
+            super::MAX_OUTPUT_TOKENS,
+            "the output side must be the explicit maximum the body carries"
+        );
     }
 
     #[test]

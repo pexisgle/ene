@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
 #[cfg(any(unix, windows))]
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthChallenge;
@@ -438,6 +439,12 @@ impl Client {
         }
         loop {
             let incoming = read_frame(&mut self.stream).await?;
+            if self
+                .answer_deletion_demand_if_any(&incoming.payload)
+                .await?
+            {
+                continue;
+            }
             match decide_frame(own_message_id, &incoming) {
                 FrameDecision::AbsorbPresence(fact) => self.state.observe_presence(&fact),
                 FrameDecision::Answer(payload) => {
@@ -448,6 +455,41 @@ impl Client {
                 }
                 FrameDecision::Defer => self.state.push_deferred(incoming),
             }
+        }
+    }
+
+    /// Answers one unsolicited Host local-erasure demand inline, returning
+    /// whether an answer was written.
+    ///
+    /// The demand is a control fact, never the reply this session is waiting
+    /// for: it is handled and the read continues. The reply carries only class
+    /// names and correlation — never a target body — and claims nothing beyond
+    /// this process's own local wiping (IPC §17, lifecycle §10).
+    async fn answer_deletion_demand_if_any(
+        &mut self,
+        payload: &WirePayload,
+    ) -> Result<bool, CliError> {
+        let WirePayload::DeletionDemand(demand) = payload else {
+            return Ok(false);
+        };
+        let result = self.local_erasure_result(demand);
+        write_frame(
+            &mut self.stream,
+            &frame_for(WirePayload::LocalErasureResult(result), self.sender),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    /// Builds this session's local-erasure report for one demand.
+    fn local_erasure_result(&mut self, demand: &DeletionDemand) -> LocalErasureResult {
+        let wiped = self.state.wipe_transient();
+        LocalErasureResult {
+            demand: demand.demand.clone(),
+            operation: demand.operation.clone(),
+            sweep: demand.sweep,
+            wiped,
+            unverified: Vec::new(),
         }
     }
 
@@ -465,18 +507,24 @@ impl Client {
     /// Stream follower for `send`: an authoritative
     /// [`PresenceAttribution`](ene_api::v1::payload::WirePayload::PresenceAttribution)
     /// fact refreshes the session generation and is still returned, so the
-    /// caller decides what to display.
+    /// caller decides what to display. A Host local-erasure demand is answered
+    /// inline and never surfaces as a stream frame.
     ///
     /// # Errors
     ///
     /// Returns [`CliError::Transport`] or [`CliError::Codec`] when the next
     /// frame cannot be read or decoded.
     pub async fn next_frame(&mut self) -> Result<WirePayload, CliError> {
-        let payload = read_frame(&mut self.stream).await?.payload;
-        if let WirePayload::PresenceAttribution(fact) = &payload {
-            self.state.observe_presence(fact);
+        loop {
+            let payload = read_frame(&mut self.stream).await?.payload;
+            if self.answer_deletion_demand_if_any(&payload).await? {
+                continue;
+            }
+            if let WirePayload::PresenceAttribution(fact) = &payload {
+                self.state.observe_presence(fact);
+            }
+            return Ok(payload);
         }
-        Ok(payload)
     }
 }
 

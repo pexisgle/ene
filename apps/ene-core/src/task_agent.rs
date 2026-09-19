@@ -190,6 +190,8 @@ fn mirror_not_sent(reason: NotSentReason) -> TaskAgentInferenceOutcome {
         NotSentReason::OverLimit => Outcome::NotSent(NotSent::OverLimit),
         NotSentReason::EvaluationConsumed => Outcome::NotSent(NotSent::EvaluationConsumed),
         NotSentReason::DataUseHeld => Outcome::NotSent(NotSent::DataUseHeld),
+        NotSentReason::UsageCapReached => Outcome::NotSent(NotSent::UsageCapReached),
+        NotSentReason::UsageCapIndeterminate => Outcome::NotSent(NotSent::UsageCapIndeterminate),
     }
 }
 
@@ -244,12 +246,18 @@ mod tests {
         reason = "in-test fake; async matches the executor contract"
     )]
     impl InferenceExecutor for RecordingExecutor {
-        async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError> {
+        async fn admit_dialogue(
+            &self,
+            _data_use: Vec<RawId>,
+        ) -> Result<Admission, InferenceTechnicalError> {
             self.record("admit_dialogue");
             Ok(Admission::Declined(NotSentReason::NotInAllowlist))
         }
 
-        async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError> {
+        async fn admit_learning(
+            &self,
+            _data_use: Vec<RawId>,
+        ) -> Result<Admission, InferenceTechnicalError> {
             self.record("admit_learning");
             Ok(Admission::Declined(NotSentReason::NotInAllowlist))
         }
@@ -387,6 +395,14 @@ mod tests {
             (
                 NotSentReason::DataUseHeld,
                 Outcome::NotSent(NotSent::DataUseHeld),
+            ),
+            (
+                NotSentReason::UsageCapReached,
+                Outcome::NotSent(NotSent::UsageCapReached),
+            ),
+            (
+                NotSentReason::UsageCapIndeterminate,
+                Outcome::NotSent(NotSent::UsageCapIndeterminate),
             ),
             (NotSentReason::TaskPremiseStale, Outcome::StaleTaskPremise),
         ] {

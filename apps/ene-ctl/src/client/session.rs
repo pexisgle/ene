@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 
+use ene_api::v1::deletion::ClientTempClass;
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::PresenceAttributionWire;
@@ -118,6 +119,24 @@ impl SessionState {
             let _ = self.deferred.pop_front();
         }
         self.deferred.push_back(frame);
+    }
+
+    /// Wipes the Client-local transient classes one Host demand names and
+    /// reports what this process held (IPC §17.2, Stage 6 A3c).
+    ///
+    /// The deferred queue is the only Ene-managed body-bearing local copy this
+    /// process keeps — undelivered summaries, excerpts, and history pages
+    /// received but not yet consumed — so it is dropped whole. Terminal
+    /// scrollback and shell history sit outside this process's management
+    /// boundary and are neither claimed wiped nor reported as an unverified
+    /// Ene-managed range; the Host's system-wide remainder verification never
+    /// treats this local report as its proof.
+    pub fn wipe_transient(&mut self) -> Vec<ClientTempClass> {
+        self.deferred.clear();
+        vec![
+            ClientTempClass::PresentationBuffer,
+            ClientTempClass::InputDraft,
+        ]
     }
 
     /// Facts never sit in the queue, so a hit is always an answer the caller

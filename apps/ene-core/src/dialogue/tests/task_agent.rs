@@ -8,12 +8,11 @@ use ene_credential::CredentialScrubber;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,
-    TaskAgentEphemeralId, TaskAgentNotSent, TaskAgentOutput, TaskAgentTurnOutcome,
-    TaskAgentTurnPremise, TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId,
-    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
-    TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
-    TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim, orchestrate_result_arrival,
-    orchestrate_task_agent_turn,
+    TaskAgentEphemeralId, TaskAgentNotSent, TaskAgentTurnOutcome, TaskAgentTurnPremise,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise,
+    TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise, TaskRef, TaskRepository as _,
+    TaskResultAcceptance, TaskResultAdoptionClaim, orchestrate_task_agent_turn,
 };
 
 async fn seed_task_and_delegation(
@@ -316,13 +315,8 @@ async fn task_agent_turn_is_execution_sealed_after_finalization() {
         .await
         .expect("setup must complete");
     let (_created, delegation, _purpose_source) = seed_task_and_delegation(&handle).await;
-    let result = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        TaskAgentOutput::new(String::from("final report")),
-    )
-    .await
-    .expect("the finalization records the result");
+    let result =
+        crate::test_support::record_result(&handle.store, delegation, "final report").await;
     assert!(result.adopted_revision.is_none());
 
     let executor = HostInference {
@@ -372,13 +366,8 @@ async fn task_agent_turn_is_terminal_after_completion() {
         .await
         .expect("setup must complete");
     let (created, delegation, _purpose_source) = seed_task_and_delegation(&handle).await;
-    let result = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        TaskAgentOutput::new(String::from("final report")),
-    )
-    .await
-    .expect("the finalization records the result");
+    let result =
+        crate::test_support::record_result(&handle.store, delegation, "final report").await;
     let adopted = handle
         .store
         .adopt_result(TaskResultAdoptionClaim {

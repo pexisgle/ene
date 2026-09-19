@@ -12,6 +12,7 @@
 
 use ene_primitive::RawId;
 
+use crate::identity::MemoryId;
 use crate::repository::{LearningRepository, LearningTechnicalError};
 
 /// Rows one candidate arm contributes to one recall.
@@ -40,8 +41,16 @@ pub struct RecallQuery {
 }
 
 /// One recalled Memory, projected for use in a context.
+///
+/// The identity travels with the content: a caller that puts the content into
+/// a logical input can name the canonical Memory it consumed, so a deletion
+/// admission can associate the use with the interval its provenance belongs
+/// to (`erasure_use_hold`). It is an opaque correlation, never a body.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecalledMemory {
+    /// Canonical identity of the Memory this content is the current
+    /// recognition of.
+    pub id: MemoryId,
     /// Recognition text; redacted from [`core::fmt::Debug`].
     pub content: String,
 }
@@ -103,6 +112,7 @@ pub async fn recall(
         .into_iter()
         .take(query.limit)
         .map(|(_, memory)| RecalledMemory {
+            id: memory.id,
             content: memory.content,
         })
         .collect())
@@ -303,6 +313,7 @@ mod tests {
             .commit_memory_change(MemoryChangeCommit {
                 summary: None,
                 secret_premise: None,
+                claim: None,
                 change: MemoryChange {
                     target: MemoryTarget::Existing {
                         id: memory,
@@ -364,6 +375,7 @@ mod tests {
     #[test]
     fn recalled_memory_debug_redacts_content() {
         let memory = crate::recall::RecalledMemory {
+            id: crate::MemoryId::generate(),
             content: String::from("probe-recall-content"),
         };
         let rendered = format!("{memory:?}");

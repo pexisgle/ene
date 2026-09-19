@@ -31,25 +31,47 @@
 //! and the immutable pricing snapshot bound to the ticket at admission
 //! ([`cost::project_cost`]); a missing rate or unknown counts settle as
 //! [`cost::UsageCostFact::Unknown`], never a zero amount.
+//!
+//! The attempt claim is also the cap-admission linearization point
+//! (`usage-cost-cap` §9): when a current provider or system cap applies, the
+//! same short transaction reads the cap revisions, sums the window's
+//! `Reserved + CommittedReported + CommittedUnknown` consumption, and inserts
+//! the conservative upper-bound reservation only if every applicable cap
+//! would still hold. A held or indeterminate cap decision creates no attempt
+//! and no reservation, and the provider receives zero bytes. Settlement
+//! (`record_usage`) commits reported usage to `CommittedReported` (counting
+//! the actual cost and releasing the unused reservation) and every uncertain
+//! outcome to `CommittedUnknown`, which keeps the reserved upper bound
+//! counted; a `Released` reservation is never inferred from a transport error
+//! string.
 
 pub mod cost;
 pub mod pricing;
 pub mod provider;
+pub mod usage_query;
 
 use std::future::Future;
 use std::pin::Pin;
 
+use cost::UsageEstimate;
 use ene_credential::{
     CredentialRef, CredentialRefRepository, CredentialSetRevision, CredentialStore, ScrubbedText,
 };
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRepository, ConsentRevision,
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
-    PermissionEvaluationId, PurposeKind, check_live_authorization,
+    PermissionEvaluationId, PurposeKind, UsageCapRef, UsageReservationRef, UsageReservationState,
+    check_live_authorization,
 };
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
-use pricing::{PricingCatalog, PricingResolution, PricingSnapshot};
+use pricing::{PricingCatalog, PricingResolution, PricingSnapshot, PricingSnapshotRef};
 use thiserror::Error;
+
+pub use usage_query::{
+    ReportedTokenUsage, USAGE_SUMMARY_PAGE_MAX, USAGE_SUMMARY_RANGE_DEFAULT_DAYS,
+    USAGE_SUMMARY_RANGE_MAX_DAYS, UsageSummaryCursor, UsageSummaryQuery, UsageSummaryRepository,
+    UsageSummaryRow, UsageSummaryStatus,
+};
 
 /// Maximum accepted input length in Unicode scalar values.
 pub const MAX_INPUT_CHARS: usize = 8_000;
@@ -118,6 +140,18 @@ pub enum NotSentReason {
     /// refusal, not task/consent staleness and not a storage error: the
     /// provider receives zero bytes and the attempt is not claimed.
     DataUseHeld,
+    /// At least one current cap applies to the route and the window's
+    /// consumption plus this request's safe upper bound would exceed it. The
+    /// provider receives zero bytes and neither an attempt nor a reservation
+    /// is created. A cap refusal is a domain outcome, never consent
+    /// staleness, a data-use hold, or a storage failure.
+    UsageCapReached,
+    /// At least one current cap applies to the route, but no finite safe
+    /// upper bound can be constructed for this request (no reviewed rate, no
+    /// provider estimate, or a currency the cap cannot be compared in), so
+    /// the cap cannot be proven satisfied. The provider receives zero bytes:
+    /// an unprovable bound is never treated as zero or released.
+    UsageCapIndeterminate,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -258,6 +292,21 @@ pub trait ProviderTransport: Send + Sync {
         req: ProviderRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>;
 
+    /// The safe upper bound of the token usage this adapter's request can
+    /// bill (`usage-cost-cap` §8), or `None` when the adapter cannot build a
+    /// finite bound.
+    ///
+    /// The admission converts the estimate into a cap reservation under the
+    /// admission pricing snapshot, so it must cover every token the provider
+    /// contract can charge: the input bound must be tokenizer-safe for the
+    /// request body, and the output bound must be the explicit maximum the
+    /// adapter sets on the request itself (not an average). A `None` answer
+    /// keeps uncapped sends working and refuses cap-enabled sends
+    /// ([`NotSentReason::UsageCapIndeterminate`]) instead of guessing.
+    fn usage_estimate(&self, _req: &ProviderRequest) -> Option<UsageEstimate> {
+        None
+    }
+
     /// Runs one completion, pushing incremental output to `sink`.
     ///
     /// Deltas are pushed in provider order and the transport stops reading
@@ -335,6 +384,15 @@ pub trait UsageRepository: Send + Sync {
     /// Persist the first complete settlement for a claimed ticket. Duplicate
     /// arrivals are idempotent; an Unknown settlement is not revised later.
     /// Reject orphan tickets, route mismatches, and inconsistent token facts.
+    ///
+    /// The same transaction settles the ticket's usage reservation when one
+    /// exists: a reported fact commits it as
+    /// [`UsageReservationState::CommittedReported`] with the actual cost
+    /// derived from the bound pricing snapshot (releasing the unused
+    /// reservation), and an unknown fact commits it as
+    /// [`UsageReservationState::CommittedUnknown`], which keeps the reserved
+    /// upper bound counted against every cap. The first settlement wins; a
+    /// duplicate never revises a terminal reservation.
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
 
     /// Projects the durable cost fact of a settled ticket.
@@ -348,6 +406,57 @@ pub trait UsageRepository: Send + Sync {
         &self,
         ticket: InferenceTicketId,
     ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError>;
+
+    /// Loads the ticket's usage reservation, if the admission created one.
+    ///
+    /// `Ok(None)` means no reservation exists: either the claim predates the
+    /// cap regime or no cap applied to the route, so there is no reserved
+    /// amount. A malformed or internally inconsistent row is a technical
+    /// error. This read settles nothing.
+    async fn load_usage_reservation(
+        &self,
+        ticket: InferenceTicketId,
+    ) -> Result<Option<UsageReservation>, InferenceTechnicalError>;
+
+    /// Settles every non-terminal usage reservation as
+    /// [`UsageReservationState::CommittedUnknown`] (`usage-cost-cap` §15).
+    ///
+    /// This is the Host-startup re-evaluation of reservations orphaned by a
+    /// crash: external consumption cannot be denied, so the reserved upper
+    /// bound stays counted and the ticket settles an Unknown token usage
+    /// fact; a crash never releases a reservation and never zeroes usage.
+    /// Terminal reservations are not re-counted or re-inserted. Returns the
+    /// number of reservations settled by this call; the operation is
+    /// idempotent.
+    async fn reconcile_orphaned_usage_reservations(&self) -> Result<u64, InferenceTechnicalError>;
+}
+
+/// One durable usage reservation as read back for correlation.
+///
+/// The reference is the identity the cap-admission boundary minted; `ticket`
+/// correlates it to the claimed attempt. `committed` is present exactly for
+/// [`UsageReservationState::CommittedReported`], where it carries the actual
+/// cost the reservation settled at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageReservation {
+    /// Durable reservation identity.
+    pub reference: UsageReservationRef,
+    /// Claimed attempt this reservation was opened for.
+    pub ticket: InferenceTicketId,
+    /// Provider route the upper bound was computed for.
+    pub provider: String,
+    /// Model route the upper bound was computed for.
+    pub model: String,
+    /// Immutable pricing snapshot the upper bound was computed under.
+    pub pricing: PricingSnapshotRef,
+    /// Conservative cap amount the admission reserved.
+    pub upper_bound: cost::Money,
+    /// Current lifecycle state.
+    pub state: UsageReservationState,
+    /// Actual committed amount, exactly for `CommittedReported`.
+    pub committed: Option<cost::Money>,
+    /// Instant the reservation was opened; its cap window is derived from it.
+    pub opened_at: WallClockWithTz,
 }
 
 /// One settled ticket's durable token and cost facts.
@@ -389,6 +498,19 @@ pub struct InferenceAttempt {
     /// claim verifies it against the delegation row and the current Task in
     /// the same transaction.
     pub task_agent: Option<TaskAgentAttemptPremise>,
+    /// Ordered canonical source correlation of the logical input this attempt
+    /// sends, in input order. A Task Agent attempt carries its premise's
+    /// `data_use` verbatim; a Learning formation carries the transcript
+    /// message identities and the current Memory identities its prompt read;
+    /// a dialogue attempt carries the assembled prompt's read-set (the
+    /// History message identities and remembered Memory identities it
+    /// consumed, possibly empty when no background was read). The values are
+    /// opaque [`RawId`]s, never bodies or hashes. The claim compares every
+    /// source against the current erasure conditions inside its transaction,
+    /// and a deletion admission may associate the claimed attempt with its
+    /// interval so a result arriving after completion is still recognized as
+    /// stale.
+    pub data_use: Vec<RawId>,
     /// Reviewed pricing snapshot resolved for this route immediately before
     /// the claim (`usage-cost-cap` §9), or `None` when the first-party
     /// catalog has no reviewed rate for the route. The claim publishes the
@@ -396,6 +518,14 @@ pub struct InferenceAttempt {
     /// fact of this ticket can never be repriced by a later catalog revision.
     /// `None` settles the cost as Unknown, never as zero.
     pub pricing: Option<PricingSnapshot>,
+    /// Conservative safe upper bound of this request's billable token usage,
+    /// resolved by the provider adapter before the claim (`usage-cost-cap`
+    /// §8), or `None` when the adapter cannot construct a finite bound.
+    /// [`Self::pricing`] and this estimate together are what the claim turns
+    /// into a cap reservation; when a current cap applies and either is
+    /// absent, the claim refuses with [`AttemptBeginOutcome::CapIndeterminate`]
+    /// rather than sending without a provable bound.
+    pub usage_estimate: Option<UsageEstimate>,
 }
 
 /// One claimed attempt as read back for attribution and restart.
@@ -414,13 +544,19 @@ pub struct InferenceAttemptRecord {
     /// Task Agent correlation, present iff the consumer is
     /// [`ConsumerKind::TaskAgent`]; a record that disagrees is never composed.
     pub task_agent: Option<TaskAgentAttemptPremise>,
+    /// Ordered canonical source correlation read back from the attempt. For a
+    /// Task Agent attempt it equals
+    /// [`TaskAgentAttemptPremise::data_use`].
+    pub data_use: Vec<RawId>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AttemptBeginOutcome {
     /// The attempt is claimed under the expected consent: the caller may
     /// issue provider I/O outside any lock. A later consent move cannot
-    /// un-start it; result adoption still decides separately.
+    /// un-start it; result adoption still decides separately. When a current
+    /// cap applied to the route, the reservation is durable before this
+    /// answer: the cap can never be oversubscribed by a concurrent claim.
     Started,
     /// The expected consent or credential-set premise no longer holds (or was
     /// never recorded), or this ticket was already claimed: the caller must
@@ -435,6 +571,20 @@ pub enum AttemptBeginOutcome {
     /// for this ticket, and the attempt is not recorded. Distinct from both
     /// staleness outcomes and never a storage error.
     DataUseHeld,
+    /// A current cap's window consumption plus this request's safe upper
+    /// bound would exceed the limit: the caller must NOT issue provider I/O
+    /// for this ticket, and neither the attempt nor a reservation is
+    /// recorded. The carried reference names the first violated cap in the
+    /// deterministic evaluation order (system before provider, daily before
+    /// monthly).
+    HeldByCap(UsageCapRef),
+    /// At least one current cap applies to the route, but the claim cannot
+    /// construct a finite safe upper bound under it (no reviewed rate, no
+    /// provider estimate, a cap currency the request cannot be compared in,
+    /// or an unrepresentable sum): the caller must NOT issue provider I/O.
+    /// The cap is never treated as satisfied and the bound is never assumed
+    /// zero.
+    CapIndeterminate,
 }
 
 /// Linearization point for starting provider I/O.
@@ -490,6 +640,7 @@ pub struct AdmissionRequest {
     consent: ConsentRecord,
     credential: CredentialRef,
     task_agent: Option<TaskAgentAttemptPremise>,
+    data_use: Vec<RawId>,
 }
 
 impl AdmissionRequest {
@@ -515,6 +666,7 @@ impl AdmissionRequest {
                         candidate: self.candidate,
                         authorization,
                         task_agent: self.task_agent,
+                        data_use: self.data_use,
                     }))
                 } else {
                     Admission::Declined(NotSentReason::EvaluationConsumed)
@@ -543,21 +695,32 @@ pub enum PreparedAdmission {
 
 /// Resolves the consent and credential premises for one dialogue admission.
 ///
+/// `data_use` is the ordered canonical source correlation of the assembled
+/// logical input: the History message identities and remembered Memory
+/// identities the dialogue prompt actually read (empty when the prompt
+/// carried no background). It rides the attempt claim, so a condition that
+/// committed first holds the send, and a deletion admission can associate an
+/// already-claimed turn with the interval its provenance belongs to.
+///
 /// The returned request still needs [`AdmissionRequest::authorize`]; this
 /// function performs no authorization and holds no lock.
 pub async fn prepare_dialogue_admission(
     consent: &impl ConsentRepository,
     credential_refs: &impl CredentialRefRepository,
     credential_store: &impl CredentialStore,
+    data_use: Vec<RawId>,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
     prepare_admission(
         consent,
         credential_refs,
         credential_store,
-        ConsumerKind::CompanionDialogue,
-        CapabilityKind::Dialogue,
-        PurposeKind::DialogueResponse,
-        None,
+        AdmissionBinding {
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            task_agent: None,
+            data_use,
+        },
     )
     .await
 }
@@ -568,6 +731,11 @@ pub async fn prepare_dialogue_admission(
 /// Learning is a distinct consumer and purpose: it shares the current
 /// provider assignment, but never presents itself as dialogue, so consent
 /// accounting and the closed-world allowlist can tell the two uses apart.
+/// `data_use` is the formation's ordered canonical source correlation (the
+/// transcript message identities and the Memory identities the prompt read);
+/// it rides the attempt claim, so a condition that committed first holds the
+/// send and a deletion admission can associate an already-claimed formation
+/// with the interval its provenance belongs to.
 ///
 /// The returned request still needs [`AdmissionRequest::authorize`]; this
 /// function performs no authorization and holds no lock.
@@ -575,15 +743,19 @@ pub async fn prepare_learning_admission(
     consent: &impl ConsentRepository,
     credential_refs: &impl CredentialRefRepository,
     credential_store: &impl CredentialStore,
+    data_use: Vec<RawId>,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
     prepare_admission(
         consent,
         credential_refs,
         credential_store,
-        ConsumerKind::CompanionLearning,
-        CapabilityKind::Learning,
-        PurposeKind::MemoryFormation,
-        None,
+        AdmissionBinding {
+            consumer: ConsumerKind::CompanionLearning,
+            capability: CapabilityKind::Learning,
+            purpose: PurposeKind::MemoryFormation,
+            task_agent: None,
+            data_use,
+        },
     )
     .await
 }
@@ -606,16 +778,29 @@ pub async fn prepare_task_agent_admission(
     credential_store: &impl CredentialStore,
     task_agent: TaskAgentAttemptPremise,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
+    let data_use = task_agent.data_use.clone();
     prepare_admission(
         consent,
         credential_refs,
         credential_store,
-        ConsumerKind::TaskAgent,
-        CapabilityKind::Dialogue,
-        PurposeKind::TaskAgentTurn,
-        Some(task_agent),
+        AdmissionBinding {
+            consumer: ConsumerKind::TaskAgent,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::TaskAgentTurn,
+            task_agent: Some(task_agent),
+            data_use,
+        },
     )
     .await
+}
+
+/// The consumer binding and durable correlation of one admission.
+struct AdmissionBinding {
+    consumer: ConsumerKind,
+    capability: CapabilityKind,
+    purpose: PurposeKind,
+    task_agent: Option<TaskAgentAttemptPremise>,
+    data_use: Vec<RawId>,
 }
 
 /// Shared preparation for one consumer's admission.
@@ -627,11 +812,15 @@ async fn prepare_admission(
     consent: &impl ConsentRepository,
     credential_refs: &impl CredentialRefRepository,
     credential_store: &impl CredentialStore,
-    consumer: ConsumerKind,
-    capability: CapabilityKind,
-    purpose: PurposeKind,
-    task_agent: Option<TaskAgentAttemptPremise>,
+    binding: AdmissionBinding,
 ) -> Result<PreparedAdmission, InferenceTechnicalError> {
+    let AdmissionBinding {
+        consumer,
+        capability,
+        purpose,
+        task_agent,
+        data_use,
+    } = binding;
     let record = consent.load_current(capability).await.map_err(|_| {
         InferenceTechnicalError::StorageUnavailable {
             reason: String::from("load consent"),
@@ -667,6 +856,7 @@ async fn prepare_admission(
         consent: record,
         credential,
         task_agent,
+        data_use,
     })))
 }
 
@@ -685,6 +875,7 @@ pub struct AuthorizedInference {
     candidate: InferenceUseCandidate,
     authorization: PermissionEvaluationId,
     task_agent: Option<TaskAgentAttemptPremise>,
+    data_use: Vec<RawId>,
 }
 
 impl AuthorizedInference {
@@ -694,10 +885,28 @@ impl AuthorizedInference {
         (&self.consent.0, self.consent.1.as_u64())
     }
 
+    /// The ticket this use will claim at dispatch.
+    ///
+    /// The ticket is the durable, single-use correlation of the provider
+    /// call: a caller that must observe the claimed use before dispatch (for
+    /// example a presentation predicate that refuses a reply whose claim a
+    /// deletion admission already associated with an interval) reads it here.
+    /// It is not authority and can never be re-claimed twice.
+    #[must_use]
+    pub fn ticket(&self) -> InferenceTicketId {
+        self.ticket
+    }
+
     /// Task Agent correlation carried through the claim, when present.
     #[must_use]
     pub fn task_agent_premise(&self) -> Option<&TaskAgentAttemptPremise> {
         self.task_agent.as_ref()
+    }
+
+    /// Ordered canonical source correlation carried through the claim.
+    #[must_use]
+    pub fn data_use(&self) -> &[RawId] {
+        &self.data_use
     }
 }
 
@@ -791,13 +1000,27 @@ pub enum InferenceDispatchOutcome {
 )]
 pub trait InferenceExecutor: Send + Sync {
     /// Resolves and authorizes one dialogue-purpose use without sending.
-    async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError>;
+    ///
+    /// `data_use` is the assembled dialogue prompt's ordered canonical source
+    /// correlation (the History message identities and remembered Memory
+    /// identities it read); it rides the attempt claim so a current condition
+    /// holds the send and a deletion admission can associate an already-claimed
+    /// turn with the interval its provenance belongs to.
+    async fn admit_dialogue(
+        &self,
+        data_use: Vec<RawId>,
+    ) -> Result<Admission, InferenceTechnicalError>;
 
     /// Resolves and authorizes one learning-formation use without sending.
     ///
     /// A distinct consumer/purpose from dialogue: the result is judged by
-    /// Learning, never presented as a dialogue response.
-    async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError>;
+    /// Learning, never presented as a dialogue response. `data_use` is the
+    /// formation's ordered canonical source correlation; it rides the attempt
+    /// claim so a current condition holds the send before any provider byte.
+    async fn admit_learning(
+        &self,
+        data_use: Vec<RawId>,
+    ) -> Result<Admission, InferenceTechnicalError>;
 
     /// Resolves and authorizes one Task Agent turn without sending.
     ///
@@ -834,7 +1057,8 @@ pub trait InferenceExecutor: Send + Sync {
 }
 
 /// Dispatches one authorized use: input validation, pricing resolution,
-/// attempt claim, provider call, adoption re-check, and usage recording.
+/// safe usage estimate, attempt claim with cap admission, provider call,
+/// adoption re-check, and usage recording.
 ///
 /// The input cap is checked here, before the durable attempt claim: an
 /// over-limit request is a never-sent refusal and must not leave an attempt
@@ -842,16 +1066,22 @@ pub trait InferenceExecutor: Send + Sync {
 /// immediately before the claim and travels with the attempt, so the ticket's
 /// cost fact is bound to the rate the call ran under and a later catalog
 /// revision cannot reprice it; an unreviewed route claims without a rate and
-/// settles its cost as Unknown. The prompt's credential-set premise is
-/// compared in the same claim transaction, so a prompt scrubbed before a
-/// credential became registered is never sent. From the successful claim
-/// onward, every path either records usage (uncertain or reported) or reports
-/// stale before any provider I/O. A technical provider failure records an
-/// unknown-usage fact before propagating: the attempt may have run. A
-/// completed call records its reported counts whether or not the reply is
-/// adopted; an adoption read failure still records the reported counts before
-/// propagating the storage error. A reported fact requires all three counts
-/// with cached input a subset of input; any missing, malformed, or
+/// settles its cost as Unknown. The provider adapter's safe usage upper bound
+/// rides the same claim: when a current cap applies, the claim reserves the
+/// bound and compares every applicable cap inside its transaction, so a
+/// request that would exceed a cap is refused with zero provider bytes and no
+/// attempt row. An applicable cap without a finite bound refuses
+/// [`NotSentReason::UsageCapIndeterminate`]; neither case is folded into
+/// consent staleness or a storage failure. The prompt's credential-set
+/// premise is compared in the same claim transaction, so a prompt scrubbed
+/// before a credential became registered is never sent. From the successful
+/// claim onward, every path either records usage (uncertain or reported) or
+/// reports stale before any provider I/O. A technical provider failure
+/// records an unknown-usage fact before propagating: the attempt may have
+/// run. A completed call records its reported counts whether or not the reply
+/// is adopted; an adoption read failure still records the reported counts
+/// before propagating the storage error. A reported fact requires all three
+/// counts with cached input a subset of input; any missing, malformed, or
 /// inconsistent provider usage settles as [`UsageSource::Unknown`] with all
 /// counts absent, never zero. The settlement is the first complete fact for
 /// the ticket and cannot be revised by a later duplicate.
@@ -893,6 +1123,7 @@ pub async fn dispatch_authorized(
     let credential_set = prompt.credential_set();
     let credential = authorized.credential;
     let task_agent = authorized.task_agent;
+    let data_use = authorized.data_use;
     // The pricing snapshot is resolved right before the claim (usage-cost-cap
     // §9): the rate this call runs under is fixed for the ticket and a later
     // catalog revision only affects calls admitted after it. An unpriced
@@ -905,11 +1136,22 @@ pub async fn dispatch_authorized(
         PricingResolution::Priced(snapshot) => Some(snapshot),
         PricingResolution::Unpriced => None,
     };
+    let request = ProviderRequest {
+        model: model.clone(),
+        credential,
+        input: prompt.into_text(),
+    };
+    // The estimate is resolved before the claim from the exact request the
+    // adapter will send, and it travels with the attempt: the claim converts
+    // it into the reservation upper bound under the admission pricing
+    // snapshot. An adapter with no finite bound answers `None`; uncapped
+    // routes still send, cap-enabled routes refuse typedly.
+    let usage_estimate = transport.usage_estimate(&request);
     // The claim is the linearization point: it reads, compares, and inserts
     // in one short transaction, so a stale consent, a stale credential-set
-    // premise, or a moved Task Agent delegation/task premise fails here
-    // before any byte leaves. A store failure is infrastructure, never a
-    // refusal.
+    // premise, a moved Task Agent delegation/task premise, or an exceeded
+    // usage cap fails here before any byte leaves. A store failure is
+    // infrastructure, never a refusal.
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
@@ -921,7 +1163,9 @@ pub async fn dispatch_authorized(
             provider: provider.clone(),
             model: model.clone(),
             task_agent,
+            data_use,
             pricing,
+            usage_estimate,
         })
         .await
     {
@@ -941,13 +1185,18 @@ pub async fn dispatch_authorized(
                 NotSentReason::DataUseHeld,
             ));
         }
+        Ok(AttemptBeginOutcome::HeldByCap(_)) => {
+            return Ok(InferenceDispatchOutcome::NotSent(
+                NotSentReason::UsageCapReached,
+            ));
+        }
+        Ok(AttemptBeginOutcome::CapIndeterminate) => {
+            return Ok(InferenceDispatchOutcome::NotSent(
+                NotSentReason::UsageCapIndeterminate,
+            ));
+        }
         Err(error) => return Err(error),
     }
-    let request = ProviderRequest {
-        model: model.clone(),
-        credential,
-        input: prompt.into_text(),
-    };
     let response = if let Some(abort) = abort {
         tokio::select! {
             biased;
@@ -1066,7 +1315,10 @@ pub mod fake {
     use std::pin::Pin;
 
     use super::RawUsage;
-    use super::{InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport};
+    use super::{
+        InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
+        UsageEstimate,
+    };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FakeFailure {
@@ -1079,6 +1331,9 @@ pub mod fake {
         pub text: String,
         pub usage: Option<RawUsage>,
         pub fail: Option<FakeFailure>,
+        /// Safe upper bound this fake advertises; `None` mirrors an adapter
+        /// that cannot construct a finite bound.
+        pub usage_estimate: Option<UsageEstimate>,
     }
 
     impl FakeProviderTransport {
@@ -1088,6 +1343,7 @@ pub mod fake {
                 text,
                 usage,
                 fail: None,
+                usage_estimate: None,
             }
         }
 
@@ -1097,7 +1353,16 @@ pub mod fake {
                 text: String::new(),
                 usage: None,
                 fail: Some(fail),
+                usage_estimate: None,
             }
+        }
+
+        /// Advertises a finite safe upper bound for every request, so a
+        /// cap-enabled dispatch can reserve under it.
+        #[must_use]
+        pub fn with_usage_estimate(mut self, estimate: UsageEstimate) -> Self {
+            self.usage_estimate = Some(estimate);
+            self
         }
     }
 
@@ -1123,6 +1388,10 @@ pub mod fake {
             };
             Box::pin(async move { result })
         }
+
+        fn usage_estimate(&self, _req: &ProviderRequest) -> Option<UsageEstimate> {
+            self.usage_estimate
+        }
     }
 }
 
@@ -1136,8 +1405,8 @@ mod dispatch_tests {
         InferenceAttemptRecord, InferenceAttemptRepository, InferenceDispatchOutcome,
         InferenceResultArrival, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
         NotSentReason, PermissionEvaluationId, ProviderRequest, ProviderResponse,
-        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageCostRecord, UsageFact,
-        UsageRepository, UsageSource, dispatch_authorized,
+        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageCostRecord, UsageEstimate,
+        UsageFact, UsageRepository, UsageReservation, UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -1313,6 +1582,62 @@ mod dispatch_tests {
         }
     }
 
+    /// An attempt repository whose claim always answers that a cap would be
+    /// exceeded, modelling a send the reservation refuses.
+    struct HeldByCapAttempts(ene_permission::UsageCapRef);
+
+    impl InferenceAttemptRepository for HeldByCapAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::HeldByCap(self.0.clone()))
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// An attempt repository whose claim cannot prove a finite safe upper
+    /// bound under a current cap.
+    struct CapIndeterminateAttempts;
+
+    impl InferenceAttemptRepository for CapIndeterminateAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::CapIndeterminate)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
     /// An attempt repository that keeps the claimed attempts for correlation
     /// assertions.
     struct CapturedAttempts(Mutex<Vec<InferenceAttempt>>);
@@ -1394,6 +1719,31 @@ mod dispatch_tests {
             &self,
             _ticket: InferenceTicketId,
         ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_reservation(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageReservation>, InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn reconcile_orphaned_usage_reservations(
+            &self,
+        ) -> Result<u64, InferenceTechnicalError> {
             Err(InferenceTechnicalError::StorageUnavailable {
                 reason: String::from("usage store down"),
             })
@@ -1485,6 +1835,27 @@ mod dispatch_tests {
         ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
             Ok(None)
         }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_reservation(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageReservation>, InferenceTechnicalError> {
+            Ok(None)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn reconcile_orphaned_usage_reservations(
+            &self,
+        ) -> Result<u64, InferenceTechnicalError> {
+            Ok(0)
+        }
     }
 
     struct ScrubRefs(ene_credential::CredentialSetRevision);
@@ -1543,6 +1914,7 @@ mod dispatch_tests {
             },
             authorization: PermissionEvaluationId(RawId::new()),
             task_agent: None,
+            data_use: Vec::new(),
         }
     }
 
@@ -1557,6 +1929,7 @@ mod dispatch_tests {
 
     fn authorized_task_agent(premise: TaskAgentAttemptPremise) -> AuthorizedInference {
         let consent = record(1);
+        let data_use = premise.data_use.clone();
         AuthorizedInference {
             ticket: InferenceTicketId(RawId::new()),
             consent: (consent.id, consent.rev),
@@ -1572,6 +1945,7 @@ mod dispatch_tests {
             },
             authorization: PermissionEvaluationId(RawId::new()),
             task_agent: Some(premise),
+            data_use,
         }
     }
 
@@ -1616,6 +1990,96 @@ mod dispatch_tests {
         assert_eq!(
             pricing.source_revision,
             crate::pricing::FIRST_PARTY_REVISION
+        );
+    }
+
+    #[tokio::test]
+    async fn held_and_indeterminate_cap_admissions_stay_distinct_refusals() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let held = HeldByCapAttempts(ene_permission::UsageCapRef::new(
+            ene_permission::UsageCapId::new(
+                ene_permission::UsageCapScope::System,
+                ene_permission::UsageCapWindow::DailyUtc,
+            ),
+            ene_permission::UsageCapRevision::from_u64(1),
+        ));
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &held,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::UsageCapReached),
+            "a cap-exceeded refusal never reads as consent or erasure staleness"
+        );
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &CapIndeterminateAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::UsageCapIndeterminate),
+            "an unprovable bound is its own typed refusal, never held-by-cap or zero"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "neither cap refusal may reach the provider"
+        );
+        assert!(
+            usage.0.lock().expect("usage capture lock").is_empty(),
+            "a refused send records no usage fact"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_estimate_travels_with_the_claimed_attempt() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let estimate = UsageEstimate {
+            input_tokens_upper_bound: 120,
+            output_tokens_upper_bound: 40,
+        };
+        let transport =
+            FakeProviderTransport::new(String::from("ok"), None).with_usage_estimate(estimate);
+        dispatch_authorized(
+            authorized_route("openai", "gpt-4o"),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(
+            claimed[0].usage_estimate,
+            Some(estimate),
+            "the adapter's safe bound must reach the cap-admission transaction"
         );
     }
 
@@ -2312,7 +2776,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let consent = FixedConsent(Some(record_for(CapabilityKind::Learning)));
         let refs = FixedRefs(vec![credential]);
-        let prepared = prepare_learning_admission(&consent, &refs, &credential_store).await;
+        let prepared =
+            prepare_learning_admission(&consent, &refs, &credential_store, Vec::new()).await;
         let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
             panic!("a complete setup must prepare a learning admission");
         };
@@ -2330,7 +2795,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
         let refs = FixedRefs(vec![credential]);
-        let prepared = prepare_learning_admission(&consent, &refs, &credential_store).await;
+        let prepared =
+            prepare_learning_admission(&consent, &refs, &credential_store, Vec::new()).await;
         assert_eq!(
             prepared,
             Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
@@ -2387,7 +2853,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
         let refs = FixedRefs(vec![credential]);
-        let prepared = prepare_dialogue_admission(&consent, &refs, &credential_store).await;
+        let prepared =
+            prepare_dialogue_admission(&consent, &refs, &credential_store, Vec::new()).await;
         let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
             panic!("a complete setup must prepare a dialogue admission");
         };
@@ -2403,7 +2870,8 @@ mod admission_tests {
         let (credential_store, _) = provisioned();
         let refs = FixedRefs(Vec::new());
         let prepared =
-            prepare_learning_admission(&FixedConsent(None), &refs, &credential_store).await;
+            prepare_learning_admission(&FixedConsent(None), &refs, &credential_store, Vec::new())
+                .await;
         assert_eq!(
             prepared,
             Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
@@ -2420,6 +2888,7 @@ mod admission_tests {
             &FixedConsent(Some(record_for(CapabilityKind::Learning))),
             &refs,
             &credential_store,
+            Vec::new(),
         )
         .await;
         assert_eq!(
@@ -2436,7 +2905,8 @@ mod admission_tests {
         let (credential_store, credential) = provisioned();
         let refs = FixedRefs(vec![credential]);
         let failing = FailingConsent;
-        let result = prepare_learning_admission(&failing, &refs, &credential_store).await;
+        let result =
+            prepare_learning_admission(&failing, &refs, &credential_store, Vec::new()).await;
         assert!(matches!(
             result,
             Err(InferenceTechnicalError::StorageUnavailable { .. })
