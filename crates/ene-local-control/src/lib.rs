@@ -5,7 +5,7 @@
 //! - [`ToHost`] / [`FromHost`] speak the **requester listener**, a local
 //!   endpoint any same-user process may dial. It carries non-secret requests
 //!   and non-secret outcomes. It never issues a seat, never carries a secret,
-//!   and never completes a [`ConfirmationSession`](ConfirmationChallenge).
+//!   and never completes a [`FromConfirmation::ConfirmationChallenge`] session.
 //! - [`ToConfirmation`] / [`FromConfirmation`] speak the **inherited
 //!   confirmation channel** the Host hands to the GUI it spawned. Only this
 //!   channel carries challenges, secret intake, and session completion.

@@ -221,7 +221,7 @@ impl ConfirmationClient {
     ///
     /// # Errors
     ///
-    /// As [`ConfirmationClient::await_outcome`].
+    /// As `ConfirmationClient::await_outcome`.
     pub async fn request_deletion_resume(
         &mut self,
         operation: &str,
@@ -247,7 +247,7 @@ impl ConfirmationClient {
     ///
     /// # Errors
     ///
-    /// As [`ConfirmationClient::await_challenge`].
+    /// As `ConfirmationClient::await_challenge`.
     pub async fn request_device_approve(&mut self, pending_id: &str) -> Result<(), DesktopError> {
         self.requester
             .request_accepted(&ToHost::RequestDeviceApprove {
@@ -264,7 +264,7 @@ impl ConfirmationClient {
     ///
     /// # Errors
     ///
-    /// As [`ConfirmationClient::await_challenge`].
+    /// As `ConfirmationClient::await_challenge`.
     pub async fn request_credential_put(
         &mut self,
         provider: &str,
@@ -283,7 +283,7 @@ impl ConfirmationClient {
     ///
     /// # Errors
     ///
-    /// As [`ConfirmationClient::await_challenge`].
+    /// As `ConfirmationClient::await_challenge`.
     pub async fn request_deletion_confirm(&mut self, request_id: &str) -> Result<(), DesktopError> {
         self.requester
             .request_accepted(&ToHost::RequestDeletionConfirm {
@@ -420,7 +420,7 @@ impl ConfirmationClient {
     ///
     /// # Errors
     ///
-    /// As [`ConfirmationClient::await_outcome`].
+    /// As `ConfirmationClient::await_outcome`.
     pub async fn send_confirmed_true(&mut self) -> Result<FromConfirmation, DesktopError> {
         self.send(&ToConfirmation::ConfirmedTrue)?;
         self.await_outcome().await

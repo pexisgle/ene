@@ -114,7 +114,7 @@ where
 
 #[cfg(unix)]
 mod platform {
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::fd::{FromRawFd as _, OwnedFd};
     use std::os::unix::net::UnixStream;
 
     use crate::{FromConfirmation, ToConfirmation};
@@ -225,12 +225,8 @@ mod platform {
             // single owner and never re-hands the channel to Body, tools, or
             // plugins.
             let fd = unsafe { OwnedFd::from_raw_fd(0) };
-            let raw = fd.as_raw_fd();
-            core::mem::forget(fd);
-            // SAFETY: `raw` is fd 0 as inspected above, and this is its only
-            // owner after the forget; the stream closes it exactly once.
             Ok(Self {
-                stream: unsafe { UnixStream::from_raw_fd(raw) },
+                stream: UnixStream::from(fd),
             })
         }
 

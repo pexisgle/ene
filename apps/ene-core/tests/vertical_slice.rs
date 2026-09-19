@@ -1231,7 +1231,11 @@ impl ServingHost {
 
     async fn stop(&mut self) {
         self.shutdown.send_replace(true);
-        let _ = tokio::time::timeout(Duration::from_secs(30), &mut self.task).await;
+        tokio::time::timeout(Duration::from_secs(30), &mut self.task)
+            .await
+            .expect("the in-process Host must stop within the timeout")
+            .expect("the in-process Host task must join")
+            .expect("the in-process Host must stop cleanly");
     }
 }
 

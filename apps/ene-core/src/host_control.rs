@@ -9,7 +9,7 @@
 //!   [`ToHost`] / [`FromHost`], which have no challenge or completion shape.
 //! - The **inherited confirmation channel** is a private socket pair / pipe
 //!   the Host creates while spawning the official GUI and hands only to that
-//!   child. It is the only place [`ConfirmationChallenge`], secret intake, and
+//!   child. It is the only place [`FromConfirmation::ConfirmationChallenge`], secret intake, and
 //!   [`SessionComplete`](ToConfirmation::SessionComplete) exist.
 //!
 //! Seat authority comes from the spawn: the Host records the child process
