@@ -3,6 +3,7 @@
 //! Hide and clean exit do not talk to Host. A broken parent pipe is a
 //! disconnect, not Task cancel.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -162,7 +163,18 @@ fn unix_stream_from_fd(fd: i32) -> Result<tokio::net::UnixStream, BodyError> {
 /// # Errors
 ///
 /// Same as [`run`].
-pub async fn run_with_io<R, W>(
+pub async fn run_with_io<R, W>(reader: R, writer: W, options: RunOptions) -> Result<(), BodyError>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    match run_until_disconnect(reader, writer, options).await {
+        Ok(()) | Err(BodyError::Disconnected) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn run_until_disconnect<R, W>(
     mut reader: R,
     writer: W,
     options: RunOptions,
@@ -222,6 +234,7 @@ where
                             return Ok(());
                         }
                     }
+                    Err(error) if peer_gone(&error) => return Err(BodyError::Disconnected),
                     Err(error) => {
                         return Err(BodyError::Transport(std::format!("ipc read: {error}")));
                     }
@@ -344,12 +357,27 @@ where
     guard
         .write_all(&bytes)
         .await
-        .map_err(|error| BodyError::Transport(std::format!("ipc write: {error}")))?;
+        .map_err(|error| map_write_error("write", error))?;
     guard
         .flush()
         .await
-        .map_err(|error| BodyError::Transport(std::format!("ipc flush: {error}")))?;
+        .map_err(|error| map_write_error("flush", error))?;
     Ok(())
+}
+
+fn map_write_error(op: &'static str, error: std::io::Error) -> BodyError {
+    if peer_gone(&error) {
+        BodyError::Disconnected
+    } else {
+        BodyError::Transport(std::format!("ipc {op}: {error}"))
+    }
+}
+
+fn peer_gone(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof
+    )
 }
 
 #[cfg(test)]

@@ -14,6 +14,8 @@ pub enum BodyError {
     Ipc(#[from] IpcError),
     #[error("transport: {0}")]
     Transport(String),
+    #[error("peer disconnected")]
+    Disconnected,
     #[error("runtime: {0}")]
     Runtime(String),
 }
