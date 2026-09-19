@@ -74,7 +74,20 @@ impl Gpu {
 }
 
 async fn init_inner() -> Gpu {
-    let instance = wgpu::Instance::default();
+    // Instance construction probes the OS and its backends synchronously: on a
+    // machine whose driver is absent, half-installed, or hung (a container, a
+    // WSL GPU passthrough, a partially removed ICD), that probe can block
+    // without ever yielding, so the caller's bound would never fire. Running it
+    // on a blocking thread keeps the timeout enforceable and leaves the IPC
+    // loop able to answer.
+    let instance = match tokio::task::spawn_blocking(wgpu::Instance::default).await {
+        Ok(instance) => instance,
+        Err(_) => {
+            return Gpu::Failed(GpuFailInfo {
+                reason: GpuFailReason::NoAdapter,
+            });
+        }
+    };
     let adapter = match instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
