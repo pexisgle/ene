@@ -2,7 +2,7 @@
 //!
 //! A separate listener from the Client `ene.sock` / named pipe. Linux: data
 //! directory + `SO_PEERCRED` same UID. Windows: narrower DACL named pipe +
-//! client PID. The exclusive [`FirstPartyControlSeat`] admits at most one
+//! client PID. The exclusive `FirstPartyControlSeat` admits at most one
 //! speaker; a second connection is [`FromHost::SeatOccupied`]. Completion
 //! requires the mint-time connection and the same peer PID. Reconnect
 //! invalidates outstanding sessions.
