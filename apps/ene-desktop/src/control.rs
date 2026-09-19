@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ene_local_control::{ControlOp, FromHost, RedactedSecret, ToHost};
+use ene_local_control::{ControlOp, FromHost, PendingDeletionPreview, RedactedSecret, ToHost};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
 
@@ -121,6 +121,43 @@ impl ControlSeat {
         .await
     }
 
+    pub async fn list_pending_deletions(
+        &mut self,
+    ) -> Result<Vec<PendingDeletionPreview>, DesktopError> {
+        write_message(&mut self.stream.inner, &ToHost::PendingDeletions).await?;
+        match read_message(&mut self.stream.inner).await? {
+            FromHost::PendingDeletions { requests } => Ok(requests),
+            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
+            other => Err(DesktopError::Control(format!(
+                "expected pending deletions, got {}",
+                control_kind(&other)
+            ))),
+        }
+    }
+
+    pub async fn request_deletion_confirm(&mut self, request_id: &str) -> Result<(), DesktopError> {
+        self.exchange_for_challenge(ToHost::DeletionConfirm {
+            request_id: request_id.to_string(),
+        })
+        .await
+    }
+
+    pub async fn request_deletion_resume(
+        &mut self,
+        operation: &str,
+        sweep: u64,
+    ) -> Result<FromHost, DesktopError> {
+        write_message(
+            &mut self.stream.inner,
+            &ToHost::DeletionResume {
+                operation: operation.to_string(),
+                sweep,
+            },
+        )
+        .await?;
+        read_message(&mut self.stream.inner).await
+    }
+
     pub async fn complete_pending(&mut self) -> Result<FromHost, DesktopError> {
         let Some(challenge) = self.challenge.take() else {
             return Err(DesktopError::Protocol(String::from(
@@ -178,6 +215,7 @@ fn control_kind(from: &FromHost) -> &'static str {
         FromHost::ConfirmationChallenge { .. } => "ConfirmationChallenge",
         FromHost::Outcome(_) => "Outcome",
         FromHost::Unavailable => "Unavailable",
+        FromHost::PendingDeletions { .. } => "PendingDeletions",
     }
 }
 

@@ -47,6 +47,17 @@ pub enum ControlOp {
     DeletionConfirm,
 }
 
+/// Body-free preview of one staged Targeted Deletion request.
+///
+/// The request identity stays Host-local (not on `ene-api`). The exact
+/// target text never rides this DTO: the seated Owner already typed it,
+/// and GUI snapshots must not reconstruct it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PendingDeletionPreview {
+    pub request_id: String,
+    pub purpose: String,
+}
+
 /// Messages a seated control speaker may send.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToHost {
@@ -61,6 +72,14 @@ pub enum ToHost {
     },
     DeletionConfirm {
         request_id: String,
+    },
+    /// Seated read of staged Targeted Deletion request identities.
+    PendingDeletions,
+    /// Owner-initiated resume of a Held operation. The operation was
+    /// already admitted; this is not a second destructive confirmation.
+    DeletionResume {
+        operation: String,
+        sweep: u64,
     },
     SessionComplete {
         session_id: Uuid,
@@ -85,6 +104,9 @@ pub enum FromHost {
     },
     Outcome(ControlOutcome),
     Unavailable,
+    PendingDeletions {
+        requests: Vec<PendingDeletionPreview>,
+    },
 }
 
 /// Non-secret completion facts. Pairing secrets for Host-local display use
@@ -120,6 +142,10 @@ pub enum ControlOutcome {
     },
     DeletionNeedsClarification,
     DeletionMissing,
+    DeletionResumed {
+        operation: String,
+        sweep: u64,
+    },
     SessionCompleted {
         session_id: Uuid,
     },
@@ -168,5 +194,19 @@ mod tests {
         let occupied = serde_json::to_string(&FromHost::SeatOccupied).expect("must serialize");
         let parsed: FromHost = serde_json::from_str(&occupied).expect("must deserialize");
         assert!(matches!(parsed, FromHost::SeatOccupied));
+    }
+
+    #[test]
+    fn pending_deletion_preview_has_no_target_body_field() {
+        let preview = super::PendingDeletionPreview {
+            request_id: String::from("00000000-0000-0000-0000-000000000001"),
+            purpose: String::from("privacy"),
+        };
+        let json = serde_json::to_string(&preview).expect("must serialize");
+        assert!(
+            !json.contains("exact"),
+            "pending preview must not carry target text: {json}"
+        );
+        assert!(json.contains("privacy"));
     }
 }

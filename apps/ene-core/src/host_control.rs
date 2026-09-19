@@ -23,7 +23,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex as StdMutex;
 
-use ene_local_control::{ControlOp, ControlOutcome, FromHost, RedactedSecret, ToHost};
+use ene_local_control::{
+    ControlOp, ControlOutcome, FromHost, PendingDeletionPreview, RedactedSecret, ToHost,
+};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::RawId;
 use uuid::Uuid;
@@ -463,6 +465,46 @@ async fn dispatch_seated(
             request_id.clone(),
             PendingOp::DeletionConfirm { request_id },
         ),
+        ToHost::PendingDeletions => match handle.pending_targeted_deletions(None, 50).await {
+            Ok(list) => FromHost::PendingDeletions {
+                requests: list
+                    .iter()
+                    .map(|request| PendingDeletionPreview {
+                        request_id: request
+                            .request()
+                            .as_raw()
+                            .as_uuid()
+                            .as_hyphenated()
+                            .to_string(),
+                        purpose: request.purpose().as_str().to_string(),
+                    })
+                    .collect(),
+            },
+            Err(_) => FromHost::Unavailable,
+        },
+        ToHost::DeletionResume { operation, sweep } => {
+            match handle.resume_targeted_deletion(&operation, sweep).await {
+                Ok(ene_preservation::DeletionLifecycleOutcome::Applied(current)) => {
+                    FromHost::Outcome(ControlOutcome::DeletionResumed {
+                        operation: current
+                            .operation
+                            .as_raw()
+                            .as_uuid()
+                            .as_hyphenated()
+                            .to_string(),
+                        sweep: current.sweep.as_u64(),
+                    })
+                }
+                Ok(ene_preservation::DeletionLifecycleOutcome::Missing) => {
+                    FromHost::Outcome(ControlOutcome::DeletionMissing)
+                }
+                Ok(ene_preservation::DeletionLifecycleOutcome::Held(_)) => {
+                    FromHost::Outcome(ControlOutcome::DeletionHeldByOperation { operation, sweep })
+                }
+                Ok(_) => FromHost::DeniedByBoundary,
+                Err(_) => FromHost::Unavailable,
+            }
+        }
         ToHost::SessionComplete { session_id, nonce } => {
             match handle
                 .control_seat
@@ -756,6 +798,7 @@ fn from_host_kind(message: &FromHost) -> &'static str {
         FromHost::ConfirmationChallenge { .. } => "ConfirmationChallenge",
         FromHost::Outcome(_) => "Outcome",
         FromHost::Unavailable => "Unavailable",
+        FromHost::PendingDeletions { .. } => "PendingDeletions",
     }
 }
 
