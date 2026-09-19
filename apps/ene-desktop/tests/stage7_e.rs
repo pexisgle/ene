@@ -44,7 +44,6 @@ const TARGET: &str = "stage7-e-keyword-omega";
 struct GateTransport {
     replies: Mutex<VecDeque<String>>,
     sends: AtomicUsize,
-    park: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl GateTransport {
@@ -52,7 +51,6 @@ impl GateTransport {
         Arc::new(Self {
             replies: Mutex::new(replies.iter().map(|text| (*text).to_string()).collect()),
             sends: AtomicUsize::new(0),
-            park: Mutex::new(None),
         })
     }
 
@@ -75,16 +73,6 @@ impl ProviderTransport for GateTransport {
         let _ = req;
         Box::pin(async move {
             self.sends.fetch_add(1, Ordering::SeqCst);
-            let parked = self
-                .park
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-            if let Some(rx) = parked {
-                match rx.await {
-                    Ok(()) | Err(_) => {}
-                }
-            }
             let reply = self
                 .replies
                 .lock()
@@ -303,6 +291,10 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         FromHost::Outcome(ControlOutcome::DeletionStarted { .. }) => {}
         other => panic!("expected DeletionStarted, got {other:?}"),
     }
+    assert!(
+        desktop.deletion_has_operations(),
+        "started deletion is visible on the panel"
+    );
     drive_gui_until(&mut desktop, &handle, "completed").await;
 
     let erasure = desktop

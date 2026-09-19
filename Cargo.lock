@@ -1242,7 +1242,9 @@ name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
  "ene-api",
+ "ene-body",
  "ene-client",
+ "ene-companion",
  "ene-config",
  "ene-core",
  "ene-credential",

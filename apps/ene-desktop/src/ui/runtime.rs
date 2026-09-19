@@ -920,6 +920,11 @@ impl DesktopRuntime {
     }
 
     #[must_use]
+    pub fn deletion_has_operations(&self) -> bool {
+        self.deletion.has_operations()
+    }
+
+    #[must_use]
     pub fn last_erasure(&self) -> Option<&LocalErasureResult> {
         self.last_erasure.as_ref()
     }
