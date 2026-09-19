@@ -4,6 +4,7 @@
 //! disconnect, not Task cancel.
 
 use std::io::ErrorKind;
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
