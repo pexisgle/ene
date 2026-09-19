@@ -407,6 +407,13 @@ impl DesktopRuntime {
                 self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
+            FromHost::Outcome(
+                ControlOutcome::CredentialRefused { .. } | ControlOutcome::DeviceUnknown { .. },
+            )
+            | FromHost::Unavailable => {
+                self.deny_reason = i18n::control_deny(self.locale, &reply);
+                self.page = Page::Wizard;
+            }
             other => {
                 self.deny_reason = i18n::control_deny(self.locale, other);
             }
