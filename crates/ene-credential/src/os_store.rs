@@ -294,4 +294,60 @@ mod tests {
         let read = store.with_bearer(&cred, |bearer| bearer.to_string());
         assert!(read.is_err(), "no active version means no bearer");
     }
+
+    /// The real backend probe: publishes one version, reads it back, proves a
+    /// second version is a separate item, and removes both.
+    ///
+    /// The probe records 未実施 instead of failing when the platform store is
+    /// unavailable (a Linux session with no Secret Service, a locked keyring):
+    /// an unrun probe is not a pass, and it is not a product defect either.
+    #[test]
+    fn the_real_os_store_round_trips_when_available() {
+        use super::OsCredentialStore;
+        use crate::secret::CredentialStore as _;
+
+        let namespace = format!("ene-probe-{}", ene_primitive::RawId::new().as_uuid());
+        let store = OsCredentialStore::new(namespace);
+        let cred = CredentialRef::new("probe", "round-trip").expect("valid ref");
+        if store.put_version(&cred, 1, "probe-value-one").is_err() {
+            eprintln!("os-store probe: 未実施 (the platform store is unavailable here)");
+            return;
+        }
+        eprintln!("os-store probe: the platform store accepted a version");
+        let read = store.with_version(&cred, 1, |bearer| bearer.to_string());
+        assert_eq!(
+            read.expect("a published version must read back"),
+            "probe-value-one"
+        );
+        store
+            .put_version(&cred, 2, "probe-value-two")
+            .expect("a second version is its own item");
+        assert_eq!(
+            store
+                .with_version(&cred, 2, |bearer| bearer.to_string())
+                .expect("the second version must read back"),
+            "probe-value-two"
+        );
+        store.activate(&cred, 2);
+        assert_eq!(
+            store
+                .with_bearer(&cred, |bearer| bearer.to_string())
+                .expect("activation must point reads at the new version"),
+            "probe-value-two"
+        );
+        assert!(
+            store.put_version(&cred, 2, "probe-value-two").is_err(),
+            "a published version is immutable"
+        );
+        store
+            .delete_version(&cred, 1)
+            .expect("a retired version must be removable");
+        store
+            .delete_version(&cred, 2)
+            .expect("the active version must be removable by cleanup");
+        assert!(
+            store.with_version(&cred, 2, |_| ()).is_err(),
+            "the removed version must be gone"
+        );
+    }
 }
