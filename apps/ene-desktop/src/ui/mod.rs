@@ -4,6 +4,7 @@
 
 pub(crate) mod deletion;
 mod memory;
+pub mod presentation;
 mod runtime;
 pub(crate) mod tasks;
 pub(crate) mod usage;

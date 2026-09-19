@@ -21,7 +21,7 @@ use crate::ui::{Composer, MemoryPage};
 
 /// Mutable GUI-owned copies one deletion demand may name.
 pub(crate) struct GuiOwned<'a> {
-    pub timeline: &'a mut Vec<String>,
+    pub timeline: &'a mut Vec<crate::ui::presentation::Message>,
     pub history: &'a mut Vec<HistoryItem>,
     pub composer: &'a mut Composer,
     pub search_draft: &'a mut String,
@@ -113,7 +113,7 @@ mod tests {
     use ene_api::v1::refs::DeletionOperationWireRef;
 
     struct Fixture {
-        timeline: Vec<String>,
+        timeline: Vec<crate::ui::presentation::Message>,
         history: Vec<ene_api::v1::round::HistoryItem>,
         composer: Composer,
         search_draft: String,
@@ -151,7 +151,10 @@ mod tests {
             }],
         };
         let mut fixture = Fixture {
-            timeline: vec![String::from("hello")],
+            timeline: vec![crate::ui::presentation::Message {
+                text: String::from("hello"),
+                ..Default::default()
+            }],
             history: Vec::new(),
             composer: Composer::default(),
             search_draft: String::from("search"),
@@ -171,7 +174,7 @@ mod tests {
         assert!(fixture.composer.draft().is_empty());
         assert_eq!(fixture.composer.undo_len(), 0);
         assert!(fixture.search_draft.is_empty());
-        assert_eq!(fixture.timeline, vec![String::from("hello")]);
+        assert_eq!(fixture.timeline[0].text, "hello");
     }
 
     #[test]
@@ -185,7 +188,10 @@ mod tests {
             }],
         };
         let mut fixture = Fixture {
-            timeline: vec![String::from("keep-this-keyword")],
+            timeline: vec![crate::ui::presentation::Message {
+                text: String::from("keep-this-keyword"),
+                ..Default::default()
+            }],
             history: Vec::new(),
             composer: Composer::default(),
             search_draft: String::new(),

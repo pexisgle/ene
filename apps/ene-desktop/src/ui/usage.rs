@@ -61,6 +61,97 @@ impl Default for UsagePanel {
 }
 
 impl UsagePanel {
+    pub(crate) fn rows(&self, locale: crate::i18n::Locale) -> Vec<super::presentation::Row> {
+        use super::presentation::{Row, state, tr};
+        self.page
+            .as_ref()
+            .map(|p| {
+                p.rows
+                    .iter()
+                    .map(|r| Row {
+                        title: format!("{} / {}", r.provider, r.model),
+                        body: r
+                            .cost
+                            .as_ref()
+                            .map(|c| {
+                                format!(
+                                    "{} {:.6}",
+                                    c.total.currency,
+                                    c.total.micros as f64 / 1_000_000.0
+                                )
+                            })
+                            .unwrap_or_else(|| tr(locale, "料金不明", "Cost unknown")),
+                        meta: r
+                            .tokens
+                            .as_ref()
+                            .map(|t| format!("{} / {}", t.input_tokens, t.output_tokens))
+                            .unwrap_or_else(|| tr(locale, "不明", "Unknown")),
+                        state: state(locale, &r.status),
+                        ..Row::default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub(crate) fn cap_rows(&self, locale: crate::i18n::Locale) -> Vec<super::presentation::Row> {
+        use super::presentation::{Row, tr};
+        self.page
+            .as_ref()
+            .map(|p| {
+                p.caps
+                    .iter()
+                    .map(|c| {
+                        Row::text(
+                            &format!(
+                                "{} · {}",
+                                c.provider.as_deref().unwrap_or(
+                                    if locale == crate::i18n::Locale::Ja {
+                                        "全体"
+                                    } else {
+                                        "All providers"
+                                    }
+                                ),
+                                if c.window == "daily_utc" {
+                                    tr(locale, "日次 (UTC)", "Daily (UTC)")
+                                } else {
+                                    tr(locale, "月次 (UTC)", "Monthly (UTC)")
+                                }
+                            ),
+                            c.stored
+                                .as_ref()
+                                .map(|s| {
+                                    let remaining = match &s.consumption {
+                                        UsageCapConsumptionView::Known { remaining, .. } => {
+                                            format!(
+                                                "{} {:.6}",
+                                                remaining.currency,
+                                                remaining.micros as f64 / 1_000_000.0
+                                            )
+                                        }
+                                        UsageCapConsumptionView::Indeterminate => {
+                                            tr(locale, "不明", "Unknown")
+                                        }
+                                    };
+                                    format!(
+                                        "{} {} {:.6} · {} {}",
+                                        tr(locale, "上限", "Limit"),
+                                        s.limit.currency,
+                                        s.limit.micros as f64 / 1_000_000.0,
+                                        tr(locale, "残り", "Remaining"),
+                                        remaining
+                                    )
+                                })
+                                .unwrap_or_else(|| tr(locale, "未設定", "Not set")),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub(crate) fn has_more(&self) -> bool {
+        self.page.as_ref().is_some_and(|p| p.next_cursor.is_some())
+    }
+
     /// Display-only body. Unknown cost is never formatted as yen zero.
     #[must_use]
     pub fn render(&self) -> String {
@@ -233,12 +324,12 @@ impl UsagePanel {
                     }
                     None => String::from("usage cursor is stale; restart from the head"),
                 };
-                Ok(())
+                Err(DesktopError::Protocol(String::from("stale usage page")))
             }
             WirePayload::UsageSummaryResponse(UsageSummaryResponse::Unavailable) => {
                 self.page = None;
                 self.notice = String::from("usage is unavailable; retry later");
-                Ok(())
+                Err(DesktopError::Protocol(String::from("usage unavailable")))
             }
             other => Err(DesktopError::Protocol(format!(
                 "expected UsageSummaryResponse, got {}",

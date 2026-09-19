@@ -63,6 +63,11 @@ impl PendingChallenge {
 }
 
 impl ControlSeat {
+    /// Forget the local authority reference. This does not roll back a sent operation.
+    pub(crate) fn discard_pending(&mut self) {
+        self.challenge = None;
+    }
+
     /// Dials the control inlet and sends [`ToHost::SeatHello`].
     ///
     /// Occupying an empty seat is accident prevention, not authenticity.

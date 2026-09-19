@@ -32,6 +32,8 @@ pub struct DeletionPanel {
     page: Option<DeletionStatusPage>,
     notice: String,
     pending_request_id: Option<String>,
+    pending: Vec<ene_local_control::PendingDeletionPreview>,
+    selected: String,
 }
 
 impl core::fmt::Debug for DeletionPanel {
@@ -57,11 +59,87 @@ impl Default for DeletionPanel {
             page: None,
             notice: String::new(),
             pending_request_id: None,
+            pending: Vec::new(),
+            selected: String::new(),
         }
     }
 }
 
 impl DeletionPanel {
+    pub(crate) fn rows(&self, locale: crate::i18n::Locale) -> Vec<super::presentation::Row> {
+        use super::presentation::{Row, state, tr};
+        let mut rows: Vec<Row> = self
+            .pending
+            .iter()
+            .enumerate()
+            .map(|(index, p)| Row {
+                key: format!("request:{}", p.request_id),
+                title: format!(
+                    "{} {}",
+                    tr(locale, "削除要求", "Deletion request"),
+                    index + 1
+                ),
+                body: tr(
+                    locale,
+                    "本人確認後に削除を開始します",
+                    "Deletion starts after owner confirmation",
+                ),
+                state: tr(locale, "確認待ち", "Awaiting confirmation"),
+                ..Row::default()
+            })
+            .collect();
+        if let Some(page) = &self.page {
+            rows.extend(page.operations.iter().map(|op| Row {
+                key: format!("operation:{}:{}", op.operation.0, op.sweep),
+                title: tr(locale, "データ削除", "Data deletion"),
+                state: state(locale, op.phase.as_str()),
+                body: match &op.participants {
+                    DeletionParticipantReportWire::NotReported => {
+                        tr(locale, "進捗の報告を待っています", "Waiting for progress")
+                    }
+                    DeletionParticipantReportWire::Reported(entries) => format!(
+                        "{} {}",
+                        entries.len(),
+                        tr(locale, "件の処理先から報告", "participants reported")
+                    ),
+                },
+                meta: op.started_at.clone(),
+            }));
+        }
+        rows
+    }
+    pub(crate) fn selected_key(&self) -> String {
+        self.selected.clone()
+    }
+    pub(crate) fn select_key(&mut self, key: &str) -> Result<(), DesktopError> {
+        if !self
+            .rows(crate::i18n::Locale::En)
+            .iter()
+            .any(|r| r.key == key)
+        {
+            return Err(DesktopError::Protocol(String::from(
+                "stale deletion selection",
+            )));
+        }
+        self.selected = key.into();
+        Ok(())
+    }
+    pub(crate) fn can_resume(&self) -> bool {
+        self.page.as_ref().is_some_and(|p| {
+            p.operations.iter().any(|op| {
+                self.selected == format!("operation:{}:{}", op.operation.0, op.sweep)
+                    && op.phase == DeletionPhaseWire::Held
+            })
+        })
+    }
+    pub(crate) async fn refresh_pending(
+        &mut self,
+        seat: &mut ControlSeat,
+    ) -> Result<(), DesktopError> {
+        self.pending = seat.list_pending_deletions().await?;
+        Ok(())
+    }
+
     pub fn set_exact_text(&mut self, text: String) {
         self.exact_text.zeroize();
         self.exact_text = text;
@@ -206,7 +284,9 @@ impl DeletionPanel {
             WirePayload::DeletionStatusResponse(DeletionStatusResponse::Unavailable) => {
                 self.page = None;
                 self.notice = String::from("deletion status is unavailable; retry later");
-                Ok(())
+                Err(DesktopError::Protocol(String::from(
+                    "deletion status unavailable",
+                )))
             }
             other => Err(DesktopError::Protocol(format!(
                 "expected DeletionStatusResponse, got {}",
@@ -219,7 +299,17 @@ impl DeletionPanel {
     /// mints a confirmation session. Exact text does not travel this path.
     pub async fn begin_confirm(&mut self, seat: &mut ControlSeat) -> Result<(), DesktopError> {
         let pending = seat.list_pending_deletions().await?;
-        let Some(preview) = pending.first() else {
+        let preview = pending
+            .iter()
+            .find(|p| self.selected == format!("request:{}", p.request_id))
+            .or_else(|| {
+                if self.selected.is_empty() && pending.len() == 1 {
+                    pending.first()
+                } else {
+                    None
+                }
+            });
+        let Some(preview) = preview else {
             return Err(DesktopError::Protocol(String::from(
                 "no staged deletion request",
             )));
@@ -229,7 +319,19 @@ impl DeletionPanel {
     }
 
     pub async fn resume(&mut self, seat: &mut ControlSeat) -> Result<FromHost, DesktopError> {
-        let Some(operation) = self.page.as_ref().and_then(|page| page.operations.first()) else {
+        let operation = self.page.as_ref().and_then(|page| {
+            page.operations
+                .iter()
+                .find(|op| self.selected == format!("operation:{}:{}", op.operation.0, op.sweep))
+                .or_else(|| {
+                    if self.selected.is_empty() && page.operations.len() == 1 {
+                        page.operations.first()
+                    } else {
+                        None
+                    }
+                })
+        });
+        let Some(operation) = operation else {
             return Err(DesktopError::Protocol(String::from(
                 "no deletion operation to resume",
             )));

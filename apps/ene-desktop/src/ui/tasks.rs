@@ -45,6 +45,7 @@ pub(crate) struct TaskPanel {
     result_text: String,
     result_adopted: Option<u64>,
     action_lines: Vec<String>,
+    report_rows: Vec<super::presentation::Row>,
     workspace_path: Option<String>,
     undelivered_lines: Vec<String>,
     /// Set only after a receipt's items were copied into this panel.
@@ -71,6 +72,66 @@ struct PresentedReceipt {
 }
 
 impl TaskPanel {
+    pub(crate) fn rows(&self, locale: crate::i18n::Locale) -> Vec<super::presentation::Row> {
+        use super::presentation::{Row, state, task_key, tr};
+        self.items
+            .iter()
+            .enumerate()
+            .map(|(index, task)| Row {
+                key: task_key(&task.task.0, task.revision, &task.purpose),
+                title: format!("{} {}", tr(locale, "作業", "Task"), index + 1),
+                state: if task.running {
+                    tr(locale, "実行中", "Running")
+                } else {
+                    state(locale, &task.progress)
+                },
+                ..Row::default()
+            })
+            .collect()
+    }
+    pub(crate) fn selected_key(&self) -> String {
+        self.displayed
+            .as_ref()
+            .map(|t| super::presentation::task_key(&t.task, t.revision, &t.purpose))
+            .unwrap_or_default()
+    }
+    pub(crate) fn index_for_key(&self, key: &str) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|t| super::presentation::task_key(&t.task.0, t.revision, &t.purpose) == key)
+    }
+    pub(crate) fn details(&self, locale: crate::i18n::Locale) -> Vec<super::presentation::Row> {
+        use super::presentation::{Row, tr};
+        if self.displayed.is_none() {
+            return Vec::new();
+        }
+        let mut rows = vec![
+            Row::text(&tr(locale, "目的", "Purpose"), &self.purpose_text),
+            Row::text(
+                &tr(locale, "結果", "Result"),
+                if self.result_text.is_empty() {
+                    tr(locale, "まだ結果はありません", "No result yet")
+                } else {
+                    self.result_text.clone()
+                },
+            ),
+        ];
+        if let Some(path) = &self.workspace_path {
+            rows.push(Row::text("Workspace", path));
+        }
+        for (index, row) in self.report_rows.iter().enumerate() {
+            rows.push(Row {
+                title: format!(
+                    "{} {}",
+                    tr(locale, "成果物・操作", "Artifacts and actions"),
+                    index + 1
+                ),
+                ..row.clone()
+            });
+        }
+        rows
+    }
+
     #[must_use]
     pub(crate) fn list_lines(&self) -> Vec<String> {
         self.items.iter().map(list_line).collect()
@@ -167,6 +228,7 @@ impl TaskPanel {
             && self.purpose_text.is_empty()
             && self.result_text.is_empty()
             && self.action_lines.is_empty()
+            && self.report_rows.is_empty()
             && self.undelivered_lines.is_empty()
             && self.presented.is_none()
     }
@@ -216,6 +278,9 @@ impl TaskPanel {
         .await?;
         match answer {
             WirePayload::SelectTaskResponse(SelectTaskResponse::Selected(selected)) => {
+                if selected.revision != item.revision || selected.purpose != item.purpose {
+                    return Err(DesktopError::Protocol(String::from("stale task selection")));
+                }
                 self.displayed = Some(DisplayedTask {
                     task: selected.task.0,
                     revision: selected.revision,
@@ -488,6 +553,11 @@ impl TaskPanel {
         page: TaskReportPage,
     ) -> Result<(), DesktopError> {
         if let Some(shown) = &mut self.displayed {
+            if shown.revision != page.revision || shown.purpose != page.purpose {
+                return Err(DesktopError::Protocol(String::from(
+                    "task report premise changed",
+                )));
+            }
             shown.revision = page.revision;
             shown.progress = page.progress.clone();
             shown.purpose = page.purpose.clone();
@@ -496,7 +566,19 @@ impl TaskPanel {
         self.result_text.clear();
         self.result_adopted = None;
         self.action_lines.clear();
+        self.report_rows.clear();
         for row in &page.rows {
+            if row.kind != "task_result" {
+                let body = if let Some(source) = &row.source {
+                    load_source(client, source).await?
+                } else {
+                    String::new()
+                };
+                self.report_rows.push(super::presentation::Row {
+                    body,
+                    ..Default::default()
+                });
+            }
             match row.kind.as_str() {
                 "task_result" => {
                     self.result_adopted = row.adopted_revision;
@@ -528,6 +610,7 @@ impl TaskPanel {
         self.result_text.clear();
         self.result_adopted = None;
         self.action_lines.clear();
+        self.report_rows.clear();
         self.undelivered_lines.clear();
         self.presented = None;
     }

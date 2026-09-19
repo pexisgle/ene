@@ -268,6 +268,24 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         "presenting chat stores a receipt the demand must invalidate"
     );
 
+    // Two surface copies and the task pane remain live until their asynchronous
+    // erasure acknowledgment arrives. Host must not receive a premature wiped.
+    let surfaces = Arc::new(Mutex::new(vec![desktop.surface_snapshot(); 3]));
+    let erased = Arc::new(AtomicUsize::new(0));
+    desktop.attach_surface_erasure({
+        let surfaces = Arc::clone(&surfaces);
+        let erased = Arc::clone(&erased);
+        Arc::new(move || {
+            let surfaces = Arc::clone(&surfaces);
+            let erased = Arc::clone(&erased);
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                surfaces.lock().unwrap().clear();
+                erased.fetch_add(1, Ordering::SeqCst);
+                true
+            })
+        })
+    });
     desktop.open_page(Page::Deletion);
     desktop.set_deletion_exact_text(String::from(TARGET));
     let staged = desktop.request_deletion().await.expect("stage");
@@ -307,6 +325,8 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
             || erasure.wiped.contains(&ClientTempClass::InputDraft),
         "the GUI must report a class it actually cleared: {erasure:?}"
     );
+    assert!(erased.load(Ordering::SeqCst) > 0);
+    assert!(surfaces.lock().unwrap().is_empty());
     assert!(!desktop.composer_mut().composing());
     assert!(desktop.composer_mut().draft().is_empty());
     assert_eq!(desktop.composer_mut().undo_len(), 0);
@@ -520,4 +540,38 @@ fn conversation_ack_hook_stays_in_session() {
     let src = include_str!("../src/session.rs");
     assert!(src.contains("ConfirmPresentation"));
     assert!(src.contains("PresentationStatus::Presented"));
+}
+
+#[tokio::test]
+async fn closed_confirmation_cannot_be_reused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["unused"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), transport);
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    desktop.begin_pairing().await.expect("pair");
+    let key = desktop
+        .surface_snapshot()
+        .confirmation
+        .expect("challenge")
+        .key;
+    desktop.cancel_secret();
+    assert!(desktop.surface_snapshot().confirmation.is_none());
+    assert!(desktop.confirm_key(&key).await.is_err());
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn stale_rows_do_not_select_another_task_or_memory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    desktop
+        .composer_mut()
+        .set_draft("chat draft stays separate".into());
+    assert!(desktop.select_task_key("expired-row").await.is_err());
+    assert!(desktop.select_memory_key("expired-row").await.is_err());
+    assert!(desktop.select_deletion_key("expired-row").is_err());
+    assert_eq!(desktop.composer_mut().draft(), "chat draft stays separate");
+    assert!(desktop.surface_snapshot().selected_task.is_empty());
 }

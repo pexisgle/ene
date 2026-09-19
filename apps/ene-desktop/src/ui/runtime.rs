@@ -38,12 +38,14 @@ pub struct DesktopRuntime {
     secret: SecretIntake,
     client: Option<Client>,
     control: Option<ControlSeat>,
-    timeline: Vec<String>,
+    timeline: Vec<super::presentation::Message>,
+    surface_erasure: Option<super::presentation::SurfaceErasure>,
     history: Vec<HistoryItem>,
     connection: &'static str,
     presence: String,
     deny_reason: String,
     facts: SetupFacts,
+    setup_completed: bool,
     ui_ticks: u64,
     body: BodySupervisor,
     body_status: BodyStatus,
@@ -72,6 +74,7 @@ impl DesktopRuntime {
             client: None,
             control: None,
             timeline: Vec::new(),
+            surface_erasure: None,
             history: Vec::new(),
             connection: i18n::label(locale, Label::Disconnected),
             presence: String::from("unknown"),
@@ -82,6 +85,7 @@ impl DesktopRuntime {
                 model: None,
                 mark: String::new(),
             },
+            setup_completed: false,
             ui_ticks: 0,
             body: BodySupervisor::new(),
             body_status: BodyStatus::Absent,
@@ -114,7 +118,17 @@ impl DesktopRuntime {
             locale: self.locale.as_tag().to_string(),
             page: format!("{:?}", self.page),
             wizard_step: format!("{:?}", self.wizard_step),
-            timeline: self.timeline.clone(),
+            timeline: self
+                .timeline
+                .iter()
+                .map(|m| {
+                    format!(
+                        "[{}] {}",
+                        if m.owner { "owner" } else { "companion" },
+                        m.text
+                    )
+                })
+                .collect(),
             history: history_lines(&self.history),
             draft: self.composer.draft().to_string(),
             composing: self.composer.composing(),
@@ -137,7 +151,7 @@ impl DesktopRuntime {
             about_slint: true,
             body_status: format!("{:?}", self.body_status),
             ui_ticks: self.ui_ticks,
-            setup_ready: self.facts.setup_ready(),
+            setup_ready: self.facts.setup_ready() && self.setup_completed,
             credential_present: self.facts.credential_present,
             consent_assigned: self.facts.consent_assigned,
             secret_visible: matches!(self.wizard_step, WizardStep::Credential),
@@ -192,6 +206,9 @@ impl DesktopRuntime {
 
     pub fn cancel_secret(&mut self) {
         self.secret.cancel();
+        if let Some(seat) = &mut self.control {
+            seat.discard_pending();
+        }
         if matches!(self.page, Page::Confirm) {
             self.page = Page::Wizard;
         }
@@ -324,6 +341,7 @@ impl DesktopRuntime {
                 usage,
                 chat_receipt,
                 last_erasure,
+                surface_erasure,
                 ..
             } = self;
             let seat = control.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
@@ -339,7 +357,14 @@ impl DesktopRuntime {
                     deletion,
                     chat_receipt,
                 };
-                complete_pending_pumping(seat, client.as_mut(), &mut copies, last_erasure).await?
+                complete_pending_pumping(
+                    seat,
+                    client.as_mut(),
+                    &mut copies,
+                    last_erasure,
+                    surface_erasure.as_ref(),
+                )
+                .await?
             } else {
                 seat.complete_pending().await?
             }
@@ -459,6 +484,14 @@ impl DesktopRuntime {
             match complete_answer {
                 WirePayload::ManagementOutcome(complete) => {
                     self.deny_reason = i18n::management_deny(self.locale, &complete);
+                    self.setup_completed = matches!(
+                        complete,
+                        ManagementOutcome::AppliedAsOneTime
+                            | ManagementOutcome::StoredAsRuleView { .. }
+                    );
+                    if !self.setup_completed {
+                        return Ok(complete);
+                    }
                 }
                 other => {
                     return Err(DesktopError::Protocol(format!(
@@ -545,8 +578,18 @@ impl DesktopRuntime {
         };
         match collected {
             Ok(turn) => {
-                self.timeline.push(format!("[owner] {text}"));
-                self.timeline.push(format!("[companion] {}", turn.reply));
+                self.timeline.push(super::presentation::Message {
+                    round: turn.round.clone(),
+                    owner: true,
+                    text,
+                    caption: String::new(),
+                });
+                self.timeline.push(super::presentation::Message {
+                    round: turn.round.clone(),
+                    owner: false,
+                    text: turn.reply.clone(),
+                    caption: String::new(),
+                });
                 self.chat_receipt = Some((turn.round.clone(), turn.stream));
                 self.pull_presence();
                 {
@@ -567,7 +610,11 @@ impl DesktopRuntime {
             }
             Err(error) => {
                 self.deny_reason = error.to_string();
-                self.timeline.push(format!("[owner] {text}"));
+                self.timeline.push(super::presentation::Message {
+                    owner: true,
+                    text,
+                    ..Default::default()
+                });
                 self.flush_pending_erasure().await;
                 Err(error)
             }
@@ -957,7 +1004,13 @@ impl DesktopRuntime {
             deletion: &mut self.deletion,
             chat_receipt: &mut self.chat_receipt,
         };
-        apply_pending_erasure(client, &mut copies, &mut self.last_erasure).await;
+        apply_pending_erasure(
+            client,
+            &mut copies,
+            &mut self.last_erasure,
+            self.surface_erasure.as_ref(),
+        )
+        .await;
     }
 
     fn ensure_client(&self) -> Result<(), DesktopError> {
@@ -1002,12 +1055,18 @@ async fn apply_pending_erasure(
     client: &mut Client,
     copies: &mut GuiOwned<'_>,
     last_erasure: &mut Option<LocalErasureResult>,
+    surface: Option<&super::presentation::SurfaceErasure>,
 ) {
     loop {
         let Some(demand) = client.take_pending_erasure() else {
             return;
         };
-        let result = erasure::apply_demand(&demand, copies);
+        let mut result = erasure::apply_demand(&demand, copies);
+        if let Some(erase) = surface
+            && !erase().await
+        {
+            result.unverified.append(&mut result.wiped);
+        }
         *last_erasure = Some(result.clone());
         match client.report_local_erasure(result).await {
             Ok(()) | Err(_) => {}
@@ -1020,6 +1079,7 @@ async fn complete_pending_pumping(
     client: Option<&mut Client>,
     copies: &mut GuiOwned<'_>,
     last_erasure: &mut Option<LocalErasureResult>,
+    surface: Option<&super::presentation::SurfaceErasure>,
 ) -> Result<FromHost, DesktopError> {
     let Some(client) = client else {
         return seat.complete_pending().await;
@@ -1033,7 +1093,7 @@ async fn complete_pending_pumping(
                 match copies.deletion.refresh(client).await {
                     Ok(()) | Err(_) => {}
                 }
-                apply_pending_erasure(client, copies, last_erasure).await;
+                apply_pending_erasure(client, copies, last_erasure, surface).await;
             }
         }
     }
@@ -1053,5 +1113,106 @@ fn load_locale(data_dir: &Path) -> Locale {
 fn persist_locale(data_dir: &Path, locale: Locale) {
     match std::fs::write(locale_path(data_dir), locale.as_tag()) {
         Ok(()) | Err(_) => {}
+    }
+}
+
+impl DesktopRuntime {
+    /// Attach all live surfaces before accepting Host deletion demands.
+    pub fn attach_surface_erasure(&mut self, erase: super::presentation::SurfaceErasure) {
+        self.surface_erasure = Some(erase);
+    }
+    pub fn surface_snapshot(&self) -> super::presentation::SurfaceSnapshot {
+        use super::presentation::{Confirmation, Message, Row, SurfaceSnapshot, memory_key, tr};
+        let locale = self.locale;
+        let mut messages: Vec<Message> = self
+            .history
+            .iter()
+            .map(|h| Message {
+                round: h.round.0.clone(),
+                owner: matches!(h.role, ene_api::v1::round::HistoryRole::Owner),
+                text: h.text.clone(),
+                caption: h.at.clone(),
+            })
+            .collect();
+        messages.extend(
+            self.timeline
+                .iter()
+                .filter(|m| {
+                    !self.history.iter().any(|h| {
+                        h.round.0 == m.round
+                            && matches!(h.role, ene_api::v1::round::HistoryRole::Owner) == m.owner
+                    })
+                })
+                .cloned(),
+        );
+        SurfaceSnapshot {
+            japanese: locale == Locale::Ja, connected: self.client.is_some(), ready: self.facts.setup_ready() && self.setup_completed,
+            credential: self.facts.credential_present, consent: self.facts.consent_assigned,
+            model: self.facts.model.clone().unwrap_or_else(|| self.model.clone()),
+            step: match self.wizard_step { WizardStep::Language => 0, WizardStep::BundledEne => 1, WizardStep::CloudCost => 2, WizardStep::Credential => 3, WizardStep::Assignment => 4 },
+            status: if self.client.is_some() { tr(locale, "接続済み", "Connected") } else { tr(locale, "未接続 · セットアップを確認してください", "Disconnected · review setup") },
+            messages, tasks: self.tasks.rows(locale), details: self.tasks.details(locale), selected_task: self.tasks.selected_key(),
+            memories: self.memory.rows().iter().map(|m| Row { key: memory_key(&m.id, &m.revision), title: tr(locale, "記憶", "Memory"), body: m.content.clone(), meta: m.created_at.clone(), state: m.importance.clone() }).collect(),
+            revisions: self.memory.revisions().iter().map(|m| Row { title: format!("{} {}", tr(locale, "履歴", "Revision"), m.revision), body: m.content.clone(), meta: [m.at.clone(), m.grounds_summary.clone().unwrap_or_default(), m.grounds.clone().unwrap_or_default()].join("
+"), ..Row::default() }).collect(),
+            selected_memory: self.memory.revisions_of().and_then(|id| self.memory.rows().iter().find(|m| m.id == id)).map(|m| memory_key(&m.id, &m.revision)).unwrap_or_default(),
+            memory_more: self.memory.next_after().is_some(), revisions_more: self.memory.next_revision_after().is_some(),
+            usage: self.usage.rows(locale), caps: self.usage.cap_rows(locale), usage_more: self.usage.has_more(),
+            deletions: self.deletion.rows(locale), selected_deletion: self.deletion.selected_key(), can_resume_deletion: self.deletion.can_resume(),
+            confirmation: self.control.as_ref().and_then(ControlSeat::pending_challenge).map(|c| {
+                let (ja, en, ja_desc, en_desc, target) = match c.op {
+                    ControlOp::DeviceApprove => ("この端末を接続", "Connect this device", "この端末から会話と管理を行えるようにします。", "Allow this device to use conversation and management.", tr(locale, "このデスクトップ端末", "This desktop device")),
+                    ControlOp::CredentialPut => ("API キーを登録", "Register API key", "入力したキーを Host の資格情報ストアへ登録します。", "Store the entered key in the Host credential store.", String::from("OpenAI")),
+                    ControlOp::DeletionConfirm => ("データ削除を確認", "Confirm data deletion", "選択した削除要求を実行します。対象データと一時的な表示コピーが削除されます。", "Execute the selected deletion request, including matching data and temporary display copies.", tr(locale, "選択した削除要求", "Selected deletion request")),
+                };
+                Confirmation { key: c.session_id.to_string(), title: tr(locale, ja, en), description: tr(locale, ja_desc, en_desc), target }
+            }),
+        }
+    }
+    pub async fn select_task_key(&mut self, key: &str) -> Result<(), DesktopError> {
+        let index = self
+            .tasks
+            .index_for_key(key)
+            .ok_or_else(|| DesktopError::Protocol(String::from("stale task selection")))?;
+        self.select_listed_task(index).await
+    }
+    pub fn check_task_key(&self, key: &str) -> Result<(), DesktopError> {
+        if !key.is_empty() && self.tasks.selected_key() == key {
+            Ok(())
+        } else {
+            Err(DesktopError::Protocol(String::from("stale task selection")))
+        }
+    }
+    pub async fn select_memory_key(&mut self, key: &str) -> Result<(), DesktopError> {
+        let id = self
+            .memory
+            .rows()
+            .iter()
+            .find(|m| super::presentation::memory_key(&m.id, &m.revision) == key)
+            .map(|m| m.id.clone())
+            .ok_or_else(|| DesktopError::Protocol(String::from("stale memory selection")))?;
+        self.open_memory_revisions(&id).await
+    }
+    pub fn select_deletion_key(&mut self, key: &str) -> Result<(), DesktopError> {
+        self.deletion.select_key(key)
+    }
+    pub async fn refresh_deletion_requests(&mut self) -> Result<(), DesktopError> {
+        self.refresh_deletion().await?;
+        let seat = self
+            .control
+            .as_mut()
+            .ok_or(DesktopError::DeniedByBoundary)?;
+        self.deletion.refresh_pending(seat).await
+    }
+    pub async fn confirm_key(&mut self, key: &str) -> Result<FromHost, DesktopError> {
+        if !self
+            .control
+            .as_ref()
+            .and_then(ControlSeat::pending_challenge)
+            .is_some_and(|c| c.session_id.to_string() == key)
+        {
+            return Err(DesktopError::Protocol(String::from("stale confirmation")));
+        }
+        self.confirm_owner().await
     }
 }
