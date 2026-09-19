@@ -4,3 +4,15 @@
 [profile.default]
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# These process-level tests have startup and IPC deadlines that become flaky
+# when several CPU-heavy Host fixtures overlap on the Windows runner. Reserve
+# the worker pool for each one without serializing the rest of the suite.
+[[profile.default.overrides]]
+filter = '''
+test(dummy_parent_receives_ready_and_clean_exit_on_shutdown)
+| test(stage6_e2e::stage6_management_view_memory_body_is_a_required_client_participant)
+| test(stage6_e2e::stage6_deletion_races_provider_wait_and_delayed_result)
+'''
+platform = { host = 'cfg(windows)' }
+threads-required = "num-test-threads"
