@@ -1,6 +1,6 @@
 import { Button, VerticalBox, HorizontalBox, LineEdit, AboutSlint, ScrollView } from "std-widgets.slint";
 
-export enum UiPage { wizard, chat, history, memory, settings, about, confirm }
+export enum UiPage { wizard, chat, history, memory, tasks, settings, about, confirm }
 
 export component AppWindow inherits Window {
     title: "ene";
@@ -24,8 +24,11 @@ export component AppWindow inherits Window {
     in-out property <string> nav-chat: "Chat";
     in-out property <string> nav-history: "History";
     in-out property <string> nav-memory: "Memory";
+    in-out property <string> nav-tasks: "Tasks";
     in-out property <string> nav-settings: "Settings";
     in-out property <string> nav-about: "About";
+    in-out property <string> tasks: "";
+    in-out property <string> task-detail: "";
     in-out property <string> action-send: "Send";
     in-out property <string> action-next: "Next";
     in-out property <string> action-back: "Back";
@@ -40,6 +43,12 @@ export component AppWindow inherits Window {
     callback open-memory();
     callback open-settings();
     callback open-about();
+    callback open-tasks();
+    callback refresh-tasks();
+    callback select-task();
+    callback cancel-task();
+    callback resume-task();
+    callback select-workspace();
     callback confirm-owner();
     callback cancel-owner();
     callback switch-ja();
@@ -58,6 +67,7 @@ export component AppWindow inherits Window {
             Button { text: nav-chat; clicked => { root.open-chat(); } }
             Button { text: nav-history; clicked => { root.open-history(); } }
             Button { text: nav-memory; clicked => { root.open-memory(); } }
+            Button { text: nav-tasks; clicked => { root.open-tasks(); } }
             Button { text: nav-settings; clicked => { root.open-settings(); } }
             Button { text: nav-about; clicked => { root.open-about(); } }
             Button { text: "JA"; clicked => { root.switch-ja(); } }
@@ -114,6 +124,29 @@ export component AppWindow inherits Window {
 
         if page == UiPage.memory: ScrollView {
             Text { text: memory; wrap: word-wrap; }
+        }
+
+        if page == UiPage.tasks: VerticalBox {
+            ScrollView {
+                vertical-stretch: 1;
+                Text { text: tasks; wrap: word-wrap; }
+            }
+            ScrollView {
+                vertical-stretch: 1;
+                Text { text: task-detail; wrap: word-wrap; }
+            }
+            LineEdit {
+                text: draft;
+                placeholder-text: "Workspace path or resume instruction";
+                edited(text) => { root.draft-changed(text); }
+            }
+            HorizontalBox {
+                Button { text: "Refresh"; clicked => { root.refresh-tasks(); } }
+                Button { text: "Select"; clicked => { root.select-task(); } }
+                Button { text: action-cancel; clicked => { root.cancel-task(); } }
+                Button { text: "Resume"; clicked => { root.resume-task(); } }
+                Button { text: "Workspace"; clicked => { root.select-workspace(); } }
+            }
         }
 
         if page == UiPage.settings: ScrollView {

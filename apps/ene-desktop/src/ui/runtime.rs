@@ -15,6 +15,7 @@ use crate::host_launch::{self, DetachedHost};
 use crate::i18n::{self, Label, Locale};
 use crate::secret::SecretIntake;
 use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
+use crate::ui::tasks::TaskPanel;
 use crate::ui::{Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep, history_lines};
 use crate::{BUNDLED_ENE_ASSET, DESKTOP_DESCRIPTOR};
 
@@ -43,6 +44,7 @@ pub struct DesktopRuntime {
     model: String,
     detached_host: Option<DetachedHost>,
     memory: MemoryPage,
+    tasks: TaskPanel,
 }
 
 impl DesktopRuntime {
@@ -75,6 +77,7 @@ impl DesktopRuntime {
             model: String::from(DEFAULT_MODEL),
             detached_host: None,
             memory: MemoryPage::default(),
+            tasks: TaskPanel::default(),
         }
     }
 
@@ -107,6 +110,8 @@ impl DesktopRuntime {
                 .map(session::presence_label)
                 .map(str::to_string)
                 .unwrap_or_else(|| self.presence.clone()),
+            tasks: self.tasks.list_lines(),
+            task_detail: self.tasks.detail_text(),
             deny_reason: self.deny_reason.clone(),
             challenge_target: self
                 .control
@@ -410,6 +415,7 @@ impl DesktopRuntime {
     pub fn take_client(&mut self) -> Option<Client> {
         self.connection = i18n::label(self.locale, Label::Disconnected);
         self.presence = String::from("unknown");
+        self.tasks.reset_connection_state();
         self.client.take()
     }
 
@@ -421,6 +427,7 @@ impl DesktopRuntime {
 
     pub async fn reconnect(&mut self) -> Result<(), DesktopError> {
         self.client = None;
+        self.tasks.reset_connection_state();
         let mut attempts = 0_u8;
         let client = loop {
             match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR, None).await {
@@ -442,6 +449,7 @@ impl DesktopRuntime {
         self.pull_presence();
         self.refresh_setup().await?;
         self.refresh_history().await?;
+        self.refresh_tasks().await?;
         Ok(())
     }
 
@@ -550,6 +558,83 @@ impl DesktopRuntime {
         };
         self.memory.apply_host_view(&view, view_request, append);
         Ok(())
+    }
+
+    pub async fn open_tasks(&mut self) -> Result<(), DesktopError> {
+        self.page = Page::Tasks;
+        self.refresh_tasks().await
+    }
+
+    pub async fn refresh_tasks(&mut self) -> Result<(), DesktopError> {
+        self.ensure_client()?;
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        self.tasks.refresh_list(client).await
+    }
+
+    pub async fn select_listed_task(&mut self, index: usize) -> Result<(), DesktopError> {
+        self.ensure_client()?;
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        self.tasks.select(client, index).await
+    }
+
+    pub async fn select_workspace_folder(
+        &mut self,
+        path: &Path,
+    ) -> Result<ManagementOutcome, DesktopError> {
+        self.ensure_client()?;
+        self.refresh_setup().await?;
+        let mark = self.facts.mark.clone();
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        self.tasks.select_workspace(client, &mark, path).await
+    }
+
+    pub async fn cancel_displayed_task(&mut self) -> Result<ManagementOutcome, DesktopError> {
+        self.ensure_client()?;
+        self.refresh_setup().await?;
+        let mark = self.facts.mark.clone();
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        let outcome = self.tasks.cancel_displayed(client, &mark).await?;
+        self.tasks.refresh_list(client).await?;
+        Ok(outcome)
+    }
+
+    pub async fn resume_displayed_task(
+        &mut self,
+        instruction: String,
+    ) -> Result<ene_api::v1::undelivered::ResumeTaskOutcomeWire, DesktopError> {
+        self.ensure_client()?;
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        self.tasks.resume_displayed(client, instruction).await
+    }
+
+    pub async fn present_task_undelivered(&mut self) -> Result<(), DesktopError> {
+        self.ensure_client()?;
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        self.tasks.present_undelivered(client).await
+    }
+
+    pub async fn ack_presented_tasks(
+        &mut self,
+    ) -> Result<ene_api::v1::undelivered::UndeliveredAckOutcome, DesktopError> {
+        self.ensure_client()?;
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        self.tasks.ack_presented(client).await
+    }
+
+    #[must_use]
+    pub fn has_presented_task_receipt(&self) -> bool {
+        self.tasks.has_presented_receipt()
+    }
+
+    /// Resume premise currently shown. List refresh must not rewrite this.
+    #[must_use]
+    pub fn displayed_task_revision(&self) -> Option<u64> {
+        self.tasks.displayed().map(|shown| shown.revision)
+    }
+
+    #[must_use]
+    pub fn displayed_task_purpose(&self) -> Option<String> {
+        self.tasks.displayed().map(|shown| shown.purpose.clone())
     }
 
     fn ensure_client(&self) -> Result<(), DesktopError> {

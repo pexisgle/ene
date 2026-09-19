@@ -145,6 +145,120 @@ fn bind_navigation(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
         let runtime = Arc::clone(&runtime);
         move || spawn_page(ui.clone(), Arc::clone(&runtime), Page::About)
     });
+    window.on_open_tasks({
+        let ui = window.as_weak();
+        let runtime = Arc::clone(&runtime);
+        move || {
+            let ui = ui.clone();
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let snap = {
+                    let mut desktop = runtime.lock().await;
+                    match desktop.open_tasks().await {
+                        Ok(()) | Err(_) => {}
+                    }
+                    desktop.snapshot()
+                };
+                push_snapshot(ui, snap);
+            });
+        }
+    });
+    window.on_refresh_tasks({
+        let ui = window.as_weak();
+        let runtime = Arc::clone(&runtime);
+        move || {
+            let ui = ui.clone();
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let snap = {
+                    let mut desktop = runtime.lock().await;
+                    match desktop.refresh_tasks().await {
+                        Ok(()) | Err(_) => {}
+                    }
+                    desktop.snapshot()
+                };
+                push_snapshot(ui, snap);
+            });
+        }
+    });
+    window.on_select_task({
+        let ui = window.as_weak();
+        let runtime = Arc::clone(&runtime);
+        move || {
+            let ui = ui.clone();
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let snap = {
+                    let mut desktop = runtime.lock().await;
+                    match desktop.select_listed_task(0).await {
+                        Ok(()) | Err(_) => {}
+                    }
+                    desktop.snapshot()
+                };
+                push_snapshot(ui, snap);
+            });
+        }
+    });
+    window.on_cancel_task({
+        let ui = window.as_weak();
+        let runtime = Arc::clone(&runtime);
+        move || {
+            let ui = ui.clone();
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let snap = {
+                    let mut desktop = runtime.lock().await;
+                    match desktop.cancel_displayed_task().await {
+                        Ok(_) | Err(_) => {}
+                    }
+                    desktop.snapshot()
+                };
+                push_snapshot(ui, snap);
+            });
+        }
+    });
+    window.on_resume_task({
+        let ui = window.as_weak();
+        let runtime = Arc::clone(&runtime);
+        move || {
+            let ui = ui.clone();
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let snap = {
+                    let mut desktop = runtime.lock().await;
+                    let instruction = desktop.composer_mut().take_sendable().unwrap_or_default();
+                    match desktop.resume_displayed_task(instruction).await {
+                        Ok(_) | Err(_) => {}
+                    }
+                    desktop.snapshot()
+                };
+                push_snapshot(ui, snap);
+            });
+        }
+    });
+    window.on_select_workspace({
+        let ui = window.as_weak();
+        let runtime = Arc::clone(&runtime);
+        move || {
+            let ui = ui.clone();
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let snap = {
+                    let mut desktop = runtime.lock().await;
+                    if let Some(path) = desktop.composer_mut().take_sendable() {
+                        match desktop
+                            .select_workspace_folder(std::path::Path::new(&path))
+                            .await
+                        {
+                            Ok(_) | Err(_) => {}
+                        }
+                    }
+                    desktop.snapshot()
+                };
+                push_snapshot(ui, snap);
+            });
+        }
+    });
 }
 
 fn bind_wizard(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
@@ -347,6 +461,8 @@ fn apply_snapshot(window: &AppWindow, snap: &GuiSnapshot) {
     window.set_timeline(SharedString::from(snap.timeline.join("\n")));
     window.set_history(SharedString::from(snap.history.join("\n")));
     window.set_memory(SharedString::from(snap.memory_panel.as_str()));
+    window.set_tasks(SharedString::from(snap.tasks.join("\n")));
+    window.set_task_detail(SharedString::from(snap.task_detail.as_str()));
     window.set_draft(SharedString::from(snap.draft.as_str()));
     window.set_composing(snap.composing);
     window.set_secret_visible(snap.secret_visible);
@@ -358,6 +474,7 @@ fn apply_snapshot(window: &AppWindow, snap: &GuiSnapshot) {
     window.set_nav_chat(SharedString::from(i18n::label(locale, Label::Chat)));
     window.set_nav_history(SharedString::from(i18n::label(locale, Label::History)));
     window.set_nav_memory(SharedString::from(i18n::label(locale, Label::Memory)));
+    window.set_nav_tasks(SharedString::from(i18n::label(locale, Label::Tasks)));
     window.set_nav_settings(SharedString::from(i18n::label(locale, Label::Settings)));
     window.set_nav_about(SharedString::from(i18n::label(locale, Label::About)));
     window.set_action_send(SharedString::from(i18n::label(locale, Label::Send)));
@@ -369,6 +486,7 @@ fn apply_snapshot(window: &AppWindow, snap: &GuiSnapshot) {
         "Chat" => ene_desktop_ui::UiPage::Chat,
         "History" => ene_desktop_ui::UiPage::History,
         "Memory" => ene_desktop_ui::UiPage::Memory,
+        "Tasks" => ene_desktop_ui::UiPage::Tasks,
         "Settings" => ene_desktop_ui::UiPage::Settings,
         "About" => ene_desktop_ui::UiPage::About,
         "Confirm" => ene_desktop_ui::UiPage::Confirm,
