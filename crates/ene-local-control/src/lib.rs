@@ -108,10 +108,6 @@ pub enum ToHost {
     RequestDeletionConfirm {
         request_id: String,
     },
-    RequestDeletionResume {
-        operation: String,
-        sweep: u64,
-    },
     /// Read of staged Targeted Deletion request identities.
     PendingDeletions,
     /// Non-secret status of one accepted request, by the Host-issued id.
@@ -197,6 +193,10 @@ pub enum FromHost {
 /// What the Host-spawned GUI may send on its inherited confirmation channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToConfirmation {
+    /// Owner-initiated resume of a Held Targeted Deletion operation. The
+    /// operation was already admitted; this continues it and is not a second
+    /// destructive confirmation.
+    DeletionResume { operation: String, sweep: u64 },
     /// Secret intake for one live credential session. The raw value rides only
     /// this channel, bound to the session minted for the same operation.
     CredentialSecret {
@@ -255,6 +255,13 @@ pub enum ControlOutcome {
     /// not stored: intake alone neither writes the OS store nor publishes a
     /// usable reference.
     CredentialStaged {
+        provider: String,
+        label: String,
+    },
+    /// The value reached the OS store, but the approval sweep and the usable
+    /// reference did not commit. Neither a stored credential nor an untouched
+    /// one: recovery inspects the pending pair before another attempt.
+    CredentialUncommitted {
         provider: String,
         label: String,
     },

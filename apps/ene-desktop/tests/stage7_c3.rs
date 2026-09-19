@@ -29,7 +29,7 @@ use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::MemoryCredentialStore;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
-use ene_local_control::{ControlOutcome, FromHost};
+use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
 
 const MODEL: &str = "gpt-4o-mini";
 const SECRET: &str = "sk-stage7-c3-secret-4402";
@@ -141,23 +141,23 @@ async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
-async fn pair_and_seat(desktop: &mut DesktopRuntime) {
+async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
+    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
-        .occupy_seat()
-        .await
-        .expect("empty seat occupancy is accident prevention, not authenticity");
+        .attach_confirmation(channel)
+        .expect("the private channel is the seat");
     desktop
         .connect_or_begin_pairing()
         .await
         .expect("pairing must challenge");
     match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromHost::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
         other => panic!("expected DeviceApproved, got {other:?}"),
     }
 }
 
-async fn pair_and_setup(desktop: &mut DesktopRuntime) {
-    pair_and_seat(desktop).await;
+async fn pair_and_setup(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
+    pair_and_seat(desktop, handle).await;
     desktop.set_secret(String::from(SECRET));
     desktop
         .begin_credential_put()
@@ -168,7 +168,7 @@ async fn pair_and_setup(desktop: &mut DesktopRuntime) {
         .await
         .expect("owner confirm stores the key")
     {
-        FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
         other => panic!("expected CredentialStored, got {other:?}"),
     }
     desktop.set_model(String::from(MODEL));
@@ -250,7 +250,7 @@ async fn unknown_cost_is_not_yen_zero_and_stale_cap_is_rejected() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
 
     desktop.open_page(Page::Usage);
     desktop.set_usage_period(None, None);
@@ -348,7 +348,7 @@ async fn secrets_stay_out_and_client_confirmed_true_cannot_delete() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
 
     desktop.open_page(Page::Deletion);
     desktop.set_deletion_purpose(ene_api::v1::deletion::DeletionPurposeWire::Privacy);
@@ -387,7 +387,7 @@ async fn secrets_stay_out_and_client_confirmed_true_cannot_delete() {
         .await
         .expect("control ConfirmedTrue");
     assert!(
-        matches!(control_denied, FromHost::DeniedByBoundary),
+        matches!(control_denied, FromConfirmation::DeniedByBoundary),
         "session-less ConfirmedTrue must deny"
     );
     server.shutdown_and_join().await;
@@ -402,7 +402,7 @@ async fn seated_confirm_completes_targeted_deletion() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
     desktop
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
@@ -439,7 +439,9 @@ async fn seated_confirm_completes_targeted_deletion() {
         .await
         .expect("owner confirm starts deletion")
     {
-        FromHost::Outcome(ControlOutcome::DeletionStarted { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Started {
+            ..
+        })) => {}
         other => panic!("expected DeletionStarted, got {other:?}"),
     }
     drive_gui_until(&mut desktop, &handle, "completed").await;
@@ -470,7 +472,7 @@ async fn unreachable_client_is_not_completion_and_resume_is_explicit() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
     desktop
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
@@ -490,7 +492,9 @@ async fn unreachable_client_is_not_completion_and_resume_is_explicit() {
         .await
         .expect("admission still starts")
     {
-        FromHost::Outcome(ControlOutcome::DeletionStarted { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Started {
+            ..
+        })) => {}
         other => panic!("expected DeletionStarted, got {other:?}"),
     }
     wait_handle_phase(&handle, DeletionPhaseWire::Held).await;
@@ -514,7 +518,9 @@ async fn unreachable_client_is_not_completion_and_resume_is_explicit() {
         .expect("status after reconnect");
     if desktop.deletion_phase_token() == Some("held") {
         match desktop.resume_deletion().await.expect("explicit resume") {
-            FromHost::Outcome(ControlOutcome::DeletionResumed { .. }) => {}
+            FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
+                ..
+            })) => {}
             other => panic!("expected DeletionResumed, got {other:?}"),
         }
         assert!(
@@ -537,7 +543,7 @@ async fn finalizing_is_distinct_from_completed() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
     desktop
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
@@ -581,7 +587,9 @@ async fn finalizing_is_distinct_from_completed() {
     assert_ne!(page.operations[0].phase, DeletionPhaseWire::Completed);
     handle.release_deletion_finalizing_park_for_tests();
     match confirm.await.expect("confirm task joins") {
-        Ok(FromHost::Outcome(ControlOutcome::DeletionStarted { .. })) => {}
+        Ok(FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Started {
+            ..
+        }))) => {}
         other => panic!("expected DeletionStarted, got {other:?}"),
     }
     let mut desktop = Arc::try_unwrap(desktop)

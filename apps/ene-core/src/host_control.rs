@@ -55,8 +55,6 @@ const CONTROL_SOCKET_NAME: &str = "host-control.sock";
 /// One accepted requester request: what the Owner's surface is being asked to
 /// confirm, and what it has decided so far.
 struct AcceptedRequest {
-    op: ControlOp,
-    target: String,
     state: RequestState,
 }
 
@@ -173,7 +171,7 @@ impl FirstPartyControlSeat {
     ///
     /// The request carries no authority of its own: it only records what the
     /// Owner's surface should show, and its state is read back by the same id.
-    fn accept_request(&self, op: ControlOp, target: String) -> (String, RequestState) {
+    fn accept_request(&self) -> (String, RequestState) {
         let mut inner = lock_unpoison(&self.inner);
         let request_id = Uuid::new_v4().as_hyphenated().to_string();
         let state = if inner.holder.is_some() {
@@ -184,8 +182,6 @@ impl FirstPartyControlSeat {
         inner.requests.insert(
             request_id.clone(),
             AcceptedRequest {
-                op,
-                target,
                 state: state.clone(),
             },
         );
@@ -236,9 +232,11 @@ impl FirstPartyControlSeat {
         // take the frame has already ended; the session stays unconsumed and
         // the next spawn invalidates it.
         if let Some(outbound) = inner.outbound.as_ref() {
-            let _ = outbound.send(ene_local_control::channel::ChannelEvent::Outbound(
+            match outbound.send(ene_local_control::channel::ChannelEvent::Outbound(
                 challenge.clone(),
-            ));
+            )) {
+                Ok(()) | Err(_) => {}
+            }
         }
         challenge
     }
@@ -376,6 +374,24 @@ impl ControlClient {
             .map_err(|error| control_failure(&format!("answer failed: {error}")))?
             .ok_or_else(|| control_failure("the serving Host closed without an answer"))
     }
+
+    /// Sends raw JSON on the requester listener and reports whether an answer
+    /// came back. Test-only: it exists so a regression can prove that a
+    /// completion-shaped frame cannot even be decoded here.
+    #[doc(hidden)]
+    pub async fn exchange_raw(&mut self, raw: &str) -> Result<String, CoreError> {
+        let body = raw.as_bytes();
+        if body.len() > MAX_CONTROL_FRAME_BYTES as usize {
+            return Err(control_failure("frame exceeds the bound"));
+        }
+        write_bytes(&mut self.stream, body)
+            .await
+            .map_err(|error| control_failure(&format!("send failed: {error}")))?;
+        let answer = read_raw_answer(&mut self.stream)
+            .await
+            .map_err(|error| control_failure(&format!("answer failed: {error}")))?;
+        answer.ok_or_else(|| control_failure("the serving Host closed without an answer"))
+    }
 }
 
 /// The requester listener, bound before the device listener accepts so a
@@ -500,9 +516,7 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
             Err(_) => FromHost::Unavailable,
         },
         ToHost::RequestDeviceApprove { pending_id } => {
-            let (request_id, state) = handle
-                .control_seat
-                .accept_request(ControlOp::DeviceApprove, pending_id.clone());
+            let (request_id, state) = handle.control_seat.accept_request();
             if matches!(state, RequestState::AwaitingOwnerConfirmation) {
                 handle.control_seat.mint(
                     &request_id,
@@ -515,9 +529,7 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
         }
         ToHost::RequestCredentialPut { provider, label } => {
             let target = format!("{provider}:{label}");
-            let (request_id, state) = handle
-                .control_seat
-                .accept_request(ControlOp::CredentialPut, target.clone());
+            let (request_id, state) = handle.control_seat.accept_request();
             if matches!(state, RequestState::AwaitingOwnerConfirmation) {
                 handle.control_seat.mint(
                     &request_id,
@@ -535,9 +547,7 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
             FromHost::RequestAccepted { request_id }
         }
         ToHost::RequestDeletionConfirm { request_id } => {
-            let (accepted_id, state) = handle
-                .control_seat
-                .accept_request(ControlOp::DeletionConfirm, request_id.clone());
+            let (accepted_id, state) = handle.control_seat.accept_request();
             if matches!(state, RequestState::AwaitingOwnerConfirmation) {
                 handle.control_seat.mint(
                     &accepted_id,
@@ -548,21 +558,6 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
             }
             FromHost::RequestAccepted {
                 request_id: accepted_id,
-            }
-        }
-        ToHost::RequestDeletionResume { operation, sweep } => {
-            match handle.resume_targeted_deletion(&operation, sweep).await {
-                Ok(ene_preservation::DeletionLifecycleOutcome::Applied(current)) => {
-                    FromHost::RequestAccepted {
-                        request_id: current
-                            .operation
-                            .as_raw()
-                            .as_uuid()
-                            .as_hyphenated()
-                            .to_string(),
-                    }
-                }
-                Ok(_) | Err(_) => FromHost::Unavailable,
             }
         }
         ToHost::PendingDeletions => match handle.pending_targeted_deletions(None, 50).await {
@@ -597,32 +592,6 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
 /// Only this path may complete a session or accept a secret. The seat is
 /// released when the channel ends, so the GUI's own death cannot leave a
 /// confirmable session behind.
-#[cfg(any(unix, windows))]
-pub(crate) async fn serve_confirmation<S>(
-    mut stream: S,
-    handle: Arc<HostHandle>,
-    child_id: u32,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    loop {
-        let request = tokio::select! {
-            biased;
-            () = crate::conn::wait_for_shutdown(&mut shutdown) => break,
-            result = read_message::<_, ToConfirmation>(&mut stream) => match result {
-                Ok(Some(request)) => request,
-                Ok(None) | Err(_) => break,
-            },
-        };
-        let reply = dispatch_confirmation(&handle, request).await;
-        if write_message(&mut stream, &reply).await.is_err() {
-            break;
-        }
-    }
-    handle.control_seat.seat_closed(child_id);
-}
-
 #[cfg(any(unix, windows))]
 async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> FromConfirmation {
     match request {
@@ -665,6 +634,22 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
             // Intake alone neither stores nor publishes: the Owner's direct
             // confirmation on the same surface consumes the staged value.
             FromConfirmation::Outcome(ControlOutcome::CredentialStaged { provider, label })
+        }
+        ToConfirmation::DeletionResume { operation, sweep } => {
+            match handle.resume_targeted_deletion(&operation, sweep).await {
+                Ok(ene_preservation::DeletionLifecycleOutcome::Applied(current)) => {
+                    FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
+                        operation: current
+                            .operation
+                            .as_raw()
+                            .as_uuid()
+                            .as_hyphenated()
+                            .to_string(),
+                        sweep: current.sweep.as_u64(),
+                    }))
+                }
+                Ok(_) | Err(_) => FromConfirmation::Unavailable,
+            }
         }
         ToConfirmation::ConfirmedTrue => FromConfirmation::DeniedByBoundary,
     }
@@ -853,6 +838,29 @@ fn locate_gui_binary() -> Option<PathBuf> {
 }
 
 impl HostHandle {
+    /// Waits for every in-flight confirmation dispatch to finish.
+    ///
+    /// The serving composition calls this before releasing its authority: an
+    /// operation the Owner's surface already admitted must not be cut in half,
+    /// and no dispatch may outlive the handle it borrowed.
+    pub(crate) async fn join_confirmation_tasks(&self) {
+        loop {
+            let next = {
+                let mut tasks = self
+                    .confirmation_tasks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                tasks.pop()
+            };
+            let Some(task) = next else {
+                return;
+            };
+            match task.await {
+                Ok(()) | Err(_) => {}
+            }
+        }
+    }
+
     /// Opens the official first-party GUI, or converges on the live one.
     ///
     /// The Host spawns the child itself and hands it the private confirmation
@@ -932,8 +940,11 @@ impl HostHandle {
     ) {
         use ene_local_control::channel::ChannelEvent;
 
+        // One queue carries both directions. Two queues would need a select
+        // that a blocking reader cannot offer: `recv` on the inbound queue
+        // would starve the outbound challenges behind it.
         let (events, events_rx) = std::sync::mpsc::channel::<ChannelEvent>();
-        let seat_generation = self.control_seat.seat_spawned_gui(child_id, events);
+        let seat_generation = self.control_seat.seat_spawned_gui(child_id, events.clone());
         let reader_channel = match host_channel.try_clone() {
             Ok(clone) => clone,
             Err(_) => {
@@ -941,8 +952,7 @@ impl HostHandle {
                 return;
             }
         };
-        let (frame_tx, frame_rx) = std::sync::mpsc::channel::<ChannelEvent>();
-        let reader_tx = frame_tx.clone();
+        let reader_tx = events.clone();
         let reader = std::thread::Builder::new()
             .name(String::from("ene-confirmation-read"))
             .spawn(move || {
@@ -955,7 +965,9 @@ impl HostHandle {
                             }
                         }
                         Ok(None) | Err(_) => {
-                            let _ = reader_tx.send(ChannelEvent::Closed);
+                            match reader_tx.send(ChannelEvent::Closed) {
+                                Ok(()) | Err(_) => {}
+                            }
                             break;
                         }
                     }
@@ -965,14 +977,24 @@ impl HostHandle {
             self.control_seat.seat_closed(child_id);
             return;
         }
-        let handle = Arc::clone(self);
+        // The serving thread must not keep the Host alive: a GUI whose channel
+        // stays open would otherwise retain the predecessor past shutdown. It
+        // upgrades per frame and reports Unavailable once the Host is gone.
+        let handle = Arc::downgrade(self);
+        // Replies from dispatched frames come back through the same queue, so
+        // the channel keeps one writer and one ordering.
+        let replies = events.clone();
+        drop(events);
+        // Dispatch runs on the runtime, never by blocking this thread on it:
+        // a current-thread runtime is driven by its own caller, so a foreign
+        // `block_on` here would park instead of progressing. The thread only
+        // moves bytes; replies come back through the same queue it drains.
         let runtime = tokio::runtime::Handle::current();
         let served = std::thread::Builder::new()
             .name(String::from("ene-confirmation-serve"))
             .spawn(move || {
                 let mut writer = host_channel;
-                let mut closed = false;
-                for event in frame_rx.iter().chain(events_rx) {
+                for event in events_rx {
                     match event {
                         ChannelEvent::Outbound(frame) => {
                             if writer.send(&frame).is_err() {
@@ -980,20 +1002,35 @@ impl HostHandle {
                             }
                         }
                         ChannelEvent::Inbound(frame) => {
-                            let reply = runtime.block_on(dispatch_confirmation(&handle, frame));
-                            if writer.send(&reply).is_err() {
+                            let Some(host) = handle.upgrade() else {
                                 break;
-                            }
+                            };
+                            let replies = replies.clone();
+                            let dispatched_handle = Arc::clone(&host);
+                            let dispatched = runtime.spawn(async move {
+                                let reply = dispatch_confirmation(&dispatched_handle, frame).await;
+                                match replies.send(ChannelEvent::Outbound(reply)) {
+                                    Ok(()) | Err(_) => {}
+                                }
+                            });
+                            // The Host joins these on shutdown: an operation the
+                            // Owner's surface already admitted runs to
+                            // completion before the serving authority goes
+                            // away, and no task outlives the handle it borrows.
+                            host.confirmation_tasks
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push(dispatched);
                         }
-                        ChannelEvent::Closed => {
-                            closed = true;
-                            break;
-                        }
+                        ChannelEvent::Closed => break,
                     }
                 }
-                let _ = closed;
                 drop(writer);
-                handle.control_seat.seat_closed(child_id);
+                // The seat belongs to the Host, which may already be gone;
+                // clearing it is best effort and never resurrects the handle.
+                if let Some(handle) = handle.upgrade() {
+                    handle.control_seat.seat_closed(child_id);
+                }
             });
         if served.is_err() {
             self.control_seat.seat_closed(child_id);
@@ -1239,6 +1276,43 @@ where
     stream.flush().await
 }
 
+/// Writes one already-encoded body with its length prefix.
+#[cfg(any(unix, windows))]
+async fn write_bytes<W>(stream: &mut W, body: &[u8]) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt as _;
+
+    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await
+}
+
+/// Reads one length-prefixed body verbatim; [`None`] when the peer closed or
+/// the frame is malformed or oversize.
+#[cfg(any(unix, windows))]
+async fn read_raw_answer<R>(stream: &mut R) -> std::io::Result<Option<String>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+
+    let mut prefix = [0_u8; 4];
+    match stream.read_exact(&mut prefix).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let length = u32::from_be_bytes(prefix);
+    if length == 0 || length > MAX_CONTROL_FRAME_BYTES {
+        return Ok(None);
+    }
+    let mut body = vec![0_u8; length as usize];
+    stream.read_exact(&mut body).await?;
+    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+}
+
 /// Reads one length-prefixed JSON message; [`None`] when the peer closed or
 /// the frame is malformed or oversize.
 #[cfg(any(unix, windows))]
@@ -1277,9 +1351,9 @@ mod tests {
             sweep: ene_preservation::DeletionSweepGeneration::from_u64(4),
         };
         for outcome in [
-            ConfirmTargetedDeletionOutcome::Started(current.clone()),
-            ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current.clone()),
-            ConfirmTargetedDeletionOutcome::HeldByOperation(current.clone()),
+            ConfirmTargetedDeletionOutcome::Started(current),
+            ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current),
+            ConfirmTargetedDeletionOutcome::HeldByOperation(current),
             ConfirmTargetedDeletionOutcome::NeedsClarification,
             ConfirmTargetedDeletionOutcome::Missing,
         ] {
@@ -1324,7 +1398,7 @@ mod tests {
             !seat.has_seat(),
             "a Host that never spawned a GUI has no seat to hand out"
         );
-        let (request_id, state) = seat.accept_request(ControlOp::DeviceApprove, String::from("p"));
+        let (request_id, state) = seat.accept_request();
         assert!(
             matches!(state, RequestState::ConfirmationUnavailable),
             "a request with no confirmation surface must say so, got {state:?}"
@@ -1346,8 +1420,8 @@ mod tests {
     #[test]
     fn a_new_spawned_gui_invalidates_the_previous_seat_and_its_sessions() {
         let seat = FirstPartyControlSeat::default();
-        let first = seat.seat_spawned_gui(11);
-        let (request_id, _) = seat.accept_request(ControlOp::DeletionConfirm, String::from("r"));
+        let first = seat.seat_spawned_gui(11, std::sync::mpsc::channel().0);
+        let (request_id, _) = seat.accept_request();
         let FromConfirmation::ConfirmationChallenge {
             session_id, nonce, ..
         } = seat.mint(
@@ -1361,7 +1435,7 @@ mod tests {
         else {
             panic!("a live seat must mint a challenge");
         };
-        let second = seat.seat_spawned_gui(22);
+        let second = seat.seat_spawned_gui(22, std::sync::mpsc::channel().0);
         assert_ne!(first, second, "a new child is a new seat generation");
         assert!(
             seat.take(session_id, &nonce).is_none(),
@@ -1372,10 +1446,10 @@ mod tests {
     #[test]
     fn the_gui_channel_ending_clears_the_seat() {
         let seat = FirstPartyControlSeat::default();
-        seat.seat_spawned_gui(7);
+        seat.seat_spawned_gui(7, std::sync::mpsc::channel().0);
         seat.seat_closed(7);
         assert!(!seat.has_seat(), "a closed GUI leaves no seat behind");
-        let (request_id, state) = seat.accept_request(ControlOp::CredentialPut, String::from("p"));
+        let (request_id, state) = seat.accept_request();
         assert!(matches!(state, RequestState::ConfirmationUnavailable));
         assert!(matches!(
             seat.mint(
@@ -1385,7 +1459,7 @@ mod tests {
                 PendingOp::CredentialPut {
                     provider: String::from("openai"),
                     label: String::from("main"),
-                    secret: RedactedSecret::new(String::new()),
+                    secret: None,
                 },
             ),
             FromConfirmation::DeniedByBoundary
@@ -1395,8 +1469,8 @@ mod tests {
     #[test]
     fn a_foreign_nonce_cannot_complete_a_session() {
         let seat = FirstPartyControlSeat::default();
-        seat.seat_spawned_gui(3);
-        let (request_id, _) = seat.accept_request(ControlOp::DeviceApprove, String::from("p"));
+        seat.seat_spawned_gui(3, std::sync::mpsc::channel().0);
+        let (request_id, _) = seat.accept_request();
         let FromConfirmation::ConfirmationChallenge { session_id, .. } = seat.mint(
             &request_id,
             ControlOp::DeviceApprove,

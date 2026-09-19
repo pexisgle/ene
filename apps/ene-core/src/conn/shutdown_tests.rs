@@ -201,14 +201,56 @@ async fn control_and_device_cleanup(fail: bool) {
     let request = stage_request(&store).await;
     let gate = Arc::new(TestGate::default());
     *crate::lock_unpoison(&handle.host_control_confirm_gate) = Some(Arc::clone(&gate));
-    let mut serving = Serving::start(dir.path(), Arc::new(handle)).await;
+    let handle = Arc::new(handle);
+    let mut serving = Serving::start(dir.path(), Arc::clone(&handle)).await;
     let seam = Arc::clone(&serving.seam);
     let mut device = connect_device(dir.path()).await;
     serving.until(seam.device_started.notified()).await;
+    // The Owner's confirmation surface is the GUI the Host spawned; the
+    // console asks, and this surface confirms on its private channel.
+    let mut gui = crate::host_control::seat_test_gui_for_tests(&handle)
+        .expect("the private confirmation channel must open");
+    // The fixture must not retain the Host itself: `finish` asserts that no
+    // serving child survives cleanup, and a local handle would be one.
+    drop(handle);
+    let (confirmed_tx, confirmed_rx) = tokio::sync::oneshot::channel();
+    // The surface keeps its end open until the test drops it: closing the
+    // channel ends the seat, and this fixture must hold it through the parked
+    // confirmation.
+    std::thread::spawn(move || {
+        let mut reader = gui.try_clone().expect("clone");
+        if let Ok(Some(ene_local_control::FromConfirmation::ConfirmationChallenge {
+            session_id,
+            nonce,
+            ..
+        })) = reader.recv()
+        {
+            match gui
+                .send(&ene_local_control::ToConfirmation::SessionComplete { session_id, nonce })
+            {
+                Ok(()) | Err(_) => {}
+            }
+        }
+        match confirmed_tx.send(()) {
+            Ok(()) | Err(_) => {}
+        }
+        // Hold the channel open for the duration of the test.
+        std::thread::sleep(Duration::from_secs(30));
+    });
     let control_dir = dir.path().to_path_buf();
     let console = tokio::spawn(async move {
         crate::host_control::confirm_targeted_deletion(&control_dir, &request).await
     });
+    // The serving future is driven by `until`: waiting outside it would leave
+    // the accept loop unpolled and the console's request unanswered.
+    serving
+        .until(async move {
+            tokio::time::timeout(HANG_GUARD, confirmed_rx)
+                .await
+                .expect("the confirmation surface must answer the challenge")
+                .expect("the surface task must not drop its signal")
+        })
+        .await;
     serving.until(gate.wait_entered()).await;
     assert!(store.deletion_status(None, 10).await.unwrap().is_empty());
 

@@ -506,6 +506,10 @@ fn show_requester_state(
                 "{what}: {provider}:{label} was not stored; the value is entered on the \
                  confirmation surface, never on this command line"
             ),
+            RequesterOutcome::CredentialUncommitted { provider, label } => format!(
+                "{what}: {provider}:{label} reached the OS store, but registration did not \
+                 commit; inspect the pending state before retrying, and do not re-send the value"
+            ),
             RequesterOutcome::Deletion(outcome) => {
                 format!("{what}: the deletion request settled as {outcome:?}")
             }

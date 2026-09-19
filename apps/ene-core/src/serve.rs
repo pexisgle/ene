@@ -470,6 +470,11 @@ pub struct HostHandle {
     pub(crate) gui_open: AsyncMutex<()>,
     /// The GUI child this Host started, if any.
     pub(crate) gui_child: StdMutex<Option<crate::host_control::GuiProcess>>,
+    /// In-flight confirmation-channel dispatches. The serving composition
+    /// joins them on shutdown, so an operation admitted by the Owner's surface
+    /// finishes (or is refused) before the Host releases its authority and no
+    /// task outlives the handle it borrows.
+    pub(crate) confirmation_tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
     /// File-backed pairing-secret store by device, opened on
     /// `<data_dir>/device-auth.json`.
     ///
@@ -779,6 +784,7 @@ impl HostHandle {
             data_dir: data_dir.to_path_buf(),
             gui_open: AsyncMutex::new(()),
             gui_child: StdMutex::new(None),
+            confirmation_tasks: StdMutex::new(Vec::new()),
             auth_store,
             learning_queue: Arc::clone(&learning_queue),
             host_transient_arrival: Arc::clone(&host_transient_arrival),

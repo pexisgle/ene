@@ -1132,6 +1132,9 @@ where
     #[cfg(test)]
     handle.serving_test.shutdown_started.notify_one();
     let handler_result = handlers.stop_and_join().await;
+    // The Owner's confirmation surface may have an admitted operation still
+    // running; it finishes before this process stops owning the authority.
+    handle.join_confirmation_tasks().await;
     let task_result = launcher.shutdown_and_join().await;
     let driver_result = deletion_driver.stop_and_join().await;
     result
@@ -1742,6 +1745,9 @@ where
     #[cfg(test)]
     handle.serving_test.shutdown_started.notify_one();
     let handler_result = handlers.stop_and_join().await;
+    // Same join as the Unix path: an admitted confirmation finishes before the
+    // serving authority goes away.
+    handle.join_confirmation_tasks().await;
     let task_result = launcher.shutdown_and_join().await;
     let driver_result = deletion_driver.stop_and_join().await;
     result

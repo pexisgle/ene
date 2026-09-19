@@ -2408,6 +2408,33 @@ async fn render_single_pending_request(handle: &HostHandle) -> String {
 async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOperationRef {
     let request = render_single_pending_request(served.handle()).await;
     let dir = served.dir.clone();
+    // The Owner's confirmation surface is the GUI the Host spawned. The
+    // console asks on the requester listener; this surface confirms on the
+    // private channel, and the Client's frame pump keeps answering the bounded
+    // local-erasure demand while the console waits.
+    let gui_handle = served.handle_arc();
+    let mut gui = ene_core::host_control::seat_test_gui_for_tests(&gui_handle)
+        .expect("the private confirmation channel must open");
+    let (confirmed_tx, confirmed_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut reader = gui.try_clone().expect("clone");
+        if let Ok(Some(ene_local_control::FromConfirmation::ConfirmationChallenge {
+            session_id,
+            nonce,
+            ..
+        })) = reader.recv()
+        {
+            match gui
+                .send(&ene_local_control::ToConfirmation::SessionComplete { session_id, nonce })
+            {
+                Ok(()) | Err(_) => {}
+            }
+        }
+        match confirmed_tx.send(()) {
+            Ok(()) | Err(_) => {}
+        }
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    });
     let outcome = match served.client.as_mut() {
         Some(client) => {
             let mut confirmation = Box::pin(ene_core::host_control::confirm_targeted_deletion(
@@ -2425,8 +2452,21 @@ async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOp
                 }
             }
         }
-        None => ene_core::host_control::confirm_targeted_deletion(&dir, &request).await,
+        None => {
+            let confirmation = ene_core::host_control::confirm_targeted_deletion(&dir, &request);
+            tokio::pin!(confirmation);
+            loop {
+                tokio::select! {
+                    outcome = &mut confirmation => break outcome,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+                }
+            }
+        }
     };
+    tokio::time::timeout(std::time::Duration::from_secs(30), confirmed_rx)
+        .await
+        .expect("the confirmation surface must answer")
+        .expect("the surface task must not drop its signal");
     match outcome.expect("the serving Host control inlet must answer") {
         ConfirmTargetedDeletionOutcome::Started(current) => current,
         other => panic!("the Owner confirmation must start the operation, got {other:?}"),

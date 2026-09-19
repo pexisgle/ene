@@ -188,6 +188,17 @@ mod platform {
     }
 
     impl GuiChannel {
+        /// Duplicates this end so one thread can read while the owner writes.
+        ///
+        /// # Errors
+        ///
+        /// Returns the OS failure when the descriptor cannot be duplicated.
+        pub fn try_clone(&self) -> std::io::Result<Self> {
+            Ok(Self {
+                stream: self.stream.try_clone()?,
+            })
+        }
+
         /// Creates a connected pair for tests that drive a GUI in-process.
         ///
         /// The production GUI always adopts the Host's stdio; this constructor
@@ -369,6 +380,18 @@ mod platform {
     }
 
     impl GuiChannel {
+        /// Duplicates this end so one thread can read while the owner writes.
+        ///
+        /// # Errors
+        ///
+        /// Returns the OS failure when a handle cannot be duplicated.
+        pub fn try_clone(&self) -> std::io::Result<Self> {
+            Ok(Self {
+                from_host: self.from_host.try_clone()?,
+                to_host: self.to_host.try_clone()?,
+            })
+        }
+
         /// Creates a connected pair for tests that drive a GUI in-process.
         ///
         /// The production GUI always adopts the Host's stdio; this constructor
