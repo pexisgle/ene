@@ -8,6 +8,7 @@
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
   - Linux 検証は Cloud Agent 上の Ubuntu 24.04 X11 で実施済み（[報告](reports/stage-7-linux-2026-09-19.md)）。NixOS 26.11 を待たない。Stage 7 は完了しない。
   - 残件: Windows 11、KDE Wayland overlay / IME、公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）、Performance Gate。placeholder を製品キャラクターとして扱わない。
+  - 統合 tip は `codex/stage7-integration`（#1661 の GUI + #1660 の Linux 修正のうち現行設計でも必要なもの）。Windows 報告の GUI 再起動 P1 はここで修正済み。A1 の trust boundary 全面改修は `codex/stage7-a1-boundary-wip` で進行中（未完成・単体では build しない）。
 
 ## 完了したステージ (Completed)
 
