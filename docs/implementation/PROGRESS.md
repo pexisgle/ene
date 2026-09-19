@@ -7,6 +7,7 @@
 - **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、production 実装は A1 から**
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
   - 次の production slice は **A1: `ene-client` 抽出と serving 中 control**（GUI toolkit は含めない）。
+  - D renderer-core は `apps/ene-body` に投影 IPC と headless pose/health を追加するが、overlay / VRM runtime / SpringBone / IME / NixOS 26.11 の技術成立 probe は未実施。acceptance §2 と Stage 7 完了にはしない。
   - GUI・秘密入力・OS 保護ストア・overlay / VRM の技術成立 probe は未実施。A1 は probe を待たない。slice F まで Stage 7 を完了としない。
 
 ## 完了したステージ (Completed)
