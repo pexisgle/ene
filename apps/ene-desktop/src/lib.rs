@@ -16,6 +16,7 @@ pub mod erasure;
 pub mod i18n;
 pub mod measure;
 pub mod session;
+pub mod snapshot_pump;
 pub mod ui;
 
 pub(crate) mod host_launch;

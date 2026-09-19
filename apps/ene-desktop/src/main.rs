@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use ene_config::{Config, resolve_data_dir};
 use ene_desktop::i18n::{self, Label, Locale};
+use ene_desktop::snapshot_pump::SnapshotPump;
 use ene_desktop::ui::{DesktopError, DesktopRuntime, GuiSnapshot, Page};
 use ene_desktop_ui::AppWindow;
 use slint::{ComponentHandle as _, SharedString, Timer, TimerMode, Weak};
@@ -30,42 +31,51 @@ fn main() -> Result<(), DesktopError> {
     desktop.try_spawn_body(&desktop.bundled_ene_asset());
     let initial = desktop.snapshot();
     let runtime = Arc::new(Mutex::new(desktop));
+    let pump = Arc::new(SnapshotPump::new());
     let window = AppWindow::new().map_err(|error| DesktopError::Protocol(error.to_string()))?;
     apply_snapshot(&window, &initial);
 
-    bind_navigation(&window, Arc::clone(&runtime));
-    bind_wizard(&window, Arc::clone(&runtime));
-    bind_chat(&window, Arc::clone(&runtime));
-    bind_locale(&window, Arc::clone(&runtime));
-    bind_confirm(&window, Arc::clone(&runtime));
+    bind_navigation(&window, Arc::clone(&runtime), Arc::clone(&pump));
+    bind_wizard(&window, Arc::clone(&runtime), Arc::clone(&pump));
+    bind_chat(&window, Arc::clone(&runtime), Arc::clone(&pump));
+    bind_locale(&window, Arc::clone(&runtime), Arc::clone(&pump));
+    bind_confirm(&window, Arc::clone(&runtime), Arc::clone(&pump));
 
     let tick_ui = window.as_weak();
     let tick_runtime = Arc::clone(&runtime);
+    let tick_pump = Arc::clone(&pump);
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let ui = tick_ui.clone();
         let runtime = Arc::clone(&tick_runtime);
+        let pump = Arc::clone(&tick_pump);
         tokio::spawn(async move {
-            let snap = {
+            let (seq, snap) = {
                 let mut desktop = runtime.lock().await;
                 desktop.tick();
-                desktop.snapshot()
+                let snap = desktop.snapshot();
+                (pump.stamp(), snap)
             };
-            push_snapshot(ui, snap);
+            push_snapshot(ui, pump, seq, snap);
         });
     });
 
     {
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         let ui = window.as_weak();
         tokio_runtime.spawn(async move {
-            let mut desktop = runtime.lock().await;
-            if let Ok(()) = desktop.occupy_seat().await {
-                match desktop.begin_pairing().await {
-                    Ok(()) | Err(_) => {}
+            let (seq, snap) = {
+                let mut desktop = runtime.lock().await;
+                if let Ok(()) = desktop.occupy_seat().await {
+                    match desktop.begin_pairing().await {
+                        Ok(()) | Err(_) => {}
+                    }
                 }
-            }
-            push_snapshot(ui, desktop.snapshot());
+                let snap = desktop.snapshot();
+                (pump.stamp(), snap)
+            };
+            push_snapshot(ui, pump, seq, snap);
         });
     }
 
@@ -77,173 +87,219 @@ fn main() -> Result<(), DesktopError> {
     Ok(())
 }
 
-fn bind_navigation(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
+fn bind_navigation(
+    window: &AppWindow,
+    runtime: Arc<Mutex<DesktopRuntime>>,
+    pump: Arc<SnapshotPump>,
+) {
     window.on_open_chat({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
-        move || spawn_page(ui.clone(), Arc::clone(&runtime), Page::Chat)
+        let pump = Arc::clone(&pump);
+        move || {
+            spawn_page(
+                ui.clone(),
+                Arc::clone(&runtime),
+                Arc::clone(&pump),
+                Page::Chat,
+            )
+        }
     });
     window.on_open_history({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     desktop.open_page(Page::History);
                     match desktop.refresh_history().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_open_memory({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     desktop.open_page(Page::Memory);
                     match desktop.refresh_memory().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_open_settings({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     desktop.open_page(Page::Settings);
                     match desktop.refresh_management_without_body().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_open_about({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
-        move || spawn_page(ui.clone(), Arc::clone(&runtime), Page::About)
+        let pump = Arc::clone(&pump);
+        move || {
+            spawn_page(
+                ui.clone(),
+                Arc::clone(&runtime),
+                Arc::clone(&pump),
+                Page::About,
+            )
+        }
     });
     window.on_open_tasks({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.open_tasks().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_refresh_tasks({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.refresh_tasks().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_select_task({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.select_listed_task(0).await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_cancel_task({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.cancel_displayed_task().await {
                         Ok(_) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_resume_task({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     let instruction = desktop.composer_mut().take_sendable().unwrap_or_default();
                     match desktop.resume_displayed_task(instruction).await {
                         Ok(_) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_select_workspace({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     if let Some(path) = desktop.composer_mut().take_sendable() {
                         match desktop
@@ -253,155 +309,180 @@ fn bind_navigation(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
                             Ok(_) | Err(_) => {}
                         }
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_open_usage({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     desktop.open_page(Page::Usage);
                     match desktop.refresh_usage().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_open_deletion({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     desktop.open_page(Page::Deletion);
                     match desktop.refresh_deletion().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_refresh_usage({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.refresh_usage().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_apply_usage_cap({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.apply_usage_cap().await {
                         Ok(_) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_refresh_deletion({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.refresh_deletion().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_request_deletion({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.request_deletion().await {
                         Ok(_) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_begin_deletion_confirm({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.begin_deletion_confirm().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_resume_deletion({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.resume_deletion().await {
                         Ok(_) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
@@ -417,15 +498,17 @@ fn bind_navigation(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
     });
 }
 
-fn bind_wizard(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
+fn bind_wizard(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>, pump: Arc<SnapshotPump>) {
     window.on_wizard_next({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     let before = desktop.snapshot().wizard_step.clone();
                     desktop.wizard_next();
@@ -440,25 +523,29 @@ fn bind_wizard(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
                             Ok(_) | Err(_) => {}
                         }
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_wizard_back({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     desktop.wizard_back();
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
@@ -474,7 +561,7 @@ fn bind_wizard(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
     });
 }
 
-fn bind_chat(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
+fn bind_chat(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>, pump: Arc<SnapshotPump>) {
     window.on_draft_changed({
         let runtime = Arc::clone(&runtime);
         move |value| {
@@ -506,97 +593,137 @@ fn bind_chat(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
     window.on_send({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.send_text().await {
                         Ok(()) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
 }
 
-fn bind_locale(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
+fn bind_locale(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>, pump: Arc<SnapshotPump>) {
     window.on_switch_ja({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
-        move || spawn_locale(ui.clone(), Arc::clone(&runtime), Locale::Ja)
+        let pump = Arc::clone(&pump);
+        move || {
+            spawn_locale(
+                ui.clone(),
+                Arc::clone(&runtime),
+                Arc::clone(&pump),
+                Locale::Ja,
+            )
+        }
     });
     window.on_switch_en({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
-        move || spawn_locale(ui.clone(), Arc::clone(&runtime), Locale::En)
+        let pump = Arc::clone(&pump);
+        move || {
+            spawn_locale(
+                ui.clone(),
+                Arc::clone(&runtime),
+                Arc::clone(&pump),
+                Locale::En,
+            )
+        }
     });
 }
 
-fn bind_confirm(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
+fn bind_confirm(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>, pump: Arc<SnapshotPump>) {
     window.on_confirm_owner({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     match desktop.confirm_owner().await {
                         Ok(_) | Err(_) => {}
                     }
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
     window.on_cancel_owner({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
+        let pump = Arc::clone(&pump);
         move || {
             let ui = ui.clone();
             let runtime = Arc::clone(&runtime);
+            let pump = Arc::clone(&pump);
             tokio::spawn(async move {
-                let snap = {
+                let (seq, snap) = {
                     let mut desktop = runtime.lock().await;
                     desktop.cancel_secret();
-                    desktop.snapshot()
+                    let snap = desktop.snapshot();
+                    (pump.stamp(), snap)
                 };
-                push_snapshot(ui, snap);
+                push_snapshot(ui, pump, seq, snap);
             });
         }
     });
 }
 
-fn spawn_page(ui: Weak<AppWindow>, runtime: Arc<Mutex<DesktopRuntime>>, page: Page) {
+fn spawn_page(
+    ui: Weak<AppWindow>,
+    runtime: Arc<Mutex<DesktopRuntime>>,
+    pump: Arc<SnapshotPump>,
+    page: Page,
+) {
     tokio::spawn(async move {
-        let snap = {
+        let (seq, snap) = {
             let mut desktop = runtime.lock().await;
             desktop.open_page(page);
-            desktop.snapshot()
+            let snap = desktop.snapshot();
+            (pump.stamp(), snap)
         };
-        push_snapshot(ui, snap);
+        push_snapshot(ui, pump, seq, snap);
     });
 }
 
-fn spawn_locale(ui: Weak<AppWindow>, runtime: Arc<Mutex<DesktopRuntime>>, locale: Locale) {
+fn spawn_locale(
+    ui: Weak<AppWindow>,
+    runtime: Arc<Mutex<DesktopRuntime>>,
+    pump: Arc<SnapshotPump>,
+    locale: Locale,
+) {
     tokio::spawn(async move {
-        let snap = {
+        let (seq, snap) = {
             let mut desktop = runtime.lock().await;
             desktop.set_locale(locale);
-            desktop.snapshot()
+            let snap = desktop.snapshot();
+            (pump.stamp(), snap)
         };
-        push_snapshot(ui, snap);
+        push_snapshot(ui, pump, seq, snap);
     });
 }
 
-fn push_snapshot(ui: Weak<AppWindow>, snap: GuiSnapshot) {
+fn push_snapshot(ui: Weak<AppWindow>, pump: Arc<SnapshotPump>, seq: u64, snap: GuiSnapshot) {
     match slint::invoke_from_event_loop(move || {
+        if !pump.accept(seq) {
+            return;
+        }
         if let Some(window) = ui.upgrade() {
             apply_snapshot(&window, &snap);
         }

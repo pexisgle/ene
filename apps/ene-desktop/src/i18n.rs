@@ -4,7 +4,7 @@
 //! Host domain state are not rewritten.
 
 use ene_api::v1::management::ManagementOutcome;
-use ene_local_control::FromHost;
+use ene_local_control::{ControlOutcome, FromHost};
 
 /// UI locale. Persisted as a GUI preference, never as setup-complete consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +198,18 @@ pub fn control_deny(locale: Locale, from: &FromHost) -> String {
         (Locale::En, FromHost::SeatOccupied) => String::from("The confirmation seat is occupied."),
         (Locale::Ja, FromHost::Unavailable) => String::from("Host の確認面を利用できません。"),
         (Locale::En, FromHost::Unavailable) => String::from("Confirmation is unavailable."),
+        (Locale::Ja, FromHost::Outcome(ControlOutcome::CredentialRefused { .. })) => String::from(
+            "資格情報は保存されませんでした。OS の保護ストアが使えないか、登録が拒否されました。",
+        ),
+        (Locale::En, FromHost::Outcome(ControlOutcome::CredentialRefused { .. })) => String::from(
+            "The credential was not stored. The OS protected store is unavailable or refused the put.",
+        ),
+        (Locale::Ja, FromHost::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
+            String::from("このペアリング要求は Host にありません。")
+        }
+        (Locale::En, FromHost::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
+            String::from("This pairing request is unknown to Host.")
+        }
         (Locale::Ja, _) => String::from("制御の応答を処理できません。"),
         (Locale::En, _) => String::from("The control channel answered unexpectedly."),
     }
@@ -205,7 +217,21 @@ pub fn control_deny(locale: Locale, from: &FromHost) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Label, Locale, label};
+    use super::{Label, Locale, control_deny, label};
+    use ene_local_control::{ControlOutcome, FromHost};
+
+    #[test]
+    fn credential_refused_is_not_an_unexpected_control_answer() {
+        let refused = FromHost::Outcome(ControlOutcome::CredentialRefused {
+            provider: String::from("openai"),
+            label: String::from("main"),
+        });
+        let ja = control_deny(Locale::Ja, &refused);
+        let en = control_deny(Locale::En, &refused);
+        assert!(!ja.contains("処理できません"));
+        assert!(!en.contains("unexpected"));
+        assert!(ja.contains("保護ストア") || ja.contains("拒否"));
+    }
 
     #[test]
     fn locale_switch_changes_labels_only() {
