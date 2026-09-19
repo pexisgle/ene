@@ -6,7 +6,8 @@
 
 - **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、A1 は PR、B (`ene-desktop`) 実装中**
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
-  - 次の production slice は **B: 初回セットアップからテキスト会話までの縦断 GUI**。C1/C2/C3 と D は B の後。
+  - 次の production slice は **E: GUI の提示・一時データ・障害経路**。C1/C2/C3 と D は統合済み。F は E の後。
+  - D renderer-core は `apps/ene-body` に投影 IPC と headless pose/health を追加するが、overlay / VRM runtime / SpringBone / IME / NixOS 26.11 の技術成立 probe は未実施。acceptance §2 と Stage 7 完了にはしない。
   - GUI・秘密入力・OS 保護ストア・overlay / VRM の技術成立 probe は未実施。slice F まで Stage 7 を完了としない。
   - 公式同梱 `ene` VRM は未投入（[#1651](https://github.com/pexisgle/ene/issues/1651)）。placeholder を製品キャラクターとして扱わない。
 

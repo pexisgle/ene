@@ -35,6 +35,9 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # Windows-only volume identity for the Action filesystem boundary, plus the
 # Stage 5 named-pipe transport (explicit DACL, peer token check).
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
+# Stage 7 D: Body is the only process that owns a GPU device. Overlay OS
+# backends stay stubbed; this crate is not a Host/desktop dependency.
+wgpu = "27"
 
 [workspace.lints.clippy]
 allow_attributes = "forbid"
