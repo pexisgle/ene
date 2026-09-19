@@ -69,8 +69,10 @@ jobs:
         with:
           cache-on-failure: false
           save-if: true
-      # nextest overlaps binaries enough to make Windows rename+read of the
-      # device file return Unreadable (ene-client concurrent_stores test).
-      # cargo test is the proven-green runner on this OS.
+      # Linux and Windows cache keys are distinct. A failed Windows job does
+      # not populate this restore. nextest is not used here: overlapping
+      # binaries made Windows rename+read of the device file return
+      # Unreadable (ene-client concurrent_stores). cargo test is the
+      # proven-green runner on this OS.
       - name: Run tests
         run: cargo test --locked --workspace
