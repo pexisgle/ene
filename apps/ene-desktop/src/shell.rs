@@ -567,13 +567,12 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::Startup => {
             d.ensure_host(None)?;
             d.try_spawn_body(&d.bundled_ene_asset());
-            d.occupy_seat().await?;
-            d.begin_pairing().await?;
+            d.connect_or_begin_pairing().await?;
             None
         }
         Command::Refresh(page) => {
             match page {
-                6 if !d.surface_snapshot().connected => d.begin_pairing().await?,
+                6 if !d.surface_snapshot().connected => d.connect_or_begin_pairing().await?,
                 2 => d.refresh_memory().await?,
                 3 => d.refresh_usage().await?,
                 4 => d.refresh_deletion_requests().await?,
@@ -735,11 +734,6 @@ fn control_notice(ja: bool, result: &ene_local_control::FromHost) -> String {
             ja,
             "既存の削除処理に含まれています。",
             "Covered by an existing deletion.",
-        ),
-        FromHost::Outcome(ControlOutcome::CredentialUncommitted { .. }) => local(
-            ja,
-            "値は保護ストアに届きましたが、登録の確定が完了していません。保留状態を確認してください。",
-            "The value reached the protected store, but registration did not commit; check the pending state.",
         ),
         FromHost::Outcome(ControlOutcome::DeletionHeldByOperation { .. }) => local(
             ja,

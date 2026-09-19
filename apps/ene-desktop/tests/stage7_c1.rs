@@ -233,7 +233,7 @@ async fn pair_and_seat(desktop: &mut DesktopRuntime) {
         .await
         .expect("empty seat occupancy is accident prevention, not authenticity");
     desktop
-        .begin_pairing()
+        .connect_or_begin_pairing()
         .await
         .expect("pairing must challenge");
     match desktop.confirm_owner().await.expect("owner confirm pairs") {
