@@ -441,57 +441,80 @@ fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError
 
     block_on(async {
         match HostLock::acquire(data_dir) {
-            Ok(_lock) => approve_device_offline(data_dir, pending_id).await,
+            Ok(_lock) => Err(host_not_serving()),
             Err(CoreError::AlreadyRunning) => {
-                match ene_core::host_control::approve_device(data_dir, pending_id).await? {
-                    Some(secret) => write_pairing_secret(&secret),
-                    None => unknown_pending(data_dir, pending_id).await,
-                }
+                let state =
+                    ene_core::host_control::request_device_approve(data_dir, pending_id).await?;
+                show_requester_state("device approval", &state)
             }
             Err(error) => Err(error),
         }
     })
 }
 
-async fn approve_device_offline(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
-    let handle = HostHandle::open(data_dir).await?;
-    if let Some((_, secret)) = handle.approve_device(pending_id).await? {
-        return write_pairing_secret(&secret);
-    }
-    unknown_pending_from(&handle, pending_id).await
+/// The requester-only refusal when no Host is serving.
+///
+/// The Owner's confirmation surface lives in the serving process, so an
+/// offline command can never record a confirmation; the old offline mutation
+/// fallback is deliberately gone (first-party-desktop §5.1.5).
+fn host_not_serving() -> CoreError {
+    CoreError::Approve(String::from(
+        "the Host is not serving; start `ene-core serve` and retry — the Owner's \
+         confirmation surface runs there, and an offline command cannot record one",
+    ))
 }
 
-fn write_pairing_secret(secret: &str) -> Result<(), CoreError> {
+/// Shows one requester request's settled state. Secrets never appear here: the
+/// pairing provision and the credential value belong to their own channels.
+fn show_requester_state(
+    what: &str,
+    state: &ene_local_control::RequestState,
+) -> Result<(), CoreError> {
     use std::io::Write as _;
+
+    use ene_local_control::{RequestState, RequesterOutcome};
+
+    let line = match state {
+        RequestState::AwaitingOwnerConfirmation => format!(
+            "{what}: the Owner's confirmation surface has not decided yet; no change was applied"
+        ),
+        RequestState::ConfirmationUnavailable => {
+            format!("{what}: no confirmation surface is available; no change was applied")
+        }
+        RequestState::Rejected => format!("{what}: the Owner declined; no change was applied"),
+        RequestState::StalePremise => format!(
+            "{what}: the target or its premise moved; request again against the current state"
+        ),
+        RequestState::OutcomeUnavailable => format!(
+            "{what}: the outcome could not be read; check the current state before retrying"
+        ),
+        RequestState::Applied { outcome } => match outcome {
+            RequesterOutcome::DeviceApproved {
+                pending_id,
+                device_id,
+            } => format!(
+                "{what}: approved pending {pending_id} as device {device_id}; the pairing \
+                 client receives its own provision"
+            ),
+            RequesterOutcome::DeviceUnknown { pending_id } => {
+                format!("{what}: pending {pending_id} is unknown to the serving Host")
+            }
+            RequesterOutcome::CredentialStored { provider, label } => {
+                format!("{what}: {provider}:{label} is registered and active")
+            }
+            RequesterOutcome::CredentialRefused { provider, label } => format!(
+                "{what}: {provider}:{label} was not stored; the value is entered on the \
+                 confirmation surface, never on this command line"
+            ),
+            RequesterOutcome::Deletion(outcome) => {
+                format!("{what}: the deletion request settled as {outcome:?}")
+            }
+        },
+    };
     let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
-        CoreError::Store(format!(
-            "approved, but the secret could not be shown: {error}"
-        ))
-    })?;
-    stdout.flush().map_err(|error| {
-        CoreError::Store(format!(
-            "approved, but the secret could not be shown: {error}"
-        ))
-    })?;
-    Ok(())
-}
-
-async fn unknown_pending(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
-    let handle = HostHandle::open(data_dir).await?;
-    unknown_pending_from(&handle, pending_id).await
-}
-
-async fn unknown_pending_from(handle: &HostHandle, pending_id: &str) -> Result<(), CoreError> {
-    let pending = handle.pending_devices().await?;
-    Err(CoreError::Approve(format!(
-        "unknown pending id {pending_id:?}; pending: [{pending}]",
-        pending = pending
-            .iter()
-            .map(|entry| entry.pending_id.as_str())
-            .collect::<Vec<&str>>()
-            .join(", ")
-    )))
+    writeln!(stdout, "{line}")
+        .and_then(|()| stdout.flush())
+        .map_err(|error| CoreError::Approve(format!("the outcome could not be shown: {error}")))
 }
 
 /// Unknown pairs fail with the pending set so the Owner can retry exactly.
@@ -512,58 +535,16 @@ fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Resul
 
     block_on(async {
         match HostLock::acquire(data_dir) {
-            Ok(_lock) => approve_credential_offline(data_dir, provider, label).await,
+            Ok(_lock) => Err(host_not_serving()),
             Err(CoreError::AlreadyRunning) => {
-                let secret = serving_credential_secret()?;
-                if ene_core::host_control::put_credential(data_dir, provider, label, &secret)
-                    .await?
-                {
-                    return Ok(());
-                }
-                unknown_credential(data_dir, provider, label).await
+                let state =
+                    ene_core::host_control::request_credential_put(data_dir, provider, label)
+                        .await?;
+                show_requester_state("credential registration", &state)
             }
             Err(error) => Err(error),
         }
     })
-}
-
-fn serving_credential_secret() -> Result<String, CoreError> {
-    match std::env::var(ene_credential::ENV_API_KEY) {
-        Ok(value) if !value.is_empty() => Ok(value),
-        _ => Err(CoreError::Approve(String::from(
-            "serving-time credential put requires ENE_OPENAI_API_KEY; \
-             do not fall through to the Client channel",
-        ))),
-    }
-}
-
-async fn approve_credential_offline(
-    data_dir: &Path,
-    provider: &str,
-    label: &str,
-) -> Result<(), CoreError> {
-    let handle = HostHandle::open(data_dir).await?;
-    if handle.approve_credential(provider, label).await? {
-        return Ok(());
-    }
-    unknown_credential_from(&handle, provider, label).await
-}
-
-async fn unknown_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
-    let handle = HostHandle::open(data_dir).await?;
-    unknown_credential_from(&handle, provider, label).await
-}
-
-async fn unknown_credential_from(
-    handle: &HostHandle,
-    provider: &str,
-    label: &str,
-) -> Result<(), CoreError> {
-    let pending = handle.pending_credentials().await?;
-    Err(CoreError::Approve(format!(
-        "unknown credential {provider}:{label}; pending: [{pending}]",
-        pending = pending.join(", ")
-    )))
 }
 
 /// Prints the Targeted Deletion requests awaiting the Owner's confirmation,
