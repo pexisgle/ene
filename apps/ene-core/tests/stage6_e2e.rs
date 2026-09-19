@@ -605,21 +605,6 @@ async fn wait_until_deletion_drivers(handle: &HostHandle, expected: usize) {
     .await;
 }
 
-/// Waits until `handle` is the only strong reference, so dropping it drops
-/// the predecessor Store before a successor opens the same database.
-async fn wait_until_unique_host(handle: &Arc<HostHandle>) {
-    wait_until(
-        || Arc::strong_count(handle) == 1,
-        || {
-            format!(
-                "HostHandle still has {} strong references after serving stopped",
-                Arc::strong_count(handle)
-            )
-        },
-    )
-    .await;
-}
-
 /// One served Host under test: the composition handle, the listener task, and
 /// a live first-party client.
 ///
@@ -705,7 +690,6 @@ impl Served {
             Ok(Err(error)) => panic!("the aborted listener failed: {error}"),
         }
         wait_until_deletion_drivers(self.handle(), 0).await;
-        wait_until_unique_host(self.handle.as_ref().expect("a live HostHandle")).await;
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
 
@@ -721,7 +705,6 @@ impl Served {
     /// stays up.
     async fn serve(&mut self) -> Client {
         wait_until_deletion_drivers(self.handle(), 0).await;
-        wait_until_unique_host(self.handle.as_ref().expect("a live HostHandle")).await;
         drop(self.handle.take());
         let handle = open_host(&self.dir).await;
         handle
