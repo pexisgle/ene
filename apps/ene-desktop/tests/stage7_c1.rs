@@ -35,8 +35,8 @@ use ene_core::host_control;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::MemoryCredentialStore;
 use ene_desktop::i18n::{self, Label, Locale};
+use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
-use ene_desktop::{DESKTOP_DESCRIPTOR, session};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{ControlOutcome, FromHost};
 
@@ -101,8 +101,7 @@ impl LearningTransport {
     fn last_dialogue_input(&self) -> Option<String> {
         self.all_inputs()
             .into_iter()
-            .filter(|input| !input.contains("learning formation pass"))
-            .last()
+            .rfind(|input| !input.contains("learning formation pass"))
     }
 }
 
