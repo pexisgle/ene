@@ -419,6 +419,10 @@ task_report と一覧は現在の Task 行・result・Action facts を read tran
 - 画面監視（Observer）の消費は専用の割り当てとして記録を区別しますが、システム全体のコスト上限の合算には正しく含めます。
 
 
+### 9.4 Credential の世代公開
+
+credential owner は immutable な有効 snapshot の取得と更新を credential publication guard で制御します。取得順序は control admission → credential publication guard → SQLite とし、必要なものだけを取得します。OS store / provider I/O 中は保持しません。確認の確定は同じ control admission 内で GUI close / session expiry と直列化します。OS candidate の保存は公開ではなく、有効 version の切替・approval sweep・既存 credential-set revision の前進・操作 outcome の commit が有効化の確定点です。同じ guard 内で準備済み snapshot を公開し、旧世代の本文・lease は既存の保存 / inference claim の revision 比較で拒否します。claim が先なら元の version に束縛した already-started use として扱い、最新キーへ付け替えません。競合・失効・部分失敗・startup は [Credential publication](credential-publication.md) に従います。
+
 ## 10. 滞在先・クライアント端末の競合制御（`PresenceGeneration` による制御）
 
 ### 10.1 直列化と確定前照合
@@ -618,7 +622,8 @@ DBへの登録を先行させて「DBにレコードはあるがファイルが�
 
 - **データベーストランザクション（`Immediate`）**: 前提の比較とデータの書き込みをアトミックに行うための、ミリ秒オーダーのごく短い排他制御です。非同期の `.await` や外部通信、AI推論をトランザクションの内部で実行してはいけません。
 - **機能ごとのローカルミューテックス / メールボックス**: タスク単位（`SD-Task`）、コンパニオン単位（`SD-Presence`）、削除完了集約（`SD-Deletion`）、復元切替の瞬間（`SD-Restore`）の順序制御のためにのみ使用します。他のドメインのミューテックスと二重に抱え込むような多重保持は禁止します。
-- **公開保護（publication guard）**: ファイルの保存リネームからDBポインタ登録完了までのごく短い間、定期クリーンアップ処理との排他を行うためにのみ使用します。システム全体のグローバルロックとして流用してはいけません。
+- **ファイルの公開保護（publication guard）**: ファイルの保存リネームからDBポインタ登録完了までのごく短い間、定期クリーンアップ処理との排他を行うためにのみ使用します。システム全体のグローバルロックとして流用してはいけません。
+- **credential publication guard / control admission**: 第9.4節の専用境界です。ファイルの公開保護や domain mutex を流用しません。確認の失効と credential の確定を結ぶ明記された順序だけで組み合わせ、保持中に `.await` や外部 I/O を行いません。
 - **キャンセル通知シグナル（`Notify` / token）**: 処理を中断させる合図を送るためのものであり、排他制御のロックではありません。
 - **ファイルシステムロック（例: `ene-core.lock`）**: プロセスの多重起動を防止するためなどの大枠の保護に限り使用し、通常のデータ書き込みの直列化には流用しません。
 - システム全体を止めるようなグローバルロックや、全ドメインを包括する長大なロックは一切設けません。
@@ -785,4 +790,3 @@ fn reserve_usage(
 | **通信疎通・時刻・UI** | 経過時間の解釈、失われた通信の勝手な補完の禁止、確認不能な状態を安全側に倒して不受理とすること。 | 疎通確認の具体的な通信プロトコル、時間の減衰計算、画面キャプチャの取得タイミング、ユーザーへの提示確認方法、要約の粒度、UIの画面レイアウト。 |
 
 アーカイブ形式、暗号化の実装、シリアライズ形式、Rust の具体的な型やトレイトの定義、クレート分割の詳細も固定しません。これらはホストPCとクライアント端末の信頼境界、および各機能の責任分担を遵守した上で、最もシンプルで信頼性の高い実装手法を選択します。
-

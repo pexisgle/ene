@@ -965,13 +965,17 @@ enum AuthenticatedUseOutcome {
 
 #### K-C.1 ScrubbedText の構成所有者と合成境界
 
-`ScrubbedText` の構成は `ene-credential` の scrub module だけが所有します。具象 `CredentialScrubber` は Host ではなく同 module に置き、Host composition root は既存の `CredentialRefRepository` / `CredentialSetRepository` と pinned `CredentialStore` を注入します。別 registry は作りません。revision を refs / bearer より先に読み、全登録値を longest-first で除去し、registry / bearer が読めない場合や空 bearer は本文を返さず fail closed とします。
+`ScrubbedText` の構成は `ene-credential` の scrub module だけが所有します。具象 `CredentialScrubber` は Host ではなく同 module に置き、Host composition root は既存の `CredentialRefRepository` / `CredentialSetRepository` と revision に束縛した immutable snapshot を供給する `CredentialStore` を注入します。別 registry は作りません。公開 guard 内で同じ snapshot の refs / bearer と revision を一緒に取得し、全登録値を longest-first で除去します。本文の処理後に新しい revision を取り直して proof を昇格させません。snapshot を構成できない場合や空 bearer は本文を返さず fail closed とします。
 
 `ScrubbedText` の本文・revision は private とし、読み取り accessor と本文の消費だけを公開します。public literal、任意本文と revision を受け取る constructor、Deserialize、可変本文参照、test feature による constructor は提供しません。`SecretScrubber` port の外部実装は失敗または credential-owned scrubber への委譲が可能ですが、自ら proof を mint できません。テストも repository / bearer の fixture をこの同じ具象境界へ注入します。この型は注入された credential authority に対する scrub の証明であり、任意の repository 実装が正規 Host authority であることまで型で証明するものではありません。production の authority 選択は Host composition root に残します。
 
 会話・Learning は選択予算などのために先行 scrub した断片を使ってよいものの、合成後の本文全体を再び scrub 境界へ通してから推論へ渡します。断片の連結・見出し等で値が再形成され得るため、断片の proof と任意の合成本文だけから proof を作ってはなりません。先行断片がある場合、最終 proof の premise は全先行断片と最終 scrub の revision の最小値まで保守化します。この操作は既存 proof の revision を下げるだけで、本文の差し替えや revision の昇格を許しません。先行断片がない場合も最終本文を scrub します。Task Agent は既存の契約どおり、論理入力全体の単一 scrub のままです。
 
 scrub proof は送信・保存 authority ではありません。既存の durable commit / inference attempt claim における credential-set revision の等値比較、approval / startup sweep と revision bump の不可分性は変更しません。合成中に revision が動いても、最終 scrub だけの新しい revision で古い断片の premise を洗い替えません。封止の compile-fail、同じ具象境界の redaction / failure、合成と revision drift を C1 で検証し、全域 no-secret / restart E2E の拡張は C2 / C3 に分離します。
+
+#### K-C.2 稼働中の credential 更新
+
+OS 保護ストアへの候補保存と有効化を分離します。有効 version の参照切替、既存本文の approval sweep、credential-set revision、操作 outcome は同じ master transaction で確定し、credential owner の公開 guard 内で対応する immutable snapshot を公開します。scoped use は claim と同じ version / revision に束縛し、claim 後に最新キーへ取り直しません。snapshot と実行中 lease の寿命、失効、partial failure、restart は [Credential publication](credential-publication.md) を正本とします。OS `put` 成功や登録のみで利用同意を成立させません。
 
 ### K-D Provider 割当解決
 
@@ -1663,7 +1667,7 @@ struct ResetCommand {
 
 公式（第一者）の入出力・提示担当は、作業担当へのタスク中断・スケジュール管理・記録確認、個体調整担当へのパートナー停止・削除、権限・制約担当への承認・拒絶・ルール・同意・費用枠・デバイス管理、認証情報管理への明示的な設定、保全・消去担当へのデータ削除・バックアップ・復元・初期化を、直接要求できます。ここで「直接」とは、パートナー自身の思考LLMによる承認や、長時間タスクの完了を待つ必要がないという意味であり、特定のAPI形式を強制するものではありません。各担当責任者による要求の受理・前提確認・結果判定に従う必要があり、UI層にシステムの状態を勝手に書き換える特権を与えるわけではありません。要求の受付と完了、保存済みデータへの影響、判明している作用と不明な状態を、画面上で明確に区別して提示します（H-10 / X-10 / K-1 / D-A〜D-E に共通する管理インターフェースの性質）。
 
-特に権限の大きい重大な操作の最終確認は、ホストPC本体の信頼できる公式管理画面（trusted first-party management surface）に厳格に限定します（[要件「信頼境界」](../../requirements/requirements.md#信頼境界)、具体的な対象と確認境界は IPC §18、判定手段は [First-party desktop](first-party-desktop.md) 第5節）。Client の `ManagementIntent`（IPC M-18）は候補のままです。高権限の最終確認は、Host が exclusive `FirstPartyControlSeat` に束縛した one-shot `ConfirmationSession` が、その同一 control 接続から完了したときに限り成立します。nonce は freshness であり、Owner 身元ではありません。席の exclusive 性と接続束縛は、席の取得者を公式 GUI だと証明しません。`ene-local-control` はその request / 秘密 intake / seat 束縛完了に使い、`ene-api` に載せません。control socket を開けたことや同一 OS ユーザーであることは Owner 確認ではありません。席が埋まっているときの第二接続からの nonce 提示は `DeniedByBoundary` です。空席へ先着した同一 UID process は席を取れ、Milestone 1 はその取得者を公式 GUI だと証明しません。`confirmed=true` 自己申告も `DeniedByBoundary` です。ペアリングの承認やデバイスの信頼・失効、認証情報の変更、バックアップ復元および復元後の一括有効化、全データ初期化などの要求は、リモート端末から送信することは可能ですが、リモート端末側で「確認した」と自己申告したことだけを根拠にして処理を実行してはなりません。担当者は、公式 `ene-desktop` がその席を持っているときの first-party 面で確認された操作の由来と、対象データおよび現在の前提条件に結び付く確認事実を必要とします。コマンドのデータが存在していることだけで「確認済み」と誤認してはなりません。ホストと同居する通信経路やペアリングが存在することだけで無条件の信頼を与えてはなりません。通常の Client、製品 `ene-ctl`、ツール、プラグイン、LLM、Computer Use の結果電文は完了経路ではありません。ene 認可の Computer Use は確認面を対象にできません。空席先着と、席保持 process への ene 外入力注入はプロトコルで公式 GUI / Owner と区別できず、脅威モデルの残差です。任意の同一 UID process を必ず排除できるとは言いません。なお、管理機能全体に対して、会話がアクティブでなければならないという制約は課しません。
+特に権限の大きい重大な操作の最終確認は、Host が信頼されたインストールから起動した公式 GUI の直接確認に限定します（[要件「信頼境界」](../../requirements/requirements.md#信頼境界)、[Runtime Topology](../architecture/runtime-topology.md#第一者確認面の信頼前提)、IPC §18）。Host はその child にだけ継承した非公開 endpoint と生存記録から exclusive `FirstPartyControlSeat` を発行し、操作・対象・前提と seat に束縛した one-shot `ConfirmationSession` の completion を各 owner の確定境界で照合します。nonce は freshness だけであり、公開 listener への先着、同一 UID、PID、`confirmed=true`、CLI や tool の出力を確認権限にしません。`ene-local-control` は要求専用 DTO と確認専用 DTO を分離し、requester は非秘密 request / outcome だけを扱います。GUI 不在時は Host が起動し、起動できなければ `ConfirmationUnavailable` とします。offline CLI で確認を省略する経路は残しません。通常 Client、`ene-ctl`、LLM、tool、plugin、Computer Use の結果電文は最終確認経路ではなく、ene Computer Use は確認面へ入力できません。Host / GUI restart は未消費 session を失効させます。詳細は [First-party desktop 第5節](first-party-desktop.md#5-trust--credential--failure)。会話の稼働や provider 成功を管理操作の前提にはしません。
 
 ```rust
 struct ManagementOperationCommand {

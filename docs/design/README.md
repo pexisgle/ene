@@ -33,6 +33,7 @@
   - [権限・認証情報・実行・推論サブシステム](subsystems/permission-credential-execution-inference.md)
   - [アクション実行の安全性 (Action Execution)](critical-areas/action-execution.md)
   - [利用量・費用・利用上限 (Usage / Cost / Cap)](concrete/usage-cost-cap.md)
+  - [Credential の登録・更新・失効と有効世代の公開](concrete/credential-publication.md)
 - **データの削除・保全・バックアップ**:
   - [指定データの完全削除 (Targeted Deletion)](critical-areas/targeted-deletion.md)
   - [Targeted Deletion の operation・participant・完了契約](concrete/targeted-deletion-lifecycle.md)
