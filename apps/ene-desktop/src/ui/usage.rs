@@ -344,7 +344,7 @@ async fn ask(client: &mut Client, payload: WirePayload) -> Result<WirePayload, D
 #[cfg(test)]
 mod tests {
     use super::{UNKNOWN, render_cost, render_row};
-    use ene_api::v1::usage::{UsageCostView, UsageMoneyView, UsageSummaryRowView};
+    use ene_api::v1::usage::{UsageMoneyView, UsageSummaryRowView};
 
     fn money(micros: u64) -> UsageMoneyView {
         UsageMoneyView {
