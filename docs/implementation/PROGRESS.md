@@ -4,11 +4,11 @@
 
 ## 現在進行中のステージ (Current Milestone)
 
-- **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、A1 は PR、B (`ene-desktop`) 実装中**
+- **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A1 と B/C/E の実装は統合済み、D/F と実 desktop acceptance が残る**
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
   - Linux 検証は Cloud Agent 上の Ubuntu 24.04 X11 で実施済み（[報告](reports/stage-7-linux-2026-09-19.md)）。NixOS 26.11 を待たない。Stage 7 は完了しない。
-  - 残件: Windows 11 の実機 acceptance、KDE Wayland overlay / IME、公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）、Performance Gate。placeholder を製品キャラクターとして扱わない。
-  - 統合 tip は `codex/stage7-integration`（#1661 の GUI + #1660 の Linux 修正のうち現行設計でも必要なもの）。Windows 報告の GUI 再起動 P1、`CredentialStored` の早すぎる返却、A1 の trust boundary 再設計（requester listener と Host-spawned GUI の専用確認 channel の分離、`SeatHello` 経路の削除、`ene-core approve-*` の requester 化、offline mutation fallback の削除）はここで完了。
+  - 残件: IPC §9.2 の pairing provision frame、実 overlay window、VRM runtime / SpringBone と公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）、Linux Secret Service の実 desktop probe、Windows 11 / Linux の日英・IME acceptance、Performance Gate。placeholder を製品キャラクターとして扱わない。
+  - 統合 tip は [#1664](https://github.com/pexisgle/ene/pull/1664) として `main` に land 済み。Windows 報告の GUI 再起動 P1、`CredentialStored` の早すぎる返却、A1 の trust boundary 再設計（requester listener と Host-spawned GUI の専用確認 channel の分離、`SeatHello` 経路の削除、`ene-core approve-*` の requester 化、offline mutation fallback の削除）、credential publication、OS-store adapter、Linux gate 修正、CI 高速化を含む。
   - credential の登録は version 公開として実装済み: OS item は version ごとに作り、activation transaction が sweep・active version・revision・outcome を一緒に commit する。実 OS store adapter は Windows Credential Manager で probe 済み、Linux Secret Service は adapter のみ（この環境に service が無いため 未実施）。
 
 ## 完了したステージ (Completed)
@@ -23,9 +23,10 @@
 
 ## 未解決のブロッカー (Blockers)
 
-- **現在ブロッカーはありません。**
+- Stage 7 D の製品キャラクター完成には公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）が必要。実 overlay window と IPC の作業は先行できる。
+- **上記アセット以外に現在ブロッカーはありません。**
 - 個別の非ブロッキングな設計・実装フォローアップは GitHub Issues で管理します。
-- Stage 7 の Linux 自動テストと X11 GUI 操作は [Linux 報告](reports/stage-7-linux-2026-09-19.md) にある。Windows 11、overlay / IME、Performance Gate は未実施。
+- Stage 7 の Linux 自動テストと X11 GUI 操作は [Linux 報告](reports/stage-7-linux-2026-09-19.md) にある。Windows 11 / Linux 実 desktop の日英・IME、overlay / VRM、Linux Secret Service、Performance Gate は未実施。
 
 ## 次のステージ (Next Stage)
 
