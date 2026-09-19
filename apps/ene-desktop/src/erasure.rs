@@ -20,7 +20,7 @@ use crate::ui::usage::UsagePanel;
 use crate::ui::{Composer, MemoryPage};
 
 /// Mutable GUI-owned copies one deletion demand may name.
-pub struct GuiOwned<'a> {
+pub(crate) struct GuiOwned<'a> {
     pub timeline: &'a mut Vec<String>,
     pub history: &'a mut Vec<HistoryItem>,
     pub composer: &'a mut Composer,
@@ -34,7 +34,7 @@ pub struct GuiOwned<'a> {
 
 /// Wipes GUI copies named by a Host deletion demand. Returns `wiped` only
 /// for copies this process actually cleared and confirmed empty.
-pub fn apply_demand(demand: &DeletionDemand, copies: GuiOwned<'_>) -> LocalErasureResult {
+pub(crate) fn apply_demand(demand: &DeletionDemand, copies: GuiOwned<'_>) -> LocalErasureResult {
     let mut wiped = Vec::new();
     let mut unverified = Vec::new();
     for target in &demand.targets {
@@ -60,7 +60,7 @@ pub fn apply_demand(demand: &DeletionDemand, copies: GuiOwned<'_>) -> LocalErasu
                 copies.usage.wipe_body();
                 copies.deletion.wipe_exact_text();
                 *copies.chat_receipt = None;
-                if presentation_gone(copies) {
+                if presentation_gone(&copies) {
                     wiped.push(ClientTempClass::PresentationBuffer);
                 } else {
                     unverified.push(ClientTempClass::PresentationBuffer);

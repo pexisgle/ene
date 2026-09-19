@@ -2,11 +2,11 @@
 //!
 //! Slint is a projection. Domain and secrets do not live in generated UI.
 
-mod deletion;
+pub(crate) mod deletion;
 mod memory;
 mod runtime;
-mod tasks;
-mod usage;
+pub(crate) mod tasks;
+pub(crate) mod usage;
 
 use ene_api::v1::round::HistoryItem;
 use ene_client::error::ClientError;
