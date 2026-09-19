@@ -4,9 +4,9 @@ Repository-level guidance for coding agents working on the new implementation.
 
 Backward compatibility is out of scope. Do not add migration layers, shims,
 legacy workarounds, or compatibility code for previous implementations.
-`.old/` is reference-only and never authoritative: do not depend on it or
-preserve behavior merely because it existed there. Validate behavior against
-the current requirements and design.
+Retired implementations are not kept in the repository and are never
+authoritative: do not preserve behavior merely because it existed there.
+Validate behavior against the current requirements and design.
 
 ## Source of truth
 

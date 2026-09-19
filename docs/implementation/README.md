@@ -37,7 +37,7 @@
 
 ### 1.3 後方互換性は考慮しない
 
-ene の新実装では `.old/` を含む旧実装との backward compatibility、migration shim、legacy workaround を設計しません。現在の要件・設計を直接満たす、最も単純で堅牢な実装を優先します。
+ene の新実装では旧実装との backward compatibility、migration shim、legacy workaround を設計しません。現在の要件・設計を直接満たす、最も単純で堅牢な実装を優先します。
 
 ### 1.4 実装文書の責務を分ける
 

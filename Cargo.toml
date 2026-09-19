@@ -1,7 +1,5 @@
 [workspace]
 members = ["crates/*", "apps/*"]
-# Retired implementation. Never add members under .old/.
-exclude = [".old"]
 resolver = "2"
 
 [workspace.package]

@@ -38,7 +38,7 @@ Stage 7 は Stage 0〜6 の domain authority と安全性契約を再設計し�
 
 ## 3. A0 結論（design。production Rust はまだ書かない）
 
-A0 の成果物は [First-party desktop](../../design/concrete/first-party-desktop.md) と、それを指す CM / IPC / IB の更新です。`.old/` の `ene-stage` は移植しない。未検証 crate を恒久 contract として固定しない。
+A0 の成果物は [First-party desktop](../../design/concrete/first-party-desktop.md) と、それを指す CM / IPC / IB の更新です。旧実装の `ene-stage` は移植しない。未検証 crate を恒久 contract として固定しない。
 
 ### 3.1 Process / 名前（確定）
 
