@@ -25,9 +25,9 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use ene_api::v1::management::{
@@ -44,12 +44,15 @@ use ene_api::v1::undelivered::{
 };
 use ene_core::conn;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::{CredentialRef, MemoryCredentialStore};
+use ene_credential::{
+    CredentialRef, CredentialScrubber, MemoryCredentialStore, SecretScrubber as _,
+};
 use ene_ctl::client::Client;
 use ene_ctl::cmds;
 use ene_ctl::device::{StoredDevice, store_device};
 use ene_ctl::errors::CliError;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
+use ene_task::TaskRepository as _;
 
 const DESCRIPTOR: &str = "stage5 e2e";
 const MODEL: &str = "gpt-slice-test";
@@ -75,6 +78,7 @@ struct GateTransport {
     inputs: Mutex<Vec<String>>,
     sends: AtomicUsize,
     blocks: Mutex<BTreeSet<usize>>,
+    failures: Mutex<BTreeSet<usize>>,
 }
 
 impl GateTransport {
@@ -84,6 +88,7 @@ impl GateTransport {
             inputs: Mutex::new(Vec::new()),
             sends: AtomicUsize::new(0),
             blocks: Mutex::new(blocks.iter().copied().collect()),
+            failures: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -96,6 +101,13 @@ impl GateTransport {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&call);
+    }
+
+    /// Ends a parked provider call without producing a final result or an
+    /// Action directive, so graceful restart can drain the old execution.
+    fn fail(&self, call: usize) {
+        self.failures.lock().unwrap().insert(call);
+        self.unblock(call);
     }
 
     fn input_texts(&self) -> Vec<String> {
@@ -155,6 +167,13 @@ impl ProviderTransport for GateTransport {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .pop_front()
                 .unwrap_or_default();
+            if self.failures.lock().unwrap().remove(&call) {
+                return Err(
+                    ene_inference::InferenceTechnicalError::ProviderTransportFailed(String::from(
+                        "fixture provider disconnected before returning a result",
+                    )),
+                );
+            }
             Ok(ProviderResponse { text, usage: None })
         })
     }
@@ -332,18 +351,63 @@ async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), St
     Ok(())
 }
 
+/// Owns serving shutdown without retaining a strong Host reference. Joining
+/// every serving child, then observing the dead Weak, precedes any successor.
+struct ServingTask {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<Result<(), CoreError>>,
+    host: Weak<HostHandle>,
+}
+
+impl ServingTask {
+    fn start(
+        dir: &std::path::Path,
+        handle: Arc<HostHandle>,
+        transport: Arc<GateTransport>,
+    ) -> Self {
+        let host = Arc::downgrade(&handle);
+        let (shutdown, stopped) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(conn::run_until_shutdown(
+            dir.to_path_buf(),
+            handle,
+            transport,
+            stopped,
+        ));
+        Self {
+            shutdown,
+            task,
+            host,
+        }
+    }
+
+    async fn shutdown_and_join(self) {
+        self.shutdown.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(30), self.task)
+            .await
+            .expect("serving shutdown must drain; release provider gates before restart")
+            .expect("serving task must join")
+            .expect("serving shutdown must succeed");
+        assert!(
+            self.host.upgrade().is_none(),
+            "the predecessor Host must be gone before restart"
+        );
+    }
+
+    /// Final test teardown only; a restart always uses shutdown_and_join.
+    fn abort(&self) {
+        self.task.abort();
+    }
+}
+
 /// Serves `dir` with `transport`, pairs the first device, and completes
-/// setup; returns the serving handle, the server task, and a live client.
+/// setup; returns a weak Host observer, the serving owner, and a live client.
 async fn serve_and_setup(
     dir: std::path::PathBuf,
     transport: Arc<GateTransport>,
-) -> (
-    Arc<HostHandle>,
-    tokio::task::JoinHandle<Result<(), CoreError>>,
-    Client,
-) {
+) -> (Weak<HostHandle>, ServingTask, Client) {
     let handle = open_host(&dir).await;
-    let server = tokio::spawn(conn::run(dir.clone(), Arc::clone(&handle), transport));
+    let observer = Arc::downgrade(&handle);
+    let server = ServingTask::start(&dir, handle, transport);
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
@@ -360,7 +424,7 @@ async fn serve_and_setup(
     setup_flow(&mut client, &approver)
         .await
         .expect("setup must complete");
-    (handle, server, client)
+    (observer, server, client)
 }
 
 /// One conversation round over the socket: submit, require acceptance, drain
@@ -583,20 +647,20 @@ async fn wait_path(path: std::path::PathBuf) {
     }
 }
 
-/// Stops the server, reopens the Host on the same directory, and serves
-/// again with `transport`. Mirrors a Host restart; in-flight background
-/// executions of the old handle stay parked on the old transport.
+/// Gracefully joins the predecessor before opening and starting its successor.
 async fn restart_host(
     dir: &std::path::Path,
-    server: tokio::task::JoinHandle<Result<(), CoreError>>,
+    server: ServingTask,
     transport: Arc<GateTransport>,
-) -> (
-    Arc<HostHandle>,
-    tokio::task::JoinHandle<Result<(), CoreError>>,
-) {
-    server.abort();
-    tokio::task::yield_now().await;
-    drop(std::fs::remove_file(dir.join("ene.sock")));
+) -> (Weak<HostHandle>, ServingTask) {
+    server.shutdown_and_join().await;
+    start_restarted_host(dir, transport).await
+}
+
+async fn start_restarted_host(
+    dir: &std::path::Path,
+    transport: Arc<GateTransport>,
+) -> (Weak<HostHandle>, ServingTask) {
     let handle = open_host(dir).await;
     // Production startup mutations before the listener binds: normalization,
     // pairing cleanup, sweep, and sealed-result reconciliation.
@@ -604,12 +668,100 @@ async fn restart_host(
         .run_startup_mutations()
         .await
         .expect("restart startup must complete");
-    let server = tokio::spawn(conn::run(dir.to_path_buf(), Arc::clone(&handle), transport));
+    let observer = Arc::downgrade(&handle);
+    let server = ServingTask::start(dir, handle, transport);
     assert!(
         wait_for_listener(dir).await,
         "listener must rebind after restart"
     );
-    (handle, server)
+    (observer, server)
+}
+
+/// A persisted Present state from before process loss. Graceful teardown
+/// deliberately records disconnect first; after quiescence this fixture
+/// restores only the presence rows and log boundary that a crash would leave.
+struct PresenceCrashState {
+    companion: String,
+    state: String,
+    active_client: Option<String>,
+    generation: i64,
+    last_client: Option<String>,
+    recovery_destination: Option<String>,
+    last_transition: i64,
+}
+
+impl PresenceCrashState {
+    fn capture(dir: &std::path::Path) -> Self {
+        let db = rusqlite::Connection::open(dir.join("app.db")).unwrap();
+        let snapshot = db
+            .query_row(
+                "SELECT p.companion_id, p.state, p.active_client, p.generation,
+                    h.last_client, h.recovery_destination,
+                    (SELECT COALESCE(MAX(transition_seq), 0) FROM presence_transition_log
+                     WHERE companion_id = p.companion_id)
+             FROM presence_attribution p JOIN relocation_hint h USING (companion_id)",
+                (),
+                |row| {
+                    Ok(Self {
+                        companion: row.get(0)?,
+                        state: row.get(1)?,
+                        active_client: row.get(2)?,
+                        generation: row.get(3)?,
+                        last_client: row.get(4)?,
+                        recovery_destination: row.get(5)?,
+                        last_transition: row.get(6)?,
+                    })
+                },
+            )
+            .expect("present crash fixture must have attribution and relocation hint");
+        assert_eq!(snapshot.state, "present");
+        snapshot
+    }
+
+    fn restore_after_quiescence(self, dir: &std::path::Path) {
+        let mut db = rusqlite::Connection::open(dir.join("app.db")).unwrap();
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            tx.execute(
+                "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3
+             WHERE companion_id = ?4",
+                rusqlite::params![
+                    self.state,
+                    self.active_client,
+                    self.generation,
+                    self.companion
+                ],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.execute(
+                "UPDATE relocation_hint SET last_client = ?1, recovery_destination = ?2
+             WHERE companion_id = ?3",
+                rusqlite::params![self.last_client, self.recovery_destination, self.companion],
+            )
+            .unwrap(),
+            1
+        );
+        tx.execute(
+            "DELETE FROM presence_transition_log WHERE companion_id = ?1 AND transition_seq > ?2",
+            rusqlite::params![self.companion, self.last_transition],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+}
+
+async fn restart_host_from_presence_crash(
+    dir: &std::path::Path,
+    server: ServingTask,
+    transport: Arc<GateTransport>,
+) -> (Weak<HostHandle>, ServingTask) {
+    let crash = PresenceCrashState::capture(dir);
+    server.shutdown_and_join().await;
+    crash.restore_after_quiescence(dir);
+    start_restarted_host(dir, transport).await
 }
 
 /// Observation poll for the server-side disconnect fallback (not an
@@ -1586,11 +1738,10 @@ async fn s5_13_presence_states_across_restart() {
     let (state, generation) = presence_row(&dir);
     assert_eq!(state, "present", "first round summons presence");
 
-    // Present restarts into RecoveryWait with a new generation. The client
-    // stays connected across the restart (that is what keeps it Present);
-    // a later disconnect write from the old world loses against the new
-    // generation, so dropping this connection is safe.
-    let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport)).await;
+    // Preserve the crash's durable Present input explicitly, after joining
+    // graceful disconnect cleanup; no predecessor can write into recovery.
+    let (_handle, server) =
+        restart_host_from_presence_crash(&dir, server, Arc::clone(&transport)).await;
     let (state, recovery_generation) = presence_row(&dir);
     assert_eq!(state, "recovery_wait", "present must wait recovery");
     assert!(
@@ -1612,7 +1763,8 @@ async fn s5_13_presence_states_across_restart() {
     assert_eq!(state, "present", "the original client restores presence");
 
     // A re-crash mid-recovery neither duplicates nor resolves the wait.
-    let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport)).await;
+    let (_handle, server) =
+        restart_host_from_presence_crash(&dir, server, Arc::clone(&transport)).await;
     assert_eq!(presence_row(&dir).0, "recovery_wait");
     drop(c2);
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport)).await;
@@ -1742,6 +1894,7 @@ async fn s5_15_restart_launches_nothing_and_shows_lifecycle() {
     drop(c1);
 
     // Restart with a fresh, silent transport: nothing old may launch.
+    transport.fail(4);
     let silent = Arc::new(GateTransport::new(Vec::new(), &[]));
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&silent)).await;
     let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
@@ -1838,7 +1991,7 @@ async fn s5_16_explicit_resume_mints_r_plus_1_once_per_path() {
     transport_a.wait_sends(3).await;
     drop(c1);
 
-    // Crash mid-execution, then restart with a fresh transport: the new
+    // End the old provider wait without a result, then restart: the new
     // execution must not auto-send (S5-18 adjacency), and the interrupted
     // r1 must list with no reservation held.
     // T_b calls: 1 create-A2, 2 final-A2, 3 propose-B, 4 read-B,
@@ -1856,6 +2009,7 @@ async fn s5_16_explicit_resume_mints_r_plus_1_once_per_path() {
         ],
         &[5],
     ));
+    transport_a.fail(3);
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_b)).await;
     let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
@@ -1998,6 +2152,7 @@ async fn s5_16_explicit_resume_mints_r_plus_1_once_per_path() {
         ],
         &[],
     ));
+    transport_b.fail(5);
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_c)).await;
     let mut c3 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
@@ -2107,6 +2262,7 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     // Restart with the resumed execution held before its first send, so no
     // completion can interfere with the gate assertions.
     let transport_b = Arc::new(GateTransport::new(vec![String::from("held")], &[1]));
+    transport_a.fail(3);
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_b)).await;
     let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
@@ -2161,7 +2317,7 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     assert_eq!(transport_b.sends(), 1, "retry launches nothing");
     assert_eq!(table_count(&dir, "delegation"), 2, "retry commits nothing");
 
-    // Crash before the held execution sends anything, then restart silent:
+    // End the held call without a result, then restart silent:
     // the old command never auto-resends. Over the socket the old
     // connection's task ref already resolves to nothing (refs are
     // connection-scoped, so ref resolution precedes the epoch compare that
@@ -2169,6 +2325,7 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     // and nothing launches.
     drop(c2);
     let transport_c = Arc::new(GateTransport::new(Vec::new(), &[]));
+    transport_b.fail(1);
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_c)).await;
     let mut c3 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
@@ -2266,20 +2423,6 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
 
 /// Observation poll for a durable table count (background completion, not
 /// ordering; ordering uses provider gates).
-async fn wait_table_count(dir: &std::path::Path, table: &str, wanted: i64) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if table_count(dir, table) >= wanted {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "{table} did not reach {wanted}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 fn delegation_ids(dir: &std::path::Path, task: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     let mut statement = conn
@@ -2312,10 +2455,10 @@ fn task_results(dir: &std::path::Path) -> Vec<(String, i64, String, Option<i64>)
 /// recorded once to the original execution and sealed there — adoption is
 /// original-only, the resumed Task waits for (and completes with) only its
 /// own delegation, and old evidence never moves into the new delegation's
-/// relied set. The resume commits on the restarted Host, whose launch
-/// registry is empty (a live parked execution on the same handle answers
-/// AlreadyRunning, per S5-17); the crashed-but-parked old run then delivers
-/// its gated final, which records stale-revisioned to the original only.
+/// relied set. The old provider call ends without a result before graceful
+/// restart. A late-arrival fixture then enters the successor's canonical
+/// arrival/adoption boundaries with the immutable original execution refs;
+/// no predecessor Host or runner survives into the successor's lifetime.
 /// Late failures go stale and settlements stay attempt-local at owner level
 /// (`result_arrival` / `resume_orchestration`); the socket E2E pins the
 /// result-routing observables.
@@ -2325,8 +2468,8 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
     let dir = temp.path().to_path_buf();
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
-    // T_a calls: 1 propose, 2 read, 3 create, 4 final-d1 (held across the
-    // crash: the old run stays parked on the old handle).
+    // T_a calls: 1 propose, 2 read, 3 create, 4 final-d1 (held, then failed
+    // without a result so graceful shutdown can join the original runner).
     let transport_a = Arc::new(GateTransport::new(
         vec![
             task_reply(
@@ -2354,10 +2497,23 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
         .into_iter()
         .next()
         .expect("d1 must exist");
+    let original = {
+        let predecessor = _handle.upgrade().expect("predecessor is serving");
+        predecessor
+            .store_for_tests()
+            .load_delegation(ene_task::DelegationId::from_raw(
+                ene_primitive::RawId::from_uuid(uuid::Uuid::parse_str(&d1).unwrap()),
+            ))
+            .await
+            .expect("original delegation must load")
+            .expect("original delegation must exist")
+    };
+    assert_eq!(original.task.revision.as_u64(), 1);
+    transport_a.fail(4);
     drop(c1);
 
-    // Crash with the old final still gated, then resume on the restarted
-    // Host (empty launch registry: no AlreadyRunning). The new delegation's
+    // Join the old runner before opening the restarted Host (empty launch
+    // registry: no AlreadyRunning). The new delegation's
     // own final is held so the late arrival lands while r2 still waits.
     // T_b calls: 1 create-B2, 2 final-B2 (held).
     let transport_b = Arc::new(GateTransport::new(
@@ -2370,6 +2526,11 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
         &[2],
     ));
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_b)).await;
+    assert_eq!(
+        table_count(&dir, "task_result"),
+        0,
+        "the old call ended without a result"
+    );
     let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
         .expect("reconnect must succeed");
@@ -2405,8 +2566,47 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
     // The old final arrives late: recorded once to the original execution
     // and sealed there, never adopted as the Task's completion — r2 still
     // waits for its own delegation.
-    transport_a.unblock(4);
-    wait_table_count(&dir, "task_result", 1).await;
+    {
+        let successor = _handle.upgrade().expect("successor is serving");
+        let store = successor.store_for_tests();
+        let credentials = memory_store();
+        let scrubbed = CredentialScrubber {
+            refs: store,
+            store: &credentials,
+        }
+        .scrub("created report.md")
+        .await
+        .expect("late result must be scrubbed");
+        let arrival = ene_task::orchestrate_result_arrival(
+            store,
+            original.delegation,
+            ene_task::TaskResultScrubPremise::from_scrubbed(scrubbed),
+        )
+        .await
+        .expect("canonical late arrival must record");
+        let ene_task::TaskResultArrivalOutcome::Recorded(result) = arrival else {
+            panic!("late arrival must have a current credential premise");
+        };
+        assert_eq!(result.task, original.task);
+        assert_eq!(result.delegation, original.delegation);
+        let claim = store
+            .load_result_adoption_claim(result.result)
+            .await
+            .expect("original execution's attempt set must load")
+            .expect("late result must exist");
+        assert_eq!(
+            claim.attempt_refs.len(),
+            2,
+            "only the original read and create belong to d1"
+        );
+        assert_eq!(
+            store
+                .adopt_result(claim)
+                .await
+                .expect("late adoption must answer"),
+            ene_task::TaskResultAcceptance::RecordedToOriginalOnly,
+        );
+    }
     let results = task_results(&dir);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1, 1, "old result stays at its revision");
@@ -2643,8 +2843,7 @@ async fn s5_23_second_host_serves_nothing_and_mutates_nothing() {
         .expect("winner task must complete");
     assert_eq!(page.tasks[0].revision, 1);
     drop(c1);
-    server_a.abort();
-    tokio::task::yield_now().await;
+    server_a.shutdown_and_join().await;
 
     // Handoff: with the winner gone, the same loser binds the stale socket
     // and serves — one server, never two.
