@@ -7,10 +7,9 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+ene-client = { path = "../../crates/ene-client" }
 ene-config = { path = "../../crates/ene-config" }
 ene-api = { path = "../../crates/ene-api" }
-ene-credential = { path = "../../crates/ene-credential" }
-ene-plugin-ipc = { path = "../../crates/ene-plugin-ipc" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

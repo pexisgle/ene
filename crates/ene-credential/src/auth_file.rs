@@ -83,6 +83,17 @@ pub struct FileDeviceAuthStore {
     path: PathBuf,
 }
 
+/// A clone names the same protected file that
+/// [`FileDeviceAuthStore::open`] already validated; cloning never re-opens,
+/// re-reads, or re-checks the file.
+impl Clone for FileDeviceAuthStore {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+        }
+    }
+}
+
 impl core::fmt::Debug for FileDeviceAuthStore {
     /// The read is best-effort: an unreadable or unparseable file renders
     /// the count as `"unreadable"` instead of failing.
@@ -279,6 +290,61 @@ impl FileDeviceAuthStore {
             return Ok(false);
         };
         Ok(verify_pairing_proof(text, nonce, proof_hex))
+    }
+
+    /// Removes every entry whose device key or stored descriptor contains the
+    /// exact `target` text, returning the number of removed entries.
+    ///
+    /// This is the Targeted Deletion erasure for the protected device-auth
+    /// file: device display descriptors are caller-supplied text, and a key
+    /// can be the target itself. Removing an entry also removes that device's
+    /// local verification material, so the device must pair again — a local
+    /// erasure, never a statement about the device's trust elsewhere. A no-op
+    /// target (nothing matches) never rewrites the file, so a duplicate sweep
+    /// has no second effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the lock
+    /// or the file cannot be read, the staging temp cannot be written, the
+    /// atomic replace fails, or protection cannot be re-established. An
+    /// unreadable file fails closed rather than reporting an erasure that
+    /// cannot be proven.
+    pub fn erase_target_text(&self, target: &str) -> Result<u64, CredentialTechnicalError> {
+        if target.is_empty() {
+            return Ok(0);
+        }
+        self.with_mutation_lock(|| {
+            let mut entries = self.read_entries()?;
+            let before = entries.len();
+            entries
+                .retain(|key, entry| !key.contains(target) && !entry.descriptor.contains(target));
+            let removed = before - entries.len();
+            if removed > 0 {
+                self.write_entries(&entries)?;
+            }
+            Ok(removed as u64)
+        })
+    }
+
+    /// Counts entries whose device key or stored descriptor still contains the
+    /// exact `target` text: the bounded remainder check for the same surface
+    /// [`Self::erase_target_text`] covers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the file
+    /// cannot be read or fails validation, so an unproven remainder is never
+    /// reported as zero.
+    pub fn count_target_text(&self, target: &str) -> Result<u64, CredentialTechnicalError> {
+        if target.is_empty() {
+            return Ok(0);
+        }
+        let entries = self.read_entries()?;
+        Ok(entries
+            .iter()
+            .filter(|(key, entry)| key.contains(target) || entry.descriptor.contains(target))
+            .count() as u64)
     }
 
     fn read_entries(&self) -> Result<BTreeMap<String, StoredDeviceAuth>, CredentialTechnicalError> {

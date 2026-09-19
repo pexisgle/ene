@@ -1,0 +1,26 @@
+[package]
+name = "ene-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ene-api = { path = "../ene-api" }
+ene-config = { path = "../ene-config" }
+ene-primitive = { path = "../ene-primitive" }
+ene-plugin-ipc = { path = "../ene-plugin-ipc" }
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

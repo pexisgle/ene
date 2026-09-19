@@ -1,14 +1,16 @@
 use crate::Store;
+mod publication;
 use ene_companion::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
-    HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
-    ReportStatusTransition, RoundIntentMark, UndeliveredRepository,
+    ActivityId, ActivityRepository as _, AppendHistoryCommand, CommandId, CompanionId,
+    CompanionLifecycle, CompanionRepository, CompanionTechnicalError, HistoryAppendOutcome,
+    HistoryRepository, HistoryRole, PresentationMark, RecordResumeActivityCommand, ReportStatus,
+    ReportStatusTransition, ResumeActivityOutcome, RoundIntentMark, UndeliveredRepository,
 };
 use ene_credential::{
     CredentialApprovalRepository, CredentialIntentRepository as _, CredentialRef,
-    CredentialRefRepository, CredentialSetRepository, CredentialSetRevision,
-    DevicePairingRepository, DevicePairingStatus, MemoryCredentialStore, RegistrationApply,
-    RegistrationFingerprint, RegistrationState,
+    CredentialRefRepository, CredentialScrubber, CredentialSetRepository, CredentialSetRevision,
+    CredentialTechnicalError, DevicePairingRepository, DevicePairingStatus, MemoryCredentialStore,
+    RegistrationApply, RegistrationFingerprint, RegistrationState,
 };
 use ene_inference::{
     AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _,
@@ -34,9 +36,9 @@ use ene_task::{
     DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome, TaskCommitPremise,
     TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
     TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise, TaskPurpose,
-    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskRevision,
-    TaskTechnicalError, WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceFolderRef,
-    WorkspaceNeedRef,
+    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskResultArrivalOutcome,
+    TaskResultRecord, TaskResultScrubPremise, TaskRevision, TaskTechnicalError, WorkspaceAssocId,
+    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
 };
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -140,6 +142,28 @@ fn history_command_with_ids(
         round_intent: command_id.map(|_| RoundIntentMark::Auto),
         incarnation: Some((1, 2)),
         local_id: local_id.map(String::from),
+    }
+}
+
+/// Records one resume-instruction activity and returns its identity.
+///
+/// The A4 held path (`HeldForErasure`) is exercised by its own boundary
+/// tests; this helper is the committed path the existing AU17 coverage
+/// expects, and reports a held outcome as an unavailability so those legacy
+/// assertions keep their `Result` shape without conflating the outcome in
+/// production code.
+async fn record_activity_id(
+    store: &Store,
+    cmd: RecordResumeActivityCommand,
+) -> Result<ActivityId, CompanionTechnicalError> {
+    match store.record_resume_activity(cmd).await {
+        Ok(ResumeActivityOutcome::Recorded(activity)) => Ok(activity),
+        Ok(ResumeActivityOutcome::HeldForErasure) => {
+            Err(CompanionTechnicalError::StorageUnavailable {
+                reason: String::from("activity held for erasure"),
+            })
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -458,7 +482,7 @@ async fn reply_after_newer_owner_input_is_stale() {
     stale_reply.role = HistoryRole::Companion;
     stale_reply.expected_owner_message = Some(owner1);
     let (outcome, registered) = store
-        .append_reply_with_undelivered(stale_reply, true)
+        .append_reply_with_undelivered(stale_reply, true, None)
         .await
         .unwrap();
     assert_eq!(
@@ -474,7 +498,7 @@ async fn reply_after_newer_owner_input_is_stale() {
     current_reply.role = HistoryRole::Companion;
     current_reply.expected_owner_message = Some(owner2);
     let (outcome, _) = store
-        .append_reply_with_undelivered(current_reply, true)
+        .append_reply_with_undelivered(current_reply, true, None)
         .await
         .unwrap();
     assert!(
@@ -593,7 +617,11 @@ async fn undelivered_register_mark_and_stale_mark() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
     let appended = store
-        .append_reply_with_undelivered(history_command(companion, generation, "reply body"), true)
+        .append_reply_with_undelivered(
+            history_command(companion, generation, "reply body"),
+            true,
+            None,
+        )
         .await;
     let (outcome, registered) = appended.unwrap();
     assert!(
@@ -1080,7 +1108,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         Some("send-1"),
     );
     let first = store
-        .append_reply_with_undelivered(base.clone(), true)
+        .append_reply_with_undelivered(base.clone(), true, None)
         .await;
     let (first_outcome, first_registered) = first.unwrap();
     let HistoryAppendOutcome::CommittedAs { message: first_id } = first_outcome else {
@@ -1091,7 +1119,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         "first commit registers undelivered"
     );
     let retry = store
-        .append_reply_with_undelivered(base.clone(), true)
+        .append_reply_with_undelivered(base.clone(), true, None)
         .await;
     let (retry_outcome, retry_registered) = retry.unwrap();
     let HistoryAppendOutcome::AlreadyCommittedAs { message, round } = retry_outcome else {
@@ -2380,8 +2408,10 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
         expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(rev)),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
+        data_use: Vec::new(),
         task_agent: None,
         pricing: None,
+        usage_estimate: None,
     };
     let ticket = InferenceTicketId(RawId::new());
     let started = store.begin_inference_attempt(claim(ticket, 1)).await;
@@ -2490,6 +2520,7 @@ async fn restart_keeps_timeline_intact() {
         .append_reply_with_undelivered(
             history_command(companion, current.generation, "second"),
             false,
+            None,
         )
         .await;
     assert!(second_append.is_ok(), "second append must succeed");
@@ -2594,6 +2625,7 @@ fn commit(summary: Option<SummaryRecord>, change: MemoryChange) -> MemoryChangeC
     MemoryChangeCommit {
         summary,
         secret_premise: None,
+        claim: None,
         change,
     }
 }
@@ -3852,7 +3884,7 @@ async fn approval_sweep_redacts_task_and_activity_bodies() {
     use ene_companion::{
         ActivityRepository as _, RecordResumeActivityCommand, TaskFact, UndeliveredSource,
     };
-    use ene_task::{TaskAgentOutput, TaskReportSourceRef, orchestrate_result_arrival};
+    use ene_task::TaskReportSourceRef;
 
     let secret = "sk-sweep-task-body";
     let store = open_memory().await.unwrap();
@@ -3908,15 +3940,15 @@ async fn approval_sweep_redacts_task_and_activity_bodies() {
             .expect("the delegation must commit"),
         DelegationOutcome::Delegated(_)
     ));
-    let arrival = orchestrate_result_arrival(
+    let arrival = record_result(
         &store,
         delegation,
-        TaskAgentOutput::new(format!("final report mentions {secret}")),
+        &format!("final report mentions {secret}"),
     )
-    .await
-    .expect("the result must record");
-    let activity = store
-        .record_resume_activity(RecordResumeActivityCommand {
+    .await;
+    let activity = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion: CompanionId::from_raw(companion),
             task: current,
             purpose: TaskPurposeRef {
@@ -3925,9 +3957,10 @@ async fn approval_sweep_redacts_task_and_activity_bodies() {
             },
             body: format!("continue from the key {secret}"),
             command: RawId::new(),
-        })
-        .await
-        .expect("the activity must record");
+        },
+    )
+    .await
+    .expect("the activity must record");
 
     approve_pair(&store, "openai", "main", secret, "reg-sweep-task-body").await;
 
@@ -4120,6 +4153,7 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(evidence.clone()),
             secret_premise: Some(premise),
+            claim: None,
             change: learning_change(
                 companion,
                 MemoryTarget::New { id: memory },
@@ -4187,8 +4221,10 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
             expected_credential_set: premise,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
+            usage_estimate: None,
         })
         .await;
     assert_eq!(
@@ -4264,8 +4300,10 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
             expected_credential_set: stale_proof.credential_set(),
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
+            usage_estimate: None,
         })
         .await;
     assert_eq!(
@@ -4304,8 +4342,10 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
             expected_credential_set: fresh_proof.credential_set(),
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
+            usage_estimate: None,
         })
         .await;
     assert_eq!(
@@ -4384,6 +4424,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(evidence.clone()),
             secret_premise: Some(premise),
+            claim: None,
             change: learning_change(
                 companion,
                 MemoryTarget::New { id: memory },
@@ -4415,6 +4456,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(learning_summary(companion, "fresh evidence")),
             secret_premise: Some(updated),
+            claim: None,
             change: learning_change(
                 companion,
                 MemoryTarget::New { id: fresh_memory },
@@ -4470,8 +4512,10 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
             expected_credential_set: premise,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
+            usage_estimate: None,
         })
         .await;
     assert_eq!(stale, Ok(AttemptBeginOutcome::Stale));
@@ -4486,8 +4530,10 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
             expected_credential_set: updated,
             provider: String::from("openai"),
             model: String::from("dialogue-1"),
+            data_use: Vec::new(),
             task_agent: None,
             pricing: None,
+            usage_estimate: None,
         })
         .await;
     assert_eq!(fresh, Ok(AttemptBeginOutcome::Started));
@@ -7267,18 +7313,87 @@ async fn delegation_creation_faults_roll_back_every_write() {
     assert_eq!(task_table_count(&store, "delegation"), 1);
 }
 
+/// A readable credential registry with no refs, pinned at one revision.
+struct EmptyRevisionRegistry(CredentialSetRevision);
+
+impl CredentialRefRepository for EmptyRevisionRegistry {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError> {
+        Ok(Vec::new())
+    }
+}
+
+impl CredentialSetRepository for EmptyRevisionRegistry {
+    #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+    async fn current_set_revision(
+        &self,
+    ) -> Result<CredentialSetRevision, CredentialTechnicalError> {
+        Ok(self.0)
+    }
+}
+
+/// Scrubs `text` through the credential-owned boundary under `revision`; the
+/// returned premise is the only way a test can name a Task result body.
+async fn scrubbed_result_at(revision: CredentialSetRevision, text: &str) -> TaskResultScrubPremise {
+    use ene_credential::SecretScrubber as _;
+
+    let registry = EmptyRevisionRegistry(revision);
+    let values = MemoryCredentialStore::new();
+    TaskResultScrubPremise::from_scrubbed(
+        ene_credential::CredentialScrubber {
+            refs: &registry,
+            store: &values,
+        }
+        .scrub(text)
+        .await
+        .expect("the empty fixture registry is readable"),
+    )
+}
+
+/// Scrubs `text` under the store's current credential-set revision.
+async fn scrubbed_result(store: &Store, text: &str) -> TaskResultScrubPremise {
+    let revision = store
+        .current_set_revision()
+        .await
+        .expect("the fixture credential-set revision reads");
+    scrubbed_result_at(revision, text).await
+}
+
+/// Records one result through the production arrival boundary and returns the
+/// recorded result. Fixtures scrub at the current revision, so a stale
+/// refusal here would be a fixture error.
+async fn record_result(store: &Store, delegation: DelegationId, text: &str) -> TaskResultRecord {
+    match orchestrate_result_arrival(store, delegation, scrubbed_result(store, text).await)
+        .await
+        .expect("the arrival must answer")
+    {
+        TaskResultArrivalOutcome::Recorded(record) => record,
+        TaskResultArrivalOutcome::StaleCredentialSet { .. } => {
+            panic!("the fixture scrubbed at the current revision")
+        }
+    }
+}
+
 mod action;
 mod agent;
 mod cancel;
+mod client_delivery;
+mod completion;
+mod delayed_arrival;
 mod deletion_request;
 mod erasure;
+mod erasure_owners;
+mod participant_erasure;
 mod presence;
 mod preservation;
 mod report_reads;
 mod result_reevaluation;
 mod resume;
+mod source_reconciliation;
 mod targeted_deletion;
 mod task_failure;
 mod task_result;
 mod undelivered;
 mod usage;
+mod usage_cap;
+mod usage_query;

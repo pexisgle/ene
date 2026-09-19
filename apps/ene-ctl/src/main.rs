@@ -247,6 +247,58 @@ fn ene_ctl_command() -> clap::Command {
                         .value_parser(clap::value_parser!(u32)),
                 ),
         )
+        .subcommand(
+            clap::Command::new("usage")
+                .about("Read one bounded page of usage / cost and the current caps")
+                .arg(Arg::new("from").long("from").value_name("RFC3339"))
+                .arg(Arg::new("to").long("to").value_name("RFC3339"))
+                .arg(Arg::new("provider").long("provider").value_name("NAME"))
+                .arg(Arg::new("model").long("model").value_name("NAME"))
+                .arg(Arg::new("consumer").long("consumer").value_name("NAME"))
+                .arg(Arg::new("purpose").long("purpose").value_name("NAME"))
+                .arg(
+                    Arg::new("status")
+                        .long("status")
+                        .value_name("reported|unknown|reserved"),
+                )
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u32)),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("usage-cap")
+                .about("Set or update one system/provider daily/monthly usage cap")
+                .arg(
+                    Arg::new("scope")
+                        .long("scope")
+                        .value_name("system|provider")
+                        .default_value("system"),
+                )
+                .arg(Arg::new("provider").long("provider").value_name("NAME"))
+                .arg(
+                    Arg::new("window")
+                        .long("window")
+                        .value_name("daily_utc|monthly_utc")
+                        .default_value("daily_utc"),
+                )
+                .arg(
+                    Arg::new("currency")
+                        .long("currency")
+                        .value_name("CODE")
+                        .default_value("USD"),
+                )
+                .arg(
+                    Arg::new("limit-micros")
+                        .long("limit-micros")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u64))
+                        .required(true),
+                ),
+        )
 }
 
 struct Cli {
@@ -372,6 +424,52 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             cursor: sub.get_one::<String>("cursor").cloned(),
             limit: sub.get_one::<u32>("limit").copied(),
         },
+        "usage" => cmds::Command::Usage(cmds::UsageArgs {
+            from: sub.get_one::<String>("from").cloned(),
+            to: sub.get_one::<String>("to").cloned(),
+            provider: sub.get_one::<String>("provider").cloned(),
+            model: sub.get_one::<String>("model").cloned(),
+            consumer: sub.get_one::<String>("consumer").cloned(),
+            purpose: sub.get_one::<String>("purpose").cloned(),
+            status: sub.get_one::<String>("status").cloned(),
+            cursor: sub.get_one::<String>("cursor").cloned(),
+            limit: sub.get_one::<u32>("limit").copied(),
+        }),
+        "usage-cap" => {
+            let scope = sub
+                .get_one::<String>("scope")
+                .cloned()
+                .unwrap_or_else(|| String::from("system"));
+            let provider = sub.get_one::<String>("provider").cloned();
+            match (scope.as_str(), provider.as_deref()) {
+                ("system", None) => {}
+                ("provider", Some(_)) => {}
+                ("system", Some(_)) => {
+                    return Err(usage_error(
+                        "--provider is only valid with --scope provider",
+                    ));
+                }
+                ("provider", None) => {
+                    return Err(usage_error("--scope provider requires --provider NAME"));
+                }
+                _ => return Err(usage_error("--scope must be system or provider")),
+            }
+            cmds::Command::UsageCap {
+                scope,
+                provider,
+                window: sub
+                    .get_one::<String>("window")
+                    .cloned()
+                    .unwrap_or_else(|| String::from("daily_utc")),
+                currency: sub
+                    .get_one::<String>("currency")
+                    .cloned()
+                    .unwrap_or_else(|| String::from("USD")),
+                limit_micros: *sub
+                    .get_one::<u64>("limit-micros")
+                    .ok_or_else(|| usage_error("usage-cap requires --limit-micros N"))?,
+            }
+        }
         other => return Err(usage_error(format!("unknown command: {other}"))),
     };
     Ok(Cli { config, command })
@@ -564,6 +662,115 @@ async fn run_command(
             let response = request_deletion_status(&mut session, cursor.as_deref(), limit).await?;
             emit(&cmds::render_deletion_status(&response))
         }
+        cmds::Command::Usage(args) => {
+            let response = request_usage(&mut session, &args).await?;
+            emit(&cmds::render_usage_page(&response))
+        }
+        cmds::Command::UsageCap {
+            scope,
+            provider,
+            window,
+            currency,
+            limit_micros,
+        } => {
+            run_usage_cap(
+                &mut session,
+                &scope,
+                provider.as_deref(),
+                &window,
+                &currency,
+                limit_micros,
+            )
+            .await
+        }
+    }
+}
+
+/// One bounded usage summary read. `Reject` (a malformed filter the Host
+/// refuses) stays distinct from `Unavailable` (the read could not answer) and
+/// from a stale cursor.
+async fn request_usage(
+    session: &mut client::Client,
+    args: &cmds::UsageArgs,
+) -> Result<ene_api::v1::usage::UsageSummaryResponse, CliError> {
+    match session
+        .request(WirePayload::UsageSummaryRequest(cmds::usage_request(args)))
+        .await?
+    {
+        WirePayload::UsageSummaryResponse(response) => Ok(response),
+        WirePayload::Reject(notice) => Err(CliError::ServerRejected(format!(
+            "usage request rejected: {}",
+            notice.detail
+        ))),
+        unexpected => Err(CliError::ServerRejected(format!(
+            "unexpected {} while reading usage; expected UsageSummaryResponse",
+            unexpected.message_type()
+        ))),
+    }
+}
+
+/// Sets or updates one usage cap through the permission-owned command.
+///
+/// The Client only proposes: it first reads the bounded usage page so the
+/// intent's base view is the mark the Host issued for exactly this slot, then
+/// sends the shared-grammar cap target. The Host re-checks the current
+/// authenticated connection, the mark, and the cap revision; a stale answer
+/// means the Owner re-reads instead of overwriting.
+async fn run_usage_cap(
+    session: &mut client::Client,
+    scope: &str,
+    provider: Option<&str>,
+    window: &str,
+    currency: &str,
+    limit_micros: u64,
+) -> Result<(), CliError> {
+    let args = cmds::UsageArgs {
+        from: None,
+        to: None,
+        provider: provider.map(str::to_owned),
+        model: None,
+        consumer: None,
+        purpose: None,
+        status: None,
+        cursor: None,
+        limit: Some(1),
+    };
+    let response = request_usage(session, &args).await?;
+    let ene_api::v1::usage::UsageSummaryResponse::Page(page) = response else {
+        return Err(CliError::ServerOutcome(String::from(
+            "usage is unavailable; cannot build a cap base view",
+        )));
+    };
+    let Some(base) = cmds::usage_cap_mark_for(&page, scope, provider, window) else {
+        return Err(CliError::ServerOutcome(String::from(
+            "the usage read did not name this cap slot; retry later",
+        )));
+    };
+    let intent = cmds::usage_cap_intent(
+        CommandWireId(uuid::Uuid::new_v4()),
+        base,
+        scope,
+        provider,
+        window,
+        currency,
+        limit_micros,
+    );
+    let outcome = match session
+        .request(WirePayload::ManagementIntent(intent))
+        .await?
+    {
+        WirePayload::ManagementOutcome(outcome) => outcome,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
+                "unexpected {} while applying an intent; expected ManagementOutcome",
+                unexpected.message_type()
+            )));
+        }
+    };
+    match cmds::describe_management(&outcome) {
+        cmds::ManagementAction::Applied { detail } => emit(&detail),
+        cmds::ManagementAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
+        cmds::ManagementAction::Terminal { message } => Err(CliError::ServerRejected(message)),
     }
 }
 
@@ -597,16 +804,18 @@ async fn run_deletion(
         purpose,
         text,
     );
-    let outcome = session
+    let outcome = match session
         .request(WirePayload::ManagementIntent(intent))
-        .await
-        .and_then(|payload| match payload {
-            WirePayload::ManagementOutcome(outcome) => Ok(outcome),
-            unexpected => Err(CliError::ServerRejected(format!(
+        .await?
+    {
+        WirePayload::ManagementOutcome(outcome) => outcome,
+        unexpected => {
+            return Err(CliError::ServerRejected(format!(
                 "unexpected {} while applying an intent; expected ManagementOutcome",
                 unexpected.message_type()
-            ))),
-        })?;
+            )));
+        }
+    };
     match cmds::describe_management(&outcome) {
         cmds::ManagementAction::Applied { detail } => emit(&format!(
             "{detail}; confirm it on the Host PC (`ene-core pending-deletions`)"
@@ -1636,5 +1845,134 @@ mod tests {
                 "an unshown {status:?} stream observes unknown and fails"
             );
         }
+    }
+
+    #[test]
+    fn usage_forms_parse_into_filters_and_reject_misuse() {
+        use super::cmds::{Command as Cmd, UsageArgs};
+
+        let cli = parse(&[
+            "usage",
+            "--from",
+            "2026-09-01T00:00:00Z",
+            "--to",
+            "2026-09-02T00:00:00Z",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-x",
+            "--consumer",
+            "companion_dialogue",
+            "--purpose",
+            "dialogue_response",
+            "--status",
+            "reported",
+            "--cursor",
+            "cursor-1",
+            "--limit",
+            "10",
+        ])
+        .expect("the full usage form parses");
+        assert!(
+            cli.command
+                == Cmd::Usage(UsageArgs {
+                    from: Some(String::from("2026-09-01T00:00:00Z")),
+                    to: Some(String::from("2026-09-02T00:00:00Z")),
+                    provider: Some(String::from("openai")),
+                    model: Some(String::from("gpt-x")),
+                    consumer: Some(String::from("companion_dialogue")),
+                    purpose: Some(String::from("dialogue_response")),
+                    status: Some(String::from("reported")),
+                    cursor: Some(String::from("cursor-1")),
+                    limit: Some(10),
+                })
+        );
+        let bare = parse(&["usage"]).expect("a filter-less usage read parses");
+        assert!(
+            bare.command
+                == Cmd::Usage(UsageArgs {
+                    from: None,
+                    to: None,
+                    provider: None,
+                    model: None,
+                    consumer: None,
+                    purpose: None,
+                    status: None,
+                    cursor: None,
+                    limit: None,
+                })
+        );
+        assert!(matches!(
+            parse(&["usage", "--limit", "many"]),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn usage_cap_forms_parse_and_validate_scope_pairing() {
+        use super::cmds::Command as Cmd;
+
+        let system = parse(&["usage-cap", "--limit-micros", "1000"])
+            .expect("the default system daily form parses");
+        assert!(
+            system.command
+                == Cmd::UsageCap {
+                    scope: String::from("system"),
+                    provider: None,
+                    window: String::from("daily_utc"),
+                    currency: String::from("USD"),
+                    limit_micros: 1_000,
+                }
+        );
+        let provider = parse(&[
+            "usage-cap",
+            "--scope",
+            "provider",
+            "--provider",
+            "openai",
+            "--window",
+            "monthly_utc",
+            "--currency",
+            "USD",
+            "--limit-micros",
+            "42",
+        ])
+        .expect("the provider monthly form parses");
+        assert!(
+            provider.command
+                == Cmd::UsageCap {
+                    scope: String::from("provider"),
+                    provider: Some(String::from("openai")),
+                    window: String::from("monthly_utc"),
+                    currency: String::from("USD"),
+                    limit_micros: 42,
+                }
+        );
+        // A scope/provider disagreement is a usage error, never a guessed
+        // slot.
+        assert!(matches!(
+            parse(&["usage-cap", "--scope", "provider", "--limit-micros", "1"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&[
+                "usage-cap",
+                "--scope",
+                "system",
+                "--provider",
+                "openai",
+                "--limit-micros",
+                "1"
+            ]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&["usage-cap", "--scope", "global", "--limit-micros", "1"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&["usage-cap", "--limit-micros", "many"]),
+            Err(CliError::Usage(_))
+        ));
     }
 }

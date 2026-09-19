@@ -70,7 +70,7 @@
 //! - [`HostHandle`] methods take `&self`: every lock guard is dropped before
 //!   the next await, and no handle-wide async lock spans provider I/O.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -85,9 +85,9 @@ use ene_companion::{CompanionId, CompanionRepository};
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialRefRepository as _, CredentialStore,
     CredentialTechnicalError, DevicePairingRepository, DeviceRecord, EnvCredentialStore,
-    FileDeviceAuthStore, MemoryCredentialStore,
+    FileDeviceAuthStore, MemoryCredentialStore, VersionedCredentialStore as _,
 };
-use ene_inference::ProviderTransport;
+use ene_inference::{ProviderTransport, UsageRepository as _};
 use ene_permission::EvaluationTracker;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, FallbackCandidate, LiveReachabilityRef, MoveDecision,
@@ -137,6 +137,8 @@ pub enum CoreError {
     AlreadyRunning,
     #[error("bind failed: {0}")]
     Bind(String),
+    #[error("serving task failed: {0}")]
+    Serving(String),
     #[error("inference failed: {0}")]
     Inference(String),
     /// Unknown descriptors list the pending descriptors so the Owner can
@@ -152,6 +154,10 @@ pub enum CoreError {
     Deletion(String),
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(&'static str),
+    /// Exclusive first-party control seat is held by another connection.
+    /// Callers must not fall through to the Client channel.
+    #[error("first-party control seat occupied; do not fall through to the Client channel")]
+    SeatOccupied,
 }
 
 /// Where Host responses go at the point they are decided.
@@ -222,14 +228,23 @@ impl FrameSink for tokio::sync::mpsc::Sender<WireFrame> {
 ///
 /// [`CredentialStore::with_bearer`] is generic over its closure return type,
 /// so the trait is not dyn-compatible and the handle holds this closed enum
-/// instead of a trait object. [`CredStore::Env`] is the production store for
-/// the `openai` provider (the bearer is read from the process environment
-/// once at Host startup and pinned in memory for the run, never re-read);
-/// [`CredStore::Memory`] is the test and local-development store.
+/// instead of a trait object. [`CredStore::Env`] is the test/dev environment
+/// adapter (the bearer is read from the process environment once at Host
+/// startup and pinned in memory for the run, never re-read). It is not a
+/// product source of truth: serving-time [`CredentialStore::put`] fail-closes.
+/// [`CredStore::Memory`] is the test and local-development store. Product
+/// durable storage is an OS protected store; a provisional adapter is not
+/// pinned here.
 #[derive(Debug)]
 pub enum CredStore {
     Env(EnvCredentialStore),
     Memory(MemoryCredentialStore),
+    /// The product backend: the OS protected store, written through the
+    /// credential owner's version publication, never by a bare `put`.
+    Os(ene_credential::OsCredentialStore),
+    /// Versioned in-memory backend for tests: the same publication protocol
+    /// without an OS store, never a product source of truth.
+    MemoryVersioned(ene_credential::MemoryVersionedStore),
 }
 
 impl CredentialStore for CredStore {
@@ -241,6 +256,8 @@ impl CredentialStore for CredStore {
         match self {
             Self::Env(inner) => inner.with_bearer(cred, f),
             Self::Memory(inner) => inner.with_bearer(cred, f),
+            Self::Os(inner) => inner.with_bearer(cred, f),
+            Self::MemoryVersioned(inner) => inner.with_bearer(cred, f),
         }
     }
 
@@ -248,6 +265,97 @@ impl CredentialStore for CredStore {
         match self {
             Self::Env(inner) => inner.contains(cred),
             Self::Memory(inner) => inner.contains(cred),
+            Self::Os(inner) => inner.contains(cred),
+            Self::MemoryVersioned(inner) => inner.contains(cred),
+        }
+    }
+
+    fn put(&self, cred: &CredentialRef, secret: &str) -> Result<(), CredentialTechnicalError> {
+        match self {
+            Self::Env(inner) => inner.put(cred, secret),
+            Self::Memory(inner) => inner.put(cred, secret),
+            Self::Os(inner) => inner.put(cred, secret),
+            Self::MemoryVersioned(inner) => inner.put(cred, secret),
+        }
+    }
+}
+
+impl CredStore {
+    /// True when this backend can publish credential versions.
+    ///
+    /// The product path uses the OS store; tests may use the versioned
+    /// in-memory backend to exercise the same protocol. A backend without
+    /// versions (environment store, plain in-memory store) reports false, so
+    /// the Host says registration is unavailable rather than publishing a
+    /// value nothing can activate.
+    #[must_use]
+    pub fn supports_versions(&self) -> bool {
+        match self {
+            Self::Os(_) | Self::MemoryVersioned(_) => true,
+            Self::Env(_) | Self::Memory(_) => false,
+        }
+    }
+}
+
+impl ene_credential::VersionedCredentialStore for CredStore {
+    fn put_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        secret: &str,
+    ) -> Result<(), CredentialTechnicalError> {
+        match self {
+            Self::Os(inner) => inner.put_version(cred, version, secret),
+            Self::MemoryVersioned(inner) => inner.put_version(cred, version, secret),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot publish credential versions",
+                    cred.id()
+                ),
+            }),
+        }
+    }
+
+    fn with_version<R>(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError> {
+        match self {
+            Self::Os(inner) => inner.with_version(cred, version, f),
+            Self::MemoryVersioned(inner) => inner.with_version(cred, version, f),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot read credential versions",
+                    cred.id()
+                ),
+            }),
+        }
+    }
+
+    fn activate(&self, cred: &CredentialRef, version: u64) {
+        match self {
+            Self::Os(inner) => inner.activate(cred, version),
+            Self::MemoryVersioned(inner) => inner.activate(cred, version),
+            Self::Env(_) | Self::Memory(_) => {}
+        }
+    }
+
+    fn delete_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<(), CredentialTechnicalError> {
+        match self {
+            Self::Os(inner) => inner.delete_version(cred, version),
+            Self::MemoryVersioned(inner) => inner.delete_version(cred, version),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot remove credential versions",
+                    cred.id()
+                ),
+            }),
         }
     }
 }
@@ -444,6 +552,21 @@ pub struct HostHandle {
     pub(crate) open_rounds: StdMutex<HashMap<(String, String), OpenRound>>,
     pub(crate) rounds: Arc<StdMutex<HashMap<String, RoundId>>>,
     pub(crate) cred_store: CredStore,
+    /// Exclusive Host-local first-party control seat. At most one live
+    /// speaker; reconnect invalidates outstanding confirmation sessions.
+    pub(crate) control_seat: crate::host_control::FirstPartyControlSeat,
+    /// This Host's data directory: the requester listener, the GUI spawn, and
+    /// the child's environment are all derived from it.
+    pub(crate) data_dir: std::path::PathBuf,
+    /// Serializes `OpenDesktop` so concurrent launchers cannot start two GUIs.
+    pub(crate) gui_open: AsyncMutex<()>,
+    /// The GUI child this Host started, if any.
+    pub(crate) gui_child: StdMutex<Option<crate::host_control::GuiProcess>>,
+    /// In-flight confirmation-channel dispatches. The serving composition
+    /// joins them on shutdown, so an operation admitted by the Owner's surface
+    /// finishes (or is refused) before the Host releases its authority and no
+    /// task outlives the handle it borrows.
+    pub(crate) confirmation_tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
     /// File-backed pairing-secret store by device, opened on
     /// `<data_dir>/device-auth.json`.
     ///
@@ -459,8 +582,15 @@ pub struct HostHandle {
     /// completion. See
     /// [`crate::dialogue`]: the pass is post-response work, never a condition
     /// of the client-visible completion, and a crash simply drops the queued
-    /// derived update instead of replaying an old pass.
-    pub(crate) learning_queue: StdMutex<VecDeque<ene_learning::ExperienceCandidate>>,
+    /// derived update instead of replaying an old pass. Shared with the
+    /// Host-transient erasure participant (A3c), which drops covered premises.
+    /// A worker-owned `taken` slot keeps a popped candidate visible until its
+    /// body-free formation identity is published.
+    pub(crate) learning_queue: Arc<StdMutex<crate::transient_erasure::LearningFormationQueue>>,
+    /// Process-local linearization of HostTransient Learning arrivals against
+    /// Verified-commit and finalizing. Shared with
+    /// [`crate::transient_erasure::HostTransientParticipant`].
+    pub(crate) host_transient_arrival: Arc<crate::transient_erasure::HostTransientArrival>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.
     pub(crate) learning_worker: AsyncMutex<()>,
@@ -520,6 +650,59 @@ pub struct HostHandle {
     /// reopening composition re-registers its implementations before driving,
     /// so a restart can never turn a missing implementation into completion.
     pub(crate) targeted_deletion: StdMutex<crate::targeted_deletion::ErasureParticipantRegistry>,
+    /// Serving-time retry pacing for retryable Targeted Deletion holds.
+    ///
+    /// Owned only by the serving tick: one bounded tick holds the async mutex
+    /// for its duration so two concurrent ticks cannot double-drive the same
+    /// hold. In-memory and never authority: it decides no phase, converts no
+    /// hold into a completion, and a restart drops it (startup recovery
+    /// resumes independently). See
+    /// [`HeldRetrySchedule`](crate::targeted_deletion::HeldRetrySchedule).
+    pub(crate) deletion_hold_retry: AsyncMutex<crate::targeted_deletion::HeldRetrySchedule>,
+    /// Process-local serialization of every Targeted Deletion fan-out and
+    /// finalization entry (drive, serving tick, confirmation kick, startup
+    /// recovery).
+    ///
+    /// This is not a second deletion authority: currentness, completion, and
+    /// participant facts stay in the canonical store. It only ensures one
+    /// participant demand cannot still be in-flight in this process while
+    /// another driver Completes the same operation, so a non-rollbackable
+    /// side effect (process memory, device-auth file, Client wire wipe)
+    /// cannot run after closure. A Host restart drops the in-flight work and
+    /// resumes from durable store state.
+    pub(crate) targeted_deletion_drive: AsyncMutex<()>,
+    /// Serving-composition Targeted Deletion *async* drivers currently bound
+    /// to this handle. The listener owns at most one. This is not started
+    /// `spawn_blocking` Store work; graceful restart joins that work before
+    /// dropping the predecessor handle.
+    deletion_drivers: std::sync::atomic::AtomicUsize,
+    /// Test (and graceful-restart) wake for one bounded serving tick without
+    /// waiting for [`crate::conn`]'s 15s period.
+    pub(crate) deletion_driver_wake: tokio::sync::Notify,
+    /// Deterministic coordination of the real serving composition in tests.
+    #[cfg(test)]
+    pub(crate) serving_test: Arc<crate::conn::shutdown_tests::ServingTest>,
+    /// Parks an admitted control confirmation outside transport cancellation.
+    #[cfg(test)]
+    pub(crate) host_control_confirm_gate: StdMutex<Option<Arc<TestGate>>>,
+    /// Invalidation fence for in-flight Host transient payloads (A3c).
+    ///
+    /// Bumped by the Host-transient erasure demand; a dialogue stream or
+    /// assembled reply that started before the bump can no longer prove its
+    /// payload is uncovered and fails closed. Holds no deletion condition, so
+    /// it is not a second currentness registry.
+    pub(crate) transient_fence: Arc<crate::transient_erasure::TransientErasureFence>,
+    /// In-flight local-erasure demand plumbing for Client incarnations
+    /// (A3c, lifecycle §8.1).
+    ///
+    /// The evidence itself is durable (`client_delivery_evidence`): the
+    /// serving composition writes it before a body leaves the Host, and
+    /// admission reads it, so a restart drops only the pending waiters while
+    /// every incarnation that may hold a target-bearing copy is still named.
+    /// Reachability still resolves through the connection table, so an
+    /// incarnation from an earlier Host process is an explicit unreachable
+    /// hold instead of a guessed delivery.
+    pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
     /// Test-only deterministic gate for conversation task-control commands.
     #[cfg(test)]
     pub(crate) task_control_gate:
@@ -540,6 +723,11 @@ pub struct HostHandle {
     /// Test-only pause after a confirmation read and before durable commit.
     #[cfg(test)]
     pub(crate) confirm_commit_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
+    /// Test-only pause between a body-display path's coverage premise read and
+    /// the durable delivery-evidence write, so a test can commit a condition
+    /// in that exact window.
+    #[cfg(test)]
+    pub(crate) delivery_evidence_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
     /// Test-only deterministic gate before a read query's connection-scoped
     /// ref/cursor mint.
     #[cfg(test)]
@@ -565,6 +753,11 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
+    #[cfg(test)]
+    pub(crate) fn host_control_confirm_gate(&self) -> Option<Arc<TestGate>> {
+        crate::lock_unpoison(&self.host_control_confirm_gate).clone()
+    }
+
     /// Opens (or creates) the Host state under `data_dir` with the production
     /// credential store.
     ///
@@ -584,18 +777,40 @@ impl HostHandle {
     /// Returns [`CoreError::Store`] when the directory cannot be ensured or
     /// the database cannot be opened or migrated.
     pub async fn open(data_dir: &Path) -> Result<Self, CoreError> {
-        Self::open_with_cred_store(data_dir, CredStore::Env(EnvCredentialStore::new())).await
+        // The product path prefers the OS protected store: credentials are
+        // published as versions there, and a Host without one reports
+        // registration as unavailable rather than pretending. The environment
+        // store stays available for development and for the existing env-based
+        // deployments, where the value is pinned at startup.
+        let store = if std::env::var(ene_credential::ENV_API_KEY).is_ok() {
+            CredStore::Env(EnvCredentialStore::new())
+        } else {
+            CredStore::Os(ene_credential::OsCredentialStore::new(
+                ene_credential::DEFAULT_NAMESPACE,
+            ))
+        };
+        Self::open_with_cred_store(data_dir, store).await
     }
 
     /// Runs the serving startup mutations in production order (PR §6.4):
     /// presence normalization, unapproved-pairing cleanup, credential sweep,
-    /// and sealed-result reconciliation. Normalization goes first because
+    /// sealed-result reconciliation, orphaned usage-reservation
+    /// reconciliation, and Targeted Deletion recovery. Normalization goes
+    /// first because
     /// every client-dependent admission depends on it, while the sweep and
     /// reconciliation do not; unapproved pendings never survive a restart
     /// (paired records are untouched); the sweep keeps the Host from serving
     /// content prepared under an unknown credential set; reconciliation
     /// neither resumes an execution nor replays a provider call or Action,
-    /// and a still-blocked result stays withheld. The
+    /// and a still-blocked result stays withheld. Orphaned reservations
+    /// settle `CommittedUnknown` (`usage-cost-cap` §15): a crash never
+    /// releases a usage slot and never resets consumption to zero. Targeted
+    /// Deletion recovery runs last: it reads the durable unfinished
+    /// operations, resumes a retryable hold (recovery, lifecycle §5.1/§14),
+    /// leaves `GenerationExhausted` held (fail closed), and drives bounded
+    /// fan-out passes so an operation admitted by an earlier process is
+    /// advanced before the listener admits work — a restart is never taken
+    /// as completion evidence. The
     /// [`crate::serve::lifecycle::serve`] entry point runs this
     /// between the store open and the listener bind; Host-integration tests
     /// run it to restart faithfully without a second listener. Like
@@ -606,14 +821,72 @@ impl HostHandle {
     /// # Errors
     ///
     /// [`CoreError::Store`] when normalization, the pairing cleanup, the
-    /// sweep, or the reconciliation cannot complete.
+    /// sweep, the sealed-result reconciliation, or the usage-reservation
+    /// reconciliation cannot complete, and [`CoreError::Deletion`] when
+    /// Targeted Deletion recovery cannot drive the durable operations.
     pub async fn run_startup_mutations(&self) -> Result<(), CoreError> {
         self.normalize_presence_on_startup().await?;
         self.clear_unapproved_pendings().await?;
+        self.reconcile_credential_publication().await?;
         self.sweep_registered_values().await?;
         self.reconcile_sealed_results()
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
+        self.store
+            .reconcile_orphaned_usage_reservations()
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        self.recover_targeted_deletion_on_startup().await?;
+        Ok(())
+    }
+
+    /// Reconciles the credential publication state before the Host serves.
+    ///
+    /// Every registered credential's active version is read from the durable
+    /// record and pointed at in the OS store, so routine authentication reads
+    /// the version the last activation committed. A registered credential
+    /// whose item is missing or unreadable stays **unactive**: the Host fails
+    /// closed for it rather than falling back to an older value, an environment
+    /// variable, or a different provider.
+    ///
+    /// An unfinished mutation is deliberately left alone. `Prepared` and
+    /// `Staged` records may have written an OS item, so they are neither
+    /// activated nor re-written here: an unknown write result is reconciled by
+    /// inspection, never by repeating the write, and a restart never applies a
+    /// past decision the Owner did not make.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when the durable records cannot be read.
+    pub async fn reconcile_credential_publication(&self) -> Result<(), CoreError> {
+        use ene_credential::{CredentialPublicationRepository as _, VersionedCredentialStore as _};
+
+        if !self.cred_store.supports_versions() {
+            return Ok(());
+        }
+        let refs = ene_credential::CredentialRefRepository::list_refs(&self.store)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        for credential in refs {
+            let active = self
+                .store
+                .active_credential_version(credential.provider(), credential.label())
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            let Some(version) = active.active else {
+                continue;
+            };
+            // Verify the item before pointing reads at it: an activated
+            // version whose value the OS store no longer holds must read as
+            // unavailable, not as an empty or older credential.
+            let readable = self
+                .cred_store
+                .with_version(&credential, version.as_u64(), |_| ())
+                .is_ok();
+            if readable {
+                self.cred_store.activate(&credential, version.as_u64());
+            }
+        }
         Ok(())
     }
 
@@ -644,27 +917,53 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))?;
         let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
             .map_err(|error| CoreError::Store(error.to_string()))?;
+        let presentations = Arc::new(StdMutex::new(
+            crate::presentation::PresentationState::default(),
+        ));
+        let learning_queue = Arc::new(StdMutex::new(
+            crate::transient_erasure::LearningFormationQueue::default(),
+        ));
+        let host_transient_arrival =
+            Arc::new(crate::transient_erasure::HostTransientArrival::default());
+        let transient_fence = Arc::new(crate::transient_erasure::TransientErasureFence::default());
+        let client_transients = Arc::new(crate::transient_erasure::ClientTransientRegistry::new(
+            store.clone(),
+        ));
         let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
             open_rounds: StdMutex::new(HashMap::new()),
             rounds: Arc::new(StdMutex::new(HashMap::new())),
             cred_store,
+            control_seat: crate::host_control::FirstPartyControlSeat::default(),
+            data_dir: data_dir.to_path_buf(),
+            gui_open: AsyncMutex::new(()),
+            gui_child: StdMutex::new(None),
+            confirmation_tasks: StdMutex::new(Vec::new()),
             auth_store,
-            learning_queue: StdMutex::new(VecDeque::new()),
+            learning_queue: Arc::clone(&learning_queue),
+            host_transient_arrival: Arc::clone(&host_transient_arrival),
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: std::sync::Arc::new(crate::task_run::TaskExecutionRegistry::default()),
             conversation_tasks: crate::task_control::ConversationTaskProjection::default(),
-            presentations: Arc::new(StdMutex::new(
-                crate::presentation::PresentationState::default(),
-            )),
+            presentations: Arc::clone(&presentations),
             presentation_lock: AsyncMutex::new(()),
             trusted_task_premises: crate::task_control::TrustedTaskPremises::default(),
             task_launcher: OnceLock::new(),
             targeted_deletion: StdMutex::new(
                 crate::targeted_deletion::ErasureParticipantRegistry::new(),
             ),
+            deletion_hold_retry: AsyncMutex::new(crate::targeted_deletion::HeldRetrySchedule::new()),
+            targeted_deletion_drive: AsyncMutex::new(()),
+            deletion_drivers: std::sync::atomic::AtomicUsize::new(0),
+            deletion_driver_wake: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            serving_test: Arc::default(),
+            #[cfg(test)]
+            host_control_confirm_gate: StdMutex::new(None),
+            transient_fence: Arc::clone(&transient_fence),
+            client_transients,
             #[cfg(test)]
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -678,6 +977,8 @@ impl HostHandle {
             #[cfg(test)]
             confirm_commit_gate: StdMutex::new(None),
             #[cfg(test)]
+            delivery_evidence_gate: StdMutex::new(None),
+            #[cfg(test)]
             ref_mint_gate: StdMutex::new(None),
             #[cfg(test)]
             fetch_gate: StdMutex::new(None),
@@ -688,21 +989,74 @@ impl HostHandle {
             #[cfg(all(test, unix))]
             receipt_expiry_runs: std::sync::atomic::AtomicUsize::new(0),
         };
-        // The composition registers the built-in local-erasure implementations
-        // for the owners the store serves (lifecycle §9): a reopening
-        // composition re-registers before any drive, so a restart can never
-        // turn a missing implementation into completion.
-        handle
-            .register_deletion_participant(Arc::new(ene_store::CompanionErasureParticipant::new(
-                handle.store.clone(),
-            )))
-            .map_err(|error| CoreError::Deletion(error.to_string()))?;
-        handle
-            .register_deletion_participant(Arc::new(ene_store::LearningErasureParticipant::new(
-                handle.store.clone(),
-            )))
-            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        // The composition root owns the concrete participant mapping: the
+        // current product surface's local owners are registered before the
+        // handle is handed out, so a fan-out never sees an admitted
+        // requirement whose implementation this process simply forgot to add.
+        handle.install_local_erasure_participants()?;
         Ok(handle)
+    }
+
+    /// Registers the local-erasure implementations of the current product
+    /// surface (lifecycle §9).
+    ///
+    /// This is the composition seam: `ene-preservation` owns the trait and
+    /// never depends on a concrete participant crate, and each implementation
+    /// lives with its owner's durable master. An owner without an
+    /// implementation stays an explicit unsupported hold; this method only
+    /// adds the implementations that exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Deletion`] if an owner already has an
+    /// implementation, which would make the fan-out nondeterministic.
+    fn install_local_erasure_participants(&self) -> Result<(), CoreError> {
+        use std::sync::Arc;
+
+        let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 8] = [
+            Arc::new(ene_store::CompanionErasureParticipant::new(
+                self.store.clone(),
+            )),
+            Arc::new(ene_store::LearningErasureParticipant::new(
+                self.store.clone(),
+            )),
+            Arc::new(ene_store::TaskErasureParticipant::new(self.store.clone())),
+            Arc::new(ene_store::ActionErasureParticipant::new(self.store.clone())),
+            Arc::new(ene_store::InferenceErasureParticipant::new(
+                self.store.clone(),
+            )),
+            Arc::new(ene_permission::PermissionErasureParticipant::new(Arc::new(
+                self.store.clone(),
+            ))),
+            Arc::new(ene_credential::CredentialErasureParticipant::new(
+                Arc::new(self.store.clone()),
+                Arc::new(self.auth_store.clone()),
+            )),
+            Arc::new(ene_presence::PresenceErasureParticipant::new(Arc::new(
+                self.store.clone(),
+            ))),
+        ];
+        for participant in participants {
+            self.register_deletion_participant(participant)?;
+        }
+        let host_transient = Arc::new(crate::transient_erasure::HostTransientParticipant::new(
+            self.store.clone(),
+            self.transient_fence.clone(),
+            self.presentations.clone(),
+            self.learning_queue.clone(),
+            Arc::clone(&self.host_transient_arrival),
+        ));
+        crate::lock_unpoison(&self.targeted_deletion)
+            .register_host_transient(host_transient)
+            .map_err(|owner| {
+                CoreError::Deletion(format!(
+                    "duplicate deletion participant for owner class {}",
+                    owner.class_name()
+                ))
+            })?;
+        crate::lock_unpoison(&self.targeted_deletion)
+            .install_client_transients(Arc::clone(&self.client_transients));
+        Ok(())
     }
 
     /// Startup credential boundary: sweeps every registered pinned value out
@@ -735,6 +1089,67 @@ impl HostHandle {
 
     pub(crate) fn companion_wire(&self) -> &str {
         &self.companion_wire
+    }
+
+    /// The composition store handle this Host cloned into participants.
+    ///
+    /// Parks live on this in-memory instance. A second [`Store::open`] on the
+    /// same file would not share them, so production-path race tests must arm
+    /// the serving handle's store rather than reopening the database. Park
+    /// methods exist only on a `test-support` / `cfg(test)` store build;
+    /// this accessor itself is the integration-test seam onto the same
+    /// in-process store the participants already hold.
+    #[doc(hidden)]
+    pub fn store_for_tests(&self) -> &Store {
+        &self.store
+    }
+
+    /// Whether the serving credential store holds `(provider, label)`.
+    ///
+    /// Integration-test seam for Stage 7 A1 serving-time put. Never returns
+    /// secret material.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn credential_contains_for_tests(&self, provider: &str, label: &str) -> bool {
+        CredentialRef::new(provider, label).is_ok_and(|cred| self.cred_store.contains(&cred))
+    }
+
+    /// How many serving-composition Targeted Deletion drivers currently hold
+    /// this handle. Production keeps this at 0 or 1. This is the async driver
+    /// future, not started `spawn_blocking` Store work.
+    #[doc(hidden)]
+    pub fn live_targeted_deletion_drivers_for_tests(&self) -> usize {
+        self.deletion_drivers
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wakes the serving Targeted Deletion driver so tests can start one
+    /// bounded tick without waiting for the 15s period.
+    #[doc(hidden)]
+    pub fn wake_deletion_driver_for_tests(&self) {
+        self.deletion_driver_wake.notify_waiters();
+    }
+
+    /// Bounds one Client local-erasure silence wait. Production never calls
+    /// this; the 30s hold bound stays the product wait.
+    #[doc(hidden)]
+    pub fn set_client_erasure_wait_for_tests(&self, limit: std::time::Duration) {
+        self.client_transients.set_wait_limit_for_test(limit);
+    }
+
+    /// Marks a serving-composition Targeted Deletion driver as live on this
+    /// handle. Paired with [`Self::end_deletion_driver`] from the driver task
+    /// Drop, including abort, so a successor Host can observe that the
+    /// predecessor driver is gone.
+    pub(crate) fn begin_deletion_driver(&self) {
+        self.deletion_drivers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Marks that serving-composition Targeted Deletion driver as gone.
+    pub(crate) fn end_deletion_driver(&self) {
+        self.deletion_drivers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Resolves an inbound companion wire ref to its domain companion.
@@ -819,16 +1234,73 @@ impl HostHandle {
     }
 
     /// Required participant snapshot for a newly admitted operation: the
-    /// current product surface's semantic owners (lifecycle §8).
+    /// current product surface's semantic owners plus every Client incarnation
+    /// with durable uncleared body-delivery evidence (lifecycle §8).
     ///
     /// The set is snapshotted durably with the operation admission; later
     /// changes in the registered implementations never widen an admitted
-    /// operation, and an owner with no implementation is still required.
-    /// Client-incarnation owners are appended by the Client-transient slice
-    /// once it can identify which incarnation may hold a target-bearing copy.
+    /// operation, and an owner with no implementation is still required. The
+    /// Client part is read from the canonical `client_delivery_evidence`
+    /// table, not from process memory: a Host restart that emptied the
+    /// in-memory demand plumbing still names every incarnation that may hold a
+    /// target-bearing local copy, and a Client that only sent requests has no
+    /// row and is not claimed — an incarnation the Host cannot name is never
+    /// invented (lifecycle §8.1).
+    ///
+    /// A failed evidence read fails the whole snapshot closed: an incomplete
+    /// required set must never be admitted as if it were authoritative.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when the durable delivery evidence cannot be read.
+    pub async fn required_deletion_participants(
+        &self,
+    ) -> Result<Vec<ene_preservation::ParticipantOwnerRef>, CoreError> {
+        let mut owners = crate::targeted_deletion::current_product_surface_owners();
+        let mut after = None;
+        loop {
+            // Pages bound each upstream read; admission walks to a short page
+            // rather than truncating, because a dropped incarnation would be a
+            // missing required participant.
+            let page = self
+                .store
+                .client_delivery_evidence_incarnations(after, 100)
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            if page.is_empty() {
+                break;
+            }
+            let short = page.len() < 100;
+            after = page.last().copied();
+            owners.extend(
+                page.into_iter()
+                    .map(ene_preservation::ParticipantOwnerRef::ClientIncarnation),
+            );
+            if short {
+                break;
+            }
+        }
+        Ok(owners)
+    }
+
+    /// Installs the serving composition's connection table as the authority
+    /// for Client-incarnation reachability (lifecycle §8.1).
+    ///
+    /// A handle opened without a serving composition has no table: every
+    /// Client demand is then an explicit unreachable hold instead of a
+    /// guessed delivery path.
+    pub(crate) fn install_client_connection_table(&self, table: std::sync::Arc<ConnectionTable>) {
+        self.client_transients.install_connection_table(table);
+    }
+
+    /// The current Host transient erasure fence epoch (A3c).
+    ///
+    /// A dialogue stream or assembled reply captures it at start and fails
+    /// closed when it moved: no transient payload published across the move
+    /// can prove it is uncovered.
     #[must_use]
-    pub fn required_deletion_participants(&self) -> Vec<ene_preservation::ParticipantOwnerRef> {
-        crate::targeted_deletion::current_product_surface_owners()
+    pub(crate) fn transient_fence_epoch(&self) -> u64 {
+        self.transient_fence.epoch()
     }
 
     /// Test-only: empties the erasure-participant registry.
@@ -846,12 +1318,15 @@ impl HostHandle {
     /// Runs one bounded Targeted Deletion fan-out pass over the durable
     /// unfinished operations.
     ///
-    /// Only active operations are driven: held operations wait for an explicit
-    /// resume decision and finalizing operations belong to the completion
-    /// boundary. Participants already verified for the current sweep are never
-    /// demanded again, so a crash mid-fan-out continues with only the
-    /// unfinished participants (§14); the durable snapshot and the operation
-    /// identity are never regenerated.
+    /// Active operations are driven through their participants and then
+    /// through the sealed completion boundary; held operations wait for an
+    /// explicit resume decision; finalizing operations resume the remaining
+    /// completion steps from their durable marker. Participants already
+    /// verified for the current sweep are never demanded again, so a crash
+    /// mid-fan-out continues with only the unfinished participants (§14); the
+    /// durable snapshot and the operation identity are never regenerated.
+    /// Production entries serialize on the process-local drive lock so one
+    /// in-flight demand cannot overlap another driver's completion.
     ///
     /// # Errors
     ///
@@ -861,8 +1336,92 @@ impl HostHandle {
         &self,
         pass: crate::targeted_deletion::TargetedDeletionPass,
     ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
+        let _drive = self.targeted_deletion_drive.lock().await;
         let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
         crate::targeted_deletion::drive_targeted_deletion(&self.store, &registry, pass).await
+    }
+
+    /// Runs one bounded serving-time Targeted Deletion tick (lifecycle §14).
+    ///
+    /// The serving composition calls this periodically from a single driver
+    /// task. One tick issues at most one backed-off resume of a retryable
+    /// `Held(Unavailable)` operation and then exactly one bounded fan-out pass
+    /// ([`TargetedDeletionPass::default`](crate::targeted_deletion::TargetedDeletionPass::default));
+    /// a hold therefore cannot be
+    /// retried in a tight loop, and `Held(GenerationExhausted)` is never
+    /// resumed. Concurrent callers serialize on the process-local drive lock
+    /// (and then the retry schedule), so two ticks cannot double-drive one
+    /// hold or complete an operation while another demand is in-flight; the
+    /// durable store still owns every idempotency and completion premise.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Deletion`] when the canonical store refuses. A failed tick
+    /// must not stop serving and must not infer any outcome: the durable
+    /// operation state stays authoritative and a later tick re-derives it.
+    pub async fn run_targeted_deletion_tick(
+        &self,
+    ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
+        let _drive = self.targeted_deletion_drive.lock().await;
+        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
+        let mut schedule = self.deletion_hold_retry.lock().await;
+        crate::targeted_deletion::tick_targeted_deletion(
+            &self.store,
+            &registry,
+            crate::targeted_deletion::TargetedDeletionPass::default(),
+            &mut schedule,
+        )
+        .await
+    }
+
+    /// Restores unfinished Targeted Deletion operations at startup (lifecycle
+    /// §14).
+    ///
+    /// Runs inside [`HostHandle::run_startup_mutations`], after the state open
+    /// and before the listener binds: a retryable `Held(Unavailable)`
+    /// operation is resumed as the restart's recovery decision, every
+    /// `Active` / `Finalizing` operation is driven through bounded fan-out
+    /// passes, and `Held(GenerationExhausted)` stays held. Failures are
+    /// technical and fail startup; a still-held or unfinished operation is a
+    /// domain state, not an error. Shares the process-local drive lock with
+    /// the serving tick and confirmation kick.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Deletion`] when the canonical store refuses the recovery
+    /// drive.
+    pub(crate) async fn recover_targeted_deletion_on_startup(&self) -> Result<(), CoreError> {
+        let _drive = self.targeted_deletion_drive.lock().await;
+        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
+        crate::targeted_deletion::recover_targeted_deletions(
+            &self.store,
+            &registry,
+            crate::targeted_deletion::TargetedDeletionPass::default(),
+            crate::targeted_deletion::BOUNDED_DRIVE_PASS_BUDGET,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Best-effort bounded drive right after a destructive admission.
+    ///
+    /// The Owner's confirmation is already durable and the canonical operation
+    /// exists; this kick is not part of the admission decision. A failed kick
+    /// must not make the caller report the confirmation as failed — the
+    /// durable operation stays for the serving tick or the next startup
+    /// recovery — and it never estimates completion, because every pass
+    /// re-derives its premises inside the sealed store boundary. Shares the
+    /// process-local drive lock with the serving tick and startup recovery.
+    pub(crate) async fn kick_targeted_deletion(&self) {
+        let _drive = self.targeted_deletion_drive.lock().await;
+        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
+        let _drive_outcome = crate::targeted_deletion::drive_targeted_deletion_until_settled(
+            &self.store,
+            &registry,
+            crate::targeted_deletion::TargetedDeletionPass::default(),
+            crate::targeted_deletion::BOUNDED_DRIVE_PASS_BUDGET,
+        )
+        .await;
     }
 
     pub(crate) fn task_launcher(
@@ -909,7 +1468,7 @@ impl HostHandle {
     ///
     /// [`TaskAgentRunError`] for storage and inference technical failures;
     /// stale, terminal, sealed, already-started, already-running,
-    /// reservation, refused, and
+    /// reservation, a stale final-result credential premise, refused, and
     /// not-sent answers stay domain outcomes inside [`TaskAgentRunOutcome`].
     pub async fn run_task_agent<T: ProviderTransport + Send + Sync>(
         &self,
@@ -1267,6 +1826,31 @@ impl HostHandle {
                     }
                 }
             }
+            WirePayload::UsageSummaryRequest(query) => {
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "usage summary on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
+                }
+                for response in self.usage_summary_wire(&frame, &live, query).await {
+                    if sink.emit(response).is_err() {
+                        break;
+                    }
+                }
+            }
+            WirePayload::LocalErasureResult(result) => {
+                if let Some(refusal) =
+                    Self::gate_refusal(&frame, &live, "erasure result on a superseded connection")
+                {
+                    return emit_end(sink, refusal);
+                }
+                // A client report, not a command: it answers an outstanding
+                // demand for this connection's incarnation when it matches one
+                // and changes nothing otherwise. No reply is emitted — a
+                // local-erasure result is itself the fact, and it is never
+                // global completion (lifecycle §10).
+                self.accept_client_erasure_result(&live, result).await;
+            }
             // Inbound rejects, stray acks, and future variants answer
             // nothing: only the Host rejects, and only in response.
             _ => {}
@@ -1585,6 +2169,180 @@ impl HostHandle {
         }
     }
 
+    /// Serving-time credential intake: stores `secret` through
+    /// [`CredentialStore::put`]. Usable-ref publication remains
+    /// [`HostHandle::approve_credential`]. Errors never carry the secret.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when the backend refuses the put.
+    pub async fn put_credential(
+        &self,
+        provider: &str,
+        label: &str,
+        secret: &str,
+    ) -> Result<bool, CoreError> {
+        let Ok(credential) = CredentialRef::new(provider, label) else {
+            return Ok(false);
+        };
+        self.cred_store
+            .put(&credential, secret)
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        Ok(true)
+    }
+
+    /// Publishes one credential through the version protocol and activates it.
+    ///
+    /// This is the product registration path: a mutation is recorded before
+    /// the OS write, the candidate lands in a **new** item, and one transaction
+    /// sweeps both the candidate and the value it replaces, points the active
+    /// reference at the candidate, advances the credential-set revision, and
+    /// records the outcome. Only after that commit is the running adapter
+    /// pointed at the new version, so a read before the commit still resolves
+    /// the previous one.
+    ///
+    /// A write whose result is unknown is reconciled by reading the recorded
+    /// item; it is never repeated blindly. The returned outcome distinguishes
+    /// activation, staleness, refusal, and an unknown result, and never carries
+    /// the value.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when the durable journal cannot be read or written.
+    pub async fn publish_credential(
+        &self,
+        provider: &str,
+        label: &str,
+        mutation_id: &str,
+        secret: &str,
+    ) -> Result<ene_credential::MutationOutcome, CoreError> {
+        use ene_credential::{
+            ActivationOutcome, CredentialPublicationRepository as _, MutationKind, MutationOutcome,
+            SecretVersionId,
+        };
+
+        let Ok(credential) = CredentialRef::new(provider, label) else {
+            return Ok(MutationOutcome::Refused);
+        };
+        let mutation = self
+            .store
+            .begin_credential_mutation(
+                mutation_id.to_string(),
+                MutationKind::Register,
+                provider.to_string(),
+                label.to_string(),
+                None,
+            )
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        // A retry of a decided mutation answers from its stored outcome: the
+        // decision is never re-applied and the value is never re-sent.
+        if let Some(outcome) = mutation.outcome {
+            return Ok(outcome);
+        }
+        if !self.cred_store.supports_versions() {
+            // No version-capable backend means no registration surface: the
+            // value is not stored and the mutation says so instead of
+            // pretending.
+            let outcome = MutationOutcome::Refused;
+            self.store
+                .record_credential_mutation_outcome(mutation_id, outcome.clone())
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            return Ok(outcome);
+        }
+        let os = &self.cred_store;
+        let version = mutation
+            .candidate_version
+            .map(SecretVersionId::as_u64)
+            .unwrap_or_else(|| {
+                // Version ids come from the monotonic set revision: a version
+                // is never reused, so a retired item keeps its own name.
+                0
+            });
+        let version = if version == 0 {
+            ene_credential::CredentialSetRepository::current_set_revision(&self.store)
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?
+                .as_u64()
+                .checked_add(1)
+                .ok_or_else(|| CoreError::Store(String::from("credential version exhausted")))?
+        } else {
+            version
+        };
+        let candidate = SecretVersionId::from_u64(version);
+        match mutation.candidate_version {
+            Some(recorded) if recorded == candidate => {}
+            Some(_) => {}
+            None => {
+                // The OS item is written before the phase records it, so a
+                // crash between the two is reconciled by the read below rather
+                // than by writing again.
+                match os.put_version(&credential, version, secret) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        // "Already published" is the ambiguous case: the value
+                        // may be there from an interrupted attempt, so it is
+                        // verified instead of reported as a failure.
+                        if !os
+                            .with_version(&credential, version, |bearer| bearer == secret)
+                            .unwrap_or(false)
+                        {
+                            let outcome = MutationOutcome::Refused;
+                            self.store
+                                .record_credential_mutation_outcome(mutation_id, outcome.clone())
+                                .await
+                                .map_err(|error| CoreError::Store(error.to_string()))?;
+                            return Ok(outcome);
+                        }
+                        let _ = error;
+                    }
+                }
+                self.store
+                    .mark_credential_staged(mutation_id, candidate)
+                    .await
+                    .map_err(|error| CoreError::Store(error.to_string()))?;
+            }
+        }
+        let previous = self
+            .store
+            .active_credential_version(provider, label)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        // The replaced value is swept inside the activation transaction: its
+        // bytes are read here only to remove them from stored content, and they
+        // never leave this scope.
+        let retired_bearer = previous.active.and_then(|retired| {
+            os.with_version(&credential, retired.as_u64(), str::to_owned)
+                .ok()
+        });
+        let activation = self
+            .store
+            .activate_credential(mutation_id, secret, retired_bearer.as_deref())
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        match activation {
+            ActivationOutcome::Activated { revision, retired } => {
+                os.activate(&credential, version);
+                // The retired item is removed after the commit, and the record
+                // says so only once the removal succeeded: a failure leaves the
+                // cleanup pending rather than claiming the value is gone.
+                if let Some(retired) = retired
+                    && os.delete_version(&credential, retired.as_u64()).is_ok()
+                {
+                    self.store
+                        .mark_credential_cleaned(provider, label, retired)
+                        .await
+                        .map_err(|error| CoreError::Store(error.to_string()))?;
+                }
+                Ok(MutationOutcome::Activated { revision })
+            }
+            ActivationOutcome::Stale { .. } => Ok(MutationOutcome::Stale),
+            ActivationOutcome::AlreadyDecided(outcome) => Ok(outcome),
+            ActivationOutcome::Missing => Ok(MutationOutcome::Unknown),
+        }
+    }
+
     pub async fn pending_credentials(&self) -> Result<Vec<String>, CoreError> {
         let pending = CredentialApprovalRepository::list_pending(&self.store)
             .await
@@ -1682,16 +2440,19 @@ impl HostHandle {
     ///
     /// Owners: presentation subscriptions, receipts, query-scoped refs,
     /// cursors, carried item refs, resume retry-epoch slots; conversation
-    /// open rounds; the first-party Task selection. Streams need no registry:
-    /// every publication re-checks the connection table (CCT §10.4). Durable
-    /// rows are never touched — a released receipt leaves its rows
-    /// re-presentable, and a dropped open round leaves its History rows
-    /// readable through `HistoryRequest`.
+    /// open rounds; the first-party Task selection; and any outstanding Client
+    /// local-erasure demand addressed to this connection (its waiter reports a
+    /// hold, never a completion). Streams need no registry: every publication
+    /// re-checks the connection table (CCT §10.4). Durable rows are never
+    /// touched — a released receipt leaves its rows re-presentable, and a
+    /// dropped open round leaves its History rows readable through
+    /// `HistoryRequest`.
     fn drop_connection_transient_state(&self, connection: &ConnectionWireId) {
         self.drop_presentation_connection_state(connection);
         self.drop_open_rounds_for(connection);
         self.conversation_tasks
             .drop_first_party_selection_for(connection);
+        self.client_transients.note_connection_ended(connection);
     }
 
     /// Arms the confirmation gate before either commit lock is acquired.
@@ -1712,6 +2473,27 @@ impl HostHandle {
     #[cfg(test)]
     pub(crate) fn disarm_confirm_commit_gate(&self) {
         *crate::lock_unpoison(&self.confirm_commit_gate) = None;
+    }
+
+    /// Arms the body-delivery evidence gate: a display path pauses after its
+    /// coverage premise read and before the durable evidence write.
+    #[cfg(test)]
+    pub(crate) fn arm_delivery_evidence_gate(&self) -> std::sync::Arc<TestGate> {
+        let gate = std::sync::Arc::new(TestGate::default());
+        *crate::lock_unpoison(&self.delivery_evidence_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// Disarms the body-delivery evidence gate.
+    #[cfg(test)]
+    pub(crate) fn disarm_delivery_evidence_gate(&self) {
+        *crate::lock_unpoison(&self.delivery_evidence_gate) = None;
+    }
+
+    /// The armed body-delivery evidence gate, when a test installed one.
+    #[cfg(test)]
+    pub(crate) fn delivery_evidence_gate(&self) -> Option<std::sync::Arc<TestGate>> {
+        crate::lock_unpoison(&self.delivery_evidence_gate).clone()
     }
 
     /// Arms the test-only close-admission gate and returns it.

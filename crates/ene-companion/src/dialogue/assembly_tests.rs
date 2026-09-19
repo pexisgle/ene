@@ -145,6 +145,13 @@ impl CredentialStore for FixtureStore {
     fn contains(&self, cred: &CredentialRef) -> bool {
         cred == &self.alpha || cred == &self.late
     }
+
+    fn put(&self, cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
+        let id = cred.id();
+        Err(CredentialTechnicalError::StorageUnavailable {
+            reason: format!("{id}: fixture store does not accept serving-time put"),
+        })
+    }
 }
 
 fn history_item(text: &str) -> HistoryMessage {
@@ -182,6 +189,7 @@ impl HistoryRepository for FixedHistory<'_> {
         &self,
         _cmd: crate::AppendHistoryCommand,
         _register_unpresented: bool,
+        _inference_claim: Option<RawId>,
     ) -> Result<
         (crate::HistoryAppendOutcome, Option<crate::UndeliveredRef>),
         crate::CompanionTechnicalError,
@@ -278,7 +286,7 @@ impl LearningRepository for FixedLearning<'_> {
             .0
             .iter()
             .map(|recalled| ene_learning::Memory {
-                id: ene_learning::MemoryId::from_raw(RawId::new()),
+                id: recalled.id,
                 revision: ene_learning::MemoryRevision::initial(),
                 scope: ene_learning::LearningScope::companion(companion),
                 content: recalled.content.clone(),
@@ -317,13 +325,13 @@ async fn assembled_dialogue_prompt_is_scrubbed_again_by_the_credential_boundary(
     registry.expand_on_refs_read(4, 7);
     let history = vec![history_item("context fragment")];
     let recalled = vec![RecalledMemory {
+        id: ene_learning::MemoryId::generate(),
         content: format!("note {LATE}"),
     }];
 
     let input_line = format!("input {ALPHA} tail");
     let proof = assemble_dialogue_input(
         companion,
-        RawId::new(),
         input_line.as_str(),
         &FixedHistory(&history),
         &FixedLearning(&recalled),
@@ -331,6 +339,7 @@ async fn assembled_dialogue_prompt_is_scrubbed_again_by_the_credential_boundary(
     )
     .await
     .expect("every registered value is removable");
+    let proof = proof.prompt();
 
     assert!(
         !proof.text().contains(LATE),
@@ -369,7 +378,6 @@ async fn revision_drift_during_assembly_preserves_the_oldest_premise() {
     registry.advance_on_read(2, 9);
     let proof = assemble_dialogue_input(
         companion,
-        RawId::new(),
         "input that drifts",
         &FixedHistory(&history),
         &FixedLearning(&recalled),
@@ -377,6 +385,7 @@ async fn revision_drift_during_assembly_preserves_the_oldest_premise() {
     )
     .await
     .expect("scrubbing succeeds");
+    let proof = proof.prompt();
 
     // The drift demonstrably fired mid-assembly: the registry names 9 now.
     assert_eq!(
@@ -388,5 +397,58 @@ async fn revision_drift_during_assembly_preserves_the_oldest_premise() {
         proof.credential_set(),
         CredentialSetRevision::from_u64(2),
         "the fragment premise read at revision 2 must survive the final scrub at 9"
+    );
+}
+
+#[tokio::test]
+async fn the_assembled_read_set_names_exactly_the_memory_and_history_rows_it_consumed() {
+    let registry = FixtureRegistry::new(1);
+    let store = FixtureStore::for_refs(&registry);
+    let scrubber = CredentialScrubber {
+        refs: &registry,
+        store: &store,
+    };
+    let companion = CompanionId::from_raw(RawId::new());
+    // Two History rows (the caller receives them oldest-first) and two
+    // recalled Memories (rank order, as `recall` returned them).
+    let older = history_item("the older message");
+    let newer = history_item("the newer message");
+    let older_id = older.id;
+    let newer_id = newer.id;
+    let first_memory = ene_learning::MemoryId::generate();
+    let second_memory = ene_learning::MemoryId::generate();
+    let history = vec![older, newer];
+    let recalled = vec![
+        RecalledMemory {
+            id: first_memory,
+            content: String::from("identical memory body"),
+        },
+        RecalledMemory {
+            id: second_memory,
+            content: String::from("identical memory body"),
+        },
+    ];
+
+    let input = assemble_dialogue_input(
+        companion,
+        "what did we say?",
+        &FixedHistory(&history),
+        &FixedLearning(&recalled),
+        &scrubber,
+    )
+    .await
+    .expect("assembling and scrubbing succeeds");
+
+    // Logical-input order: the Memory section renders before the
+    // conversation section, and each section keeps its rendered order.
+    assert_eq!(
+        input.data_use(),
+        &[
+            first_memory.as_raw(),
+            second_memory.as_raw(),
+            older_id,
+            newer_id,
+        ],
+        "the read-set must name exactly the rows the prompt consumed, in input order"
     );
 }

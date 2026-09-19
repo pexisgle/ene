@@ -254,12 +254,111 @@ pub struct DeletionParticipantStatusWire {
     pub sweep: u64,
 }
 
+/// Host-minted correlation identity of one Client local-erasure demand
+/// (IPC §17.1). The Host mints it per demand, the Client echoes it on the
+/// [`LocalErasureResult`], and a result whose identity names no outstanding
+/// demand for that incarnation is ignored. It is an opaque string, never
+/// parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DeletionDemandWireId(pub String);
+
+/// One class of Client-local transient data a demand can wipe (IPC §17.2).
+///
+/// The closed set names the current first-party Client surface only; a class
+/// is wiped as a whole because the current Client keeps no ranged local copy
+/// index. Finer targeting (a time range or a per-item local-copy identity)
+/// is added by the slice that first keeps such an index — the Host never
+/// guesses a range for a Client that does not track one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClientTempClass {
+    /// Received-but-unconsumed presentation material: undelivered summaries,
+    /// excerpts, and history pages held in the Client's deferred/display
+    /// buffer before the user has seen them.
+    PresentationBuffer,
+    /// The local input draft the user has typed but not submitted. It may
+    /// already quote the target and must not survive as a local copy.
+    InputDraft,
+}
+
+impl ClientTempClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PresentationBuffer => "presentation-buffer",
+            Self::InputDraft => "input-draft",
+        }
+    }
+
+    /// Parses the [`Self::as_str`] vocabulary, closed world. An unknown class
+    /// is refused, never silently mapped to "no local copy".
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "presentation-buffer" => Some(Self::PresentationBuffer),
+            "input-draft" => Some(Self::InputDraft),
+            _ => None,
+        }
+    }
+}
+
+/// One target of a [`DeletionDemand`].
+///
+/// Targets name local data by class, never by the mechanical target text or a
+/// re-derivable copy of it: the wire never carries the Owner's body or the
+/// Host's search material (IPC §17.2, §23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeletionTargetWire {
+    WipeClass { class: ClientTempClass },
+}
+
+/// Host → Client local-erasure demand (IPC §17.1, lifecycle §9).
+///
+/// It is a bounded command for one Client incarnation: wipe the named local
+/// transient classes and report what was wiped and what could not be
+/// verified. It carries no target body, no search material, and no authority
+/// to declare the system-wide deletion complete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletionDemand {
+    /// Host-minted demand correlation; the result echoes it verbatim.
+    pub demand: DeletionDemandWireId,
+    /// Operation identity rendering (the same projection the status view
+    /// uses). Correlation only: the Client cannot mutate by echoing it.
+    pub operation: DeletionOperationWireRef,
+    /// Sweep the demand belongs to. A result for an older sweep never
+    /// completes the current one.
+    pub sweep: u64,
+    pub targets: Vec<DeletionTargetWire>,
+}
+
+/// Client → Host report of one bounded local-erasure demand (IPC §17.1).
+///
+/// It reports what this Client wiped and what it could not verify. An empty
+/// `unverified` list is the participant's own local completion premise, never
+/// the system-wide completion (§10: local completion and global completion
+/// are different facts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalErasureResult {
+    /// Echo of the [`DeletionDemand::demand`] this result answers.
+    pub demand: DeletionDemandWireId,
+    /// Operation the Client believed it was demanded for. The Host refuses a
+    /// mismatch instead of adopting a foreign operation's erasure.
+    pub operation: DeletionOperationWireRef,
+    /// Sweep the Client believed it was demanded for.
+    pub sweep: u64,
+    pub wiped: Vec<ClientTempClass>,
+    /// Classes the Client could not verify as wiped (for example a local copy
+    /// outside its management boundary). A non-empty list keeps the
+    /// participant unfinished: it is never read as success.
+    pub unverified: Vec<ClientTempClass>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::refs::ManagementTargetWire;
     use super::{
-        DELETION_EXACT_TEXT_MAX_BYTES, DELETION_TARGET_PREFIX, DeletionParticipantReportWire,
-        DeletionPhaseWire, DeletionPurposeWire, deletion_target, parse_deletion_target,
+        ClientTempClass, DELETION_EXACT_TEXT_MAX_BYTES, DELETION_TARGET_PREFIX,
+        DeletionParticipantReportWire, DeletionPhaseWire, DeletionPurposeWire, deletion_target,
+        parse_deletion_target,
     };
 
     #[test]
@@ -355,5 +454,61 @@ mod tests {
             DeletionParticipantReportWire::Reported(Vec::new()),
             "an empty report is not the same fact as an absent report"
         );
+    }
+
+    #[test]
+    fn client_temp_classes_round_trip_through_their_closed_vocabulary() {
+        for class in [
+            ClientTempClass::PresentationBuffer,
+            ClientTempClass::InputDraft,
+        ] {
+            assert_eq!(ClientTempClass::from_name(class.as_str()), Some(class));
+        }
+        assert_eq!(ClientTempClass::from_name("screen-scrollback"), None);
+    }
+
+    #[test]
+    fn demand_and_result_round_trip_without_a_target_body() {
+        use super::super::refs::DeletionOperationWireRef;
+        use super::{DeletionDemand, DeletionDemandWireId, DeletionTargetWire, LocalErasureResult};
+
+        let demand = DeletionDemand {
+            demand: DeletionDemandWireId(String::from("demand-1")),
+            operation: DeletionOperationWireRef(String::from("operation-1")),
+            sweep: 2,
+            targets: vec![
+                DeletionTargetWire::WipeClass {
+                    class: ClientTempClass::PresentationBuffer,
+                },
+                DeletionTargetWire::WipeClass {
+                    class: ClientTempClass::InputDraft,
+                },
+            ],
+        };
+        let payload = super::super::payload::WirePayload::DeletionDemand(demand.clone());
+        assert_eq!(payload.message_type(), "DeletionDemand");
+        let json = serde_json::to_string(&payload).expect("the demand must serialize");
+        assert!(
+            !json.to_lowercase().contains("deletion:"),
+            "the wire never carries the mechanical target grammar: {json}"
+        );
+        assert!(
+            !json.contains("target-body"),
+            "no body can ride a demand: {json}"
+        );
+        let result = LocalErasureResult {
+            demand: demand.demand.clone(),
+            operation: demand.operation.clone(),
+            sweep: demand.sweep,
+            wiped: vec![ClientTempClass::PresentationBuffer],
+            unverified: vec![ClientTempClass::InputDraft],
+        };
+        let payload = super::super::payload::WirePayload::LocalErasureResult(result.clone());
+        assert_eq!(payload.message_type(), "LocalErasureResult");
+        let round_trip: LocalErasureResult =
+            serde_json::from_str(&serde_json::to_string(&result).expect("serializes"))
+                .expect("round-trips");
+        assert_eq!(round_trip, result);
+        assert!(!format!("{demand:?}").contains("target-body"));
     }
 }

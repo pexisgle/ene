@@ -1,6 +1,6 @@
 use super::AttachOutcome;
 use crate::serve::{CredStore, HostHandle, LiveInput, device_client};
-use crate::test_support::{live_input, memory_handle_with};
+use crate::test_support::{live_input, memory_handle, memory_handle_with};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
@@ -121,6 +121,7 @@ fn intent_frame_with_id(
                 origin: RationaleOrigin::ManagementSurface,
                 quote: None,
             },
+            confirmed: false,
         }),
     };
     stamped(frame, connection)
@@ -441,6 +442,7 @@ async fn append_absent_reply(
                 local_id: None,
             },
             true,
+            None,
         )
         .await
         .expect("the absent reply must commit");
@@ -3247,11 +3249,17 @@ async fn learning_admission_requires_its_own_capability_assignment() {
     };
     // Stage 2 setup assigned the dialogue capability only.
     assert!(
-        matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
+        matches!(
+            executor.admit_dialogue(Vec::new()).await,
+            Ok(Admission::Admitted(_))
+        ),
         "dialogue admission still works independently"
     );
     assert!(
-        matches!(executor.admit_learning().await, Ok(Admission::Declined(_))),
+        matches!(
+            executor.admit_learning(Vec::new()).await,
+            Ok(Admission::Declined(_))
+        ),
         "dialogue consent must not authorize learning formation"
     );
 
@@ -3278,11 +3286,17 @@ async fn learning_admission_requires_its_own_capability_assignment() {
         "the learning assignment must commit, got {assigned:?}"
     );
     assert!(
-        matches!(executor.admit_learning().await, Ok(Admission::Admitted(_))),
+        matches!(
+            executor.admit_learning(Vec::new()).await,
+            Ok(Admission::Admitted(_))
+        ),
         "learning is admitted only after its own consent exists"
     );
     assert!(
-        matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
+        matches!(
+            executor.admit_dialogue(Vec::new()).await,
+            Ok(Admission::Admitted(_))
+        ),
         "the dialogue assignment is untouched"
     );
 }
@@ -3466,6 +3480,683 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     assert!(summary.content.contains("jasmine tea"), "grounds are kept");
 }
 
+/// P1-1: a TARGET-bearing ExperienceCandidate popped from the Learning queue
+/// before the inference claim is still old-origin after Targeted Deletion
+/// completes. The stale transcript must not reach the provider; a genuine
+/// post-completion Owner origin of the same string may still form.
+#[tokio::test]
+async fn a_popped_learning_candidate_is_refused_after_deletion_completes() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::LearningRepository as _;
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "inflight-learning-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes inflight-learning-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes inflight-learning-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-inflight-learning");
+    let setup = round_test_handle("dlg-inflight-learning", &live, transport.as_ref()).await;
+    let (handle, dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-inflight-learning",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let responses = handle
+        .handle_frame(frame, live.clone(), transport.as_ref())
+        .await;
+    assert_stream_completed(&responses);
+    assert!(
+        handle.has_pending_learning(),
+        "the completed reply must queue the TARGET-bearing candidate"
+    );
+
+    let handle = Arc::new(handle);
+    handle.store.arm_learning_formation_park_for_tests();
+    let worker_handle = Arc::clone(&handle);
+    let worker_transport = Arc::clone(&transport);
+    let worker = tokio::spawn(async move {
+        worker_handle
+            .run_pending_learning(worker_transport.as_ref())
+            .await;
+    });
+    handle.store.wait_learning_formation_park_for_tests().await;
+    assert!(
+        !handle.has_pending_learning(),
+        "the worker has already taken the candidate off the queue"
+    );
+    let db = dir.path().join("app.db");
+    let sqlite_count = |sql: &str| -> i64 {
+        let conn = rusqlite::Connection::open(&db).expect("the state database opens");
+        conn.query_row(sql, [], |row| row.get(0))
+            .expect("the probe must answer")
+    };
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM inference_attempt WHERE capability = 'learning'"),
+        0,
+        "the Learning inference claim must not exist yet"
+    );
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM learning_formation"),
+        1,
+        "taking the candidate publishes a body-free formation identity"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        if outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            break;
+        }
+    }
+    let phase = handle
+        .store
+        .deletion_status(None, 100)
+        .await
+        .expect("the status must read")
+        .into_iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the operation must stay readable")
+        .phase;
+    assert_eq!(phase, DeletionOperationPhase::Completed);
+    assert_eq!(
+        handle
+            .store
+            .count_exact_text_remainder_for_tests(target)
+            .await
+            .unwrap(),
+        0
+    );
+
+    handle.store.release_learning_formation_park_for_tests();
+    worker.await.expect("the parked worker joins");
+
+    let learning_bytes: usize = transport
+        .inputs()
+        .iter()
+        .filter(|input| input.contains("learning formation pass"))
+        .map(String::len)
+        .sum();
+    assert_eq!(
+        learning_bytes, 0,
+        "the stale candidate must not send one byte to the provider"
+    );
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM inference_attempt WHERE capability = 'learning'"),
+        0,
+        "the stale pass must not create a Learning claim"
+    );
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert!(
+        memories.is_empty(),
+        "old-origin derived Memory must not form, got {memories:?}"
+    );
+    assert_eq!(sqlite_count("SELECT COUNT(*) FROM learning_summary"), 0);
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM learning_memory_revision"),
+        0
+    );
+    assert_eq!(
+        handle
+            .store
+            .count_exact_text_remainder_for_tests(target)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let fresh = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "local-inflight-learning-fresh",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let fresh_responses = handle
+        .handle_frame(fresh, live.clone(), transport.as_ref())
+        .await;
+    assert_stream_completed(&fresh_responses);
+    handle.run_pending_learning(transport.as_ref()).await;
+    let fresh_memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh_memories.len(),
+        1,
+        "a genuine post-completion dialogue must still form, got {fresh_memories:?}"
+    );
+    assert!(
+        fresh_memories[0].content.contains(target),
+        "the fresh Memory keeps the Owner's new origin"
+    );
+}
+
+/// P1: a TARGET-bearing ExperienceCandidate that exists after pin_experience
+/// and before the Learning queue cannot be skipped by Targeted Deletion.
+#[tokio::test]
+async fn a_pinned_learning_candidate_cannot_be_skipped_before_queue() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::LearningRepository as _;
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "pin-queue-learning-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes pin-queue-learning-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes pin-queue-learning-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-pin-queue-learning");
+    let setup = round_test_handle("dlg-pin-queue-learning", &live, transport.as_ref()).await;
+    let (handle, dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let handle = Arc::new(handle);
+    handle.store.arm_learning_pin_queue_park_for_tests();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-pin-queue-learning",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let parked = {
+        let handle = Arc::clone(&handle);
+        let live = live.clone();
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { handle.handle_frame(frame, live, transport.as_ref()).await })
+    };
+    handle.store.wait_learning_pin_queue_park_for_tests().await;
+    assert!(
+        !handle.has_pending_learning(),
+        "the candidate exists after pin and before the queue"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    for _ in 0..16 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        assert_ne!(
+            phase,
+            DeletionOperationPhase::Completed,
+            "deletion must not complete over a pinned unqueued candidate: {outcome:?}"
+        );
+        if outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+            && phase != DeletionOperationPhase::Completed
+        {
+            break;
+        }
+    }
+
+    handle.store.release_learning_pin_queue_park_for_tests();
+    let _responses = parked.await.expect("the parked dialogue joins");
+    assert!(
+        handle.has_pending_learning(),
+        "release must enqueue the old-origin candidate"
+    );
+
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        if outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            break;
+        }
+    }
+    let phase = handle
+        .store
+        .deletion_status(None, 100)
+        .await
+        .expect("the status must read")
+        .into_iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the operation must stay readable")
+        .phase;
+    assert_eq!(phase, DeletionOperationPhase::Completed);
+
+    let db = dir.path().join("app.db");
+    let sqlite_count = |sql: &str| -> i64 {
+        let conn = rusqlite::Connection::open(&db).expect("the state database opens");
+        conn.query_row(sql, [], |row| row.get(0))
+            .expect("the probe must answer")
+    };
+    let learning_bytes: usize = transport
+        .inputs()
+        .iter()
+        .filter(|input| input.contains("learning formation pass"))
+        .map(String::len)
+        .sum();
+    assert_eq!(
+        learning_bytes, 0,
+        "the stale candidate must not send one byte to the provider"
+    );
+    assert_eq!(sqlite_count("SELECT COUNT(*) FROM learning_summary"), 0);
+    assert_eq!(
+        sqlite_count("SELECT COUNT(*) FROM learning_memory_revision"),
+        0
+    );
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert!(
+        memories.is_empty(),
+        "old-origin derived Memory must not form, got {memories:?}"
+    );
+
+    let fresh = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "local-pin-queue-learning-fresh",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let fresh_responses = handle
+        .handle_frame(fresh, live.clone(), transport.as_ref())
+        .await;
+    assert_stream_completed(&fresh_responses);
+    handle.run_pending_learning(transport.as_ref()).await;
+    let fresh_memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh_memories.len(),
+        1,
+        "a genuine post-completion dialogue must still form, got {fresh_memories:?}"
+    );
+    assert!(
+        fresh_memories[0].content.contains(target),
+        "the fresh Memory keeps the Owner's new origin"
+    );
+}
+
+/// Major: aborting handle_frame after the Learning pin is acquired must
+/// release occupancy. Without a Drop guard, `inflight_pins` stays 1 until
+/// Host restart and Targeted Deletion cannot converge.
+#[tokio::test]
+async fn a_cancelled_learning_pin_releases_occupancy_before_queue() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "cancel-pin-before-queue-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes cancel-pin-before-queue-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes cancel-pin-before-queue-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-cancel-pin-before-queue");
+    let setup = round_test_handle("dlg-cancel-pin-before-queue", &live, transport.as_ref()).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let handle = Arc::new(handle);
+    handle.store.arm_learning_pin_queue_park_for_tests();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-cancel-pin-before-queue",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let parked = {
+        let handle = Arc::clone(&handle);
+        let live = live.clone();
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { handle.handle_frame(frame, live, transport.as_ref()).await })
+    };
+    handle.store.wait_learning_pin_queue_park_for_tests().await;
+    assert_eq!(
+        handle.host_transient_arrival.inflight_pins(),
+        1,
+        "the production pin guard is occupied at the pre-queue park"
+    );
+    assert!(
+        !handle.has_pending_learning(),
+        "cancel-before-queue has no process-memory remainder yet"
+    );
+    assert!(
+        !handle.host_transient_arrival.has_unpublished(),
+        "unpublished publication is not owed before the queue push"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    let outcome = handle
+        .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+        .await
+        .expect("the fan-out must not fail");
+    let phase = handle
+        .store
+        .deletion_status(None, 100)
+        .await
+        .expect("the status must read")
+        .into_iter()
+        .find(|record| record.current.operation == current.operation)
+        .expect("the operation must stay readable")
+        .phase;
+    assert_ne!(
+        phase,
+        DeletionOperationPhase::Completed,
+        "an inflight Learning pin is remainder, not Verified: {outcome:?}"
+    );
+
+    parked.abort();
+    let join = parked.await;
+    assert!(
+        join.expect_err("the cancelled dialogue must not succeed")
+            .is_cancelled()
+    );
+    assert_eq!(
+        handle.host_transient_arrival.inflight_pins(),
+        0,
+        "Drop of the pin guard must release occupancy"
+    );
+    assert!(
+        !handle.has_pending_learning(),
+        "the local candidate dies with the cancelled future"
+    );
+    assert!(
+        !handle.host_transient_arrival.has_unpublished(),
+        "pin Drop must not invent unpublished arrival state"
+    );
+
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        if phase == DeletionOperationPhase::Completed
+            && outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            return;
+        }
+    }
+    panic!("Targeted Deletion must converge after the cancelled pin is released");
+}
+
+/// After queue push and before canonical publish, aborting handle_frame
+/// releases occupancy but must keep unpublished bookkeeping so a later drive
+/// retries publication instead of Completing over the queued TARGET.
+#[tokio::test]
+async fn a_cancelled_queued_arrival_keeps_unpublished_after_pin_drop() {
+    use std::sync::Arc;
+
+    use crate::targeted_deletion::{TargetedDeletionPass, current_product_surface_owners};
+    use ene_preservation::{
+        DeletionOperationPhase, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let target = "cancel-queued-arrival-canary-token";
+    let transport = Arc::new(LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes cancel-queued-arrival-canary-token tea.", "memories": [{"action": "create", "content": "The owner likes cancel-queued-arrival-canary-token tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    ));
+    let live = live_input("client-cancel-queued-arrival");
+    let setup = round_test_handle("dlg-cancel-queued-arrival", &live, transport.as_ref()).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, transport.as_ref()).await,
+        "learning formation needs its own capability assignment"
+    );
+    let handle = Arc::new(handle);
+    handle
+        .store
+        .arm_host_transient_arrival_publish_park_for_tests();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-cancel-queued-arrival",
+        &format!("please remember that I like {target} tea"),
+        live.connection_id,
+    );
+    let parked = {
+        let handle = Arc::clone(&handle);
+        let live = live.clone();
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { handle.handle_frame(frame, live, transport.as_ref()).await })
+    };
+    handle
+        .store
+        .wait_host_transient_arrival_publish_park_for_tests()
+        .await;
+    assert_eq!(handle.host_transient_arrival.inflight_pins(), 1);
+    assert!(
+        handle.has_pending_learning(),
+        "the candidate is on the queue before canonical publish"
+    );
+    assert!(
+        handle.host_transient_arrival.has_unpublished(),
+        "queue push owes canonical publication"
+    );
+
+    let admitted = handle
+        .store
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        target.to_owned(),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                current_product_surface_owners(),
+            )
+            .confirmed_for_tests(),
+        )
+        .await
+        .expect("admission must commit");
+    let current = match admitted {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+
+    parked.abort();
+    let join = parked.await;
+    assert!(
+        join.expect_err("the cancelled dialogue must not succeed")
+            .is_cancelled()
+    );
+    assert_eq!(handle.host_transient_arrival.inflight_pins(), 0);
+    assert!(
+        handle.has_pending_learning(),
+        "the queued candidate survives pin Drop"
+    );
+    assert!(
+        handle.host_transient_arrival.has_unpublished(),
+        "pin Drop must not clear unpublished arrival bookkeeping"
+    );
+
+    for _ in 0..64 {
+        let outcome = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
+            .await
+            .expect("the fan-out must not fail");
+        let phase = handle
+            .store
+            .deletion_status(None, 100)
+            .await
+            .expect("the status must read")
+            .into_iter()
+            .find(|record| record.current.operation == current.operation)
+            .expect("the operation must stay readable")
+            .phase;
+        if phase == DeletionOperationPhase::Completed
+            && outcome.held == 0
+            && outcome.unfinished == 0
+            && outcome.demands == 0
+            && outcome.reconciliation_pages == 0
+        {
+            return;
+        }
+    }
+    panic!("publication retry after pin Drop must let Targeted Deletion converge");
+}
+
 /// A provider or transport failure in the Learning pass is a technical
 /// failure, not a semantic decline: an experience the model never judged must
 /// not be reported as "nothing worth keeping".
@@ -3506,6 +4197,7 @@ async fn learning_transport_failure_is_reported_as_unavailable() {
             start: RawId::new(),
             end: RawId::new(),
         },
+        sources: Vec::new(),
         transcript: vec![ExperienceTurn {
             role: ExperienceRole::Owner,
             text: String::from("remember this"),
@@ -4621,6 +5313,319 @@ async fn memory_view_renders_current_recognition_grounds_and_revisions() {
     assert!(body.contains("The owner prefers coffee now."), "{body}");
 }
 
+/// A current erasure condition withholds covered Memory bodies at the
+/// management read boundary — current list, revision content, and shared
+/// grounds — while an unrelated body still renders. Only a response that
+/// actually handed a non-empty body over records the calling incarnation as a
+/// possible target-bearing local copy (lifecycle §8.1; critical-areas §5.2).
+#[tokio::test]
+async fn memory_view_withholds_covered_bodies_and_tracks_only_delivered_ones() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ChangeKind, ExperienceSourceKind, Importance, LearningRepository as _, LearningScope,
+        MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, SourceRangeRef, SummaryId,
+        SummaryRecord, TemporalMeaning,
+    };
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-memory-coverage");
+    // A direct-handle test mints `LiveInput` without an admitted frame, which
+    // is what pins the incarnation; pin it exactly as that frame would.
+    assert!(
+        live.authority
+            .pin_incarnation_for_tests(&live.connection_id, 7, 8),
+        "the fixture connection must pin one incarnation"
+    );
+    let (handle, _dir) = memory_handle("dlg-memory-coverage").await.unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let scope = LearningScope::companion(companion.as_raw());
+    let covered = MemoryId::generate();
+    let evidence = SummaryRecord {
+        id: SummaryId::generate(),
+        scope,
+        content: String::from("grounds for the covered target"),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: RawId::new(),
+            end: RawId::new(),
+        },
+        formed_at: WallClockWithTz::now(),
+    };
+    let committed = handle
+        .store
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(evidence),
+            secret_premise: None,
+            claim: None,
+            change: MemoryChange {
+                target: MemoryTarget::New { id: covered },
+                scope,
+                content: String::from("the covered target body"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        committed,
+        ene_learning::MemoryChangeOutcome::Committed { .. }
+    ));
+
+    // The condition is durable but no participant is driven, so the Memory
+    // rows stay readable and the read-time filter is the only gate.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("covered target"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    match handle.store.start_targeted_deletion(command).await.unwrap() {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("unexpected admission outcome: {other:?}"),
+    }
+
+    async fn tracked(handle: &HostHandle) -> bool {
+        handle
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read")
+            .iter()
+            .any(|owner| matches!(owner, ParticipantOwnerRef::ClientIncarnation(_)))
+    }
+    assert!(
+        !tracked(&handle).await,
+        "the fixture handed no body over yet"
+    );
+
+    // The current list keeps the row identity and cursor, withholds the
+    // covered body, and records no delivery.
+    let requested = handle
+        .handle_frame(
+            memory_request_frame(live.connection_id, None),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert!(body.contains("memory "), "the row identity stays: {body}");
+    assert!(
+        !body.contains("covered target"),
+        "the covered current body is withheld: {body}"
+    );
+    assert!(
+        !tracked(&handle).await,
+        "a covered-only response hands over no body"
+    );
+
+    // The revision page withholds the covered revision content and its
+    // covered shared grounds in the same pass.
+    let requested = handle
+        .handle_frame(
+            revision_request_frame(
+                live.connection_id,
+                &covered.as_raw().as_uuid().to_string(),
+                None,
+            ),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert!(body.contains("rev1"), "the revision identity stays: {body}");
+    assert!(
+        !body.contains("covered target"),
+        "the covered revision content and grounds are withheld: {body}"
+    );
+    assert!(
+        !tracked(&handle).await,
+        "a withheld revision and grounds hand over no body"
+    );
+
+    // An unrelated body still renders and is what records the delivery.
+    let committed = handle
+        .store
+        .commit_memory_change(MemoryChangeCommit {
+            summary: None,
+            secret_premise: None,
+            claim: None,
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope,
+                content: String::from("an unrelated body"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        committed,
+        ene_learning::MemoryChangeOutcome::Committed { .. }
+    ));
+    let requested = handle
+        .handle_frame(
+            view_request_frame(live.connection_id),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert!(body.contains("an unrelated body"), "{body}");
+    assert!(
+        !body.contains("covered target"),
+        "the covered row stays withheld in a mixed page: {body}"
+    );
+    assert!(
+        tracked(&handle).await,
+        "the delivered Memory body records the Client incarnation"
+    );
+}
+
+/// The delivery-evidence write is the handoff linearization point: a condition
+/// that commits between the display path's coverage premise read and the
+/// evidence write must not let the covered body leave. The admission snapshot
+/// legitimately predates the paused write, so only the post-evidence re-check
+/// can withhold the body (lifecycle §8.1; critical-areas §5.2/§6.1).
+#[tokio::test]
+async fn a_condition_committed_before_the_evidence_write_withholds_the_body() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-delivery-race");
+    assert!(
+        live.authority
+            .pin_incarnation_for_tests(&live.connection_id, 9, 10),
+        "the fixture connection must pin one incarnation"
+    );
+    let (handle, _dir) = memory_handle("dlg-delivery-race").await.unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let scope = LearningScope::companion(companion.as_raw());
+    assert!(matches!(
+        handle
+            .store
+            .commit_memory_change(MemoryChangeCommit {
+                summary: None,
+                secret_premise: None,
+                claim: None,
+                change: MemoryChange {
+                    target: MemoryTarget::New {
+                        id: MemoryId::generate(),
+                    },
+                    scope,
+                    content: String::from("the covered target body"),
+                    importance: Importance::default(),
+                    temporal: TemporalMeaning::Enduring,
+                    change: ChangeKind::Initial,
+                    recall_suppressed: false,
+                    at: WallClockWithTz::now(),
+                },
+            })
+            .await
+            .unwrap(),
+        ene_learning::MemoryChangeOutcome::Committed { .. }
+    ));
+
+    // The request renders the body under a clear premise and pauses at the
+    // evidence write.
+    let gate = handle.arm_delivery_evidence_gate();
+    let transport = ok_transport();
+    let mut request = Box::pin(handle.handle_frame(
+        view_request_frame(live.connection_id),
+        live.clone(),
+        &transport,
+    ));
+    tokio::select! {
+        _ = &mut request => panic!("the request must pause at the delivery gate"),
+        () = gate.wait_entered() => {}
+    }
+
+    // The condition commits in exactly that window: the admission transaction
+    // reads the evidence table before the paused write, so this incarnation is
+    // not part of the operation's durable snapshot.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("covered target"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    let current = match handle.store.start_targeted_deletion(command).await.unwrap() {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("unexpected admission outcome: {other:?}"),
+    };
+    assert!(
+        !handle
+            .store
+            .deletion_participants(current.operation, None, 100)
+            .await
+            .unwrap()
+            .iter()
+            .any(|record| matches!(
+                record.participant.owner,
+                ParticipantOwnerRef::ClientIncarnation(_)
+            )),
+        "the admission snapshot predates the paused evidence write"
+    );
+
+    // The write resumes, then the post-evidence re-check must withhold the
+    // body: it never leaves after the condition became current.
+    gate.release();
+    let requested = request.await;
+    let body = memory_body(&requested);
+    assert!(
+        !body.contains("covered target"),
+        "a condition committed before the evidence write withholds the body: {body}"
+    );
+    // The evidence row itself is conservative and keeps the incarnation
+    // nameable by a later admission.
+    assert!(
+        handle
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read")
+            .iter()
+            .any(|owner| matches!(owner, ParticipantOwnerRef::ClientIncarnation(_))),
+        "the evidence write still records the handoff attempt"
+    );
+    handle.disarm_delivery_evidence_gate();
+}
+
 /// A page cursor drives the read-only Memory view, and untrusted cursor text
 /// is refused instead of interpreted.
 #[tokio::test]
@@ -4644,6 +5649,7 @@ async fn memory_view_cursor_pages_older_memories_and_rejects_invalid_ids() {
             .commit_memory_change(MemoryChangeCommit {
                 summary: None,
                 secret_premise: None,
+                claim: None,
                 change: MemoryChange {
                     target: MemoryTarget::New {
                         id: MemoryId::generate(),
@@ -4743,6 +5749,7 @@ async fn memory_revision_pages_are_bounded_and_fully_traversable() {
                   summary: Option<SummaryRecord>| MemoryChangeCommit {
         summary,
         secret_premise: None,
+        claim: None,
         change: MemoryChange {
             target,
             scope,
@@ -4951,6 +5958,7 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
         .commit_memory_change(MemoryChangeCommit {
             summary: None,
             secret_premise: Some(premise),
+            claim: None,
             change: MemoryChange {
                 target: MemoryTarget::New {
                     id: MemoryId::generate(),
@@ -5525,6 +6533,8 @@ fn gate_for(
         tx,
         seq: 0,
         opened: true,
+        fence_epoch: premises.handle.transient_fence_epoch(),
+        inference_claim: RawId::new(),
     }
 }
 
@@ -7095,5 +8105,345 @@ async fn provider_output_never_starts_a_targeted_deletion() {
             .unwrap()
             .is_empty(),
         "no erasure condition is published by a provider turn"
+    );
+}
+
+/// Stage 6 A3c: a Targeted Deletion condition that becomes durable while a
+/// reply is streaming stops the remaining deltas and refuses the assembled
+/// reply, so the payload is neither displayed nor appended to History.
+#[tokio::test]
+async fn a3c_a_deletion_mid_stream_stops_deltas_and_reply_adoption() {
+    use crate::targeted_deletion::TargetedDeletionPass;
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+
+    let transport = GatedStreamingTransport::new(&["Hel", "lo deleted body"]);
+    let live = live_input("client-stream-erasure");
+    let (handle, _dir) = round_test_handle("dlg-stream-erasure", &live, &transport)
+        .await
+        .unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-stream-erasure",
+        "hi",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut host =
+        Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 4 {
+        tokio::select! {
+            biased;
+            () = &mut host => panic!("the provider completed before the early frames"),
+            maybe = rx.recv() => early.push(maybe.expect("frames must arrive")),
+        }
+    }
+    let WirePayload::TextStreamFrame(first) = &early[3].payload else {
+        panic!("the fourth frame is the first delta");
+    };
+    assert_eq!(
+        first.delta, "Hel",
+        "the first delta is displayed before the condition"
+    );
+
+    // The condition becomes durable, then the Host transient holder is
+    // demanded: the in-flight stream and its assembled reply are invalidated.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("deleted body"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        ene_primitive::WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .confirmed_for_tests();
+    assert!(matches!(
+        handle
+            .store
+            .start_targeted_deletion(command)
+            .await
+            .expect("admission commits"),
+        StartTargetedDeletionOutcome::Started(_)
+    ));
+    let outcome = handle
+        .drive_targeted_deletion(TargetedDeletionPass::new(100, 4))
+        .await
+        .expect("the pass runs");
+    assert!(
+        outcome.verified >= 1,
+        "the host-transient demand verified its bounded work: {outcome:?}"
+    );
+
+    transport.release().await;
+    host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut frames = early;
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+
+    let deltas: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["Hel"],
+        "no delta after the condition is displayed: {deltas:?}"
+    );
+    let close = frames.iter().find_map(|frame| match &frame.payload {
+        WirePayload::TextStreamClose(close) => Some(close.status),
+        _ => None,
+    });
+    assert_eq!(
+        close,
+        Some(StreamClose::Interrupted),
+        "the stream fails closed instead of completing a covered reply"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        1,
+        "the owner input is durable and the covered reply is never adopted"
+    );
+}
+
+/// A4: an Owner submit whose body is under a canonical current condition is
+/// held at the intake boundary — no History row, no round acceptance.
+///
+/// The matching "fresh Owner input after completion" ordering is asserted at
+/// the canonical boundary (the store's `delayed_arrival` suite); the
+/// end-to-end completion walk belongs to integration slice D, which owns the
+/// A5 completion authority this slice does not have.
+#[tokio::test]
+async fn a4_a_covered_submit_is_held_without_a_history_row() {
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+    let (handle, _dir) = setup_handle("dlg-a4-held").await.unwrap();
+    let transport = ok_transport();
+    let live = live_input("client-a4-held");
+    assert!(
+        register_assign_complete(&handle, &live, &transport).await,
+        "setup must complete"
+    );
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("the private key"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        ene_primitive::WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    match handle
+        .store
+        .start_targeted_deletion(command)
+        .await
+        .expect("admission commits")
+    {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("the operation must start, got {other:?}"),
+    }
+
+    let responses = handle
+        .handle_frame(
+            submit_frame(
+                handle.companion_wire(),
+                Some(0),
+                None,
+                "local-a4",
+                "please keep the private key",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let (_, answers) = split_presence_fact(&responses);
+    assert!(
+        answers.iter().all(|frame| !matches!(
+            frame.payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        )),
+        "a covered submit is never accepted, got {responses:?}"
+    );
+    assert!(
+        answers.iter().any(|frame| matches!(
+            frame.payload,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::HeldForTransition)
+        )),
+        "the intake answers a retry-later hold, got {responses:?}"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        0,
+        "no History row exists for the held submit"
+    );
+}
+
+/// M2: a dialogue claim that a deletion admission associated with its interval
+/// through the prompt read-set stops the remaining deltas and refuses the
+/// reply, even though the Host transient fence never moved.
+///
+/// This is the durable old-claim provenance boundary in isolation: the
+/// admission names a History identity the prompt actually read, the claim is
+/// already durable, and no participant is driven — so only the per-delta claim
+/// hold can refuse the second delta and the adoption.
+#[tokio::test]
+async fn m2_a_dialogue_claim_hold_stops_streaming_and_reply_adoption() {
+    use ene_companion::{AppendHistoryCommand, CompanionRepository as _, HistoryRepository as _};
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+        TargetedDeletionTarget,
+    };
+
+    let transport = GatedStreamingTransport::new(&["Hel", "lo paraphrased"]);
+    let live = live_input("client-claim-hold");
+    let (handle, _dir) = round_test_handle("dlg-claim-hold", &live, &transport)
+        .await
+        .unwrap();
+    // Seed one durable History row the next prompt will read, so the claim's
+    // read-set names a canonical identity the admission can associate.
+    let companion = handle
+        .store
+        .ensure_running_companion()
+        .await
+        .expect("the companion must resolve");
+    let generation = current_generation(&handle).await.unwrap();
+    let seeded = match handle
+        .store
+        .append_message(AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("a seeded ordinary question"),
+            lang: String::from("en"),
+            at: ene_primitive::WallClockWithTz::now(),
+            expected_generation: ene_presence::PresenceGeneration::from_u64(generation),
+            expected_consent: None,
+            expected_credential_set: None,
+            expected_owner_message: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .expect("the seed append must answer")
+    {
+        ene_companion::HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the seed append must commit, got {other:?}"),
+    };
+
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(generation),
+        None,
+        "local-claim-hold",
+        "hi",
+        live.connection_id,
+    );
+    let (stream_tx, mut rx) = tokio::sync::mpsc::channel(crate::serve::STREAM_BUFFER_FRAMES);
+    let mut sink = stream_tx.clone();
+    let mut host =
+        Box::pin(handle.handle_frame_to(frame, live.clone(), &transport, &mut sink, &stream_tx));
+    let mut early = Vec::new();
+    while early.len() < 4 {
+        tokio::select! {
+            biased;
+            () = &mut host => panic!("the provider completed before the early frames"),
+            maybe = rx.recv() => early.push(maybe.expect("frames must arrive")),
+        }
+    }
+    let WirePayload::TextStreamFrame(first) = &early[3].payload else {
+        panic!("the fourth frame is the first delta");
+    };
+    assert_eq!(
+        first.delta, "Hel",
+        "the first delta is displayed before the admission"
+    );
+
+    // The admission names the seeded row as a covered source: the already
+    // claimed dialogue attempt's read-set intersects it, so the durable hold
+    // is written. No participant is driven, so the transient fence stays put
+    // and only the claim hold can stop the rest.
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                String::from("an unrelated target"),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        ene_primitive::WallClockWithTz::now(),
+        vec![seeded],
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    assert!(matches!(
+        handle
+            .store
+            .start_targeted_deletion(command)
+            .await
+            .expect("admission commits"),
+        StartTargetedDeletionOutcome::Started(_)
+    ));
+
+    transport.release().await;
+    host.await;
+    drop(sink);
+    drop(stream_tx);
+    let mut frames = early;
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+    let deltas: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.payload {
+            WirePayload::TextStreamFrame(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["Hel"],
+        "the delta produced under a held claim is never presented: {deltas:?}"
+    );
+    let close = frames.iter().find_map(|frame| match &frame.payload {
+        WirePayload::TextStreamClose(close) => Some(close.status),
+        _ => None,
+    });
+    assert_eq!(
+        close,
+        Some(StreamClose::Interrupted),
+        "a held claim closes the stream interrupted instead of adopting"
+    );
+    assert_eq!(
+        timeline_count(&handle).await.unwrap(),
+        2,
+        "the seeded row and the owner input are durable, never the held reply"
     );
 }

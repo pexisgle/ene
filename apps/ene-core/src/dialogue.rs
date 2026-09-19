@@ -65,7 +65,7 @@ use ene_api::v1::round::{
 };
 use ene_companion::dialogue::{
     AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification,
-    begin_turn_committed, classify_replay, finish_turn,
+    assemble_dialogue_input, begin_turn_committed, classify_replay, finish_turn, pin_experience,
 };
 use ene_companion::{
     CommandId, CompanionId, CompanionLifecycle, CompanionRepository, HistoryRepository,
@@ -241,9 +241,9 @@ fn command_conflict_detail(command: &CommandId) -> String {
     )
 }
 
-/// Admission never produces the over-limit, task-premise-stale, or data-use
-/// hold reasons, which belong to dispatch; they map defensively rather than
-/// claiming a setup failure.
+/// Admission never produces the over-limit, task-premise-stale, data-use
+/// hold, or usage-cap reasons, which belong to dispatch; they map defensively
+/// rather than claiming a setup failure.
 fn admission_reason(reason: NotSentReason) -> &'static str {
     match reason {
         NotSentReason::SetupIncomplete => "setup-incomplete",
@@ -253,6 +253,8 @@ fn admission_reason(reason: NotSentReason) -> &'static str {
         NotSentReason::OverLimit => "unknown-reason",
         NotSentReason::TaskPremiseStale => "unknown-reason",
         NotSentReason::DataUseHeld => "unknown-reason",
+        NotSentReason::UsageCapReached => "unknown-reason",
+        NotSentReason::UsageCapIndeterminate => "unknown-reason",
     }
 }
 
@@ -361,12 +363,16 @@ impl HostHandle {
     /// Mediates one [`SubmitTextInput`] frame into the companion turn.
     ///
     /// Order: companion mapping, mandatory command key, durable idempotent
-    /// replay, presence attach, presentation intake, then the companion-owned
-    /// turn (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
-    /// inference boundary. Admission precedes the append so a declined input
-    /// leaves neither history rows nor transient round claims behind; the
-    /// round projection is minted atomically with its map entry (one domain
-    /// round, one wire), and a racy duplicate that lands on
+    /// replay, presence attach, presentation intake, dialogue prompt
+    /// assembly, then the companion-owned turn
+    /// (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
+    /// inference boundary. The assembled prompt's canonical read-set rides
+    /// the admission as the attempt's `data_use`, so the claim gate and the
+    /// deletion admission see the exact provenance the provider input was
+    /// built from. Admission precedes the append so a declined input leaves
+    /// neither history rows nor transient round claims behind; the round
+    /// projection is minted atomically with its map entry (one domain round,
+    /// one wire), and a racy duplicate that lands on
     /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
     /// accept without re-running inference. The canonical round premise comes
     /// from the input `round`, a populated envelope `round_view` must agree
@@ -751,6 +757,18 @@ impl HostHandle {
             tracker: &self.tracker,
             transport,
         };
+        // The prompt is assembled before admission: its canonical read-set
+        // (the History and Memory identities actually consumed) rides the
+        // admission into the attempt's `data_use`, so the claim gate and the
+        // deletion admission see the same provenance the provider input was
+        // built from. A read failure degrades the context, but a scrub
+        // failure holds the send without an Owner row, exactly like the input
+        // scrub above.
+        let Ok(prompt) =
+            assemble_dialogue_input(companion, &text, &self.store, &self.store, &scrubber).await
+        else {
+            return emit_end(sink, held_frame(frame, live));
+        };
         let input = AcceptedDialogueInput {
             companion,
             round: accepted.as_raw(),
@@ -767,7 +785,7 @@ impl HostHandle {
                 frame.envelope.sender.incarnation_id.random,
             )),
         };
-        let authorized = match executor.admit_dialogue().await {
+        let authorized = match executor.admit_dialogue(prompt.data_use().to_vec()).await {
             Ok(Admission::Admitted(authorized)) => *authorized,
             Ok(Admission::Declined(reason)) => {
                 return emit_end(
@@ -777,6 +795,11 @@ impl HostHandle {
             }
             Err(_) => return emit_end(sink, held_frame(frame, live)),
         };
+        // The claimed ticket is the durable correlation of the provider call
+        // this turn is about to start: the stream predicate reads it so a
+        // reply whose claim a deletion admission associated with an interval
+        // is never presented, even when the Host transient fence did not move.
+        let inference_claim = authorized.ticket().0;
         // Test-only race gate: pause after admission and before the guarded
         // acceptance section, so a test can supersede the connection in
         // between and pin that nothing commits.
@@ -790,6 +813,7 @@ impl HostHandle {
             .with_current_connection_blocking(live, move || {
                 begin_turn_committed(
                     commit_input,
+                    prompt,
                     authorized,
                     |owner| store.append_message_sync(owner),
                     |companion, command| store.lookup_command_sync(companion, command),
@@ -842,6 +866,11 @@ impl HostHandle {
                     }
                 }
                 let stream = StreamWireId(RawId::new().as_uuid());
+                // The fence epoch is captured before the stream can publish:
+                // a Targeted Deletion that invalidates Host transient payloads
+                // after this point stops the stream and refuses the assembly,
+                // because the reply can no longer prove it is uncovered.
+                let fence_epoch = self.transient_fence.epoch();
                 // Installation is not publication authority: replacement can
                 // win between them. Queue both control frames in one short
                 // ownership section, never socket I/O or an await. Already
@@ -897,6 +926,8 @@ impl HostHandle {
                     tx: stream_tx.clone(),
                     seq: 0,
                     opened,
+                    fence_epoch,
+                    inference_claim,
                 };
                 let task_control =
                     crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
@@ -909,14 +940,26 @@ impl HostHandle {
                     // the store transaction, which compares the turn's
                     // Owner message premise atomically.
                     let is_current = || {
-                        self.open_round_for(&live.connection_id, &companion_key)
-                            .is_none_or(|open| open.round == accepted)
+                        // A Targeted Deletion that invalidated Host transient
+                        // payloads since this turn started refuses the adoption:
+                        // the assembled reply can no longer prove it is
+                        // uncovered, and a durable reply is not worth
+                        // resurrecting a deleted body into History. The
+                        // durable claim hold is the second, completion-proof
+                        // refusal: an unreadable hold fails closed.
+                        self.transient_fence.epoch() == fence_epoch
+                            && matches!(
+                                self.store.inference_claim_held_sync(inference_claim),
+                                Ok(false)
+                            )
+                            && self
+                                .open_round_for(&live.connection_id, &companion_key)
+                                .is_none_or(|open| open.round == accepted)
                     };
                     finish_turn(
                         turn,
                         &self.store,
                         &executor,
-                        &self.store,
                         &scrubber,
                         &task_control,
                         &mut gate,
@@ -925,15 +968,23 @@ impl HostHandle {
                     .await
                 };
                 match outcome {
-                    DialogueOutcome::Completed { experience, .. } => {
-                        // The durable reply is the client-visible completion:
-                        // the formation pass is queued and runs after the
-                        // response is handed off, never before it (design
-                        // H-1: response completion and all Learning updates
-                        // are not one condition). The queue item is the
-                        // premise pinned at completion, never a later re-read.
-                        if let Some(experience) = experience {
-                            self.queue_learning_formation(*experience);
+                    DialogueOutcome::Completed { input, .. } => {
+                        // Occupancy starts before pin_experience so a
+                        // body-bearing local candidate cannot exist outside
+                        // HostTransient remainder. It starts after dispatch:
+                        // an in-flight stream is the fence's remainder, not a
+                        // Learning pin, and must not block Verified. The
+                        // guard releases occupancy on cancel/drop, not only
+                        // on the success path.
+                        {
+                            let _pin = self.acquire_learning_pin().await;
+                            if let Some(experience) = pin_experience(&input, &self.store).await {
+                                #[cfg(any(test, feature = "test-support"))]
+                                self.store
+                                    .pause_learning_pin_queue_if_armed_for_tests()
+                                    .await;
+                                self.queue_learning_formation(experience).await;
+                            }
                         }
                         gate.finish().await;
                     }
@@ -972,6 +1023,7 @@ impl HostHandle {
                 ),
             ),
             DialogueBegin::Held => emit_end(sink, held_frame(frame, live)),
+            DialogueBegin::HeldForErasure => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldByLifecycle(_) => {
                 emit_end(sink, revalidate_frame(frame, live, "stopped-companion"));
             }
@@ -1070,7 +1122,42 @@ impl HostHandle {
         request: &HistoryRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let response = self.read_history(request).await;
+        let coverage = self.current_coverage().await;
+        let response = match self.read_history(request).await {
+            HistoryResponse::Items(items) => {
+                let had_body = items.iter().any(|item| !item.text.is_empty());
+                // A covered body is not displayed: the canonical source is
+                // re-read here and checked against the current conditions, so
+                // a timeline page cannot show an erased message while the
+                // durable erasure finishes.
+                let items: Vec<_> = items
+                    .into_iter()
+                    .filter(|item| !coverage.covers(&item.text))
+                    .collect();
+                let serves_body = items.iter().any(|item| !item.text.is_empty());
+                if had_body && serves_body && !self.note_client_body_delivery(live).await {
+                    // No durable delivery evidence: withhold the page rather
+                    // than hand over a copy the Host cannot account for.
+                    HistoryResponse::Unavailable
+                } else {
+                    // The premise above was read before the evidence write and
+                    // the handoff. Admission serializes with that write, so a
+                    // condition that committed in between is either already in
+                    // the snapshot (evidence committed first) or must withhold
+                    // the body here: without this re-read a covered page could
+                    // leave while its incarnation is absent from the
+                    // operation's snapshot (critical-areas §5.2/§6.1).
+                    let fresh = self.current_coverage().await;
+                    HistoryResponse::Items(
+                        items
+                            .into_iter()
+                            .filter(|item| !fresh.covers(&item.text))
+                            .collect(),
+                    )
+                }
+            }
+            other => other,
+        };
         vec![outgoing_frame(
             frame,
             live,
@@ -1170,9 +1257,30 @@ impl HostHandle {
     /// durable reply append, so a formation decline or failure never rewrites
     /// it. Each item carries its own source range and transcript, so the
     /// worker judges exactly that Experience; it never reads a later History
-    /// window and silently folds newer turns into an older pass.
-    fn queue_learning_formation(&self, experience: ExperienceCandidate) {
+    /// window and silently folds newer turns into an older pass. A full queue
+    /// drops the oldest pending pass rather than growing without bound.
+    ///
+    /// TARGET-bearing old-origin work is published to the canonical store as
+    /// a body-free delayed-arrival so an already-Verified HostTransient row
+    /// cannot complete over the new remainder.
+    pub(crate) async fn queue_learning_formation(&self, experience: ExperienceCandidate) {
+        let _gate = self.host_transient_arrival.lock().await;
         crate::lock_unpoison(&self.learning_queue).push_back(experience);
+        self.host_transient_arrival.note_queued_arrival();
+        #[cfg(any(test, feature = "test-support"))]
+        self.store
+            .pause_host_transient_arrival_publish_if_armed_for_tests()
+            .await;
+        crate::transient_erasure::publish_owed_learning_arrivals(
+            &self.store,
+            &self.host_transient_arrival,
+            &self.learning_queue,
+        )
+        .await;
+    }
+
+    async fn acquire_learning_pin(&self) -> crate::transient_erasure::LearningPinGuard {
+        self.host_transient_arrival.acquire_pin().await
     }
 
     /// Whether a queued formation pass is waiting.
@@ -1202,20 +1310,61 @@ impl HostHandle {
     /// keeps a genuine overlap from overwriting newer recognition. Stopped
     /// companions are skipped because stopping must not start new internal
     /// activity. A pass failure drops its item, so there is no retry storm.
+    ///
+    /// Taking a candidate off the pending queue parks it in the worker-owned
+    /// `taken` slot until a body-free formation identity is published. HostTransient
+    /// can no longer drop that transcript as a queue entry; it also cannot
+    /// report Verified while the slot still carries a covered body. After the
+    /// identity commits, deletion correspondence outlives the slot, so a
+    /// deletion that completes before the Learning claim still refuses the
+    /// stale origin at the provider gate.
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
         let _serialized = self.learning_worker.lock().await;
         loop {
             let next = {
                 let mut queue = crate::lock_unpoison(&self.learning_queue);
-                queue.pop_front()
+                queue.take_pending()
             };
             let Some(experience) = next else {
                 break;
             };
+            // The candidate is in `taken` and no formation identity exists
+            // yet. HostTransient must observe this generation change instead
+            // of verifying from a pre-take snapshot.
+            #[cfg(any(test, feature = "test-support"))]
+            self.store.pause_learning_take_if_armed_for_tests().await;
+            let formation = match self
+                .store
+                .begin_learning_formation(experience.companion, experience.sources.clone())
+                .await
+            {
+                Ok(formation) => formation,
+                Err(_) => {
+                    crate::lock_unpoison(&self.learning_queue).clear_taken();
+                    continue;
+                }
+            };
+            crate::lock_unpoison(&self.learning_queue).clear_taken();
+            #[cfg(any(test, feature = "test-support"))]
+            self.store
+                .pause_learning_formation_if_armed_for_tests()
+                .await;
+            let refuse = self
+                .store
+                .learning_formation_must_refuse(formation)
+                .await
+                .unwrap_or(true);
+            if refuse {
+                drop(self.store.settle_learning_formation(formation).await);
+                continue;
+            }
             let companion = CompanionId::from_raw(experience.companion);
             match self.store.load_lifecycle(companion).await {
                 Ok(Some(CompanionLifecycle::Running)) => {}
-                _ => continue,
+                _ => {
+                    drop(self.store.settle_learning_formation(formation).await);
+                    continue;
+                }
             }
             let executor = HostInference {
                 store: &self.store,
@@ -1236,6 +1385,7 @@ impl HostHandle {
                 )
                 .await,
             );
+            drop(self.store.settle_learning_formation(formation).await);
         }
     }
 }
@@ -1289,20 +1439,28 @@ impl<T: ProviderTransport + Send + Sync> HostInference<'_, T> {
 }
 
 impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_, T> {
-    async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError> {
+    async fn admit_dialogue(
+        &self,
+        data_use: Vec<ene_primitive::RawId>,
+    ) -> Result<Admission, InferenceTechnicalError> {
         self.admit(ene_inference::prepare_dialogue_admission(
             self.store,
             self.store,
             self.cred_store,
+            data_use,
         ))
         .await
     }
 
-    async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError> {
+    async fn admit_learning(
+        &self,
+        data_use: Vec<ene_primitive::RawId>,
+    ) -> Result<Admission, InferenceTechnicalError> {
         self.admit(ene_inference::prepare_learning_admission(
             self.store,
             self.store,
             self.cred_store,
+            data_use,
         ))
         .await
     }
@@ -1373,6 +1531,13 @@ struct StreamGate<'a> {
     seq: u64,
     /// No wire close (or delta) is legal unless Open was queued.
     opened: bool,
+    /// The Host transient erasure fence epoch this stream started under; a
+    /// later epoch means the payload can no longer be published.
+    fence_epoch: u64,
+    /// The ticket this stream's provider claim runs under: a deletion
+    /// admission that associated the claim with an interval refuses every
+    /// later delta, even after the operation completed.
+    inference_claim: RawId,
 }
 
 impl StreamGate<'_> {
@@ -1398,6 +1563,26 @@ impl StreamGate<'_> {
         // a replacement invalidates this stream even though the device,
         // client id, generation, and round key look unchanged.
         if !self.connection_current() {
+            return false;
+        }
+        // A Targeted Deletion invalidated Host transient payloads since this
+        // stream opened: the remaining deltas can no longer prove they are
+        // uncovered, so they fail closed instead of publishing.
+        if self.handle.transient_fence_epoch() != self.fence_epoch {
+            return false;
+        }
+        // The durable old-claim provenance (lifecycle §11 R2): a deletion
+        // admission associated this provider claim with its interval, so the
+        // reply cannot be presented even after the operation completed and no
+        // current condition is readable. The read is per delta and an
+        // unreadable hold refuses, never presents.
+        if !matches!(
+            self.handle
+                .store
+                .inference_claim_held(self.inference_claim)
+                .await,
+            Ok(false)
+        ) {
             return false;
         }
         // A newer submit replaced this stream's round: the owner's
@@ -1542,8 +1727,24 @@ impl DeltaSink for StreamGate<'_> {
             };
             // Re-check after the capacity wait: the premise may have gone
             // stale while parked, and a stale delta must never publish.
-            // `permit.send` is synchronous, so no await sits between this
-            // check and the publication.
+            if !self.current().await {
+                drop(permit);
+                return DeltaFlow::Abort("the presentation premise went stale");
+            }
+            // Write-ahead delivery evidence: the delta body may only leave the
+            // Host after this incarnation's durable evidence row is committed,
+            // so a crash between the send and the record cannot lose the copy
+            // (lifecycle §8.1). A failed commit aborts the stream instead of
+            // creating an unaccountable copy; the durable reply still reaches
+            // the Client through its presentation subscription.
+            if !self.handle.note_client_body_delivery(self.live).await {
+                drop(permit);
+                return DeltaFlow::Abort("the delivery evidence could not be committed");
+            }
+            // Final premise check after the durable write: the write awaited,
+            // so a condition, fence, or connection that moved meanwhile must
+            // still stop this delta before it is published. The evidence row,
+            // when written, is conservative and re-derived by a later demand.
             if !self.current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");

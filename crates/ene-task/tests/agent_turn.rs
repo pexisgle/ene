@@ -26,14 +26,15 @@ use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
     DelegationScope, Task, TaskAgentActionExchange, TaskAgentEphemeralId, TaskAgentInference,
     TaskAgentInferenceError, TaskAgentInferenceOutcome, TaskAgentInferencePremise,
-    TaskAgentInferenceProduced, TaskAgentNotSent, TaskAgentObservation, TaskAgentOutput,
-    TaskAgentResultArrival, TaskAgentTurnError, TaskAgentTurnOutcome, TaskAgentTurnPremise,
-    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
-    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
-    TaskInstructionRole, TaskInstructionSource, TaskInstructionSourceError,
-    TaskInstructionSourceRecord, TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef,
-    TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
-    TaskRevision, TaskRevisionRecord, TaskTechnicalError, orchestrate_task_agent_turn,
+    TaskAgentInferenceProduced, TaskAgentNotSent, TaskAgentObservation, TaskAgentObservationId,
+    TaskAgentOutput, TaskAgentResultArrival, TaskAgentTurnError, TaskAgentTurnOutcome,
+    TaskAgentTurnPremise, TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise,
+    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskInstructionRole, TaskInstructionSource,
+    TaskInstructionSourceError, TaskInstructionSourceRecord, TaskProgress, TaskPurpose,
+    TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskRevision, TaskRevisionRecord,
+    TaskTechnicalError, orchestrate_task_agent_turn,
 };
 
 /// Instruction source for turns whose context carries no adopted instruction:
@@ -188,6 +189,14 @@ impl FakeTaskRepository {
 }
 
 impl TaskRepository for FakeTaskRepository {
+    async fn record_task_agent_observation(
+        &self,
+        _premise: ene_task::TaskAgentObservationPremise,
+    ) -> Result<ene_task::TaskAgentObservationId, ene_task::TaskTechnicalError> {
+        Err(ene_task::TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_agent_observation is outside this fixture's scope"),
+        })
+    }
     async fn create_task(
         &self,
         _premise: TaskCreationPremise,
@@ -251,7 +260,7 @@ impl TaskRepository for FakeTaskRepository {
     async fn record_task_result_arrival(
         &self,
         _arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<ene_task::TaskResultArrivalOutcome, TaskTechnicalError> {
         Err(TaskTechnicalError::StorageUnavailable {
             reason: String::from("record_task_result_arrival is outside this fixture's scope"),
         })
@@ -788,12 +797,20 @@ async fn an_over_budget_transcript_drops_oldest_exchanges_with_a_fixed_note() {
 
     let old = TaskAgentActionExchange {
         request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"old.txt\"}")),
-        observation: TaskAgentObservation::new(format!("read ok:\n{}", "o".repeat(400))),
+        observation: TaskAgentObservation::new(
+            TaskAgentObservationId::generate(),
+            format!("read ok:\n{}", "o".repeat(400)),
+        ),
     };
     let newest = TaskAgentActionExchange {
         request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"new.txt\"}")),
-        observation: TaskAgentObservation::new(format!("read ok:\n{}", "n".repeat(100))),
+        observation: TaskAgentObservation::new(
+            TaskAgentObservationId::generate(),
+            format!("read ok:\n{}", "n".repeat(100)),
+        ),
     };
+    let newest_occurrence = newest.observation.occurrence();
+    let old_occurrence = old.observation.occurrence();
     let outcome = orchestrate_task_agent_turn(
         &repository,
         &NoInstructionSource,
@@ -808,6 +825,16 @@ async fn an_over_budget_transcript_drops_oldest_exchanges_with_a_fixed_note() {
     .expect("a trimmed transcript is still a domain outcome");
 
     assert!(matches!(outcome, TaskAgentTurnOutcome::Produced(_)));
+    let captured = inference.premises();
+    let received = captured.first().expect("the premise was captured");
+    assert!(
+        received.data_use.contains(&newest_occurrence.as_raw()),
+        "a kept observation occurrence joins the turn correlation"
+    );
+    assert!(
+        !received.data_use.contains(&old_occurrence.as_raw()),
+        "a dropped exchange is not in the logical input and adds no correlation"
+    );
     let raw = scrubber.inputs();
     assert_eq!(raw.len(), 1);
     assert!(
@@ -844,7 +871,10 @@ async fn an_exchange_that_cannot_fit_alone_is_not_replaced_by_a_note() {
 
     let oversized = TaskAgentActionExchange {
         request: TaskAgentOutput::new(String::from("{\"tool\":\"read\",\"path\":\"huge.txt\"}")),
-        observation: TaskAgentObservation::new(format!("read ok:\n{}", "x".repeat(2_000))),
+        observation: TaskAgentObservation::new(
+            TaskAgentObservationId::generate(),
+            format!("read ok:\n{}", "x".repeat(2_000)),
+        ),
     };
     let outcome = orchestrate_task_agent_turn(
         &repository,
@@ -915,6 +945,8 @@ async fn action_exchanges_are_replayed_in_order_and_scrubbed_once() {
     let purpose_source = loaded.context[0].origin.source;
     let fixture = turn_fixture(loaded, delegation_ref);
 
+    let read_occurrence = TaskAgentObservationId::generate();
+    let create_occurrence = TaskAgentObservationId::generate();
     let premise = TaskAgentTurnPremise {
         delegation: fixture.delegation,
         exchanges: vec![
@@ -922,15 +954,16 @@ async fn action_exchanges_are_replayed_in_order_and_scrubbed_once() {
                 request: TaskAgentOutput::new(String::from(
                     r#"{"tool":"read","path":"input.txt"}"#,
                 )),
-                observation: TaskAgentObservation::new(String::from("notes")),
+                observation: TaskAgentObservation::new(read_occurrence, String::from("notes")),
             },
             TaskAgentActionExchange {
                 request: TaskAgentOutput::new(String::from(
                     "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# report\"}",
                 )),
-                observation: TaskAgentObservation::new(String::from(
-                    "created at the requested workspace path",
-                )),
+                observation: TaskAgentObservation::new(
+                    create_occurrence,
+                    String::from("created at the requested workspace path"),
+                ),
             },
         ],
     };
@@ -966,8 +999,12 @@ async fn action_exchanges_are_replayed_in_order_and_scrubbed_once() {
     );
     assert_eq!(
         received.data_use,
-        vec![purpose_source],
-        "execution-local exchanges add no canonical source to the correlation"
+        vec![
+            purpose_source,
+            read_occurrence.as_raw(),
+            create_occurrence.as_raw()
+        ],
+        "observation occurrence identities join the correlation in logical-input order"
     );
 }
 
@@ -1340,6 +1377,8 @@ async fn every_not_sent_reason_maps_through_unchanged() {
         TaskAgentNotSent::ConsentStale,
         TaskAgentNotSent::OverLimit,
         TaskAgentNotSent::EvaluationConsumed,
+        TaskAgentNotSent::UsageCapReached,
+        TaskAgentNotSent::UsageCapIndeterminate,
     ];
 
     for reason in reasons {

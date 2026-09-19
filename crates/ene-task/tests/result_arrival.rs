@@ -14,14 +14,16 @@
     reason = "integration-test fixtures and helpers live outside #[test] functions, where clippy.toml's test allowances do not apply"
 )]
 
+mod common;
+
 use std::sync::Mutex;
 
 use ene_primitive::WallClockWithTz;
 use ene_task::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef, TaskAgentOutput,
     TaskAgentResultArrival, TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskId,
-    TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord, TaskRevision, TaskTechnicalError, orchestrate_result_arrival,
+    TaskRef, TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultArrivalOutcome, TaskResultId, TaskResultRecord, TaskRevision, TaskTechnicalError,
 };
 
 /// Captures every arrival the orchestration records; it implements no other
@@ -42,6 +44,14 @@ impl CapturingRepository {
 }
 
 impl TaskRepository for CapturingRepository {
+    async fn record_task_agent_observation(
+        &self,
+        _premise: ene_task::TaskAgentObservationPremise,
+    ) -> Result<ene_task::TaskAgentObservationId, ene_task::TaskTechnicalError> {
+        Err(ene_task::TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_agent_observation is outside this fixture's scope"),
+        })
+    }
     async fn create_task(
         &self,
         _premise: ene_task::TaskCreationPremise,
@@ -84,7 +94,7 @@ impl TaskRepository for CapturingRepository {
     async fn record_task_result_arrival(
         &self,
         arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<TaskResultArrivalOutcome, TaskTechnicalError> {
         let record = TaskResultRecord {
             result: arrival.result,
             task: TaskRef {
@@ -92,7 +102,7 @@ impl TaskRepository for CapturingRepository {
                 revision: TaskRevision::initial(),
             },
             delegation: arrival.delegation,
-            body: arrival.body.clone(),
+            body: TaskAgentOutput::new(arrival.body.body().to_owned()),
             attempt_refs: Vec::new(),
             adopted_revision: None,
             recorded_at: WallClockWithTz::now(),
@@ -101,7 +111,7 @@ impl TaskRepository for CapturingRepository {
             .lock()
             .expect("capture lock is never poisoned")
             .push(arrival);
-        Ok(record)
+        Ok(TaskResultArrivalOutcome::Recorded(record))
     }
 
     async fn load_task_result(
@@ -216,20 +226,8 @@ async fn finalization_mints_the_identity_and_records_the_arrival_once() {
     let repository = CapturingRepository::default();
     let delegation = DelegationId::generate();
 
-    let first = orchestrate_result_arrival(
-        &repository,
-        delegation,
-        TaskAgentOutput::new(String::from("first body")),
-    )
-    .await
-    .expect("the arrival records");
-    let second = orchestrate_result_arrival(
-        &repository,
-        delegation,
-        TaskAgentOutput::new(String::from("second body")),
-    )
-    .await
-    .expect("the arrival records");
+    let first = common::record(&repository, delegation, "first body").await;
+    let second = common::record(&repository, delegation, "second body").await;
 
     assert_ne!(
         first.result, second.result,
@@ -239,8 +237,8 @@ async fn finalization_mints_the_identity_and_records_the_arrival_once() {
     assert_eq!(arrivals.len(), 2);
     assert_eq!(arrivals[0].delegation, delegation);
     assert_eq!(arrivals[0].result, first.result);
-    assert_eq!(arrivals[0].body.text(), "first body");
+    assert_eq!(arrivals[0].body.body(), "first body");
     assert_eq!(arrivals[1].result, second.result);
-    assert_eq!(arrivals[1].body.text(), "second body");
+    assert_eq!(arrivals[1].body.body(), "second body");
     assert_eq!(first.adopted_revision, None);
 }

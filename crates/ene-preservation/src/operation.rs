@@ -1,20 +1,25 @@
 //! Targeted Deletion admission and unfinished-operation contracts.
 //!
-//! A1 deliberately provides no public confirmation mint and no transition to
-//! finalizing/completed. A1b supplies the trusted first-party issuer
+//! A1 deliberately provides no public confirmation mint. A1b supplies the
+//! trusted first-party issuer
 //! ([`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command));
-//! the verified completion boundary (A5) must supply completion, not caller
-//! booleans.
+//! A5 supplies the sealed finalizing/completion boundary
+//! ([`PreservationRepository::begin_deletion_finalizing`] /
+//! [`PreservationRepository::complete_deletion_finalizing`]), whose premise is
+//! the durable participant aggregate and the system-wide mechanical remainder
+//! verification — never a caller boolean.
 
 use ene_primitive::{RawId, WallClockWithTz};
 use zeroize::Zeroizing;
 
 use crate::{
-    ConfirmTargetedDeletionOutcome, DeletionMaterialOutcome, DeletionOperationId,
-    DeletionParticipantRecord, DeletionRequestId, DeletionSurfaceMark, DeletionSweepGeneration,
-    ErasureConditionRef, ParticipantCompletionFact, ParticipantCompletionOutcome,
-    ParticipantDemandOutcome, ParticipantOwnerRef, StageTargetedDeletionRequestCommand,
-    StageTargetedDeletionRequestOutcome, TargetedDeletionRequest,
+    ConfirmTargetedDeletionOutcome, DeletionCompletionAudit, DeletionCompletionSummary,
+    DeletionFinalizationOutcome, DeletionMaterialOutcome, DeletionOperationId,
+    DeletionParticipantRecord, DeletionReconciliationOutcome, DeletionRequestId,
+    DeletionSurfaceMark, DeletionSweepGeneration, ErasureConditionRef, ParticipantCompletionFact,
+    ParticipantCompletionOutcome, ParticipantDemandOutcome, ParticipantOwnerRef,
+    StageTargetedDeletionRequestCommand, StageTargetedDeletionRequestOutcome,
+    TargetedDeletionRequest,
 };
 
 /// Operation-lifetime material; never an audit field or management payload.
@@ -323,7 +328,10 @@ pub enum PreservationTechnicalError {
 /// Canonical persistence boundary. Admission publishes operation, protected
 /// material, initial condition, known source correlations, and the required
 /// participant snapshot atomically before returning Started. No participant
-/// effects occur within these methods.
+/// effects occur within these methods. On the first-party request path the
+/// known source correlations are enumerated from the owner's durable identity
+/// rows whose text carries the confirmed exact target (lifecycle §4.1 point
+/// 4); the direct command path publishes exactly its caller-provided set.
 ///
 /// Source-correlation invariant for the erasure-currentness hot path: an
 /// unfinished operation keeps `erasure_condition_source` rows only in its
@@ -448,12 +456,58 @@ pub trait PreservationRepository: Send + Sync {
     /// durable (crash recovery, and the intent path observing a confirmed
     /// request). Adds no authority: without the durable confirmation row this
     /// answers [`StartTargetedDeletionOutcome::ConfirmationRequired`].
+    ///
+    /// The admission transaction writes the operation, its protected material,
+    /// the initial condition, the required participant snapshot, and a durable
+    /// reconciliation cursor per known identity table, then publishes the
+    /// first bounded pages of the source correlations already known at
+    /// admission (lifecycle §4.1 point 4): the implementation enumerates the
+    /// owner's durable identity rows whose stored text carries the confirmed
+    /// exact target, in bounded pages, and associates the already-claimed uses
+    /// each page covers. A Client, model output, or caller never names a
+    /// source on this path. The page bound is a work bound, not a correctness
+    /// bound: the durable cursor lets
+    /// [`Self::reconcile_deletion_sources`] walk every remaining covered
+    /// identity to its end, and global completion refuses while that walk is
+    /// incomplete.
+    ///
+    /// The direct (`start_targeted_deletion`) path has no enumeration to do:
+    /// its caller-provided `known_sources` are the whole publication, so its
+    /// reconciliation rows commit already complete.
     fn start_confirmed_targeted_deletion(
         &self,
         request: DeletionRequestId,
         required_participants: Vec<ParticipantOwnerRef>,
     ) -> impl std::future::Future<
         Output = Result<StartTargetedDeletionOutcome, PreservationTechnicalError>,
+    > + Send;
+    /// One bounded step of the exhaustive already-known covered-source
+    /// reconciliation for the operation's current sweep (lifecycle §4.1 point
+    /// 4, §12 step 1).
+    ///
+    /// Each call processes at most one bounded page from one known identity
+    /// table: identities whose stored body carries the confirmed exact target
+    /// are published as current-sweep source correlations, and the
+    /// already-claimed in-flight uses whose durable provenance intersects that
+    /// page are durably associated with the operation. The durable
+    /// `(operation, sweep, identity table)` cursor advances in the same
+    /// transaction as the page, so a crash resumes at the next page instead of
+    /// re-deciding a generation, and a retried page is idempotent (source and
+    /// hold writes are keyed inserts). A new sweep generation resets the
+    /// cursors; an old generation's step answers
+    /// [`DeletionReconciliationOutcome::StaleSweep`].
+    ///
+    /// Correctness never depends on the page size: the walk ends only when a
+    /// table's ordered scan reaches its end, and
+    /// [`Self::begin_deletion_finalizing`] refuses
+    /// (`DeletionFinalizationOutcome::ReconciliationIncomplete`) until every
+    /// table is complete for the current sweep.
+    fn reconcile_deletion_sources(
+        &self,
+        expected: DeletionOperationRef,
+        page_size: u32,
+    ) -> impl std::future::Future<
+        Output = Result<DeletionReconciliationOutcome, PreservationTechnicalError>,
     > + Send;
     /// SELECT-only, keyset-paged staged requests still awaiting the Host-local
     /// confirmation; limit is 1..=100. Confirmed requests are excluded: their
@@ -481,4 +535,83 @@ pub trait PreservationRepository: Send + Sync {
     fn deletion_surface_mark(
         &self,
     ) -> impl std::future::Future<Output = Result<DeletionSurfaceMark, PreservationTechnicalError>> + Send;
+
+    /// SELECT-only durable aggregate of the required participant set for the
+    /// operation's current sweep (§10). One operation is one bounded read; an
+    /// unknown operation is [`PreservationTechnicalError::UnknownOperation`],
+    /// never an empty participant set.
+    fn deletion_completion_summary(
+        &self,
+        operation: DeletionOperationId,
+    ) -> impl std::future::Future<
+        Output = Result<DeletionCompletionSummary, PreservationTechnicalError>,
+    > + Send;
+
+    /// Sealed finalizing transition (§12).
+    ///
+    /// The caller supplies only the expected operation ref. The store re-reads
+    /// the durable participant aggregate inside the write transaction and
+    /// refuses unless **every** required participant is `Verified` for the
+    /// operation's *current* sweep; there is no boolean, token, or
+    /// self-reported premise that can substitute for that durable state. The
+    /// same transaction re-reads the current sweep's covered-source
+    /// reconciliation state and refuses with
+    /// [`DeletionFinalizationOutcome::ReconciliationIncomplete`] while any
+    /// known identity table is still being walked: the already-claimed
+    /// in-flight uses the completion must account for are only all durable
+    /// once the exhaustive walk finished, and an arbitrary page bound is never
+    /// a completion premise (§4.1 point 4, §18).
+    ///
+    /// Before entering `Finalizing`, the same transaction runs the
+    /// system-wide mechanical remainder verification (LLM-independent, over
+    /// the closed canonical content surface). If it finds still-collected
+    /// target data, the completion is abandoned *before* any material is
+    /// destroyed: a new sweep generation opens, every participant resets to
+    /// pending, and the outcome is
+    /// [`DeletionFinalizationOutcome::RemainderCollected`].
+    ///
+    /// The transition is idempotent for an operation already `Finalizing`.
+    fn begin_deletion_finalizing(
+        &self,
+        expected: DeletionOperationRef,
+    ) -> impl std::future::Future<
+        Output = Result<DeletionFinalizationOutcome, PreservationTechnicalError>,
+    > + Send;
+
+    /// Sealed completion commit (§12 steps 1-6).
+    ///
+    /// Only a durably `Finalizing` operation can complete. In one Immediate
+    /// transaction the store:
+    ///
+    /// 1. re-checks that the current generation collected no delayed-arrival /
+    ///    remainder data (the system-wide mechanical probe);
+    /// 2. destroys the operation-lifetime target/search material, its semantic
+    ///    hints, its staged request's exact text, and every source
+    ///    correlation;
+    /// 3. verifies that material is unrecoverable from the canonical rows;
+    /// 4. commits the body-free completion audit;
+    /// 5. closes the current erasure condition;
+    /// 6. commits the operation as `Completed`.
+    ///
+    /// A step-1 remainder never wipes material: it opens a new sweep and
+    /// returns [`DeletionFinalizationOutcome::RemainderCollected`]. Because
+    /// steps 2-6 share one commit, a crash cannot leave the condition closed
+    /// while the operation is unfinished, and a restart resumes from the
+    /// durable `Finalizing` marker instead of estimating completion (§14).
+    fn complete_deletion_finalizing(
+        &self,
+        expected: DeletionOperationRef,
+    ) -> impl std::future::Future<
+        Output = Result<DeletionFinalizationOutcome, PreservationTechnicalError>,
+    > + Send;
+
+    /// SELECT-only body-free completion audit (§13). [`None`] while the
+    /// operation is unfinished; the audit exists exactly when the operation is
+    /// `Completed`.
+    fn deletion_completion_audit(
+        &self,
+        operation: DeletionOperationId,
+    ) -> impl std::future::Future<
+        Output = Result<Option<DeletionCompletionAudit>, PreservationTechnicalError>,
+    > + Send;
 }

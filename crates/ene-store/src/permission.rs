@@ -3,9 +3,10 @@ use std::sync::Arc;
 use ene_permission::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
     IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
-    IntentResolution, PermissionTechnicalError, ShortcutIntentOutcome, consent_mark,
-    parse_consent_mark,
+    IntentResolution, PermissionErasureOutcome, PermissionErasureRepository,
+    PermissionTechnicalError, ShortcutIntentOutcome, consent_mark, parse_consent_mark,
 };
+use ene_preservation::ErasureConditionRef;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::Store;
@@ -14,6 +15,7 @@ use crate::codec::{
     insert_decided_row_tx, lock_shared, permission_unavailable, replay_or_conflict, select_consent,
     select_intent_row_tx,
 };
+use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
 const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (capability, id, rev, provider, model, credential_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
@@ -313,5 +315,114 @@ impl IntentOutcomeRepository for Store {
             }
         })
         .await
+    }
+}
+
+/// Bounded rows mutated per table in one local erasure pass. A pass that hits
+/// the bound reports its remainder and the next demand re-scans from the
+/// start: erased rows no longer match, so re-scanning is progress and needs no
+/// continuation cursor (lifecycle §9).
+const ERASURE_BATCH_ROWS: i64 = 500;
+
+/// Redacts the caller-supplied text columns of the decision journal.
+///
+/// The journal row itself is never deleted: deleting a decided intent would
+/// reopen its identity, so a retried id could re-execute a decision the Owner
+/// already received. The erased span is removed (`''`, never a marker), so no
+/// marker text can itself become a target match or a target-derived value.
+const SQL_REDACT_INTENT_JOURNAL: &str = "UPDATE management_intent
+     SET target = replace(target, ?1, ''),
+         rationale_quote = replace(rationale_quote, ?1, '')
+     WHERE rowid IN (
+         SELECT rowid FROM management_intent
+         WHERE instr(target, ?1) > 0
+            OR instr(COALESCE(rationale_quote, ''), ?1) > 0
+         LIMIT ?2
+     )";
+
+/// Invalidates a current consent record that carries the target text.
+///
+/// Erasure never rewrites the route in place and never turns a rule removal
+/// into a permission: the required current control outcome is "no consent",
+/// which fails closed until the Owner re-assigns.
+const SQL_INVALIDATE_CONSENT: &str = "DELETE FROM consent_record
+     WHERE capability IN (
+         SELECT capability FROM consent_record
+         WHERE instr(id, ?1) > 0 OR instr(provider, ?1) > 0
+            OR instr(model, ?1) > 0 OR instr(credential_id, ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_COUNT_JOURNAL_TARGET: &str = "SELECT COUNT(*) FROM management_intent
+     WHERE instr(target, ?1) > 0 OR instr(COALESCE(rationale_quote, ''), ?1) > 0";
+
+const SQL_COUNT_CONSENT_TARGET: &str = "SELECT COUNT(*) FROM consent_record
+     WHERE instr(id, ?1) > 0 OR instr(provider, ?1) > 0
+        OR instr(model, ?1) > 0 OR instr(credential_id, ?1) > 0";
+
+fn erasure_count(value: i64) -> Result<u64, PermissionTechnicalError> {
+    u64::try_from(value).map_err(|_| permission_unavailable(String::from("count out of range")))
+}
+
+impl PermissionErasureRepository for Store {
+    fn erase_target_text(
+        &self,
+        condition: ErasureConditionRef,
+        target: &str,
+    ) -> impl std::future::Future<
+        Output = Result<PermissionErasureOutcome, PermissionTechnicalError>,
+    > + Send {
+        #[cfg(any(test, feature = "test-support"))]
+        let parks = Arc::clone(&self.test_parks);
+        let conn = Arc::clone(&self.conn);
+        let target = target.to_owned();
+        async move {
+            #[cfg(any(test, feature = "test-support"))]
+            parks.erasure_mutation.pause_if_armed().await;
+            run_blocking(move || {
+                let mut guard = lock_shared(&conn);
+                let tx = guard
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                // Stale-generation rejection and the mutation share one short
+                // transaction: a superseded sweep or a completed operation
+                // mutates nothing (lifecycle §6-§7/§9.1).
+                if !condition_is_current(&tx, condition)
+                    .map_err(|error| permission_unavailable(error.to_string()))?
+                {
+                    return Ok(PermissionErasureOutcome::NotCurrent);
+                }
+                let journal_redacted = tx
+                    .execute(
+                        SQL_REDACT_INTENT_JOURNAL,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                let consents_invalidated = tx
+                    .execute(SQL_INVALIDATE_CONSENT, params![target, ERASURE_BATCH_ROWS])
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                let journal_remainder: i64 = tx
+                    .query_row(SQL_COUNT_JOURNAL_TARGET, params![target], |row| row.get(0))
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                let consent_remainder: i64 = tx
+                    .query_row(SQL_COUNT_CONSENT_TARGET, params![target], |row| row.get(0))
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                let erased = erasure_count(
+                    i64::try_from(journal_redacted + consents_invalidated)
+                        .map_err(|_| permission_unavailable(String::from("count out of range")))?,
+                )?;
+                let remainder = erasure_count(
+                    journal_remainder
+                        .checked_add(consent_remainder)
+                        .ok_or_else(|| {
+                            permission_unavailable(String::from("count out of range"))
+                        })?,
+                )?;
+                tx.commit()
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                Ok(PermissionErasureOutcome::Applied { erased, remainder })
+            })
+            .await
+        }
     }
 }

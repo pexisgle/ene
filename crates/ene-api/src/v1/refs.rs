@@ -113,3 +113,7 @@ string_wire_ref!(
     BaseViewMark,
     "Opaque display-revision mark an intent was built on. Comparison material, never authority."
 );
+string_wire_ref!(
+    UsageCursorWire,
+    "Opaque usage summary cursor, Host-issued and bound to one connection and query. Echo only."
+);

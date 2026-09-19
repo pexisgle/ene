@@ -70,6 +70,54 @@ fn commit_change_sync(
             return Ok(MemoryChangeOutcome::StaleCredentialSet);
         }
     }
+    // The A4/R2 claim-hold gate: a formation claimed before a deletion
+    // condition committed was associated with that operation at admission
+    // (`erasure_use_hold`). The association outlives the operation, so a
+    // delayed formation is refused even when the operation completed and no
+    // current condition is readable. The check names the claim, never the
+    // target text: the same string from a fresh claim after completion is a
+    // new origin.
+    if let Some(claim) = commit.claim
+        && crate::preservation::held_use(
+            &tx,
+            crate::preservation::USE_KIND_INFERENCE_ATTEMPT,
+            claim.as_raw(),
+        )
+        .map_err(|error| learning_unavailable(error.to_string()))?
+    {
+        // The direct-correlation fallback in `held_use` may have written the
+        // durable hold for an unreconciled operation; commit it even though
+        // the formation itself is refused, so the correspondence survives
+        // this arrival instead of rolling back with the refused try.
+        tx.commit().map_err(learning_unavailable)?;
+        return Ok(MemoryChangeOutcome::HeldForErasure);
+    }
+    // The A4 delayed-arrival gate: the Summary evidence, the proposed
+    // recognition text, and the Summary's source correlation are compared
+    // against the canonical current conditions inside this same transaction.
+    // A formation pass whose output re-states the target, or whose evidence
+    // derives from a covered source, is refused before any row — evidence,
+    // current Memory, revision, or token index. A completed operation is not
+    // a current condition, so new formation over a fresh source proceeds.
+    let covered = |text: &str| {
+        crate::preservation::covering_text(&tx, text)
+            .map_err(|error| learning_unavailable(error.to_string()))
+            .map(|coverage| coverage.is_some())
+    };
+    if let Some(summary) = &commit.summary {
+        if covered(&summary.content)? {
+            return Ok(MemoryChangeOutcome::HeldForErasure);
+        }
+        if crate::preservation::covering_sources(&tx, &[summary.source.start, summary.source.end])
+            .map_err(|error| learning_unavailable(error.to_string()))?
+            .is_some()
+        {
+            return Ok(MemoryChangeOutcome::HeldForErasure);
+        }
+    }
+    if covered(&commit.change.content)? {
+        return Ok(MemoryChangeOutcome::HeldForErasure);
+    }
     if let Some(summary) = &commit.summary {
         insert_summary(&tx, summary)?;
     }
@@ -439,6 +487,13 @@ fn recall_candidates_sync(
         values.push(Box::new(term.clone()));
     }
     let guard = lock_shared(conn);
+    // Recall is a use, not only a read: a Memory under a current deletion
+    // condition is not offered to any consumer (the dialogue prompt would
+    // otherwise put its content into the provider input), and an unreadable
+    // premise withholds every body. The durable erase is the owner sweep's;
+    // this is the same canonical premise applied at the read boundary.
+    let premise = crate::preservation::TextCoveragePremise::read(&guard)
+        .map_err(|error| learning_unavailable(error.to_string()))?;
     let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;
     let rows = statement
         .query_map(
@@ -454,6 +509,9 @@ fn recall_candidates_sync(
     for row in rows {
         let (raw, insertion_order) = row.map_err(learning_unavailable)?;
         let memory = decode_memory(raw)?;
+        if premise.covers(&memory.content) {
+            continue;
+        }
         if !candidates
             .iter()
             .any(|(_, existing)| existing.id == memory.id)

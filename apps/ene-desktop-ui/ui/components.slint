@@ -1,0 +1,159 @@
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export struct Item { key: string, title: string, body: string, meta: string, state: string }
+export struct Message { owner: bool, text: string, caption: string }
+
+export component Action inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: max(72px, label.preferred-width + 28px);
+    min-height: 38px;
+    max-height: 38px;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius;
+    background: !enabled ? Theme.surface : primary ? Theme.accent : selected || hit.has-hover ? Theme.raised : Theme.surface;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus || selected ? Theme.accent : Theme.border;
+    opacity: enabled ? 1 : 0.45;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px;
+        label := Text {
+            text: root.text;
+            color: !root.enabled ? Theme.muted : root.primary ? Theme.on-accent : root.danger ? Theme.danger : Theme.text;
+            font-size: Theme.body-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    hit := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { focus.focus(); root.clicked(); }
+    }
+    focus := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+export component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+    height: 40px;
+    border-radius: Theme.radius;
+    background: selected ? Theme.raised : transparent;
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { root.clicked(); }
+    Rectangle { x: 0px; y: 10px; width: 3px; height: 20px; border-radius: 2px; background: root.selected ? Theme.accent : transparent; }
+    Text { x: 14px; text: root.text; color: root.selected ? Theme.text : Theme.muted; font-size: 14px; vertical-alignment: center; }
+    TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
+    focus := FocusScope { width: 0px; key-pressed(event) => { if event.text == Key.Return || event.text == Key.Space { root.clicked(); return accept; } return reject; } }
+}
+export component Heading inherits Text {
+    color: Theme.text; font-size: Theme.title-size; font-weight: 600;
+    wrap: word-wrap; vertical-stretch: 0;
+}
+export component Caption inherits Text {
+    color: Theme.muted; font-size: Theme.small-size; wrap: word-wrap; vertical-stretch: 0;
+}
+export component BodyText inherits Text {
+    color: Theme.text; font-size: Theme.body-size; wrap: word-wrap; vertical-stretch: 0;
+}
+export component Field inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> password: false;
+    in property <bool> enabled: true;
+    in-out property <string> value;
+    callback edited(string);
+    callback accepted();
+    min-height: 72px;
+    vertical-stretch: 0;
+    forward-focus: editor;
+    public function focus-input() { editor.focus(); }
+    VerticalLayout {
+        spacing: 8px;
+        Caption { text: root.label; }
+        editor := LineEdit {
+            text <=> root.value;
+            enabled: root.enabled;
+            height: 40px;
+            font-size: Theme.body-size;
+            input-type: root.password ? InputType.password : InputType.text;
+            placeholder-text: root.hint;
+            edited(t) => { root.edited(t); }
+            accepted => { root.accepted(); }
+        }
+    }
+}
+export component Notice inherits Rectangle {
+    in property <string> text;
+    in property <bool> error: false;
+    min-height: content.preferred-height + 24px;
+    vertical-stretch: 0;
+    border-radius: Theme.radius;
+    background: Theme.surface;
+    border-width: 1px; border-color: error ? Theme.danger : Theme.border;
+    content := Text {
+        x: 12px; y: 12px; width: parent.width - 24px;
+        text: root.text; wrap: word-wrap; color: root.error ? Theme.danger : Theme.muted;
+        font-size: 13px;
+    }
+}
+export component EmptyState inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    min-height: 150px;
+    VerticalLayout {
+        padding: 24px; spacing: 12px; alignment: center;
+        Heading { text: root.title; font-size: 20px; }
+        Caption { text: root.description; }
+    }
+}
+export component RowCard inherits Rectangle {
+    in property <Item> item;
+    in property <bool> selected: false;
+    callback clicked(string);
+    min-height: content.min-height;
+    vertical-stretch: 0;
+    border-radius: Theme.radius;
+    background: selected ? Theme.raised : Theme.surface;
+    border-width: 1px;
+    border-color: selected || focus.has-focus ? Theme.accent : Theme.border;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: item.title;
+    accessible-action-default => { root.clicked(root.item.key); }
+    content := VerticalLayout {
+        padding: 12px; spacing: 6px;
+        HorizontalLayout {
+            Text { text: root.item.title; color: Theme.text; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+            Text { text: root.item.state; color: Theme.accent; font-size: 12px; horizontal-stretch: 0; wrap: word-wrap; }
+        }
+        if item.body != "": BodyText { text: root.item.body; }
+        if item.meta != "": Caption { text: root.item.meta; }
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(root.item.key); } }
+    focus := FocusScope { width: 0px; key-pressed(event) => { if event.text == Key.Return || event.text == Key.Space { root.clicked(root.item.key); return accept; } return reject; } }
+}

@@ -17,11 +17,11 @@ use ene_action::{
     ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, ActionStartOutcome,
     AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds, OperationKind, RealTargetRef,
 };
-use ene_companion::{ActivityRepository as _, ManagementActivity, RecordResumeActivityCommand};
+use ene_companion::{ManagementActivity, RecordResumeActivityCommand};
 use ene_task::{
     ConversationTaskRepository as _, OwnerMessageCurrentness, ResumeInstructionSource,
-    ResumeTaskCommand, SteeringPremiseRef, TaskAgentOutput, TaskResumeCommitPremise,
-    TaskResumeHold, TaskResumeOutcome, TaskResumeReadiness, orchestrate_result_arrival,
+    ResumeTaskCommand, SteeringPremiseRef, TaskResumeCommitPremise, TaskResumeHold,
+    TaskResumeOutcome, TaskResumeReadiness,
 };
 
 async fn open_store() -> Store {
@@ -495,13 +495,7 @@ async fn adoptable_sealed_result_answers_before_any_new_work() {
     let (created, assoc) = seed_task(&store, companion).await;
     let delegation = seed_delegation(&store, created, assoc).await;
     let message = append_owner(&store, companion, generation, "keep going").await;
-    orchestrate_result_arrival(
-        &store,
-        delegation,
-        TaskAgentOutput::new(String::from("the recorded answer")),
-    )
-    .await
-    .expect("the arrival must record");
+    record_result(&store, delegation, "the recorded answer").await;
 
     let record = store.load_task(created.task).await.unwrap().unwrap();
     let before = table_counts(&store);
@@ -538,13 +532,7 @@ async fn result_blocked_only_by_confirmed_failure_does_not_hold_resume() {
         .await
         .expect("the certainty CAS must answer");
     assert_eq!(settled, CertaintyUpdateOutcome::Updated);
-    orchestrate_result_arrival(
-        &store,
-        delegation,
-        TaskAgentOutput::new(String::from("the recorded answer")),
-    )
-    .await
-    .expect("the arrival must record");
+    record_result(&store, delegation, "the recorded answer").await;
 
     let record = store.load_task(created.task).await.unwrap().unwrap();
     let outcome = commit(
@@ -890,16 +878,18 @@ async fn activity_record_is_idempotent_by_command_and_resumes() {
     let record = store.load_task(created.task).await.unwrap().unwrap();
     let command_key = RawId::new();
 
-    let first = store
-        .record_resume_activity(RecordResumeActivityCommand {
+    let first = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion,
             task: record.task.reference,
             purpose: record.task.purpose,
             body: String::from("continue from the saved facts"),
             command: command_key,
-        })
-        .await
-        .expect("the activity must record");
+        },
+    )
+    .await
+    .expect("the activity must record");
     let loaded: Option<ManagementActivity> = store
         .load_activity(first)
         .await
@@ -910,16 +900,18 @@ async fn activity_record_is_idempotent_by_command_and_resumes() {
     assert_eq!(loaded.body, "continue from the saved facts");
 
     // The same epoch key returns the same activity without a second row.
-    let second = store
-        .record_resume_activity(RecordResumeActivityCommand {
+    let second = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion,
             task: record.task.reference,
             purpose: record.task.purpose,
             body: String::from("continue from the saved facts"),
             command: command_key,
-        })
-        .await
-        .expect("the retry must answer");
+        },
+    )
+    .await
+    .expect("the retry must answer");
     assert_eq!(first, second);
 
     let outcome = commit(
@@ -961,16 +953,18 @@ async fn activity_for_another_task_is_a_forged_reference() {
     let first = store.load_task(first_task.task).await.unwrap().unwrap();
     let second = store.load_task(second_task.task).await.unwrap().unwrap();
 
-    let activity = store
-        .record_resume_activity(RecordResumeActivityCommand {
+    let activity = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion,
             task: first.task.reference,
             purpose: first.task.purpose,
             body: String::from("continue the first task"),
             command: RawId::new(),
-        })
-        .await
-        .expect("the activity must record");
+        },
+    )
+    .await
+    .expect("the activity must record");
 
     // Resuming the second task from the first task's activity is forgery,
     // never a hold: it fails closed with zero writes.
@@ -993,15 +987,17 @@ async fn activity_for_another_task_is_a_forged_reference() {
     assert_eq!(table_counts(&store), before);
 
     // A conflicting reuse of one command key fails closed as well.
-    let conflict = store
-        .record_resume_activity(RecordResumeActivityCommand {
+    let conflict = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion,
             task: second.task.reference,
             purpose: second.task.purpose,
             body: String::from("a different instruction"),
             command: RawId::new(),
-        })
-        .await;
+        },
+    )
+    .await;
     assert!(
         conflict.is_ok(),
         "a fresh key records independently of content"
@@ -1016,25 +1012,29 @@ async fn conflicting_command_key_reuse_fails_closed() {
     let (created, _) = seed_task(&store, companion).await;
     let record = store.load_task(created.task).await.unwrap().unwrap();
     let command_key = RawId::new();
-    store
-        .record_resume_activity(RecordResumeActivityCommand {
+    record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion,
             task: record.task.reference,
             purpose: record.task.purpose,
             body: String::from("continue from the saved facts"),
             command: command_key,
-        })
-        .await
-        .expect("the activity must record");
-    let conflict = store
-        .record_resume_activity(RecordResumeActivityCommand {
+        },
+    )
+    .await
+    .expect("the activity must record");
+    let conflict = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion,
             task: record.task.reference,
             purpose: record.task.purpose,
             body: String::from("a different instruction"),
             command: command_key,
-        })
-        .await;
+        },
+    )
+    .await;
     assert!(
         matches!(
             conflict,
@@ -1050,16 +1050,18 @@ async fn malformed_activity_row_fails_closed() {
     let (companion, _) = running_companion(&store).await.unwrap();
     let (created, _) = seed_task(&store, companion).await;
     let record = store.load_task(created.task).await.unwrap().unwrap();
-    let activity = store
-        .record_resume_activity(RecordResumeActivityCommand {
+    let activity = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
             companion,
             task: record.task.reference,
             purpose: record.task.purpose,
             body: String::from("continue from the saved facts"),
             command: RawId::new(),
-        })
-        .await
-        .expect("the activity must record");
+        },
+    )
+    .await
+    .expect("the activity must record");
     {
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
@@ -1119,13 +1121,7 @@ async fn late_old_delegation_result_records_to_the_original_only() {
 
     // The old execution's late final result still records and seals under
     // its own identity, but adoption leaves the new revision alone.
-    let arrival = orchestrate_result_arrival(
-        &store,
-        old_delegation,
-        TaskAgentOutput::new(String::from("the late answer")),
-    )
-    .await
-    .expect("the late arrival must record");
+    let arrival = record_result(&store, old_delegation, "the late answer").await;
     let claim = store
         .load_result_adoption_claim(arrival.result)
         .await
@@ -1154,13 +1150,7 @@ async fn past_facts_page_carries_attribution_without_bodies() {
     let first = start_attempt(&store, delegation, created, assoc, "first.txt").await;
     settle_success(&store, first).await;
     let second = start_attempt(&store, delegation, created, assoc, "second.txt").await;
-    let result = orchestrate_result_arrival(
-        &store,
-        delegation,
-        TaskAgentOutput::new(String::from("the sealed answer body")),
-    )
-    .await
-    .expect("the arrival must record");
+    let result = record_result(&store, delegation, "the sealed answer body").await;
     let _ = append_owner(&store, companion, generation, "keep going").await;
 
     let page = store
@@ -1207,13 +1197,7 @@ async fn superseded_instruction_source_wins_over_execution_and_availability_gate
                 start_attempt(&store, delegation, created, assoc, "pending.txt").await;
             }
             _ => {
-                orchestrate_result_arrival(
-                    &store,
-                    delegation,
-                    TaskAgentOutput::new(String::from("the sealed answer")),
-                )
-                .await
-                .expect("the arrival must record");
+                record_result(&store, delegation, "the sealed answer").await;
             }
         }
         let record = store.load_task(created.task).await.unwrap().unwrap();

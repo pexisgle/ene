@@ -20,6 +20,7 @@ mod context;
 mod delegation;
 mod failure;
 mod instruction;
+mod observation;
 mod orchestrate;
 mod report;
 mod repository;
@@ -47,6 +48,7 @@ pub use instruction::{
     TaskInstructionRole, TaskInstructionSource, TaskInstructionSourceError,
     TaskInstructionSourceRecord,
 };
+pub use observation::{TaskAgentObservationId, TaskAgentObservationPremise};
 pub use orchestrate::{
     SteeringProposalPremise, TaskProposalOutcome, TaskProposalPremise, orchestrate_delegation,
     orchestrate_result_arrival, orchestrate_steering, orchestrate_steering_current,
@@ -62,8 +64,9 @@ pub use repository::{
     TaskTechnicalError,
 };
 pub use result::{
-    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord, UnadoptedResultCursor,
+    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultArrivalOutcome, TaskResultId, TaskResultRecord, TaskResultScrubPremise,
+    UnadoptedResultCursor,
 };
 pub use resume::{
     ResumeInstructionSource, ResumeTaskCommand, TaskResumeCommitPremise, TaskResumeHold,

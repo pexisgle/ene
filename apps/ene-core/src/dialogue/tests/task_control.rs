@@ -202,6 +202,7 @@ fn workspace_intent_frame(live: &LiveInput, path: &str) -> WireFrame {
                 origin: RationaleOrigin::ManagementSurface,
                 quote: None,
             },
+            confirmed: false,
         }),
     }
 }

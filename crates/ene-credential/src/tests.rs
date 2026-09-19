@@ -36,6 +36,11 @@ async fn availability_requires_both_registry_and_store() {
     );
     let both = available_credential("acme", &cred.id(), &registry, &store).await;
     assert_eq!(both, Ok(Some(cred.clone())), "both sides must agree");
+    store
+        .put(&cred, "rotated-bearer")
+        .expect("memory store accepts serving-time put");
+    let rotated = store.with_bearer(&cred, str::to_owned).expect("put bearer");
+    assert_eq!(rotated, "rotated-bearer");
     let wrong_provider = available_credential("other", &cred.id(), &registry, &store).await;
     assert_eq!(
         wrong_provider,
@@ -524,6 +529,21 @@ fn device_auth_debug_carries_no_secret_or_descriptor() {
     assert!(!rendered.contains(descriptor));
 }
 
+#[test]
+fn memory_put_stores_without_echoing_the_secret_in_debug() {
+    let store = MemoryCredentialStore::new();
+    let credential = CredentialRef::new("openai", "rotated").expect("valid test fixture");
+    store
+        .put(&credential, "sk-must-not-appear")
+        .expect("memory put must accept");
+    assert!(store.contains(&credential));
+    let rendered = format!("{store:?}");
+    assert!(
+        !rendered.contains("sk-must-not-appear"),
+        "memory store Debug must not show the secret: {rendered}"
+    );
+}
+
 mod env_credential_store_tests {
     use crate::CredentialTechnicalError;
     use crate::registry::CredentialRef;
@@ -601,5 +621,23 @@ mod env_credential_store_tests {
         assert_eq!(first, "pinned-key");
         assert_eq!(second, "pinned-key");
         assert_eq!(calls.get(), 1, "calls never re-read the source");
+    }
+
+    #[test]
+    fn put_fail_closes_and_never_echoes_the_secret() {
+        let store = EnvCredentialStore::from_lookup(|_| Some("pinned-key".to_owned()));
+        let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
+        let error = store
+            .put(&credential, "sk-must-not-appear")
+            .expect_err("env store is not a product source of truth");
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains("sk-must-not-appear"),
+            "env put error must not echo the secret: {rendered}"
+        );
+        assert!(
+            rendered.contains("not a product source of truth"),
+            "env put must fail closed: {rendered}"
+        );
     }
 }
