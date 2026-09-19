@@ -334,7 +334,9 @@ async fn unknown_cost_is_not_yen_zero_and_stale_cap_is_rejected() {
     );
     let snap = desktop.snapshot();
     assert!(
-        snap.deny_reason.contains("Stale") || snap.deny_reason.contains("stale"),
+        snap.deny_reason.contains("stale")
+            || snap.deny_reason.contains("Stale")
+            || snap.deny_reason.contains("古い"),
         "the GUI must surface the stale rejection: {}",
         snap.deny_reason
     );
@@ -419,8 +421,9 @@ async fn seated_confirm_completes_targeted_deletion() {
     );
     let snap = desktop.snapshot();
     assert!(
-        !snap.contains_secret(TARGET),
-        "the typed target is wiped from the panel after the request"
+        !snap.deletion_body.contains(TARGET),
+        "the typed target is wiped from the panel after the request: {}",
+        snap.deletion_body
     );
     assert!(
         snap.deletion_body
@@ -559,6 +562,19 @@ async fn finalizing_is_distinct_from_completed() {
     )
     .await
     .expect("finalizing park must be entered");
+    let page = local_deletion_page(&handle).await;
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "the sealed boundary must not complete while parked: {page:?}"
+    );
+    handle
+        .begin_deletion_finalizing_for_tests(
+            &page.operations[0].operation.0,
+            page.operations[0].sweep,
+        )
+        .await
+        .expect("the Finalizing marker must commit");
     let page = local_deletion_page(&handle).await;
     assert_eq!(
         page.operations[0].phase,

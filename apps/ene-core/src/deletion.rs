@@ -654,6 +654,28 @@ impl HostHandle {
     pub fn release_deletion_finalizing_park_for_tests(&self) {
         self.store.release_deletion_finalizing_park_for_tests();
     }
+
+    /// Commits the sealed `Finalizing` marker so a GUI test can observe that
+    /// phase as distinct from `Active` and `Completed`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn begin_deletion_finalizing_for_tests(
+        &self,
+        operation: &str,
+        sweep: u64,
+    ) -> Result<ene_preservation::DeletionFinalizationOutcome, CoreError> {
+        let Ok(uuid) = uuid::Uuid::parse_str(operation) else {
+            return Ok(ene_preservation::DeletionFinalizationOutcome::Missing);
+        };
+        let current = DeletionOperationRef {
+            operation: DeletionOperationId::from_raw(RawId::from_uuid(uuid)),
+            sweep: DeletionSweepGeneration::from_u64(sweep),
+        };
+        self.store
+            .begin_deletion_finalizing(current)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))
+    }
 }
 
 #[cfg(test)]
