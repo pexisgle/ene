@@ -542,6 +542,35 @@ impl DesktopRuntime {
         self.usage.set_status_filter(status);
     }
 
+    pub fn set_usage_period(&mut self, from: Option<String>, to: Option<String>) {
+        self.usage.set_period(from, to);
+    }
+
+    pub fn set_usage_attribution(
+        &mut self,
+        provider: Option<String>,
+        model: Option<String>,
+        consumer: Option<String>,
+        purpose: Option<String>,
+    ) {
+        self.usage
+            .set_attribution_filters(provider, model, consumer, purpose);
+    }
+
+    pub fn set_usage_cap_slot(
+        &mut self,
+        scope: String,
+        provider: Option<String>,
+        window: String,
+        currency: String,
+    ) {
+        self.usage.set_cap_slot(scope, provider, window, currency);
+    }
+
+    pub fn set_deletion_purpose(&mut self, purpose: ene_api::v1::deletion::DeletionPurposeWire) {
+        self.deletion.set_purpose(purpose);
+    }
+
     /// Cap mutation uses the last-read mark. Remaining on the panel is
     /// display-only and is not consulted.
     pub async fn apply_usage_cap(&mut self) -> Result<ManagementOutcome, DesktopError> {

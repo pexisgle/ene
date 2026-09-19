@@ -256,6 +256,20 @@ async fn unknown_cost_is_not_yen_zero_and_stale_cap_is_rejected() {
     pair_and_setup(&mut desktop).await;
 
     desktop.open_page(Page::Usage);
+    desktop.set_usage_period(None, None);
+    desktop.set_usage_attribution(
+        Some(String::from("openai")),
+        Some(String::from(MODEL)),
+        Some(String::from("companion_dialogue")),
+        Some(String::from("dialogue_response")),
+    );
+    desktop.set_usage_cap_slot(
+        String::from("system"),
+        None,
+        String::from("daily_utc"),
+        String::from("USD"),
+    );
+    desktop.set_usage_status_filter(None);
     desktop
         .composer_mut()
         .set_draft(String::from("first usage turn"));
@@ -267,6 +281,10 @@ async fn unknown_cost_is_not_yen_zero_and_stale_cap_is_rejected() {
     assert_eq!(transport.sends(), 2);
 
     desktop.refresh_usage().await.expect("usage query");
+    desktop
+        .next_usage_page()
+        .await
+        .expect("next page is a no-op without a cursor");
     let snap = desktop.snapshot();
     assert!(
         snap.usage_body.contains("unknown"),
@@ -334,6 +352,7 @@ async fn secrets_stay_out_and_client_confirmed_true_cannot_delete() {
     pair_and_setup(&mut desktop).await;
 
     desktop.open_page(Page::Deletion);
+    desktop.set_deletion_purpose(ene_api::v1::deletion::DeletionPurposeWire::Privacy);
     desktop.set_deletion_exact_text(String::from(TARGET));
     let snap = desktop.snapshot();
     assert!(
