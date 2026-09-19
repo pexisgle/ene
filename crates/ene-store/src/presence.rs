@@ -3,11 +3,12 @@ use std::sync::Arc;
 use ene_companion::CompanionLifecycle;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
-    PresenceCheckRef, PresenceGeneration, PresenceRepository, PresenceState,
-    PresenceTechnicalError, RelocationHint, StartupNormalizationFailure,
-    StartupNormalizationFailureReason, StartupNormalizationReport, StopCompanionOutcome,
-    ThinMoveReason,
+    PresenceCheckRef, PresenceErasureOutcome, PresenceErasureRepository, PresenceGeneration,
+    PresenceRepository, PresenceState, PresenceTechnicalError, RelocationHint,
+    StartupNormalizationFailure, StartupNormalizationFailureReason, StartupNormalizationReport,
+    StopCompanionOutcome, ThinMoveReason,
 };
+use ene_preservation::ErasureConditionRef;
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{TransactionBehavior, params};
 
@@ -16,6 +17,7 @@ use crate::codec::{
     decode_id, decode_lifecycle, encode_id, encode_move_reason, encode_presence_state, encode_u64,
     lock_shared, presence_unavailable, select_attribution, select_hint,
 };
+use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
 const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3 WHERE companion_id = ?4";
@@ -549,5 +551,161 @@ impl PresenceRepository for Store {
             }))
         })
         .await
+    }
+}
+
+/// Bounded rows mutated per statement in one local erasure pass (lifecycle §9).
+const ERASURE_BATCH_ROWS: i64 = 500;
+
+/// A companion identity that is the target is erased whole: the identity is
+/// the row's primary fact, so a redaction would be a silent rename. The
+/// companion itself belongs to its own owner; presence only removes its
+/// attribution.
+const SQL_ERASE_ATTRIBUTION_IDENTITY: &str = "DELETE FROM presence_attribution
+     WHERE companion_id IN (
+         SELECT companion_id FROM presence_attribution
+         WHERE instr(companion_id, ?1) > 0
+         LIMIT ?2
+     )";
+
+/// An attribution that names the target as its active client is stopped with
+/// the client cleared: `Present` without an active client is malformed, and a
+/// stopped companion is never moved, summoned, or recovered, so the erased
+/// client can never be re-crowned. The generation is not advanced (stop
+/// semantics, PR §6.4).
+const SQL_ERASE_ATTRIBUTION_ACTIVE_CLIENT: &str = "UPDATE presence_attribution
+     SET state = 'stopped', active_client = NULL
+     WHERE companion_id IN (
+         SELECT companion_id FROM presence_attribution
+         WHERE active_client IS NOT NULL AND instr(active_client, ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_ERASE_HINT_IDENTITY: &str = "DELETE FROM relocation_hint
+     WHERE companion_id IN (
+         SELECT companion_id FROM relocation_hint
+         WHERE instr(companion_id, ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_ERASE_HINT_LAST_CLIENT: &str = "UPDATE relocation_hint
+     SET last_client = NULL
+     WHERE companion_id IN (
+         SELECT companion_id FROM relocation_hint
+         WHERE last_client IS NOT NULL AND instr(last_client, ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_ERASE_HINT_RECOVERY_DESTINATION: &str = "UPDATE relocation_hint
+     SET recovery_destination = NULL
+     WHERE companion_id IN (
+         SELECT companion_id FROM relocation_hint
+         WHERE recovery_destination IS NOT NULL AND instr(recovery_destination, ?1) > 0
+         LIMIT ?2
+     )";
+
+/// Presence history rows naming the target companion are erased whole: a
+/// transition log row is a copy of one attribution change, not a current
+/// fact, so removing it is the complete local erasure. The state vocabulary,
+/// reason tokens, generation counters, and host-stamped times are derived
+/// values, not caller text, and are never matched or mutated.
+const SQL_ERASE_TRANSITION_LOG: &str = "DELETE FROM presence_transition_log
+     WHERE transition_seq IN (
+         SELECT transition_seq FROM presence_transition_log
+         WHERE instr(companion_id, ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_COUNT_PRESENCE_TARGET: &str = "SELECT
+     (SELECT COUNT(*) FROM presence_attribution
+      WHERE instr(companion_id, ?1) > 0
+         OR instr(COALESCE(active_client, ''), ?1) > 0)
+   + (SELECT COUNT(*) FROM relocation_hint
+      WHERE instr(companion_id, ?1) > 0
+         OR instr(COALESCE(last_client, ''), ?1) > 0
+         OR instr(COALESCE(recovery_destination, ''), ?1) > 0)
+   + (SELECT COUNT(*) FROM presence_transition_log
+      WHERE instr(companion_id, ?1) > 0)";
+
+fn erasure_count(value: i64) -> Result<u64, PresenceTechnicalError> {
+    u64::try_from(value).map_err(|_| presence_unavailable(String::from("count out of range")))
+}
+
+impl PresenceErasureRepository for Store {
+    fn erase_target_text(
+        &self,
+        condition: ErasureConditionRef,
+        target: &str,
+    ) -> impl std::future::Future<Output = Result<PresenceErasureOutcome, PresenceTechnicalError>> + Send
+    {
+        #[cfg(any(test, feature = "test-support"))]
+        let parks = Arc::clone(&self.test_parks);
+        let conn = Arc::clone(&self.conn);
+        let target = target.to_owned();
+        async move {
+            #[cfg(any(test, feature = "test-support"))]
+            parks.erasure_mutation.pause_if_armed().await;
+            run_blocking(move || {
+                let mut guard = lock_shared(&conn);
+                let tx = guard
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                // Stale-generation rejection and the mutation share one short
+                // transaction: a superseded sweep or a completed operation
+                // mutates nothing (lifecycle §6-§7/§9.1).
+                if !condition_is_current(&tx, condition)
+                    .map_err(|error| presence_unavailable(error.to_string()))?
+                {
+                    return Ok(PresenceErasureOutcome::NotCurrent);
+                }
+                let attribution = tx
+                    .execute(
+                        SQL_ERASE_ATTRIBUTION_IDENTITY,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                let stopped = tx
+                    .execute(
+                        SQL_ERASE_ATTRIBUTION_ACTIVE_CLIENT,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                let hints = tx
+                    .execute(SQL_ERASE_HINT_IDENTITY, params![target, ERASURE_BATCH_ROWS])
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                let last_clients = tx
+                    .execute(
+                        SQL_ERASE_HINT_LAST_CLIENT,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                let destinations = tx
+                    .execute(
+                        SQL_ERASE_HINT_RECOVERY_DESTINATION,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                let transitions = tx
+                    .execute(
+                        SQL_ERASE_TRANSITION_LOG,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                let remainder: i64 = tx
+                    .query_row(SQL_COUNT_PRESENCE_TARGET, params![target], |row| row.get(0))
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                let erased = erasure_count(
+                    i64::try_from(
+                        attribution + stopped + hints + last_clients + destinations + transitions,
+                    )
+                    .map_err(|_| presence_unavailable(String::from("count out of range")))?,
+                )?;
+                let remainder = erasure_count(remainder)?;
+                tx.commit()
+                    .map_err(|error| presence_unavailable(error.to_string()))?;
+                Ok(PresenceErasureOutcome::Applied { erased, remainder })
+            })
+            .await
+        }
     }
 }

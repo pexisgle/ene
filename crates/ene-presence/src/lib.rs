@@ -25,6 +25,9 @@
 
 use ene_primitive::{GenerationInner, RawId};
 
+mod erasure;
+pub use erasure::{PresenceErasureOutcome, PresenceErasureParticipant, PresenceErasureRepository};
+
 /// Client instance identity.
 ///
 /// Wraps a [`RawId`]; distinct from connection identity, incarnation, and

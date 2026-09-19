@@ -19,7 +19,9 @@
 //! explicit match in [`check_live_authorization`], never by default-allow.
 
 mod action;
+mod erasure;
 mod intent;
+mod usage_cap;
 
 use std::collections::HashMap;
 
@@ -30,7 +32,16 @@ pub use action::{
     ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
     ActionPermissionEvaluationId, ActionUseCandidate, CurrentActionPremise, authorize_action_use,
 };
+pub use erasure::{
+    PermissionErasureOutcome, PermissionErasureParticipant, PermissionErasureRepository,
+};
 pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
+pub use usage_cap::{
+    SetUsageCapCommand, SetUsageCapOutcome, UsageCap, UsageCapConsumption, UsageCapId, UsageCapRef,
+    UsageCapRepository, UsageCapRevision, UsageCapScope, UsageCapStatus, UsageCapStatusQuery,
+    UsageCapWindow, UsageReservationRef, UsageReservationState, UtcPeriod, parse_usage_cap_mark,
+    usage_cap_mark,
+};
 
 /// Single-use authorization token for one inference use.
 ///

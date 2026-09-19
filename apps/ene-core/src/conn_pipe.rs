@@ -6,17 +6,16 @@
 //! the same directory fails to create, like the Unix singleton probe),
 //! `PIPE_REJECT_REMOTE_CLIENTS` (remote machines cannot connect at the OS
 //! layer), and an explicit DACL limited to this process's logon SID (see
-//! [`LogonSidAttrs`]). Every accepted connection additionally passes
+//! `LogonSidAttrs`). Every accepted connection additionally passes
 //! [`peer_same_user`] — the OS peer token check — before a single frame is
 //! read: an unprovable peer is dropped without a byte, exactly like the Unix
-//! uid-mismatch path. Frames, the [`ConnectionTable`](crate::conn::ConnectionTable),
+//! uid-mismatch path. Frames, the `ConnectionTable`,
 //! and [`HostHandle::handle_frame`](crate::serve::HostHandle::handle_frame)
 //! are shared with the Unix socket path, so authentication, currentness, and
 //! the connection phase machine are identical on both transports.
 //!
-//! Compiled for Windows (see the `x86_64-pc-windows-*` check); behavior is
-//! unverified here — this host is Linux, so no Windows listener has ever
-//! accepted a connection in CI. [`CoreError::Bind`](crate::serve::CoreError::Bind)
+//! Shared listener regressions exercise this transport on Windows and Unix
+//! sockets on Unix. [`CoreError::Bind`]
 //! reports every creation failure; nothing silently falls back.
 
 use std::ffi::OsStr;
@@ -253,6 +252,27 @@ pub fn peer_same_user(pipe: RawHandle) -> bool {
     if known == 0 {
         return false;
     }
+    peer_same_user_pid(pid)
+}
+
+/// OS peer process id for one connected pipe instance.
+///
+/// [`None`] when the client pid cannot be proven; the caller drops the
+/// connection rather than minting a seat against an unprovable peer.
+#[must_use]
+pub fn peer_process_id(pipe: RawHandle) -> Option<u32> {
+    let mut pid = 0u32;
+    // SAFETY: `pipe` is a live server instance owned by the listener loop;
+    // `pid` is a valid out-pointer for the call.
+    let known = unsafe { GetNamedPipeClientProcessId(pipe as HANDLE, &raw mut pid) };
+    if known == 0 || pid == 0 {
+        None
+    } else {
+        Some(pid)
+    }
+}
+
+fn peer_same_user_pid(pid: u32) -> bool {
     // SAFETY: `PROCESS_QUERY_LIMITED_INFORMATION` is the least privilege that
     // still admits `OpenProcessToken(TOKEN_QUERY)` on the result.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -279,7 +299,7 @@ pub fn peer_same_user(pipe: RawHandle) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::Bind`](crate::serve::CoreError::Bind) when the logon
+/// Returns [`CoreError::Bind`] when the logon
 /// SID cannot be read or the pipe cannot be created.
 pub fn create_first_server(pipe: &str) -> Result<NamedPipeServer, CoreError> {
     create_server(pipe, true)

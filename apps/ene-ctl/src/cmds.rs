@@ -25,11 +25,11 @@ use ene_api::v1::deletion::{
 };
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
-    ManagementViewRequest, RationaleOrigin, consent_target, credential_target,
+    ManagementViewRequest, RationaleOrigin, consent_target, credential_target, usage_cap_target,
 };
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
-    RoundWireId, TextLangWire,
+    RoundWireId, TextLangWire, UsageCursorWire,
 };
 use ene_api::v1::round::{
     HistoryItem, HistoryRequest, HistoryRole, PresentationStatus, RoundIntakeOutcomeWire,
@@ -40,6 +40,10 @@ use ene_api::v1::undelivered::{
     ReportSourceWireRef, ResumeTask, ResumeTaskOutcomeWire, SelectTask, TaskListPage,
     TaskReportPage, TaskReportResponse, TaskWireRef, UndeliveredAck, UndeliveredAckOutcome,
     UndeliveredRequest, UndeliveredResponse, UndeliveredSummary,
+};
+use ene_api::v1::usage::{
+    UsageCapConsumptionView, UsageMoneyView, UsageSummaryPage, UsageSummaryRequest,
+    UsageSummaryResponse,
 };
 
 /// Fallback companion reference sent until the first presence fact arrives.
@@ -146,6 +150,37 @@ pub enum Command {
         cursor: Option<String>,
         limit: Option<u32>,
     },
+    /// Read one bounded page of the first-party usage / cost summary plus
+    /// the current cap slots (`usage-cost-cap` §16). No body text, prompt,
+    /// output, or credential value crosses this path.
+    Usage(UsageArgs),
+    /// Set or update one provider/system daily/monthly usage cap
+    /// (`usage-cost-cap` §13/§17). The Client only proposes: the Host
+    /// re-checks the current authenticated connection, the base-view mark
+    /// from a read, and the cap revision before the permission-owned command
+    /// commits.
+    UsageCap {
+        scope: String,
+        provider: Option<String>,
+        window: String,
+        currency: String,
+        limit_micros: u64,
+    },
+}
+
+/// Filters of one bounded usage summary read. Every field is a display
+/// filter; the Host clamps the period and the row count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageArgs {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub consumer: Option<String>,
+    pub purpose: Option<String>,
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,6 +474,7 @@ pub fn credential_intent(
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     }
 }
 
@@ -461,6 +497,7 @@ pub fn assignment_intent(
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     }
 }
 
@@ -487,6 +524,7 @@ pub fn deletion_intent(
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     }
 }
 
@@ -528,6 +566,178 @@ pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
         lines.push(format!("next {}", next.0));
     }
     lines.join("\n")
+}
+
+/// Builds one bounded usage summary request from the CLI filters. Absent
+/// fields stay absent: the Host applies its own period default and clamps the
+/// limit, so the CLI never widens the read beyond the owner boundary.
+#[must_use]
+pub fn usage_request(args: &UsageArgs) -> UsageSummaryRequest {
+    UsageSummaryRequest {
+        from: args.from.clone(),
+        to: args.to.clone(),
+        provider: args.provider.clone(),
+        model: args.model.clone(),
+        consumer: args.consumer.clone(),
+        purpose: args.purpose.clone(),
+        status: args.status.clone(),
+        cursor: args.cursor.clone().map(UsageCursorWire),
+        limit: args.limit,
+    }
+}
+
+/// Builds one cap set/update intent. The target grammar is shared with the
+/// Host (`usage_cap_target`, never a CLI-local mini-language); the base mark
+/// comes from a just-read [`UsageSummaryPage`], so the Host re-checks a
+/// revision the Owner actually saw. `quote` is never populated: the cap value
+/// travels in the typed target.
+#[must_use]
+pub fn usage_cap_intent(
+    intent_id: CommandWireId,
+    base: &str,
+    scope: &str,
+    provider: Option<&str>,
+    window: &str,
+    currency: &str,
+    limit_micros: u64,
+) -> ManagementIntent {
+    ManagementIntent {
+        intent_id,
+        kind: ManagementIntentKind::ManageRuleConsentCap,
+        target: usage_cap_target(scope, provider, window, currency, limit_micros),
+        base_view: BaseViewMark(base.to_string()),
+        rationale: IntentRationaleWire {
+            origin: RationaleOrigin::ManagementSurface,
+            quote: None,
+        },
+        confirmed: false,
+    }
+}
+
+/// Finds the opaque currentness mark of exactly one cap slot in a freshly
+/// read page. `None` means the page did not name the slot: the CLI must not
+/// invent a mark or guess a revision.
+#[must_use]
+pub fn usage_cap_mark_for<'a>(
+    page: &'a UsageSummaryPage,
+    scope: &str,
+    provider: Option<&str>,
+    window: &str,
+) -> Option<&'a str> {
+    page.caps
+        .iter()
+        .find(|cap| {
+            cap.scope == scope && cap.provider.as_deref() == provider && cap.window == window
+        })
+        .map(|cap| cap.mark.as_str())
+}
+
+/// Renders one bounded usage page: one line per row, one line per cap slot,
+/// and the `next:` cursor while a later page exists. Unavailable and stale
+/// answers keep their distinct meaning instead of an empty page.
+#[must_use]
+pub fn render_usage_page(response: &UsageSummaryResponse) -> String {
+    match response {
+        UsageSummaryResponse::Unavailable => String::from("usage is unavailable; retry later"),
+        UsageSummaryResponse::StaleBaseView { current } => match current {
+            Some(current) => format!(
+                "usage cursor is stale; restart from the head (current {})",
+                current.0
+            ),
+            None => String::from("usage cursor is stale; restart from the head"),
+        },
+        UsageSummaryResponse::Page(page) => {
+            let mut lines = vec![format!("evaluated-at {}", page.evaluated_at)];
+            for row in &page.rows {
+                let tokens = row.tokens.as_ref().map_or_else(
+                    || String::from("-"),
+                    |tokens| {
+                        format!(
+                            "{}/{}/{}",
+                            tokens.input_tokens, tokens.cached_input_tokens, tokens.output_tokens
+                        )
+                    },
+                );
+                let cost = row.cost.as_ref().map_or_else(
+                    || String::from("-"),
+                    |cost| {
+                        format!(
+                            "{}/{}/{}/{}",
+                            render_money(&cost.input),
+                            render_money(&cost.cached_input),
+                            render_money(&cost.output),
+                            render_money(&cost.total)
+                        )
+                    },
+                );
+                let reserved = row
+                    .reserved
+                    .as_ref()
+                    .map_or_else(|| String::from("-"), render_money);
+                lines.push(format!(
+                    "{} {}/{} {} {} {} tokens={} cost={} reserved={}",
+                    row.started_at,
+                    row.provider,
+                    row.model,
+                    row.consumer,
+                    row.purpose,
+                    row.status,
+                    tokens,
+                    cost,
+                    reserved
+                ));
+            }
+            for cap in &page.caps {
+                let scope = cap.provider.as_deref().map_or_else(
+                    || String::from("system"),
+                    |provider| format!("provider={provider}"),
+                );
+                match &cap.stored {
+                    None => lines.push(format!(
+                        "cap {} {} {} no-cap",
+                        cap.mark, scope, cap.window
+                    )),
+                    Some(stored) => match &stored.consumption {
+                        UsageCapConsumptionView::Indeterminate => lines.push(format!(
+                            "cap {} {} {} limit={} indeterminate",
+                            cap.mark,
+                            scope,
+                            cap.window,
+                            render_money(&stored.limit)
+                        )),
+                        UsageCapConsumptionView::Known {
+                            reserved,
+                            committed_reported,
+                            committed_unknown,
+                            consumed,
+                            remaining,
+                            held,
+                        } => lines.push(format!(
+                            "cap {} {} {} limit={} consumed={} reserved={} reported={} unknown={} remaining={} held={}",
+                            cap.mark,
+                            scope,
+                            cap.window,
+                            render_money(&stored.limit),
+                            render_money(consumed),
+                            render_money(reserved),
+                            render_money(committed_reported),
+                            render_money(committed_unknown),
+                            render_money(remaining),
+                            held
+                        )),
+                    },
+                }
+            }
+            if let Some(next) = &page.next_cursor {
+                lines.push(format!("next {}", next.0));
+            }
+            lines.join("\n")
+        }
+    }
+}
+
+fn render_money(money: &UsageMoneyView) -> String {
+    format!("{}:{}", money.currency, money.micros)
 }
 
 /// Renders one `kind: title – body` line per section, in Host order.
@@ -627,6 +837,9 @@ pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> AckAction {
         },
         UndeliveredAckOutcome::StaleConnection => AckAction::Retryable {
             message: String::from("stale connection; re-query on this connection and retry"),
+        },
+        UndeliveredAckOutcome::HeldForErasure => AckAction::Retryable {
+            message: String::from("items are under deletion; re-query after it settles"),
         },
     }
 }
@@ -1417,5 +1630,225 @@ mod tests {
             super::render_deletion_status(&DeletionStatusResponse::Unavailable),
             "deletion status is unavailable; retry later"
         );
+    }
+
+    use ene_api::v1::management::{ManagementIntentKind, RationaleOrigin};
+    use ene_api::v1::refs::UsageCursorWire;
+    use ene_api::v1::usage::{
+        UsageCapConsumptionView, UsageCapStoredView, UsageCapView, UsageCostView, UsageMoneyView,
+        UsageSummaryPage, UsageSummaryResponse, UsageSummaryRowView, UsageTokenUsageView,
+    };
+
+    use super::{
+        UsageArgs, render_usage_page, usage_cap_intent, usage_cap_mark_for, usage_request,
+    };
+
+    fn fixture_usage_page() -> UsageSummaryPage {
+        UsageSummaryPage {
+            rows: vec![UsageSummaryRowView {
+                provider: String::from("openai"),
+                model: String::from("gpt-x"),
+                consumer: String::from("companion_dialogue"),
+                purpose: String::from("dialogue_response"),
+                status: String::from("reported"),
+                tokens: Some(UsageTokenUsageView {
+                    input_tokens: 10,
+                    cached_input_tokens: 4,
+                    output_tokens: 2,
+                }),
+                cost: Some(UsageCostView {
+                    input: UsageMoneyView {
+                        currency: String::from("USD"),
+                        micros: 6,
+                    },
+                    cached_input: UsageMoneyView {
+                        currency: String::from("USD"),
+                        micros: 1,
+                    },
+                    output: UsageMoneyView {
+                        currency: String::from("USD"),
+                        micros: 4,
+                    },
+                    total: UsageMoneyView {
+                        currency: String::from("USD"),
+                        micros: 11,
+                    },
+                }),
+                reserved: None,
+                started_at: String::from("2026-09-17T00:00:00.000000000Z"),
+            }],
+            next_cursor: Some(UsageCursorWire(String::from("cursor-2"))),
+            caps: vec![
+                UsageCapView {
+                    mark: String::from("usage-cap-system-daily_utc-rev-0"),
+                    scope: String::from("system"),
+                    provider: None,
+                    window: String::from("daily_utc"),
+                    stored: Some(UsageCapStoredView {
+                        limit: UsageMoneyView {
+                            currency: String::from("USD"),
+                            micros: 1_000,
+                        },
+                        consumption: UsageCapConsumptionView::Known {
+                            reserved: UsageMoneyView {
+                                currency: String::from("USD"),
+                                micros: 200,
+                            },
+                            committed_reported: UsageMoneyView {
+                                currency: String::from("USD"),
+                                micros: 100,
+                            },
+                            committed_unknown: UsageMoneyView {
+                                currency: String::from("USD"),
+                                micros: 200,
+                            },
+                            consumed: UsageMoneyView {
+                                currency: String::from("USD"),
+                                micros: 500,
+                            },
+                            remaining: UsageMoneyView {
+                                currency: String::from("USD"),
+                                micros: 500,
+                            },
+                            held: false,
+                        },
+                    }),
+                },
+                UsageCapView {
+                    mark: String::from("usage-cap-provider-openai-daily_utc-none"),
+                    scope: String::from("provider"),
+                    provider: Some(String::from("openai")),
+                    window: String::from("daily_utc"),
+                    stored: None,
+                },
+            ],
+            evaluated_at: String::from("2026-09-17T00:00:00.000000000Z"),
+        }
+    }
+
+    #[test]
+    fn usage_request_maps_filters_and_wraps_the_cursor() {
+        let args = UsageArgs {
+            from: Some(String::from("2026-09-01T00:00:00Z")),
+            to: None,
+            provider: Some(String::from("openai")),
+            model: None,
+            consumer: Some(String::from("companion_dialogue")),
+            purpose: None,
+            status: Some(String::from("reserved")),
+            cursor: Some(String::from("cursor-1")),
+            limit: Some(10),
+        };
+        let request = usage_request(&args);
+        assert_eq!(request.from.as_deref(), Some("2026-09-01T00:00:00Z"));
+        assert_eq!(request.to, None);
+        assert_eq!(request.provider.as_deref(), Some("openai"));
+        assert_eq!(request.limit, Some(10));
+        assert_eq!(
+            request.cursor,
+            Some(UsageCursorWire(String::from("cursor-1")))
+        );
+    }
+
+    #[test]
+    fn usage_cap_intent_uses_the_shared_grammar_and_no_quote() {
+        let intent = usage_cap_intent(
+            CommandWireId(uuid::Uuid::nil()),
+            "usage-cap-system-daily_utc-none",
+            "system",
+            None,
+            "daily_utc",
+            "USD",
+            1_000,
+        );
+        assert_eq!(intent.kind, ManagementIntentKind::ManageRuleConsentCap);
+        assert_eq!(intent.target.0.as_str(), "cap:system:daily_utc:USD:1000");
+        assert_eq!(
+            intent.base_view,
+            BaseViewMark(String::from("usage-cap-system-daily_utc-none"))
+        );
+        assert_eq!(intent.rationale.origin, RationaleOrigin::ManagementSurface);
+        assert_eq!(intent.rationale.quote, None);
+        let provider = usage_cap_intent(
+            CommandWireId(uuid::Uuid::nil()),
+            "usage-cap-provider-openai-monthly_utc-rev-2",
+            "provider",
+            Some("openai"),
+            "monthly_utc",
+            "USD",
+            42,
+        );
+        assert_eq!(
+            provider.target.0.as_str(),
+            "cap:provider:openai:monthly_utc:USD:42"
+        );
+    }
+
+    #[test]
+    fn usage_cap_mark_for_selects_exactly_one_slot() {
+        let page = fixture_usage_page();
+        assert_eq!(
+            usage_cap_mark_for(&page, "system", None, "daily_utc"),
+            Some("usage-cap-system-daily_utc-rev-0")
+        );
+        assert_eq!(
+            usage_cap_mark_for(&page, "provider", Some("openai"), "daily_utc"),
+            Some("usage-cap-provider-openai-daily_utc-none")
+        );
+        assert_eq!(
+            usage_cap_mark_for(&page, "system", None, "monthly_utc"),
+            None,
+            "an unnamed slot yields no mark instead of a guess"
+        );
+        assert_eq!(
+            usage_cap_mark_for(&page, "provider", Some("other"), "daily_utc"),
+            None
+        );
+    }
+
+    #[test]
+    fn render_usage_page_prints_rows_caps_and_the_cursor() {
+        let response = UsageSummaryResponse::Page(fixture_usage_page());
+        let rendered = render_usage_page(&response);
+        for needle in [
+            "evaluated-at 2026-09-17T00:00:00.000000000Z",
+            "openai/gpt-x",
+            "companion_dialogue",
+            "dialogue_response",
+            "reported",
+            "tokens=10/4/2",
+            "cost=USD:6/USD:1/USD:4/USD:11",
+            "usage-cap-system-daily_utc-rev-0",
+            "consumed=USD:500",
+            "remaining=USD:500",
+            "held=false",
+            "usage-cap-provider-openai-daily_utc-none",
+            "no-cap",
+            "next cursor-2",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "the render must include {needle:?}: {rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains("UsageSummaryPage"),
+            "no Debug dumps: {rendered}"
+        );
+    }
+
+    #[test]
+    fn render_usage_page_keeps_stale_and_unavailable_distinct() {
+        let stale = render_usage_page(&UsageSummaryResponse::StaleBaseView {
+            current: Some(UsageCursorWire(String::from("cursor-9"))),
+        });
+        assert!(stale.contains("stale"), "stale must say so: {stale}");
+        assert!(stale.contains("cursor-9"));
+        let unavailable = render_usage_page(&UsageSummaryResponse::Unavailable);
+        assert!(
+            unavailable.contains("unavailable"),
+            "unavailable must not read as an empty page: {unavailable}"
+        );
+        assert!(!unavailable.contains("next"));
     }
 }

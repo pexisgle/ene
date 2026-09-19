@@ -201,12 +201,11 @@ mod tests {
     use ene_store::Store;
     use ene_task::{
         AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
-        DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskAgentOutput,
-        TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskContextOrigin,
-        TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskRef,
-        TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId,
+        DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome,
+        TaskCommitPremise, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
+        TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskRef, TaskRepository,
+        TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId,
         WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
-        orchestrate_result_arrival,
     };
 
     struct Host {
@@ -487,13 +486,8 @@ mod tests {
     #[tokio::test]
     async fn a_sealed_execution_refuses_before_an_attempt_or_effect() {
         let host = host().await;
-        let result = orchestrate_result_arrival(
-            &host.store,
-            host.delegation,
-            TaskAgentOutput::new(String::from("final report")),
-        )
-        .await
-        .expect("the finalization records the result");
+        let result =
+            crate::test_support::record_result(&host.store, host.delegation, "final report").await;
         assert!(result.adopted_revision.is_none());
         let outcome = run_workspace_action(
             &host.store,
@@ -516,13 +510,8 @@ mod tests {
     #[tokio::test]
     async fn a_terminal_task_refuses_before_an_attempt_or_effect() {
         let host = host().await;
-        let result = orchestrate_result_arrival(
-            &host.store,
-            host.delegation,
-            TaskAgentOutput::new(String::from("final report")),
-        )
-        .await
-        .expect("the finalization records the result");
+        let result =
+            crate::test_support::record_result(&host.store, host.delegation, "final report").await;
         let adopted = host
             .store
             .adopt_result(TaskResultAdoptionClaim {

@@ -1,0 +1,270 @@
+//! Japanese / English UI labels and deny-reason text.
+//!
+//! Switching locale rewrites labels only. Conversation bodies, history, and
+//! Host domain state are not rewritten.
+
+use ene_api::v1::management::ManagementOutcome;
+use ene_local_control::{ControlOutcome, FromConfirmation};
+
+/// UI locale. Persisted as a GUI preference, never as setup-complete consent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locale {
+    Ja,
+    En,
+}
+
+impl Locale {
+    #[must_use]
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            Self::Ja => "ja",
+            Self::En => "en",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(tag: &str) -> Self {
+        if tag.eq_ignore_ascii_case("en") || tag.eq_ignore_ascii_case("en-us") {
+            Self::En
+        } else {
+            Self::Ja
+        }
+    }
+}
+
+/// Stable label keys so tests can switch locale without depending on prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Label {
+    Chat,
+    History,
+    Memory,
+    Tasks,
+    Settings,
+    About,
+    Usage,
+    Deletion,
+    Refresh,
+    Resume,
+    RequestDeletion,
+    ApplyCap,
+    WizardLanguage,
+    WizardBundledEne,
+    WizardCloudCost,
+    WizardCredential,
+    WizardAssignment,
+    Send,
+    Confirm,
+    Cancel,
+    Next,
+    Back,
+    CompanionStopped,
+    ProviderDown,
+    AvatarAbsent,
+    Connecting,
+    Connected,
+    Disconnected,
+}
+
+#[must_use]
+pub fn label(locale: Locale, key: Label) -> &'static str {
+    match (locale, key) {
+        (Locale::Ja, Label::Chat) => "会話",
+        (Locale::En, Label::Chat) => "Chat",
+        (Locale::Ja, Label::History) => "履歴",
+        (Locale::En, Label::History) => "History",
+        (Locale::Ja, Label::Memory) => "記憶",
+        (Locale::En, Label::Memory) => "Memory",
+        (Locale::Ja, Label::Tasks) => "タスク",
+        (Locale::En, Label::Tasks) => "Tasks",
+        (Locale::Ja, Label::Settings) => "設定",
+        (Locale::En, Label::Settings) => "Settings",
+        (Locale::Ja, Label::About) => "情報",
+        (Locale::En, Label::About) => "About",
+        (Locale::Ja, Label::Usage) => "利用量",
+        (Locale::En, Label::Usage) => "Usage",
+        (Locale::Ja, Label::Deletion) => "削除",
+        (Locale::En, Label::Deletion) => "Deletion",
+        (Locale::Ja, Label::Refresh) => "更新",
+        (Locale::En, Label::Refresh) => "Refresh",
+        (Locale::Ja, Label::Resume) => "再開",
+        (Locale::En, Label::Resume) => "Resume",
+        (Locale::Ja, Label::RequestDeletion) => "削除を要求",
+        (Locale::En, Label::RequestDeletion) => "Request deletion",
+        (Locale::Ja, Label::ApplyCap) => "上限を更新",
+        (Locale::En, Label::ApplyCap) => "Apply cap",
+        (Locale::Ja, Label::WizardLanguage) => "UI言語を選んでください",
+        (Locale::En, Label::WizardLanguage) => "Choose a UI language",
+        (Locale::Ja, Label::WizardBundledEne) => {
+            "同梱キャラクターは公式の ene です。編集基盤は使いません。"
+        }
+        (Locale::En, Label::WizardBundledEne) => {
+            "The bundled character is official ene. This is not a character editor."
+        }
+        (Locale::Ja, Label::WizardCloudCost) => {
+            "会話はクラウドへ送られ、トークン課金が発生します。キー登録だけでは送信しません。"
+        }
+        (Locale::En, Label::WizardCloudCost) => {
+            "Chat is sent to the cloud and incurs token cost. Registering a key does not send."
+        }
+        (Locale::Ja, Label::WizardCredential) => {
+            "OpenAI API キーを登録します（この欄は会話ではありません）"
+        }
+        (Locale::En, Label::WizardCredential) => {
+            "Register an OpenAI API key (this field is not chat)"
+        }
+        (Locale::Ja, Label::WizardAssignment) => "使用モデルを割り当てるとセットアップが完了します",
+        (Locale::En, Label::WizardAssignment) => {
+            "Assign a model to finish setup. This is the consent step."
+        }
+        (Locale::Ja, Label::Send) => "送信",
+        (Locale::En, Label::Send) => "Send",
+        (Locale::Ja, Label::Confirm) => "確認する",
+        (Locale::En, Label::Confirm) => "Confirm",
+        (Locale::Ja, Label::Cancel) => "キャンセル",
+        (Locale::En, Label::Cancel) => "Cancel",
+        (Locale::Ja, Label::Next) => "次へ",
+        (Locale::En, Label::Next) => "Next",
+        (Locale::Ja, Label::Back) => "戻る",
+        (Locale::En, Label::Back) => "Back",
+        (Locale::Ja, Label::CompanionStopped) => "パートナーは停止中です。管理は利用できます。",
+        (Locale::En, Label::CompanionStopped) => {
+            "Companion is stopped. Management remains available."
+        }
+        (Locale::Ja, Label::ProviderDown) => "プロバイダーに到達できません。管理は利用できます。",
+        (Locale::En, Label::ProviderDown) => {
+            "Provider is unreachable. Management remains available."
+        }
+        (Locale::Ja, Label::AvatarAbsent) => "アバターはありません。会話と設定は利用できます。",
+        (Locale::En, Label::AvatarAbsent) => {
+            "Avatar is absent. Chat and settings remain available."
+        }
+        (Locale::Ja, Label::Connecting) => "接続中",
+        (Locale::En, Label::Connecting) => "Connecting",
+        (Locale::Ja, Label::Connected) => "接続済み",
+        (Locale::En, Label::Connected) => "Connected",
+        (Locale::Ja, Label::Disconnected) => "未接続",
+        (Locale::En, Label::Disconnected) => "Disconnected",
+    }
+}
+
+#[must_use]
+pub fn management_deny(locale: Locale, outcome: &ManagementOutcome) -> String {
+    match (locale, outcome) {
+        (Locale::Ja, ManagementOutcome::DeniedByBoundary) => {
+            String::from("境界により拒否されました。Client の confirmed=true では完了しません。")
+        }
+        (Locale::En, ManagementOutcome::DeniedByBoundary) => String::from(
+            "Denied by the control boundary. Client confirmed=true cannot complete this.",
+        ),
+        (Locale::Ja, ManagementOutcome::NeedsClarification) => {
+            String::from("内容を確認できません。条件を見直してください。")
+        }
+        (Locale::En, ManagementOutcome::NeedsClarification) => {
+            String::from("Needs clarification; refine the request.")
+        }
+        (Locale::Ja, ManagementOutcome::HeldByOperation) => {
+            String::from("別の操作が進行中です。後で再試行してください。")
+        }
+        (Locale::En, ManagementOutcome::HeldByOperation) => {
+            String::from("Held by a concurrent operation; retry later.")
+        }
+        (Locale::Ja, ManagementOutcome::StaleBaseView { .. }) => {
+            String::from("表示が古いため拒否されました。最新の画面からやり直してください。")
+        }
+        (Locale::En, ManagementOutcome::StaleBaseView { .. }) => {
+            String::from("Stale view; reload and retry.")
+        }
+        (Locale::Ja, ManagementOutcome::AppliedAsOneTime) => String::from("適用しました。"),
+        (Locale::En, ManagementOutcome::AppliedAsOneTime) => String::from("Applied."),
+        (Locale::Ja, ManagementOutcome::StoredAsRuleView { .. }) => {
+            String::from("規則として保存しました。")
+        }
+        (Locale::En, ManagementOutcome::StoredAsRuleView { .. }) => {
+            String::from("Stored as a rule.")
+        }
+    }
+}
+
+#[must_use]
+/// Renders one confirmation-channel answer. The requester listener's own
+/// answers are rendered where they are read.
+pub fn control_deny(locale: Locale, from: &FromConfirmation) -> String {
+    match (locale, from) {
+        (Locale::Ja, FromConfirmation::DeniedByBoundary) => {
+            String::from("確認は Host が起動した GUI の専用チャネルとセッションに束縛されます。")
+        }
+        (Locale::En, FromConfirmation::DeniedByBoundary) => String::from(
+            "Confirmation is bound to the private channel and session the Host issued to its own GUI.",
+        ),
+        (Locale::Ja, FromConfirmation::Unavailable) => {
+            String::from("Host の確認面を利用できません。")
+        }
+        (Locale::En, FromConfirmation::Unavailable) => String::from("Confirmation is unavailable."),
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })) => {
+            String::from(
+                "資格情報は保存されませんでした。OS の保護ストアが使えないか、登録が拒否されました。",
+            )
+        }
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })) => {
+            String::from(
+                "The credential was not stored. The OS protected store is unavailable or refused the put.",
+            )
+        }
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
+            String::from(
+                "値は保護ストアに届きましたが、登録の確定が完了していません。再試行する前に保留状態を確認してください。",
+            )
+        }
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
+            String::from(
+                "The value reached the protected store, but registration did not commit. Check the pending state before retrying.",
+            )
+        }
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::Rejected { .. })) => {
+            String::from("確認は拒否されました。変更は適用されていません。")
+        }
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::Rejected { .. })) => {
+            String::from("The confirmation was declined. No change was applied.")
+        }
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
+            String::from("このペアリング要求は Host にありません。")
+        }
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
+            String::from("This pairing request is unknown to Host.")
+        }
+        (Locale::Ja, _) => String::from("制御の応答を処理できません。"),
+        (Locale::En, _) => String::from("The control channel answered unexpectedly."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Label, Locale, control_deny, label};
+    use ene_local_control::{ControlOutcome, FromConfirmation};
+
+    #[test]
+    fn credential_refused_is_not_an_unexpected_control_answer() {
+        let refused = FromConfirmation::Outcome(ControlOutcome::CredentialRefused {
+            provider: String::from("openai"),
+            label: String::from("main"),
+        });
+        let ja = control_deny(Locale::Ja, &refused);
+        let en = control_deny(Locale::En, &refused);
+        assert!(!ja.contains("処理できません"));
+        assert!(!en.contains("unexpected"));
+        assert!(ja.contains("保護ストア") || ja.contains("拒否"));
+    }
+
+    #[test]
+    fn locale_switch_changes_labels_only() {
+        let ja = label(Locale::Ja, Label::Chat);
+        let en = label(Locale::En, Label::Chat);
+        assert_ne!(ja, en);
+        assert_ne!(
+            label(Locale::Ja, Label::Memory),
+            label(Locale::En, Label::Memory)
+        );
+        assert_eq!(Locale::parse("en").as_tag(), "en");
+        assert_eq!(Locale::parse("ja").as_tag(), "ja");
+    }
+}

@@ -84,10 +84,9 @@ use ene_core::conn;
 use ene_core::conn_pipe;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::{CredentialRef, MemoryCredentialStore, PendingPairing};
-use ene_ctl::client::Client;
+use ene_ctl::client::{Client, ClientError};
 use ene_ctl::cmds;
 use ene_ctl::device::{StoredDevice, load_pending_id, store_device};
-use ene_ctl::errors::CliError;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use rusqlite::OptionalExtension as _;
 use tokio::net::windows::named_pipe::ClientOptions;
@@ -185,8 +184,8 @@ async fn dial_until_pending(dir: &Path) -> Result<(), String> {
         )
         .await;
         match attempt {
-            Ok(Err(CliError::ServerOutcome(_))) => return Ok(()),
-            Ok(Err(CliError::Transport(reason))) => {
+            Ok(Err(ClientError::ServerOutcome(_))) => return Ok(()),
+            Ok(Err(ClientError::Transport(reason))) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(format!("the pipe never accepted a client: {reason}"));
                 }
@@ -302,6 +301,7 @@ fn setup_complete_intent(target: &str, mark: &str) -> WirePayload {
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     })
 }
 

@@ -12,7 +12,11 @@
 //! orchestration pipeline. With the `approve-device` subcommand it resolves
 //! the data directory and records one Owner pairing approval through
 //! [`HostHandle::approve_device`](ene_core::serve::HostHandle::approve_device):
-//! the Host-local trusted inlet for pending device requests.
+//! the Host-local trusted inlet for pending device requests. With the
+//! `confirm-deletion` subcommand it dials the serving Host's Host-local
+//! control inlet ([`ene_core::host_control`]) instead of opening the state
+//! offline: the confirmation must execute where the Client delivery tracking
+//! lives (lifecycle §8.1).
 
 use std::path::{Path, PathBuf};
 
@@ -61,7 +65,10 @@ enum CliCommand {
         limit: u32,
     },
     /// The Owner's final confirmation for one staged Targeted Deletion
-    /// request: it starts the canonical operation (IPC §18.1).
+    /// request: it runs inside the serving Host via the Host-local control
+    /// inlet and starts the canonical operation (IPC §18.1, lifecycle
+    /// §8.1). A stopped Host cannot confirm: an offline handle cannot name
+    /// the Clients that may hold a target-bearing copy.
     ConfirmDeletion {
         config: Option<PathBuf>,
         request: String,
@@ -146,7 +153,9 @@ fn ene_core_command() -> clap::Command {
         )
         .subcommand(
             ClapCommand::new("confirm-deletion")
-                .about("Confirm one staged Targeted Deletion request and start it")
+                .about(
+                    "Confirm one staged Targeted Deletion request through the running serving Host",
+                )
                 .arg(
                     Arg::new("request")
                         .long("request")
@@ -414,75 +423,131 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
 /// trusted inlet, and nowhere else; the operator provisions it into the
 /// client's protected device file.
 ///
-/// This is an offline mutation, so it takes the single-writer
-/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store
-/// (PR §6.4): a running Host owns the mutation and the command is refused.
+/// This is an offline mutation when no Host is serving, so it takes the
+/// single-writer [`HostLock`](ene_core::host_lock::HostLock) before opening
+/// the store (PR §6.4). While a Host is serving, the command speaks the
+/// Host-local control inlet instead. An occupied seat fails; the command
+/// never falls through to the Client channel.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
-/// directory, [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened, and [`CoreError::Approve`] when the pending id is
-/// unknown (listing the pending ids) or the approval write fails.
+/// Returns [`CoreError::AlreadyRunning`] only when the lock is held and the
+/// control inlet is not this path's concern; serving occupancy is
+/// [`CoreError::SeatOccupied`]. [`CoreError::Store`] when the runtime cannot
+/// be built or the state cannot be opened, and [`CoreError::Approve`] when
+/// the pending id is unknown.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
-    use std::io::Write as _;
-
     use ene_core::host_lock::HostLock;
 
     block_on(async {
-        let _lock = HostLock::acquire(data_dir)?;
-        let handle = HostHandle::open(data_dir).await?;
-        if let Some((_, secret)) = handle.approve_device(pending_id).await? {
-            let mut stdout = std::io::stdout().lock();
-            writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
-                CoreError::Store(format!(
-                    "approved, but the secret could not be shown: {error}"
-                ))
-            })?;
-            stdout.flush().map_err(|error| {
-                CoreError::Store(format!(
-                    "approved, but the secret could not be shown: {error}"
-                ))
-            })?;
-            return Ok(());
+        match HostLock::acquire(data_dir) {
+            Ok(_lock) => Err(host_not_serving()),
+            Err(CoreError::AlreadyRunning) => {
+                let state =
+                    ene_core::host_control::request_device_approve(data_dir, pending_id).await?;
+                show_requester_state("device approval", &state)
+            }
+            Err(error) => Err(error),
         }
-        let pending = handle.pending_devices().await?;
-        Err(CoreError::Approve(format!(
-            "unknown pending id {pending_id:?}; pending: [{pending}]",
-            pending = pending
-                .iter()
-                .map(|entry| entry.pending_id.as_str())
-                .collect::<Vec<&str>>()
-                .join(", ")
-        )))
     })
+}
+
+/// The requester-only refusal when no Host is serving.
+///
+/// The Owner's confirmation surface lives in the serving process, so an
+/// offline command can never record a confirmation; the old offline mutation
+/// fallback is deliberately gone (first-party-desktop §5.1.5).
+fn host_not_serving() -> CoreError {
+    CoreError::Approve(String::from(
+        "the Host is not serving; start `ene-core serve` and retry — the Owner's \
+         confirmation surface runs there, and an offline command cannot record one",
+    ))
+}
+
+/// Shows one requester request's settled state. Secrets never appear here: the
+/// pairing provision and the credential value belong to their own channels.
+fn show_requester_state(
+    what: &str,
+    state: &ene_local_control::RequestState,
+) -> Result<(), CoreError> {
+    use std::io::Write as _;
+
+    use ene_local_control::{RequestState, RequesterOutcome};
+
+    let line = match state {
+        RequestState::AwaitingOwnerConfirmation => format!(
+            "{what}: the Owner's confirmation surface has not decided yet; no change was applied"
+        ),
+        RequestState::ConfirmationUnavailable => {
+            format!("{what}: no confirmation surface is available; no change was applied")
+        }
+        RequestState::Rejected => format!("{what}: the Owner declined; no change was applied"),
+        RequestState::StalePremise => format!(
+            "{what}: the target or its premise moved; request again against the current state"
+        ),
+        RequestState::OutcomeUnavailable => format!(
+            "{what}: the outcome could not be read; check the current state before retrying"
+        ),
+        RequestState::Applied { outcome } => match outcome {
+            RequesterOutcome::DeviceApproved {
+                pending_id,
+                device_id,
+            } => format!(
+                "{what}: approved pending {pending_id} as device {device_id}; the pairing \
+                 client receives its own provision"
+            ),
+            RequesterOutcome::DeviceUnknown { pending_id } => {
+                format!("{what}: pending {pending_id} is unknown to the serving Host")
+            }
+            RequesterOutcome::CredentialStored { provider, label } => {
+                format!("{what}: {provider}:{label} is registered and active")
+            }
+            RequesterOutcome::CredentialRefused { provider, label } => format!(
+                "{what}: {provider}:{label} was not stored; the value is entered on the \
+                 confirmation surface, never on this command line"
+            ),
+            RequesterOutcome::CredentialUncommitted { provider, label } => format!(
+                "{what}: {provider}:{label} reached the OS store, but registration did not \
+                 commit; inspect the pending state before retrying, and do not re-send the value"
+            ),
+            RequesterOutcome::Deletion(outcome) => {
+                format!("{what}: the deletion request settled as {outcome:?}")
+            }
+        },
+    };
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{line}")
+        .and_then(|()| stdout.flush())
+        .map_err(|error| CoreError::Approve(format!("the outcome could not be shown: {error}")))
 }
 
 /// Unknown pairs fail with the pending set so the Owner can retry exactly.
 ///
-/// Like `approve-device`, this offline mutation takes the single-writer
-/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store.
+/// Offline (no serving Host) this takes [`HostLock`] before opening the
+/// store. While serving, the command puts the bearer over the control inlet
+/// (`ENE_OPENAI_API_KEY`); an occupied seat fails and never falls through
+/// to the Client channel.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
-/// directory, [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened, and [`CoreError::Approve`] when the pair is
-/// unknown.
+/// [`CoreError::SeatOccupied`] when the control seat is held,
+/// [`CoreError::Store`] when the runtime cannot be built or the state cannot
+/// be opened, and [`CoreError::Approve`] when the pair is unknown or the
+/// serving-time secret is missing.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
     block_on(async {
-        let _lock = HostLock::acquire(data_dir)?;
-        let handle = HostHandle::open(data_dir).await?;
-        if handle.approve_credential(provider, label).await? {
-            return Ok(());
+        match HostLock::acquire(data_dir) {
+            Ok(_lock) => Err(host_not_serving()),
+            Err(CoreError::AlreadyRunning) => {
+                let state =
+                    ene_core::host_control::request_credential_put(data_dir, provider, label)
+                        .await?;
+                show_requester_state("credential registration", &state)
+            }
+            Err(error) => Err(error),
         }
-        let pending = handle.pending_credentials().await?;
-        Err(CoreError::Approve(format!(
-            "unknown credential {provider}:{label}; pending: [{pending}]",
-            pending = pending.join(", ")
-        )))
     })
 }
 
@@ -534,33 +599,40 @@ fn run_pending_deletions(
 }
 
 /// Records one Owner confirmation and starts the canonical Targeted Deletion
-/// operation (IPC §18.1), then prints the operation identity the status view
-/// reports.
+/// operation (IPC §18.1) through the serving Host's Host-local first-party
+/// control inlet, then prints the operation identity the status view reports.
+///
+/// The confirmation must run in the serving process. The required
+/// participant snapshot includes every Client incarnation with durable
+/// body-delivery evidence, and only the serving process can reach those
+/// incarnations through its live connection table (lifecycle §8.1); an
+/// offline state open could name them but could never complete their local
+/// erasure, so this command never admits from an offline handle. It dials
+/// [`ene_core::host_control`] and reports the serving Host's typed outcome;
+/// when no Host is serving it fails with recovery guidance instead of
+/// confirming.
 ///
 /// An unknown request id fails with the pending id set (never their target
-/// text, which stays on the `pending-deletions` preview). Like every other
-/// offline mutation this takes the single-writer
-/// [`HostLock`](ene_core::host_lock::HostLock) before opening the store.
+/// text, which stays on the `pending-deletions` preview).
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::AlreadyRunning`] while a serving Host owns the data
-/// directory, [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened, and [`CoreError::Deletion`] for an unknown or
-/// inadmissible request.
+/// Returns [`CoreError::Deletion`] when the serving Host is not reachable on
+/// the control inlet (or refuses technically), for an unknown or
+/// inadmissible request, and [`CoreError::Store`] when the pending-id
+/// fallback cannot be read.
 fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
 
-    use ene_core::host_lock::HostLock;
     use ene_preservation::ConfirmTargetedDeletionOutcome;
 
     let request_id = parse_deletion_request_id(request)?;
     block_on(async move {
-        let _lock = HostLock::acquire(data_dir)?;
-        let handle = HostHandle::open(data_dir).await?;
-        let outcome = handle
-            .confirm_targeted_deletion(&deletion_request_id_text_of(request_id))
-            .await?;
+        let outcome = ene_core::host_control::confirm_targeted_deletion(
+            data_dir,
+            &deletion_request_id_text_of(request_id),
+        )
+        .await?;
         let mut stdout = std::io::stdout().lock();
         let line = match outcome {
             ConfirmTargetedDeletionOutcome::Started(operation) => format!(
@@ -584,6 +656,9 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
                 )));
             }
             ConfirmTargetedDeletionOutcome::Missing => {
+                // A read-only state open is safe while serving; the pending
+                // preview never admits anything.
+                let handle = HostHandle::open(data_dir).await?;
                 let pending = handle.pending_targeted_deletions(None, 100).await?;
                 return Err(CoreError::Deletion(format!(
                     "unknown deletion request {request:?}; pending: [{}]",

@@ -9,7 +9,12 @@
 //!
 //! Single instance: [`run`] binds through `bind_singleton`, which treats
 //! `AddrInUse` as a possible live peer and probes before deciding to unlink a
-//! stale path; a probe timeout fails safe toward live.
+//! stale path; a probe timeout fails safe toward live. The same process also
+//! binds the Host-local first-party control endpoint
+//! ([`crate::host_control`]) in its accept loop: the Owner's Targeted
+//! Deletion confirmation must execute against the live connection table and
+//! Client delivery tracking, so it is served from this process and never
+//! from an offline state open (lifecycle §8.1, PR §6.4).
 //!
 //! Per-connection state lives in `ConnectionTable`, owned by this module:
 //! [`run`] mints one [`ConnectionWireId`] per accepted connection, and every
@@ -43,7 +48,7 @@
 //! presentation memory → Task execution registry → SQLite.
 //!
 //! Same-user proof without new dependencies: after binding, the listener reads
-//! the socket file owner through [`MetadataExt::uid`](std::os::unix::fs::MetadataExt)
+//! the socket file owner through [`MetadataExt::uid`]
 //! (created by this process inside the `0700` data directory, so its owner is
 //! the Host user) and compares it against each peer credential uid from
 //! [`tokio::net::UnixStream::peer_cred`]. A mismatch, or an unreadable peer
@@ -69,7 +74,8 @@
 //!
 //! [`LiveInput::peer_uid_ok`]: crate::serve::LiveInput::peer_uid_ok
 //! [`LiveInput`]: crate::serve::LiveInput
-//! [`MetadataExt::uid`](std::os::unix::fs::MetadataExt): <https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html>
+//! [`MetadataExt::uid`]: https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html#tymethod.uid
+//! [`tokio::net::UnixStream::peer_cred`]: https://docs.rs/tokio/latest/tokio/net/struct.UnixStream.html#method.peer_cred
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,7 +83,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use ene_inference::ProviderTransport;
 
-use crate::serve::{CoreError, HostHandle};
+use crate::serve::{CoreError, HostHandle, outgoing_frame};
 
 const SOCKET_NAME: &str = "ene.sock";
 
@@ -88,6 +94,16 @@ const SOCKET_NAME: &str = "ene.sock";
 /// maybe-live path).
 #[cfg(unix)]
 const SINGLETON_PROBE_MILLIS: u64 = 200;
+
+/// Period between serving-time Targeted Deletion ticks (lifecycle §14).
+///
+/// One tick runs at most one bounded fan-out pass plus at most one backed-off
+/// resume of a retryable hold, so the period bounds the retry rate of a held
+/// operation. A confirmation kicks its operation immediately; this driver
+/// continues whatever remains — multi-pass sweeps, a hold whose holder became
+/// reachable, or a kick that failed technically.
+#[cfg(any(unix, windows))]
+const DELETION_DRIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Resolves the listener socket path for a data directory.
 ///
@@ -580,6 +596,43 @@ impl ConnectionTable {
             .map(|record| record.phase)
     }
 
+    /// The Client incarnation pinned to one connection, if a frame pinned it.
+    ///
+    /// The pin is written by the first admitted frame only; later frames must
+    /// agree or the connection is dropped, so this is Host-observed identity,
+    /// never a Client claim.
+    pub(crate) fn incarnation_of(&self, id: &ConnectionWireId) -> Option<(u64, u64)> {
+        let table = crate::lock_unpoison(&self.inner);
+        let record = table.records.get(id)?;
+        record
+            .incarnation
+            .map(|incarnation| (incarnation.counter, incarnation.random))
+    }
+
+    /// The current authenticated connection of one Client incarnation, if any.
+    ///
+    /// Only an authenticated, device-current record is reachability evidence:
+    /// a superseded, closed, or unauthenticated socket is never used to
+    /// deliver a demand, and its absence is an explicit unreachable hold.
+    pub(crate) fn current_connection_for_incarnation(
+        &self,
+        counter: u64,
+        random: u64,
+    ) -> Option<ConnectionWireId> {
+        let table = crate::lock_unpoison(&self.inner);
+        table.records.iter().find_map(|(id, record)| {
+            let incarnation = record.incarnation?;
+            if incarnation.counter != counter || incarnation.random != random {
+                return None;
+            }
+            if record.phase != ConnectionPhase::Authenticated {
+                return None;
+            }
+            let device = record.paired_device.as_ref()?;
+            (table.device_current.get(device) == Some(id)).then_some(*id)
+        })
+    }
+
     /// Runs one short synchronous commit under the connection-ownership
     /// section (CCT §10.4).
     ///
@@ -606,6 +659,26 @@ impl ConnectionTable {
             return None;
         }
         Some(commit())
+    }
+
+    /// Test-only: pins one incarnation on an accepted record exactly as the
+    /// first admitted frame would, so Client-lifecycle tests need no transport.
+    #[cfg(test)]
+    pub(crate) fn pin_incarnation_for_tests(
+        &self,
+        id: &ConnectionWireId,
+        counter: u64,
+        random: u64,
+    ) -> bool {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return false;
+        };
+        if record.incarnation.is_some() {
+            return false;
+        }
+        record.incarnation = Some(ClientIncarnationId { counter, random });
+        true
     }
 
     /// Test-only pending-challenge snapshot.
@@ -657,12 +730,16 @@ impl ConnectionTable {
 /// Binds the singleton listener for `socket`, treating `AddrInUse` as a
 /// possible live peer and probing via [`probe_and_rebind`].
 ///
+/// Shared by the device socket and the Host-local control socket: both are
+/// single-instance per data directory (the `host.lock` owns that premise) and
+/// both must clear a stale path left by a crashed process.
+///
 /// # Errors
 ///
 /// Returns [`CoreError::Bind`] when a live Host already serves the path, when
 /// a stale path cannot be cleared, or when the (re)bind fails.
 #[cfg(unix)]
-async fn bind_singleton(socket: &Path) -> Result<UnixListener, CoreError> {
+pub(crate) async fn bind_singleton(socket: &Path) -> Result<UnixListener, CoreError> {
     match UnixListener::bind(socket) {
         Ok(listener) => Ok(listener),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
@@ -700,14 +777,236 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
     UnixListener::bind(socket).map_err(|error| CoreError::Bind(format!("bind: {error}")))
 }
 
+/// Cancels a Tokio task when dropped.
+///
+/// `conn::run` keeps the Targeted Deletion driver JoinHandle in this guard
+/// for the accept-loop lifetime. Unexpected drop or panic of the listener
+/// aborts the driver as a best-effort emergency stop. Graceful shutdown
+/// retains this guard throughout [`AbortOnDrop::join`] while a running tick
+/// finishes its started Store work. Dropping the join remains an emergency
+/// abort. The transport-only reader uses the same guard and can be cancelled
+/// safely.
+#[must_use = "dropping this guard aborts the owned task"]
+#[cfg(any(unix, windows))]
+struct AbortOnDrop<T> {
+    task: Option<tokio::task::JoinHandle<T>>,
+}
+
+#[cfg(any(unix, windows))]
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl<T> AbortOnDrop<T> {
+    /// Awaits the task without aborting it. Used after a shutdown signal so
+    /// an already-started bounded tick (and its `spawn_blocking` Store work)
+    /// can finish.
+    async fn join(mut self) -> Result<(), tokio::task::JoinError> {
+        let Some(task) = self.task.as_mut() else {
+            return Ok(());
+        };
+        let result = task.await;
+        self.task.take();
+        result.map(|_| ())
+    }
+}
+
+/// A serving-owned stop signal, independent of how the accept loop ends.
+#[cfg(any(unix, windows))]
+struct DeletionDriver {
+    stop: tokio::sync::watch::Sender<bool>,
+    task: AbortOnDrop<()>,
+}
+
+#[cfg(any(unix, windows))]
+impl DeletionDriver {
+    async fn stop_and_join(self) -> Result<(), CoreError> {
+        self.stop.send_replace(true);
+        self.task
+            .join()
+            .await
+            .map_err(|_| CoreError::Serving("deletion driver panicked or was cancelled".into()))
+    }
+}
+
+#[cfg(any(unix, windows))]
+pub(crate) async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow_and_update() {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn serving_failure(_handle: &HostHandle) -> CoreError {
+    #[cfg(test)]
+    {
+        _handle.serving_test.fail.notified().await;
+        CoreError::Bind("injected serving-loop failure".into())
+    }
+    #[cfg(not(test))]
+    std::future::pending().await
+}
+
+/// Owns the handlers of one serving composition. Drop is an emergency abort;
+/// normal/error loop exits close admission and drain every started mutation.
+#[cfg(any(unix, windows))]
+struct ServingHandlers {
+    stop: tokio::sync::watch::Sender<bool>,
+    tasks: tokio::task::JoinSet<()>,
+    failure: Option<CoreError>,
+}
+
+/// The Host stores a launcher Arc; only the serving owner may release its
+/// runners on emergency drop, including their temporary strong Host Arcs.
+#[cfg(any(unix, windows))]
+struct TaskAgentOwner<T>(Arc<crate::task_run::BackgroundTaskAgent<T>>);
+
+#[cfg(any(unix, windows))]
+impl<T> Drop for TaskAgentOwner<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl ServingHandlers {
+    fn new() -> Self {
+        let (stop, _) = tokio::sync::watch::channel(false);
+        Self {
+            stop,
+            tasks: tokio::task::JoinSet::new(),
+            failure: None,
+        }
+    }
+
+    fn record(&mut self, result: Option<Result<(), tokio::task::JoinError>>) {
+        if let Some(Err(_)) = result {
+            // JoinError's panic text can contain provider or target material.
+            self.failure.get_or_insert_with(|| {
+                CoreError::Serving("serving handler panicked or was cancelled".into())
+            });
+        }
+    }
+
+    async fn stop_and_join(&mut self) -> Result<(), CoreError> {
+        self.stop.send_replace(true);
+        while let Some(result) = self.tasks.join_next().await {
+            self.record(Some(result));
+        }
+        self.failure.take().map_or(Ok(()), Err)
+    }
+}
+
+/// Publishes this handle's serving-composition driver liveness from first
+/// poll until the driver task is dropped, including abort.
+///
+/// Liveness is recorded here rather than at `tokio::spawn` so a never-polled
+/// aborted task does not look alive, and so Drop of the task future is what
+/// clears the count.
+#[must_use = "the driver liveness ends when this guard is dropped"]
+#[cfg(any(unix, windows))]
+struct DeletionDriverLive {
+    handle: Arc<HostHandle>,
+}
+
+#[cfg(any(unix, windows))]
+impl DeletionDriverLive {
+    fn enter(handle: Arc<HostHandle>) -> Self {
+        handle.begin_deletion_driver();
+        Self { handle }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Drop for DeletionDriverLive {
+    fn drop(&mut self) {
+        self.handle.end_deletion_driver();
+    }
+}
+
+/// Starts the serving-composition Targeted Deletion driver (lifecycle §14).
+///
+/// The returned guard is the driver's lifetime: `conn::run` must keep it
+/// across the accept loop. Graceful shutdown joins it so a running tick
+/// finishes; unexpected drop still aborts as an emergency stop. Aborting
+/// the driver does not cancel durable operations; a successor Host resumes
+/// them from SQLite through startup recovery.
+///
+/// The driver is the production caller of the bounded fan-out tick
+/// ([`HostHandle::run_targeted_deletion_tick`]): each period it runs at most
+/// one pass plus at most one backed-off resume of a retryable hold. It is a
+/// task rather than `select!` arm of the accept loop because a bounded pass
+/// can wait on a Client local-erasure bound
+/// ([`crate::transient_erasure`]): accepting a connection must never stall
+/// behind erasure work. A failed tick stops nothing and infers no outcome —
+/// there is no logging subsystem, the durable operation state stays
+/// authoritative, and the next period re-derives it.
+#[must_use = "the driver is cancelled when this guard is dropped; bind it for the listener lifetime"]
+#[cfg(any(unix, windows))]
+fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> DeletionDriver {
+    let (stop, mut shutdown) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
+        let _live = DeletionDriverLive::enter(Arc::clone(&handle));
+        #[cfg(test)]
+        handle.serving_test.ready.notify_one();
+        let mut period = tokio::time::interval_at(
+            tokio::time::Instant::now() + DELETION_DRIVE_PERIOD,
+            DELETION_DRIVE_PERIOD,
+        );
+        period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                () = handle.deletion_driver_wake.notified() => {}
+                _ = period.tick() => {}
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+            // Once this tick starts, graceful shutdown waits for it — including
+            // any `spawn_blocking` Store work it already entered.
+            drop(handle.run_targeted_deletion_tick().await);
+        }
+    });
+    DeletionDriver {
+        stop,
+        task: AbortOnDrop { task: Some(task) },
+    }
+}
+
 /// Serves the Unix socket listener until the process ends.
 ///
 /// Binds [`socket_path`] through the singleton check, proves each peer
 /// against the socket owner, and spawns one frame-loop task per authorized
 /// connection, driving the fake-friendly [`HostHandle::handle_frame`] seam.
-/// There is no shutdown signal in `Stage 2`: the future resolves only on bind
-/// failure; otherwise it runs until killed. The handle is shared by reference
-/// (`Arc` with `&self` methods), so no handle-wide lock spans provider I/O.
+/// The Host-local first-party control endpoint is bound in the same task and
+/// served by the same accept loop, so it lives and dies with this listener
+/// (one abort releases both). Production keeps an unsignalled shutdown
+/// sender, so the 15s Targeted Deletion driver keeps running until the
+/// process is killed. Dropping or aborting this future still aborts that
+/// driver as an emergency stop; graceful restart uses
+/// [`run_until_shutdown`] so a running tick can finish its started Store
+/// work. The handle is shared by reference (`Arc` with `&self` methods), so
+/// no handle-wide lock spans provider I/O.
 ///
 /// # Errors
 ///
@@ -718,6 +1017,35 @@ pub async fn run<T>(
     data_dir: PathBuf,
     handle: Arc<HostHandle>,
     transport: Arc<T>,
+) -> Result<(), CoreError>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    let (_keep_alive, shutdown) = tokio::sync::watch::channel(false);
+    run_until_shutdown(data_dir, handle, transport, shutdown).await
+}
+
+/// Serves the Unix socket listener until `shutdown` is set to `true`.
+///
+/// Every normal or serving-loop error return is quiescent: accepts have
+/// stopped, control and device handlers (including admitted requests, close
+/// cleanup and post-response Learning) have joined, Task Agent executions
+/// have drained, and the deletion driver has finished its bounded tick and
+/// all started deletion Store work. Shutdown interrupts transport waits,
+/// never an admitted mutation. An accept error takes precedence over a
+/// secondary handler error. Forced drop is an emergency abort, not a
+/// graceful restart boundary.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Bind`] when the socket cannot be bound (including a
+/// live peer) or the socket metadata cannot be read.
+#[cfg(unix)]
+pub async fn run_until_shutdown<T>(
+    data_dir: PathBuf,
+    handle: Arc<HostHandle>,
+    transport: Arc<T>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), CoreError>
 where
     T: ProviderTransport + Send + Sync + 'static,
@@ -737,27 +1065,82 @@ where
         Arc::clone(&handle),
         Arc::clone(&transport),
     ));
-    let _ = handle.install_task_launcher(launcher);
+    let _ = handle.install_task_launcher(launcher.clone());
+    let _task_owner = TaskAgentOwner(Arc::clone(&launcher));
     let table = Arc::new(ConnectionTable::new());
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
-        };
-        let peer_ok = match stream.peer_cred() {
-            Ok(cred) => cred.uid() == owner,
-            Err(_) => false,
-        };
-        if !peer_ok {
-            continue;
+    // The serving composition owns the reachability authority for Client
+    // incarnations: without it a Client demand would be an unreachable hold.
+    handle.install_client_connection_table(Arc::clone(&table));
+    // The Host-local first-party control inlet is bound before the device
+    // listener accepts: the Owner's Targeted Deletion confirmation must run
+    // in this serving process, where the Client delivery tracking and the
+    // connection table are alive (lifecycle §8.1, PR §6.4).
+    let control = crate::host_control::ControlListener::bind(&data_dir).await?;
+    // Bound to this future: graceful shutdown joins the driver after the
+    // current tick; unexpected drop still aborts as an emergency stop.
+    let deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle));
+    let mut handlers = ServingHandlers::new();
+    let result = loop {
+        if *shutdown.borrow() {
+            break Ok(());
         }
-        let connection = table.note_accept();
-        let handle = Arc::clone(&handle);
-        let transport = Arc::clone(&transport);
-        let table = Arc::clone(&table);
-        tokio::spawn(async move {
-            serve_connection(stream, connection, handle, transport, table).await;
-        });
-    }
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break Ok(());
+                }
+            }
+            error = serving_failure(&handle) => break Err(error),
+            accepted = listener.accept() => {
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(CoreError::Bind(format!("accept: {error}"))),
+                };
+                let peer_ok = match stream.peer_cred() {
+                    Ok(cred) => cred.uid() == owner,
+                    Err(_) => false,
+                };
+                if !peer_ok {
+                    continue;
+                }
+                let connection = table.note_accept();
+                let handle = Arc::clone(&handle);
+                let transport = Arc::clone(&transport);
+                let table = Arc::clone(&table);
+                let stop = handlers.stop.subscribe();
+                handlers.tasks.spawn(async move {
+                    serve_connection(stream, connection, handle, transport, table, stop).await;
+                });
+            }
+            accepted = control.accept() => {
+                match accepted {
+                    Ok(Some(stream)) => {
+                        handlers.tasks.spawn(crate::host_control::serve_requester(
+                            stream, Arc::clone(&handle), handlers.stop.subscribe(),
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
+                }
+            }
+            joined = handlers.tasks.join_next(), if !handlers.tasks.is_empty() => {
+                handlers.record(joined);
+            }
+        }
+    };
+    #[cfg(test)]
+    handle.serving_test.shutdown_started.notify_one();
+    let handler_result = handlers.stop_and_join().await;
+    // The Owner's confirmation surface may have an admitted operation still
+    // running; it finishes before this process stops owning the authority.
+    handle.join_confirmation_tasks().await;
+    let task_result = launcher.shutdown_and_join().await;
+    let driver_result = deletion_driver.stop_and_join().await;
+    result
+        .and(handler_result)
+        .and(task_result)
+        .and(driver_result)
 }
 
 #[cfg(any(unix, windows))]
@@ -774,6 +1157,7 @@ async fn write_response(
     stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     response: WireFrame,
     terminal: &mut bool,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool {
     use tokio::io::AsyncWriteExt as _;
 
@@ -783,7 +1167,11 @@ async fn write_response(
     let Ok(encoded) = encode_frame(&response) else {
         return false;
     };
-    stream.write_all(&encoded).await.is_ok()
+    tokio::select! {
+        biased;
+        () = wait_for_shutdown(shutdown) => false,
+        result = stream.write_all(&encoded) => result.is_ok(),
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -842,6 +1230,7 @@ async fn emit_push<W>(
     connection: &ConnectionWireId,
     template: &Option<(WireFrame, LiveInput)>,
     terminal: &mut bool,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -862,7 +1251,49 @@ where
     let Some(pushed) = handle.push_undelivered(frame, &live).await else {
         return true;
     };
-    write_response(write_half, pushed, terminal).await
+    write_response(write_half, pushed, terminal, shutdown).await
+}
+
+/// Emits one pending Client local-erasure demand on this connection.
+///
+/// Mirrors [`emit_push`]: the demand is addressed to the connection's pinned
+/// incarnation and written under the connection's last admitted frame as the
+/// envelope template. The demand is marked delivered before the write; a write
+/// failure ends further pushes, and the participant wait reports an explicit
+/// hold (never a completion) for this pass, so a lost demand is re-driven
+/// idempotently by a later pass.
+#[cfg(any(unix, windows))]
+async fn emit_client_demand<W>(
+    write_half: &mut W,
+    handle: &HostHandle,
+    table: &Arc<ConnectionTable>,
+    connection: &ConnectionWireId,
+    template: &Option<(WireFrame, LiveInput)>,
+    terminal: &mut bool,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let Some((frame, _)) = template else {
+        return true;
+    };
+    let Some(live) = table.snapshot(connection) else {
+        return true;
+    };
+    if !table.is_current_authenticated(connection) {
+        return true;
+    }
+    let Some(payload) = handle.take_client_demand(&live).await else {
+        return true;
+    };
+    write_response(
+        write_half,
+        outgoing_frame(frame, &live, payload),
+        terminal,
+        shutdown,
+    )
+    .await
 }
 
 /// An incarnation mismatch, a corrupt or oversize frame, or a terminal
@@ -887,13 +1318,20 @@ async fn serve_connection<S, T>(
     handle: Arc<HostHandle>,
     transport: Arc<T>,
     table: Arc<ConnectionTable>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: ProviderTransport + Send + Sync + 'static,
 {
+    #[cfg(test)]
+    handle.serving_test.device_started.notify_one();
     let (read_half, mut write_half) = tokio::io::split(stream);
     let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
-    let reader = tokio::spawn(read_frames(read_half, frames_tx));
+    let reader = AbortOnDrop {
+        task: Some(tokio::spawn(read_frames(read_half, frames_tx))),
+    };
+    let mut learning = tokio::task::JoinSet::new();
+    let mut learning_failure = None;
     // Subscribe before the first read: a registration that commits while the
     // loop starts still changes the epoch, so the waiter cannot miss it.
     let mut wake = handle.undelivered_wakeup();
@@ -917,6 +1355,13 @@ async fn serve_connection<S, T>(
         };
         tokio::select! {
             biased;
+            () = wait_for_shutdown(&mut shutdown) => break 'connection,
+            joined = learning.join_next(), if !learning.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    learning_failure = Some(error);
+                    break 'connection;
+                }
+            }
             maybe = frames_rx.recv() => {
                 let Some(frame) = maybe else {
                     // Reader ended (EOF, invalid frame, or oversize): the
@@ -951,7 +1396,7 @@ async fn serve_connection<S, T>(
                 loop {
                     if host_done {
                         while let Ok(response) = frame_rx.try_recv() {
-                            if !write_response(&mut write_half, response, &mut terminal).await {
+                            if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
                                 failed = true;
                                 break;
                             }
@@ -960,13 +1405,17 @@ async fn serve_connection<S, T>(
                     }
                     tokio::select! {
                         biased;
+                        () = wait_for_shutdown(&mut shutdown) => {
+                            failed = true;
+                            break;
+                        }
                         () = &mut host => {
                             host_done = true;
                         }
                         maybe = frame_rx.recv() => {
                             match maybe {
                                 Some(response) => {
-                                    if !write_response(&mut write_half, response, &mut terminal).await {
+                                    if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
                                         failed = true;
                                         break;
                                     }
@@ -976,19 +1425,33 @@ async fn serve_connection<S, T>(
                         }
                     }
                 }
-                // The response above is already on the wire: post-response
-                // Learning formation runs in its own task, never as part of
-                // the request's completion. `run_pending_learning`
+                // Stop output backpressure, but never drop an admitted request
+                // while its Store work or Learning handoff can still mutate.
+                if !host_done {
+                    drop(frame_rx);
+                    host.await;
+                }
+                // After request completion, Learning formation runs in its
+                // own owned task even if transport output was interrupted.
+                // The handler joins it before exiting. `run_pending_learning`
                 // serializes and drains, so a second spawn that finds an
                 // emptied queue is a cheap no-op.
                 if handle.has_pending_learning() {
                     let worker_handle = Arc::clone(&handle);
                     let worker_transport = Arc::clone(&transport);
-                    tokio::spawn(async move {
+                    learning.spawn(async move {
+                        #[cfg(test)]
+                        if worker_handle.serving_test.park_learning.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            worker_handle.serving_test.learning_entered.notify_one();
+                            worker_handle.serving_test.learning_release.notified().await;
+                        }
                         worker_handle
                             .run_pending_learning(worker_transport.as_ref())
                             .await;
                     });
+                }
+                if failed || terminal {
+                    break 'connection;
                 }
                 template = Some((frame_template, live_template));
                 // A registration hint that fired before this first admitted
@@ -1003,13 +1466,25 @@ async fn serve_connection<S, T>(
                         &connection,
                         &template,
                         &mut terminal,
+                        &mut shutdown,
                     )
                     .await
                 {
                     push_blocked = true;
                 }
-                if failed || terminal {
-                    break 'connection;
+                if !push_blocked
+                    && !emit_client_demand(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                        &mut shutdown,
+                    )
+                    .await
+                {
+                    push_blocked = true;
                 }
             }
             changed = wake.changed() => {
@@ -1025,6 +1500,37 @@ async fn serve_connection<S, T>(
                         &connection,
                         &template,
                         &mut terminal,
+                        &mut shutdown,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
+                if !push_blocked
+                    && !emit_client_demand(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                        &mut shutdown,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
+            }
+            () = handle.client_demand_wakeup().notified() => {
+                if !push_blocked
+                    && !emit_client_demand(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                        &mut shutdown,
                     )
                     .await
                 {
@@ -1046,6 +1552,21 @@ async fn serve_connection<S, T>(
                         &connection,
                         &template,
                         &mut terminal,
+                        &mut shutdown,
+                    )
+                    .await
+                {
+                    push_blocked = true;
+                }
+                if !push_blocked
+                    && !emit_client_demand(
+                        &mut write_half,
+                        &handle,
+                        &table,
+                        &connection,
+                        &template,
+                        &mut terminal,
+                        &mut shutdown,
                     )
                     .await
                 {
@@ -1054,8 +1575,41 @@ async fn serve_connection<S, T>(
             }
         }
     }
-    reader.abort();
+    if let Some(task) = &reader.task {
+        task.abort();
+    }
+    let reader_failure = reader
+        .join()
+        .await
+        .err()
+        .filter(|error| !error.is_cancelled());
+    // Losing transport reachability must not wait for post-response inference.
+    // The handler still owns and joins that Learning work before it exits.
     handle.close_connection(&table, connection).await;
+    let learning_failure = drain_learning(&mut learning, learning_failure).await;
+    #[cfg(test)]
+    handle.serving_test.device_finished.notify_one();
+    if let Some(error) = learning_failure.or(reader_failure) {
+        // Only after all mutation-capable siblings and close cleanup ended
+        // may the serving supervisor observe this child failure.
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+        std::panic::resume_unwind(Box::new("Learning worker was cancelled"));
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn drain_learning(
+    tasks: &mut tokio::task::JoinSet<()>,
+    mut failure: Option<tokio::task::JoinError>,
+) -> Option<tokio::task::JoinError> {
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            failure.get_or_insert(error);
+        }
+    }
+    failure
 }
 
 /// Serves the Windows named-pipe listener until the process ends.
@@ -1065,10 +1619,12 @@ async fn serve_connection<S, T>(
 /// instances vanish with their process, so there is no stale path to unlink),
 /// proves each peer with the OS token check, and spawns one frame-loop task
 /// per authorized connection over the shared [`HostHandle::handle_frame`]
-/// seam. There is no shutdown signal in `Stage 2`: the future resolves only
-/// on creation failure; otherwise it runs until killed. Behavior beyond
-/// creation is Windows-unverified on this Linux host (see
-/// [`crate::conn_pipe`]).
+/// seam. Production keeps an unsignalled shutdown sender, matching Unix:
+/// the 15s Targeted Deletion driver keeps running until the process is
+/// killed. Dropping or aborting this future still aborts that driver as an
+/// emergency stop; graceful restart uses [`run_until_shutdown`] so a running
+/// tick can finish its started Store work. The same shutdown regressions
+/// exercise the Unix socket and Windows named-pipe transports.
 ///
 /// # Errors
 ///
@@ -1079,6 +1635,35 @@ pub async fn run<T>(
     data_dir: PathBuf,
     handle: Arc<HostHandle>,
     transport: Arc<T>,
+) -> Result<(), CoreError>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    let (_keep_alive, shutdown) = tokio::sync::watch::channel(false);
+    run_until_shutdown(data_dir, handle, transport, shutdown).await
+}
+
+/// Serves the Windows named-pipe listener until `shutdown` is set to `true`.
+///
+/// Every normal or serving-loop error return is quiescent: accepts have
+/// stopped, control and device handlers (including admitted requests, close
+/// cleanup and post-response Learning) have joined, Task Agent executions
+/// have drained, and the deletion driver has finished its bounded tick and
+/// all started deletion Store work. Shutdown interrupts transport waits,
+/// never an admitted mutation. An accept error takes precedence over a
+/// secondary handler error. Forced drop is an emergency abort, not a
+/// graceful restart boundary.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Bind`] when the first pipe instance cannot be created
+/// (including a live peer) or a follow-up instance cannot be created.
+#[cfg(windows)]
+pub async fn run_until_shutdown<T>(
+    data_dir: PathBuf,
+    handle: Arc<HostHandle>,
+    transport: Arc<T>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), CoreError>
 where
     T: ProviderTransport + Send + Sync + 'static,
@@ -1094,32 +1679,81 @@ where
         Arc::clone(&handle),
         Arc::clone(&transport),
     ));
-    let _ = handle.install_task_launcher(launcher);
+    let _ = handle.install_task_launcher(launcher.clone());
+    let _task_owner = TaskAgentOwner(Arc::clone(&launcher));
     let table = Arc::new(ConnectionTable::new());
-    loop {
-        if server.connect().await.is_err() {
-            // A failed wait leaves this instance unusable; replace it rather
-            // than serving half-open state.
-            server = crate::conn_pipe::create_next_server(&pipe)?;
-            continue;
+    handle.install_client_connection_table(Arc::clone(&table));
+    // The Host-local first-party control inlet: same ownership and peer
+    // check as the Unix path; the Owner's Targeted Deletion confirmation
+    // must run in this serving process (lifecycle §8.1, PR §6.4).
+    let mut control = crate::host_control::ControlListener::bind(&data_dir)?;
+    // Same serving-composition driver lifetime as the Unix listener.
+    let deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle));
+    let mut handlers = ServingHandlers::new();
+    let result: Result<(), CoreError> = async {
+        loop {
+            if *shutdown.borrow() {
+                return Ok(());
+            }
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return Ok(());
+                    }
+                }
+                error = serving_failure(&handle) => return Err(error),
+                connected = server.connect() => {
+                    if connected.is_err() {
+                        // A failed wait leaves this instance unusable; replace it
+                        // rather than serving half-open state.
+                        server = crate::conn_pipe::create_next_server(&pipe)?;
+                        continue;
+                    }
+                    // The OS peer token check runs before any frame is read: an
+                    // unprovable peer is dropped without a byte, like the Unix
+                    // uid-mismatch path.
+                    let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
+                    let next = crate::conn_pipe::create_next_server(&pipe)?;
+                    let current = std::mem::replace(&mut server, next);
+                    if !peer_ok {
+                        continue;
+                    }
+                    let connection = table.note_accept();
+                    let handle = Arc::clone(&handle);
+                    let transport = Arc::clone(&transport);
+                    let table = Arc::clone(&table);
+                    let stop = handlers.stop.subscribe();
+                    handlers.tasks.spawn(async move {
+                        serve_connection(current, connection, handle, transport, table, stop).await;
+                    });
+                }
+                accepted = control.accept() => {
+                    if let Some(stream) = accepted? {
+                        handlers.tasks.spawn(crate::host_control::serve_requester(
+                            stream, Arc::clone(&handle), handlers.stop.subscribe(),
+                        ));
+                    }
+                }
+                joined = handlers.tasks.join_next(), if !handlers.tasks.is_empty() => {
+                    handlers.record(joined);
+                }
+            }
         }
-        // The OS peer token check runs before any frame is read: an
-        // unprovable peer is dropped without a byte, like the Unix
-        // uid-mismatch path.
-        let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
-        let next = crate::conn_pipe::create_next_server(&pipe)?;
-        let current = std::mem::replace(&mut server, next);
-        if !peer_ok {
-            continue;
-        }
-        let connection = table.note_accept();
-        let handle = Arc::clone(&handle);
-        let transport = Arc::clone(&transport);
-        let table = Arc::clone(&table);
-        tokio::spawn(async move {
-            serve_connection(current, connection, handle, transport, table).await;
-        });
     }
+    .await;
+    #[cfg(test)]
+    handle.serving_test.shutdown_started.notify_one();
+    let handler_result = handlers.stop_and_join().await;
+    // Same join as the Unix path: an admitted confirmation finishes before the
+    // serving authority goes away.
+    handle.join_confirmation_tasks().await;
+    let task_result = launcher.shutdown_and_join().await;
+    let driver_result = deletion_driver.stop_and_join().await;
+    result
+        .and(handler_result)
+        .and(task_result)
+        .and(driver_result)
 }
 
 /// Unsupported platforms have no listener.
@@ -1140,5 +1774,25 @@ pub async fn run(
     Err(CoreError::UnsupportedPlatform("no supported listener"))
 }
 
+/// # Errors
+///
+/// Always returns [`CoreError::UnsupportedPlatform`].
+#[cfg(not(any(unix, windows)))]
+#[expect(
+    clippy::unused_async,
+    reason = "stub mirrors the async listener signature; no transport exists here"
+)]
+pub async fn run_until_shutdown(
+    _data_dir: PathBuf,
+    _handle: Arc<HostHandle>,
+    _transport: Arc<impl ProviderTransport>,
+    _shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), CoreError> {
+    Err(CoreError::UnsupportedPlatform("no supported listener"))
+}
+
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, any(unix, windows)))]
+pub(crate) mod shutdown_tests;

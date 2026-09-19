@@ -38,13 +38,14 @@ use ene_task::{
     AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
     DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness,
     PAST_FACTS_ENTRY_CAP, PastExecutedFact, PastExecutedFactsPage, REPORT_PAGE_MAX,
-    ResumeInstructionSource, Task, TaskAgentEphemeralId, TaskAgentOutput, TaskAgentResultArrival,
-    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId,
-    TaskContextItem, TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome,
-    TaskCreationPremise, TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId,
-    TaskProgress, TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow,
-    TaskReportRowCursor, TaskReportRowKind, TaskReportSourcePage, TaskReportSourceRef,
-    TaskRepository, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId, TaskResultRecord,
+    ResumeInstructionSource, Task, TaskAgentEphemeralId, TaskAgentObservationId,
+    TaskAgentObservationPremise, TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome,
+    TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskCreationPremise,
+    TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId, TaskProgress, TaskPurpose,
+    TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow, TaskReportRowCursor, TaskReportRowKind,
+    TaskReportSourcePage, TaskReportSourceRef, TaskRepository, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultArrivalOutcome, TaskResultId, TaskResultRecord,
     TaskResumeCommitPremise, TaskResumeHold, TaskResumeOutcome, TaskRevision, TaskRevisionRecord,
     TaskTechnicalError, UnadoptedResultCursor, WorkspaceAssocId, WorkspaceAssociation,
     WorkspaceFolderRef,
@@ -132,6 +133,16 @@ const SQL_SELECT_RESULT_BY_DELEGATION: &str = "SELECT result_id, task_id, task_r
 /// The durable start marker of one delegated execution: the first attempt
 /// committed under the delegation, whichever owner rows it.
 const SQL_DELEGATION_HAS_STARTED_WORK: &str = "SELECT EXISTS(SELECT 1 FROM inference_attempt WHERE delegation_id = ?1 UNION ALL SELECT 1 FROM action_attempt WHERE delegation_id = ?1)";
+
+/// One observation occurrence row, read for the idempotent retry compare.
+const SQL_SELECT_OBSERVATION: &str = "SELECT delegation_id, task_id, task_revision, workspace_assoc_id, action_attempt_id, path, body_observed, observed_at FROM task_agent_observation WHERE observation_id = ?1";
+
+const SQL_INSERT_OBSERVATION: &str = "INSERT INTO task_agent_observation (observation_id, delegation_id, task_id, task_revision, workspace_assoc_id, action_attempt_id, path, body_observed, observed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)";
+
+/// The producing attempt's copied correlation and resolved target: the
+/// observation row copies the target path from the attempt and must agree
+/// with every correlation column before the row is written.
+const SQL_SELECT_OBSERVATION_ATTEMPT: &str = "SELECT delegation_id, task_id, task_revision, workspace_assoc_id, real_target, operation FROM action_attempt WHERE attempt_id = ?1";
 
 const SQL_INSERT_RESULT: &str = "INSERT INTO task_result (result_id, task_id, task_revision, delegation_id, body, adopted_revision, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
@@ -427,13 +438,36 @@ fn create_task_sync(
     {
         return Ok(TaskCreationOutcome::Superseded);
     }
+    // The A4 delayed-arrival gate: the purpose text (derived from the Owner
+    // turn) and the workspace boundary copies are materialized body-free when
+    // a canonical current condition covers them, so the creation fact
+    // survives while the covered text is never re-saved. This is the same
+    // fixed marker the Task owner sweep leaves in the purpose columns.
+    let purpose_text = crate::preservation::redact_covered_text(&tx, &premise.purpose.text)
+        .map_err(|error| task_unavailable(error.to_string()))?;
+    let workspace_paths = match &premise.workspace {
+        None => (None, None),
+        Some(workspace) => (
+            Some(
+                crate::preservation::redact_covered_text(&tx, &workspace.need.folder.path)
+                    .map_err(|error| task_unavailable(error.to_string()))?,
+            ),
+            workspace
+                .need
+                .save_target
+                .as_ref()
+                .map(|target| crate::preservation::redact_covered_text(&tx, &target.path))
+                .transpose()
+                .map_err(|error| task_unavailable(error.to_string()))?,
+        ),
+    };
     tx.execute(
         SQL_INSERT_TASK,
         params![
             task_text,
             revision_raw,
             revision_raw,
-            premise.purpose.text,
+            purpose_text,
             assignee_text,
             TaskProgress::Started.as_str(),
         ],
@@ -445,7 +479,7 @@ fn create_task_sync(
             task_text,
             revision_raw,
             revision_raw,
-            premise.purpose.text,
+            purpose_text,
             assignee_text,
         ],
     )
@@ -465,17 +499,14 @@ fn create_task_sync(
     )
     .map_err(task_unavailable)?;
     if let Some(workspace) = &premise.workspace {
+        let (folder, save_target) = &workspace_paths;
         tx.execute(
             SQL_INSERT_WORKSPACE_ASSOC,
             params![
                 encode_id(workspace.assoc.as_raw()),
                 task_text,
-                workspace.need.folder.path,
-                workspace
-                    .need
-                    .save_target
-                    .as_ref()
-                    .map(|target| target.path.as_str()),
+                folder.as_deref(),
+                save_target.as_deref(),
             ],
         )
         .map_err(task_unavailable)?;
@@ -663,11 +694,36 @@ fn forward_steering_sync(
     // provenance when the purpose does not change.
     let current_purpose_entry =
         validated_adopted_purpose_entry(&tx, &task_text, current.revision, current_adopted)?;
+    // The A4 delayed-steering gate: a forward whose adopted instruction source
+    // or newly adopted purpose is under a canonical current condition is
+    // refused with nothing written, so a delayed steering cannot re-save
+    // covered content into a new revision. The source correlation catches an
+    // instruction generated before the deletion from a covered turn; the text
+    // catches a purpose that restates the target.
+    if let Some(instruction) = &premise.adopted_instruction
+        && crate::preservation::covering_condition(&tx, &encode_id(instruction.origin.source))
+            .map_err(|error| task_unavailable(error.to_string()))?
+            .is_some()
+    {
+        return Ok(TaskCommitOutcome::HeldForErasure);
+    }
+    if let Some(adoption) = &premise.new_purpose
+        && (crate::preservation::covering_text(&tx, &adoption.purpose.text)
+            .map_err(|error| task_unavailable(error.to_string()))?
+            .is_some()
+            || crate::preservation::covering_condition(&tx, &encode_id(adoption.origin.source))
+                .map_err(|error| task_unavailable(error.to_string()))?
+                .is_some())
+    {
+        return Ok(TaskCommitOutcome::HeldForErasure);
+    }
     // The adopted-purpose entry's identity comes from the premise in both
     // branches: the repository only stamps the post-CAS reference and, on a
     // change, the adopted revision. On a carry-forward the old adopted
     // identity stays in `item`, while the provenance and acquisition are
-    // copied from the validated entry in force.
+    // copied from the validated entry in force. A carried purpose under a
+    // current condition is materialized body-free instead of blocking the
+    // steering: the new revision keeps the fact, not a second copy.
     let (adopted_revision, purpose_text, origin_kind, origin_source, acquired_at) =
         match premise.new_purpose {
             Some(adoption) => (
@@ -684,7 +740,8 @@ fn forward_steering_sync(
                 validate_adopted_purpose_provenance(&current_purpose_entry)?;
                 (
                     current_adopted,
-                    snapshot.purpose_text,
+                    crate::preservation::redact_covered_text(&tx, &snapshot.purpose_text)
+                        .map_err(|error| task_unavailable(error.to_string()))?,
                     current_purpose_entry.origin_kind,
                     current_purpose_entry.origin_source,
                     current_purpose_entry.acquired_at,
@@ -1010,16 +1067,25 @@ fn create_delegation_sync(
     }
     let delegator = current_assignee;
     // The scope is a copy of the boundary the delegator relied on, written
-    // verbatim; it records the boundary, not a permission.
+    // verbatim; it records the boundary, not a permission. A copy under a
+    // canonical current condition is materialized body-free (the same fixed
+    // marker the Task owner sweep leaves in the scope columns) instead of
+    // blocking the delegation: the delegation fact survives, the covered
+    // text is not re-saved.
     let (scope_assoc, scope_folder, scope_save_target) = match &scope_copy.workspace {
         None => (None, None, None),
         Some(workspace) => (
             Some(encode_id(workspace.assoc.as_raw())),
-            Some(workspace.folder.path.as_str()),
+            Some(
+                crate::preservation::redact_covered_text(&tx, &workspace.folder.path)
+                    .map_err(|error| task_unavailable(error.to_string()))?,
+            ),
             workspace
                 .save_target
                 .as_ref()
-                .map(|target| target.path.as_str()),
+                .map(|target| crate::preservation::redact_covered_text(&tx, &target.path))
+                .transpose()
+                .map_err(|error| task_unavailable(error.to_string()))?,
         ),
     };
     tx.execute(
@@ -1697,23 +1763,61 @@ fn compose_result(
 
 /// Records one final result arrival and seals its delegation (AU15a).
 ///
-/// Every check lives in the one short `Immediate` transaction: the
-/// delegation correspondence must exist and decode, a same-identity retry
-/// must match the stored body/delegation/revision exactly (idempotent, one
-/// body row), and a different identity for an already-sealed delegation is a
-/// fail-closed technical error. Currentness, certainty, terminal state, and
-/// completion are deliberately not judged here.
+/// Every check lives in the one short `Immediate` transaction. The first
+/// read is the durable credential-set revision, compared against the arrival
+/// body's scrub premise before any body work: a set that advanced after the
+/// scrub refuses with [`TaskResultArrivalOutcome::StaleCredentialSet`] and
+/// zero writes, so neither the body nor a body-free seal row is ever written
+/// from a stale premise. The delegation correspondence must then exist and
+/// decode, a same-identity retry must match the stored
+/// body/delegation/revision exactly (idempotent, one body row) and only under
+/// a current premise, and a different identity for an already-sealed
+/// delegation is a fail-closed technical error. Certainty, terminal state,
+/// and completion are deliberately not judged here.
 fn record_task_result_arrival_sync(
     conn: &Mutex<Connection>,
     arrival: TaskAgentResultArrival,
-) -> Result<TaskResultRecord, TaskTechnicalError> {
+) -> Result<TaskResultArrivalOutcome, TaskTechnicalError> {
     let delegation_text = encode_id(arrival.delegation.as_raw());
     let result_text = encode_id(arrival.result.as_raw());
-    let body_text = arrival.body.text().to_owned();
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
+    // Credential currentness first, in the same transaction as the insert:
+    // the scrub read the revision before the values it covers, so a set that
+    // advanced since leaves the body unproven and nothing may be written. The
+    // refusal is a domain outcome; the caller re-scrubs the original answer
+    // under `current` and arrives again.
+    let current = crate::credential::current_set_revision(&tx)
+        .map_err(|error| task_unavailable(error.to_string()))?;
+    if current != arrival.body.credential_set() {
+        return Ok(TaskResultArrivalOutcome::StaleCredentialSet { current });
+    }
+    // The A4/R2 delayed-result gate: a body under a canonical current
+    // condition — or one produced by a delegation already associated with a
+    // deletion operation at admission (`erasure_use_hold`) — is collected
+    // instead of persisted. The arrival fact (sealing the delegation, its
+    // notification) survives, the target text is never stored. The claim hold
+    // outlives the operation, so a result arriving after completion is still
+    // refused even though no current condition is readable; a delegation
+    // never held is unaffected. The same redaction applies to the idempotency
+    // comparison below, so a retry of the same result stays an idempotent
+    // replay instead of re-introducing the body; a retry arriving after the
+    // condition closed compares against the collected (body-free) stored form
+    // and fails closed rather than rewriting the target.
+    let held = crate::preservation::held_use(
+        &tx,
+        crate::preservation::USE_KIND_TASK_DELEGATION,
+        arrival.delegation.as_raw(),
+    )
+    .map_err(|error| task_unavailable(error.to_string()))?;
+    let body_text = if held {
+        String::from(crate::erasure::ERASED_MARKER)
+    } else {
+        crate::preservation::redact_covered_text(&tx, arrival.body.body())
+            .map_err(|error| task_unavailable(error.to_string()))?
+    };
     let correspondence: Option<(String, i64)> = tx
         .query_row(
             SQL_SELECT_DELEGATION_CORRESPONDENCE,
@@ -1761,7 +1865,7 @@ fn record_task_result_arrival_sync(
             raw.recorded_at,
         )?;
         tx.commit().map_err(task_unavailable)?;
-        return Ok(record);
+        return Ok(TaskResultArrivalOutcome::Recorded(record));
     }
     let sealed: Option<String> = tx
         .query_row(
@@ -1814,7 +1918,7 @@ fn record_task_result_arrival_sync(
         TaskFact::ResultRecorded(arrival.result.as_raw()),
     )?;
     tx.commit().map_err(task_unavailable)?;
-    Ok(TaskResultRecord {
+    Ok(TaskResultArrivalOutcome::Recorded(TaskResultRecord {
         result: arrival.result,
         task: TaskRef {
             task: TaskId::from_raw(delegation_task),
@@ -1825,7 +1929,7 @@ fn record_task_result_arrival_sync(
         attempt_refs: Vec::new(),
         adopted_revision: None,
         recorded_at,
-    })
+    }))
 }
 
 fn load_task_result_sync(
@@ -1855,6 +1959,240 @@ fn load_task_result_sync(
             )
         })
         .transpose()
+}
+
+/// Records one execution-local observation occurrence (Stage 6 A4).
+///
+/// One short `Immediate` transaction: a same-identity retry is compared
+/// field-by-field against the stored row and replayed idempotently; the
+/// delegation correspondence supplies the copied `(task, revision)`; a
+/// producing Action attempt is resolved by identity and its copied
+/// `(delegation, task, revision, workspace)` plus its resolved target path
+/// become the row's correlation. A body-observed occurrence must name a
+/// `read`/`list` attempt: the observation reproduced workspace content, so
+/// the ledger records that its source is surveyable. The transient observed
+/// body is then compared against the canonical current erasure conditions in
+/// this same transaction — a covered body publishes the occurrence identity
+/// as a durable covered source and associates the delegation with the
+/// operation — and is never stored. The observation identity, occurrence
+/// correlation, path, and body-observed marker are objective facts; only the
+/// path is a mechanical-erasure column.
+fn record_task_agent_observation_sync(
+    conn: &Mutex<Connection>,
+    premise: TaskAgentObservationPremise,
+) -> Result<TaskAgentObservationId, TaskTechnicalError> {
+    let observation_text = encode_id(premise.observation.as_raw());
+    let delegation_text = encode_id(premise.delegation.as_raw());
+    let observed_at = premise.observed_at.to_rfc3339();
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(task_unavailable)?;
+    let correlation = observation_correlation(&tx, &premise)?;
+    let existing: Option<RawObservation> = tx
+        .query_row(
+            SQL_SELECT_OBSERVATION,
+            params![observation_text],
+            raw_observation_row,
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    if let Some(raw) = existing {
+        let same = raw.delegation == delegation_text
+            && raw.task == correlation.task
+            && raw.task_revision == correlation.task_revision
+            && raw.workspace == correlation.workspace
+            && raw.attempt == correlation.attempt
+            && raw.path == correlation.path
+            && raw.body_observed == correlation.body_observed
+            && raw.observed_at == observed_at;
+        if !same {
+            return Err(task_unavailable(
+                "task observation identity reused with different correlation",
+            ));
+        }
+        tx.commit().map_err(task_unavailable)?;
+        return Ok(premise.observation);
+    }
+    tx.execute(
+        SQL_INSERT_OBSERVATION,
+        params![
+            observation_text,
+            delegation_text,
+            correlation.task,
+            correlation.task_revision,
+            correlation.workspace,
+            correlation.attempt,
+            correlation.path,
+            correlation.body_observed,
+            observed_at,
+        ],
+    )
+    .map_err(task_unavailable)?;
+    // The A4 receiving boundary: an observation body reproduced under a
+    // current condition is covered at the moment it is recorded, so the
+    // execution's delayed result is associated with the operation before the
+    // execution can produce it. The resolved target path is checked the same
+    // way: it is a mechanical-erasure column (the admission survey checks it
+    // on the producing attempt), and an observation recorded after admission
+    // must not escape that survey only because its row did not exist when the
+    // survey ran. The check and the association share this transaction with
+    // the row write.
+    let covered = match &premise.observed {
+        Some(observed) => crate::preservation::covering_text_condition(&tx, observed)
+            .map_err(|error| task_unavailable(error.to_string()))?,
+        None => None,
+    };
+    let covered = match covered {
+        Some(hit) => Some(hit),
+        None => match correlation.path.as_deref() {
+            Some(path) => crate::preservation::covering_text_condition(&tx, path)
+                .map_err(|error| task_unavailable(error.to_string()))?,
+            None => None,
+        },
+    };
+    if let Some((condition, _coverage)) = covered {
+        crate::preservation::publish_observation_source(
+            &tx,
+            condition,
+            premise.observation.as_raw(),
+        )
+        .map_err(|error| task_unavailable(error.to_string()))?;
+        crate::preservation::hold_delegation(
+            &tx,
+            condition,
+            premise.delegation.as_raw(),
+            &observed_at,
+        )
+        .map_err(|error| task_unavailable(error.to_string()))?;
+    }
+    tx.commit().map_err(task_unavailable)?;
+    Ok(premise.observation)
+}
+
+/// The verified correlation one observation row is written with.
+struct ObservationCorrelation {
+    task: String,
+    task_revision: i64,
+    workspace: Option<String>,
+    attempt: Option<String>,
+    path: Option<String>,
+    body_observed: bool,
+}
+
+/// Derives and verifies the correlation of one observation premise.
+///
+/// The delegation correspondence is required (a missing row is an
+/// inconsistent unit, like the result-arrival path). A refusal premise must
+/// carry no attempt and no observed body. An Action-derived premise must name
+/// an existing attempt whose copied `(delegation, task, revision, workspace)`
+/// agrees with the delegation correspondence; a disagreement is a technical
+/// error, never a composed row. A body-observed occurrence must come from a
+/// `read`/`list` attempt — the only operations whose observation reproduces
+/// workspace content in the current product surface — so the ledger never
+/// claims a source class the survey cannot cover.
+fn observation_correlation(
+    tx: &rusqlite::Transaction<'_>,
+    premise: &TaskAgentObservationPremise,
+) -> Result<ObservationCorrelation, TaskTechnicalError> {
+    let delegation_text = encode_id(premise.delegation.as_raw());
+    let correspondence: Option<(String, i64)> = tx
+        .query_row(
+            SQL_SELECT_DELEGATION_CORRESPONDENCE,
+            params![delegation_text],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some((task, task_revision)) = correspondence else {
+        return Err(task_unavailable(
+            "delegation correspondence missing for observation record",
+        ));
+    };
+    let Some(attempt) = &premise.attempt else {
+        if premise.observed.is_some() {
+            return Err(task_unavailable(
+                "refusal observation carries an observed body",
+            ));
+        }
+        return Ok(ObservationCorrelation {
+            task,
+            task_revision,
+            workspace: None,
+            attempt: None,
+            path: None,
+            body_observed: false,
+        });
+    };
+    let attempt_text = encode_id(*attempt);
+    let stored: Option<(String, String, i64, String, String, String)> = tx
+        .query_row(
+            SQL_SELECT_OBSERVATION_ATTEMPT,
+            params![attempt_text],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(task_unavailable)?;
+    let Some((delegation, stored_task, stored_revision, workspace, real_target, operation)) =
+        stored
+    else {
+        return Err(task_unavailable(
+            "producing action attempt missing for observation record",
+        ));
+    };
+    if delegation != delegation_text || stored_task != task || stored_revision != task_revision {
+        return Err(task_unavailable(
+            "producing action attempt disagrees with the delegation correspondence",
+        ));
+    }
+    let body_observed = premise.observed.is_some();
+    if body_observed && !matches!(operation.as_str(), "read" | "list") {
+        return Err(task_unavailable(
+            "observed body names a non-body action operation",
+        ));
+    }
+    Ok(ObservationCorrelation {
+        task,
+        task_revision,
+        workspace: Some(workspace),
+        attempt: Some(attempt_text),
+        path: Some(real_target),
+        body_observed,
+    })
+}
+
+/// One stored observation row's idempotency comparison fields.
+struct RawObservation {
+    delegation: String,
+    task: String,
+    task_revision: i64,
+    workspace: Option<String>,
+    attempt: Option<String>,
+    path: Option<String>,
+    body_observed: bool,
+    observed_at: String,
+}
+
+fn raw_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawObservation> {
+    Ok(RawObservation {
+        delegation: row.get(0)?,
+        task: row.get(1)?,
+        task_revision: row.get(2)?,
+        workspace: row.get(3)?,
+        attempt: row.get(4)?,
+        path: row.get(5)?,
+        body_observed: row.get(6)?,
+        observed_at: row.get(7)?,
+    })
 }
 
 fn delegation_has_started_work_sync(
@@ -3280,7 +3618,7 @@ impl TaskRepository for Store {
     async fn record_task_result_arrival(
         &self,
         arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError> {
+    ) -> Result<TaskResultArrivalOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         self.hint_after_commit(
             run_blocking(move || record_task_result_arrival_sync(&conn, arrival)).await,
@@ -3309,6 +3647,16 @@ impl TaskRepository for Store {
     ) -> Result<bool, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || delegation_has_started_work_sync(&conn, delegation)).await
+    }
+
+    async fn record_task_agent_observation(
+        &self,
+        premise: TaskAgentObservationPremise,
+    ) -> Result<TaskAgentObservationId, TaskTechnicalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.test_parks.observation_write.pause_if_armed().await;
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || record_task_agent_observation_sync(&conn, premise)).await
     }
 
     async fn adopt_result(

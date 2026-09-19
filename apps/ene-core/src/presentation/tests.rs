@@ -48,7 +48,7 @@ use ene_task::{
     DelegationScope, TaskAgentEphemeralId, TaskContextEntryId, TaskContextOrigin,
     TaskContextOriginKind, TaskCreationPremise, TaskId, TaskPurpose, TaskRef, TaskRepository as _,
     TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId, WorkspaceAssociationPremise,
-    WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
+    WorkspaceFolderRef, WorkspaceNeedRef,
 };
 
 use crate::conn::{ConnectionPhase, ConnectionTable};
@@ -168,6 +168,7 @@ async fn append_reply(
                 local_id: None,
             },
             true,
+            None,
         )
         .await
         .expect("the append must commit");
@@ -3477,13 +3478,7 @@ async fn task_fact_notifications_attach_their_task_report() {
         .await
         .expect("the certainty CAS must answer");
     assert_eq!(settled, CertaintyUpdateOutcome::Updated);
-    let arrival = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        ene_task::TaskAgentOutput::new(String::from("done")),
-    )
-    .await
-    .expect("the arrival must record");
+    let arrival = crate::test_support::record_result(&handle.store, delegation, "done").await;
     let acceptance = handle
         .store
         .adopt_result(TaskResultAdoptionClaim {
@@ -3603,4 +3598,427 @@ async fn failed_mark_stays_unselected_and_represents() {
         "got {outcome:?}"
     );
     assert!(unpresented_statuses(&handle).await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6 A3c: Targeted Deletion transient invalidation at the presentation
+// boundary. The Host-transient participant invalidates receipts and carried
+// refs, and every fresh read re-checks the canonical current conditions before
+// materializing a body.
+// ---------------------------------------------------------------------------
+
+use crate::targeted_deletion::TargetedDeletionPass;
+use ene_preservation::{
+    DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+    PreservationRepository as _, StartTargetedDeletionCommand, StartTargetedDeletionOutcome,
+    TargetedDeletionTarget,
+};
+
+/// Admits one deletion operation with `participants` and runs one bounded
+/// fan-out pass, so the Host-transient owner (registered by the composition)
+/// is actually demanded.
+async fn admit_and_drive(handle: &HostHandle, text: &str, participants: Vec<ParticipantOwnerRef>) {
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                text.to_owned(),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        participants,
+    )
+    .confirmed_for_tests();
+    match handle
+        .store
+        .start_targeted_deletion(command)
+        .await
+        .expect("admission must commit")
+    {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("unexpected admission outcome: {other:?}"),
+    }
+    let outcome = handle
+        .drive_targeted_deletion(TargetedDeletionPass::new(100, 4))
+        .await
+        .expect("the pass runs");
+    assert!(
+        outcome.verified >= 1,
+        "the host-transient demand verifies its own bounded work: {outcome:?}"
+    );
+}
+
+/// One authenticated-and-current connection on a caller-owned table: the
+/// same-device replacement below installs a second record and supersedes the
+/// first, exactly like the handshake path (IPC §9.3).
+fn authenticated_connection(
+    table: &Arc<ConnectionTable>,
+    device: &str,
+) -> (ConnectionWireId, LiveInput) {
+    let id = table.note_accept();
+    authenticate(table, &id, device);
+    let live = table
+        .snapshot(&id)
+        .expect("the authenticated connection snapshots");
+    (id, live)
+}
+
+#[tokio::test]
+async fn a3c_an_old_receipt_cannot_present_after_a_condition_and_transient_demand() {
+    let (handle, _dir) = open_handle("present-a3c-ack").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "the target body", generation).await;
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(summary.items[0].excerpt, "the target body");
+
+    // The condition is durable and the Host transient holder is demanded
+    // before the ACK arrives.
+    admit_and_drive(
+        &handle,
+        "the target body",
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+
+    let outcome = ack(
+        &handle,
+        &live,
+        &summary.receipt.0,
+        summary.round.clone(),
+        summary.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            UndeliveredAckOutcome::StalePresentation | UndeliveredAckOutcome::UnknownRef
+        ),
+        "an invalidated receipt never presents a covered row, got {outcome:?}"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(statuses.len(), 1);
+    assert_ne!(
+        statuses[0].1,
+        ReportStatus::Presented,
+        "the covered row stays unpresented"
+    );
+    // A local transient drop is not the global completion: the operation is
+    // still unfinished after the verified host-transient demand.
+    assert_eq!(
+        handle
+            .store
+            .unfinished_deletions(None, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a3c_a_fresh_read_after_a_condition_withholds_the_covered_body() {
+    let (handle, _dir) = open_handle("present-a3c-read").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "covered body text", generation).await;
+    append_reply(&handle, "unrelated body text", generation).await;
+
+    admit_and_drive(
+        &handle,
+        "covered body text",
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+
+    // A reconnect (fresh connection lifetime) reconstructs the page from the
+    // canonical source: the covered body is withheld, the unrelated one is
+    // still served.
+    let reconnected = live_input(DEVICE_A);
+    let summary = summary_of(fetch(&handle, &reconnected, None, None, false).await);
+    assert_eq!(summary.items.len(), 2, "correlation rows stay pageable");
+    let excerpts: Vec<&str> = summary
+        .items
+        .iter()
+        .map(|item| item.excerpt.as_str())
+        .collect();
+    assert!(
+        excerpts
+            .iter()
+            .all(|excerpt| !excerpt.contains("covered body text")),
+        "no covered body is re-materialized: {excerpts:?}"
+    );
+    assert!(
+        excerpts.contains(&"unrelated body text"),
+        "unrelated bodies stay presentable: {excerpts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a3c_a_replacement_and_deletion_never_resurrect_the_stale_payload() {
+    let (handle, _dir) = open_handle("present-a3c-replace").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let table = Arc::new(ConnectionTable::new());
+    handle.install_client_connection_table(Arc::clone(&table));
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "stale payload body", generation).await;
+
+    // C1 receives the summary first.
+    let (c1_id, c1) = authenticated_connection(&table, DEVICE_A);
+    let first = summary_of(fetch(&handle, &c1, None, None, false).await);
+    assert_eq!(first.items.len(), 1);
+    assert!(first.items[0].excerpt.contains("stale payload body"));
+
+    // C2 replaces C1 (the handshake path reports the supersession to the
+    // Host's single lifecycle boundary), and a deletion condition becomes
+    // durable; the transient demand drops the receipt world.
+    let (_c2_id, c2) = authenticated_connection(&table, DEVICE_A);
+    handle.on_connection_superseded(&c1_id);
+    admit_and_drive(
+        &handle,
+        "stale payload body",
+        vec![ParticipantOwnerRef::HostTransient],
+    )
+    .await;
+
+    // C1's own connection is superseded: nothing installs for it any more.
+    let frame = frame_for(
+        WirePayload::UndeliveredRequest(UndeliveredRequest {
+            companion: None,
+            cursor: None,
+            limit: None,
+            redisplay: false,
+        }),
+        &c1,
+        None,
+        None,
+        None,
+    );
+    let request = match &frame.payload {
+        WirePayload::UndeliveredRequest(request) => request.clone(),
+        _ => unreachable!(),
+    };
+    let refused = handle.request_undelivered(&frame, &c1, &request).await;
+    assert_eq!(refused.len(), 1, "one request answers one frame");
+    assert!(
+        matches!(refused[0].payload, WirePayload::Reject(_)),
+        "a superseded connection never restarts a presentation pass"
+    );
+    // C1's old receipt never presents covered rows on any connection.
+    let stale_ack = ack(
+        &handle,
+        &c2,
+        &first.receipt.0,
+        first.round.clone(),
+        first.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        matches!(
+            stale_ack,
+            UndeliveredAckOutcome::StaleConnection | UndeliveredAckOutcome::StalePresentation
+        ),
+        "the old receipt is stale, got {stale_ack:?}"
+    );
+
+    // C2's fresh pass re-reads the canonical source: no covered body.
+    let second = summary_of(fetch(&handle, &c2, None, None, false).await);
+    assert!(
+        second
+            .items
+            .iter()
+            .all(|item| !item.excerpt.contains("stale payload body")),
+        "the replacement never inherits the stale payload: {:?}",
+        second.items
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert!(
+        statuses
+            .iter()
+            .all(|(_, status)| *status != ReportStatus::Presented),
+        "no path moved the covered row to Presented: {statuses:?}"
+    );
+}
+
+#[tokio::test]
+async fn a3c_the_read_coverage_premise_is_canonical_and_body_free() {
+    let (handle, _dir) = open_handle("present-a3c-coverage").await;
+    // No current condition: the canonical read answers the authoritative
+    // empty set, never a cached "no deletion" sentinel.
+    assert!(!handle.current_coverage().await.covers("the target body"));
+    // Admitted without driving a participant, so the operation stays current;
+    // the coverage read itself never carries a body.
+    admit_condition_only(&handle, "the target body").await;
+    let coverage = handle.current_coverage().await;
+    assert!(
+        coverage.covers("prefix the target body suffix"),
+        "a body containing the mechanical target is covered"
+    );
+    assert!(
+        !coverage.covers("unrelated text"),
+        "an unrelated body stays presentable"
+    );
+}
+
+/// One operation admitted without driving any participant, so the Host
+/// transient fence (and any receipt) stays untouched: the A4 boundary gates
+/// are what the presentation paths meet.
+async fn admit_condition_only(handle: &HostHandle, text: &str) {
+    use ene_preservation::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantOwnerRef,
+        StartTargetedDeletionCommand, StartTargetedDeletionOutcome, TargetedDeletionTarget,
+    };
+    let command = StartTargetedDeletionCommand::new(
+        TargetedDeletionTarget {
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                text.to_owned(),
+            )),
+            semantic_hints: Vec::new(),
+        },
+        DeletionPurpose::Privacy,
+        WallClockWithTz::now(),
+        Vec::new(),
+        vec![ParticipantOwnerRef::Companion],
+    )
+    .confirmed_for_tests();
+    match handle
+        .store
+        .start_targeted_deletion(command)
+        .await
+        .expect("admission must commit")
+    {
+        StartTargetedDeletionOutcome::Started(_) => {}
+        other => panic!("unexpected admission outcome: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a4_a_covered_item_is_neither_started_nor_acked() {
+    let (handle, _dir) = open_handle("present-a4-ack").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "the target body", generation).await;
+
+    // The condition is durable but no participant is driven: the fence is
+    // untouched, so the receipt created below is current and the store's
+    // canonical gate is the only refusal.
+    admit_condition_only(&handle, "the target body").await;
+
+    // Presentation start: the covered row is never claimed (its status stays
+    // Pending) and its excerpt is withheld by both the read-time coverage
+    // check and the in-transaction start gate.
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(
+        summary.items[0].excerpt, "",
+        "a covered body is never carried into a receipt"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].1,
+        ReportStatus::Pending,
+        "the covered row stays Pending, never PresentationUnknown or Presented"
+    );
+
+    // ACK: the held start is not a confirmation; the row still never reaches
+    // Presented.
+    let acked = ack(
+        &handle,
+        &live,
+        &summary.receipt.0,
+        summary.round.clone(),
+        summary.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert!(
+        !matches!(acked, UndeliveredAckOutcome::Presented { .. }),
+        "a covered row is never confirmed presented, got {acked:?}"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(statuses[0].1, ReportStatus::Pending);
+}
+
+#[tokio::test]
+async fn a4_an_ack_after_a_condition_holds_the_presented_transition() {
+    let (handle, _dir) = open_handle("present-a4-ack-held").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "the target body", generation).await;
+
+    // The receipt is created before the condition: the row is carried and
+    // marked PresentationUnknown.
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(summary.items[0].excerpt, "the target body");
+
+    admit_condition_only(&handle, "the target body").await;
+
+    let outcome = ack(
+        &handle,
+        &live,
+        &summary.receipt.0,
+        summary.round.clone(),
+        summary.presence_generation,
+        PresentationStatus::Presented,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        UndeliveredAckOutcome::HeldForErasure,
+        "the ACK is a domain hold, not a confirmation and not a stale receipt"
+    );
+    let statuses = unpresented_statuses(&handle).await;
+    assert_eq!(
+        statuses[0].1,
+        ReportStatus::PresentationUnknown,
+        "the held ACK writes no Presented status"
+    );
+}
+
+#[tokio::test]
+async fn a4_an_unreadable_target_withholds_every_body() {
+    let (handle, _dir) = open_handle("present-a4-unreadable").await;
+    let _ = attach(&handle, DEVICE_A).await;
+    let live = live_input(DEVICE_A);
+    let generation = attribution_of(&handle).await.generation;
+    append_reply(&handle, "an ordinary body", generation).await;
+    admit_condition_only(&handle, "an ordinary body").await;
+    assert!(!handle.current_coverage().await.covers("an unrelated body"));
+
+    // The finalizing material wipe leaves the condition current with no
+    // readable target: the premise can no longer prove any body uncovered,
+    // so it fails closed instead of presenting as if deletion had ended.
+    let operation = {
+        let page = handle
+            .store
+            .unfinished_deletions(None, 10)
+            .await
+            .expect("the operation must read");
+        page[0].current.operation
+    };
+    handle
+        .store
+        .wipe_protected_material_for_tests(operation)
+        .await
+        .expect("the test wipe must apply");
+    assert!(
+        handle.current_coverage().await.covers("an unrelated body"),
+        "an unreadable target withholds every body"
+    );
+    let summary = summary_of(fetch(&handle, &live, None, None, false).await);
+    assert_eq!(summary.items.len(), 1);
+    assert_eq!(
+        summary.items[0].excerpt, "",
+        "a body behind an unreadable target is never carried"
+    );
 }

@@ -5,9 +5,9 @@ use ene_companion::{
     ActivityId, ActivityRepository, AppendHistoryCommand, CommandId, CompanionId,
     CompanionLifecycle, CompanionRepository, CompanionTechnicalError, HistoryAppendOutcome,
     HistoryMessage, HistoryRepository, HistoryRole, ManagementActivity, PresentationMark,
-    RecordResumeActivityCommand, ReportStatus, ReportStatusTransition, TaskFact,
-    UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredPage, UndeliveredRef,
-    UndeliveredRepository, UndeliveredSource, UndeliveredTechnicalError,
+    RecordResumeActivityCommand, ReportStatus, ReportStatusTransition, ResumeActivityOutcome,
+    TaskFact, UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredPage,
+    UndeliveredRef, UndeliveredRepository, UndeliveredSource, UndeliveredTechnicalError,
 };
 use ene_permission::CapabilityKind;
 use ene_presence::{PresenceGeneration, PresenceState};
@@ -76,9 +76,6 @@ pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
 pub(crate) const SQL_EXISTS_NEWER_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM history_message WHERE companion_id = ?1 AND role = ?2 AND rowid > ?3 LIMIT 1)";
 
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (companion_id, source_kind, source_id, source_phase) DO NOTHING";
-
-const SQL_SELECT_UNDELIVERED_STATUS: &str =
-    "SELECT status FROM undelivered WHERE undelivered_id = ?1";
 
 const SQL_UPDATE_UNDELIVERED_STATUS: &str =
     "UPDATE undelivered SET status = ?1 WHERE undelivered_id = ?2";
@@ -196,6 +193,7 @@ fn append_history(
     conn: &Mutex<Connection>,
     cmd: &AppendHistoryCommand,
     register_unpresented: bool,
+    inference_claim: Option<RawId>,
 ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
     let message = RawId::new();
     let message_text = encode_id(message);
@@ -331,6 +329,44 @@ fn append_history(
         }
     }
     let command_text = cmd.command_id.map(|command| encode_id(command.0));
+    // The A4 delayed-arrival gate: the body about to be stored is compared
+    // against the canonical current conditions inside this same transaction,
+    // so a condition that committed first refuses the write (R1) and a
+    // condition that commits after only affects already-stored rows, which
+    // the owner sweep collects. The accepted Owner input a reply derives
+    // from is checked as a source correlation: a body generated before the
+    // deletion, from a covered turn, is refused even when the provider
+    // paraphrased the target (R2). A completed operation is not a current
+    // condition, so a fresh Owner input after completion is accepted (§7).
+    if crate::preservation::covering_text(&tx, &cmd.text)
+        .map_err(|error| companion_unavailable(error.to_string()))?
+        .is_some()
+    {
+        return Ok((HistoryAppendOutcome::HeldForErasure, None));
+    }
+    if let Some(expected) = cmd.expected_owner_message
+        && crate::preservation::covering_condition(&tx, &encode_id(expected))
+            .map_err(|error| companion_unavailable(error.to_string()))?
+            .is_some()
+    {
+        return Ok((HistoryAppendOutcome::HeldForErasure, None));
+    }
+    // The durable old-claim provenance (lifecycle §11 R2): a reply adopted
+    // from a provider claim that admission associated with a deletion
+    // interval is refused even after the operation completed and no current
+    // condition is readable. The hold names the single-use claim, never the
+    // text, so the refusal cannot re-materialize the target and a fresh claim
+    // after completion is not a permanent keyword ban.
+    if let Some(claim) = inference_claim
+        && crate::preservation::held_use(
+            &tx,
+            crate::preservation::USE_KIND_INFERENCE_ATTEMPT,
+            claim,
+        )
+        .map_err(|error| companion_unavailable(error.to_string()))?
+    {
+        return Ok((HistoryAppendOutcome::HeldForErasure, None));
+    }
     let (client_counter, client_random) = match cmd.incarnation {
         Some((counter, random)) => (
             Some(encode_u64(counter).map_err(companion_unavailable)?),
@@ -491,7 +527,7 @@ impl Store {
         &self,
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
-        let (outcome, _) = append_history(&self.conn, &cmd, false)?;
+        let (outcome, _) = append_history(&self.conn, &cmd, false, None)?;
         Ok(outcome)
     }
 
@@ -570,7 +606,7 @@ impl HistoryRepository for Store {
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            let (outcome, _) = append_history(&conn, &cmd, false)?;
+            let (outcome, _) = append_history(&conn, &cmd, false, None)?;
             Ok(outcome)
         })
         .await
@@ -580,10 +616,14 @@ impl HistoryRepository for Store {
         &self,
         cmd: AppendHistoryCommand,
         register_unpresented: bool,
+        inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         self.hint_after_commit(
-            run_blocking(move || append_history(&conn, &cmd, register_unpresented)).await,
+            run_blocking(move || {
+                append_history(&conn, &cmd, register_unpresented, inference_claim)
+            })
+            .await,
         )
     }
 
@@ -702,6 +742,13 @@ impl HistoryRepository for Store {
             let key = encode_id(companion.as_raw());
             let cap = encode_u64(limit).map_err(companion_unavailable)?;
             let guard = lock_shared(&conn);
+            // The current-condition premise is read once for the page and
+            // compared in place: a body under a current deletion condition is
+            // not handed to a caller (the dialogue prompt would otherwise put
+            // it into the provider input), and an unreadable premise withholds
+            // every body instead of serving one as uncovered.
+            let premise = crate::preservation::TextCoveragePremise::read(&guard)
+                .map_err(|error| companion_unavailable(error.to_string()))?;
             let mut query = guard
                 .prepare(SQL_SELECT_RECENT_TIMELINE)
                 .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -713,6 +760,9 @@ impl HistoryRepository for Store {
                 let row = row.map_err(|error| companion_unavailable(error.to_string()))?;
                 let message =
                     decode_history_message(companion, row).map_err(companion_unavailable)?;
+                if premise.covers(&message.text) {
+                    continue;
+                }
                 timeline.push(message);
             }
             // The SQL walk is newest-first so the cap keeps the newest items;
@@ -828,13 +878,15 @@ fn compare_and_mark_reported(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| undelivered_unavailable(error.to_string()))?;
-    let found: Option<String> = tx
-        .query_row(SQL_SELECT_UNDELIVERED_STATUS, params![key], |row| {
-            row.get(0)
-        })
+    let found: Option<(String, String, String, String)> = tx
+        .query_row(
+            "SELECT status,source_kind,source_id,source_phase FROM undelivered WHERE undelivered_id = ?1",
+            params![key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
         .optional()
         .map_err(|error| undelivered_unavailable(error.to_string()))?;
-    let Some(status_text) = found else {
+    let Some((status_text, source_kind, source_id, source_phase)) = found else {
         return Ok(ReportStatusTransition::StaleSource);
     };
     let current = decode_report_status(&status_text).map_err(undelivered_unavailable)?;
@@ -843,6 +895,19 @@ fn compare_and_mark_reported(
     // write nothing instead of returning the row to `Pending`.
     if current == ReportStatus::Presented {
         return Ok(ReportStatusTransition::AlreadyPresented);
+    }
+    // The A4 boundary gate: neither a presentation start nor a confirmation
+    // may claim an item whose canonical source body is under a current
+    // erasure condition. The check runs in the same transaction as the status
+    // compare, so a condition that committed first holds the transition and a
+    // condition that commits after only affects the already-written status.
+    // A reconnecting Client's stale local-copy report follows the same path
+    // and is held identically. A completed operation is not a current
+    // condition: after completion the item may transition again.
+    if crate::preservation::covered_undelivered_source(&tx, &source_kind, &source_id, &source_phase)
+        .map_err(|error| undelivered_unavailable(error.to_string()))?
+    {
+        return Ok(ReportStatusTransition::HeldForErasure);
     }
     if current != expected {
         return Ok(ReportStatusTransition::StaleSource);
@@ -1174,11 +1239,23 @@ fn decode_activity_row(
 fn record_resume_activity_locked(
     conn: &Mutex<Connection>,
     cmd: RecordResumeActivityCommand,
-) -> Result<ActivityId, CompanionTechnicalError> {
+) -> Result<ResumeActivityOutcome, CompanionTechnicalError> {
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| activity_unavailable(error.to_string()))?;
+    // The A4 delayed-instruction gate: the resume instruction body is
+    // compared against the canonical current conditions inside this same
+    // transaction, so a covered instruction is never recorded — and the
+    // resume it would feed is held instead of re-saving the target. A
+    // completed operation is not a current condition, so a fresh resume
+    // instruction proceeds.
+    if crate::preservation::covering_text(&tx, &cmd.body)
+        .map_err(|error| activity_unavailable(error.to_string()))?
+        .is_some()
+    {
+        return Ok(ResumeActivityOutcome::HeldForErasure);
+    }
     let command_text = encode_id(cmd.command);
     tx.execute(
         SQL_INSERT_ACTIVITY,
@@ -1237,7 +1314,7 @@ fn record_resume_activity_locked(
     }
     tx.commit()
         .map_err(|error| activity_unavailable(error.to_string()))?;
-    Ok(activity)
+    Ok(ResumeActivityOutcome::Recorded(activity))
 }
 
 impl Store {
@@ -1255,7 +1332,7 @@ impl Store {
     pub fn record_resume_activity_sync(
         &self,
         cmd: RecordResumeActivityCommand,
-    ) -> Result<ActivityId, CompanionTechnicalError> {
+    ) -> Result<ResumeActivityOutcome, CompanionTechnicalError> {
         record_resume_activity_locked(&self.conn, cmd)
     }
 }
@@ -1264,7 +1341,7 @@ impl ActivityRepository for Store {
     async fn record_resume_activity(
         &self,
         cmd: RecordResumeActivityCommand,
-    ) -> Result<ActivityId, CompanionTechnicalError> {
+    ) -> Result<ResumeActivityOutcome, CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || record_resume_activity_locked(&conn, cmd)).await
     }

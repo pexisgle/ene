@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::deletion::{DeletionStatusRequest, DeletionStatusResponse};
+use super::deletion::{
+    DeletionDemand, DeletionStatusRequest, DeletionStatusResponse, LocalErasureResult,
+};
 use super::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, DisconnectNotice,
     NegotiatedConnection, PairingRequest, PairingResult,
@@ -25,6 +27,17 @@ use super::undelivered::{
     ResumeTaskOutcomeWire, SelectTask, SelectTaskResponse, TaskListResponse, TaskReportResponse,
     UndeliveredAck, UndeliveredAckOutcome, UndeliveredRequest, UndeliveredResponse,
 };
+use super::usage::{UsageSummaryRequest, UsageSummaryResponse};
+
+/// Host → Client activity hint for the Body overlay (IPC M-21).
+///
+/// Asset reference and pose hint only. Never chat body, Memory, Task
+/// commands, pairing material, or secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BodyStateHint {
+    pub asset_ref: String,
+    pub pose_hint: String,
+}
 
 /// Externally tagged; unknown variants are rejected at deserialization,
 /// never defaulted.
@@ -53,6 +66,8 @@ pub enum WirePayload {
     ManagementView(ManagementView),
     DeletionStatusRequest(DeletionStatusRequest),
     DeletionStatusResponse(DeletionStatusResponse),
+    DeletionDemand(DeletionDemand),
+    LocalErasureResult(LocalErasureResult),
     UndeliveredRequest(UndeliveredRequest),
     UndeliveredResponse(UndeliveredResponse),
     UndeliveredAck(UndeliveredAck),
@@ -67,6 +82,9 @@ pub enum WirePayload {
     SelectTaskResponse(SelectTaskResponse),
     ResumeTask(ResumeTask),
     ResumeTaskOutcome(ResumeTaskOutcomeWire),
+    UsageSummaryRequest(UsageSummaryRequest),
+    UsageSummaryResponse(UsageSummaryResponse),
+    BodyStateHint(BodyStateHint),
     Reject(RejectNotice),
 }
 
@@ -100,6 +118,8 @@ impl WirePayload {
             Self::ManagementView(_) => "ManagementView",
             Self::DeletionStatusRequest(_) => "DeletionStatusRequest",
             Self::DeletionStatusResponse(_) => "DeletionStatusResponse",
+            Self::DeletionDemand(_) => "DeletionDemand",
+            Self::LocalErasureResult(_) => "LocalErasureResult",
             Self::UndeliveredRequest(_) => "UndeliveredRequest",
             Self::UndeliveredResponse(_) => "UndeliveredResponse",
             Self::UndeliveredAck(_) => "UndeliveredAck",
@@ -114,6 +134,9 @@ impl WirePayload {
             Self::SelectTaskResponse(_) => "SelectTaskResponse",
             Self::ResumeTask(_) => "ResumeTask",
             Self::ResumeTaskOutcome(_) => "ResumeTaskOutcome",
+            Self::UsageSummaryRequest(_) => "UsageSummaryRequest",
+            Self::UsageSummaryResponse(_) => "UsageSummaryResponse",
+            Self::BodyStateHint(_) => "BodyStateHint",
             Self::Reject(_) => "Reject",
         }
     }

@@ -201,6 +201,7 @@ Client は durable master ではありませんが、target-bearing transient co
 - target-bearing copy の保持可能性があり、local erasure の確認が必要な Client が unreachable の場合は `Held` とします。
 - disconnect、connection replacement、ACK timeout だけを local erase 完了の証明にしてはいけません。
 - Client 宛て wire に target の平文本文や検索 material を送らず、Host が把握する source / receipt / local-copy identity など最小 correlation へ写像します。
+- body-bearing read（History item、presentation excerpt、report source、management view の Memory 本文 / revision 履歴 / grounds）は、本文を実際に返した時点を delivery 証拠として Host の canonical store に body-free に durable 記録し（再起動で失わない）、covered 本文は同じ read 時に withhold します。検証済みの full-class local erasure だけがこの記録を消去でき、disconnect・connection replacement・ACK timeout・Host restart は消去の証明になりません。
 
 ## 9. participant boundary
 

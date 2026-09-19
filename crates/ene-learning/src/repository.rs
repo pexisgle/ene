@@ -10,7 +10,7 @@ use ene_credential::CredentialSetRevision;
 use ene_primitive::{RawId, WallClockWithTz};
 use thiserror::Error;
 
-use crate::identity::{MemoryId, MemoryRevision, SummaryId};
+use crate::identity::{LearningClaimRef, MemoryId, MemoryRevision, SummaryId};
 use crate::memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};
 use crate::scope::LearningScope;
 use crate::summary::SummaryRecord;
@@ -102,6 +102,16 @@ pub struct MemoryChangeCommit {
     /// refuses content scrubbed before a credential became registered.
     /// [`None`] skips the check (tests and non-content commits).
     pub secret_premise: Option<CredentialSetRevision>,
+    /// Durable provider claim this formation pass ran under, when the caller
+    /// obtained one from the inference boundary.
+    ///
+    /// The implementation refuses the whole commit with
+    /// [`MemoryChangeOutcome::HeldForErasure`] when the claim was already
+    /// associated with a deletion operation whose condition committed after
+    /// the claim (`erasure_use_hold`), even when the operation has since
+    /// completed and no current condition is readable. [`None`] skips the
+    /// claim-hold check (direct test and non-provider commits).
+    pub claim: Option<LearningClaimRef>,
     pub change: MemoryChange,
 }
 
@@ -131,6 +141,21 @@ pub enum MemoryChangeOutcome {
     /// The caller must not retry the same content: it may carry the newly
     /// registered value and needs a fresh scrub and currentness premise.
     StaleCredentialSet,
+    /// A canonical current erasure condition covers the proposed Summary
+    /// content, Memory content, or the Summary's source correlation
+    /// (lifecycle §7/§11), or the commit names a provider claim already
+    /// associated with a deletion interval (§11 R2). Nothing was written: no
+    /// Summary evidence, no current row, no revision, no token index.
+    ///
+    /// This is the delayed-formation boundary: a formation pass whose input
+    /// or output contains (or derives from) data under an active deletion is
+    /// refused instead of being persisted, and a pass claimed before the
+    /// deletion is refused even after the operation completed, because its
+    /// provenance belongs to the deleted interval. The outcome carries no
+    /// payload, so the rejection path cannot re-materialize the target.
+    /// Distinct from [`Self::StaleTarget`] (the recognition moved) and
+    /// [`Self::StaleCredentialSet`] (the scrub premise moved).
+    HeldForErasure,
 }
 
 /// Durable Learning boundary.

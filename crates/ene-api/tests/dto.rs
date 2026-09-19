@@ -107,6 +107,11 @@ fn presence_and_management_roundtrip() {
             origin: RationaleOrigin::Conversation,
             quote: None,
         },
+        confirmed: false,
+    });
+    roundtrip(&ene_api::v1::payload::BodyStateHint {
+        asset_ref: String::from("bundled:ene"),
+        pose_hint: String::from("idle"),
     });
 }
 

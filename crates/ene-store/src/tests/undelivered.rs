@@ -395,6 +395,7 @@ async fn bounded_listing_pages_without_gaps_and_defers_new_rows_to_the_next_pass
             .append_reply_with_undelivered(
                 history_command(companion, generation, &format!("reply {index}")),
                 true,
+                None,
             )
             .await
             .unwrap();
@@ -432,6 +433,7 @@ async fn bounded_listing_pages_without_gaps_and_defers_new_rows_to_the_next_pass
             .append_reply_with_undelivered(
                 history_command(companion, generation, &format!("late {index}")),
                 true,
+                None,
             )
             .await
             .unwrap();
@@ -492,7 +494,7 @@ async fn reads_register_nothing_and_excerpts_stay_bounded() {
     let (companion, generation) = running_companion(&store).await.unwrap();
     let body = "日本語の本文です";
     let (_, registered) = store
-        .append_reply_with_undelivered(history_command(companion, generation, body), true)
+        .append_reply_with_undelivered(history_command(companion, generation, body), true, None)
         .await
         .unwrap();
     let entry = registered.unwrap();
@@ -571,7 +573,7 @@ async fn undelivered_unknown_is_relisted_and_receipts_never_downgrade_presented(
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
     let (_, registered) = store
-        .append_reply_with_undelivered(history_command(companion, generation, "body"), true)
+        .append_reply_with_undelivered(history_command(companion, generation, "body"), true, None)
         .await
         .unwrap();
     let entry = registered.unwrap();

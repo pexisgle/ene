@@ -18,8 +18,12 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ene_action::{ActionAttemptId, ActionAttemptRepository as _, ActionCertainty, OperationKind};
-use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
+use ene_action::{ActionAttemptRepository as _, ActionCertainty, OperationKind};
+use ene_credential::{
+    CredentialIntentRepository as _, CredentialRef, CredentialScrubber, CredentialSetRevision,
+    MemoryCredentialStore, RegistrationApply, RegistrationFingerprint, RegistrationState,
+    ScrubbedText, SecretScrubError, SecretScrubber,
+};
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 use ene_task::{
@@ -33,9 +37,9 @@ use ene_task::{
 };
 
 use super::{
-    CompletedFollowUp, DEFAULT_MAX_TURNS, TaskAgentDirective, TaskAgentProtocolViolation,
-    TaskAgentRunOutcome, TaskAgentRunRefusal, TaskExecutionRegistry, completed_follow_up,
-    parse_directive, run_task_agent_execution,
+    DEFAULT_MAX_TURNS, TaskAgentDirective, TaskAgentProtocolViolation, TaskAgentRunOutcome,
+    TaskAgentRunRefusal, TaskExecutionRegistry, completed_observation, observed_workspace_body,
+    parse_directive, run_task_agent_execution, unconfirmed_effect,
 };
 
 /// One Task with a real workspace association and one delegation.
@@ -258,10 +262,10 @@ impl TaskInstructionSource for NoInstructions {
     }
 }
 
-async fn run(
+async fn run<S: SecretScrubber>(
     fixture: &Fixture,
     inference: &ScriptedInference,
-    scrubber: &MarkerScrubber,
+    scrubber: &S,
     max_turns: u32,
 ) -> Result<TaskAgentRunOutcome, super::TaskAgentRunError> {
     let registry = TaskExecutionRegistry::default();
@@ -312,6 +316,47 @@ async fn a_consent_lapse_discards_the_output_without_action_or_result() {
     );
 }
 
+/// Fails the credential scrub only for the final answer, so the run reaches
+/// the result-record boundary with an unprovable premise.
+struct FinalFailingScrubber;
+
+impl SecretScrubber for FinalFailingScrubber {
+    async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
+        if text.contains("the unscrubbable result") {
+            return Err(SecretScrubError::SecretUnavailable);
+        }
+        Ok(scrub_fixture(text, CredentialSetRevision::initial()).await)
+    }
+}
+
+#[tokio::test]
+async fn an_unscrubbable_final_answer_seals_nothing() {
+    let fixture = fixture().await;
+    let inference = ScriptedInference::new(vec![
+        r#"{"final":"the unscrubbable result that must never be stored"}"#,
+    ]);
+    let scrubber = FinalFailingScrubber;
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS).await;
+    assert!(
+        matches!(
+            outcome,
+            Err(super::TaskAgentRunError::ResultScrubUnavailable { .. })
+        ),
+        "an unprovable result scrub fails closed, got {outcome:?}"
+    );
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .expect("the result read must answer")
+            .is_none(),
+        "no result body is recorded from an unprovable scrub premise"
+    );
+    assert_eq!(inference.calls(), 1, "the provider call itself stands");
+}
+
 #[tokio::test]
 async fn a_transcript_that_outgrows_the_budget_keeps_the_task_running() {
     let fixture = fixture().await;
@@ -335,7 +380,11 @@ async fn a_transcript_that_outgrows_the_budget_keeps_the_task_running() {
         "the execution continues instead of wedging on the input bound, got {outcome:?}"
     );
     let raw = scrubber.inputs();
-    assert_eq!(raw.len(), 3, "one scrub per turn");
+    assert_eq!(
+        raw.len(),
+        4,
+        "one scrub per turn plus the final result body"
+    );
     for (index, input) in raw.iter().enumerate() {
         assert!(
             input.chars().count() <= 1050,
@@ -431,7 +480,11 @@ async fn final_answer_is_recorded_and_adopted_as_completion() {
         acceptance,
         TaskResultAcceptance::AdoptedAsCompletion(fixture.task)
     );
-    assert_eq!(result.body.text(), "report written");
+    assert_eq!(
+        result.body.text(),
+        "[scrubbed] report written",
+        "the durable result body passes the credential scrub"
+    );
     assert_eq!(result.attempt_refs, Vec::<RawId>::new());
     let loaded = fixture
         .store
@@ -521,7 +574,11 @@ async fn read_then_create_then_final_runs_the_whole_loop() {
         "the first turn has no transcript"
     );
     let scrubbed = scrubber.inputs();
-    assert_eq!(scrubbed.len(), 3, "each turn is scrubbed exactly once");
+    assert_eq!(
+        scrubbed.len(),
+        4,
+        "each turn is scrubbed exactly once, and the final result body once more"
+    );
     assert!(
         scrubbed[2].contains("read ok:\nnotes") && scrubbed[2].contains("[TOOL CALL]"),
         "the raw transcript is scrubbed as one string, got {}",
@@ -863,41 +920,26 @@ fn registry_signals_every_running_execution_of_the_task_only() {
 fn an_unconfirmable_effect_stops_and_is_never_replayed() {
     use ene_action::{ActionOutput, EffectGrounds, ObservedEffect};
 
-    let attempt = ActionAttemptId::generate();
+    // An unresolved effect is the stop decision; it is never rendered as a
+    // replayable observation.
     let unknown = ObservedEffect {
         certainty: ActionCertainty::Unknown,
         grounds: EffectGrounds::OutcomeUnverified,
         output: None,
     };
-    match completed_follow_up(
-        TaskAgentOutput::new(String::from("{}")),
-        attempt,
-        &unknown,
-        true,
-    ) {
-        CompletedFollowUp::Stop(TaskAgentRunOutcome::EffectUnresolved { attempt: stopped }) => {
-            assert_eq!(stopped, attempt);
-        }
-        other => panic!("an unknown effect must stop the loop, got {other:?}"),
-    }
+    assert!(unconfirmed_effect(&unknown));
 
-    // A confirmed pre-effect refusal continues with a fixed-class observation.
+    // A confirmed pre-effect refusal continues with a fixed-class observation
+    // and never claims a workspace body source.
     let refused = ObservedEffect {
         certainty: ActionCertainty::ConfirmedFailure,
         grounds: EffectGrounds::RefusedBeforeEffect,
         output: None,
     };
-    match completed_follow_up(
-        TaskAgentOutput::new(String::from("{}")),
-        attempt,
-        &refused,
-        true,
-    ) {
-        CompletedFollowUp::Continue(exchange) => {
-            assert!(exchange.observation.text().contains("refused"));
-        }
-        other => panic!("a confirmed refusal is replayable, got {other:?}"),
-    }
+    assert!(!unconfirmed_effect(&refused));
+    let text = completed_observation(&refused, true);
+    assert!(text.contains("refused"));
+    assert!(!observed_workspace_body(&refused));
 
     // A confirmed success whose fact could not be recorded still continues,
     // but the observation states the durable record is unverified.
@@ -906,18 +948,26 @@ fn an_unconfirmable_effect_stops_and_is_never_replayed() {
         grounds: EffectGrounds::ObservedAtTarget,
         output: Some(ActionOutput::Updated),
     };
-    match completed_follow_up(
-        TaskAgentOutput::new(String::from("{}")),
-        attempt,
-        &confirmed,
-        false,
-    ) {
-        CompletedFollowUp::Continue(exchange) => {
-            assert!(exchange.observation.text().contains("edit ok"));
-            assert!(exchange.observation.text().contains("could not be stored"));
-        }
-        other => panic!("a confirmed success continues, got {other:?}"),
-    }
+    assert!(!unconfirmed_effect(&confirmed));
+    let text = completed_observation(&confirmed, false);
+    assert!(text.contains("edit ok"));
+    assert!(text.contains("could not be stored"));
+    assert!(!observed_workspace_body(&confirmed));
+
+    // A read body or a listing is the workspace-content class the deletion
+    // survey must mechanically read; a write confirmation is not.
+    let read = ObservedEffect {
+        certainty: ActionCertainty::ConfirmedSuccess,
+        grounds: EffectGrounds::ObservedAtTarget,
+        output: Some(ActionOutput::Bytes(b"content".to_vec())),
+    };
+    assert!(observed_workspace_body(&read));
+    let listing = ObservedEffect {
+        certainty: ActionCertainty::ConfirmedSuccess,
+        grounds: EffectGrounds::ObservedAtTarget,
+        output: Some(ActionOutput::Listing(Vec::new())),
+    };
+    assert!(observed_workspace_body(&listing));
 }
 
 #[test]
@@ -1084,4 +1134,253 @@ fn release_drops_a_reservation_without_starting_anything() {
     ));
     // The freed Task accepts a new explicit reservation.
     assert!(registry.reserve(DelegationId::generate(), task));
+}
+
+/// Registers one usable pair through the production register-then-approve
+/// path and provisions its bearer in the memory store.
+async fn register_scrub_pair(
+    store: &Store,
+    values: &MemoryCredentialStore,
+    provider: &str,
+    label: &str,
+    bearer: &str,
+    intent_id: &str,
+) {
+    let applied = store
+        .request_registration_with_intent(
+            provider.to_owned(),
+            label.to_owned(),
+            RegistrationFingerprint {
+                intent_id: intent_id.to_owned(),
+                kind: String::from("register"),
+                target: format!("credential:{provider}:{label}"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+            },
+        )
+        .await;
+    assert_eq!(
+        applied,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
+        "a fresh pair must pend Owner approval"
+    );
+    assert!(
+        store
+            .approve_credential_with_sweep(provider, label, bearer)
+            .expect("the approval write must commit"),
+        "the approval makes the pair usable"
+    );
+    values.insert(
+        CredentialRef::new(provider, label).expect("valid fixture ref"),
+        bearer,
+    );
+}
+
+/// The deterministic race barrier for the final result commit: a real
+/// credential scrubber whose final-answer scrub advances the credential set
+/// (and provisions the new bearer) `rotate_every`-th time, so the stale
+/// refusal and the re-scrub are exercised without any timing dependence.
+struct RotateAfterFinalScrub<'a> {
+    store: &'a Store,
+    values: &'a MemoryCredentialStore,
+    provider: &'a str,
+    label: &'a str,
+    rotated: &'a str,
+    final_body: &'a str,
+    rotate_every: bool,
+    final_scrubs: Mutex<u32>,
+}
+
+impl RotateAfterFinalScrub<'_> {
+    /// Advances the set with one approval; the sweep itself is production's.
+    fn rotate(&self) {
+        assert!(
+            self.store
+                .approve_credential_with_sweep(self.provider, self.label, self.rotated)
+                .expect("the rotation approval must commit"),
+            "the fixture pair is usable and the rotation applies"
+        );
+        self.values.insert(
+            CredentialRef::new(self.provider, self.label).expect("valid fixture ref"),
+            self.rotated,
+        );
+    }
+
+    fn final_scrubs(&self) -> u32 {
+        *self.final_scrubs.lock().expect("scrub count lock")
+    }
+}
+
+impl SecretScrubber for RotateAfterFinalScrub<'_> {
+    async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError> {
+        let proof = CredentialScrubber {
+            refs: self.store,
+            store: self.values,
+        }
+        .scrub(text)
+        .await?;
+        if text == self.final_body {
+            let first = {
+                let mut scrubs = self.final_scrubs.lock().expect("scrub count lock");
+                *scrubs += 1;
+                *scrubs == 1
+            };
+            if self.rotate_every || first {
+                self.rotate();
+            }
+        }
+        Ok(proof)
+    }
+}
+
+/// The required race: the final answer is scrubbed under revision N, the
+/// credential set advances to N+1 before the durable result commit, the
+/// commit refuses the stale premise with zero writes, the execution re-scrubs
+/// the original answer under N+1, and only the newly scrubbed result commits.
+/// The raw value never lands durably and the diagnostics stay body-free.
+#[tokio::test]
+async fn a_rotation_between_result_scrub_and_commit_rescrubs_before_recording() {
+    let secret = "sk-stage6-c3-race-secret-marker";
+    let fixture = fixture().await;
+    let values = MemoryCredentialStore::new();
+    register_scrub_pair(
+        &fixture.store,
+        &values,
+        "acme",
+        "main",
+        "sk-placeholder-value",
+        "reg-c3-race",
+    )
+    .await;
+
+    let answer = format!("the final report quotes {secret}");
+    let inference = ScriptedInference::new(vec![&format!(r#"{{"final":"{answer}"}}"#)]);
+    let scrubber = RotateAfterFinalScrub {
+        store: &fixture.store,
+        values: &values,
+        provider: "acme",
+        label: "main",
+        rotated: secret,
+        final_body: &answer,
+        rotate_every: false,
+        final_scrubs: Mutex::new(0),
+    };
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
+        .await
+        .expect("the re-scrub must finalize");
+    assert!(
+        !format!("{outcome:?}").contains(secret),
+        "the final outcome diagnostics carry no secret"
+    );
+    let result = match outcome {
+        TaskAgentRunOutcome::Finalized { result, .. } => result,
+        other => panic!("the execution must finalize, got {other:?}"),
+    };
+    assert_eq!(
+        scrubber.final_scrubs(),
+        2,
+        "the stale body is dropped and the answer re-scrubbed exactly once"
+    );
+    assert_eq!(
+        result.body.text(),
+        format!(
+            "the final report quotes {}",
+            ene_credential::REDACTED_CREDENTIAL
+        )
+    );
+    assert_eq!(
+        fixture
+            .store
+            .count_exact_text_remainder_for_tests(secret)
+            .await
+            .expect("the remainder probe must answer"),
+        0,
+        "the raw value never lands durably"
+    );
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .expect("the seal reads")
+            .is_some(),
+        "only the re-scrubbed result seals the execution"
+    );
+}
+
+/// A set that keeps advancing past every re-scrub exhausts the bounded
+/// re-scrub budget: the execution refuses with the stale domain outcome and
+/// writes no result, so neither the raw answer nor a stale scrubbed body can
+/// be committed.
+#[tokio::test]
+async fn a_credential_set_that_keeps_moving_refuses_without_a_result() {
+    let secret = "sk-stage6-c3-churn-secret-marker";
+    let fixture = fixture().await;
+    let values = MemoryCredentialStore::new();
+    register_scrub_pair(
+        &fixture.store,
+        &values,
+        "acme",
+        "main",
+        "sk-placeholder-value",
+        "reg-c3-churn",
+    )
+    .await;
+
+    let answer = format!("the churning report quotes {secret}");
+    let inference = ScriptedInference::new(vec![&format!(r#"{{"final":"{answer}"}}"#)]);
+    let scrubber = RotateAfterFinalScrub {
+        store: &fixture.store,
+        values: &values,
+        provider: "acme",
+        label: "main",
+        rotated: secret,
+        final_body: &answer,
+        rotate_every: true,
+        final_scrubs: Mutex::new(0),
+    };
+
+    let outcome = run(&fixture, &inference, &scrubber, DEFAULT_MAX_TURNS)
+        .await
+        .expect("a moving set is a domain outcome");
+    assert_eq!(
+        scrubber.final_scrubs(),
+        super::FINAL_RESULT_SCRUB_ATTEMPTS,
+        "the bounded re-scrub budget is exhausted before giving up"
+    );
+    assert!(
+        !format!("{outcome:?}").contains(secret),
+        "the refusal diagnostics carry no secret"
+    );
+    let TaskAgentRunOutcome::Refused(TaskAgentRunRefusal::StaleCredentialSet { current }) = outcome
+    else {
+        panic!("a moving set must refuse as stale, got {outcome:?}");
+    };
+    assert_eq!(
+        current,
+        CredentialSetRevision::from_u64(1 + u64::from(super::FINAL_RESULT_SCRUB_ATTEMPTS)),
+        "the refusal names the last observed revision"
+    );
+    assert!(
+        fixture
+            .store
+            .load_delegation_result(fixture.delegation)
+            .await
+            .expect("the seal reads")
+            .is_none(),
+        "no result body is recorded when the set never settles"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .count_exact_text_remainder_for_tests(secret)
+            .await
+            .expect("the remainder probe must answer"),
+        0,
+        "the raw value never lands durably"
+    );
 }

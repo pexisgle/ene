@@ -162,9 +162,9 @@ renderer に渡す情報は必要なアセット参照と表示指示に限定�
 
 ### F: Milestone 1 の実機 acceptance / performance と closeout
 
-**範囲**: §6 の全行を統合 tip の GUI から確認し、§7 の測定生データと結果を残す。測り方は [First-party desktop](../../design/concrete/first-party-desktop.md) 第8節。閾値は acceptance の Performance Gates。Body を除外しない。Linux 最終合格は正式リリースされた NixOS 26.11 KDE Wayland。今の KDE Wayland probe で代替しない。
+**範囲**: §6 の全行を統合 tip の GUI から確認し、§7 の測定生データと結果を残す。測り方は [First-party desktop](../../design/concrete/first-party-desktop.md) 第8節。閾値は acceptance の Performance Gates。Body を除外しない。Linux 検証は Cloud Agent 上の Linux（記録した distro / compositor）で行う。NixOS 26.11 公式 desktop を待たない。KDE Wayland overlay 成功を X11 で代替しない。
 
-**gate**: 両 OS・両言語の対象 scenario と性能基準を満たすこと。未実施、失敗、暫定回避は成功と区別します。26.11 が未リリースなら Linux 最終 acceptance は open のまま残し、他 slice の完了記録を偽らない。完了後にだけ `PROGRESS.md` を Stage 8 へ進めます。
+**gate**: 実施した OS・言語の対象 scenario と、測れた性能生データを残すこと。未実施、失敗、暫定回避は成功と区別する。Windows 11 と Performance Gate と overlay/VRM が残っていれば Stage 7 を完了とせず、`PROGRESS.md` を Stage 8 へ進めない。Linux 側の実施記録は [reports/stage-7-linux-2026-09-19.md](../reports/stage-7-linux-2026-09-19.md)。
 
 ## 5. 依存順と並列化
 
@@ -176,7 +176,7 @@ Overlay / VRM / measurement probe → D renderer ───→ D integration → 
                                                   B
 ```
 
-A1a は GUI / overlay probe を待たない。A1b は child provenance、A1c は credential publication の gate を満たす。B は A1 全体と GUI / 秘密入力 / 実 OS-store probe の後。D の単体 renderer は独立に進められるが、GUI fallback の完了 gate は B への統合後である。NixOS 26.11 公式 desktop は F の Linux 最終 acceptance であり、他 slice の着手を止めない。
+A1a は GUI / overlay probe を待たない。A1b は child provenance、A1c は credential publication の gate を満たす。B は A1 全体と GUI / 秘密入力 / 実 OS-store probe の後。D の単体 renderer は独立に進められるが、GUI fallback の完了 gate は B への統合後である。Linux 検証は F で実施し、NixOS 26.11 公式 desktop を待たない。
 
 C1 / C2 / C3 は異なる owner と画面に分け、共通 Client boundary・DTO・schema が確定した範囲だけ並列化します。
 
@@ -217,4 +217,24 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 | Issues / PRs | 個別不足、probe 結果、exact tip。pass / fail / 未実施を区別する |
 | `PROGRESS.md` | current / completed / blocker / next の短い index のみ。Stage 6 完了前に Stage 7 を current としない |
 
-次に実装する slice は **A1a**（Stage 6 完了後）。A1b / A1c は各契約の検証後に完了とする。B は GUI / 秘密入力面 / 実 OS-store probe の後、D は overlay / VRM / 計測 probe の後。NixOS 26.11 公式 acceptance は F で実施する。
+次に残る検証は Windows 11、overlay / VRM / IME、Performance Gate。Linux 自動テストと X11 GUI の記録は [reports/stage-7-linux-2026-09-19.md](../reports/stage-7-linux-2026-09-19.md)。NixOS 26.11 を Linux 検証の完了条件にしない。
+
+### A1 trust boundary の実装状況（2026-09-20）
+
+`ene-local-control` は要求専用 listener（`ToHost` / `FromHost`: 要求と非秘密の request state。challenge・秘密・completion の frame 型を持たない）と、Host が起動した GUI にだけ渡す専用確認 channel（`ToConfirmation` / `FromConfirmation`）に分離した。seat は Host の spawn から発行し、空席の先着では取得できない。`ene-core approve-*` は requester であり、pairing secret も credential 生値もその stdout / outcome には出ない。offline mutation fallback は削除した。
+
+初回 pairing の認証専用 provision frame（IPC §9.2）は未実装。現在 pairing secret は Host-spawned GUI の確認 channel に届き、Client 側は `ENE_PAIRING_SECRET` / GUI の `connect_with_bootstrap` 経路のままである。この差分は A1 の残作業として残す。
+
+#### A1c: credential publication（実装済み）
+
+`SecretVersionId` は値から導出しない採番であり、OS item は installation namespace と version ごとに作る。`credential_mutation` は attempt を write-once で記録し、`credential_active` は active / retired version だけを持つ（どちらも非秘密）。`activate_credential` は一つの transaction で、候補と置換対象の sweep、usable ref、active version、credential-set revision、`Activated` とその outcome を一緒に commit する。前提 revision が動いていれば候補は adopt せず sweep し、`Stale` を durable に残すので retry は保存済みの決定を返す。
+
+実 OS store adapter は `keyring` 経由で version item を作り、素の `put` を拒否する（owner の publish→activate だけが値を usable にする）。起動時は登録済み credential の active version を durable 記録から読み、item が読めることを確認してから adapter を向ける: 読めない active version は unactive のままにする。未完了 mutation（`Prepared` / `Staged`）は再実行も activate もしない。
+
+Windows Credential Manager での probe は成功（version 作成・読み戻し・上書き拒否・activate・削除）。Linux Secret Service は adapter を実装済みだが、この環境に service が無いため probe は 未実施であり、合格とは書かない。
+
+#### 未実施のまま残るもの
+
+- 実 overlay: `apps/ene-body` の overlay backend は Headless のまま（Windows DWM / KDE layer-shell は `NotRun`）。VM runtime / SpringBone / 表情も未実装。
+- 公式同梱 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）。
+- Windows 11 実機 acceptance と Performance Gate（idle CPU / resident / 実表示 FPS / 1 秒受付）。

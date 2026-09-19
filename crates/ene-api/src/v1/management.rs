@@ -47,6 +47,112 @@ pub const TASK_TARGET_PREFIX: &str = "task:";
 /// canonically before it becomes a trusted premise.
 pub const WORKSPACE_TARGET_PREFIX: &str = "workspace:";
 
+/// Fixed prefix of one usage-cap management intent
+/// (`usage-cost-cap` §13/§17):
+///
+/// ```text
+/// usage-cap = "cap:" ( "system:" window ":" currency ":" limit-micros
+///                    | "provider:" provider ":" window ":" currency ":" limit-micros )
+/// window    = "daily_utc" | "monthly_utc"
+/// currency  = currency code (the owner vocabulary, e.g. "USD")
+/// ```
+///
+/// The target carries the intended limit only; it is never authority. The
+/// intent's `base_view` is the opaque cap mark the reader saw, and the Host
+/// re-checks it against the current revision before the permission-owned
+/// command runs.
+pub const USAGE_CAP_TARGET_PREFIX: &str = "cap:";
+
+/// Parsed usage-cap target: exactly the assignment parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UsageCapTarget {
+    /// `"system"` or `"provider"`.
+    pub scope: String,
+    /// Provider name for the provider scope, `None` for the system scope.
+    pub provider: Option<String>,
+    /// `"daily_utc"` or `"monthly_utc"`.
+    pub window: String,
+    /// Currency code, as the owner's closed vocabulary spells it.
+    pub currency: String,
+    /// Exact limit in micro-currency units. Zero is a representable target
+    /// that the owner refuses as `InvalidLimit`; the grammar never decides.
+    pub limit_micros: u64,
+}
+
+/// Plain constructor: it does not validate. Non-empty parts and the closed
+/// scope/window vocabularies are enforced at Host parse, which stays
+/// authoritative.
+#[must_use]
+pub fn usage_cap_target(
+    scope: &str,
+    provider: Option<&str>,
+    window: &str,
+    currency: &str,
+    limit_micros: u64,
+) -> ManagementTargetWire {
+    match provider {
+        Some(provider) => ManagementTargetWire(format!(
+            "{USAGE_CAP_TARGET_PREFIX}{scope}:{provider}:{window}:{currency}:{limit_micros}"
+        )),
+        None => ManagementTargetWire(format!(
+            "{USAGE_CAP_TARGET_PREFIX}{scope}:{window}:{currency}:{limit_micros}"
+        )),
+    }
+}
+
+/// Exact rule: strip the `cap:` prefix and parse the two shapes of
+/// [`USAGE_CAP_TARGET_PREFIX`]. Every part must be non-empty and the limit
+/// must be a plain decimal `u64`; anything else is `None`, never a guessed
+/// cap. The closed scope/window/currency vocabularies are validated by the
+/// owner at command time, so the grammar stays vocabulary-neutral.
+#[must_use]
+pub fn parse_usage_cap_target(target: &ManagementTargetWire) -> Option<UsageCapTarget> {
+    let rest = target.0.strip_prefix(USAGE_CAP_TARGET_PREFIX)?;
+    let mut parts = rest.split(':');
+    let scope = parts.next()?;
+    match scope {
+        "system" => {
+            let window = non_empty(parts.next()?)?;
+            let currency = non_empty(parts.next()?)?;
+            let limit_micros = parts.next()?.parse::<u64>().ok()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            Some(UsageCapTarget {
+                scope: String::from("system"),
+                provider: None,
+                window,
+                currency,
+                limit_micros,
+            })
+        }
+        "provider" => {
+            let provider = non_empty(parts.next()?)?;
+            let window = non_empty(parts.next()?)?;
+            let currency = non_empty(parts.next()?)?;
+            let limit_micros = parts.next()?.parse::<u64>().ok()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            Some(UsageCapTarget {
+                scope: String::from("provider"),
+                provider: Some(provider),
+                window,
+                currency,
+                limit_micros,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn non_empty(part: &str) -> Option<String> {
+    if part.is_empty() {
+        return None;
+    }
+    Some(part.to_owned())
+}
+
 /// Plain constructor: it does not validate. The Host parse and validation
 /// stay authoritative.
 #[must_use]
@@ -165,6 +271,10 @@ pub enum ManagementIntentKind {
     ManageSchedule,
     /// Deny or refuse rule/consent handling.
     DenyOrRefuse,
+    /// Rule / consent / cap management. The consent grammar
+    /// (`consent:{capability}:...`) assigns a route; the cap grammar
+    /// (`cap:{scope}:{window}:{currency}:{limit}`, `usage-cost-cap` §13)
+    /// sets a usage cap, whose currentness is the intent `base_view` mark.
     ManageRuleConsentCap,
     ManageDevice,
     /// Credential configuration intent (values travel the protected
@@ -206,6 +316,11 @@ pub struct ManagementIntent {
     /// never defaulted to unconstrained.
     pub base_view: BaseViewMark,
     pub rationale: IntentRationaleWire,
+    /// Self-declared confirmation is never Host confirmation (IPC §18).
+    /// `true` is [`ManagementOutcome::DeniedByBoundary`] and does not complete
+    /// a `ConfirmationSession`.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 impl core::fmt::Debug for ManagementIntent {
@@ -222,6 +337,7 @@ impl core::fmt::Debug for ManagementIntent {
         builder
             .field("base_view", &self.base_view)
             .field("rationale", &"[redacted]")
+            .field("confirmed", &self.confirmed)
             .finish()
     }
 }
@@ -330,9 +446,10 @@ mod tests {
     use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
     use super::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
-        SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, consent_target, credential_target,
-        parse_consent_target, parse_credential_target, parse_task_target, parse_workspace_target,
-        task_target, workspace_target,
+        SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, UsageCapTarget, consent_target,
+        credential_target, parse_consent_target, parse_credential_target, parse_task_target,
+        parse_usage_cap_target, parse_workspace_target, task_target, usage_cap_target,
+        workspace_target,
     };
     use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
@@ -347,6 +464,7 @@ mod tests {
                 origin: RationaleOrigin::ManagementSurface,
                 quote: Some(String::from("quoted private words")),
             },
+            confirmed: false,
         }
     }
 
@@ -364,6 +482,35 @@ mod tests {
         assert!(
             rendered.contains("mark-1"),
             "marks stay visible: {rendered}"
+        );
+        assert!(
+            rendered.contains("confirmed"),
+            "self-declared confirmation stays visible: {rendered}"
+        );
+    }
+
+    #[test]
+    fn omitted_confirmed_deserializes_false_and_true_is_never_host_confirmation() {
+        let baseline = intent();
+        let json = serde_json::to_value(&baseline).expect("intent serializes");
+        let serde_json::Value::Object(mut map) = json else {
+            panic!("intent JSON must be an object");
+        };
+        map.remove("confirmed");
+        let omitted: ManagementIntent =
+            serde_json::from_value(serde_json::Value::Object(map)).expect("omitted confirmed");
+        assert!(
+            !omitted.confirmed,
+            "missing confirmed must default to false"
+        );
+        let mut declared = intent();
+        declared.confirmed = true;
+        let back: ManagementIntent =
+            serde_json::from_str(&serde_json::to_string(&declared).expect("serializes"))
+                .expect("roundtrip");
+        assert!(
+            back.confirmed,
+            "the flag is a Client self-declaration the Host must refuse"
         );
     }
 
@@ -579,5 +726,69 @@ mod tests {
                 "setup target is not a consent target: {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn usage_cap_target_roundtrips_both_scopes() {
+        let system = usage_cap_target("system", None, "daily_utc", "USD", 1_000_000);
+        assert_eq!(system.0.as_str(), "cap:system:daily_utc:USD:1000000");
+        assert_eq!(
+            parse_usage_cap_target(&system),
+            Some(UsageCapTarget {
+                scope: String::from("system"),
+                provider: None,
+                window: String::from("daily_utc"),
+                currency: String::from("USD"),
+                limit_micros: 1_000_000,
+            })
+        );
+        let provider = usage_cap_target("provider", Some("openai"), "monthly_utc", "USD", 42);
+        assert_eq!(
+            provider.0.as_str(),
+            "cap:provider:openai:monthly_utc:USD:42"
+        );
+        assert_eq!(
+            parse_usage_cap_target(&provider),
+            Some(UsageCapTarget {
+                scope: String::from("provider"),
+                provider: Some(String::from("openai")),
+                window: String::from("monthly_utc"),
+                currency: String::from("USD"),
+                limit_micros: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn usage_cap_target_rejects_other_shapes_and_never_guesses() {
+        for raw in [
+            "cap:",
+            "cap:system",
+            "cap:system:daily_utc",
+            "cap:system:daily_utc:USD",
+            "cap:system:daily_utc:USD:not-a-number",
+            "cap:system:daily_utc:USD:-1",
+            "cap:system:daily_utc:USD:1:extra",
+            "cap:provider:openai:daily_utc:USD",
+            "cap:provider::daily_utc:USD:1",
+            "cap:provider:openai::USD:1",
+            "cap:provider:openai:daily_utc::1",
+            "cap:global:daily_utc:USD:1",
+            "consent:dialogue:openai:gpt-x:cred-1",
+            "setup:show",
+            "",
+        ] {
+            assert_eq!(
+                parse_usage_cap_target(&ManagementTargetWire(String::from(raw))),
+                None,
+                "the cap grammar rejects {raw:?} without guessing"
+            );
+        }
+        // Zero is representable text; the owner refuses it as a limit, so the
+        // grammar does not pre-decide that domain outcome.
+        assert!(
+            parse_usage_cap_target(&usage_cap_target("system", None, "daily_utc", "USD", 0))
+                .is_some()
+        );
     }
 }

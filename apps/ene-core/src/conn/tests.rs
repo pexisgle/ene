@@ -579,12 +579,14 @@ async fn redelivery_keeps_the_connection_serving() {
     let id = table.note_accept();
     let pair = tokio::net::UnixStream::pair();
     let (mut client, server) = pair.unwrap();
+    let (_stop, shutdown) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(super::serve_connection(
         server,
         id,
         Arc::new(handle),
         Arc::new(FakeProviderTransport::new(String::from("hi"), None)),
         Arc::clone(&table),
+        shutdown.clone(),
     ));
     let incarnation = incarnation(5, 6);
     let duplicate = WireMessageId(uuid::Uuid::new_v4());
@@ -672,12 +674,14 @@ async fn paired_connection_drops_a_frame_without_a_device_claim() {
 
     let pair = tokio::net::UnixStream::pair();
     let (mut client, server) = pair.unwrap();
+    let (_stop, shutdown) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(super::serve_connection(
         server,
         id,
         Arc::new(handle),
         Arc::new(FakeProviderTransport::new(String::new(), None)),
         Arc::clone(&table),
+        shutdown.clone(),
     ));
     let frame = WireFrame {
         envelope: new_outgoing_envelope(
@@ -828,6 +832,7 @@ async fn append_registered(
                 local_id: None,
             },
             true,
+            None,
         )
         .await
         .expect("the append must commit");
@@ -889,6 +894,7 @@ async fn subscription_pushes_a_new_arrival_without_a_request() {
 
     let pair = tokio::net::UnixStream::pair().unwrap();
     let (mut client, server) = pair;
+    let (_stop, shutdown) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(super::serve_connection(
         server,
         id,
@@ -898,6 +904,7 @@ async fn subscription_pushes_a_new_arrival_without_a_request() {
             None,
         )),
         Arc::clone(&table),
+        shutdown.clone(),
     ));
 
     // Drain the (empty) backlog: this is the only request the Client sends.
@@ -950,6 +957,7 @@ async fn subscription_advances_on_receipt_timeout_without_a_request() {
 
     let pair = tokio::net::UnixStream::pair().unwrap();
     let (mut client, server) = pair;
+    let (_stop, shutdown) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(super::serve_connection(
         server,
         id,
@@ -959,6 +967,7 @@ async fn subscription_advances_on_receipt_timeout_without_a_request() {
             None,
         )),
         Arc::clone(&table),
+        shutdown.clone(),
     ));
 
     // One request with a page bound of one: the pass continues with a
@@ -1089,6 +1098,7 @@ async fn receipt_expiry_advances_after_a_push_write_failure() {
     let fail_writes = Arc::new(AtomicBool::new(false));
     let pair = tokio::net::UnixStream::pair().unwrap();
     let (mut client, server) = pair;
+    let (_stop, shutdown) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(super::serve_connection(
         FlakyWrite {
             inner: server,
@@ -1101,6 +1111,7 @@ async fn receipt_expiry_advances_after_a_push_write_failure() {
             None,
         )),
         Arc::clone(&table),
+        shutdown.clone(),
     ));
 
     // Drain the empty backlog over a healthy write side.

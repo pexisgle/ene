@@ -33,14 +33,16 @@ use ene_api::v1::round::{
 };
 use ene_companion::{CompanionRepository, UndeliveredRepository};
 use ene_core::conn;
+use ene_core::host_control;
 use ene_core::serve::{CredStore, HostHandle};
+use ene_credential::MemoryVersionedStore;
 use ene_credential::{CredentialRef, MemoryCredentialStore};
-use ene_ctl::client::Client;
+use ene_ctl::client::{Client, ClientError};
 use ene_ctl::cmds;
 use ene_ctl::device::{StoredDevice, store_device};
-use ene_ctl::errors::CliError;
 use ene_inference::RawUsage;
 use ene_inference::fake::FakeProviderTransport;
+use ene_local_control::{ControlOp, FromConfirmation, ToConfirmation};
 use ene_store::Store;
 
 const DESCRIPTOR: &str = "e2e laptop";
@@ -107,7 +109,7 @@ async fn dialogue_and_learning_calls_share_one_ticket_accounting_path() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -216,6 +218,7 @@ fn complete_intent(target: &str, mark: &str) -> WirePayload {
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
+        confirmed: false,
     })
 }
 
@@ -491,7 +494,7 @@ async fn production_path_setup_to_restart() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -642,18 +645,6 @@ fn workspace_binary(name: &str) -> Option<std::path::PathBuf> {
 /// listener holding the test socket.
 struct KillOnDrop(Option<std::process::Child>);
 
-impl KillOnDrop {
-    /// Stops the serving child and waits for exit, so the OS has released the
-    /// single-writer `host.lock` before an offline mutation command runs
-    /// (PR §6.4).
-    fn stop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            drop(child.kill());
-            drop(child.wait());
-        }
-    }
-}
-
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
@@ -720,19 +711,8 @@ async fn binaries_drive_pairing_setup_and_views() {
     );
     let config = config_path.to_string_lossy().into_owned();
 
-    let mut server = std::process::Command::new(&core);
-    // Fake provider key for the SERVER child only (never our own process
-    // env): production reads the bearer from its environment, so without it
-    // the credential gate would deny assignment. No inference runs here, so
-    // no network is touched; the key only satisfies presence checks.
-    server.env("ENE_OPENAI_API_KEY", "sk-test-only");
-    server.args(["serve", "--config", &config]);
-    server.stdout(std::process::Stdio::null());
-    server.stderr(std::process::Stdio::null());
-    let server = server.spawn();
-    let server = server.unwrap();
-    let mut server = KillOnDrop(Some(server));
-    let bound = wait_for_socket(&dir).await;
+    let serving = ServingHost::start(&dir, Arc::new(fake_transport())).await;
+    let bound = true;
     let listing: Vec<String> = std::fs::read_dir(&dir)
         .map(|entries| {
             entries
@@ -780,44 +760,48 @@ async fn binaries_drive_pairing_setup_and_views() {
         "one pending ID must list, got {pending_out:?}"
     );
     let pending_id = pending_id.unwrap();
-    // `approve-device` is an offline mutation command: it takes the
-    // single-writer lock, so the serving Host stops for the approval and
-    // restarts after (PR §6.4). The list names opaque pending IDs first
-    // (the descriptor after it is display-only); approval names the ID.
-    server.stop();
-    let mut approve = std::process::Command::new(&core);
-    approve.args([
-        "approve-device",
-        "--pending",
-        pending_id.as_str(),
-        "--config",
-        &config,
-    ]);
-    approve.stdout(std::process::Stdio::piped());
-    approve.stderr(std::process::Stdio::piped());
-    let approved = approve.output();
-    let approved = approved.unwrap();
+    // The console asks as a requester; the Owner confirms on the private
+    // channel the Host issued to its GUI, and the one-time provision comes
+    // back there rather than to the console. The list names opaque pending IDs
+    // first (the descriptor after it is display-only); approval names the ID.
+    let gui = host_control::seat_test_gui_for_tests(serving.handle()).expect("private channel");
+    let mut approve = tokio::process::Command::new(&core);
+    approve
+        .args([
+            "approve-device",
+            "--pending",
+            pending_id.as_str(),
+            "--config",
+            &config,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let approve = approve.spawn().expect("the requester must start");
+    let (session_id, nonce) = read_challenge(&gui, ControlOp::DeviceApprove).await;
+    owner_send(&gui, ToConfirmation::SessionComplete { session_id, nonce }).await;
+    let reply = owner_recv(&gui).await;
+    let FromConfirmation::Outcome(ene_local_control::ControlOutcome::DeviceApproved {
+        pairing_secret,
+        ..
+    }) = reply
+    else {
+        panic!("the Owner's confirmation must approve the pending, got {reply:?}");
+    };
+    let secret = pairing_secret.expose().to_string();
+    assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    let approved = approve
+        .wait_with_output()
+        .await
+        .expect("the requester exits");
     assert!(
         approved.status.success(),
         "approve-device must exit 0: {}",
         String::from_utf8_lossy(&approved.stderr)
     );
     let shown = String::from_utf8_lossy(&approved.stdout).into_owned();
-    let secret = shown
-        .lines()
-        .find_map(|line| line.strip_prefix("pairing secret (show once): "))
-        .map(str::to_string);
     assert!(
-        secret.is_some(),
-        "approve must print the one-time secret, got {shown:?}"
-    );
-    let secret = secret.unwrap();
-    assert!(!secret.trim().is_empty(), "secret must be non-blank");
-    server = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")])
-        .expect("the Host must respawn after the offline approval");
-    assert!(
-        wait_for_listener(&dir).await,
-        "the restarted Host must accept after the offline approval"
+        !shown.contains(&secret),
+        "the requester's outcome must not carry the pairing secret: {shown:?}"
     );
 
     let status = run_cli(
@@ -868,37 +852,61 @@ async fn binaries_drive_pairing_setup_and_views() {
         "unapproved setup must hold at exit 2, got {setup:?}"
     );
 
-    // The credential approval is an offline mutation command too: stop the
-    // serving Host, approve, restart.
-    server.stop();
-    let mut approve_cred = std::process::Command::new(&core);
-    // The approval process must be able to read the bearer: it sweeps any
-    // prior plaintext occurrence before the ref becomes usable.
-    approve_cred.env("ENE_OPENAI_API_KEY", "sk-test-only");
-    approve_cred.args([
-        "approve-credential",
-        "--provider",
-        "openai",
-        "--label",
-        "main",
-        "--config",
-        &config,
-    ]);
-    approve_cred.stdout(std::process::Stdio::null());
-    approve_cred.stderr(std::process::Stdio::piped());
-    let credential_approved = approve_cred.output();
-    let credential_approved = credential_approved.unwrap();
+    // Credential registration is the same shape: the console asks as a
+    // requester, the Owner types the value on the private channel, and the
+    // Host publishes it as a version before answering.
+    let gui = host_control::seat_test_gui_for_tests(serving.handle()).expect("private channel");
+    let mut approve_cred = tokio::process::Command::new(&core);
+    approve_cred
+        .args([
+            "approve-credential",
+            "--provider",
+            "openai",
+            "--label",
+            "main",
+            "--config",
+            &config,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let approve_cred = approve_cred.spawn().expect("the requester must start");
+    let (session_id, nonce) = read_challenge(&gui, ControlOp::CredentialPut).await;
+    owner_send(
+        &gui,
+        ToConfirmation::CredentialSecret {
+            session_id,
+            nonce: nonce.clone(),
+            provider: String::from("openai"),
+            label: String::from("main"),
+            secret: ene_local_control::RedactedSecret::new("sk-test-only"),
+        },
+    )
+    .await;
+    let staged = owner_recv(&gui).await;
+    assert!(
+        matches!(
+            staged,
+            FromConfirmation::Outcome(ene_local_control::ControlOutcome::CredentialStaged { .. })
+        ),
+        "intake must stage the value before the completion, got {staged:?}"
+    );
+    owner_send(&gui, ToConfirmation::SessionComplete { session_id, nonce }).await;
+    let published = owner_recv(&gui).await;
+    assert!(
+        matches!(
+            published,
+            FromConfirmation::Outcome(ene_local_control::ControlOutcome::CredentialStored { .. })
+        ),
+        "the Owner's completion must publish the credential, got {published:?}"
+    );
+    let credential_approved = approve_cred
+        .wait_with_output()
+        .await
+        .expect("the requester exits");
     assert!(
         credential_approved.status.success(),
         "approve-credential must exit 0: {}",
         String::from_utf8_lossy(&credential_approved.stderr)
-    );
-    server.stop();
-    let _respawned = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")])
-        .expect("the Host must respawn after the offline credential approval");
-    assert!(
-        wait_for_listener(&dir).await,
-        "the restarted Host must accept after the offline credential approval"
     );
 
     let setup = run_cli(
@@ -971,7 +979,7 @@ async fn tampered_secret_cannot_authenticate() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -989,7 +997,7 @@ async fn tampered_secret_cannot_authenticate() {
     assert!(stored.is_ok(), "test device file must store");
     let tampered = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(tampered, Err(CliError::ServerOutcome(_))),
+        matches!(tampered, Err(ClientError::ServerOutcome(_))),
         "tampered secret must not authenticate"
     );
     server.abort();
@@ -1010,7 +1018,7 @@ async fn rotation_requires_reprovisioning() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -1030,7 +1038,7 @@ async fn rotation_requires_reprovisioning() {
     );
     let stale_file = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(stale_file, Err(CliError::ServerOutcome(_))),
+        matches!(stale_file, Err(ClientError::ServerOutcome(_))),
         "rotated secret must invalidate the old file"
     );
     server.abort();
@@ -1153,13 +1161,136 @@ fn spawn_serve_binary(
     server.spawn().ok().map(|child| KillOnDrop(Some(child)))
 }
 
+/// One in-process serving Host for the binary-level suites.
+///
+/// The Owner's confirmation surface is a process the Host itself spawned and
+/// handed the private channel to. A headless test cannot produce that through a
+/// spawned Host binary, so these suites serve in process and drive the Owner's
+/// channel through the same registration path the Host uses for its own child.
+/// The client side stays the real binaries.
+struct ServingHost {
+    dir: std::path::PathBuf,
+    handle: Arc<HostHandle>,
+    transport: Arc<FakeProviderTransport>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<Result<(), ene_core::serve::CoreError>>,
+    /// The single-writer lock the production `serve` takes. The console's
+    /// `approve-*` commands probe it to tell a serving Host from a stopped one,
+    /// so an in-process Host must hold it exactly as the binary does.
+    _lock: ene_core::host_lock::HostLock,
+}
+
+impl ServingHost {
+    async fn start(dir: &std::path::Path, transport: Arc<FakeProviderTransport>) -> Self {
+        let lock = ene_core::host_lock::HostLock::acquire(dir)
+            .expect("the data directory must be free to serve");
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                dir,
+                CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+            )
+            .await
+            .expect("the Host state must open"),
+        );
+        // The production serving boundary runs its startup mutations before
+        // the listener binds; the in-process Host keeps that order.
+        handle
+            .run_startup_mutations()
+            .await
+            .expect("the startup mutations must complete");
+        let mut serving = Self {
+            dir: dir.to_path_buf(),
+            handle,
+            transport,
+            shutdown: tokio::sync::watch::channel(false).0,
+            task: tokio::spawn(async { Ok(()) }),
+            _lock: lock,
+        };
+        serving.spawn_task();
+        assert!(
+            wait_for_listener(&serving.dir).await,
+            "listener must bind ene.sock"
+        );
+        serving
+    }
+
+    fn spawn_task(&mut self) {
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        self.shutdown = shutdown;
+        self.task = tokio::spawn(conn::run_until_shutdown(
+            self.dir.clone(),
+            Arc::clone(&self.handle),
+            Arc::clone(&self.transport),
+            rx,
+        ));
+    }
+
+    fn handle(&self) -> &Arc<HostHandle> {
+        &self.handle
+    }
+
+    async fn stop(&mut self) {
+        self.shutdown.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(30), &mut self.task)
+            .await
+            .expect("the in-process Host must stop within the timeout")
+            .expect("the in-process Host task must join")
+            .expect("the in-process Host must stop cleanly");
+    }
+}
+
+/// Reads one challenge from the private channel the Host issued to its GUI.
+async fn read_challenge(
+    gui: &ene_local_control::GuiChannel,
+    expected: ControlOp,
+) -> (uuid::Uuid, String) {
+    let mut channel = gui.try_clone().expect("the private channel clones");
+    let frame = tokio::task::spawn_blocking(move || channel.recv())
+        .await
+        .expect("the reader joins")
+        .expect("the channel reads")
+        .expect("a live channel carries the challenge");
+    match frame {
+        FromConfirmation::ConfirmationChallenge {
+            session_id,
+            op,
+            nonce,
+            ..
+        } => {
+            assert_eq!(
+                op, expected,
+                "the challenge must name the operation asked for"
+            );
+            (session_id, nonce)
+        }
+        other => panic!("expected a challenge, got {other:?}"),
+    }
+}
+
+/// Sends one Owner frame on the private channel.
+async fn owner_send(gui: &ene_local_control::GuiChannel, frame: ToConfirmation) {
+    let mut channel = gui.try_clone().expect("the private channel clones");
+    tokio::task::spawn_blocking(move || channel.send(&frame))
+        .await
+        .expect("the writer joins")
+        .expect("the channel writes");
+}
+
+/// Reads one answer on the private channel.
+async fn owner_recv(gui: &ene_local_control::GuiChannel) -> FromConfirmation {
+    let mut channel = gui.try_clone().expect("the private channel clones");
+    tokio::task::spawn_blocking(move || channel.recv())
+        .await
+        .expect("the reader joins")
+        .expect("the channel reads")
+        .expect("a live channel carries the answer")
+}
+
 async fn pair_via_binaries(
     ctl: &std::path::Path,
     core: &std::path::Path,
-    dir: &std::path::Path,
     config: &str,
-    server: &mut KillOnDrop,
-    server_env: &[(&str, &str)],
+    serving: &ServingHost,
 ) -> Option<String> {
     let status = run_cli(
         ctl,
@@ -1172,9 +1303,6 @@ async fn pair_via_binaries(
         matches!(status, Some((2, _, _))),
         "pre-pairing status must pend pairing, got {status:?}"
     );
-    // The approval is an offline mutation command: it takes the single-writer
-    // lock, so the serving Host stops first and restarts after (PR §6.4).
-    server.stop();
     // The real client pairs under its platform descriptor, so approve
     // whatever it actually requested (like the operator channel would): the
     // list names the opaque pending ID first.
@@ -1194,32 +1322,44 @@ async fn pair_via_binaries(
                 .and_then(|line| line.split_whitespace().next().map(str::to_string))
         });
     let pending_id = pending_id?;
-    let mut approve = std::process::Command::new(core);
-    approve.args([
-        "approve-device",
-        "--pending",
-        pending_id.as_str(),
-        "--config",
-        config,
-    ]);
-    approve.stdout(std::process::Stdio::piped());
-    approve.stderr(std::process::Stdio::piped());
-    let approved = approve.output().ok()?;
+    // The console asks as a requester; the Owner confirms on the private
+    // channel the Host issued to its GUI, and the one-time provision comes
+    // back there rather than to the console.
+    let gui = host_control::seat_test_gui_for_tests(serving.handle()).ok()?;
+    let mut approve = tokio::process::Command::new(core);
+    approve
+        .args([
+            "approve-device",
+            "--pending",
+            pending_id.as_str(),
+            "--config",
+            config,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let approve = approve.spawn().ok()?;
+    let (session_id, nonce) = read_challenge(&gui, ControlOp::DeviceApprove).await;
+    owner_send(&gui, ToConfirmation::SessionComplete { session_id, nonce }).await;
+    let reply = owner_recv(&gui).await;
+    let FromConfirmation::Outcome(ene_local_control::ControlOutcome::DeviceApproved {
+        pairing_secret,
+        ..
+    }) = reply
+    else {
+        panic!("the Owner's confirmation must approve the pending, got {reply:?}");
+    };
+    let secret = pairing_secret.expose().to_string();
+    assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    let approved = approve.wait_with_output().await.ok()?;
     assert!(
         approved.status.success(),
         "approve-device must exit 0: {}",
         String::from_utf8_lossy(&approved.stderr)
     );
     let shown = String::from_utf8_lossy(&approved.stdout).into_owned();
-    let secret = shown
-        .lines()
-        .find_map(|line| line.strip_prefix("pairing secret (show once): "))
-        .map(str::to_string)?;
-    assert!(!secret.trim().is_empty(), "secret must be non-blank");
-    *server = spawn_serve_binary(core, config, server_env)?;
     assert!(
-        wait_for_listener(dir).await,
-        "the restarted Host must accept after the offline approval"
+        !shown.contains(&secret),
+        "the requester's outcome must not carry the pairing secret: {shown:?}"
     );
     let status = run_cli(
         ctl,
@@ -1236,6 +1376,80 @@ async fn pair_via_binaries(
 }
 
 /// The client device file is commit-on-acceptance and atomically replaced:
+/// Provisions one paired device into a data directory no Host is serving, as a
+/// completed first pairing leaves it.
+///
+/// The first pairing itself needs the Owner's confirmation surface, which the
+/// in-process suites drive directly; a suite that must run the real Host
+/// binary (to exercise the production HTTP transport, for example) starts from
+/// the state pairing leaves behind instead of re-opening the flow.
+async fn provision_paired_device(
+    dir: &std::path::Path,
+    descriptor: &str,
+) -> (DeviceWireId, String) {
+    use ene_credential::{DevicePairingRepository as _, DevicePairingStatus, FileDeviceAuthStore};
+    let store = Store::open(&dir.join("app.db"))
+        .await
+        .expect("the store must open offline");
+    let origin = String::from("fixture-origin");
+    let pending = store
+        .request_pairing(descriptor.to_string(), origin.clone(), None)
+        .await
+        .expect("a pairing request must record");
+    let DevicePairingStatus::Pending { pending } = pending else {
+        panic!("a fresh request must pend");
+    };
+    let (record, secret) = store
+        .approve_pending(&pending.pending_id, &origin)
+        .await
+        .expect("the approval must run")
+        .expect("the pending must pair");
+    let auth = FileDeviceAuthStore::open(&dir.join("device-auth.json"))
+        .expect("the device-auth store must open");
+    auth.save_secret(&record.id, &record.descriptor, &secret)
+        .expect("the pairing secret must be custodied");
+    let wire = record.wire.parse().expect("the wire id must be UUID text");
+    store_device(dir, &StoredDevice::new(DeviceWireId(wire), secret.clone()))
+        .expect("the client device file must store");
+    (DeviceWireId(wire), secret)
+}
+
+/// Creates one usable credential ref, as a completed Owner registration leaves
+/// it: the pending pair is staged and then approved with its sweep.
+async fn provision_credential(dir: &std::path::Path, provider: &str, label: &str, bearer: &str) {
+    use ene_credential::{
+        CredentialIntentRepository as _, RegistrationApply, RegistrationFingerprint,
+        RegistrationState,
+    };
+    let store = Store::open(&dir.join("app.db"))
+        .await
+        .expect("the store must open offline");
+    let fingerprint = RegistrationFingerprint {
+        intent_id: uuid::Uuid::new_v4().as_hyphenated().to_string(),
+        kind: String::from("register"),
+        target: format!("credential:{provider}:{label}"),
+        base: String::from("fixture"),
+        rationale_origin: String::from("management-surface"),
+        rationale_quote: None,
+    };
+    let staged = store
+        .request_registration_with_intent(provider.to_string(), label.to_string(), fingerprint)
+        .await
+        .expect("the registration must stage");
+    assert!(
+        matches!(
+            staged,
+            RegistrationApply::Decided(RegistrationState::HeldByOperation)
+        ),
+        "a fresh pair must pend Owner approval, got {staged:?}"
+    );
+    assert!(
+        store
+            .approve_credential_with_sweep(provider, label, bearer)
+            .expect("the approval must commit"),
+        "the approval makes the pair usable"
+    );
+}
 /// a wrong bootstrap secret must not replace a working file, a malformed
 /// file is reported as degraded state instead of the first-run path, and a
 /// proven secret repairs it.
@@ -1255,23 +1469,9 @@ async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
     let Some(config) = write_test_config(&dir) else {
         return;
     };
-    let server = spawn_serve_binary(&core, &config, &[("ENE_OPENAI_API_KEY", "sk-test-only")]);
-    assert!(server.is_some(), "serve must spawn");
-    let Some(mut server) = server else {
-        return;
-    };
-    assert!(wait_for_socket(&dir).await, "listener must bind");
+    let mut serving = ServingHost::start(&dir, Arc::new(fake_transport())).await;
 
-    let Some(secret) = pair_via_binaries(
-        &ctl,
-        &core,
-        &dir,
-        &config,
-        &mut server,
-        &[("ENE_OPENAI_API_KEY", "sk-test-only")],
-    )
-    .await
-    else {
+    let Some(secret) = pair_via_binaries(&ctl, &core, &config, &serving).await else {
         return;
     };
     let device_file = ene_ctl::device::device_file_path(&dir);
@@ -1362,6 +1562,7 @@ async fn binaries_keep_the_device_file_until_a_proof_is_accepted() {
         matches!(after_repair, Some((0, _, _))),
         "the repaired file must authenticate, got {after_repair:?}"
     );
+    serving.stop().await;
 }
 
 #[tokio::test]
@@ -1385,16 +1586,22 @@ async fn binaries_drive_send_stream_history_and_restart() {
         ("ENE_OPENAI_BASE_URL", base_url.as_str()),
     ];
 
+    // This suite runs the real Host binary to exercise the production HTTP
+    // transport, which an in-process Host cannot provide. Pairing and the
+    // credential registration need the Owner's confirmation surface, so they
+    // are provisioned as the state those flows leave behind; the flows
+    // themselves are covered where the surface exists.
+    provision_paired_device(&dir, "production transport laptop").await;
+    provision_credential(&dir, "openai", "main", "sk-test-only").await;
+
     let server = spawn_serve_binary(&core, &config, &server_env);
     assert!(server.is_some(), "serve must spawn");
-    let Some(mut server) = server else {
+    let Some(server) = server else {
         fake.abort();
         return;
     };
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
 
-    let secret = pair_via_binaries(&ctl, &core, &dir, &config, &mut server, &server_env).await;
-    assert!(secret.is_some(), "binary pairing must complete");
     let setup_args = [
         "--config",
         &config,
@@ -1406,40 +1613,8 @@ async fn binaries_drive_send_stream_history_and_restart() {
     ];
     let setup = run_cli(&ctl, &setup_args, &[], Duration::from_secs(10)).await;
     assert!(
-        matches!(setup, Some((2, _, _))),
-        "unapproved setup must hold at exit 2, got {setup:?}"
-    );
-    // The credential approval is an offline mutation command: it owns the
-    // data directory while the Host is stopped, then the Host restarts.
-    server.stop();
-    let approve_cred = std::process::Command::new(&core)
-        .env("ENE_OPENAI_API_KEY", "sk-test-only")
-        .args([
-            "approve-credential",
-            "--provider",
-            "openai",
-            "--label",
-            "main",
-            "--config",
-            &config,
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    assert!(
-        matches!(&approve_cred, Ok(output) if output.status.success()),
-        "approve-credential must exit 0"
-    );
-    server = spawn_serve_binary(&core, &config, &server_env)
-        .expect("the Host must respawn after the offline credential approval");
-    assert!(
-        wait_for_listener(&dir).await,
-        "the restarted Host must accept after the offline credential approval"
-    );
-    let setup = run_cli(&ctl, &setup_args, &[], Duration::from_secs(10)).await;
-    assert!(
         matches!(setup, Some((0, _, _))),
-        "approved setup must exit 0, got {setup:?}"
+        "setup with a registered credential must exit 0, got {setup:?}"
     );
 
     let send = run_cli(
@@ -1869,7 +2044,7 @@ async fn stage3_conversation_formation_restart_and_recall() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
@@ -2101,7 +2276,7 @@ async fn stage3_management_view_reaches_memories_beyond_the_first_page() {
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
+        matches!(pending, Err(ClientError::ServerOutcome(_))),
         "first pairing must pend"
     );
     let approver = open_host(&dir).await.unwrap();
