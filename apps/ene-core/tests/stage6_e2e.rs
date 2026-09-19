@@ -578,6 +578,48 @@ async fn setup_flow(
     Ok(())
 }
 
+/// Yields until `ready` is true. This waits for a published condition, never
+/// for a guessed Targeted Deletion tick interval.
+async fn wait_until(mut ready: impl FnMut() -> bool, mut what: impl FnMut() -> String) {
+    for _ in 0..1_000_000 {
+        if ready() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("{}", what());
+}
+
+/// Waits until this handle's serving-composition Targeted Deletion driver
+/// count equals `expected`.
+async fn wait_until_deletion_drivers(handle: &HostHandle, expected: usize) {
+    wait_until(
+        || handle.live_targeted_deletion_drivers_for_tests() == expected,
+        || {
+            format!(
+                "targeted deletion drivers stayed at {}, expected {expected}",
+                handle.live_targeted_deletion_drivers_for_tests()
+            )
+        },
+    )
+    .await;
+}
+
+/// Waits until `handle` is the only strong reference, so dropping it drops
+/// the predecessor Store before a successor opens the same database.
+async fn wait_until_unique_host(handle: &Arc<HostHandle>) {
+    wait_until(
+        || Arc::strong_count(handle) == 1,
+        || {
+            format!(
+                "HostHandle still has {} strong references after serving stopped",
+                Arc::strong_count(handle)
+            )
+        },
+    )
+    .await;
+}
+
 /// One served Host under test: the composition handle, the listener task, and
 /// a live first-party client.
 ///
@@ -587,7 +629,7 @@ async fn setup_flow(
 /// instance would block the new listener from binding.
 struct Served {
     dir: PathBuf,
-    handle: Arc<HostHandle>,
+    handle: Option<Arc<HostHandle>>,
     server: tokio::task::JoinHandle<Result<(), CoreError>>,
     client: Option<Client>,
     transport: Arc<ScriptedTransport>,
@@ -617,9 +659,10 @@ impl Served {
         setup_flow(&mut client, &approver, capabilities)
             .await
             .expect("setup must complete");
+        wait_until_deletion_drivers(&handle, 1).await;
         Self {
             dir,
-            handle,
+            handle: Some(handle),
             server,
             client: Some(client),
             transport,
@@ -631,10 +674,27 @@ impl Served {
         self.client.as_mut().expect("a live client")
     }
 
+    /// The current Host composition. Present after start/stop; `serve`
+    /// drops the predecessor before opening the successor.
+    fn handle(&self) -> &HostHandle {
+        self.handle.as_ref().expect("a live HostHandle")
+    }
+
+    /// A clone of the current Host composition Arc.
+    fn handle_arc(&self) -> Arc<HostHandle> {
+        Arc::clone(self.handle.as_ref().expect("a live HostHandle"))
+    }
+
     /// Closes the current connection and stops the listener. The state stays
     /// open on the current handle, exactly like a Host process that stopped
     /// serving.
+    ///
+    /// The client is dropped first so per-connection tasks release the
+    /// handle; then `conn::run` is aborted and awaited so its deletion-driver
+    /// guard drops; then this waits until that driver has unpublished itself.
     async fn stop(&mut self) {
+        self.client = None;
+        tokio::task::yield_now().await;
         self.server.abort();
         let aborted = std::mem::replace(
             &mut self.server,
@@ -644,39 +704,30 @@ impl Served {
             Ok(Ok(())) | Err(_) => {}
             Ok(Err(error)) => panic!("the aborted listener failed: {error}"),
         }
-        self.client = None;
-        tokio::task::yield_now().await;
+        wait_until_deletion_drivers(self.handle(), 0).await;
+        wait_until_unique_host(self.handle.as_ref().expect("a live HostHandle")).await;
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
 
     /// Opens the state again, runs the production startup mutations, and
     /// serves; returns a fresh authenticated client.
     ///
-    /// The OS transport may still be releasing the previous connection's
-    /// server instance (the Windows named-pipe listener owns the exclusive
-    /// first instance for the pipe name), so a listener that exits immediately
-    /// is retried until it stays up.
+    /// Restart order is the production one: the predecessor deletion driver
+    /// is gone, the predecessor `HostHandle` is dropped, then the successor
+    /// opens the same database and runs startup mutations. The OS transport
+    /// may still be releasing the previous connection's server instance (the
+    /// Windows named-pipe listener owns the exclusive first instance for the
+    /// pipe name), so a listener that exits immediately is retried until it
+    /// stays up.
     async fn serve(&mut self) -> Client {
+        wait_until_deletion_drivers(self.handle(), 0).await;
+        wait_until_unique_host(self.handle.as_ref().expect("a live HostHandle")).await;
+        drop(self.handle.take());
         let handle = open_host(&self.dir).await;
-        // A process restart drops the previous SQLite connection before the
-        // successor mutates. Two HostHandles on one Windows `app.db` fail
-        // Immediate transactions with SQLITE_BUSY.
-        let predecessor = std::mem::replace(&mut self.handle, Arc::clone(&handle));
-        drop(predecessor);
-        tokio::task::yield_now().await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            match handle.run_startup_mutations().await {
-                Ok(()) => break,
-                Err(error)
-                    if error.to_string().contains("database is locked")
-                        && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(error) => panic!("restart startup must complete: {error}"),
-            }
-        }
+        handle
+            .run_startup_mutations()
+            .await
+            .expect("restart startup must complete");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let mut server = tokio::spawn(conn::run(
@@ -693,10 +744,11 @@ impl Served {
                     tokio::time::Instant::now() < deadline,
                     "the listener never bound after the restart: {failure:?}"
                 );
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::task::yield_now().await;
                 continue;
             }
-            self.handle = handle;
+            wait_until_deletion_drivers(&handle, 1).await;
+            self.handle = Some(handle);
             self.server = server;
             return connect(&self.dir).await;
         }
@@ -1386,7 +1438,7 @@ async fn stage6_targeted_deletion_completes_system_wide() {
         "the wire intent must create no operation"
     );
     // Host-local trusted confirmation starts the canonical operation.
-    let current = confirm_deletion(&served.handle).await;
+    let current = confirm_deletion(served.handle()).await;
     let sends_at_confirmation = transport.sends();
     let page = deletion_page(served.client())
         .await
@@ -1408,7 +1460,7 @@ async fn stage6_targeted_deletion_completes_system_wide() {
         "the status view names the started operation"
     );
 
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
         .expect("the operation must complete");
@@ -1527,7 +1579,7 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
     // The second round's provider call parks after its attempt claim.
     transport.block_input(on_latest_owner(&second));
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let barrier = Arc::clone(&transport);
     let mut second_round = Box::pin(send_round_raw(&mut client, &second));
     let mut confirmed = false;
@@ -1607,7 +1659,7 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    confirm_deletion(&served.handle).await;
+    confirm_deletion(served.handle()).await;
     // Condition first: a fresh target-bearing submit is held at intake with
     // zero provider bytes and leaves no History row.
     let history_before = history_texts(served.client()).await;
@@ -1645,7 +1697,7 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
     for item in &fresh.items {
         assert_absent("covered excerpt", &item.excerpt, TARGET);
     }
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
         .expect("the operation must complete with a reachable Client");
@@ -1692,7 +1744,7 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    confirm_deletion(&served.handle).await;
+    confirm_deletion(served.handle()).await;
     transport.release_blocked();
     // The formation commit lands against the current condition; give it the
     // bounded window the fan-out would use, then prove no Memory exists.
@@ -1701,7 +1753,7 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
         !memory_view(served.client()).await.contains(TARGET),
         "a covered formation never writes target Memory"
     );
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
         .expect("the operation must complete");
@@ -1759,7 +1811,7 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     confirm_deletion(&handle).await;
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
@@ -1858,7 +1910,7 @@ async fn stage6_delayed_task_result_after_completion_is_collected() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     confirm_deletion(&handle).await;
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
@@ -1921,7 +1973,7 @@ async fn stage6_deletion_restart_during_active_resumes() {
             .await
             .expect("the request inlet must answer");
         assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-        confirm_deletion(&served.handle).await
+        confirm_deletion(served.handle()).await
     };
     // Restart while the operation is unfinished. The confirmation already
     // kicked one bounded pass, so the durable phase may be Active or Held on
@@ -1957,13 +2009,60 @@ async fn stage6_deletion_restart_during_active_resumes() {
     assert_eq!(transport.sends(), sends_before);
     // The restarted Host resumes and completes the operation through the
     // production fan-out.
-    let page = drive_until(&served.handle, &mut client, DeletionPhaseWire::Completed)
+    let page = drive_until(served.handle(), &mut client, DeletionPhaseWire::Completed)
         .await
         .expect("the restarted Host must complete the operation");
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
     served.server.abort();
+}
+
+/// Aborting `conn::run` cancels the serving-composition Targeted Deletion
+/// driver. The predecessor handle reports zero live drivers after the
+/// listener JoinHandle completes, without waiting for a tick interval.
+#[tokio::test]
+async fn listener_abort_stops_the_deletion_driver() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
+    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
+    wait_until_deletion_drivers(served.handle(), 1).await;
+    assert_eq!(
+        served.handle().live_targeted_deletion_drivers_for_tests(),
+        1,
+        "serving starts exactly one Targeted Deletion driver"
+    );
+    served.stop().await;
+    assert_eq!(
+        served.handle().live_targeted_deletion_drivers_for_tests(),
+        0,
+        "aborting and awaiting conn::run must leave no live deletion driver"
+    );
+}
+
+/// A Host restart leaves exactly one live Targeted Deletion driver: the
+/// successor's. The predecessor handle is gone, so it cannot keep a second
+/// process-local drive lock on the same database.
+#[tokio::test]
+async fn restart_has_exactly_one_deletion_driver() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
+    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
+    wait_until_deletion_drivers(served.handle(), 1).await;
+    let predecessor = Arc::downgrade(&served.handle_arc());
+    let _client = served.restart().await;
+    wait_until_deletion_drivers(served.handle(), 1).await;
+    assert_eq!(
+        served.handle().live_targeted_deletion_drivers_for_tests(),
+        1,
+        "restart must not leave predecessor and successor drivers both alive"
+    );
+    assert!(
+        predecessor.upgrade().is_none(),
+        "the predecessor HostHandle must drop once its serving driver is gone"
+    );
 }
 
 /// E2E 1 restart: a durable `finalizing` marker (the crash-consistent state
@@ -2078,7 +2177,7 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
     );
     // The resume is a completion step, not a second participant sweep.
     let before = transport.sends();
-    let page = drive_until(&served.handle, &mut client, DeletionPhaseWire::Completed)
+    let page = drive_until(served.handle(), &mut client, DeletionPhaseWire::Completed)
         .await
         .expect("the finalizing marker must resume to completion");
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
@@ -2132,7 +2231,7 @@ async fn render_single_pending_request(handle: &HostHandle) -> String {
 /// local-erasure demand is answered inline exactly as an interactive Client
 /// would. With no attached Client the demand resolves to an explicit hold.
 async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOperationRef {
-    let request = render_single_pending_request(&served.handle).await;
+    let request = render_single_pending_request(served.handle()).await;
     let dir = served.dir.clone();
     let outcome = match served.client.as_mut() {
         Some(client) => {
@@ -2278,7 +2377,7 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
     let current = confirm_deletion_via_serving_control(&mut served).await;
 
     // 4: the durable participant snapshot names the Client incarnation.
-    let page = local_deletion_page(&served.handle).await;
+    let page = local_deletion_page(served.handle()).await;
     let participant = client_incarnation_participant(&page)
         .expect("the durable snapshot must name the delivered Client incarnation");
     assert!(
@@ -2288,7 +2387,7 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
 
     // 6: the Client's local erasure confirmation verifies the participant and
     // the operation reaches the sealed global completion.
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
         .expect("the operation must complete");
@@ -2340,7 +2439,7 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     let _current = confirm_deletion_via_serving_control(&mut served).await;
 
     // 5: the unreachable Client is an explicit hold, never a completion.
-    let page = drive_until_local(&served.handle, DeletionPhaseWire::Held).await;
+    let page = drive_until_local(served.handle(), DeletionPhaseWire::Held).await;
     assert_ne!(
         page.operations[0].phase,
         DeletionPhaseWire::Completed,
@@ -2355,7 +2454,7 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     // tick may resume an Unavailable hold and re-demand the now-reachable
     // socket; this Client is not pumped, so that demand cannot verify.
     let replacement = connect(&served.dir).await;
-    let page = local_deletion_page(&served.handle).await;
+    let page = local_deletion_page(served.handle()).await;
     assert_ne!(
         page.operations[0].phase,
         DeletionPhaseWire::Completed,
@@ -2380,7 +2479,7 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     // recovery may resume the Unavailable hold and re-demand; this Client is
     // not pumped yet, so that demand cannot verify.
     let mut client = served.restart().await;
-    let page = local_deletion_page(&served.handle).await;
+    let page = local_deletion_page(served.handle()).await;
     assert_ne!(page.operations[0].phase, DeletionPhaseWire::Completed);
     let participant = client_incarnation_participant(&page)
         .expect("the Client participant must survive the restart");
@@ -2393,7 +2492,7 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
 
     // 6: the reconnected Client reads frames, answers the bounded demand, and
     // only then does the durable participant verify and completion commit.
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
         .await
         .expect("the reconnected Client must let the operation complete");
@@ -2475,7 +2574,7 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
 
     // The durable participant snapshot names the incarnation whose only
     // target-bearing delivery was the management Memory view.
-    let page = local_deletion_page(&served.handle).await;
+    let page = local_deletion_page(served.handle()).await;
     let participant = client_incarnation_participant(&page)
         .expect("the view-delivered Client incarnation is a required participant");
     assert!(
@@ -2491,7 +2590,7 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
 
     // The Client answers the bounded demand and only then does the operation
     // reach the sealed global completion.
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
         .expect("the operation must complete");
@@ -3669,7 +3768,7 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
         "the rotation waits for the Host-local approval, got {staged:?}"
     );
     transport.block_input(on_latest_owner(&parked_redacted));
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let barrier = Arc::clone(&transport);
     let mut parked = Box::pin(send_round_raw(served.client(), &parked_round));
     tokio::select! {
@@ -3756,7 +3855,7 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     // evidence and names the incarnation that received the copy before the
     // restart.
     let current = confirm_deletion_via_serving_control(&mut served).await;
-    let page = local_deletion_page(&served.handle).await;
+    let page = local_deletion_page(served.handle()).await;
     let participant = client_incarnation_participant(&page)
         .expect("the pre-restart delivery must stay a required participant");
     assert!(
@@ -3765,7 +3864,7 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     );
 
     // 5: the unreachable incarnation is an explicit hold, never a completion.
-    let page = drive_until_local(&served.handle, DeletionPhaseWire::Held).await;
+    let page = drive_until_local(served.handle(), DeletionPhaseWire::Held).await;
     assert_ne!(
         page.operations[0].phase,
         DeletionPhaseWire::Completed,
@@ -3779,7 +3878,7 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     );
     assert_eq!(
         served
-            .handle
+            .handle()
             .required_deletion_participants()
             .await
             .expect("the required snapshot must read")
@@ -3797,7 +3896,7 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     // identity). Only its verified local erasure lets the operation reach the
     // sealed global completion.
     let mut client = connect(&served.dir).await;
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
         .await
         .expect("the reconnected Client must let the operation complete");
@@ -3982,7 +4081,7 @@ async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase(
     // The second turn's provider call parks after its claim; its prompt read
     // the target-bearing History rows and the target-bearing Memory.
     transport.block_input(on_latest_owner(&second));
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let barrier = Arc::clone(&transport);
     let mut parked = Box::pin(send_round_raw(&mut client, &second));
     tokio::select! {
@@ -4090,7 +4189,7 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    confirm_deletion(&served.handle).await;
+    confirm_deletion(served.handle()).await;
     let sends_before = transport.sends();
     let (round, stream, reply) = send_round(served.client(), &second)
         .await
@@ -4112,7 +4211,7 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
     );
     assert_absent_all("dialogue provider input", &second_inputs, TARGET);
     // The operation completes and the completed surface stays clean.
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
         .expect("the operation must complete");
@@ -4302,7 +4401,7 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     confirm_deletion(&handle).await;
     let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
         .await
@@ -4496,7 +4595,7 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     confirm_deletion(&handle).await;
     // Admission cannot prove the discarded body was unrelated to the target,
     // so the occurrence stays deletion-relevant and the execution is held.
@@ -4643,7 +4742,7 @@ async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rew
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     confirm_deletion(&handle).await;
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
@@ -4734,7 +4833,7 @@ async fn stage6_observation_write_across_deletion_stays_old_origin() {
         .expect("workspace must select");
 
     served
-        .handle
+        .handle()
         .store_for_tests()
         .arm_observation_write_park_for_tests();
     let (round, stream, reply) =
@@ -4747,7 +4846,7 @@ async fn stage6_observation_write_across_deletion_stays_old_origin() {
     );
     confirm_round(served.client(), &round, stream).await;
     served
-        .handle
+        .handle()
         .store_for_tests()
         .wait_observation_write_park_for_tests()
         .await;
@@ -4772,7 +4871,7 @@ async fn stage6_observation_write_across_deletion_stays_old_origin() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     confirm_deletion(&handle).await;
     assert_eq!(
         transient_task_delegation_holds(&db),
@@ -4786,7 +4885,7 @@ async fn stage6_observation_write_across_deletion_stays_old_origin() {
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
 
     served
-        .handle
+        .handle()
         .store_for_tests()
         .release_observation_write_park_for_tests();
     wait_task_progress(served.client(), "completed", 1)
@@ -4971,7 +5070,7 @@ async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     confirm_deletion(&handle).await;
     let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
         .await
@@ -5209,7 +5308,7 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
         ),
         "the rotation waits for the Host-local approval, got {staged:?}"
     );
-    let handle = Arc::clone(&served.handle);
+    let handle = served.handle_arc();
     assert!(
         matches!(
             handle.approve_credential("openai", "rotated").await,

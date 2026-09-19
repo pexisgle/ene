@@ -548,6 +548,10 @@ pub struct HostHandle {
     /// cannot run after closure. A Host restart drops the in-flight work and
     /// resumes from durable store state.
     pub(crate) targeted_deletion_drive: AsyncMutex<()>,
+    /// Serving-composition Targeted Deletion drivers currently bound to this
+    /// handle. The listener owns at most one; aborting `conn::run` must drop
+    /// it so a successor Host is the only live driver.
+    deletion_drivers: std::sync::atomic::AtomicUsize,
     /// Invalidation fence for in-flight Host transient payloads (A3c).
     ///
     /// Bumped by the Host-transient erasure demand; a dialogue stream or
@@ -746,6 +750,7 @@ impl HostHandle {
             ),
             deletion_hold_retry: AsyncMutex::new(crate::targeted_deletion::HeldRetrySchedule::new()),
             targeted_deletion_drive: AsyncMutex::new(()),
+            deletion_drivers: std::sync::atomic::AtomicUsize::new(0),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
             #[cfg(test)]
@@ -886,6 +891,29 @@ impl HostHandle {
     #[doc(hidden)]
     pub fn store_for_tests(&self) -> &Store {
         &self.store
+    }
+
+    /// How many serving-composition Targeted Deletion drivers currently hold
+    /// this handle. Production keeps this at 0 or 1.
+    #[doc(hidden)]
+    pub fn live_targeted_deletion_drivers_for_tests(&self) -> usize {
+        self.deletion_drivers
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Marks a serving-composition Targeted Deletion driver as live on this
+    /// handle. Paired with [`Self::end_deletion_driver`] from the driver task
+    /// Drop, including abort, so a successor Host can observe that the
+    /// predecessor driver is gone.
+    pub(crate) fn begin_deletion_driver(&self) {
+        self.deletion_drivers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Marks that serving-composition Targeted Deletion driver as gone.
+    pub(crate) fn end_deletion_driver(&self) {
+        self.deletion_drivers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Resolves an inbound companion wire ref to its domain companion.

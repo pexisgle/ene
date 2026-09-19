@@ -776,8 +776,59 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
     UnixListener::bind(socket).map_err(|error| CoreError::Bind(format!("bind: {error}")))
 }
 
-/// Starts the process-lifetime Targeted Deletion driver for the serving
-/// composition (lifecycle §14).
+/// Cancels a Tokio task when dropped.
+///
+/// `conn::run` keeps the Targeted Deletion driver JoinHandle in this guard
+/// for the accept-loop lifetime. Aborting or dropping the listener must
+/// abort the driver so it cannot keep a predecessor [`HostHandle`] alive
+/// after serving has ended.
+#[must_use = "dropping this guard aborts the Targeted Deletion driver"]
+#[cfg(any(unix, windows))]
+struct AbortOnDrop<T> {
+    task: tokio::task::JoinHandle<T>,
+}
+
+#[cfg(any(unix, windows))]
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Publishes this handle's serving-composition driver liveness from first
+/// poll until the driver task is dropped, including abort.
+///
+/// Liveness is recorded here rather than at `tokio::spawn` so a never-polled
+/// aborted task does not look alive, and so Drop of the task future is what
+/// clears the count.
+#[must_use = "the driver liveness ends when this guard is dropped"]
+#[cfg(any(unix, windows))]
+struct DeletionDriverLive {
+    handle: Arc<HostHandle>,
+}
+
+#[cfg(any(unix, windows))]
+impl DeletionDriverLive {
+    fn enter(handle: Arc<HostHandle>) -> Self {
+        handle.begin_deletion_driver();
+        Self { handle }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Drop for DeletionDriverLive {
+    fn drop(&mut self) {
+        self.handle.end_deletion_driver();
+    }
+}
+
+/// Starts the serving-composition Targeted Deletion driver (lifecycle §14).
+///
+/// The returned guard is the driver's lifetime: `conn::run` must keep it
+/// across the accept loop so a normal return, error, abort, or drop of the
+/// listener also cancels the driver and releases its [`HostHandle`]. Aborting
+/// the driver does not cancel durable operations; a successor Host resumes
+/// them from SQLite through startup recovery.
 ///
 /// The driver is the production caller of the bounded fan-out tick
 /// ([`HostHandle::run_targeted_deletion_tick`]): each period it runs at most
@@ -788,9 +839,11 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
 /// behind erasure work. A failed tick stops nothing and infers no outcome —
 /// there is no logging subsystem, the durable operation state stays
 /// authoritative, and the next period re-derives it.
+#[must_use = "the driver is cancelled when this guard is dropped; bind it for the listener lifetime"]
 #[cfg(any(unix, windows))]
-fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) {
-    tokio::spawn(async move {
+fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> AbortOnDrop<()> {
+    let task = tokio::spawn(async move {
+        let _live = DeletionDriverLive::enter(Arc::clone(&handle));
         let mut period = tokio::time::interval_at(
             tokio::time::Instant::now() + DELETION_DRIVE_PERIOD,
             DELETION_DRIVE_PERIOD,
@@ -805,6 +858,7 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) {
             drop(handle.run_targeted_deletion_tick().await);
         }
     });
+    AbortOnDrop { task }
 }
 
 /// Serves the Unix socket listener until the process ends.
@@ -815,8 +869,10 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) {
 /// The Host-local first-party control endpoint is bound in the same task and
 /// served by the same accept loop, so it lives and dies with this listener
 /// (one abort releases both). There is no shutdown signal in `Stage 2`: the
-/// future resolves only on bind failure; otherwise it runs until killed. The
-/// handle is shared by reference (`Arc` with `&self` methods), so no
+/// future resolves only on bind failure; otherwise it runs until killed.
+/// Dropping or aborting this future also aborts the Targeted Deletion
+/// driver it owns: that driver must not outlive the serving composition.
+/// The handle is shared by reference (`Arc` with `&self` methods), so no
 /// handle-wide lock spans provider I/O.
 ///
 /// # Errors
@@ -858,9 +914,9 @@ where
     // connection table are alive (lifecycle §8.1, PR §6.4).
     let control =
         crate::host_control::ControlListener::bind(&data_dir, Arc::clone(&handle)).await?;
-    // The single serving driver continues unfinished Targeted Deletion
-    // operations across the process lifetime (lifecycle §14).
-    spawn_targeted_deletion_driver(Arc::clone(&handle));
+    // Bound to this future: dropping or aborting `run` must abort the driver
+    // so a successor Host is the only process-local drive domain.
+    let _deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -1282,9 +1338,10 @@ async fn serve_connection<S, T>(
 /// proves each peer with the OS token check, and spawns one frame-loop task
 /// per authorized connection over the shared [`HostHandle::handle_frame`]
 /// seam. There is no shutdown signal in `Stage 2`: the future resolves only
-/// on creation failure; otherwise it runs until killed. Behavior beyond
-/// creation is Windows-unverified on this Linux host (see
-/// [`crate::conn_pipe`]).
+/// on creation failure; otherwise it runs until killed. Dropping or aborting
+/// this future also aborts the Targeted Deletion driver it owns, matching
+/// the Unix listener. Behavior beyond creation is Windows-unverified on this
+/// Linux host (see [`crate::conn_pipe`]).
 ///
 /// # Errors
 ///
@@ -1317,8 +1374,8 @@ where
     // check as the Unix path; the Owner's Targeted Deletion confirmation
     // must run in this serving process (lifecycle §8.1, PR §6.4).
     let mut control = crate::host_control::ControlListener::bind(&data_dir, Arc::clone(&handle))?;
-    // Same process-lifetime Targeted Deletion driver as the Unix listener.
-    spawn_targeted_deletion_driver(Arc::clone(&handle));
+    // Same serving-composition driver lifetime as the Unix listener.
+    let _deletion_driver = spawn_targeted_deletion_driver(Arc::clone(&handle));
     loop {
         tokio::select! {
             connected = server.connect() => {
