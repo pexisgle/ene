@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use ene_api::v1::deletion::ClientTempClass;
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::payload::{BodyStateHint, WirePayload};
-use ene_api::v1::presence::PresenceAttributionWire;
+use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
 use ene_plugin_ipc::WireFrame;
@@ -46,6 +46,7 @@ pub const DEFERRED_CAP: usize = 32;
 #[derive(Clone, PartialEq, Default)]
 pub struct SessionState {
     generation: Option<u64>,
+    presence: Option<PresenceStateWire>,
     /// Companion projection to echo on submits and history requests so the
     /// Host resolves them through its mapping.
     companion: Option<String>,
@@ -59,6 +60,7 @@ impl core::fmt::Debug for SessionState {
         formatter
             .debug_struct("SessionState")
             .field("generation", &self.generation)
+            .field("presence", &self.presence)
             .field("companion", &self.companion)
             .field("connection_id", &self.connection_id)
             .field(
@@ -73,6 +75,12 @@ impl core::fmt::Debug for SessionState {
 impl SessionState {
     pub fn generation(&self) -> Option<u64> {
         self.generation
+    }
+
+    /// Latest Host presence state, if a fact has been absorbed.
+    #[must_use]
+    pub fn presence_state(&self) -> Option<PresenceStateWire> {
+        self.presence
     }
 
     pub fn set_connection(&mut self, connection_id: ConnectionWireId) {
@@ -95,6 +103,7 @@ impl SessionState {
     /// Host's current mapping instead of guessing.
     pub fn observe_presence(&mut self, fact: &PresenceAttributionWire) {
         self.generation = Some(fact.generation);
+        self.presence = Some(fact.state);
         self.companion = Some(fact.companion.0.clone());
     }
 

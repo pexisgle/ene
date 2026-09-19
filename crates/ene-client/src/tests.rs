@@ -195,7 +195,16 @@ fn session_starts_unobserved_and_tracks_latest() {
         session.generation().is_none(),
         "a new session observed nothing yet"
     );
+    assert!(
+        session.presence_state().is_none(),
+        "missing presence is not Stopped"
+    );
     session.observe_presence(&presence_fact(4));
+    assert_eq!(
+        session.presence_state(),
+        Some(PresenceStateWire::Present),
+        "presence state is observed, not invented"
+    );
     assert!(
         session.generation() == Some(4),
         "the fact generation becomes current"

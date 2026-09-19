@@ -343,6 +343,12 @@ impl Client {
         self.state.companion_ref()
     }
 
+    /// Latest absorbed presence state. Missing means no fact yet, not Stopped.
+    #[must_use]
+    pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
+        self.state.presence_state()
+    }
+
     /// Drains deferred auto-presented summaries the Host pushed without
     /// `reply_to`. The caller paints each and ACKs the receipts it fully
     /// painted.
@@ -649,6 +655,12 @@ impl Client {
     /// attributing through it.
     pub fn companion_ref(&self) -> String {
         String::from(crate::DEFAULT_COMPANION_REF)
+    }
+
+    /// No session observes presence on this platform.
+    #[must_use]
+    pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
+        None
     }
 }
 
