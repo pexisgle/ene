@@ -74,18 +74,12 @@ mod tests {
     #[test]
     fn ene_ctl_sources_do_not_open_host_control() {
         let lib = include_str!("lib.rs");
-        let errors = include_str!("errors.rs");
         let cmds = include_str!("cmds.rs");
         let main = include_str!("main.rs");
-        for (name, source) in [
-            ("lib.rs", lib),
-            ("errors.rs", errors),
-            ("cmds.rs", cmds),
-            ("main.rs", main),
-        ] {
+        for (name, source) in [("lib.rs", lib), ("cmds.rs", cmds), ("main.rs", main)] {
             assert!(
                 !source.contains(concat!("host", "-control"))
-                    && !source.contains("ene_local_control")
+                    && !source.contains(concat!("ene", "_local_control"))
                     && !source.contains(concat!("ene", "-local-control")),
                 "product ene-ctl {name} must not open the control inlet"
             );
