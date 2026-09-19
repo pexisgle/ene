@@ -777,7 +777,19 @@ impl HostHandle {
     /// Returns [`CoreError::Store`] when the directory cannot be ensured or
     /// the database cannot be opened or migrated.
     pub async fn open(data_dir: &Path) -> Result<Self, CoreError> {
-        Self::open_with_cred_store(data_dir, CredStore::Env(EnvCredentialStore::new())).await
+        // The product path prefers the OS protected store: credentials are
+        // published as versions there, and a Host without one reports
+        // registration as unavailable rather than pretending. The environment
+        // store stays available for development and for the existing env-based
+        // deployments, where the value is pinned at startup.
+        let store = if std::env::var(ene_credential::ENV_API_KEY).is_ok() {
+            CredStore::Env(EnvCredentialStore::new())
+        } else {
+            CredStore::Os(ene_credential::OsCredentialStore::new(
+                ene_credential::DEFAULT_NAMESPACE,
+            ))
+        };
+        Self::open_with_cred_store(data_dir, store).await
     }
 
     /// Runs the serving startup mutations in production order (PR §6.4):
@@ -815,6 +827,7 @@ impl HostHandle {
     pub async fn run_startup_mutations(&self) -> Result<(), CoreError> {
         self.normalize_presence_on_startup().await?;
         self.clear_unapproved_pendings().await?;
+        self.reconcile_credential_publication().await?;
         self.sweep_registered_values().await?;
         self.reconcile_sealed_results()
             .await
@@ -824,6 +837,56 @@ impl HostHandle {
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
         self.recover_targeted_deletion_on_startup().await?;
+        Ok(())
+    }
+
+    /// Reconciles the credential publication state before the Host serves.
+    ///
+    /// Every registered credential's active version is read from the durable
+    /// record and pointed at in the OS store, so routine authentication reads
+    /// the version the last activation committed. A registered credential
+    /// whose item is missing or unreadable stays **unactive**: the Host fails
+    /// closed for it rather than falling back to an older value, an environment
+    /// variable, or a different provider.
+    ///
+    /// An unfinished mutation is deliberately left alone. `Prepared` and
+    /// `Staged` records may have written an OS item, so they are neither
+    /// activated nor re-written here: an unknown write result is reconciled by
+    /// inspection, never by repeating the write, and a restart never applies a
+    /// past decision the Owner did not make.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Store`] when the durable records cannot be read.
+    pub async fn reconcile_credential_publication(&self) -> Result<(), CoreError> {
+        use ene_credential::{CredentialPublicationRepository as _, VersionedCredentialStore as _};
+
+        if !self.cred_store.supports_versions() {
+            return Ok(());
+        }
+        let refs = ene_credential::CredentialRefRepository::list_refs(&self.store)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        for credential in refs {
+            let active = self
+                .store
+                .active_credential_version(credential.provider(), credential.label())
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            let Some(version) = active.active else {
+                continue;
+            };
+            // Verify the item before pointing reads at it: an activated
+            // version whose value the OS store no longer holds must read as
+            // unavailable, not as an empty or older credential.
+            let readable = self
+                .cred_store
+                .with_version(&credential, version.as_u64(), |_| ())
+                .is_ok();
+            if readable {
+                self.cred_store.activate(&credential, version.as_u64());
+            }
+        }
         Ok(())
     }
 
