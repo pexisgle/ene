@@ -413,9 +413,22 @@ impl DesktopRuntime {
 
     pub async fn reconnect(&mut self) -> Result<(), DesktopError> {
         self.client = None;
-        let client = session::connect(&self.data_dir, DESKTOP_DESCRIPTOR, None)
-            .await
-            .map_err(DesktopError::Client)?;
+        let mut attempts = 0_u8;
+        let client = loop {
+            match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR, None).await {
+                Ok(client) => break client,
+                Err(ene_client::error::ClientError::Transport(error)) => {
+                    attempts = attempts.saturating_add(1);
+                    if attempts >= 80 {
+                        return Err(DesktopError::Client(
+                            ene_client::error::ClientError::Transport(error),
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(DesktopError::Client(error)),
+            }
+        };
         self.client = Some(client);
         self.connection = i18n::label(self.locale, Label::Connected);
         self.pull_presence();

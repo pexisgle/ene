@@ -142,7 +142,10 @@ async fn open_host(dir: &Path) -> Arc<HostHandle> {
 async fn wait_for_control(dir: &Path) -> bool {
     for _ in 0..200 {
         #[cfg(unix)]
-        if host_control::control_socket_path(dir).exists() {
+        if tokio::net::UnixStream::connect(host_control::control_socket_path(dir))
+            .await
+            .is_ok()
+        {
             return true;
         }
         #[cfg(windows)]
