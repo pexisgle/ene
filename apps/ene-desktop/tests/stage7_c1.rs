@@ -540,13 +540,50 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
     say(&mut desktop, &format!("remember my key {SECRET}")).await;
     transport.wait_learning().await;
     wait_for_memory(&mut desktop, "[credential]").await;
+    desktop
+        .refresh_history()
+        .await
+        .expect("history after secret");
+    let redacted_id = desktop
+        .memory()
+        .rows()
+        .iter()
+        .find(|row| row.content.contains("[credential]"))
+        .expect("redacted memory")
+        .id
+        .clone();
+    desktop
+        .open_memory_revisions(&redacted_id)
+        .await
+        .expect("redacted revisions");
     let snap = desktop.snapshot();
     assert!(
-        !snap.contains_secret(SECRET),
-        "registered secret must not appear in GUI state"
+        snap.memories
+            .iter()
+            .all(|row| !row.content.contains(SECRET))
+            && snap.memory_revisions.iter().all(|revision| {
+                !revision.content.contains(SECRET)
+                    && revision
+                        .grounds
+                        .as_deref()
+                        .is_none_or(|grounds| !grounds.contains(SECRET))
+            })
+            && !snap.memory_panel.contains(SECRET)
+            && snap.history.iter().all(|line| !line.contains(SECRET)),
+        "Host Memory and History must not keep the registered secret: {}",
+        snap.memory_panel
     );
-    let debug = format!("{snap:?}");
-    assert!(!debug.contains(SECRET), "Debug of snapshot must not leak");
+    let memory_debug = format!("{:?}", desktop.memory());
+    assert!(
+        !memory_debug.contains(SECRET),
+        "Memory page Debug must not leak: {memory_debug}"
+    );
+    for (position, input) in transport.all_inputs().iter().enumerate() {
+        assert!(
+            !input.contains(SECRET),
+            "provider input {position} must not carry the credential"
+        );
+    }
     assert!(
         !snap.memory_panel.contains(SECRET),
         "the memory panel must not show the secret: {}",
