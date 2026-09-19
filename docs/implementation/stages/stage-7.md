@@ -224,3 +224,17 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 `ene-local-control` は要求専用 listener（`ToHost` / `FromHost`: 要求と非秘密の request state。challenge・秘密・completion の frame 型を持たない）と、Host が起動した GUI にだけ渡す専用確認 channel（`ToConfirmation` / `FromConfirmation`）に分離した。seat は Host の spawn から発行し、空席の先着では取得できない。`ene-core approve-*` は requester であり、pairing secret も credential 生値もその stdout / outcome には出ない。offline mutation fallback は削除した。
 
 初回 pairing の認証専用 provision frame（IPC §9.2）は未実装。現在 pairing secret は Host-spawned GUI の確認 channel に届き、Client 側は `ENE_PAIRING_SECRET` / GUI の `connect_with_bootstrap` 経路のままである。この差分は A1 の残作業として残す。
+
+#### A1c: credential publication（実装済み）
+
+`SecretVersionId` は値から導出しない採番であり、OS item は installation namespace と version ごとに作る。`credential_mutation` は attempt を write-once で記録し、`credential_active` は active / retired version だけを持つ（どちらも非秘密）。`activate_credential` は一つの transaction で、候補と置換対象の sweep、usable ref、active version、credential-set revision、`Activated` とその outcome を一緒に commit する。前提 revision が動いていれば候補は adopt せず sweep し、`Stale` を durable に残すので retry は保存済みの決定を返す。
+
+実 OS store adapter は `keyring` 経由で version item を作り、素の `put` を拒否する（owner の publish→activate だけが値を usable にする）。起動時は登録済み credential の active version を durable 記録から読み、item が読めることを確認してから adapter を向ける: 読めない active version は unactive のままにする。未完了 mutation（`Prepared` / `Staged`）は再実行も activate もしない。
+
+Windows Credential Manager での probe は成功（version 作成・読み戻し・上書き拒否・activate・削除）。Linux Secret Service は adapter を実装済みだが、この環境に service が無いため probe は 未実施であり、合格とは書かない。
+
+#### 未実施のまま残るもの
+
+- 実 overlay: `apps/ene-body` の overlay backend は Headless のまま（Windows DWM / KDE layer-shell は `NotRun`）。VM runtime / SpringBone / 表情も未実装。
+- 公式同梱 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）。
+- Windows 11 実機 acceptance と Performance Gate（idle CPU / resident / 実表示 FPS / 1 秒受付）。

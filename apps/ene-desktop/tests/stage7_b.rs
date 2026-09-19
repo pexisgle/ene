@@ -224,6 +224,54 @@ async fn register_only_makes_zero_provider_calls() {
     server.shutdown_and_join().await;
 }
 
+/// A restarted GUI reconnects as the device it already paired, instead of
+/// reopening a pairing request the Host would have to approve again.
+///
+/// This is the reported P1: the restart used to dial, succeed, and turn that
+/// success into the error "pairing was expected to pend", leaving the window on
+/// the language page with `connecting / unknown` forever. A fresh runtime on
+/// the same data directory is what the product restart is.
+#[tokio::test]
+async fn a_restarted_gui_reconnects_instead_of_reopening_pairing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["still here"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+
+    // First run: pair, so a device file exists for the restart to use.
+    let mut first = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_seat(&mut first, &handle).await;
+    assert!(
+        first.surface_snapshot().connected,
+        "the paired GUI must be connected"
+    );
+    drop(first);
+
+    // Restart: a new process with the same data directory, which is what the
+    // user sees when they close and reopen the GUI while the Host keeps
+    // serving.
+    let channel = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
+    let mut restarted = DesktopRuntime::new(dir.path().to_path_buf());
+    restarted
+        .attach_confirmation(channel)
+        .expect("the private channel is the seat");
+    restarted
+        .connect_or_begin_pairing()
+        .await
+        .expect("a paired GUI must reconnect");
+    assert!(
+        restarted.surface_snapshot().connected,
+        "the restart must present the Host's current state, not a pending pairing"
+    );
+    assert_ne!(
+        restarted.snapshot().page,
+        "Confirm",
+        "an already-paired GUI must not ask the Owner to confirm pairing again"
+    );
+    server.shutdown_and_join().await;
+}
+
 #[tokio::test]
 async fn assignment_then_chat_and_locale_and_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
