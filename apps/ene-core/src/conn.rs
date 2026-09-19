@@ -48,7 +48,7 @@
 //! presentation memory → Task execution registry → SQLite.
 //!
 //! Same-user proof without new dependencies: after binding, the listener reads
-//! the socket file owner through [`MetadataExt::uid`](std::os::unix::fs::MetadataExt)
+//! the socket file owner through [`MetadataExt::uid`]
 //! (created by this process inside the `0700` data directory, so its owner is
 //! the Host user) and compares it against each peer credential uid from
 //! [`tokio::net::UnixStream::peer_cred`]. A mismatch, or an unreadable peer
@@ -74,7 +74,8 @@
 //!
 //! [`LiveInput::peer_uid_ok`]: crate::serve::LiveInput::peer_uid_ok
 //! [`LiveInput`]: crate::serve::LiveInput
-//! [`MetadataExt::uid`](std::os::unix::fs::MetadataExt): <https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html>
+//! [`MetadataExt::uid`]: https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html#tymethod.uid
+//! [`tokio::net::UnixStream::peer_cred`]: https://docs.rs/tokio/latest/tokio/net/struct.UnixStream.html#method.peer_cred
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1619,8 +1620,8 @@ async fn drain_learning(
 /// the 15s Targeted Deletion driver keeps running until the process is
 /// killed. Dropping or aborting this future still aborts that driver as an
 /// emergency stop; graceful restart uses [`run_until_shutdown`] so a running
-/// tick can finish its started Store work. Behavior beyond creation is
-/// Windows-unverified on this Linux host (see [`crate::conn_pipe`]).
+/// tick can finish its started Store work. The same shutdown regressions
+/// exercise the Unix socket and Windows named-pipe transports.
 ///
 /// # Errors
 ///
