@@ -69,8 +69,8 @@ jobs:
         with:
           cache-on-failure: false
           save-if: true
-      - uses: taiki-e/install-action@nextest
-      - name: Build workspace binaries
-        run: cargo build --locked --workspace --bins
+      # nextest overlaps binaries enough to make Windows rename+read of the
+      # device file return Unreadable (ene-client concurrent_stores test).
+      # cargo test is the proven-green runner on this OS.
       - name: Run tests
-        run: cargo nextest run --locked --workspace --no-fail-fast
+        run: cargo test --locked --workspace
