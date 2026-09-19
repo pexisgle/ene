@@ -482,11 +482,15 @@ mod tests {
     }
 
     /// A frame whose declared length is not there ends the channel rather than
-    /// guessing at partial content.
+    /// guessing at partial content. A truncated body is a transport failure,
+    /// not a message: the reader reports it and the caller closes the channel.
     #[test]
     fn a_truncated_frame_ends_the_channel() {
         let mut cursor = std::io::Cursor::new(vec![0_u8, 0, 0, 8, b'x']);
-        let decoded: Option<ToConfirmation> = read_frame(&mut cursor).expect("read");
-        assert_eq!(decoded, None);
+        let decoded: Result<Option<ToConfirmation>, _> = read_frame(&mut cursor);
+        assert!(
+            decoded.is_err(),
+            "a truncated body must surface as a failure, got {decoded:?}"
+        );
     }
 }

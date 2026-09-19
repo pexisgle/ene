@@ -218,3 +218,9 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 | `PROGRESS.md` | current / completed / blocker / next の短い index のみ。Stage 6 完了前に Stage 7 を current としない |
 
 次に残る検証は Windows 11、overlay / VRM / IME、Performance Gate。Linux 自動テストと X11 GUI の記録は [reports/stage-7-linux-2026-09-19.md](../reports/stage-7-linux-2026-09-19.md)。NixOS 26.11 を Linux 検証の完了条件にしない。
+
+### A1 trust boundary の実装状況（2026-09-20）
+
+`ene-local-control` は要求専用 listener（`ToHost` / `FromHost`: 要求と非秘密の request state。challenge・秘密・completion の frame 型を持たない）と、Host が起動した GUI にだけ渡す専用確認 channel（`ToConfirmation` / `FromConfirmation`）に分離した。seat は Host の spawn から発行し、空席の先着では取得できない。`ene-core approve-*` は requester であり、pairing secret も credential 生値もその stdout / outcome には出ない。offline mutation fallback は削除した。
+
+初回 pairing の認証専用 provision frame（IPC §9.2）は未実装。現在 pairing secret は Host-spawned GUI の確認 channel に届き、Client 側は `ENE_PAIRING_SECRET` / GUI の `connect_with_bootstrap` 経路のままである。この差分は A1 の残作業として残す。
