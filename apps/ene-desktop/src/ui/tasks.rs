@@ -171,7 +171,7 @@ impl TaskPanel {
         };
         self.items = page.tasks;
         if let Some(shown) = &self.displayed {
-            let still = self.items.iter().any(|item| item.task.0 == shown.task);
+            let still = self.items.iter().any(|item| same_listed_task(item, shown));
             if !still {
                 self.clear_selection_body();
             } else {
@@ -521,7 +521,7 @@ impl TaskPanel {
         let Some(shown) = &mut self.displayed else {
             return;
         };
-        if let Some(item) = self.items.iter().find(|item| item.task.0 == shown.task) {
+        if let Some(item) = self.items.iter().find(|item| same_listed_task(item, shown)) {
             shown.progress = item.progress.clone();
             shown.running = item.running;
         }
@@ -538,6 +538,14 @@ fn list_line(item: &TaskListItem) -> String {
 
 fn is_interrupted(shown: &DisplayedTask) -> bool {
     shown.progress == "in_progress" && !shown.running
+}
+
+fn same_listed_task(item: &TaskListItem, shown: &DisplayedTask) -> bool {
+    item.task.0 == shown.task || task_key(&item.purpose) == task_key(&shown.purpose)
+}
+
+fn task_key(purpose: &str) -> Option<&str> {
+    purpose.split_once(':').map(|(task, _)| task)
 }
 
 fn resume_from_displayed(shown: &DisplayedTask, instruction: String) -> ResumeTask {
@@ -671,9 +679,9 @@ async fn request(client: &mut Client, payload: WirePayload) -> Result<WirePayloa
 mod tests {
     use super::{
         DisplayedTask, ResumeTaskOutcomeWire, is_interrupted, resume_from_displayed, resume_label,
-        task_id_from_purpose,
+        same_listed_task, task_id_from_purpose,
     };
-    use ene_api::v1::undelivered::TaskWireRef;
+    use ene_api::v1::undelivered::{TaskListItem, TaskWireRef};
 
     fn shown(revision: u64) -> DisplayedTask {
         DisplayedTask {
@@ -735,6 +743,21 @@ mod tests {
         let id = task_id_from_purpose("01234567-89ab-cdef-0123-456789abcdef:3")
             .expect("purpose identity parses");
         assert_eq!(id.to_string(), "01234567-89ab-cdef-0123-456789abcdef");
+    }
+
+    #[test]
+    fn list_refresh_keeps_the_displayed_premise_when_wire_refs_rotate() {
+        let shown = shown(1);
+        let mut rotated = TaskListItem {
+            task: TaskWireRef(String::from("wire-2")),
+            revision: 2,
+            progress: String::from("in_progress"),
+            running: true,
+            purpose: shown.purpose.clone(),
+        };
+        assert!(same_listed_task(&rotated, &shown));
+        rotated.purpose = String::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:4");
+        assert!(!same_listed_task(&rotated, &shown));
     }
 
     #[test]
