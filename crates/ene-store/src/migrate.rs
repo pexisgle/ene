@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 36;
+const CURRENT_VERSION: i64 = 37;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -55,6 +55,29 @@ UNIQUE (provider, label)
 CREATE TABLE credential_set (
 id INTEGER PRIMARY KEY CHECK (id = 1),
 rev INTEGER NOT NULL
+);
+-- Credential publication (Stage 7 A1c): one row per registration attempt and
+-- one row per credential's active version. No secret value, hash, or
+-- encryption body is stored here: the OS item holds the value, and this table
+-- holds only the non-secret references the recovery path reconciles.
+CREATE TABLE credential_mutation (
+mutation_id TEXT PRIMARY KEY,
+op TEXT NOT NULL,
+provider TEXT NOT NULL,
+label TEXT NOT NULL,
+expected_revision INTEGER NULL,
+candidate_version INTEGER NULL,
+phase TEXT NOT NULL,
+decided_outcome TEXT NULL,
+decided_revision INTEGER NULL,
+created_at TEXT NOT NULL
+);
+CREATE TABLE credential_active (
+provider TEXT NOT NULL,
+label TEXT NOT NULL,
+active_version INTEGER NULL,
+cleanup_version INTEGER NULL,
+PRIMARY KEY (provider, label)
 );
 CREATE TABLE delegation (
 delegation_id TEXT PRIMARY KEY,
@@ -634,7 +657,9 @@ mod tests {
                 .unwrap(),
             7
         );
-        for version in [-1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35] {
+        for version in [
+            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+        ] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());
             assert_eq!(

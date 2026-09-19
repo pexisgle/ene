@@ -163,7 +163,7 @@ const SWEEP_TARGETS: &[(&str, &str)] = &[
 /// credential-derived fragments the replace cannot see. Only memories whose
 /// pre-sweep content held the bearer are rebuilt; the common case stays one
 /// cheap probe select.
-fn sweep_registered_secret(
+pub(crate) fn sweep_registered_secret(
     tx: &rusqlite::Transaction<'_>,
     bearer: &str,
 ) -> Result<(), CredentialTechnicalError> {

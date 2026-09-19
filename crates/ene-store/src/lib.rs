@@ -28,6 +28,7 @@ mod client_delivery;
 mod codec;
 mod companion;
 mod credential;
+mod credential_publication;
 mod erasure;
 mod inference;
 mod learning;

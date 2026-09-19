@@ -24,6 +24,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rmp-serde = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
+# Real OS credential store adapter for the first-party GUI setup path
+# (Windows Credential Manager, Linux Secret Service). Provisional per
+# first-party-desktop §7.4; the port and its fault-injection tests stay
+# independent of it.
+keyring = { version = "4", default-features = false, features = ["v1"] }
 # Provisional preferred text GUI for `apps/ene-desktop` only (winit,
 # Royalty-free Desktop + AboutSlint). Not a Host or Body dependency.
 slint = { version = "1.14", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "unstable-winit-030", "accessibility"] }

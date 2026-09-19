@@ -1,4 +1,5 @@
 use crate::Store;
+mod publication;
 use ene_companion::{
     ActivityId, ActivityRepository as _, AppendHistoryCommand, CommandId, CompanionId,
     CompanionLifecycle, CompanionRepository, CompanionTechnicalError, HistoryAppendOutcome,

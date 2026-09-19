@@ -1087,6 +1087,7 @@ impl HostHandle {
             let source = match &self.cred_store {
                 CredStore::Env(_) => "env-sourced",
                 CredStore::Memory(_) => "memory",
+                CredStore::Os(_) => "os-protected-store",
             };
             let (provider_text, model_text, consent_text) = match &dialogue {
                 Some(record) => (
