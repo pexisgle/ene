@@ -6,10 +6,8 @@
 
 - **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A0 設計整理済み、A1 は PR、B (`ene-desktop`) 実装中**
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
-  - 次の production slice は **F: Milestone 1 の実機 acceptance / performance**。E は GUI の提示・一時データ・障害経路を実装。Stage 7 は完了しない。
-  - D renderer-core は `apps/ene-body` に投影 IPC と headless pose/health を追加するが、overlay / VRM runtime / SpringBone / IME / NixOS 26.11 の技術成立 probe は未実施。acceptance §2 と Stage 7 完了にはしない。
-  - GUI・秘密入力・OS 保護ストア・overlay / VRM の技術成立 probe は未実施。slice F まで Stage 7 を完了としない。
-  - 公式同梱 `ene` VRM は未投入（[#1651](https://github.com/pexisgle/ene/issues/1651)）。placeholder を製品キャラクターとして扱わない。
+  - Linux 検証は Cloud Agent 上の Ubuntu 24.04 X11 で実施済み（[報告](reports/stage-7-linux-2026-09-19.md)）。NixOS 26.11 を待たない。Stage 7 は完了しない。
+  - 残件: Windows 11、KDE Wayland overlay / IME、公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）、Performance Gate。placeholder を製品キャラクターとして扱わない。
 
 ## 完了したステージ (Completed)
 
@@ -25,7 +23,7 @@
 
 - **現在ブロッカーはありません。**
 - 個別の非ブロッキングな設計・実装フォローアップは GitHub Issues で管理します。
-- Stage 7 の実機 acceptance / 性能検証は未実施です。正式版 NixOS 26.11 KDE Wayland での最終 acceptance は slice F の完了条件であり、それ以前の slice の着手条件ではありません。
+- Stage 7 の Linux 自動テストと X11 GUI 操作は [Linux 報告](reports/stage-7-linux-2026-09-19.md) にある。Windows 11、overlay / IME、Performance Gate は未実施。
 
 ## 次のステージ (Next Stage)
 

@@ -6,11 +6,11 @@
 
 ## 結論
 
-**Linux の最終 acceptance は未合格。NixOS 26.11 / KDE Wayland / 公式 VRM / Performance Gate / Milestone 1 は合格としていない。**
+**この Cloud Agent の Linux（Ubuntu 24.04.4 LTS、X11 XFCE）を、本マイルストーンの Linux 検証として記録する。NixOS 26.11 公式 desktop を待たない（検証対象の読み替え）。26.11 合格とは書かない。**
 
 この VM で Stage 7 の自動テスト（A1 / B / C1 / C2 / C3 / E、および Stage 6 e2e）は成功した。X11 XFCE 上で製品 `ene-desktop` を操作し、ウィザード事実、ページ切替、日英切替、Body 殺害後の chat 入力面を確認した。
 
-KDE Wayland ではない。overlay / IME / layer-shell / 透過 Body / 公式 ene VRM は **未実施**。headless CI と X11 成功を KDE Wayland 合格にしない。
+KDE Wayland ではない。overlay / IME / layer-shell / 透過 Body / 公式 ene VRM は **未実施**。headless CI と X11 成功を KDE Wayland overlay 合格にしない。Performance Gate と Windows 11 は別途残る。Stage 7 / Milestone 1 は完了としない。
 
 実画面で再現した GUI の不具合（stale snapshot、stretched nav、`CredentialRefused` の誤表示）は F branch で直した。Windows 報告の P1（再起動で接続回復しない、Wizard 復帰不能）と UI 品質指摘は、この Linux 修正の対象外として残る。
 
@@ -81,7 +81,7 @@ Windows 報告 §「画面構成・余白」の stretched nav は、Linux X11 �
 
 ## 性能（non-gate。合格と書かない）
 
-first-party-desktop 第8節の方法（5 分 idle、release、presented FPS、NixOS 26.11 KDE Wayland、通常 avatar 表示）は満たしていない。debug build。Body は Headless + GPU skip。`measure.rs` の verdict は `Unmeasured`。
+first-party-desktop 第8節の方法（5 分 idle、release、presented FPS、通常 avatar 表示）は満たしていない。debug build。Body は Headless + GPU skip。`measure.rs` の verdict は `Unmeasured`。Linux 検証の記録環境は本 VM であり、NixOS 26.11 上の測定ではない。
 
 30 秒 `/proc` サンプル（Host + desktop + Body、全 PID、Body 除外なし）:
 
@@ -99,13 +99,12 @@ first-party-desktop 第8節の方法（5 分 idle、release、presented FPS、Ni
 
 ## 未実施のまま残すもの
 
-- NixOS 26.11 公式 acceptance
-- KDE Wayland overlay / IME / layer-shell / click-through
+- KDE Wayland overlay / IME / layer-shell / click-through（本 Linux 検証は X11 XFCE）
 - 公式同梱 `ene` VRM（#1651）
 - Windows 11 最終 acceptance（別報告。この VM ではない）
 - 製品 OS credential store の put / read-back
 - 実 provider 会話、Memory 形成、Task 実行、削除確定の GUI E2E
-- Performance Gate
+- Performance Gate（第8節の測り方。下記 30s サンプルは非ゲート）
 - Stage 7 complete / Milestone 1 / Stage 8
 
-`PROGRESS.md` は更新していない。
+Linux 側の自動テストと X11 製品 GUI 操作は本報告が証拠である。`PROGRESS.md` は Linux 検証済みと残件だけを短く指す。
