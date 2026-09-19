@@ -1,12 +1,13 @@
 //! Testable desktop runtime. Host I/O never runs inside [`DesktopRuntime::tick`].
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ene_api::v1::management::ManagementOutcome;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::round::HistoryItem;
 use ene_client::Client;
-use ene_local_control::{ControlOutcome, FromHost};
+use ene_local_control::{ControlOp, ControlOutcome, FromHost};
 use zeroize::Zeroize as _;
 
 use crate::body_supervise::{BodyStatus, BodySupervisor};
@@ -15,6 +16,8 @@ use crate::host_launch::{self, DetachedHost};
 use crate::i18n::{self, Label, Locale};
 use crate::secret::SecretIntake;
 use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
+use crate::ui::deletion::DeletionPanel;
+use crate::ui::usage::UsagePanel;
 use crate::ui::{Composer, DesktopError, GuiSnapshot, Page, WizardStep, history_lines};
 use crate::{BUNDLED_ENE_ASSET, DESKTOP_DESCRIPTOR};
 
@@ -42,6 +45,8 @@ pub struct DesktopRuntime {
     body_status: BodyStatus,
     model: String,
     detached_host: Option<DetachedHost>,
+    usage: UsagePanel,
+    deletion: DeletionPanel,
 }
 
 impl DesktopRuntime {
@@ -73,6 +78,8 @@ impl DesktopRuntime {
             body_status: BodyStatus::Absent,
             model: String::from(DEFAULT_MODEL),
             detached_host: None,
+            usage: UsagePanel::default(),
+            deletion: DeletionPanel::default(),
         }
     }
 
@@ -119,6 +126,8 @@ impl DesktopRuntime {
             consent_assigned: self.facts.consent_assigned,
             secret_visible: matches!(self.wizard_step, WizardStep::Credential),
             wizard_body: i18n::label(self.locale, wizard_label(self.wizard_step)).to_string(),
+            usage_body: self.usage.render(),
+            deletion_body: self.deletion.render(),
         }
     }
 
@@ -267,11 +276,25 @@ impl DesktopRuntime {
 
     /// Owner gesture on the seated confirmation surface.
     pub async fn confirm_owner(&mut self) -> Result<FromHost, DesktopError> {
-        let seat = self
+        let deletion_confirm = self
             .control
-            .as_mut()
-            .ok_or(DesktopError::DeniedByBoundary)?;
-        let reply = seat.complete_pending().await?;
+            .as_ref()
+            .and_then(ControlSeat::pending_challenge)
+            .is_some_and(|challenge| matches!(challenge.op, ControlOp::DeletionConfirm));
+        let reply = {
+            let Self {
+                control,
+                client,
+                deletion,
+                ..
+            } = self;
+            let seat = control.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            if deletion_confirm {
+                complete_pending_pumping(seat, client.as_mut(), deletion).await?
+            } else {
+                seat.complete_pending().await?
+            }
+        };
         self.secret.cancel();
         match &reply {
             FromHost::Outcome(ControlOutcome::DeviceApproved { pairing_secret, .. }) => {
@@ -295,6 +318,18 @@ impl DesktopRuntime {
             FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => {
                 self.page = Page::Wizard;
                 self.refresh_setup().await?;
+            }
+            FromHost::Outcome(
+                ControlOutcome::DeletionStarted { .. }
+                | ControlOutcome::DeletionAlreadyCoveredBy { .. }
+                | ControlOutcome::DeletionHeldByOperation { .. }
+                | ControlOutcome::DeletionNeedsClarification
+                | ControlOutcome::DeletionMissing,
+            ) => {
+                self.page = Page::Deletion;
+                match self.refresh_deletion().await {
+                    Ok(()) | Err(_) => {}
+                }
             }
             FromHost::DeniedByBoundary => {
                 self.deny_reason = i18n::control_deny(self.locale, &reply);
@@ -481,6 +516,126 @@ impl DesktopRuntime {
         self.refresh_setup().await
     }
 
+    pub async fn refresh_usage(&mut self) -> Result<(), DesktopError> {
+        self.ensure_client()?;
+        {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.usage.refresh(client).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn next_usage_page(&mut self) -> Result<(), DesktopError> {
+        self.ensure_client()?;
+        {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.usage.next_page(client).await?;
+        }
+        Ok(())
+    }
+
+    pub fn set_usage_cap_limit_micros(&mut self, micros: u64) {
+        self.usage.set_cap_limit_micros(micros);
+    }
+
+    pub fn set_usage_status_filter(&mut self, status: Option<String>) {
+        self.usage.set_status_filter(status);
+    }
+
+    /// Cap mutation uses the last-read mark. Remaining on the panel is
+    /// display-only and is not consulted.
+    pub async fn apply_usage_cap(&mut self) -> Result<ManagementOutcome, DesktopError> {
+        self.ensure_client()?;
+        let outcome = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.usage.apply_cap(client).await?
+        };
+        self.deny_reason = i18n::management_deny(self.locale, &outcome);
+        Ok(outcome)
+    }
+
+    #[must_use]
+    pub fn usage_has_unknown_cost(&self) -> bool {
+        self.usage.has_unknown_cost()
+    }
+
+    pub fn set_deletion_exact_text(&mut self, text: String) {
+        self.deletion.set_exact_text(text);
+    }
+
+    pub async fn request_deletion(&mut self) -> Result<ManagementOutcome, DesktopError> {
+        self.ensure_client()?;
+        let outcome = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.deletion.request(client).await?
+        };
+        self.deny_reason = i18n::management_deny(self.locale, &outcome);
+        self.page = Page::Deletion;
+        Ok(outcome)
+    }
+
+    pub async fn deletion_confirmed_true(&mut self) -> Result<ManagementOutcome, DesktopError> {
+        self.ensure_client()?;
+        let outcome = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.deletion.request_confirmed_true(client).await?
+        };
+        self.deny_reason = i18n::management_deny(self.locale, &outcome);
+        Ok(outcome)
+    }
+
+    pub async fn refresh_deletion(&mut self) -> Result<(), DesktopError> {
+        self.ensure_client()?;
+        {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.deletion.refresh(client).await?;
+        }
+        if self.deletion.has_operations() {
+            self.wipe_gui_copies();
+            match self.refresh_history().await {
+                Ok(()) | Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn begin_deletion_confirm(&mut self) -> Result<(), DesktopError> {
+        let seat = self
+            .control
+            .as_mut()
+            .ok_or(DesktopError::DeniedByBoundary)?;
+        self.deletion.begin_confirm(seat).await?;
+        self.page = Page::Confirm;
+        Ok(())
+    }
+
+    pub async fn resume_deletion(&mut self) -> Result<FromHost, DesktopError> {
+        let reply = {
+            let seat = self
+                .control
+                .as_mut()
+                .ok_or(DesktopError::DeniedByBoundary)?;
+            self.deletion.resume(seat).await?
+        };
+        match self.refresh_deletion().await {
+            Ok(()) | Err(_) => {}
+        }
+        Ok(reply)
+    }
+
+    #[must_use]
+    pub fn deletion_phase_token(&self) -> Option<&'static str> {
+        self.deletion
+            .phase_of_first()
+            .map(ene_api::v1::deletion::DeletionPhaseWire::as_str)
+    }
+
+    fn wipe_gui_copies(&mut self) {
+        self.composer.wipe();
+        self.timeline.clear();
+        self.history.clear();
+    }
+
     fn ensure_client(&self) -> Result<(), DesktopError> {
         if self.client.is_some() {
             Ok(())
@@ -513,10 +668,32 @@ fn wizard_label(step: WizardStep) -> Label {
 }
 
 async fn request(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(std::time::Duration::from_secs(15), client.request(payload))
+    tokio::time::timeout(Duration::from_secs(15), client.request(payload))
         .await
         .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
         .map_err(DesktopError::Client)
+}
+
+async fn complete_pending_pumping(
+    seat: &mut ControlSeat,
+    client: Option<&mut Client>,
+    deletion: &mut DeletionPanel,
+) -> Result<FromHost, DesktopError> {
+    let Some(client) = client else {
+        return seat.complete_pending().await;
+    };
+    let complete = seat.complete_pending();
+    tokio::pin!(complete);
+    loop {
+        tokio::select! {
+            result = &mut complete => return result,
+            () = tokio::time::sleep(Duration::from_millis(20)) => {
+                match deletion.refresh(client).await {
+                    Ok(()) | Err(_) => {}
+                }
+            }
+        }
+    }
 }
 
 fn locale_path(data_dir: &Path) -> PathBuf {

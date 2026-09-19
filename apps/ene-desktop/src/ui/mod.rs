@@ -2,7 +2,9 @@
 //!
 //! Slint is a projection. Domain and secrets do not live in generated UI.
 
+mod deletion;
 mod runtime;
+mod usage;
 
 use ene_api::v1::round::HistoryItem;
 use ene_client::error::ClientError;
@@ -18,6 +20,8 @@ pub enum Page {
     Settings,
     About,
     Confirm,
+    Usage,
+    Deletion,
 }
 
 /// Fresh-data-dir wizard. Consent is not stored here.
@@ -131,6 +135,8 @@ pub struct GuiSnapshot {
     pub consent_assigned: bool,
     pub secret_visible: bool,
     pub wizard_body: String,
+    pub usage_body: String,
+    pub deletion_body: String,
 }
 
 impl GuiSnapshot {

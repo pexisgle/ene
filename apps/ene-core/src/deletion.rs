@@ -50,8 +50,9 @@ use ene_api::v1::reject::RejectKind;
 use ene_permission::{IntentFingerprint, IntentOutcome};
 use ene_plugin_ipc::WireFrame;
 use ene_preservation::{
-    ConfirmTargetedDeletionOutcome, DeletionOperationId, DeletionOperationPhase,
-    DeletionOperationRecord, DeletionPurpose, DeletionRequestId, DeletionSearchMaterial,
+    ConfirmTargetedDeletionOutcome, DeletionLifecycleChange, DeletionLifecycleOutcome,
+    DeletionOperationId, DeletionOperationPhase, DeletionOperationRecord, DeletionOperationRef,
+    DeletionPurpose, DeletionRequestId, DeletionSearchMaterial, DeletionSweepGeneration,
     MechanicalDeletionTarget, PreservationRepository as _, StageTargetedDeletionRequestCommand,
     StageTargetedDeletionRequestOutcome, StartTargetedDeletionOutcome, TargetedDeletionRequest,
     TargetedDeletionTarget,
@@ -597,6 +598,61 @@ impl HostHandle {
             self.kick_targeted_deletion().await;
         }
         Ok(outcome)
+    }
+
+    /// Owner-initiated resume of a Held Targeted Deletion operation.
+    ///
+    /// The operation was already admitted. This reopens a retryable
+    /// `Held(Unavailable)` hold and kicks fan-out; `GenerationExhausted`
+    /// stays held. A stale sweep or completed operation is refused without
+    /// rewriting durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Store`] when the durable journals are unreadable.
+    pub async fn resume_targeted_deletion(
+        &self,
+        operation: &str,
+        sweep: u64,
+    ) -> Result<DeletionLifecycleOutcome, CoreError> {
+        let Ok(uuid) = uuid::Uuid::parse_str(operation) else {
+            return Ok(DeletionLifecycleOutcome::Missing);
+        };
+        let current = DeletionOperationRef {
+            operation: DeletionOperationId::from_raw(RawId::from_uuid(uuid)),
+            sweep: DeletionSweepGeneration::from_u64(sweep),
+        };
+        let outcome = self
+            .store
+            .change_deletion_lifecycle(current, DeletionLifecycleChange::Resume)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        if matches!(outcome, DeletionLifecycleOutcome::Applied(_)) {
+            self.kick_targeted_deletion().await;
+        }
+        Ok(outcome)
+    }
+
+    /// Parks the sealed finalizing boundary so a GUI test can observe
+    /// `Finalizing` as distinct from `Completed`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_deletion_finalizing_park_for_tests(&self) {
+        self.store.arm_deletion_finalizing_park_for_tests();
+    }
+
+    /// Waits until the armed deletion-finalizing park has a waiter.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn wait_deletion_finalizing_park_for_tests(&self) {
+        self.store.wait_deletion_finalizing_park_for_tests().await;
+    }
+
+    /// Releases the parked deletion-finalizing attempt.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn release_deletion_finalizing_park_for_tests(&self) {
+        self.store.release_deletion_finalizing_park_for_tests();
     }
 }
 

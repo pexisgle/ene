@@ -29,7 +29,7 @@ zeroize.workspace = true
 slint = { workspace = true }
 
 [dev-dependencies]
-ene-core = { path = "../ene-core" }
+ene-core = { path = "../ene-core", features = ["test-support"] }
 ene-credential = { path = "../../crates/ene-credential" }
 ene-inference = { path = "../../crates/ene-inference" }
 tempfile.workspace = true

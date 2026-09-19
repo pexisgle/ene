@@ -1,6 +1,6 @@
 import { Button, VerticalBox, HorizontalBox, LineEdit, AboutSlint, ScrollView } from "std-widgets.slint";
 
-export enum UiPage { wizard, chat, history, settings, about, confirm }
+export enum UiPage { wizard, chat, history, settings, about, confirm, usage, deletion }
 
 export component AppWindow inherits Window {
     title: "ene";
@@ -24,6 +24,14 @@ export component AppWindow inherits Window {
     in-out property <string> nav-history: "History";
     in-out property <string> nav-settings: "Settings";
     in-out property <string> nav-about: "About";
+    in-out property <string> nav-usage: "Usage";
+    in-out property <string> nav-deletion: "Deletion";
+    in-out property <string> usage-body: "";
+    in-out property <string> deletion-body: "";
+    in-out property <string> action-refresh: "Refresh";
+    in-out property <string> action-apply-cap: "Apply cap";
+    in-out property <string> action-request-deletion: "Request deletion";
+    in-out property <string> action-resume: "Resume";
     in-out property <string> action-send: "Send";
     in-out property <string> action-next: "Next";
     in-out property <string> action-back: "Back";
@@ -37,6 +45,15 @@ export component AppWindow inherits Window {
     callback open-history();
     callback open-settings();
     callback open-about();
+    callback open-usage();
+    callback open-deletion();
+    callback refresh-usage();
+    callback apply-usage-cap();
+    callback refresh-deletion();
+    callback request-deletion();
+    callback begin-deletion-confirm();
+    callback resume-deletion();
+    callback deletion-target-changed(string);
     callback confirm-owner();
     callback cancel-owner();
     callback switch-ja();
@@ -56,6 +73,8 @@ export component AppWindow inherits Window {
             Button { text: nav-history; clicked => { root.open-history(); } }
             Button { text: nav-settings; clicked => { root.open-settings(); } }
             Button { text: nav-about; clicked => { root.open-about(); } }
+            Button { text: nav-usage; clicked => { root.open-usage(); } }
+            Button { text: nav-deletion; clicked => { root.open-deletion(); } }
             Button { text: "JA"; clicked => { root.switch-ja(); } }
             Button { text: "EN"; clicked => { root.switch-en(); } }
         }
@@ -122,6 +141,32 @@ export component AppWindow inherits Window {
             HorizontalBox {
                 Button { text: action-confirm; clicked => { root.confirm-owner(); } }
                 Button { text: action-cancel; clicked => { root.cancel-owner(); } }
+            }
+        }
+
+        if page == UiPage.usage: VerticalBox {
+            ScrollView {
+                Text { text: usage-body; wrap: word-wrap; }
+            }
+            HorizontalBox {
+                Button { text: action-refresh; clicked => { root.refresh-usage(); } }
+                Button { text: action-apply-cap; clicked => { root.apply-usage-cap(); } }
+            }
+        }
+
+        if page == UiPage.deletion: VerticalBox {
+            ScrollView {
+                Text { text: deletion-body; wrap: word-wrap; }
+            }
+            LineEdit {
+                placeholder-text: "target";
+                edited(text) => { root.deletion-target-changed(text); }
+            }
+            HorizontalBox {
+                Button { text: action-refresh; clicked => { root.refresh-deletion(); } }
+                Button { text: action-request-deletion; clicked => { root.request-deletion(); } }
+                Button { text: action-confirm; clicked => { root.begin-deletion-confirm(); } }
+                Button { text: action-resume; clicked => { root.resume-deletion(); } }
             }
         }
     }
