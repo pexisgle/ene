@@ -1,6 +1,6 @@
 import { Button, VerticalBox, HorizontalBox, LineEdit, AboutSlint, ScrollView } from "std-widgets.slint";
 
-export enum UiPage { wizard, chat, history, settings, about, confirm }
+export enum UiPage { wizard, chat, history, memory, settings, about, confirm }
 
 export component AppWindow inherits Window {
     title: "ene";
@@ -14,6 +14,7 @@ export component AppWindow inherits Window {
     in-out property <string> status: "";
     in-out property <string> timeline: "";
     in-out property <string> history: "";
+    in-out property <string> memory: "";
     in-out property <string> draft: "";
     in-out property <bool> composing: false;
     in-out property <bool> secret-visible: false;
@@ -22,6 +23,7 @@ export component AppWindow inherits Window {
     in-out property <string> deny-reason: "";
     in-out property <string> nav-chat: "Chat";
     in-out property <string> nav-history: "History";
+    in-out property <string> nav-memory: "Memory";
     in-out property <string> nav-settings: "Settings";
     in-out property <string> nav-about: "About";
     in-out property <string> action-send: "Send";
@@ -35,6 +37,7 @@ export component AppWindow inherits Window {
     callback wizard-back();
     callback open-chat();
     callback open-history();
+    callback open-memory();
     callback open-settings();
     callback open-about();
     callback confirm-owner();
@@ -54,6 +57,7 @@ export component AppWindow inherits Window {
             spacing: 8px;
             Button { text: nav-chat; clicked => { root.open-chat(); } }
             Button { text: nav-history; clicked => { root.open-history(); } }
+            Button { text: nav-memory; clicked => { root.open-memory(); } }
             Button { text: nav-settings; clicked => { root.open-settings(); } }
             Button { text: nav-about; clicked => { root.open-about(); } }
             Button { text: "JA"; clicked => { root.switch-ja(); } }
@@ -106,6 +110,10 @@ export component AppWindow inherits Window {
 
         if page == UiPage.history: ScrollView {
             Text { text: history; wrap: word-wrap; }
+        }
+
+        if page == UiPage.memory: ScrollView {
+            Text { text: memory; wrap: word-wrap; }
         }
 
         if page == UiPage.settings: ScrollView {

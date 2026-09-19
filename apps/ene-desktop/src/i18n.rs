@@ -37,6 +37,7 @@ impl Locale {
 pub enum Label {
     Chat,
     History,
+    Memory,
     Settings,
     About,
     WizardLanguage,
@@ -64,6 +65,8 @@ pub fn label(locale: Locale, key: Label) -> &'static str {
         (Locale::En, Label::Chat) => "Chat",
         (Locale::Ja, Label::History) => "履歴",
         (Locale::En, Label::History) => "History",
+        (Locale::Ja, Label::Memory) => "記憶",
+        (Locale::En, Label::Memory) => "Memory",
         (Locale::Ja, Label::Settings) => "設定",
         (Locale::En, Label::Settings) => "Settings",
         (Locale::Ja, Label::About) => "情報",
@@ -188,6 +191,10 @@ mod tests {
         let ja = label(Locale::Ja, Label::Chat);
         let en = label(Locale::En, Label::Chat);
         assert_ne!(ja, en);
+        assert_ne!(
+            label(Locale::Ja, Label::Memory),
+            label(Locale::En, Label::Memory)
+        );
         assert_eq!(Locale::parse("en").as_tag(), "en");
         assert_eq!(Locale::parse("ja").as_tag(), "ja");
     }

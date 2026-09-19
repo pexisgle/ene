@@ -2,11 +2,13 @@
 //!
 //! Slint is a projection. Domain and secrets do not live in generated UI.
 
+mod memory;
 mod runtime;
 
 use ene_api::v1::round::HistoryItem;
 use ene_client::error::ClientError;
 
+pub use memory::{MemoryPage, MemoryRevisionRow, MemoryRow};
 pub use runtime::DesktopRuntime;
 
 /// Visible page. Management remains reachable without Body.
@@ -15,6 +17,7 @@ pub enum Page {
     Wizard,
     Chat,
     History,
+    Memory,
     Settings,
     About,
     Confirm,
@@ -131,6 +134,12 @@ pub struct GuiSnapshot {
     pub consent_assigned: bool,
     pub secret_visible: bool,
     pub wizard_body: String,
+    pub memories: Vec<MemoryRow>,
+    pub memory_revisions: Vec<MemoryRevisionRow>,
+    pub memory_next: Option<String>,
+    pub memory_revisions_of: Option<String>,
+    pub memory_revisions_next: Option<u64>,
+    pub memory_panel: String,
 }
 
 impl GuiSnapshot {

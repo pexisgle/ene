@@ -20,7 +20,9 @@ pub(crate) mod host_launch;
 pub(crate) mod secret;
 
 pub use i18n::Locale;
-pub use ui::{DesktopRuntime, GuiSnapshot, Page, WizardStep};
+pub use ui::{
+    DesktopRuntime, GuiSnapshot, MemoryPage, MemoryRevisionRow, MemoryRow, Page, WizardStep,
+};
 
 /// Install-asset path for the bundled character `ene`.
 ///

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ene_api::v1::management::ManagementOutcome;
+use ene_api::v1::management::{ManagementOutcome, ManagementViewRequest};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::round::HistoryItem;
 use ene_client::Client;
@@ -15,7 +15,7 @@ use crate::host_launch::{self, DetachedHost};
 use crate::i18n::{self, Label, Locale};
 use crate::secret::SecretIntake;
 use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
-use crate::ui::{Composer, DesktopError, GuiSnapshot, Page, WizardStep, history_lines};
+use crate::ui::{Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep, history_lines};
 use crate::{BUNDLED_ENE_ASSET, DESKTOP_DESCRIPTOR};
 
 const LOCALE_FILE: &str = "desktop-locale";
@@ -42,6 +42,7 @@ pub struct DesktopRuntime {
     body_status: BodyStatus,
     model: String,
     detached_host: Option<DetachedHost>,
+    memory: MemoryPage,
 }
 
 impl DesktopRuntime {
@@ -73,6 +74,7 @@ impl DesktopRuntime {
             body_status: BodyStatus::Absent,
             model: String::from(DEFAULT_MODEL),
             detached_host: None,
+            memory: MemoryPage::default(),
         }
     }
 
@@ -119,6 +121,12 @@ impl DesktopRuntime {
             consent_assigned: self.facts.consent_assigned,
             secret_visible: matches!(self.wizard_step, WizardStep::Credential),
             wizard_body: i18n::label(self.locale, wizard_label(self.wizard_step)).to_string(),
+            memories: self.memory.rows().to_vec(),
+            memory_revisions: self.memory.revisions().to_vec(),
+            memory_next: self.memory.next_after().map(str::to_owned),
+            memory_revisions_of: self.memory.revisions_of().map(str::to_owned),
+            memory_revisions_next: self.memory.next_revision_after(),
+            memory_panel: self.memory.panel(),
         }
     }
 
@@ -479,6 +487,69 @@ impl DesktopRuntime {
     pub async fn refresh_management_without_body(&mut self) -> Result<(), DesktopError> {
         self.body_status = BodyStatus::Absent;
         self.refresh_setup().await
+    }
+
+    #[must_use]
+    pub fn memory(&self) -> &MemoryPage {
+        &self.memory
+    }
+
+    /// First Host page of current memories. The Host applies the page bound.
+    pub async fn refresh_memory(&mut self) -> Result<(), DesktopError> {
+        self.fetch_memory(MemoryPage::list_request(None), false)
+            .await
+    }
+
+    /// Next Host list page using the `next:` cursor from the last list page.
+    pub async fn page_older_memories(&mut self) -> Result<(), DesktopError> {
+        let Some(after) = self.memory.next_after().map(str::to_owned) else {
+            return Ok(());
+        };
+        self.fetch_memory(MemoryPage::list_request(Some(&after)), true)
+            .await
+    }
+
+    /// First Host revision page for one Memory named by the list.
+    pub async fn open_memory_revisions(&mut self, memory_id: &str) -> Result<(), DesktopError> {
+        self.fetch_memory(MemoryPage::revisions_request(memory_id, None), false)
+            .await
+    }
+
+    /// Next Host revision page using the `next-revision:` cursor.
+    pub async fn page_later_revisions(&mut self) -> Result<(), DesktopError> {
+        let Some(memory_id) = self.memory.revisions_of().map(str::to_owned) else {
+            return Ok(());
+        };
+        let Some(after) = self.memory.next_revision_after() else {
+            return Ok(());
+        };
+        self.fetch_memory(MemoryPage::revisions_request(&memory_id, Some(after)), true)
+            .await
+    }
+
+    async fn fetch_memory(
+        &mut self,
+        view_request: ManagementViewRequest,
+        append: bool,
+    ) -> Result<(), DesktopError> {
+        self.ensure_client()?;
+        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+        let view = match request(
+            client,
+            WirePayload::ManagementViewRequest(view_request.clone()),
+        )
+        .await?
+        {
+            WirePayload::ManagementView(view) => view,
+            other => {
+                return Err(DesktopError::Protocol(format!(
+                    "expected ManagementView, got {}",
+                    other.message_type()
+                )));
+            }
+        };
+        self.memory.apply_host_view(&view, view_request, append);
+        Ok(())
     }
 
     fn ensure_client(&self) -> Result<(), DesktopError> {

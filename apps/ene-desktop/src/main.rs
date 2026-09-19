@@ -102,6 +102,25 @@ fn bind_navigation(window: &AppWindow, runtime: Arc<Mutex<DesktopRuntime>>) {
             });
         }
     });
+    window.on_open_memory({
+        let ui = window.as_weak();
+        let runtime = Arc::clone(&runtime);
+        move || {
+            let ui = ui.clone();
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let snap = {
+                    let mut desktop = runtime.lock().await;
+                    desktop.open_page(Page::Memory);
+                    match desktop.refresh_memory().await {
+                        Ok(()) | Err(_) => {}
+                    }
+                    desktop.snapshot()
+                };
+                push_snapshot(ui, snap);
+            });
+        }
+    });
     window.on_open_settings({
         let ui = window.as_weak();
         let runtime = Arc::clone(&runtime);
@@ -327,6 +346,7 @@ fn apply_snapshot(window: &AppWindow, snap: &GuiSnapshot) {
     window.set_body(SharedString::from(snap.wizard_body.as_str()));
     window.set_timeline(SharedString::from(snap.timeline.join("\n")));
     window.set_history(SharedString::from(snap.history.join("\n")));
+    window.set_memory(SharedString::from(snap.memory_panel.as_str()));
     window.set_draft(SharedString::from(snap.draft.as_str()));
     window.set_composing(snap.composing);
     window.set_secret_visible(snap.secret_visible);
@@ -337,6 +357,7 @@ fn apply_snapshot(window: &AppWindow, snap: &GuiSnapshot) {
     window.set_deny_reason(SharedString::from(snap.deny_reason.as_str()));
     window.set_nav_chat(SharedString::from(i18n::label(locale, Label::Chat)));
     window.set_nav_history(SharedString::from(i18n::label(locale, Label::History)));
+    window.set_nav_memory(SharedString::from(i18n::label(locale, Label::Memory)));
     window.set_nav_settings(SharedString::from(i18n::label(locale, Label::Settings)));
     window.set_nav_about(SharedString::from(i18n::label(locale, Label::About)));
     window.set_action_send(SharedString::from(i18n::label(locale, Label::Send)));
@@ -347,6 +368,7 @@ fn apply_snapshot(window: &AppWindow, snap: &GuiSnapshot) {
     window.set_page(match snap.page.as_str() {
         "Chat" => ene_desktop_ui::UiPage::Chat,
         "History" => ene_desktop_ui::UiPage::History,
+        "Memory" => ene_desktop_ui::UiPage::Memory,
         "Settings" => ene_desktop_ui::UiPage::Settings,
         "About" => ene_desktop_ui::UiPage::About,
         "Confirm" => ene_desktop_ui::UiPage::Confirm,
