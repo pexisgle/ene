@@ -206,7 +206,10 @@ async fn open_host(dir: &Path) -> Arc<HostHandle> {
     )
     .await
     {
-        Ok(handle) => Arc::new(handle),
+        Ok(handle) => {
+            handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
+            Arc::new(handle)
+        }
         Err(error) => panic!("host must open: {error}"),
     }
 }

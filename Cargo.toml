@@ -54,3 +54,13 @@ panic = "deny"
 let_underscore_must_use = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+# Skip full debuginfo in the default dev profile. Line tables keep usable
+# backtraces; dependency crates do not need even that. This is the compile and
+# link cost that otherwise dominates a cold `cargo test --workspace`.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+

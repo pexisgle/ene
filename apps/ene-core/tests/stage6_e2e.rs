@@ -363,7 +363,10 @@ async fn open_host(dir: &Path) -> Arc<HostHandle> {
 async fn open_host_with(dir: &Path, store: MemoryCredentialStore) -> Arc<HostHandle> {
     let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(store)).await;
     assert!(opened.is_ok(), "host must open");
-    Arc::new(opened.unwrap())
+    let handle = Arc::new(opened.unwrap());
+    // Production silence wait is 30s; e2e must not sit on that wall clock.
+    handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
+    handle
 }
 
 /// Dials the data directory until the listener takes the pairing request and
@@ -1091,6 +1094,11 @@ async fn confirm_deletion(handle: &HostHandle) -> DeletionOperationRef {
 
 /// Drives bounded preservation passes while polling the status page, so a
 /// parked Client-incarnation demand is answered by the poll's connection read.
+///
+/// A pass that finds the demand not yet on the wire yields more-work instead
+/// of waiting. The next pass must start immediately: `join!` of one tick with
+/// a poll that waits for `wanted` would sit on the production 15s driver
+/// period after that yield.
 async fn drive_until(
     handle: &HostHandle,
     client: &mut Client,
@@ -1109,25 +1117,27 @@ async fn drive_until(
         );
         // The serving composition's production tick: the same method the
         // background driver calls, so the E2E does not step the fan-out by hand.
-        let drive = handle.run_targeted_deletion_tick();
-        let poll = async {
-            loop {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                let Ok(page) = deletion_page(client).await else {
-                    return None;
-                };
-                if page.operations.first().map(|view| view.phase) == Some(wanted) {
-                    return Some(page);
+        let mut drive = std::pin::pin!(handle.run_targeted_deletion_tick());
+        loop {
+            tokio::select! {
+                driven = &mut drive => {
+                    driven.map_err(|error| format!("the fan-out pass must run: {error:?}"))?;
+                    break;
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    return None;
+                () = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    match deletion_page(client).await {
+                        Ok(page)
+                            if page.operations.first().map(|view| view.phase) == Some(wanted) =>
+                        {
+                            return Ok(page);
+                        }
+                        Ok(_) | Err(_) => {}
+                    }
                 }
             }
-        };
-        let (driven, polled) = tokio::join!(drive, poll);
-        driven.map_err(|error| format!("the fan-out pass must run: {error:?}"))?;
-        if let Some(page) = polled {
-            return Ok(page);
         }
     }
 }
@@ -1339,6 +1349,11 @@ async fn memory_view(client: &mut Client) -> String {
 }
 
 /// Polls the undelivered subscription until a carried excerpt quotes `needle`.
+///
+/// A live receipt re-emits its selection until ACK or the 30s TTL, so a poll
+/// that only sleeps would wait out production expiry. Non-matching pages are
+/// ACKed so the next fetch can present later arrivals; the matching page is
+/// left un-ACKed.
 async fn wait_for_summary_with(client: &mut Client, needle: &str) -> UndeliveredSummary {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -1356,7 +1371,13 @@ async fn wait_for_summary_with(client: &mut Client, needle: &str) -> Undelivered
             tokio::time::Instant::now() < deadline,
             "no carried excerpt quoted the target: {summary:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if summary.receipt.0.is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        if ack_summary(client, &summary).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -2505,7 +2526,7 @@ async fn drive_until_local(handle: &HostHandle, wanted: DeletionPhaseWire) -> De
             .run_targeted_deletion_tick()
             .await
             .expect("the serving tick must run");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 }
 
