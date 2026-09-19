@@ -15,8 +15,8 @@ use ene_action::{
     RealTargetRef,
 };
 use ene_task::{
-    TaskAgentOutput, TaskFailureKind, TaskFailureOutcome, TaskFailurePremise, TaskProgress,
-    TaskResultAcceptance, TaskResultAdoptionClaim, orchestrate_result_arrival,
+    TaskFailureKind, TaskFailureOutcome, TaskFailurePremise, TaskProgress, TaskResultAcceptance,
+    TaskResultAdoptionClaim,
 };
 
 fn failure(task: TaskRef, delegation: Option<DelegationId>) -> TaskFailurePremise {
@@ -151,13 +151,7 @@ async fn completion_cannot_overwrite_failed_and_failed_cannot_overwrite_completi
             .unwrap(),
         TaskFailureOutcome::FailedAs(failed_task)
     );
-    let late = orchestrate_result_arrival(
-        &store,
-        failed_delegation,
-        TaskAgentOutput::new(String::from("late final body")),
-    )
-    .await
-    .expect("the arrival record survives failure");
+    let late = record_result(&store, failed_delegation, "late final body").await;
     assert_eq!(
         store
             .adopt_result(TaskResultAdoptionClaim {
@@ -176,13 +170,7 @@ async fn completion_cannot_overwrite_failed_and_failed_cannot_overwrite_completi
 
     // Completed first: the failure producer answers the terminal state.
     let (completed_task, completed_delegation, _) = seed_execution(&store).await;
-    let result = orchestrate_result_arrival(
-        &store,
-        completed_delegation,
-        TaskAgentOutput::new(String::from("done")),
-    )
-    .await
-    .expect("the result must record");
+    let result = record_result(&store, completed_delegation, "done").await;
     assert_eq!(
         store
             .adopt_result(TaskResultAdoptionClaim {
@@ -260,13 +248,7 @@ async fn a_failure_completion_race_has_exactly_one_terminal_winner() {
 
     let failure = store.fail_task(failure(task, Some(delegation)));
     let completion = async {
-        let result = orchestrate_result_arrival(
-            &store,
-            delegation,
-            TaskAgentOutput::new(String::from("done")),
-        )
-        .await
-        .expect("the result must record");
+        let result = record_result(&store, delegation, "done").await;
         store
             .adopt_result(TaskResultAdoptionClaim {
                 result: result.result,

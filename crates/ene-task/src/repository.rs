@@ -8,13 +8,14 @@ use crate::delegation::{
     DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationRef,
 };
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
+use crate::observation::{TaskAgentObservationId, TaskAgentObservationPremise};
 use crate::report::{
     PastExecutedFactsPage, TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage,
     TaskReportSourceRef,
 };
 use crate::result::{
-    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim, TaskResultId,
-    TaskResultRecord, UnadoptedResultCursor,
+    TaskAgentResultArrival, TaskResultAcceptance, TaskResultAdoptionClaim,
+    TaskResultArrivalOutcome, TaskResultId, TaskResultRecord, UnadoptedResultCursor,
 };
 use crate::resume::{TaskResumeCommitPremise, TaskResumeOutcome};
 use crate::task::{
@@ -59,6 +60,16 @@ pub enum TaskCommitOutcome {
     MissingTask { task: TaskId },
     /// No representable next revision exists; nothing was changed.
     RevisionExhausted { task: TaskId },
+    /// A canonical current erasure condition covers the newly adopted purpose
+    /// text or the instruction source this forward derives from
+    /// (lifecycle §7/§11). Nothing was changed: no revision snapshot, no
+    /// purpose or instruction entry, no pointer move, no notification.
+    ///
+    /// This is the delayed-steering boundary: an instruction produced from (or
+    /// restating) data under an active deletion is refused rather than
+    /// re-saved into a new revision. Distinct from [`Self::StaleExpected`]
+    /// (the revision moved) and [`Self::TaskTerminal`] (the Task is closed).
+    HeldForErasure,
 }
 
 /// The Owner-utterance currentness premise of one conversation-sourced Task
@@ -223,16 +234,25 @@ pub trait TaskRepository: Send + Sync {
     /// the result becomes visible. The relied `(task, revision)` is copied
     /// from the delegation row inside one short `Immediate` transaction; the
     /// committed row's existence is the execution seal, so no separate seal
-    /// state exists. A retry of the same [`TaskResultId`] is idempotent when
-    /// the body, delegation, and relied revision match exactly; a different
-    /// body or relied revision under the same identity, and a second final
-    /// result for an already-sealed delegation, are technical errors (fail
-    /// closed, never a domain outcome). This step judges no currentness,
-    /// certainty, terminal state, or completion.
+    /// state exists. The same transaction reads the durable credential-set
+    /// revision and compares it with the arrival body's scrub premise before
+    /// any body handling: a set that advanced after the scrub refuses with
+    /// [`TaskResultArrivalOutcome::StaleCredentialSet`] and zero writes, so a
+    /// stale body can never land. The caller must re-scrub the original
+    /// answer under the reported current revision and arrive again.
+    ///
+    /// A retry of the same [`TaskResultId`] is idempotent when the body,
+    /// delegation, and relied revision match exactly and the premise is still
+    /// current; a stale premise refuses before that comparison, so an
+    /// idempotent retry never succeeds under an old set. A different body or
+    /// relied revision under the same identity, and a second final result for
+    /// an already-sealed delegation, are technical errors (fail closed, never
+    /// a domain outcome). This step judges no certainty, terminal state, or
+    /// completion.
     async fn record_task_result_arrival(
         &self,
         arrival: TaskAgentResultArrival,
-    ) -> Result<TaskResultRecord, TaskTechnicalError>;
+    ) -> Result<TaskResultArrivalOutcome, TaskTechnicalError>;
 
     /// Loads one final result by identity, with its verified attempt
     /// correlation and adoption state.
@@ -270,6 +290,26 @@ pub trait TaskRepository: Send + Sync {
         &self,
         delegation: DelegationId,
     ) -> Result<bool, TaskTechnicalError>;
+
+    /// Records one execution-local Task Agent observation occurrence
+    /// (Stage 6 A4).
+    ///
+    /// The caller mints the occurrence identity at observation time. Inside
+    /// one short `Immediate` transaction the repository copies the
+    /// delegation's `(task, revision)` correlation, verifies the producing
+    /// Action attempt (delegation, task, revision, and workspace agreement,
+    /// and that a body-observed occurrence came from a `read`/`list` effect),
+    /// and writes the body-free ledger row. The premise's transient
+    /// `observed` body — when the occurrence reproduced workspace content —
+    /// is compared against the canonical current erasure conditions in the
+    /// same transaction: a covered body publishes the occurrence identity as
+    /// a covered source and associates the delegation with the operation, and
+    /// is never stored. A same-identity retry with the stored correlation is
+    /// an idempotent replay; a disagreement is a fail-closed technical error.
+    async fn record_task_agent_observation(
+        &self,
+        premise: TaskAgentObservationPremise,
+    ) -> Result<TaskAgentObservationId, TaskTechnicalError>;
 
     /// Attempts to adopt one recorded final result into its Task (AU15b).
     ///

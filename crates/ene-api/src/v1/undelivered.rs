@@ -211,6 +211,11 @@ pub enum UndeliveredAckOutcome {
     /// The ACK arrived on a different connection than the receipt's; ACKs
     /// never migrate across connections.
     StaleConnection,
+    /// A current erasure condition covers the carried rows' source bodies:
+    /// no status was written and the items are not confirmed presented. The
+    /// Client re-queries after the deletion settles; distinct from a stale
+    /// receipt (nothing about the receipt itself was wrong).
+    HeldForErasure,
 }
 
 /// First-party Task list query: canonical TaskId byte order, bounded.

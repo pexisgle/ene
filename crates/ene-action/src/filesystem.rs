@@ -1262,7 +1262,10 @@ mod tests {
         }
         // A junction-like directory reparse; a failure leaves only the file
         // reparse for the exclusion assertion below.
-        let _ = symlink_dir(outside.path(), directory.path().join("escape-dir"));
+        drop(symlink_dir(
+            outside.path(),
+            directory.path().join("escape-dir"),
+        ));
         assert!(
             matches!(
                 root.resolve("escape.txt", OperationKind::Read),

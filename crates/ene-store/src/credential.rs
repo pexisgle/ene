@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use ene_credential::{
-    CredentialApprovalRepository, CredentialIntentRepository, CredentialRef,
-    CredentialRefRepository, CredentialSetRepository, CredentialSetRevision, CredentialStore,
-    CredentialTechnicalError, DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord,
-    PendingCredentialApproval, PendingPairing, REDACTED_CREDENTIAL, RegistrationApply,
-    RegistrationFingerprint, RegistrationState,
+    CredentialApprovalRepository, CredentialErasureOutcome, CredentialErasureRepository,
+    CredentialIntentRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
+    CredentialSetRevision, CredentialStore, CredentialTechnicalError, DeviceId,
+    DevicePairingRepository, DevicePairingStatus, DeviceRecord, PendingCredentialApproval,
+    PendingPairing, REDACTED_CREDENTIAL, RegistrationApply, RegistrationFingerprint,
+    RegistrationState,
 };
 use ene_permission::{IntentFingerprint, IntentOutcome};
+use ene_preservation::ErasureConditionRef;
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -17,6 +19,7 @@ use crate::codec::{
     credential_unavailable, decode_device_record, decode_pending_credential,
     decode_pending_pairing, encode_id, insert_decided_row_tx, lock_shared, select_intent_row_tx,
 };
+use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
@@ -225,6 +228,23 @@ fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), Credenti
     Ok(())
 }
 
+/// Reads the durable credential-set revision inside a caller transaction.
+///
+/// The read shares the caller's transaction, so a writer can compare the
+/// revision against a scrub premise in the same short window as the write it
+/// admits: a set advanced between the premise's revision read and the commit
+/// is observed here and refuses the write.
+pub(crate) fn current_set_revision(
+    conn: &rusqlite::Connection,
+) -> Result<CredentialSetRevision, CredentialTechnicalError> {
+    let stored_rev: i64 = conn
+        .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+    let revision = u64::try_from(stored_rev)
+        .map_err(|_| credential_unavailable("credential set revision out of range"))?;
+    Ok(CredentialSetRevision::from_u64(revision))
+}
+
 impl CredentialSetRepository for Store {
     async fn current_set_revision(
         &self,
@@ -232,12 +252,7 @@ impl CredentialSetRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let stored_rev: i64 = guard
-                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let revision = u64::try_from(stored_rev)
-                .map_err(|_| credential_unavailable("credential set revision out of range"))?;
-            Ok(CredentialSetRevision::from_u64(revision))
+            current_set_revision(&guard)
         })
         .await
     }
@@ -689,5 +704,169 @@ impl CredentialIntentRepository for Store {
             }
         })
         .await
+    }
+}
+
+/// Bounded rows deleted per table in one local erasure pass (lifecycle §9).
+const ERASURE_BATCH_ROWS: i64 = 500;
+
+/// Deletes usable refs whose derived identity, provider, or label carries the
+/// target. Deleting the ref is the local erasure: the derived
+/// `provider:label` identity can never be redacted without breaking the ref
+/// grammar, and the pair must not stay usable under a textless identity. The
+/// protected bearer value is not touched here (K-C); the pair simply stops
+/// being resolvable, and the set revision advances below.
+const SQL_ERASE_CREDENTIAL_REF: &str = "DELETE FROM credential_ref
+     WHERE id IN (
+         SELECT id FROM credential_ref
+         WHERE instr(id, ?1) > 0 OR instr(provider, ?1) > 0 OR instr(label, ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_ERASE_CREDENTIAL_PENDING: &str = "DELETE FROM credential_pending
+     WHERE rowid IN (
+         SELECT rowid FROM credential_pending
+         WHERE instr(provider, ?1) > 0 OR instr(label, ?1) > 0
+         LIMIT ?2
+     )";
+
+/// Device keys, display descriptors, and the opaque wire/pending tokens are
+/// the pairing rows' text surface. Host-stamped times are not caller text and
+/// are never matched.
+const SQL_ERASE_PAIRED_DEVICE: &str = "DELETE FROM paired_device
+     WHERE rowid IN (
+         SELECT rowid FROM paired_device
+         WHERE instr(device_id, ?1) > 0 OR instr(descriptor, ?1) > 0
+            OR instr(COALESCE(wire, ''), ?1) > 0
+            OR instr(COALESCE(pending_id, ''), ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_ERASE_PAIRING_PENDING: &str = "DELETE FROM pairing_pending
+     WHERE rowid IN (
+         SELECT rowid FROM pairing_pending
+         WHERE instr(pending_id, ?1) > 0 OR instr(descriptor, ?1) > 0
+            OR instr(origin_connection, ?1) > 0
+         LIMIT ?2
+     )";
+
+const SQL_COUNT_CREDENTIAL_METADATA_TARGET: &str = "SELECT
+     (SELECT COUNT(*) FROM credential_ref
+      WHERE instr(id, ?1) > 0 OR instr(provider, ?1) > 0 OR instr(label, ?1) > 0)
+   + (SELECT COUNT(*) FROM credential_pending
+      WHERE instr(provider, ?1) > 0 OR instr(label, ?1) > 0)
+   + (SELECT COUNT(*) FROM paired_device
+      WHERE instr(device_id, ?1) > 0 OR instr(descriptor, ?1) > 0
+         OR instr(COALESCE(wire, ''), ?1) > 0
+         OR instr(COALESCE(pending_id, ''), ?1) > 0)
+   + (SELECT COUNT(*) FROM pairing_pending
+      WHERE instr(pending_id, ?1) > 0 OR instr(descriptor, ?1) > 0
+         OR instr(origin_connection, ?1) > 0)";
+
+fn erasure_count(value: i64) -> Result<u64, CredentialTechnicalError> {
+    u64::try_from(value).map_err(|_| credential_unavailable("count out of range"))
+}
+
+impl CredentialErasureRepository for Store {
+    fn erase_target_text(
+        &self,
+        condition: ErasureConditionRef,
+        target: &str,
+    ) -> impl std::future::Future<
+        Output = Result<CredentialErasureOutcome, CredentialTechnicalError>,
+    > + Send {
+        #[cfg(any(test, feature = "test-support"))]
+        let parks = Arc::clone(&self.test_parks);
+        let conn = Arc::clone(&self.conn);
+        let target = target.to_owned();
+        async move {
+            #[cfg(any(test, feature = "test-support"))]
+            parks.erasure_mutation.pause_if_armed().await;
+            run_blocking(move || {
+                let mut guard = lock_shared(&conn);
+                let tx = guard
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                // Stale-generation rejection and the mutation share one short
+                // transaction: a superseded sweep or a completed operation
+                // mutates nothing (lifecycle §6-§7/§9.1).
+                if !condition_is_current(&tx, condition)
+                    .map_err(|error| credential_unavailable(error.to_string()))?
+                {
+                    return Ok(CredentialErasureOutcome::NotCurrent);
+                }
+                let refs = tx
+                    .execute(
+                        SQL_ERASE_CREDENTIAL_REF,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                let pendings = tx
+                    .execute(
+                        SQL_ERASE_CREDENTIAL_PENDING,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                let devices = tx
+                    .execute(SQL_ERASE_PAIRED_DEVICE, params![target, ERASURE_BATCH_ROWS])
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                let pairing = tx
+                    .execute(
+                        SQL_ERASE_PAIRING_PENDING,
+                        params![target, ERASURE_BATCH_ROWS],
+                    )
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                if refs > 0 {
+                    // The usable set changed: stale scrub premises must be
+                    // refused, so the revision advances once in this same
+                    // transaction. A duplicate pass deletes nothing and never
+                    // advances it again.
+                    advance_credential_set(&tx)?;
+                }
+                let remainder: i64 = tx
+                    .query_row(
+                        SQL_COUNT_CREDENTIAL_METADATA_TARGET,
+                        params![target],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                let erased = erasure_count(
+                    i64::try_from(refs + pendings + devices + pairing)
+                        .map_err(|_| credential_unavailable("count out of range"))?,
+                )?;
+                let remainder = erasure_count(remainder)?;
+                tx.commit()
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                Ok(CredentialErasureOutcome::Applied { erased, remainder })
+            })
+            .await
+        }
+    }
+
+    fn condition_is_current(
+        &self,
+        condition: ErasureConditionRef,
+    ) -> impl std::future::Future<Output = Result<bool, CredentialTechnicalError>> + Send {
+        let conn = Arc::clone(&self.conn);
+        async move {
+            run_blocking(move || {
+                let guard = lock_shared(&conn);
+                condition_is_current(&guard, condition)
+                    .map_err(|error| credential_unavailable(error.to_string()))
+            })
+            .await
+        }
+    }
+
+    fn before_device_auth_file_erase(&self) -> impl std::future::Future<Output = ()> + Send {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let parks = Arc::clone(&self.test_parks);
+            async move {
+                parks.device_auth_file.pause_if_armed().await;
+            }
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        std::future::ready(())
     }
 }

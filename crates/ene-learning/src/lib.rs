@@ -36,9 +36,12 @@ mod test_support;
 pub use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
 pub use formation::{
     ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision, LearningInference,
-    LearningInferenceError, MAX_FORMATION_CHANGES, MAX_FORMATION_TURNS, form_experience,
+    LearningInferenceAnswer, LearningInferenceError, LearningInferencePremise,
+    MAX_FORMATION_CHANGES, MAX_FORMATION_TURNS, form_experience,
 };
-pub use identity::{ExperienceSourceKind, MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
+pub use identity::{
+    ExperienceSourceKind, LearningClaimRef, MemoryId, MemoryRevision, SourceRangeRef, SummaryId,
+};
 pub use memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};
 pub use recall::{RECALL_CANDIDATE_LIMIT, RecallQuery, RecalledMemory, recall};
 pub use relevance::recall_index_terms;

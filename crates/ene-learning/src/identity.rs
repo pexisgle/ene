@@ -29,6 +29,28 @@ impl MemoryId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SummaryId(RawId);
 
+/// Opaque identity of the provider claim one formation pass ran under.
+///
+/// The Learning crate never interprets it: it is the durable claim handle the
+/// inference boundary returned, carried into the commit so the store can
+/// refuse a formation whose claim was already associated with a deletion
+/// operation whose condition committed after that claim (lifecycle §11 R2).
+/// It is a correlation identity, never a target hash or a stored body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LearningClaimRef(RawId);
+
+impl LearningClaimRef {
+    #[must_use]
+    pub fn from_raw(raw: RawId) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub fn as_raw(self) -> RawId {
+        self.0
+    }
+}
+
 impl SummaryId {
     #[must_use]
     pub fn from_raw(raw: RawId) -> Self {

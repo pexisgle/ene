@@ -2241,10 +2241,9 @@ fn control_emit_reports_closed() {
 async fn cancel_task_admission_wires_the_cooperative_stop() {
     use ene_task::{
         AssigneeRef, CancelTaskCommand, DelegationCreationPremise, DelegationId, DelegationOutcome,
-        DelegationScope, TaskAgentEphemeralId, TaskAgentOutput, TaskCancelOutcome,
-        TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
-        TaskProgress, TaskPurpose, TaskRepository as _, TaskResultAcceptance,
-        TaskResultAdoptionClaim, orchestrate_result_arrival,
+        DelegationScope, TaskAgentEphemeralId, TaskCancelOutcome, TaskContextEntryId,
+        TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress,
+        TaskPurpose, TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim,
     };
 
     let Some((handle, _dir)) = memory_handle("cancel-task").await else {
@@ -2344,13 +2343,8 @@ async fn cancel_task_admission_wires_the_cooperative_stop() {
         .await
         .unwrap();
     assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
-    let arrival = orchestrate_result_arrival(
-        &handle.store,
-        completed_delegation,
-        TaskAgentOutput::new(String::from("done")),
-    )
-    .await
-    .unwrap();
+    let arrival =
+        crate::test_support::record_result(&handle.store, completed_delegation, "done").await;
     let adopted = handle
         .store
         .adopt_result(TaskResultAdoptionClaim {
@@ -2394,10 +2388,9 @@ async fn management_cancel_reaches_the_cancel_admission_and_replays() {
     use ene_primitive::RawId;
     use ene_task::{
         AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,
-        TaskAgentEphemeralId, TaskAgentOutput, TaskContextEntryId, TaskContextOrigin,
-        TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskPurpose,
-        TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim,
-        orchestrate_result_arrival,
+        TaskAgentEphemeralId, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
+        TaskCreationPremise, TaskId, TaskProgress, TaskPurpose, TaskRepository as _,
+        TaskResultAcceptance, TaskResultAdoptionClaim,
     };
 
     let Some((handle, _dir)) = memory_handle("management-cancel").await else {
@@ -2507,13 +2500,7 @@ async fn management_cancel_reaches_the_cancel_admission_and_replays() {
         .await
         .unwrap();
     assert!(matches!(delegated, DelegationOutcome::Delegated(_)));
-    let arrival = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        TaskAgentOutput::new(String::from("done")),
-    )
-    .await
-    .unwrap();
+    let arrival = crate::test_support::record_result(&handle.store, delegation, "done").await;
     assert!(matches!(
         handle
             .store
@@ -2968,7 +2955,8 @@ async fn supersession_drops_the_replaced_connections_presentation_state() {
 
 /// Stage 6 A1b production path: a Client intent only stages a Targeted
 /// Deletion request, the Owner confirms on the Host-local trusted inlet, the
-/// canonical operation starts, and the bounded status view reports it.
+/// canonical operation starts and is driven immediately, and the bounded
+/// status view reports it.
 #[tokio::test]
 async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
     use ene_preservation::{
@@ -3051,7 +3039,10 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
         1
     );
 
-    // The Host-local trusted confirmation is the only destructive path.
+    // The Host-local trusted confirmation is the only destructive path, and
+    // it drives the operation immediately: with no target-bearing data the
+    // bounded fan-out verifies every required owner and the sealed boundary
+    // commits, closing the current erasure condition.
     let request_text = request.as_raw().as_uuid().as_hyphenated().to_string();
     let ConfirmTargetedDeletionOutcome::Started(current) = handle
         .confirm_targeted_deletion(&request_text)
@@ -3060,15 +3051,23 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
     else {
         panic!("the Owner confirmation must start the canonical operation");
     };
-    assert_eq!(
+    assert!(
         handle
             .store
             .current_erasure_conditions(None, 10)
             .await
-            .unwrap()[0]
-            .condition,
-        current.condition(),
-        "the current erasure condition is the operation's"
+            .unwrap()
+            .is_empty(),
+        "the confirmation drive completes an empty sweep and closes the condition"
+    );
+    assert!(
+        handle
+            .store
+            .deletion_completion_audit(current.operation)
+            .await
+            .unwrap()
+            .is_some(),
+        "the driven sweep commits the body-free audit"
     );
     assert!(
         handle
@@ -3079,17 +3078,16 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
         "a confirmed request leaves the pending set"
     );
 
-    // The bounded status view reports the active operation without any body.
+    // The bounded status view reports the operation without any body; the
+    // drive is observable as the durable participant verifications.
     let page = read_deletion_page(&handle, &live, &transport, None, None).await;
     assert_eq!(page.operations.len(), 1);
     let view = &page.operations[0];
-    assert_eq!(view.phase, DeletionPhaseWire::Active);
+    assert_eq!(view.phase, DeletionPhaseWire::Completed);
     assert_eq!(view.sweep, 1);
     assert_eq!(view.purpose, DeletionPurposeWire::Privacy);
-    // The durable snapshot is reported: every required owner is pending for
-    // the current sweep, and the view never claims a completion it has none of.
     let DeletionParticipantReportWire::Reported(participants) = &view.participants else {
-        panic!("a fresh operation must report its durable participant snapshot");
+        panic!("a driven operation must report its durable participant snapshot");
     };
     assert!(
         !participants.is_empty(),
@@ -3098,16 +3096,18 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
     assert!(
         participants
             .iter()
-            .all(|participant| participant.progress == "pending" && participant.sweep == 1),
-        "a freshly admitted operation has every participant pending: {participants:?}"
+            .all(|participant| participant.progress == "verified" && participant.sweep == 1),
+        "the confirmation drive verifies every required participant: {participants:?}"
     );
     assert!(
         !format!("{view:?}").contains("leaked key"),
         "the status view never carries the target"
     );
 
-    // A fresh duplicate intent observing the live surface is held by the
-    // running operation; no second operation exists.
+    // A fresh duplicate intent after completion is a new origin (lifecycle
+    // §7): the completed operation is not a permanent keyword ban, so the
+    // same text only stages a fresh request awaiting the Owner's
+    // confirmation, and no second operation exists yet.
     let fresh = handle
         .handle_frame(
             deletion_intent_frame(
@@ -3122,13 +3122,14 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
             &transport,
         )
         .await;
-    assert_eq!(outcome_of(&fresh), ManagementOutcome::HeldByOperation);
+    assert_eq!(outcome_of(&fresh), ManagementOutcome::NeedsClarification);
     assert_eq!(
         handle.store.deletion_status(None, 10).await.unwrap().len(),
         1
     );
 
-    // A duplicate confirmation observes the same single operation.
+    // A duplicate confirmation observes the same single operation; the
+    // completed condition stays closed.
     assert_eq!(
         handle
             .confirm_targeted_deletion(&request_text)
@@ -3136,14 +3137,113 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
             .unwrap(),
         ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current)
     );
-    assert_eq!(
+    assert!(
         handle
             .store
             .current_erasure_conditions(None, 100)
             .await
             .unwrap()
-            .len(),
-        1
+            .is_empty()
+    );
+}
+
+/// Stage 6 F1: a request whose durable confirmation exists without an
+/// operation (the crash window between the confirmation commit and the
+/// canonical admission) is admitted and driven by the intent inlet itself, not
+/// left stopped until a later tick or restart.
+#[tokio::test]
+async fn a_confirmed_request_without_an_operation_is_admitted_and_driven_by_the_intent_inlet() {
+    use ene_preservation::{DeletionOperationPhase, PreservationRepository as _};
+    use ene_primitive::RawId;
+
+    let Some((handle, _dir)) = memory_handle("management-deletion-confirm-window").await else {
+        panic!("the handle must open");
+    };
+    let live = paired_input("management-deletion-confirm-window");
+    let transport = fake_transport();
+
+    let page = read_deletion_page(&handle, &live, &transport, None, None).await;
+    let responses = handle
+        .handle_frame(
+            deletion_intent_frame(
+                &live,
+                "crash window secret",
+                &page.mark.0,
+                RationaleOrigin::ManagementSurface,
+                None,
+                CommandWireId(RawId::new().as_uuid()),
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(
+        outcome_of(&responses),
+        ManagementOutcome::NeedsClarification
+    );
+    let pending = handle.pending_targeted_deletions(None, 50).await.unwrap();
+    assert_eq!(pending.len(), 1, "the request must be staged");
+    let request = pending[0].request();
+
+    // The crash window: the confirmation row commits, then the canonical
+    // admission is refused (the empty participant set is invalid), so the
+    // durable confirmation exists with no operation.
+    assert!(
+        handle
+            .store
+            .confirm_targeted_deletion(request, Vec::new())
+            .await
+            .is_err(),
+        "an empty participant set must be refused"
+    );
+    assert!(
+        handle
+            .store
+            .deletion_status(None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the refused admission leaves no operation"
+    );
+    assert!(
+        handle
+            .pending_targeted_deletions(None, 50)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the confirmation left the pending set"
+    );
+
+    // The intent inlet observes the durable confirmation, finishes the
+    // canonical admission, and drives it in the same request.
+    let mark = read_deletion_page(&handle, &live, &transport, None, None)
+        .await
+        .mark;
+    let responses = handle
+        .handle_frame(
+            deletion_intent_frame(
+                &live,
+                "crash window secret",
+                &mark.0,
+                RationaleOrigin::ManagementSurface,
+                None,
+                CommandWireId(RawId::new().as_uuid()),
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(
+        outcome_of(&responses),
+        ManagementOutcome::AppliedAsOneTime,
+        "the confirmed request finished its canonical admission"
+    );
+    let status = handle.store.deletion_status(None, 10).await.unwrap();
+    assert_eq!(status.len(), 1);
+    assert_eq!(
+        status[0].phase,
+        DeletionOperationPhase::Completed,
+        "the intent inlet must drive the admission it finished, not wait for a tick"
     );
 }
 
@@ -3351,8 +3451,13 @@ async fn targeted_deletion_stale_and_foreign_targets_leave_no_trace() {
 /// rejections, and paging walks operations once.
 #[tokio::test]
 async fn deletion_status_pages_are_bounded_and_reject_malformed_queries() {
-    use ene_preservation::{PreservationRepository as _, TargetedDeletionRequest};
-    use ene_primitive::RawId;
+    use ene_preservation::{
+        DeletionLifecycleChange, DeletionLifecycleOutcome, DeletionPurpose, DeletionSearchMaterial,
+        MechanicalDeletionTarget, ParticipantOwnerRef, PreservationRepository as _,
+        StartTargetedDeletionCommand, StartTargetedDeletionOutcome, TargetedDeletionRequest,
+        TargetedDeletionTarget,
+    };
+    use ene_primitive::{RawId, WallClockWithTz};
 
     let Some((handle, _dir)) = memory_handle("management-deletion-status").await else {
         panic!("the handle must open");
@@ -3440,27 +3545,46 @@ async fn deletion_status_pages_are_bounded_and_reject_malformed_queries() {
     }
 
     // A held operation stays visible with its hold class (lifecycle §5.1).
-    let operations = handle.store.deletion_status(None, 10).await.unwrap();
-    let held = handle
+    // The production confirmation above already drove its operations through
+    // completion (the confirmation kick is the production driver), and a
+    // completed operation is terminal, so this fixture admits one more
+    // operation directly through the canonical store and holds it.
+    let held_operation = match handle
         .store
-        .change_deletion_lifecycle(
-            operations[0].current,
-            ene_preservation::DeletionLifecycleChange::Hold,
+        .start_targeted_deletion(
+            StartTargetedDeletionCommand::new(
+                TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        String::from("held status secret"),
+                    )),
+                    semantic_hints: Vec::new(),
+                },
+                DeletionPurpose::Privacy,
+                WallClockWithTz::now(),
+                Vec::new(),
+                vec![ParticipantOwnerRef::Companion],
+            )
+            .confirmed_for_tests(),
         )
         .await
+        .unwrap()
+    {
+        StartTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("the held fixture must start: {other:?}"),
+    };
+    let held = handle
+        .store
+        .change_deletion_lifecycle(held_operation, DeletionLifecycleChange::Hold)
+        .await
         .unwrap();
-    assert!(matches!(
-        held,
-        ene_preservation::DeletionLifecycleOutcome::Applied(_)
-    ));
+    assert!(matches!(held, DeletionLifecycleOutcome::Applied(_)));
     let page = read_deletion_page(&handle, &live, &transport, None, None).await;
     let view = page
         .operations
         .iter()
         .find(|view| {
             view.operation.0
-                == operations[0]
-                    .current
+                == held_operation
                     .operation
                     .as_raw()
                     .as_uuid()
@@ -3474,3 +3598,136 @@ async fn deletion_status_pages_are_bounded_and_reject_malformed_queries() {
         Some(ene_api::v1::deletion::DeletionHoldWire::Unavailable)
     );
 }
+
+/// The serving startup sequence re-evaluates reservations orphaned by a
+/// crash: the ticket settles `CommittedUnknown` and the reserved upper bound
+/// keeps occupying the cap, never released and never reset to zero.
+#[tokio::test]
+async fn startup_reconciliation_settles_orphaned_usage_reservations() {
+    use ene_inference::{InferenceAttempt, InferenceAttemptRepository as _, UsageRepository as _};
+    use ene_permission::{
+        CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRevision, IntentFingerprint,
+        IntentOutcomeRepository as _, IntentResolution, SetUsageCapCommand, SetUsageCapOutcome,
+        UsageCapRepository as _, UsageCapScope, UsageCapWindow, UsageReservationState,
+    };
+    use ene_primitive::{Money, RawId, WallClockWithTz};
+
+    let (handle, _dir) = memory_handle("usage-cap-recovery")
+        .await
+        .expect("the memory handle must open");
+    let store = &handle.store;
+    // Seed the dialogue consent through the production intent-atomic path.
+    let fingerprint = IntentFingerprint {
+        intent_id: RawId::new().as_uuid().to_string(),
+        kind: String::from("assign"),
+        target: String::from("consent:usage-cap-recovery"),
+        base: String::from("consent-none"),
+        rationale_origin: String::from("management-surface"),
+        rationale_quote: None,
+    };
+    let committed = store
+        .assign_with_intent(
+            None,
+            ConsentRecord {
+                capability: CapabilityKind::Dialogue,
+                id: String::from("usage-cap-consent"),
+                rev: ConsentRevision::from_u64(1),
+                provider: String::from("openai"),
+                model: String::from("gpt-4o"),
+                credential_id: String::from("openai:main"),
+            },
+            fingerprint,
+        )
+        .await
+        .expect("the consent write must answer");
+    assert!(
+        matches!(
+            committed,
+            IntentResolution::Decided(ConsentCommitOutcome::Committed { .. })
+        ),
+        "the consent must commit, got {committed:?}"
+    );
+    let cap = store
+        .set_usage_cap(SetUsageCapCommand {
+            expected: None,
+            scope: UsageCapScope::System,
+            window: UsageCapWindow::DailyUtc,
+            limit: Money::from_micros(ene_primitive::CurrencyCode::Usd, 100_000),
+        })
+        .await
+        .expect("the cap write must answer");
+    assert!(
+        matches!(cap, SetUsageCapOutcome::StoredAs(_)),
+        "the cap must store, got {cap:?}"
+    );
+    let ene_inference::pricing::PricingResolution::Priced(pricing) =
+        ene_inference::pricing::PricingCatalog::first_party()
+            .expect("the reviewed catalog must be valid")
+            .resolve("openai", "gpt-4o", WallClockWithTz::now())
+    else {
+        panic!("the reviewed route must be priced");
+    };
+    let ticket = ene_inference::InferenceTicketId(RawId::new());
+    let claim = store
+        .begin_inference_attempt(InferenceAttempt {
+            ticket,
+            consumer: ene_permission::ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: ene_permission::PurposeKind::DialogueResponse,
+            expected_consent: (
+                String::from("usage-cap-consent"),
+                ConsentRevision::from_u64(1),
+            ),
+            expected_credential_set: ene_credential::CredentialSetRevision::initial(),
+            provider: String::from("openai"),
+            model: String::from("gpt-4o"),
+            data_use: Vec::new(),
+            task_agent: None,
+            pricing: Some(pricing),
+            usage_estimate: Some(ene_inference::cost::UsageEstimate {
+                input_tokens_upper_bound: 100,
+                output_tokens_upper_bound: 50,
+            }),
+        })
+        .await
+        .expect("the claim must answer");
+    assert_eq!(
+        claim,
+        ene_inference::AttemptBeginOutcome::Started,
+        "the claim must reserve under the configured cap"
+    );
+    // The crash leaves the reservation non-terminal; startup must settle it.
+    handle
+        .run_startup_mutations()
+        .await
+        .expect("startup mutations must complete");
+    let reservation = store
+        .load_usage_reservation(ticket)
+        .await
+        .expect("the reservation read must answer")
+        .expect("the reservation stays durable");
+    assert_eq!(reservation.state, UsageReservationState::CommittedUnknown);
+    let cost = store
+        .load_usage_cost(ticket)
+        .await
+        .expect("the settlement read must answer")
+        .expect("startup recovery records the unknown usage fact");
+    assert_eq!(
+        cost.usage.source,
+        ene_inference::UsageSource::Unknown,
+        "an orphaned reservation settles unknown token usage, never zero"
+    );
+    // A second startup is idempotent: the terminal state is not re-settled.
+    handle
+        .run_startup_mutations()
+        .await
+        .expect("startup mutations must stay idempotent");
+    let again = store
+        .load_usage_reservation(ticket)
+        .await
+        .expect("the reservation read must answer")
+        .expect("the reservation stays durable");
+    assert_eq!(again.state, UsageReservationState::CommittedUnknown);
+}
+
+mod usage_tests;

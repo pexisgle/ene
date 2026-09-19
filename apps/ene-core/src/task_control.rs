@@ -39,6 +39,7 @@ use ene_action::{
 use ene_api::v1::refs::ConnectionWireId;
 use ene_companion::CompanionId;
 use ene_companion::RecordResumeActivityCommand;
+use ene_companion::ResumeActivityOutcome;
 use ene_companion::dialogue::{
     DialogueTaskCommand, DialogueTaskControlPort, DialogueTaskControlReply, ProposeSteeringCommand,
     ProposeTaskCommand, TaskReport, TaskReportAttempt, TaskReportCertainty,
@@ -704,6 +705,9 @@ fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
         TaskProposalOutcome::Superseded => {
             String::from("The request was superseded by a newer message.")
         }
+        TaskProposalOutcome::HeldForErasure => {
+            String::from("The instruction could not be applied while its data is being deleted.")
+        }
     }
 }
 
@@ -1010,6 +1014,14 @@ impl HostHandle {
                     .map_err(|error| TaskTechnicalError::StorageUnavailable {
                         reason: error.to_string(),
                     })?;
+                // The A4 gate held the instruction body: the resume is held by
+                // the current erasure condition, and no activity, revision, or
+                // delegation is written.
+                let ResumeActivityOutcome::Recorded(activity) = activity else {
+                    return Ok(TaskResumeOutcome::NeedsRevalidation(
+                        ene_task::TaskResumeHold::DataUseHeld,
+                    ));
+                };
                 let command = ResumeTaskCommand {
                     premise,
                     instruction: ResumeInstructionSource::OwnerManagement {

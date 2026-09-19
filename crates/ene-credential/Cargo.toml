@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ene-preservation = { path = "../ene-preservation" }
 ene-primitive = { path = "../ene-primitive" }
 hmac.workspace = true
 serde.workspace = true

@@ -11,10 +11,11 @@ use std::sync::Mutex;
 use ene_primitive::RawId;
 
 use crate::{
-    CredentialSetRevision, LearningInference, LearningInferenceError, LearningRepository,
-    LearningScope, LearningTechnicalError, Memory, MemoryChange, MemoryChangeCommit,
-    MemoryChangeOutcome, MemoryId, MemoryRevision, MemoryRevisionRecord, MemoryTarget,
-    ScrubbedText, SecretScrubber, SummaryId, SummaryRecord,
+    CredentialSetRevision, LearningClaimRef, LearningInference, LearningInferenceAnswer,
+    LearningInferenceError, LearningInferencePremise, LearningRepository, LearningScope,
+    LearningTechnicalError, Memory, MemoryChange, MemoryChangeCommit, MemoryChangeOutcome,
+    MemoryId, MemoryRevision, MemoryRevisionRecord, MemoryTarget, ScrubbedText, SecretScrubber,
+    SummaryId, SummaryRecord,
 };
 
 #[derive(Default)]
@@ -294,7 +295,11 @@ impl ScriptedInference {
     reason = "in-test fake; async matches the inference port"
 )]
 impl LearningInference for ScriptedInference {
-    async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
+    async fn infer(
+        &self,
+        _premise: LearningInferencePremise,
+        prompt: ScrubbedText,
+    ) -> Result<LearningInferenceAnswer, LearningInferenceError> {
         self.prompts
             .lock()
             .expect("fake prompt lock")
@@ -304,6 +309,10 @@ impl LearningInference for ScriptedInference {
             .expect("fake answer lock")
             .pop_front()
             .unwrap_or(Err(LearningInferenceError::Declined))
+            .map(|answer| LearningInferenceAnswer {
+                answer,
+                claim: LearningClaimRef::from_raw(RawId::new()),
+            })
     }
 }
 
@@ -390,6 +399,7 @@ pub(crate) async fn seed_memory_with_importance(
         .commit_memory_change(MemoryChangeCommit {
             summary: None,
             secret_premise: None,
+            claim: None,
             change: MemoryChange {
                 target: MemoryTarget::New { id },
                 scope: LearningScope::companion(companion),
@@ -422,6 +432,7 @@ pub(crate) async fn forget_memory(
             .commit_memory_change(MemoryChangeCommit {
                 summary: None,
                 secret_premise: None,
+                claim: None,
                 change: MemoryChange {
                     target: MemoryTarget::Existing {
                         id: memory,
@@ -472,12 +483,17 @@ impl<'a> RacingInference<'a> {
 }
 
 impl LearningInference for RacingInference<'_> {
-    async fn infer(&self, _prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
+    async fn infer(
+        &self,
+        _premise: LearningInferencePremise,
+        _prompt: ScrubbedText,
+    ) -> Result<LearningInferenceAnswer, LearningInferenceError> {
         drop(
             self.repository
                 .commit_memory_change(MemoryChangeCommit {
                     summary: None,
                     secret_premise: None,
+                    claim: None,
                     change: MemoryChange {
                         target: MemoryTarget::Existing {
                             id: self.advance,
@@ -494,6 +510,9 @@ impl LearningInference for RacingInference<'_> {
                 })
                 .await,
         );
-        Ok(self.answer.clone())
+        Ok(LearningInferenceAnswer {
+            answer: self.answer.clone(),
+            claim: LearningClaimRef::from_raw(RawId::new()),
+        })
     }
 }

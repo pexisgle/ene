@@ -24,11 +24,11 @@ use ene_inference::{
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use ene_task::{
     AssigneeRef, CancelTaskCommand, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
-    DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskAgentOutput, TaskCancelOutcome,
+    DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskCancelOutcome,
     TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise,
     TaskFailureKind, TaskFailureOutcome, TaskFailurePremise, TaskId, TaskProgress, TaskPurpose,
     TaskRef, TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId,
-    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
+    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
 };
 
 use super::TaskProposalHostOutcome;
@@ -268,13 +268,7 @@ async fn late_certainty_settlement_re_evaluates_the_sealed_result() {
         OperationKind::Create,
     )
     .await;
-    let result = orchestrate_result_arrival(
-        &handle.store,
-        delegation,
-        TaskAgentOutput::new(String::from("report.md")),
-    )
-    .await
-    .expect("the arrival records");
+    let result = crate::test_support::record_result(&handle.store, delegation, "report.md").await;
     let withheld = handle
         .store
         .adopt_result(TaskResultAdoptionClaim {
@@ -346,22 +340,11 @@ async fn recovery_reconciliation_is_idempotent_and_reports_bounded_counts() {
         )
         .await
         .unwrap();
-    let _first = orchestrate_result_arrival(
-        &handle.store,
-        first_delegation,
-        TaskAgentOutput::new(String::from("first")),
-    )
-    .await
-    .unwrap();
+    let _first = crate::test_support::record_result(&handle.store, first_delegation, "first").await;
 
     let (second_task, second_delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
-    let _second = orchestrate_result_arrival(
-        &handle.store,
-        second_delegation,
-        TaskAgentOutput::new(String::from("second")),
-    )
-    .await
-    .unwrap();
+    let _second =
+        crate::test_support::record_result(&handle.store, second_delegation, "second").await;
 
     let summary = handle.reconcile_sealed_results().await.unwrap();
     assert_eq!(summary.evaluated, 2);
@@ -396,13 +379,8 @@ async fn reconciliation_narrows_to_readoption_possible_candidates() {
                 .unwrap(),
             TaskCancelOutcome::CancelAccepted
         );
-        let result = orchestrate_result_arrival(
-            &handle.store,
-            delegation,
-            TaskAgentOutput::new(format!("late body {index}")),
-        )
-        .await
-        .unwrap();
+        let body = format!("late body {index}");
+        let result = crate::test_support::record_result(&handle.store, delegation, &body).await;
         permanent.push((task, result.result));
     }
 
@@ -426,13 +404,9 @@ async fn reconciliation_narrows_to_readoption_possible_candidates() {
         )
         .await
         .unwrap();
-    let recoverable = orchestrate_result_arrival(
-        &handle.store,
-        recoverable_delegation,
-        TaskAgentOutput::new(String::from("recoverable")),
-    )
-    .await
-    .unwrap();
+    let recoverable =
+        crate::test_support::record_result(&handle.store, recoverable_delegation, "recoverable")
+            .await;
 
     // The candidate read is bounded and skips the permanent history.
     let candidates = handle
@@ -482,13 +456,8 @@ async fn reconciliation_pages_through_many_recoverable_candidates() {
     let mut results = Vec::new();
     for index in 0..TEST_RECONCILIATION_PAGE_SIZE + 2 {
         let (_task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
-        let result = orchestrate_result_arrival(
-            &handle.store,
-            delegation,
-            TaskAgentOutput::new(format!("body {index}")),
-        )
-        .await
-        .unwrap();
+        let body = format!("body {index}");
+        let result = crate::test_support::record_result(&handle.store, delegation, &body).await;
         results.push(result.result);
     }
     rewrite_result_times(dir.path(), &results);
@@ -579,13 +548,12 @@ async fn the_task_report_composes_canonical_task_and_action_facts() {
         )
         .await
         .unwrap();
-    let result = orchestrate_result_arrival(
+    let result = crate::test_support::record_result(
         &handle.store,
         delegation,
-        TaskAgentOutput::new(String::from("report.md was created from input.txt")),
+        "report.md was created from input.txt",
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         handle
             .store

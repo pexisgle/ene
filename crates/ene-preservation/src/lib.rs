@@ -11,11 +11,13 @@
 //! (IPC §18.1) is the sole production mint site of
 //! [`TrustedOwnerConfirmationRef`], and it needs the durable staged request
 //! plus its durable confirmation fact. Participant-local erasure
-//! implementations, delayed-arrival collection, and verified global completion
-//! belong to other slices and crates. This boundary cannot close a condition
-//! or declare global completion, and it never depends on a concrete
-//! participant crate: the Host composition registers [`ErasureParticipant`]
-//! implementations and performs the fan-out.
+//! implementations and delayed-arrival acceptance gates belong to other
+//! slices and crates. Global completion is a sealed transition whose premise
+//! is re-derived from the canonical store ([`DeletionCompletionSummary`] plus
+//! a system-wide mechanical remainder verification); no caller boolean,
+//! Client payload, or LLM output can declare it. This boundary never depends
+//! on a concrete participant crate: the Host composition registers
+//! [`ErasureParticipant`] implementations and performs the fan-out.
 
 mod operation;
 mod request;
@@ -24,6 +26,9 @@ pub use request::*;
 
 mod participant;
 pub use participant::*;
+
+mod completion;
+pub use completion::*;
 
 use ene_primitive::RawId;
 

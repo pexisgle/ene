@@ -26,8 +26,10 @@ fn task_agent_claim(
         expected_credential_set: CredentialSetRevision::initial(),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
+        data_use: premise.data_use.clone(),
         task_agent: Some(premise),
         pricing: None,
+        usage_estimate: None,
     }
 }
 
@@ -98,6 +100,17 @@ fn seed_condition(store: &Store, sweep: u64, sources: &[RawId]) {
             params![operation_text, sweep_raw],
         )
         .expect("the participant snapshot must seed");
+    // Every operation also carries its per-identity-table reconciliation
+    // cursors; a fixture that only tests the coverage gate commits them
+    // complete, the shape the direct admission path produces.
+    for identity in crate::preservation::KNOWN_SOURCE_IDENTITIES {
+        guard
+            .execute(
+                "INSERT INTO deletion_reconciliation (operation_id,sweep,identity_table,cursor,complete) VALUES (?1,?2,?3,'',1)",
+                params![operation_text, sweep_raw, identity.table],
+            )
+            .expect("the reconciliation cursor must seed");
+    }
     for source in sources {
         guard
             .execute(
@@ -480,30 +493,32 @@ async fn condition_and_data_use_survive_reopen() {
 }
 
 #[tokio::test]
-async fn non_task_attempts_record_the_empty_data_use_and_are_not_gated() {
+async fn dialogue_attempts_record_the_empty_data_use_and_are_not_gated() {
     let store = open_memory().await.unwrap();
     seed_dialogue_consent(&store).await;
-    // A condition covering the dialogue consumer's (nonexistent) sources
-    // cannot hold it: data_use is empty by construction for non-task uses.
+    // An empty read-set is a genuine "the prompt read no canonical source",
+    // not a default: a condition covering an unrelated source cannot hold it.
     seed_condition(&store, 1, &[RawId::new()]);
     let ticket = InferenceTicketId(RawId::new());
     assert_eq!(
         store
             .begin_inference_attempt(InferenceAttempt {
                 ticket,
-                consumer: ConsumerKind::CompanionLearning,
+                consumer: ConsumerKind::CompanionDialogue,
                 capability: CapabilityKind::Dialogue,
                 purpose: PurposeKind::DialogueResponse,
                 expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
                 expected_credential_set: CredentialSetRevision::initial(),
                 provider: String::from("openai"),
                 model: String::from("dialogue-1"),
+                data_use: Vec::new(),
                 task_agent: None,
                 pricing: None,
+                usage_estimate: None,
             })
             .await,
         Ok(AttemptBeginOutcome::Started),
-        "non-task inference keeps its existing path"
+        "dialogue keeps its existing path"
     );
     let record = store
         .load_inference_attempt(ticket)
@@ -511,9 +526,88 @@ async fn non_task_attempts_record_the_empty_data_use_and_are_not_gated() {
         .unwrap()
         .expect("the dialogue attempt must read");
     assert_eq!(record.task_agent, None);
+    assert!(record.data_use.is_empty());
     assert_eq!(
         task_table_count(&store, "inference_attempt_data_use"),
         0,
-        "a non-task attempt records the empty set, never a fabricated source"
+        "a dialogue attempt records the empty set, never a fabricated source"
     );
+}
+
+#[tokio::test]
+async fn learning_formation_claim_is_gated_by_its_source_correlation() {
+    let store = open_memory().await.unwrap();
+    let saved = save_consent(
+        &store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Learning,
+            id: String::from("consent-learning"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(matches!(saved, ConsentCommitOutcome::Committed { .. }));
+    let covered = RawId::new();
+    let clear = RawId::new();
+    seed_condition(&store, 1, &[covered]);
+    let claim = |ticket: InferenceTicketId, data_use: Vec<RawId>| InferenceAttempt {
+        ticket,
+        consumer: ConsumerKind::CompanionLearning,
+        capability: CapabilityKind::Learning,
+        purpose: PurposeKind::MemoryFormation,
+        expected_consent: (
+            String::from("consent-learning"),
+            ConsentRevision::from_u64(1),
+        ),
+        expected_credential_set: CredentialSetRevision::initial(),
+        provider: String::from("openai"),
+        model: String::from("dialogue-1"),
+        data_use,
+        task_agent: None,
+        pricing: None,
+        usage_estimate: None,
+    };
+    // A formation whose prompt read a covered source is held before any
+    // provider byte and before the attempt row exists.
+    assert_eq!(
+        store
+            .begin_inference_attempt(claim(InferenceTicketId(RawId::new()), vec![covered]))
+            .await,
+        Ok(AttemptBeginOutcome::DataUseHeld)
+    );
+    // Any covered source holds the whole claim, and a held claim leaves no
+    // attempt row and no provider byte.
+    let held_ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
+        store
+            .begin_inference_attempt(claim(held_ticket, vec![clear, covered]))
+            .await,
+        Ok(AttemptBeginOutcome::DataUseHeld),
+        "any covered source holds the whole claim"
+    );
+    assert_eq!(
+        store.load_inference_attempt(held_ticket).await.unwrap(),
+        None
+    );
+    // A formation whose correlation is not covered claims normally and
+    // records its ordered data_use.
+    let ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
+        store
+            .begin_inference_attempt(claim(ticket, vec![clear]))
+            .await,
+        Ok(AttemptBeginOutcome::Started)
+    );
+    let record = store
+        .load_inference_attempt(ticket)
+        .await
+        .unwrap()
+        .expect("the learning attempt must read");
+    assert_eq!(record.consumer, ConsumerKind::CompanionLearning);
+    assert_eq!(record.task_agent, None);
+    assert_eq!(record.data_use, vec![clear]);
 }

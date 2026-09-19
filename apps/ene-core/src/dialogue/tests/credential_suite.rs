@@ -72,11 +72,10 @@ use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegationCreationPremise, DelegationId, DelegationOutcome, DelegationScope,
     TaskAgentEphemeralId, TaskAgentInference, TaskAgentInferenceError, TaskAgentInferenceOutcome,
-    TaskAgentInferencePremise, TaskAgentOutput, TaskAgentTurnOutcome, TaskAgentTurnPremise,
-    TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationPremise, TaskInstructionAdoptionPremise, TaskPurpose,
-    TaskRef, TaskReportSourceRef, TaskRepository as _, TaskRevision, orchestrate_result_arrival,
-    orchestrate_task_agent_turn,
+    TaskAgentInferencePremise, TaskAgentTurnOutcome, TaskAgentTurnPremise, TaskCommitOutcome,
+    TaskCommitPremise, TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind,
+    TaskCreationPremise, TaskInstructionAdoptionPremise, TaskPurpose, TaskRef, TaskReportSourceRef,
+    TaskRepository as _, TaskRevision, orchestrate_task_agent_turn,
 };
 
 /// The one registered secret every assertion scans for.
@@ -388,13 +387,12 @@ async fn seed_legacy(handle: &HostHandle, secret: &str) -> LegacySeed {
         &format!("use the key {secret} when reading the notes"),
     )
     .await;
-    let arrival = orchestrate_result_arrival(
+    let arrival = crate::test_support::record_result(
         &handle.store,
         seeded.result_delegation,
-        TaskAgentOutput::new(format!("the draft report quotes {secret}")),
+        &format!("the draft report quotes {secret}"),
     )
-    .await
-    .expect("the legacy result must record");
+    .await;
     let activity = handle
         .store
         .record_resume_activity(RecordResumeActivityCommand {
@@ -413,6 +411,9 @@ async fn seed_legacy(handle: &HostHandle, secret: &str) -> LegacySeed {
         })
         .await
         .expect("the legacy activity must record");
+    let ene_companion::ResumeActivityOutcome::Recorded(activity) = activity else {
+        panic!("the legacy activity must record");
+    };
 
     let memory = MemoryId::generate();
     let summary = SummaryRecord {
@@ -431,6 +432,7 @@ async fn seed_legacy(handle: &HostHandle, secret: &str) -> LegacySeed {
         .commit_memory_change(MemoryChangeCommit {
             summary: Some(summary.clone()),
             secret_premise: None,
+            claim: None,
             change: MemoryChange {
                 target: MemoryTarget::New { id: memory },
                 scope: LearningScope::companion(companion.as_raw()),
@@ -1194,6 +1196,9 @@ fn learning_candidate(companion: RawId, transcript: &str) -> ExperienceCandidate
             start: RawId::new(),
             end: RawId::new(),
         },
+        // The production pin always names at least the transcript message it
+        // read; the claim refuses an empty correlation.
+        sources: vec![RawId::new()],
         transcript: vec![ExperienceTurn {
             role: ExperienceRole::Owner,
             text: transcript.to_owned(),

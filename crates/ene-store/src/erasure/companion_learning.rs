@@ -29,15 +29,16 @@
 //!
 //! The History→Summary correlation is the recorded correspondence only: the
 //! Summary's own source pins. A pin is correlated when the operation's
-//! covered sources name it (the durable link the Host publishes with the
-//! sweep) or when the pinned message still carries the target. Reading the
-//! History row for that check is a read-only cross-owner lookup; the Learning
-//! participant never writes another owner's rows. A Summary that paraphrases
-//! the target without an exact occurrence and without a recorded covered
-//! source is not mechanically reachable in this slice — no LLM and no
-//! guessed correlation is used to reach it.
+//! current `erasure_condition_source` primary key names it (indexed
+//! membership, never a materialized copy of every covered identity) or when
+//! the pinned message still carries the target. Reading the History row for
+//! that check is a read-only cross-owner lookup; the Learning participant
+//! never writes another owner's rows. A Summary that paraphrases the target
+//! without an exact occurrence and without a recorded covered source is not
+//! mechanically reachable in this slice — no LLM and no guessed correlation
+//! is used to reach it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -45,12 +46,10 @@ use ene_preservation::{
     DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, MechanicalDeletionTarget,
     ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef,
 };
-use ene_primitive::{RawId, WallClockWithTz};
+use ene_primitive::WallClockWithTz;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::codec::{
-    SOURCE_KIND_ACTIVITY_RECORD, SOURCE_KIND_HISTORY_MESSAGE, encode_id, lock_shared,
-};
+use crate::codec::{SOURCE_KIND_ACTIVITY_RECORD, SOURCE_KIND_HISTORY_MESSAGE, lock_shared};
 use crate::{Store, run_blocking};
 
 /// Rows one bounded demand scans per owner before reporting more work.
@@ -191,12 +190,8 @@ struct PageRequest<'a> {
 }
 
 /// The step function one owner applies to a bounded budget of scanned rows.
-type LocalStep = fn(
-    tx: &Transaction<'_>,
-    cursor: &mut SweepCursor,
-    target: &str,
-    covered: &[RawId],
-) -> Result<(), rusqlite::Error>;
+type LocalStep =
+    fn(tx: &Transaction<'_>, cursor: &mut SweepCursor, target: &str) -> Result<(), rusqlite::Error>;
 
 fn lock_cursor(slot: &Mutex<Option<SweepCursor>>) -> MutexGuard<'_, Option<SweepCursor>> {
     match slot.lock() {
@@ -229,14 +224,24 @@ fn run_local_demand(
     condition: ErasureConditionRef,
     owner: ParticipantOwnerRef,
     target: &str,
-    covered: &[RawId],
     step: LocalStep,
 ) -> Result<ParticipantCompletionFact, rusqlite::Error> {
     let mut guard = lock_shared(&store.conn);
     let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Deleted cells are zeroed instead of being left recoverable in freed
-    // pages; the flag is connection-scoped and only ever raised on this path.
-    tx.execute_batch("PRAGMA secure_delete = ON")?;
+    // Every store connection raises `secure_delete` at open, so deleted cells
+    // are zeroed instead of being left recoverable in freed pages.
+    let at = WallClockWithTz::now();
+    // The demand was admitted against a then-current condition. Actual
+    // mutation re-reads canonical currentness in this same Immediate
+    // transaction: a completed operation or a superseded sweep must not
+    // change a byte of target-bearing state, including a fresh origin the
+    // Owner provided after closure. NotCurrent is reported as local_complete
+    // so the durable record refuses it as stale, never as Verified.
+    if !crate::preservation::condition_is_current(&tx, condition)? {
+        return Ok(ParticipantCompletionFact::local_complete(
+            condition, owner, 0, 0, at,
+        ));
+    }
     let mut cursor = {
         let slot = lock_cursor(sweep);
         match slot.as_ref() {
@@ -244,8 +249,7 @@ fn run_local_demand(
             _ => SweepCursor::fresh(condition),
         }
     };
-    let at = WallClockWithTz::now();
-    step(&tx, &mut cursor, target, covered)?;
+    step(&tx, &mut cursor, target)?;
     tx.commit()?;
     let fact = cursor.fact(owner, at);
     *lock_cursor(sweep) = Some(cursor);
@@ -412,39 +416,6 @@ fn pin_target_bearing(
     Ok(hit)
 }
 
-/// Counts the mechanical exact-text remainder over every durable content
-/// column the Companion and Learning sweeps cover, the derived token index,
-/// and the undelivered references whose canonical source is gone.
-///
-/// The column list is the participants' shared definition (see
-/// [`COMPANION_CONTENT`] / [`LEARNING_CONTENT`]), so a test probe can never
-/// check a different column set than the sweep covers. The exact text travels
-/// only as a bound parameter.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn exact_remainder_probe(
-    conn: &rusqlite::Connection,
-    text: &str,
-) -> Result<u64, rusqlite::Error> {
-    let mut sql = String::from("SELECT 0");
-    for (table, column) in COMPANION_CONTENT.iter().chain(LEARNING_CONTENT) {
-        sql.push_str(&format!(
-            " + (SELECT COUNT(*) FROM {table} WHERE instr({column}, ?1) > 0)"
-        ));
-    }
-    sql.push_str(&format!(
-        " + (SELECT COUNT(*) FROM {TERM_TABLE} WHERE term = ?1)"
-    ));
-    sql.push_str(&format!(
-        " + (SELECT COUNT(*) FROM undelivered u WHERE \
-           (u.source_kind = '{SOURCE_KIND_HISTORY_MESSAGE}' AND NOT EXISTS \
-               (SELECT 1 FROM history_message h WHERE h.message_id = u.source_id)) \
-           OR (u.source_kind = '{SOURCE_KIND_ACTIVITY_RECORD}' AND NOT EXISTS \
-               (SELECT 1 FROM activity_record a WHERE a.activity_id = u.source_id)))"
-    ));
-    let counted: i64 = conn.query_row(&sql, params![text], |row| row.get(0))?;
-    Ok(u64::try_from(counted).unwrap_or(u64::MAX))
-}
-
 // --- Companion owner -------------------------------------------------------
 
 /// Tables of the Companion sweep, in order: History bodies, activity-record
@@ -455,7 +426,6 @@ fn companion_step(
     tx: &Transaction<'_>,
     cursor: &mut SweepCursor,
     target: &str,
-    _covered: &[RawId],
 ) -> Result<(), rusqlite::Error> {
     let mut budget = ERASURE_SCAN_ROWS;
     while budget > 0 {
@@ -550,6 +520,8 @@ impl ErasureParticipant for CompanionErasureParticipant {
         let store = self.store.clone();
         let sweep = Arc::clone(&self.sweep);
         Box::pin(async move {
+            #[cfg(any(test, feature = "test-support"))]
+            store.test_parks.erasure_mutation.pause_if_armed().await;
             let condition = command.condition();
             let owner = command.participant();
             let held = |reason| {
@@ -561,17 +533,8 @@ impl ErasureParticipant for CompanionErasureParticipant {
                 // retryable hold, never a fabricated completion.
                 return held(ParticipantHoldClass::Failed);
             };
-            let covered = command.scope().sources().to_vec();
             match run_blocking(move || {
-                run_local_demand(
-                    &store,
-                    &sweep,
-                    condition,
-                    owner,
-                    &target,
-                    &covered,
-                    companion_step,
-                )
+                run_local_demand(&store, &sweep, condition, owner, &target, companion_step)
             })
             .await
             {
@@ -603,14 +566,48 @@ fn delete_memories(tx: &Transaction<'_>, memories: &[String]) -> Result<u64, rus
     Ok(current + revisions + terms)
 }
 
+/// Whether `pin` is a covered source of `condition`'s current sweep.
+///
+/// The probe is the `(operation, sweep, source)` primary key, so a Summary
+/// page never receives the whole covered-source set. `memo` is per-demand
+/// and keyed by pin identity, so a page that repeats a pin does not repeat
+/// the lookup.
+fn pin_source_covered(
+    tx: &Transaction<'_>,
+    condition: ErasureConditionRef,
+    pin: &str,
+    memo: &mut HashMap<String, bool>,
+) -> Result<bool, rusqlite::Error> {
+    if let Some(hit) = memo.get(pin) {
+        return Ok(*hit);
+    }
+    let Ok(sweep) = i64::try_from(condition.sweep.as_u64()) else {
+        memo.insert(pin.to_owned(), false);
+        return Ok(false);
+    };
+    let hit: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM erasure_condition_source \
+         WHERE operation_id=?1 AND sweep=?2 AND source=?3)",
+        params![
+            crate::codec::encode_id(condition.operation.as_raw()),
+            sweep,
+            pin
+        ],
+        |row| row.get(0),
+    )?;
+    memo.insert(pin.to_owned(), hit);
+    Ok(hit)
+}
+
 /// One page of `learning_summary`: a row matches when its content carries the
 /// exact target or one of its recorded History source pins names a
 /// target-bearing message. The recorded pins are the only mechanical
 /// History→Summary correspondence the schema keeps.
 fn summary_page(
     tx: &Transaction<'_>,
+    condition: ErasureConditionRef,
     request: &PageRequest<'_>,
-    covered: &HashSet<String>,
+    covered_memo: &mut HashMap<String, bool>,
     memo: &mut HashMap<String, bool>,
 ) -> Result<PageOutcome, rusqlite::Error> {
     let (keys, scanned, last) = {
@@ -635,8 +632,8 @@ fn summary_page(
         drop(rows);
         for (key, start, end, content_hit) in pages {
             let correlated = content_hit
-                || covered.contains(&start)
-                || covered.contains(&end)
+                || pin_source_covered(tx, condition, &start, covered_memo)?
+                || pin_source_covered(tx, condition, &end, covered_memo)?
                 || pin_target_bearing(tx, &start, request.target, memo)?
                 || pin_target_bearing(tx, &end, request.target, memo)?;
             if correlated {
@@ -834,12 +831,13 @@ fn term_page(
 fn learning_page(
     tx: &Transaction<'_>,
     table: usize,
+    condition: ErasureConditionRef,
     request: &PageRequest<'_>,
-    covered: &HashSet<String>,
+    covered_memo: &mut HashMap<String, bool>,
     memo: &mut HashMap<String, bool>,
 ) -> Result<PageOutcome, rusqlite::Error> {
     match table {
-        0 => summary_page(tx, request, covered, memo),
+        0 => summary_page(tx, condition, request, covered_memo, memo),
         1 => revision_page(tx, request),
         2 => memory_page(tx, request),
         _ => term_page(tx, request),
@@ -850,9 +848,8 @@ fn learning_step(
     tx: &Transaction<'_>,
     cursor: &mut SweepCursor,
     target: &str,
-    covered: &[RawId],
 ) -> Result<(), rusqlite::Error> {
-    let covered: HashSet<String> = covered.iter().map(|raw| encode_id(*raw)).collect();
+    let mut covered_memo: HashMap<String, bool> = HashMap::new();
     let mut memo: HashMap<String, bool> = HashMap::new();
     let mut budget = ERASURE_SCAN_ROWS;
     while budget > 0 {
@@ -877,7 +874,14 @@ fn learning_step(
             limit,
             delete: erasing,
         };
-        let outcome = learning_page(tx, cursor.table, &request, &covered, &mut memo)?;
+        let outcome = learning_page(
+            tx,
+            cursor.table,
+            cursor.condition,
+            &request,
+            &mut covered_memo,
+            &mut memo,
+        )?;
         budget = budget.saturating_sub(outcome.scanned);
         if outcome.matched > 0 && !erasing {
             // Verification found rows the erase walk must remove: re-walk
@@ -930,6 +934,8 @@ impl ErasureParticipant for LearningErasureParticipant {
         let store = self.store.clone();
         let sweep = Arc::clone(&self.sweep);
         Box::pin(async move {
+            #[cfg(any(test, feature = "test-support"))]
+            store.test_parks.erasure_mutation.pause_if_armed().await;
             let condition = command.condition();
             let owner = command.participant();
             let held = |reason| {
@@ -938,17 +944,8 @@ impl ErasureParticipant for LearningErasureParticipant {
             let Some(target) = exact_text(&command) else {
                 return held(ParticipantHoldClass::Failed);
             };
-            let covered = command.scope().sources().to_vec();
             match run_blocking(move || {
-                run_local_demand(
-                    &store,
-                    &sweep,
-                    condition,
-                    owner,
-                    &target,
-                    &covered,
-                    learning_step,
-                )
+                run_local_demand(&store, &sweep, condition, owner, &target, learning_step)
             })
             .await
             {

@@ -47,6 +47,15 @@
 //!   existing directory; a valid path becomes the trusted first-party premise
 //!   (never provider output) that a conversation Task proposal may use, and
 //!   an invalid path clarifies with zero premise change.
+//! - `(ManageRuleConsentCap, "cap:{scope}:{window}:{currency}:{limit}")` sets
+//!   one provider/system daily/monthly usage cap through the permission-owned
+//!   command (`usage-cost-cap` §13/§17). The intent `base_view` is the opaque
+//!   mark a usage read issued for exactly that cap slot; a stale or
+//!   face-stale mark answers
+//!   [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView)
+//!   with the rebuilt current mark and stores nothing, an invalid limit
+//!   clarifies, and only the authenticated first-party connection reaches the
+//!   handler. See [`crate::usage`].
 //! - `(RequestDeletionBackupRestoreReset, "deletion:{purpose}:{exact-text}")`
 //!   is the Targeted Deletion request inlet (`Stage 6` A1b; see
 //!   [`crate::deletion`]): it can only stage a durable request awaiting the
@@ -75,6 +84,12 @@
 //! unreadable; its mark stays `"unavailable"` because it named no management
 //! revision to build on.
 //!
+//! The Memory section is body-bearing, so it is also a Targeted Deletion
+//! boundary: bodies are checked against the current erasure conditions and a
+//! covered one is withheld at read time, and a non-empty body handed to the
+//! calling incarnation is recorded as a possible target-bearing local copy
+//! (lifecycle §8.1; critical-areas §5.2).
+//!
 //! Rationale is fingerprint material only: the inlet never acts on the
 //! intent `rationale`, but its origin and quote ride the replay fingerprint
 //! so a reused id with a new rationale counts as different content.
@@ -91,6 +106,7 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
 use ene_companion::{
     ActivityRepository as _, CompanionId, CompanionRepository, RecordResumeActivityCommand,
+    ResumeActivityOutcome,
 };
 use ene_credential::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
@@ -112,6 +128,7 @@ use ene_task::{
     TaskCancelOutcome, TaskId, TaskRepository as _, TaskResumeOutcome, WorkspaceFolderRef,
 };
 
+use crate::presentation::CurrentCoverage;
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
 /// The outcome is the ack of the intent saga, so the envelope carries the
@@ -411,7 +428,18 @@ impl HostHandle {
                     ManagementOutcome::HeldByOperation,
                 )];
             }
-            Ok(activity) => activity,
+            // The instruction body is under a current erasure condition: the
+            // activity is not recorded and the resume is held, never answered
+            // as applied.
+            Ok(ResumeActivityOutcome::HeldForErasure) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+            Ok(ResumeActivityOutcome::Recorded(activity)) => activity,
         };
         match self
             .resume_task(ResumeTaskCommand {
@@ -728,11 +756,17 @@ impl HostHandle {
     ) -> Vec<WireFrame> {
         let target = intent.target.0.as_str();
         if target == SETUP_SHOW_TARGET {
-            let view = self.build_view(&[], None, None, None).await;
+            let view = self.build_view(&[], None, None, None, live).await;
             return vec![view_frame(frame, live, view)];
         }
         if target == SETUP_COMPLETE_TARGET {
             return self.complete_setup(frame, intent, live).await;
+        }
+        // The usage-cap grammar shares this kind (rule/consent/cap) but not
+        // the consent grammar: a `cap:` target reaches the permission-owned
+        // cap command with its revision compare (`usage-cost-cap` §13/§17).
+        if crate::usage::is_usage_cap_target(target) {
+            return self.set_usage_cap_intent(frame, intent, live).await;
         }
         let Some((capability, provider, model, credential_id)) =
             parse_consent_target(&intent.target)
@@ -992,6 +1026,7 @@ impl HostHandle {
                 request.memory_after.as_deref(),
                 request.memory_revisions_of.as_deref(),
                 request.memory_revisions_after,
+                live,
             )
             .await;
         vec![view_frame(frame, live, view)]
@@ -1004,12 +1039,19 @@ impl HostHandle {
     /// names. Setup state is read only for sections that report it; a
     /// `memory`-only request renders Memory without touching the consent or
     /// credential stores.
+    ///
+    /// The Memory section is read against the current erasure conditions in
+    /// the same pass that reads the bodies: a covered body is withheld, and a
+    /// non-empty body actually handed to this connection's incarnation is
+    /// recorded as a possible target-bearing local copy (lifecycle §8.1). A
+    /// response that carries no Memory body records nothing.
     pub(crate) async fn build_view(
         &self,
         wanted: &[String],
         memory_after: Option<&str>,
         memory_revisions_of: Option<&str>,
         memory_revisions_after: Option<u64>,
+        live: &LiveInput,
     ) -> ManagementView {
         let wants = |name: &str| wanted.is_empty() || wanted.iter().any(|section| section == name);
         let mut sections = Vec::new();
@@ -1085,12 +1127,38 @@ impl HostHandle {
             String::from("unavailable")
         };
         if wants("memory") {
+            // One coverage premise per rendered section, read in the same pass
+            // as the bodies: a covered body is withheld at the read boundary
+            // (critical-areas §5.2), and a body actually handed over is
+            // recorded as a Client local copy (lifecycle §8.1).
+            let coverage = self.current_coverage().await;
+            let (mut body, delivered) = self
+                .render_memory_view(
+                    memory_after,
+                    memory_revisions_of,
+                    memory_revisions_after,
+                    &coverage,
+                )
+                .await;
+            if delivered && !self.note_client_body_delivery(live).await {
+                // No durable delivery evidence: withhold the rendered bodies
+                // rather than hand over a copy the Host cannot account for.
+                body.clear();
+            } else if delivered {
+                // The premise above was read before the evidence write and the
+                // handoff: a condition that committed in between is either
+                // already in the snapshot (evidence committed first) or must
+                // withhold the rendered bodies here
+                // (critical-areas §5.2/§6.1).
+                let fresh = self.current_coverage().await;
+                if fresh.covers(&body) {
+                    body.clear();
+                }
+            }
             sections.push(ViewSection {
                 kind: String::from("memory"),
                 title: String::from("Memory"),
-                body: self
-                    .render_memory_view(memory_after, memory_revisions_of, memory_revisions_after)
-                    .await,
+                body,
             });
         }
         ManagementView {
@@ -1134,26 +1202,39 @@ impl HostHandle {
     /// Memory with hundreds of revisions must not enlarge the list page.
     /// There is no write path here: corrections and changes arrive as
     /// Experience through Learning, never by editing a Memory row.
+    ///
+    /// Every rendered body is checked against the pass's [`CurrentCoverage`]:
+    /// a covered body is withheld (the row keeps its identity and cursor
+    /// position), and the returned flag reports whether at least one
+    /// non-empty, uncovered body actually reached this section.
     async fn render_memory_view(
         &self,
         after: Option<&str>,
         revisions_of: Option<&str>,
         after_revision: Option<u64>,
-    ) -> String {
+        coverage: &CurrentCoverage,
+    ) -> (String, bool) {
         match revisions_of {
-            Some(raw) => self.render_revision_page(raw, after_revision).await,
-            None => self.render_memory_list(after).await,
+            Some(raw) => {
+                self.render_revision_page(raw, after_revision, coverage)
+                    .await
+            }
+            None => self.render_memory_list(after, coverage).await,
         }
     }
 
-    async fn render_memory_list(&self, after: Option<&str>) -> String {
+    async fn render_memory_list(
+        &self,
+        after: Option<&str>,
+        coverage: &CurrentCoverage,
+    ) -> (String, bool) {
         let Ok(companion) = self.store.ensure_running_companion().await else {
-            return String::from("unavailable");
+            return (String::from("unavailable"), false);
         };
         let cursor = match after {
             Some(raw) => match parse_memory_id(raw) {
                 Some(id) => Some(id),
-                None => return String::from("invalid cursor"),
+                None => return (String::from("invalid cursor"), false),
             },
             None => None,
         };
@@ -1162,25 +1243,27 @@ impl HostHandle {
             .list_current_memories(companion.as_raw(), cursor, MEMORY_PAGE_SIZE + 1)
             .await
         else {
-            return String::from("unavailable");
+            return (String::from("unavailable"), false);
         };
         if memories.is_empty() {
             return if after.is_some() {
-                String::from("no older memories")
+                (String::from("no older memories"), false)
             } else {
-                String::from("(none)")
+                (String::from("(none)"), false)
             };
         }
         let mut body = String::new();
+        let mut delivered = false;
         let mut last_id = memories[0].id;
         let mut rendered = 0_usize;
         for memory in memories.iter().take(MEMORY_PAGE_SIZE as usize) {
-            let line = render_memory(memory);
+            let (line, line_delivered) = render_memory(memory, coverage);
             if rendered > 0 && body.len() + line.len() > MEMORY_BODY_BUDGET {
                 break;
             }
             body.push_str(&line);
             body.push('\n');
+            delivered |= line_delivered;
             last_id = memory.id;
             rendered += 1;
         }
@@ -1189,12 +1272,17 @@ impl HostHandle {
             // the first unrendered memory and cannot skip or repeat a row.
             body.push_str(&format!("next: {}\n", last_id.as_raw().as_uuid()));
         }
-        body.trim_end().to_owned()
+        (body.trim_end().to_owned(), delivered)
     }
 
-    async fn render_revision_page(&self, memory: &str, after_revision: Option<u64>) -> String {
+    async fn render_revision_page(
+        &self,
+        memory: &str,
+        after_revision: Option<u64>,
+        coverage: &CurrentCoverage,
+    ) -> (String, bool) {
         let Some(memory_id) = parse_memory_id(memory) else {
-            return String::from("invalid cursor");
+            return (String::from("invalid cursor"), false);
         };
         let after = match after_revision {
             Some(revision) if revision > 0 => Some(MemoryRevision::from_u64(revision)),
@@ -1205,13 +1293,13 @@ impl HostHandle {
             .list_memory_revisions(memory_id, after, MEMORY_REVISION_PAGE_SIZE + 1)
             .await
         else {
-            return String::from("unavailable");
+            return (String::from("unavailable"), false);
         };
         if revisions.is_empty() {
             return if after.is_some() {
-                String::from("no more revisions")
+                (String::from("no more revisions"), false)
             } else {
-                String::from("unknown memory")
+                (String::from("unknown memory"), false)
             };
         }
         // One batch lookup for the page's grounds: a shared Summary is read
@@ -1222,15 +1310,26 @@ impl HostHandle {
         let summaries_unavailable = loaded.is_err();
         let loaded = loaded.unwrap_or_default();
         let mut body = String::new();
+        let mut delivered = false;
         let mut last_revision = revisions[0].revision;
         let mut rendered = 0_usize;
         for revision in revisions.iter().take(MEMORY_REVISION_PAGE_SIZE as usize) {
-            let mut piece = render_revision(revision);
+            let (mut piece, revision_delivered) = render_revision(revision, coverage);
+            let mut piece_delivered = revision_delivered;
             if let Some(summary_id) = revision.summary {
                 let short = short_id(summary_id.as_raw());
                 match loaded.iter().find(|summary| summary.id == summary_id) {
                     Some(summary) => {
-                        piece.push_str(&format!("  grounds summary {short}: {}\n", summary.content))
+                        // Shared grounds are a body too: a covered one is
+                        // withheld exactly like the revision content.
+                        let covered = coverage.covers(&summary.content);
+                        piece_delivered |= !covered && !summary.content.is_empty();
+                        let grounds = if covered {
+                            ""
+                        } else {
+                            summary.content.as_str()
+                        };
+                        piece.push_str(&format!("  grounds summary {short}: {grounds}\n"));
                     }
                     None if summaries_unavailable => {
                         piece.push_str("  grounds: unavailable\n");
@@ -1242,13 +1341,14 @@ impl HostHandle {
                 break;
             }
             body.push_str(&piece);
+            delivered |= piece_delivered;
             last_revision = revision.revision;
             rendered += 1;
         }
         if rendered < revisions.len() {
             body.push_str(&format!("next-revision: {}\n", last_revision.as_u64()));
         }
-        body.trim_end().to_owned()
+        (body.trim_end().to_owned(), delivered)
     }
 }
 
@@ -1290,30 +1390,47 @@ fn short_id(id: RawId) -> String {
         .collect()
 }
 
-fn render_memory(memory: &Memory) -> String {
-    format!(
-        "memory {} scope=companion importance={} temporal={} recall={} revision={} updated={}\ncontent: {}\n",
-        memory.id.as_raw().as_uuid(),
-        memory.importance.as_u8(),
-        temporal_label(memory.temporal),
-        if memory.recall_suppressed {
-            "suppressed"
-        } else {
-            "active"
-        },
-        memory.revision.as_u64(),
-        memory.updated_at.to_rfc3339(),
-        memory.content,
+/// One current Memory row, with a covered body withheld the same way an
+/// undelivered excerpt is: the row keeps its identity and pagination
+/// position, the body text never reaches the caller. The flag reports
+/// whether a non-empty, uncovered body was handed over.
+fn render_memory(memory: &Memory, coverage: &CurrentCoverage) -> (String, bool) {
+    let covered = coverage.covers(&memory.content);
+    let content = if covered { "" } else { memory.content.as_str() };
+    (
+        format!(
+            "memory {} scope=companion importance={} temporal={} recall={} revision={} updated={}\ncontent: {content}\n",
+            memory.id.as_raw().as_uuid(),
+            memory.importance.as_u8(),
+            temporal_label(memory.temporal),
+            if memory.recall_suppressed {
+                "suppressed"
+            } else {
+                "active"
+            },
+            memory.revision.as_u64(),
+            memory.updated_at.to_rfc3339(),
+        ),
+        !covered && !memory.content.is_empty(),
     )
 }
 
-fn render_revision(revision: &MemoryRevisionRecord) -> String {
-    format!(
-        "  rev{} {} at={} content: {}\n",
-        revision.revision.as_u64(),
-        change_label(revision.change),
-        revision.at.to_rfc3339(),
-        revision.content,
+/// One revision row, with a covered body withheld like [`render_memory`].
+fn render_revision(revision: &MemoryRevisionRecord, coverage: &CurrentCoverage) -> (String, bool) {
+    let covered = coverage.covers(&revision.content);
+    let content = if covered {
+        ""
+    } else {
+        revision.content.as_str()
+    };
+    (
+        format!(
+            "  rev{} {} at={} content: {content}\n",
+            revision.revision.as_u64(),
+            change_label(revision.change),
+            revision.at.to_rfc3339(),
+        ),
+        !covered && !revision.content.is_empty(),
     )
 }
 
