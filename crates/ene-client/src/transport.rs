@@ -112,6 +112,28 @@ impl Client {
         descriptor: &str,
         platform: &str,
     ) -> Result<Self, ClientError> {
+        Self::connect_with_bootstrap(
+            data_dir,
+            descriptor,
+            platform,
+            device::read_bootstrap_secret(),
+        )
+        .await
+    }
+
+    /// Same handshake as [`Self::connect`], with an in-process pairing
+    /// bootstrap instead of `ENE_PAIRING_SECRET`.
+    ///
+    /// First-party GUI uses this after a seated `DeviceApproved` so the
+    /// pairing secret never enters the process environment. The value is
+    /// the env-side input of [`device::resolve_device_secret`] and is not
+    /// logged.
+    pub async fn connect_with_bootstrap(
+        data_dir: &Path,
+        descriptor: &str,
+        platform: &str,
+        bootstrap_secret: Option<String>,
+    ) -> Result<Self, ClientError> {
         let incarnation = crate::incarnation::boot_incarnation(data_dir)?;
         #[cfg(unix)]
         let mut stream = {
@@ -141,7 +163,7 @@ impl Client {
             stored_device
                 .as_ref()
                 .and_then(|known| known.secret().map(str::to_string)),
-            device::read_bootstrap_secret(),
+            bootstrap_secret,
         );
         // A degraded file (unreadable/corrupt/blank secret) with no bootstrap
         // secret cannot authenticate with anything: report the degraded state
@@ -593,6 +615,15 @@ impl Client {
         _data_dir: &Path,
         _descriptor: &str,
         _platform: &str,
+    ) -> Result<Self, ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
+    }
+
+    pub async fn connect_with_bootstrap(
+        _data_dir: &Path,
+        _descriptor: &str,
+        _platform: &str,
+        _bootstrap_secret: Option<String>,
     ) -> Result<Self, ClientError> {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
