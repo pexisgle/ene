@@ -4,7 +4,7 @@
 //! search/input draft, IME composition, undo, deferred frames (Client),
 //! usage/deletion panel bodies, and presented chat receipts. Registered
 //! secrets are not user content and are not wiped through this path; C1
-//! secret intake is zeroized by [`crate::secret::SecretIntake`].
+//! secret intake is zeroized by crate-private `SecretIntake`.
 //!
 //! `wiped` is returned only after the named copies are confirmed empty.
 
