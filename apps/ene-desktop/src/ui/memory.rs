@@ -340,7 +340,7 @@ fn parse_memory_header(header: &str) -> Option<MemoryRow> {
 }
 
 fn parse_revision_body(body: &str) -> (Vec<MemoryRevisionRow>, Option<u64>) {
-    let mut revisions = Vec::new();
+    let mut revisions: Vec<MemoryRevisionRow> = Vec::new();
     let mut next = None;
     for line in body.lines() {
         let trimmed = line.trim();
