@@ -1015,8 +1015,7 @@ pub(crate) struct ClientTransientRegistry {
     /// is not a second deletion store; it only refuses to mint a demand when
     /// the operation is already closed.
     store: Store,
-    /// Test-only wait bound override.
-    #[cfg(test)]
+    /// Silence bound override. `None` is the production 30s hold wait.
     wait_limit: std::sync::Mutex<Option<Duration>>,
 }
 
@@ -1035,7 +1034,6 @@ impl ClientTransientRegistry {
             result_wake: Notify::new(),
             table: OnceLock::new(),
             store,
-            #[cfg(test)]
             wait_limit: std::sync::Mutex::new(None),
         }
     }
@@ -1274,12 +1272,10 @@ impl ClientTransientRegistry {
         }
     }
 
-    #[cfg(test)]
     fn wait_limit(&self) -> Duration {
         crate::lock_unpoison(&self.wait_limit).unwrap_or(CLIENT_ERASURE_WAIT)
     }
 
-    #[cfg(test)]
     pub(crate) fn set_wait_limit_for_test(&self, limit: Duration) {
         *crate::lock_unpoison(&self.wait_limit) = Some(limit);
     }
@@ -1330,10 +1326,7 @@ impl ClientIncarnationParticipant {
         owner: ParticipantOwnerRef,
         connection: ConnectionWireId,
     ) -> ParticipantCompletionFact {
-        #[cfg(test)]
         let limit = registry.wait_limit();
-        #[cfg(not(test))]
-        let limit = CLIENT_ERASURE_WAIT;
         let wait = registry.wait(identity, condition);
         let outcome = match tokio::time::timeout(limit, wait).await {
             Ok(outcome) => outcome,

@@ -959,6 +959,13 @@ impl HostHandle {
         self.deletion_driver_wake.notify_waiters();
     }
 
+    /// Bounds one Client local-erasure silence wait. Production never calls
+    /// this; the 30s hold bound stays the product wait.
+    #[doc(hidden)]
+    pub fn set_client_erasure_wait_for_tests(&self, limit: std::time::Duration) {
+        self.client_transients.set_wait_limit_for_test(limit);
+    }
+
     /// Marks a serving-composition Targeted Deletion driver as live on this
     /// handle. Paired with [`Self::end_deletion_driver`] from the driver task
     /// Drop, including abort, so a successor Host can observe that the
