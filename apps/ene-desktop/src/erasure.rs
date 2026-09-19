@@ -1,7 +1,7 @@
 //! GUI erasure participant: timeline, draft, IME composition.
 //!
 //! Registered secrets are not user content and are not wiped through this
-//! path. C1 secret intake is zeroized by [`crate::secret::SecretIntake`], not
+//! path. C1 secret intake is zeroized by crate-private `SecretIntake`, not
 //! by Targeted Deletion.
 
 use ene_api::v1::deletion::{

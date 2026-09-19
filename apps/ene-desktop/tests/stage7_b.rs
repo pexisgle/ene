@@ -149,10 +149,7 @@ async fn wait_for_control(dir: &Path) -> bool {
             return true;
         }
         #[cfg(windows)]
-        if ene_core::host_control::ControlClient::connect(dir)
-            .await
-            .is_ok()
-        {
+        if host_control::ControlClient::connect(dir).await.is_ok() {
             tokio::task::yield_now().await;
             return true;
         }
