@@ -471,7 +471,7 @@ async fn cancel_admission_is_not_stop_complete() {
     assert!(
         matches!(
             refused,
-            ResumeTaskOutcomeWire::TaskTerminal { progress } if progress == "cancelled"
+            ResumeTaskOutcomeWire::TaskTerminal { ref progress } if progress == "cancelled"
         ),
         "cancelled is terminal, got {refused:?}"
     );

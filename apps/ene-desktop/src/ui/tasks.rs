@@ -593,12 +593,11 @@ fn ack_label(outcome: &UndeliveredAckOutcome) -> String {
 fn take_pushed_summary(client: &mut Client) -> Option<UndeliveredSummary> {
     let mut found = None;
     for frame in client.take_undelivered() {
-        if let WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) =
-            frame.payload
+        if found.is_none()
+            && let WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) =
+                frame.payload
         {
-            if found.is_none() {
-                found = Some(summary);
-            }
+            found = Some(summary);
         }
     }
     found
