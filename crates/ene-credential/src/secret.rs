@@ -66,6 +66,255 @@ pub trait CredentialStore: Send + Sync {
     fn put(&self, cred: &CredentialRef, secret: &str) -> Result<(), CredentialTechnicalError>;
 }
 
+/// Version-aware backend for the publication protocol.
+///
+/// The product OS store implements this alongside [`CredentialStore`]; the
+/// in-memory store implements it for tests and local development. A backend
+/// that cannot hold versions (the environment store) deliberately does not:
+/// the Host then reports that registration is unavailable instead of writing a
+/// value nothing can activate.
+pub trait VersionedCredentialStore: Send + Sync {
+    /// Publishes one value as a new version item.
+    ///
+    /// # Errors
+    ///
+    /// [`CredentialTechnicalError::StorageUnavailable`] when the item cannot
+    /// be created. The error never carries the value.
+    fn put_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        secret: &str,
+    ) -> Result<(), CredentialTechnicalError>;
+
+    /// Runs `f` with one version's value.
+    ///
+    /// # Errors
+    ///
+    /// [`CredentialTechnicalError::StorageUnavailable`] when the version is
+    /// absent or unreadable. The error never carries the value.
+    fn with_version<R>(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError>;
+
+    /// Points routine reads at `version`.
+    ///
+    /// Called only after the activation transaction commits, so a read before
+    /// the commit still resolves the previous version.
+    fn activate(&self, cred: &CredentialRef, version: u64);
+
+    /// Removes one version item.
+    ///
+    /// # Errors
+    ///
+    /// [`CredentialTechnicalError::StorageUnavailable`] when the backend
+    /// refuses the removal.
+    fn delete_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<(), CredentialTechnicalError>;
+}
+
+impl VersionedCredentialStore for crate::OsCredentialStore {
+    fn put_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        secret: &str,
+    ) -> Result<(), CredentialTechnicalError> {
+        crate::OsCredentialStore::put_version(self, cred, version, secret)
+    }
+
+    fn with_version<R>(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError> {
+        crate::OsCredentialStore::with_version(self, cred, version, f)
+    }
+
+    fn activate(&self, cred: &CredentialRef, version: u64) {
+        crate::OsCredentialStore::activate(self, cred, version);
+    }
+
+    fn delete_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<(), CredentialTechnicalError> {
+        crate::OsCredentialStore::delete_version(self, cred, version)
+    }
+}
+
+/// Versioned in-memory backend for tests and local development.
+///
+/// It exists so the publication protocol can be exercised end to end without
+/// an OS store. It is never a product source of truth: the Host wires the OS
+/// backend for the product path and reports registration as unavailable when
+/// no version-capable backend is configured.
+pub struct MemoryVersionedStore {
+    versions: Mutex<HashMap<(CredentialRef, u64), SecretValue>>,
+    active: Mutex<HashMap<CredentialRef, u64>>,
+}
+
+impl core::fmt::Debug for MemoryVersionedStore {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let versions = match self.versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        formatter
+            .debug_struct("MemoryVersionedStore")
+            .field("versions", &versions.len())
+            .finish()
+    }
+}
+
+impl Default for MemoryVersionedStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryVersionedStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            versions: Mutex::new(HashMap::new()),
+            active: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Publishes and activates one value directly, for fixtures that need a
+    /// usable credential without driving the registration protocol. Product
+    /// code never calls this: the Host publishes through the owner.
+    pub fn provision(&self, cred: CredentialRef, secret: &str) {
+        let version = 1;
+        let mut versions = match self.versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        versions.insert(
+            (cred.clone(), version),
+            SecretValue::new(secret.as_bytes().to_vec()),
+        );
+        drop(versions);
+        let mut active = match self.active.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        active.insert(cred, version);
+    }
+}
+
+impl VersionedCredentialStore for MemoryVersionedStore {
+    fn put_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        secret: &str,
+    ) -> Result<(), CredentialTechnicalError> {
+        let mut versions = match self.versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let key = (cred.clone(), version);
+        if versions.contains_key(&key) {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: version {version} is already published", cred.id()),
+            });
+        }
+        versions.insert(key, SecretValue::new(secret.as_bytes().to_vec()));
+        Ok(())
+    }
+
+    fn with_version<R>(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError> {
+        let versions = match self.versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(secret) = versions.get(&(cred.clone(), version)) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: version {version} is absent", cred.id()),
+            });
+        };
+        let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: the stored value is not valid UTF-8", cred.id()),
+            });
+        };
+        Ok(f(bearer))
+    }
+
+    fn activate(&self, cred: &CredentialRef, version: u64) {
+        let mut active = match self.active.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        active.insert(cred.clone(), version);
+    }
+
+    fn delete_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<(), CredentialTechnicalError> {
+        let mut versions = match self.versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        versions.remove(&(cred.clone(), version));
+        Ok(())
+    }
+}
+
+impl CredentialStore for MemoryVersionedStore {
+    fn with_bearer<R>(
+        &self,
+        cred: &CredentialRef,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError> {
+        let version = {
+            let active = match self.active.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            active.get(cred).copied()
+        };
+        let Some(version) = version else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: no published version is active", cred.id()),
+            });
+        };
+        self.with_version(cred, version, f)
+    }
+
+    fn contains(&self, cred: &CredentialRef) -> bool {
+        self.with_bearer(cred, |_| ()).is_ok()
+    }
+
+    /// A bare `put` is refused: only the owner's publish-then-activate path
+    /// makes a value usable, in tests exactly as in the OS store.
+    fn put(&self, cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
+        Err(CredentialTechnicalError::StorageUnavailable {
+            reason: format!(
+                "{}: versions are published through the credential owner, not a bare put",
+                cred.id()
+            ),
+        })
+    }
+}
+
 /// In-memory bearer store for tests and local development only.
 ///
 /// Holds [`SecretValue`] entries keyed by `(provider, label)` behind a

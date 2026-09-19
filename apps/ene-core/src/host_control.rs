@@ -66,6 +66,9 @@ enum PendingOp {
     CredentialPut {
         provider: String,
         label: String,
+        /// Stable identity of this registration attempt, so a retry observes
+        /// the original mutation instead of starting a second one.
+        mutation_id: String,
         /// Staged candidate, filled by the confirmation channel's secret
         /// intake. Empty means the Owner never entered a value, which is a
         /// refusal, never a stored credential.
@@ -299,6 +302,7 @@ impl FirstPartyControlSeat {
             PendingOp::CredentialPut {
                 provider,
                 label,
+                mutation_id: _,
                 secret: staged,
             } if format!("{provider}:{label}") == target => {
                 *staged = Some(secret);
@@ -538,6 +542,7 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
                     PendingOp::CredentialPut {
                         provider,
                         label,
+                        mutation_id: Uuid::new_v4().as_hyphenated().to_string(),
                         // The secret arrives on the confirmation channel; the
                         // requester only names the pair.
                         secret: None,
@@ -686,6 +691,7 @@ async fn execute_pending(
         PendingOp::CredentialPut {
             provider,
             label,
+            mutation_id,
             secret,
         } => {
             // Completion consumes the candidate staged on the confirmation
@@ -703,34 +709,11 @@ async fn execute_pending(
             // The OS item existing is not registration: the approval sweep and
             // the usable reference must commit together, and a commit that did
             // not happen is its own state rather than success or a clean miss.
-            match handle
-                .put_credential(&provider, &label, secret.expose())
+            let outcome = handle
+                .publish_credential(&provider, &label, &mutation_id, secret.expose())
                 .await
-            {
-                Ok(true) => match handle.approve_credential(&provider, &label).await {
-                    Ok(true) => (
-                        FromConfirmation::Outcome(ControlOutcome::CredentialStored {
-                            provider: provider.clone(),
-                            label: label.clone(),
-                        }),
-                        Some(RequesterOutcome::CredentialStored { provider, label }),
-                    ),
-                    Ok(false) | Err(_) => (
-                        FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted {
-                            provider: provider.clone(),
-                            label: label.clone(),
-                        }),
-                        Some(RequesterOutcome::CredentialUncommitted { provider, label }),
-                    ),
-                },
-                Ok(false) | Err(_) => (
-                    FromConfirmation::Outcome(ControlOutcome::CredentialRefused {
-                        provider: provider.clone(),
-                        label: label.clone(),
-                    }),
-                    Some(RequesterOutcome::CredentialRefused { provider, label }),
-                ),
-            }
+                .unwrap_or(ene_credential::MutationOutcome::Unknown);
+            credential_outcome(outcome, provider, label)
         }
         PendingOp::DeletionConfirm { request_id } => {
             #[cfg(test)]
@@ -748,6 +731,44 @@ async fn execute_pending(
                 Err(_) => (FromConfirmation::Unavailable, None),
             }
         }
+    }
+}
+
+/// Renders one credential publication outcome for both channels.
+///
+/// Only a committed activation is `CredentialStored`. A commit that did not
+/// happen is its own state, and an undetermined result is neither success nor
+/// "nothing happened".
+#[cfg(any(unix, windows))]
+fn credential_outcome(
+    outcome: ene_credential::MutationOutcome,
+    provider: String,
+    label: String,
+) -> (FromConfirmation, Option<RequesterOutcome>) {
+    use ene_credential::MutationOutcome;
+    match outcome {
+        MutationOutcome::Activated { .. } => (
+            FromConfirmation::Outcome(ControlOutcome::CredentialStored {
+                provider: provider.clone(),
+                label: label.clone(),
+            }),
+            Some(RequesterOutcome::CredentialStored { provider, label }),
+        ),
+        MutationOutcome::Stale => (
+            FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted {
+                provider: provider.clone(),
+                label: label.clone(),
+            }),
+            Some(RequesterOutcome::CredentialUncommitted { provider, label }),
+        ),
+        MutationOutcome::Revoked { .. } | MutationOutcome::Rejected | MutationOutcome::Refused => (
+            FromConfirmation::Outcome(ControlOutcome::CredentialRefused {
+                provider: provider.clone(),
+                label: label.clone(),
+            }),
+            Some(RequesterOutcome::CredentialRefused { provider, label }),
+        ),
+        MutationOutcome::Unknown => (FromConfirmation::Unavailable, None),
     }
 }
 
@@ -1459,6 +1480,7 @@ mod tests {
                 PendingOp::CredentialPut {
                     provider: String::from("openai"),
                     label: String::from("main"),
+                    mutation_id: String::from("m-test"),
                     secret: None,
                 },
             ),

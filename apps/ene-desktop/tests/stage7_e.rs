@@ -29,7 +29,7 @@ use ene_companion::{CompanionRepository as _, UNDELIVERED_PAGE_MAX, UndeliveredR
 use ene_core::conn;
 use ene_core::host_control;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::MemoryCredentialStore;
+use ene_credential::MemoryVersionedStore;
 use ene_desktop::body_supervise::BodySupervisor;
 use ene_desktop::measure;
 use ene_desktop::session;
@@ -115,8 +115,11 @@ impl ServingTask {
 }
 
 async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    match HostHandle::open_with_cred_store(dir, CredStore::Memory(MemoryCredentialStore::new()))
-        .await
+    match HostHandle::open_with_cred_store(
+        dir,
+        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+    )
+    .await
     {
         Ok(handle) => Arc::new(handle),
         Err(error) => panic!("host must open: {error}"),

@@ -85,7 +85,7 @@ use ene_companion::{CompanionId, CompanionRepository};
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialRefRepository as _, CredentialStore,
     CredentialTechnicalError, DevicePairingRepository, DeviceRecord, EnvCredentialStore,
-    FileDeviceAuthStore, MemoryCredentialStore,
+    FileDeviceAuthStore, MemoryCredentialStore, VersionedCredentialStore as _,
 };
 use ene_inference::{ProviderTransport, UsageRepository as _};
 use ene_permission::EvaluationTracker;
@@ -242,6 +242,9 @@ pub enum CredStore {
     /// The product backend: the OS protected store, written through the
     /// credential owner's version publication, never by a bare `put`.
     Os(ene_credential::OsCredentialStore),
+    /// Versioned in-memory backend for tests: the same publication protocol
+    /// without an OS store, never a product source of truth.
+    MemoryVersioned(ene_credential::MemoryVersionedStore),
 }
 
 impl CredentialStore for CredStore {
@@ -254,6 +257,7 @@ impl CredentialStore for CredStore {
             Self::Env(inner) => inner.with_bearer(cred, f),
             Self::Memory(inner) => inner.with_bearer(cred, f),
             Self::Os(inner) => inner.with_bearer(cred, f),
+            Self::MemoryVersioned(inner) => inner.with_bearer(cred, f),
         }
     }
 
@@ -262,6 +266,7 @@ impl CredentialStore for CredStore {
             Self::Env(inner) => inner.contains(cred),
             Self::Memory(inner) => inner.contains(cred),
             Self::Os(inner) => inner.contains(cred),
+            Self::MemoryVersioned(inner) => inner.contains(cred),
         }
     }
 
@@ -270,17 +275,87 @@ impl CredentialStore for CredStore {
             Self::Env(inner) => inner.put(cred, secret),
             Self::Memory(inner) => inner.put(cred, secret),
             Self::Os(inner) => inner.put(cred, secret),
+            Self::MemoryVersioned(inner) => inner.put(cred, secret),
         }
     }
 }
 
 impl CredStore {
-    /// The OS backend, when this Host was opened with the product store.
+    /// True when this backend can publish credential versions.
+    ///
+    /// The product path uses the OS store; tests may use the versioned
+    /// in-memory backend to exercise the same protocol. A backend without
+    /// versions (environment store, plain in-memory store) reports false, so
+    /// the Host says registration is unavailable rather than publishing a
+    /// value nothing can activate.
     #[must_use]
-    pub fn os(&self) -> Option<&ene_credential::OsCredentialStore> {
+    pub fn supports_versions(&self) -> bool {
         match self {
-            Self::Os(inner) => Some(inner),
-            Self::Env(_) | Self::Memory(_) => None,
+            Self::Os(_) | Self::MemoryVersioned(_) => true,
+            Self::Env(_) | Self::Memory(_) => false,
+        }
+    }
+}
+
+impl ene_credential::VersionedCredentialStore for CredStore {
+    fn put_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        secret: &str,
+    ) -> Result<(), CredentialTechnicalError> {
+        match self {
+            Self::Os(inner) => inner.put_version(cred, version, secret),
+            Self::MemoryVersioned(inner) => inner.put_version(cred, version, secret),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot publish credential versions",
+                    cred.id()
+                ),
+            }),
+        }
+    }
+
+    fn with_version<R>(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError> {
+        match self {
+            Self::Os(inner) => inner.with_version(cred, version, f),
+            Self::MemoryVersioned(inner) => inner.with_version(cred, version, f),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot read credential versions",
+                    cred.id()
+                ),
+            }),
+        }
+    }
+
+    fn activate(&self, cred: &CredentialRef, version: u64) {
+        match self {
+            Self::Os(inner) => inner.activate(cred, version),
+            Self::MemoryVersioned(inner) => inner.activate(cred, version),
+            Self::Env(_) | Self::Memory(_) => {}
+        }
+    }
+
+    fn delete_version(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<(), CredentialTechnicalError> {
+        match self {
+            Self::Os(inner) => inner.delete_version(cred, version),
+            Self::MemoryVersioned(inner) => inner.delete_version(cred, version),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot remove credential versions",
+                    cred.id()
+                ),
+            }),
         }
     }
 }
@@ -2095,16 +2170,18 @@ impl HostHandle {
         if let Some(outcome) = mutation.outcome {
             return Ok(outcome);
         }
-        let Some(os) = self.cred_store.os() else {
-            // No OS store means no product registration surface: the value is
-            // not stored and the mutation says so instead of pretending.
+        if !self.cred_store.supports_versions() {
+            // No version-capable backend means no registration surface: the
+            // value is not stored and the mutation says so instead of
+            // pretending.
             let outcome = MutationOutcome::Refused;
             self.store
                 .record_credential_mutation_outcome(mutation_id, outcome.clone())
                 .await
                 .map_err(|error| CoreError::Store(error.to_string()))?;
             return Ok(outcome);
-        };
+        }
+        let os = &self.cred_store;
         let version = mutation
             .candidate_version
             .map(SecretVersionId::as_u64)

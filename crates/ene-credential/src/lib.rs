@@ -52,7 +52,8 @@ pub use scrub::{
     CredentialScrubber, CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber,
 };
 pub use secret::{
-    CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, SecretValue,
+    CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, MemoryVersionedStore,
+    SecretValue, VersionedCredentialStore,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
