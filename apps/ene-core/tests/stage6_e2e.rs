@@ -636,8 +636,14 @@ impl Served {
     /// serving.
     async fn stop(&mut self) {
         self.server.abort();
-        let aborted = std::mem::replace(&mut self.server, tokio::spawn(async {}));
-        let _ = aborted.await;
+        let aborted = std::mem::replace(
+            &mut self.server,
+            tokio::spawn(async { Ok::<(), CoreError>(()) }),
+        );
+        match aborted.await {
+            Ok(Ok(())) | Err(_) => {}
+            Ok(Err(error)) => panic!("the aborted listener failed: {error}"),
+        }
         self.client = None;
         tokio::task::yield_now().await;
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
