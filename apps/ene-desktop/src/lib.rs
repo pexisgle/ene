@@ -8,11 +8,13 @@
 //!
 //! Modules match [First-party desktop](../../docs/design/concrete/first-party-desktop.md)
 //! §6: `ui`, `session`, `control`, `body_supervise`, `i18n`, `erasure`.
+//! `measure` is the slice F recording format only; it does not claim a gate.
 
 pub mod body_supervise;
 pub mod control;
 pub mod erasure;
 pub mod i18n;
+pub mod measure;
 pub mod session;
 pub mod ui;
 

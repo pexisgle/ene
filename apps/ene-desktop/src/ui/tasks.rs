@@ -11,8 +11,8 @@
 //!
 //! Presentation ACK for undelivered Task facts is issued only after this
 //! panel has copied a receipt into its displayed state. Conversation stream
-//! ACK already lives in [`crate::session::submit_and_collect`] (slice E can
-//! keep that as the chat hook).
+//! ACK lives in [`crate::session::confirm_chat_presentation`] after the GUI
+//! presents the collected turn.
 
 use std::path::Path;
 use std::time::Duration;
@@ -152,6 +152,23 @@ impl TaskPanel {
             workspace_path,
             ..Self::default()
         };
+    }
+
+    /// Drops Task report, list, undelivered lines, and presented receipts.
+    /// Workspace folder is the last Owner-sent path, not a target body.
+    pub(crate) fn wipe_owned_copies(&mut self) {
+        self.reset_connection_state();
+    }
+
+    #[must_use]
+    pub(crate) fn presentation_cleared(&self) -> bool {
+        self.items.is_empty()
+            && self.displayed.is_none()
+            && self.purpose_text.is_empty()
+            && self.result_text.is_empty()
+            && self.action_lines.is_empty()
+            && self.undelivered_lines.is_empty()
+            && self.presented.is_none()
     }
 
     pub(crate) async fn refresh_list(&mut self, client: &mut Client) -> Result<(), DesktopError> {

@@ -177,6 +177,17 @@ impl MemoryPage {
         self.last_request.as_ref()
     }
 
+    /// Drops every Host-projected Memory copy this page holds. Old cursors
+    /// and revision views are invalid after this.
+    pub fn wipe(&mut self) {
+        *self = Self::default();
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.revisions.is_empty()
+    }
+
     /// Slint projection of the current Host page(s) already fetched.
     #[must_use]
     pub fn panel(&self) -> String {

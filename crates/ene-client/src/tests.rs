@@ -281,6 +281,40 @@ fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
 }
 
 #[test]
+fn defer_erasure_stashes_the_demand_without_claiming_gui_classes() {
+    use ene_api::v1::deletion::{
+        ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
+    };
+
+    let mut session = SessionState::default();
+    session.set_defer_erasure(true);
+    session.push_deferred(crate::frames::frame_for(
+        WirePayload::PresenceAttribution(presence_fact(1)),
+        WireSender {
+            device_id: None,
+            incarnation_id: incarnation(),
+            connection_id: None,
+        },
+    ));
+    let demand = DeletionDemand {
+        demand: DeletionDemandWireId(String::from("demand-gui")),
+        operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-gui")),
+        sweep: 1,
+        targets: vec![DeletionTargetWire::WipeClass {
+            class: ClientTempClass::PresentationBuffer,
+        }],
+    };
+    session.clear_deferred_frames();
+    session.push_pending_erasure(demand.clone());
+    let stashed = session.take_pending_erasure().expect("stashed demand");
+    assert_eq!(stashed.demand, demand.demand);
+    assert!(
+        session.take_pending_erasure().is_none(),
+        "one demand is consumed by the GUI participant"
+    );
+}
+
+#[test]
 fn stale_generation_of_reads_only_stale_answers() {
     assert!(
         stale_generation_of(&stale_answer(21)) == Some(21),

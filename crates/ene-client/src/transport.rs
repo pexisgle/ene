@@ -504,6 +504,11 @@ impl Client {
         let WirePayload::DeletionDemand(demand) = payload else {
             return Ok(false);
         };
+        if self.state.defer_erasure() {
+            self.state.clear_deferred_frames();
+            self.state.push_pending_erasure(demand.clone());
+            return Ok(true);
+        }
         let result = self.local_erasure_result(demand);
         write_frame(
             &mut self.stream,
@@ -511,6 +516,31 @@ impl Client {
         )
         .await?;
         Ok(true)
+    }
+
+    /// GUI erasure participant: stash Host demands and answer only after
+    /// this process's copies are actually erased. CLI leaves this off so
+    /// `ene-ctl` still auto-answers.
+    pub fn defer_erasure(&mut self) {
+        self.state.set_defer_erasure(true);
+    }
+
+    pub fn take_pending_erasure(&mut self) -> Option<DeletionDemand> {
+        self.state.take_pending_erasure()
+    }
+
+    /// Writes one local-erasure report. The GUI builds `wiped` only after
+    /// it confirms the named copies are gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
+    /// frame cannot be moved or encoded.
+    pub async fn report_local_erasure(
+        &mut self,
+        result: LocalErasureResult,
+    ) -> Result<(), ClientError> {
+        self.notify(WirePayload::LocalErasureResult(result)).await
     }
 
     /// Builds this session's local-erasure report for one demand.
@@ -647,6 +677,19 @@ impl Client {
     }
 
     pub async fn notify(&mut self, _payload: WirePayload) -> Result<(), ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
+    }
+
+    pub fn defer_erasure(&mut self) {}
+
+    pub fn take_pending_erasure(&mut self) -> Option<ene_api::v1::deletion::DeletionDemand> {
+        None
+    }
+
+    pub async fn report_local_erasure(
+        &mut self,
+        _result: ene_api::v1::deletion::LocalErasureResult,
+    ) -> Result<(), ClientError> {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 

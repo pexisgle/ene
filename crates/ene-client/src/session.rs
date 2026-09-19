@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use ene_api::v1::deletion::ClientTempClass;
+use ene_api::v1::deletion::{ClientTempClass, DeletionDemand};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::payload::{BodyStateHint, WirePayload};
 use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
@@ -53,6 +53,11 @@ pub struct SessionState {
     connection_id: Option<ConnectionWireId>,
     pairing_secret: Option<String>,
     deferred: VecDeque<WireFrame>,
+    /// When true, a Host [`DeletionDemand`] is stashed for the GUI erasure
+    /// participant instead of auto-answering `wiped`. CLI keeps the default
+    /// false auto-answer.
+    defer_erasure: bool,
+    pending_erasure: VecDeque<DeletionDemand>,
 }
 
 impl core::fmt::Debug for SessionState {
@@ -68,6 +73,8 @@ impl core::fmt::Debug for SessionState {
                 &self.pairing_secret.as_ref().map(|_| "[redacted]"),
             )
             .field("deferred_len", &self.deferred.len())
+            .field("defer_erasure", &self.defer_erasure)
+            .field("pending_erasure_len", &self.pending_erasure.len())
             .finish()
     }
 }
@@ -129,6 +136,11 @@ impl SessionState {
         self.deferred.push_back(frame);
     }
 
+    /// Drops the deferred presentation queue without claiming GUI classes.
+    pub fn clear_deferred_frames(&mut self) {
+        self.deferred.clear();
+    }
+
     /// Wipes the Client-local transient classes one Host demand names and
     /// reports what this process held (IPC §17.2, Stage 6 A3c).
     ///
@@ -139,12 +151,34 @@ impl SessionState {
     /// boundary and are neither claimed wiped nor reported as an unverified
     /// Ene-managed range; the Host's system-wide remainder verification never
     /// treats this local report as its proof.
+    ///
+    /// CLI auto-answer uses this. First-party GUI sets [`Self::set_defer_erasure`]
+    /// and reports only after it actually erases its own copies.
     pub fn wipe_transient(&mut self) -> Vec<ClientTempClass> {
-        self.deferred.clear();
+        self.clear_deferred_frames();
         vec![
             ClientTempClass::PresentationBuffer,
             ClientTempClass::InputDraft,
         ]
+    }
+
+    pub fn set_defer_erasure(&mut self, defer: bool) {
+        self.defer_erasure = defer;
+    }
+
+    #[must_use]
+    pub fn defer_erasure(&self) -> bool {
+        self.defer_erasure
+    }
+
+    /// Stashes one Host demand so a GUI participant can wipe its copies
+    /// before answering. The demand carries class names only, never a body.
+    pub fn push_pending_erasure(&mut self, demand: DeletionDemand) {
+        self.pending_erasure.push_back(demand);
+    }
+
+    pub fn take_pending_erasure(&mut self) -> Option<DeletionDemand> {
+        self.pending_erasure.pop_front()
     }
 
     /// Facts never sit in the queue, so a hit is always an answer the caller

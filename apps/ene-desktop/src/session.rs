@@ -14,11 +14,11 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::PresenceStateWire;
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
-    TextLangWire,
+    StreamWireId, TextLangWire,
 };
 use ene_api::v1::round::{
-    HistoryItem, HistoryRequest, HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire,
-    StreamClose, SubmitTextInput, TextBodyWire,
+    ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryResponse, PresentationStatus,
+    RoundIntakeOutcomeWire, StreamClose, SubmitTextInput, TextBodyWire,
 };
 use ene_client::error::ClientError;
 use ene_client::{Client, DEFAULT_COMPANION_REF, device};
@@ -34,6 +34,7 @@ const HOST_SETUP_SECTIONS: &[&str] = &["provider", "model", "consent", "credenti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTurn {
     pub round: String,
+    pub stream: Option<StreamWireId>,
     pub reply: String,
 }
 
@@ -231,24 +232,31 @@ pub async fn submit_and_collect(
             }
         }
     }
-    let round_id = round.clone();
-    match client
-        .notify(WirePayload::ConfirmPresentation(
-            ene_api::v1::round::ConfirmPresentationWire {
-                round: round_id,
-                stream: stream_id,
-                status: PresentationStatus::Presented,
-                detail: None,
-            },
-        ))
-        .await
-    {
-        Ok(()) | Err(_) => {}
-    }
     Ok(ChatTurn {
         round: round.0,
+        stream: stream_id,
         reply,
     })
+}
+
+/// Presentation ACK for one collected chat turn. Call only from the path
+/// that actually presented that receipt. Mere receive is not
+/// [`PresentationStatus::Presented`]. `send_text` ACKs
+/// PresentationStatus::Presented only after the timeline shows the turn.
+pub async fn confirm_chat_presentation(
+    client: &mut Client,
+    turn: &ChatTurn,
+    status: PresentationStatus,
+) -> Result<(), DesktopError> {
+    client
+        .notify(WirePayload::ConfirmPresentation(ConfirmPresentationWire {
+            round: ene_api::v1::refs::RoundWireId(turn.round.clone()),
+            stream: turn.stream,
+            status,
+            detail: None,
+        }))
+        .await
+        .map_err(DesktopError::Client)
 }
 
 pub async fn fetch_history(

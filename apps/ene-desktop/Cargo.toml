@@ -20,6 +20,7 @@ ene-client = { path = "../../crates/ene-client" }
 ene-config = { path = "../../crates/ene-config" }
 ene-local-control = { path = "../../crates/ene-local-control" }
 ene-desktop-ui = { path = "../ene-desktop-ui" }
+ene-body = { path = "../ene-body" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -32,6 +33,7 @@ slint = { workspace = true }
 ene-core = { path = "../ene-core", features = ["test-support"] }
 ene-credential = { path = "../../crates/ene-credential" }
 ene-inference = { path = "../../crates/ene-inference" }
+ene-companion = { path = "../../crates/ene-companion" }
 tempfile.workspace = true
 
 [lints]

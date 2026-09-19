@@ -27,5 +27,10 @@ fn run_main() -> Result<(), ene_body::BodyError> {
         .enable_all()
         .build()
         .map_err(|error| ene_body::BodyError::Runtime(std::format!("tokio runtime: {error}")))?;
-    runtime.block_on(run(endpoint, ene_body::RunOptions { try_gpu: true }))
+    runtime.block_on(run(
+        endpoint,
+        ene_body::RunOptions {
+            try_gpu: std::env::var_os("ENE_BODY_SKIP_GPU").is_none(),
+        },
+    ))
 }

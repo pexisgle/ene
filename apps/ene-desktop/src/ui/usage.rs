@@ -145,6 +145,17 @@ impl UsagePanel {
         self.cap_currency = currency;
     }
 
+    /// Drops the cached usage page. Filters stay; they are not target bodies.
+    pub fn wipe_body(&mut self) {
+        self.page = None;
+        self.notice.clear();
+    }
+
+    #[must_use]
+    pub fn body_cleared(&self) -> bool {
+        self.page.is_none() && self.notice.is_empty()
+    }
+
     pub async fn refresh(&mut self, client: &mut Client) -> Result<(), DesktopError> {
         self.request.cursor = None;
         self.load(client).await

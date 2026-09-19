@@ -76,6 +76,11 @@ impl DeletionPanel {
         self.exact_text.clear();
     }
 
+    #[must_use]
+    pub fn exact_text_cleared(&self) -> bool {
+        self.exact_text.is_empty()
+    }
+
     /// Status body: phases, holds, participants. No target text.
     #[must_use]
     pub fn render(&self) -> String {

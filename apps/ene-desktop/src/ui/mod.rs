@@ -63,16 +63,23 @@ impl WizardStep {
     }
 }
 
-/// Chat input plus IME composition. Composition is never sent.
+/// Chat input plus IME composition and a bounded undo stack. Composition is
+/// never sent. Undo is a GUI copy of draft text and is wiped with InputDraft.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Composer {
     draft: String,
     composing: bool,
+    undo: Vec<String>,
 }
 
 impl Composer {
+    const UNDO_CAP: usize = 32;
+
     pub fn set_draft(&mut self, text: String) {
         if !self.composing {
+            if self.draft != text {
+                self.push_undo(self.draft.clone());
+            }
             self.draft = text;
         }
     }
@@ -84,7 +91,20 @@ impl Composer {
     pub fn end_composition(&mut self, committed: Option<String>) {
         self.composing = false;
         if let Some(text) = committed {
+            if self.draft != text {
+                self.push_undo(self.draft.clone());
+            }
             self.draft = text;
+        }
+    }
+
+    /// Restores the previous committed draft. No-op while composing.
+    pub fn undo(&mut self) {
+        if self.composing {
+            return;
+        }
+        if let Some(previous) = self.undo.pop() {
+            self.draft = previous;
         }
     }
 
@@ -98,6 +118,7 @@ impl Composer {
             return None;
         }
         let taken = self.draft.clone();
+        self.push_undo(taken.clone());
         self.draft.clear();
         Some(taken)
     }
@@ -105,6 +126,7 @@ impl Composer {
     pub fn wipe(&mut self) {
         self.draft.clear();
         self.composing = false;
+        self.undo.clear();
     }
 
     #[must_use]
@@ -115,6 +137,18 @@ impl Composer {
     #[must_use]
     pub fn composing(&self) -> bool {
         self.composing
+    }
+
+    #[must_use]
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    fn push_undo(&mut self, previous: String) {
+        if self.undo.len() >= Self::UNDO_CAP {
+            self.undo.remove(0);
+        }
+        self.undo.push(previous);
     }
 }
 
@@ -150,6 +184,7 @@ pub struct GuiSnapshot {
     pub memory_panel: String,
     pub usage_body: String,
     pub deletion_body: String,
+    pub search_draft: String,
 }
 
 impl GuiSnapshot {
@@ -206,5 +241,18 @@ mod tests {
         assert!(composer.take_sendable().is_none());
         composer.end_composition(Some(String::from("こんにちは")));
         assert_eq!(composer.take_sendable().as_deref(), Some("こんにちは"));
+    }
+
+    #[test]
+    fn wipe_clears_draft_ime_and_undo() {
+        let mut composer = Composer::default();
+        composer.set_draft(String::from("one"));
+        composer.set_draft(String::from("two"));
+        assert!(composer.undo_len() > 0);
+        composer.begin_composition();
+        composer.wipe();
+        assert!(composer.draft().is_empty());
+        assert!(!composer.composing());
+        assert_eq!(composer.undo_len(), 0);
     }
 }

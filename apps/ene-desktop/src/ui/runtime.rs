@@ -3,15 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ene_api::v1::deletion::LocalErasureResult;
 use ene_api::v1::management::{ManagementOutcome, ManagementViewRequest};
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::round::HistoryItem;
+use ene_api::v1::refs::StreamWireId;
+use ene_api::v1::round::{HistoryItem, PresentationStatus};
 use ene_client::Client;
 use ene_local_control::{ControlOp, ControlOutcome, FromHost};
 use zeroize::Zeroize as _;
 
 use crate::body_supervise::{BodyStatus, BodySupervisor};
 use crate::control::ControlSeat;
+use crate::erasure::{self, GuiOwned};
 use crate::host_launch::{self, DetachedHost};
 use crate::i18n::{self, Label, Locale};
 use crate::secret::SecretIntake;
@@ -50,6 +53,9 @@ pub struct DesktopRuntime {
     tasks: TaskPanel,
     usage: UsagePanel,
     deletion: DeletionPanel,
+    search_draft: String,
+    last_erasure: Option<LocalErasureResult>,
+    chat_receipt: Option<(String, Option<StreamWireId>)>,
 }
 
 impl DesktopRuntime {
@@ -85,6 +91,9 @@ impl DesktopRuntime {
             tasks: TaskPanel::default(),
             usage: UsagePanel::default(),
             deletion: DeletionPanel::default(),
+            search_draft: String::new(),
+            last_erasure: None,
+            chat_receipt: None,
         }
     }
 
@@ -141,6 +150,7 @@ impl DesktopRuntime {
             memory_panel: self.memory.panel(),
             usage_body: self.usage.render(),
             deletion_body: self.deletion.render(),
+            search_draft: self.search_draft.clone(),
         }
     }
 
@@ -193,6 +203,12 @@ impl DesktopRuntime {
 
     pub fn try_spawn_body(&mut self, exe: &Path) {
         self.body_status = self.body.spawn_if_present(exe);
+    }
+
+    /// Kills the overlay child. Chat, settings, and cancel stay on this process.
+    pub fn kill_body(&mut self) {
+        self.body.shutdown();
+        self.body_status = self.body.poll();
     }
 
     pub fn bundled_ene_asset(&self) -> PathBuf {
@@ -299,11 +315,34 @@ impl DesktopRuntime {
                 control,
                 client,
                 deletion,
+                timeline,
+                history,
+                composer,
+                search_draft,
+                memory,
+                tasks,
+                usage,
+                chat_receipt,
+                last_erasure,
                 ..
             } = self;
             let seat = control.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
             if deletion_confirm {
-                complete_pending_pumping(seat, client.as_mut(), deletion).await?
+                complete_pending_pumping(
+                    seat,
+                    client.as_mut(),
+                    deletion,
+                    timeline,
+                    history,
+                    composer,
+                    search_draft,
+                    memory,
+                    tasks,
+                    usage,
+                    chat_receipt,
+                    last_erasure,
+                )
+                .await?
             } else {
                 seat.complete_pending().await?
             }
@@ -316,9 +355,7 @@ impl DesktopRuntime {
                     .await
                 {
                     Ok(client) => {
-                        self.client = Some(client);
-                        self.connection = i18n::label(self.locale, Label::Connected);
-                        self.pull_presence();
+                        self.adopt_client(client);
                     }
                     Err(error) => {
                         secret.zeroize();
@@ -352,6 +389,7 @@ impl DesktopRuntime {
                 self.deny_reason = i18n::control_deny(self.locale, other);
             }
         }
+        self.flush_pending_erasure().await;
         Ok(reply)
     }
 
@@ -371,13 +409,16 @@ impl DesktopRuntime {
         self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        match request(
-            client,
-            session::credential_intent(&mark, SETUP_PROVIDER_OPENAI),
-        )
-        .await?
-        {
+        let answer = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            request(
+                client,
+                session::credential_intent(&mark, SETUP_PROVIDER_OPENAI),
+            )
+            .await?
+        };
+        self.flush_pending_erasure().await;
+        match answer {
             WirePayload::ManagementOutcome(outcome) => {
                 self.deny_reason = i18n::management_deny(self.locale, &outcome);
                 self.refresh_setup().await?;
@@ -395,12 +436,15 @@ impl DesktopRuntime {
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let model = self.model.clone();
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        let assign = request(
-            client,
-            session::assignment_intent(&mark, SETUP_PROVIDER_OPENAI, &model),
-        )
-        .await?;
+        let assign = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            request(
+                client,
+                session::assignment_intent(&mark, SETUP_PROVIDER_OPENAI, &model),
+            )
+            .await?
+        };
+        self.flush_pending_erasure().await;
         let WirePayload::ManagementOutcome(outcome) = assign else {
             return Err(DesktopError::Protocol(String::from(
                 "assignment did not return an outcome",
@@ -410,8 +454,12 @@ impl DesktopRuntime {
         self.refresh_setup().await?;
         if matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }) {
             let mark = self.facts.mark.clone();
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-            match request(client, session::setup_complete_intent(&mark)).await? {
+            let complete_answer = {
+                let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+                request(client, session::setup_complete_intent(&mark)).await?
+            };
+            self.flush_pending_erasure().await;
+            match complete_answer {
                 WirePayload::ManagementOutcome(complete) => {
                     self.deny_reason = i18n::management_deny(self.locale, &complete);
                 }
@@ -434,8 +482,12 @@ impl DesktopRuntime {
         self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        match request(client, session::confirmed_true_intent(&mark)).await? {
+        let answer = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            request(client, session::confirmed_true_intent(&mark)).await?
+        };
+        self.flush_pending_erasure().await;
+        match answer {
             WirePayload::ManagementOutcome(outcome) => {
                 self.deny_reason = i18n::management_deny(self.locale, &outcome);
                 Ok(outcome)
@@ -455,9 +507,7 @@ impl DesktopRuntime {
     }
 
     pub fn restore_client(&mut self, client: Client) {
-        self.client = Some(client);
-        self.connection = i18n::label(self.locale, Label::Connected);
-        self.pull_presence();
+        self.adopt_client(client);
     }
 
     pub async fn reconnect(&mut self) -> Result<(), DesktopError> {
@@ -479,9 +529,7 @@ impl DesktopRuntime {
                 Err(error) => return Err(DesktopError::Client(error)),
             }
         };
-        self.client = Some(client);
-        self.connection = i18n::label(self.locale, Label::Connected);
-        self.pull_presence();
+        self.adopt_client(client);
         self.refresh_setup().await?;
         self.refresh_history().await?;
         self.refresh_tasks().await?;
@@ -494,18 +542,36 @@ impl DesktopRuntime {
         };
         self.ensure_client()?;
         let lang = self.locale.as_tag().to_string();
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        match session::submit_and_collect(client, &text, &lang).await {
+        let collected = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            session::submit_and_collect(client, &text, &lang).await
+        };
+        match collected {
             Ok(turn) => {
                 self.timeline.push(format!("[owner] {text}"));
                 self.timeline.push(format!("[companion] {}", turn.reply));
+                self.chat_receipt = Some((turn.round.clone(), turn.stream));
                 self.pull_presence();
+                {
+                    let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+                    match session::confirm_chat_presentation(
+                        client,
+                        &turn,
+                        PresentationStatus::Presented,
+                    )
+                    .await
+                    {
+                        Ok(()) | Err(_) => {}
+                    }
+                }
+                self.flush_pending_erasure().await;
                 self.refresh_history().await?;
                 Ok(())
             }
             Err(error) => {
                 self.deny_reason = error.to_string();
                 self.timeline.push(format!("[owner] {text}"));
+                self.flush_pending_erasure().await;
                 Err(error)
             }
         }
@@ -513,17 +579,24 @@ impl DesktopRuntime {
 
     pub async fn refresh_history(&mut self) -> Result<(), DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        self.history = session::fetch_history(client, session::DEFAULT_HISTORY_LIMIT).await?;
+        let history = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            session::fetch_history(client, session::DEFAULT_HISTORY_LIMIT).await?
+        };
+        self.history = history;
+        self.flush_pending_erasure().await;
         Ok(())
     }
 
     pub async fn refresh_setup(&mut self) -> Result<(), DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        let view = session::fetch_setup_view(client).await?;
+        let view = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            session::fetch_setup_view(client).await?
+        };
         self.facts = SetupFacts::from_view(&view);
         self.pull_presence();
+        self.flush_pending_erasure().await;
         Ok(())
     }
 
@@ -576,22 +649,25 @@ impl DesktopRuntime {
         append: bool,
     ) -> Result<(), DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        let view = match request(
-            client,
-            WirePayload::ManagementViewRequest(view_request.clone()),
-        )
-        .await?
-        {
-            WirePayload::ManagementView(view) => view,
-            other => {
-                return Err(DesktopError::Protocol(format!(
-                    "expected ManagementView, got {}",
-                    other.message_type()
-                )));
+        let view = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            match request(
+                client,
+                WirePayload::ManagementViewRequest(view_request.clone()),
+            )
+            .await?
+            {
+                WirePayload::ManagementView(view) => view,
+                other => {
+                    return Err(DesktopError::Protocol(format!(
+                        "expected ManagementView, got {}",
+                        other.message_type()
+                    )));
+                }
             }
         };
         self.memory.apply_host_view(&view, view_request, append);
+        self.flush_pending_erasure().await;
         Ok(())
     }
 
@@ -602,14 +678,22 @@ impl DesktopRuntime {
 
     pub async fn refresh_tasks(&mut self) -> Result<(), DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        self.tasks.refresh_list(client).await
+        let result = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.tasks.refresh_list(client).await
+        };
+        self.flush_pending_erasure().await;
+        result
     }
 
     pub async fn select_listed_task(&mut self, index: usize) -> Result<(), DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        self.tasks.select(client, index).await
+        let result = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.tasks.select(client, index).await
+        };
+        self.flush_pending_erasure().await;
+        result
     }
 
     pub async fn select_workspace_folder(
@@ -619,18 +703,26 @@ impl DesktopRuntime {
         self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        self.tasks.select_workspace(client, &mark, path).await
+        let result = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.tasks.select_workspace(client, &mark, path).await
+        };
+        self.flush_pending_erasure().await;
+        result
     }
 
     pub async fn cancel_displayed_task(&mut self) -> Result<ManagementOutcome, DesktopError> {
         self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        let outcome = self.tasks.cancel_displayed(client, &mark).await?;
-        self.tasks.refresh_list(client).await?;
-        Ok(outcome)
+        let result = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let outcome = self.tasks.cancel_displayed(client, &mark).await?;
+            self.tasks.refresh_list(client).await?;
+            Ok(outcome)
+        };
+        self.flush_pending_erasure().await;
+        result
     }
 
     pub async fn resume_displayed_task(
@@ -638,22 +730,34 @@ impl DesktopRuntime {
         instruction: String,
     ) -> Result<ene_api::v1::undelivered::ResumeTaskOutcomeWire, DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        self.tasks.resume_displayed(client, instruction).await
+        let result = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.tasks.resume_displayed(client, instruction).await
+        };
+        self.flush_pending_erasure().await;
+        result
     }
 
     pub async fn present_task_undelivered(&mut self) -> Result<(), DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        self.tasks.present_undelivered(client).await
+        let result = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.tasks.present_undelivered(client).await
+        };
+        self.flush_pending_erasure().await;
+        result
     }
 
     pub async fn ack_presented_tasks(
         &mut self,
     ) -> Result<ene_api::v1::undelivered::UndeliveredAckOutcome, DesktopError> {
         self.ensure_client()?;
-        let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-        self.tasks.ack_presented(client).await
+        let result = {
+            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            self.tasks.ack_presented(client).await
+        };
+        self.flush_pending_erasure().await;
+        result
     }
 
     #[must_use]
@@ -678,6 +782,7 @@ impl DesktopRuntime {
             let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
             self.usage.refresh(client).await?;
         }
+        self.flush_pending_erasure().await;
         Ok(())
     }
 
@@ -687,6 +792,7 @@ impl DesktopRuntime {
             let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
             self.usage.next_page(client).await?;
         }
+        self.flush_pending_erasure().await;
         Ok(())
     }
 
@@ -736,6 +842,7 @@ impl DesktopRuntime {
             self.usage.apply_cap(client).await?
         };
         self.deny_reason = i18n::management_deny(self.locale, &outcome);
+        self.flush_pending_erasure().await;
         Ok(outcome)
     }
 
@@ -756,6 +863,7 @@ impl DesktopRuntime {
         };
         self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.page = Page::Deletion;
+        self.flush_pending_erasure().await;
         Ok(outcome)
     }
 
@@ -766,6 +874,7 @@ impl DesktopRuntime {
             self.deletion.request_confirmed_true(client).await?
         };
         self.deny_reason = i18n::management_deny(self.locale, &outcome);
+        self.flush_pending_erasure().await;
         Ok(outcome)
     }
 
@@ -775,12 +884,7 @@ impl DesktopRuntime {
             let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
             self.deletion.refresh(client).await?;
         }
-        if self.deletion.has_operations() {
-            self.wipe_gui_copies();
-            match self.refresh_history().await {
-                Ok(()) | Err(_) => {}
-            }
-        }
+        self.flush_pending_erasure().await;
         Ok(())
     }
 
@@ -815,10 +919,45 @@ impl DesktopRuntime {
             .map(ene_api::v1::deletion::DeletionPhaseWire::as_str)
     }
 
-    fn wipe_gui_copies(&mut self) {
-        self.composer.wipe();
-        self.timeline.clear();
-        self.history.clear();
+    #[must_use]
+    pub fn last_erasure(&self) -> Option<&LocalErasureResult> {
+        self.last_erasure.as_ref()
+    }
+
+    pub fn set_search_draft(&mut self, text: String) {
+        self.search_draft = text;
+    }
+
+    #[must_use]
+    pub fn has_chat_receipt(&self) -> bool {
+        self.chat_receipt.is_some()
+    }
+
+    fn adopt_client(&mut self, mut client: Client) {
+        client.defer_erasure();
+        self.client = Some(client);
+        self.connection = i18n::label(self.locale, Label::Connected);
+        self.pull_presence();
+    }
+
+    async fn flush_pending_erasure(&mut self) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        apply_pending_erasure(
+            client,
+            &mut self.timeline,
+            &mut self.history,
+            &mut self.composer,
+            &mut self.search_draft,
+            &mut self.memory,
+            &mut self.tasks,
+            &mut self.usage,
+            &mut self.deletion,
+            &mut self.chat_receipt,
+            &mut self.last_erasure,
+        )
+        .await;
     }
 
     fn ensure_client(&self) -> Result<(), DesktopError> {
@@ -859,10 +998,57 @@ async fn request(client: &mut Client, payload: WirePayload) -> Result<WirePayloa
         .map_err(DesktopError::Client)
 }
 
+async fn apply_pending_erasure(
+    client: &mut Client,
+    timeline: &mut Vec<String>,
+    history: &mut Vec<HistoryItem>,
+    composer: &mut Composer,
+    search_draft: &mut String,
+    memory: &mut MemoryPage,
+    tasks: &mut TaskPanel,
+    usage: &mut UsagePanel,
+    deletion: &mut DeletionPanel,
+    chat_receipt: &mut Option<(String, Option<StreamWireId>)>,
+    last_erasure: &mut Option<LocalErasureResult>,
+) {
+    loop {
+        let Some(demand) = client.take_pending_erasure() else {
+            return;
+        };
+        let result = erasure::apply_demand(
+            &demand,
+            GuiOwned {
+                timeline,
+                history,
+                composer,
+                search_draft,
+                memory,
+                tasks,
+                usage,
+                deletion,
+                chat_receipt,
+            },
+        );
+        *last_erasure = Some(result.clone());
+        match client.report_local_erasure(result).await {
+            Ok(()) | Err(_) => {}
+        }
+    }
+}
+
 async fn complete_pending_pumping(
     seat: &mut ControlSeat,
     client: Option<&mut Client>,
     deletion: &mut DeletionPanel,
+    timeline: &mut Vec<String>,
+    history: &mut Vec<HistoryItem>,
+    composer: &mut Composer,
+    search_draft: &mut String,
+    memory: &mut MemoryPage,
+    tasks: &mut TaskPanel,
+    usage: &mut UsagePanel,
+    chat_receipt: &mut Option<(String, Option<StreamWireId>)>,
+    last_erasure: &mut Option<LocalErasureResult>,
 ) -> Result<FromHost, DesktopError> {
     let Some(client) = client else {
         return seat.complete_pending().await;
@@ -876,6 +1062,20 @@ async fn complete_pending_pumping(
                 match deletion.refresh(client).await {
                     Ok(()) | Err(_) => {}
                 }
+                apply_pending_erasure(
+                    client,
+                    timeline,
+                    history,
+                    composer,
+                    search_draft,
+                    memory,
+                    tasks,
+                    usage,
+                    deletion,
+                    chat_receipt,
+                    last_erasure,
+                )
+                .await;
             }
         }
     }
