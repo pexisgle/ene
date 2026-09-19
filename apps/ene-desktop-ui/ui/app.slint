@@ -79,23 +79,32 @@ export component AppWindow inherits Window {
         padding: 12px;
         spacing: 8px;
 
+        // Fixed row so wizard pages do not stretch these controls over the body.
         HorizontalBox {
             spacing: 8px;
-            Button { text: nav-chat; clicked => { root.open-chat(); } }
-            Button { text: nav-history; clicked => { root.open-history(); } }
-            Button { text: nav-memory; clicked => { root.open-memory(); } }
-            Button { text: nav-tasks; clicked => { root.open-tasks(); } }
-            Button { text: nav-settings; clicked => { root.open-settings(); } }
-            Button { text: nav-about; clicked => { root.open-about(); } }
-            Button { text: nav-usage; clicked => { root.open-usage(); } }
-            Button { text: nav-deletion; clicked => { root.open-deletion(); } }
-            Button { text: "JA"; clicked => { root.switch-ja(); } }
-            Button { text: "EN"; clicked => { root.switch-en(); } }
+            height: 32px;
+            Button { text: nav-chat; height: 32px; clicked => { root.open-chat(); } }
+            Button { text: nav-history; height: 32px; clicked => { root.open-history(); } }
+            Button { text: nav-memory; height: 32px; clicked => { root.open-memory(); } }
+            Button { text: nav-tasks; height: 32px; clicked => { root.open-tasks(); } }
+            Button { text: nav-settings; height: 32px; clicked => { root.open-settings(); } }
+            Button { text: nav-about; height: 32px; clicked => { root.open-about(); } }
+            Button { text: nav-usage; height: 32px; clicked => { root.open-usage(); } }
+            Button { text: nav-deletion; height: 32px; clicked => { root.open-deletion(); } }
+            Button { text: "JA"; height: 32px; clicked => { root.switch-ja(); } }
+            Button { text: "EN"; height: 32px; clicked => { root.switch-en(); } }
         }
 
         Text { text: heading; font-size: 18px; }
         Text { text: status; wrap: word-wrap; }
         if deny-reason != "": Text { text: deny-reason; wrap: word-wrap; }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            VerticalBox {
+                padding: 0px;
+                spacing: 8px;
 
         if page == UiPage.wizard: VerticalBox {
             Text { text: body; wrap: word-wrap; }
@@ -208,6 +217,8 @@ export component AppWindow inherits Window {
                 Button { text: action-request-deletion; clicked => { root.request-deletion(); } }
                 Button { text: action-confirm; clicked => { root.begin-deletion-confirm(); } }
                 Button { text: action-resume; clicked => { root.resume-deletion(); } }
+            }
+        }
             }
         }
     }
