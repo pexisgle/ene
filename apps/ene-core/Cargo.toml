@@ -4,11 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-autotests = false
-
-[[test]]
-name = "integration"
-path = "tests/integration.rs"
 
 [features]
 test-support = ["ene-store/test-support"]
