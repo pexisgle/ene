@@ -37,6 +37,7 @@ impl Locale {
 pub enum Label {
     Chat,
     History,
+    Tasks,
     Settings,
     About,
     WizardLanguage,
@@ -64,6 +65,8 @@ pub fn label(locale: Locale, key: Label) -> &'static str {
         (Locale::En, Label::Chat) => "Chat",
         (Locale::Ja, Label::History) => "履歴",
         (Locale::En, Label::History) => "History",
+        (Locale::Ja, Label::Tasks) => "タスク",
+        (Locale::En, Label::Tasks) => "Tasks",
         (Locale::Ja, Label::Settings) => "設定",
         (Locale::En, Label::Settings) => "Settings",
         (Locale::Ja, Label::About) => "情報",

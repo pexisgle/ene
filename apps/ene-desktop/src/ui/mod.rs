@@ -3,6 +3,7 @@
 //! Slint is a projection. Domain and secrets do not live in generated UI.
 
 mod runtime;
+mod tasks;
 
 use ene_api::v1::round::HistoryItem;
 use ene_client::error::ClientError;
@@ -15,6 +16,7 @@ pub enum Page {
     Wizard,
     Chat,
     History,
+    Tasks,
     Settings,
     About,
     Confirm,
@@ -123,6 +125,8 @@ pub struct GuiSnapshot {
     pub presence: String,
     pub deny_reason: String,
     pub challenge_target: Option<String>,
+    pub tasks: Vec<String>,
+    pub task_detail: String,
     pub about_slint: bool,
     pub body_status: String,
     pub ui_ticks: u64,
