@@ -150,6 +150,7 @@ async fn wait_for_control(dir: &Path) -> bool {
             .await
             .is_ok()
         {
+            tokio::task::yield_now().await;
             return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -361,25 +362,22 @@ async fn gui_event_loop_is_not_blocked_on_connect_or_provider_wait() {
     desktop.begin_credential_put().await.expect("put");
     desktop.confirm_owner().await.expect("store");
     desktop.set_model(String::from(MODEL));
-    desktop.assign_model().await.expect("assign");
+    let assigned = desktop.assign_model().await.expect("assign");
+    assert!(
+        matches!(assigned, ManagementOutcome::StoredAsRuleView { .. }),
+        "parked chat requires assignment, got {assigned:?}"
+    );
     desktop
         .composer_mut()
         .set_draft(String::from("while parked"));
-    let send = tokio::spawn({
-        // Drive send on this runtime after moving is hard; tick independently.
-        async move {}
-    });
-    send.await.ok();
-    let send_task = {
-        let text = String::from("while parked");
-        let dir = dir.path().to_path_buf();
-        tokio::spawn(async move {
-            let mut client = session::connect(&dir, DESKTOP_DESCRIPTOR, None)
-                .await
-                .expect("paired device reconnects");
-            session::submit_and_collect(&mut client, &text, "en").await
-        })
+    let Some(text) = desktop.composer_mut().take_sendable() else {
+        panic!("draft must send");
     };
+    let mut client = desktop.take_client().expect("paired client");
+    let send_task = tokio::spawn(async move {
+        let result = session::submit_and_collect(&mut client, &text, "en").await;
+        (client, result)
+    });
     for _ in 0..10 {
         desktop.tick();
         tokio::time::sleep(Duration::from_millis(15)).await;
@@ -389,10 +387,9 @@ async fn gui_event_loop_is_not_blocked_on_connect_or_provider_wait() {
         "ticks must advance while the provider is parked"
     );
     release.send(()).expect("release provider");
-    send_task
-        .await
-        .expect("send task joins")
-        .expect("parked chat completes");
+    let (client, result) = send_task.await.expect("send task joins");
+    result.expect("parked chat completes");
+    desktop.restore_client(client);
     desktop
         .refresh_management_without_body()
         .await
@@ -416,6 +413,17 @@ async fn ime_and_about_slint_and_missing_body() {
     assert!(desktop.snapshot().about_slint);
     desktop.try_spawn_body(&desktop.bundled_ene_asset());
     assert_eq!(desktop.snapshot().body_status, "Absent");
+    desktop.wizard_next();
+    desktop.wizard_next();
+    desktop.wizard_next();
+    assert!(
+        desktop.snapshot().secret_visible,
+        "credential step is the secret field"
+    );
+    assert!(
+        !desktop.snapshot().setup_ready,
+        "wizard steps must not invent consent"
+    );
 }
 
 #[test]

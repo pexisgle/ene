@@ -98,7 +98,13 @@ impl DesktopRuntime {
             draft: self.composer.draft().to_string(),
             composing: self.composer.composing(),
             connection: self.connection.to_string(),
-            presence: self.presence.clone(),
+            presence: self
+                .client
+                .as_ref()
+                .and_then(Client::presence_state)
+                .map(session::presence_label)
+                .map(str::to_string)
+                .unwrap_or_else(|| self.presence.clone()),
             deny_reason: self.deny_reason.clone(),
             challenge_target: self
                 .control
@@ -111,6 +117,8 @@ impl DesktopRuntime {
             setup_ready: self.facts.setup_ready(),
             credential_present: self.facts.credential_present,
             consent_assigned: self.facts.consent_assigned,
+            secret_visible: matches!(self.wizard_step, WizardStep::Credential),
+            wizard_body: i18n::label(self.locale, wizard_label(self.wizard_step)).to_string(),
         }
     }
 
@@ -127,6 +135,18 @@ impl DesktopRuntime {
         self.page = page;
         if matches!(page, Page::About) {
             self.tick();
+        }
+    }
+
+    pub fn wizard_next(&mut self) {
+        if let Some(next) = self.wizard_step.next() {
+            self.wizard_step = next;
+        }
+    }
+
+    pub fn wizard_back(&mut self) {
+        if let Some(back) = self.wizard_step.back() {
+            self.wizard_step = back;
         }
     }
 
@@ -208,6 +228,18 @@ impl DesktopRuntime {
 
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
         self.occupy_seat().await?;
+        self.ensure_client()?;
+        // Wire intent stages the pending pair. Control put+approve then
+        // makes it usable. Approve without a pending does not create the ref.
+        let staged = self.register_credential_intent().await?;
+        match staged {
+            ManagementOutcome::HeldByOperation | ManagementOutcome::AppliedAsOneTime => {}
+            other => {
+                return Err(DesktopError::Protocol(format!(
+                    "credential intent must stage or apply, got {other:?}"
+                )));
+            }
+        }
         if self.secret.is_empty() {
             return Err(DesktopError::Protocol(String::from(
                 "secret intake is empty",
@@ -250,6 +282,7 @@ impl DesktopRuntime {
                     Ok(client) => {
                         self.client = Some(client);
                         self.connection = i18n::label(self.locale, Label::Connected);
+                        self.pull_presence();
                     }
                     Err(error) => {
                         secret.zeroize();
@@ -261,7 +294,7 @@ impl DesktopRuntime {
             }
             FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => {
                 self.page = Page::Wizard;
-                self.register_credential_intent().await?;
+                self.refresh_setup().await?;
             }
             FromHost::DeniedByBoundary => {
                 self.deny_reason = i18n::control_deny(self.locale, &reply);
@@ -366,6 +399,18 @@ impl DesktopRuntime {
         }
     }
 
+    pub fn take_client(&mut self) -> Option<Client> {
+        self.connection = i18n::label(self.locale, Label::Disconnected);
+        self.presence = String::from("unknown");
+        self.client.take()
+    }
+
+    pub fn restore_client(&mut self, client: Client) {
+        self.client = Some(client);
+        self.connection = i18n::label(self.locale, Label::Connected);
+        self.pull_presence();
+    }
+
     pub async fn reconnect(&mut self) -> Result<(), DesktopError> {
         self.client = None;
         let client = session::connect(&self.data_dir, DESKTOP_DESCRIPTOR, None)
@@ -373,6 +418,7 @@ impl DesktopRuntime {
             .map_err(DesktopError::Client)?;
         self.client = Some(client);
         self.connection = i18n::label(self.locale, Label::Connected);
+        self.pull_presence();
         self.refresh_setup().await?;
         self.refresh_history().await?;
         Ok(())
@@ -389,6 +435,7 @@ impl DesktopRuntime {
             Ok(turn) => {
                 self.timeline.push(format!("[owner] {text}"));
                 self.timeline.push(format!("[companion] {}", turn.reply));
+                self.pull_presence();
                 self.refresh_history().await?;
                 Ok(())
             }
@@ -412,6 +459,7 @@ impl DesktopRuntime {
         let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
         let view = session::fetch_setup_view(client).await?;
         self.facts = SetupFacts::from_view(&view);
+        self.pull_presence();
         Ok(())
     }
 
@@ -428,6 +476,26 @@ impl DesktopRuntime {
                 "client is not connected",
             )))
         }
+    }
+
+    fn pull_presence(&mut self) {
+        self.presence = self
+            .client
+            .as_ref()
+            .and_then(Client::presence_state)
+            .map(session::presence_label)
+            .unwrap_or("unknown")
+            .to_string();
+    }
+}
+
+fn wizard_label(step: WizardStep) -> Label {
+    match step {
+        WizardStep::Language => Label::WizardLanguage,
+        WizardStep::BundledEne => Label::WizardBundledEne,
+        WizardStep::CloudCost => Label::WizardCloudCost,
+        WizardStep::Credential => Label::WizardCredential,
+        WizardStep::Assignment => Label::WizardAssignment,
     }
 }
 

@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox, LineEdit, ListView, AboutSlint, ScrollView, TextEdit } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, LineEdit, AboutSlint, ScrollView } from "std-widgets.slint";
 
 export enum UiPage { wizard, chat, history, settings, about, confirm }
 
@@ -16,10 +16,19 @@ export component AppWindow inherits Window {
     in-out property <string> history: "";
     in-out property <string> draft: "";
     in-out property <bool> composing: false;
-    in-out property <string> secret-buffer: "";
     in-out property <bool> secret-visible: false;
     in-out property <string> challenge-target: "";
     in-out property <string> about-title: "ene";
+    in-out property <string> deny-reason: "";
+    in-out property <string> nav-chat: "Chat";
+    in-out property <string> nav-history: "History";
+    in-out property <string> nav-settings: "Settings";
+    in-out property <string> nav-about: "About";
+    in-out property <string> action-send: "Send";
+    in-out property <string> action-next: "Next";
+    in-out property <string> action-back: "Back";
+    in-out property <string> action-confirm: "Confirm";
+    in-out property <string> action-cancel: "Cancel";
 
     callback send();
     callback wizard-next();
@@ -43,16 +52,17 @@ export component AppWindow inherits Window {
 
         HorizontalBox {
             spacing: 8px;
-            Button { text: "Chat"; clicked => { root.open-chat(); } }
-            Button { text: "History"; clicked => { root.open-history(); } }
-            Button { text: "Settings"; clicked => { root.open-settings(); } }
-            Button { text: "About"; clicked => { root.open-about(); } }
+            Button { text: nav-chat; clicked => { root.open-chat(); } }
+            Button { text: nav-history; clicked => { root.open-history(); } }
+            Button { text: nav-settings; clicked => { root.open-settings(); } }
+            Button { text: nav-about; clicked => { root.open-about(); } }
             Button { text: "JA"; clicked => { root.switch-ja(); } }
             Button { text: "EN"; clicked => { root.switch-en(); } }
         }
 
         Text { text: heading; font-size: 18px; }
         Text { text: status; wrap: word-wrap; }
+        if deny-reason != "": Text { text: deny-reason; wrap: word-wrap; }
 
         if page == UiPage.wizard: VerticalBox {
             Text { text: body; wrap: word-wrap; }
@@ -62,8 +72,8 @@ export component AppWindow inherits Window {
                 edited(text) => { root.secret-changed(text); }
             }
             HorizontalBox {
-                Button { text: "Back"; clicked => { root.wizard-back(); } }
-                Button { text: "Next"; clicked => { root.wizard-next(); } }
+                Button { text: action-back; clicked => { root.wizard-back(); } }
+                Button { text: action-next; clicked => { root.wizard-next(); } }
             }
         }
 
@@ -85,7 +95,7 @@ export component AppWindow inherits Window {
                 }
             }
             Button {
-                text: "Send";
+                text: action-send;
                 clicked => {
                     if (!root.composing) {
                         root.send();
@@ -110,8 +120,8 @@ export component AppWindow inherits Window {
         if page == UiPage.confirm: VerticalBox {
             Text { text: challenge-target; wrap: word-wrap; }
             HorizontalBox {
-                Button { text: "Confirm"; clicked => { root.confirm-owner(); } }
-                Button { text: "Cancel"; clicked => { root.cancel-owner(); } }
+                Button { text: action-confirm; clicked => { root.confirm-owner(); } }
+                Button { text: action-cancel; clicked => { root.cancel-owner(); } }
             }
         }
     }

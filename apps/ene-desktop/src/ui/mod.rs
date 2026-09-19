@@ -129,6 +129,8 @@ pub struct GuiSnapshot {
     pub setup_ready: bool,
     pub credential_present: bool,
     pub consent_assigned: bool,
+    pub secret_visible: bool,
+    pub wizard_body: String,
 }
 
 impl GuiSnapshot {

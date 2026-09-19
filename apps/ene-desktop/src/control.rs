@@ -67,18 +67,31 @@ impl ControlSeat {
     ///
     /// Occupying an empty seat is accident prevention, not authenticity.
     pub async fn occupy(data_dir: &Path) -> Result<Self, DesktopError> {
-        let mut stream = connect(data_dir).await?;
-        write_message(&mut stream.inner, &ToHost::SeatHello).await?;
-        match read_message(&mut stream.inner).await? {
-            FromHost::SeatGranted => Ok(Self {
-                stream,
-                challenge: None,
-            }),
-            FromHost::SeatOccupied => Err(DesktopError::SeatOccupied),
-            other => Err(DesktopError::Control(format!(
-                "hello answered {}",
-                control_kind(&other)
-            ))),
+        let mut attempts = 0_u8;
+        loop {
+            match connect(data_dir).await {
+                Ok(mut stream) => {
+                    write_message(&mut stream.inner, &ToHost::SeatHello).await?;
+                    return match read_message(&mut stream.inner).await? {
+                        FromHost::SeatGranted => Ok(Self {
+                            stream,
+                            challenge: None,
+                        }),
+                        FromHost::SeatOccupied => Err(DesktopError::SeatOccupied),
+                        other => Err(DesktopError::Control(format!(
+                            "hello answered {}",
+                            control_kind(&other)
+                        ))),
+                    };
+                }
+                Err(error) => {
+                    attempts = attempts.saturating_add(1);
+                    if attempts >= 80 {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
         }
     }
 
