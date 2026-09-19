@@ -4,7 +4,7 @@
 //! Host domain state are not rewritten.
 
 use ene_api::v1::management::ManagementOutcome;
-use ene_local_control::{ControlOutcome, FromHost};
+use ene_local_control::{ControlOutcome, FromConfirmation};
 
 /// UI locale. Persisted as a GUI preference, never as setup-complete consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,38 +186,50 @@ pub fn management_deny(locale: Locale, outcome: &ManagementOutcome) -> String {
 }
 
 #[must_use]
-pub fn control_deny(locale: Locale, from: &FromHost) -> String {
+/// Renders one confirmation-channel answer. The requester listener's own
+/// answers are rendered where they are read.
+pub fn control_deny(locale: Locale, from: &FromConfirmation) -> String {
     match (locale, from) {
-        (Locale::Ja, FromHost::DeniedByBoundary) => {
-            String::from("確認は座席とセッションに束縛されます。空席の先着は真正性ではありません。")
+        (Locale::Ja, FromConfirmation::DeniedByBoundary) => {
+            String::from("確認は Host が起動した GUI の専用チャネルとセッションに束縛されます。")
         }
-        (Locale::En, FromHost::DeniedByBoundary) => String::from(
-            "Confirmation is bound to the seat and session. Empty-seat occupancy is not authenticity.",
+        (Locale::En, FromConfirmation::DeniedByBoundary) => String::from(
+            "Confirmation is bound to the private channel and session the Host issued to its own GUI.",
         ),
-        (Locale::Ja, FromHost::SeatOccupied) => String::from("確認面は既に使用中です。"),
-        (Locale::En, FromHost::SeatOccupied) => String::from("The confirmation seat is occupied."),
-        (Locale::Ja, FromHost::Unavailable) => String::from("Host の確認面を利用できません。"),
-        (Locale::En, FromHost::Unavailable) => String::from("Confirmation is unavailable."),
-        (Locale::Ja, FromHost::Outcome(ControlOutcome::CredentialRefused { .. })) => String::from(
-            "資格情報は保存されませんでした。OS の保護ストアが使えないか、登録が拒否されました。",
-        ),
-        (Locale::En, FromHost::Outcome(ControlOutcome::CredentialRefused { .. })) => String::from(
-            "The credential was not stored. The OS protected store is unavailable or refused the put.",
-        ),
-        (Locale::Ja, FromHost::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
+        (Locale::Ja, FromConfirmation::Unavailable) => {
+            String::from("Host の確認面を利用できません。")
+        }
+        (Locale::En, FromConfirmation::Unavailable) => String::from("Confirmation is unavailable."),
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })) => {
+            String::from(
+                "資格情報は保存されませんでした。OS の保護ストアが使えないか、登録が拒否されました。",
+            )
+        }
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })) => {
+            String::from(
+                "The credential was not stored. The OS protected store is unavailable or refused the put.",
+            )
+        }
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
             String::from(
                 "値は保護ストアに届きましたが、登録の確定が完了していません。再試行する前に保留状態を確認してください。",
             )
         }
-        (Locale::En, FromHost::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted { .. })) => {
             String::from(
                 "The value reached the protected store, but registration did not commit. Check the pending state before retrying.",
             )
         }
-        (Locale::Ja, FromHost::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::Rejected { .. })) => {
+            String::from("確認は拒否されました。変更は適用されていません。")
+        }
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::Rejected { .. })) => {
+            String::from("The confirmation was declined. No change was applied.")
+        }
+        (Locale::Ja, FromConfirmation::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
             String::from("このペアリング要求は Host にありません。")
         }
-        (Locale::En, FromHost::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
+        (Locale::En, FromConfirmation::Outcome(ControlOutcome::DeviceUnknown { .. })) => {
             String::from("This pairing request is unknown to Host.")
         }
         (Locale::Ja, _) => String::from("制御の応答を処理できません。"),
@@ -228,11 +240,11 @@ pub fn control_deny(locale: Locale, from: &FromHost) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Label, Locale, control_deny, label};
-    use ene_local_control::{ControlOutcome, FromHost};
+    use ene_local_control::{ControlOutcome, FromConfirmation};
 
     #[test]
     fn credential_refused_is_not_an_unexpected_control_answer() {
-        let refused = FromHost::Outcome(ControlOutcome::CredentialRefused {
+        let refused = FromConfirmation::Outcome(ControlOutcome::CredentialRefused {
             provider: String::from("openai"),
             label: String::from("main"),
         });

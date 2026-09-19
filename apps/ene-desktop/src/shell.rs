@@ -188,11 +188,73 @@ pub fn run() -> Result<(), DesktopError> {
     let config = Config::load(None).map_err(|e| DesktopError::Protocol(e.to_string()))?;
     let data_dir = resolve_data_dir(&config)
         .ok_or_else(|| DesktopError::HostLaunch("no data directory resolved".into()))?;
+    // Two roles, one binary. The Host sets the marker while spawning the
+    // process it hands the private confirmation channel to; without it this
+    // process is the user-started launcher, which opens the Host's GUI and
+    // exits. A user or requester cannot aim this switch: it is an environment
+    // value only the Host writes.
+    match std::env::var(ene_local_control::CONFIRMATION_MODE_ENV) {
+        Ok(value) if value == ene_local_control::CONFIRMATION_MODE_STDIO => run_gui(data_dir),
+        _ => run_launcher(data_dir),
+    }
+}
+
+/// The short-lived launcher: ask the serving Host to open its GUI, then exit.
+///
+/// The launcher never holds a seat: it only requests. If no Host is serving it
+/// starts one first, which is what keeps a manual `ene-core serve` out of the
+/// normal setup path.
+fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| DesktopError::Transport(e.to_string()))?;
+    runtime.block_on(async move {
+        if !ene_desktop::host_launch::host_is_serving(&data_dir) {
+            let binary = ene_desktop::host_launch::locate_host_binary().ok_or_else(|| {
+                DesktopError::HostLaunch(String::from("ene-core binary was not found"))
+            })?;
+            let detached = ene_desktop::host_launch::detach_serve(&data_dir, &binary)
+                .map_err(|error| DesktopError::HostLaunch(error.to_string()))?;
+            if detached.pid == 0 {
+                return Err(DesktopError::HostLaunch(String::from(
+                    "detached host reported pid 0",
+                )));
+            }
+        }
+        let requester = ene_desktop::control::RequesterClient::new(&data_dir);
+        let mut attempts = 0_u8;
+        loop {
+            match requester.open_desktop().await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    return Err(DesktopError::HostLaunch(String::from(
+                        "the Host could not start its GUI",
+                    )));
+                }
+                Err(error) => {
+                    attempts = attempts.saturating_add(1);
+                    if attempts >= 80 {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    })
+}
+
+/// The Host-spawned GUI: adopt the inherited confirmation channel and run the
+/// windows.
+fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
+    let channel = ene_local_control::GuiChannel::adopt_stdio()
+        .map_err(|error| DesktopError::Transport(format!("confirmation channel: {error}")))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| DesktopError::Transport(e.to_string()))?;
     let mut desktop = DesktopRuntime::new(data_dir);
+    desktop.attach_confirmation(channel)?;
     let chat = ChatWindow::new().map_err(platform_error)?;
     let management = ManagementWindow::new().map_err(platform_error)?;
     chat.window().set_size(slint::LogicalSize::new(1100., 760.));
@@ -675,7 +737,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             let result = d.confirm_key(&key).await?;
             if matches!(
                 &result,
-                ene_local_control::FromHost::Outcome(
+                ene_local_control::FromConfirmation::Outcome(
                     ene_local_control::ControlOutcome::CredentialStored { .. }
                 )
             ) {
@@ -721,26 +783,32 @@ fn outcome_notice(ja: bool, outcome: &ManagementOutcome) -> String {
     }
     .into()
 }
-fn control_notice(ja: bool, result: &ene_local_control::FromHost) -> String {
-    use ene_local_control::{ControlOutcome, FromHost};
+fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> String {
+    use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
     match result {
-        FromHost::Outcome(
-            ControlOutcome::DeviceApproved { .. }
-            | ControlOutcome::CredentialStored { .. }
-            | ControlOutcome::DeletionStarted { .. }
-            | ControlOutcome::DeletionResumed { .. },
+        FromConfirmation::Outcome(
+            ControlOutcome::DeviceApproved { .. } | ControlOutcome::CredentialStored { .. },
         ) => local(ja, "操作を受け付けました。", "The action was accepted."),
-        FromHost::Outcome(ControlOutcome::DeletionAlreadyCoveredBy { .. }) => local(
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Started {
+            ..
+        })) => local(ja, "削除を開始しました。", "The deletion started."),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(
+            DeletionOutcome::AlreadyCoveredBy { .. },
+        )) => local(
             ja,
             "既存の削除処理に含まれています。",
             "Covered by an existing deletion.",
         ),
-        FromHost::Outcome(ControlOutcome::DeletionHeldByOperation { .. }) => local(
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::HeldByOperation {
+            ..
+        })) => local(
             ja,
             "別の操作により保留中です。",
             "Held by another operation.",
         ),
-        FromHost::Outcome(ControlOutcome::DeletionNeedsClarification) => local(
+        FromConfirmation::Outcome(ControlOutcome::Deletion(
+            DeletionOutcome::NeedsClarification,
+        )) => local(
             ja,
             "削除対象の確認が必要です。",
             "The deletion target needs clarification.",
@@ -753,6 +821,7 @@ fn control_notice(ja: bool, result: &ene_local_control::FromHost) -> String {
     }
     .into()
 }
+
 fn resume_notice(ja: bool, result: &ene_api::v1::undelivered::ResumeTaskOutcomeWire) -> String {
     use ene_api::v1::undelivered::ResumeTaskOutcomeWire as R;
     match result {

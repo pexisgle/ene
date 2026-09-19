@@ -35,7 +35,7 @@ use ene_desktop::measure;
 use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
-use ene_local_control::{ControlOutcome, FromHost};
+use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-e-secret-5519";
@@ -142,23 +142,23 @@ async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
-async fn pair_and_seat(desktop: &mut DesktopRuntime) {
+async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
+    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
-        .occupy_seat()
-        .await
-        .expect("empty seat occupancy is accident prevention, not authenticity");
+        .attach_confirmation(channel)
+        .expect("the private channel is the seat");
     desktop
         .connect_or_begin_pairing()
         .await
         .expect("pairing must challenge");
     match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromHost::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
         other => panic!("expected DeviceApproved, got {other:?}"),
     }
 }
 
-async fn pair_and_setup(desktop: &mut DesktopRuntime) {
-    pair_and_seat(desktop).await;
+async fn pair_and_setup(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
+    pair_and_seat(desktop, handle).await;
     desktop.set_secret(String::from(SECRET));
     desktop
         .begin_credential_put()
@@ -169,7 +169,7 @@ async fn pair_and_setup(desktop: &mut DesktopRuntime) {
         .await
         .expect("owner confirm stores the key")
     {
-        FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
         other => panic!("expected CredentialStored, got {other:?}"),
     }
     desktop.set_model(String::from(MODEL));
@@ -238,7 +238,7 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
     desktop
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
@@ -303,7 +303,9 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         .await
         .expect("owner confirm starts deletion")
     {
-        FromHost::Outcome(ControlOutcome::DeletionStarted { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Started {
+            ..
+        })) => {}
         other => panic!("expected DeletionStarted, got {other:?}"),
     }
     assert!(
@@ -360,7 +362,7 @@ async fn receive_without_present_is_not_presented_ack() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
 
     desktop
         .composer_mut()
@@ -413,7 +415,7 @@ async fn host_restart_and_reconnect_delivery_evidence_holds() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
     desktop.composer_mut().set_draft(String::from("hi there"));
     desktop.send_text().await.expect("chat after assignment");
     let before = desktop.snapshot().history.clone();
@@ -449,7 +451,7 @@ async fn registered_secret_never_appears_on_any_page() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
     desktop.set_secret(String::from(SECRET));
     for page in [
         Page::Wizard,
@@ -488,7 +490,7 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop).await;
+    pair_and_setup(&mut desktop, &handle).await;
 
     let Some(exe) = BodySupervisor::locate_binary() else {
         panic!("ene-body binary must be built for Body isolation");
@@ -550,6 +552,10 @@ async fn closed_confirmation_cannot_be_reused() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), transport);
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    let channel = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
+    desktop
+        .attach_confirmation(channel)
+        .expect("the private channel is the seat");
     desktop.connect_or_begin_pairing().await.expect("pair");
     let key = desktop
         .surface_snapshot()

@@ -18,10 +18,10 @@ use ene_api::v1::management::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId};
 use ene_client::Client;
-use ene_local_control::{ControlOutcome, FromHost};
+use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
 use zeroize::Zeroize as _;
 
-use crate::control::ControlSeat;
+use crate::control::ConfirmationClient;
 use crate::ui::DesktopError;
 
 /// Targeted Deletion page. Exact text is never part of the projection.
@@ -134,7 +134,7 @@ impl DeletionPanel {
     }
     pub(crate) async fn refresh_pending(
         &mut self,
-        seat: &mut ControlSeat,
+        seat: &ConfirmationClient,
     ) -> Result<(), DesktopError> {
         self.pending = seat.list_pending_deletions().await?;
         Ok(())
@@ -297,7 +297,10 @@ impl DeletionPanel {
 
     /// Lists staged request identities on the seated control channel, then
     /// mints a confirmation session. Exact text does not travel this path.
-    pub async fn begin_confirm(&mut self, seat: &mut ControlSeat) -> Result<(), DesktopError> {
+    pub async fn begin_confirm(
+        &mut self,
+        seat: &mut ConfirmationClient,
+    ) -> Result<(), DesktopError> {
         let pending = seat.list_pending_deletions().await?;
         let preview = pending
             .iter()
@@ -318,7 +321,14 @@ impl DeletionPanel {
         seat.request_deletion_confirm(&preview.request_id).await
     }
 
-    pub async fn resume(&mut self, seat: &mut ControlSeat) -> Result<FromHost, DesktopError> {
+    /// Resolves the Held operation the Owner selected, as the identity the
+    /// resume request names. Borrowing nothing keeps the request future free
+    /// to run while this panel keeps serving its own erasure demand.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Protocol`] when no Held operation is selected.
+    pub(crate) fn resume_target(&self) -> Result<(String, u64), DesktopError> {
         let operation = self.page.as_ref().and_then(|page| {
             page.operations
                 .iter()
@@ -341,16 +351,18 @@ impl DeletionPanel {
                 "resume applies to Held operations",
             )));
         }
-        let reply = seat
-            .request_deletion_resume(&operation.operation.0, operation.sweep)
-            .await?;
-        self.notice = match &reply {
-            FromHost::Outcome(ControlOutcome::DeletionResumed { operation, sweep }) => {
-                format!("resumed {operation} sweep {sweep}")
-            }
+        Ok((operation.operation.0.clone(), operation.sweep))
+    }
+
+    /// Records the resume outcome as this panel's notice.
+    pub(crate) fn note_resume(&mut self, reply: &FromConfirmation) {
+        self.notice = match reply {
+            FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
+                operation,
+                sweep,
+            })) => format!("resumed {operation} sweep {sweep}"),
             other => format!("resume={other:?}"),
         };
-        Ok(reply)
     }
 }
 

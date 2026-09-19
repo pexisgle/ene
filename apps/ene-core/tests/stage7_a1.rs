@@ -40,7 +40,10 @@ use ene_ctl::client::{Client, ClientError};
 use ene_ctl::cmds;
 use ene_ctl::device::{StoredDevice, store_device};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
-use ene_local_control::{ControlOutcome, FromHost, RedactedSecret, ToHost};
+use ene_local_control::{
+    ControlOp, ControlOutcome, DeletionOutcome, FromConfirmation, FromHost, RedactedSecret,
+    RequestState, RequesterOutcome, ToConfirmation, ToHost,
+};
 
 const DESCRIPTOR: &str = "stage7 a1";
 const MODEL: &str = "gpt-slice-test";
@@ -166,6 +169,63 @@ async fn dial_control(dir: &Path) -> ControlClient {
         }
     }
     panic!("control dial: {last:?}");
+}
+
+/// Adopts the GUI end of the private channel the Host hands to the process it
+/// spawned, and waits for the challenge the request just pushed.
+async fn expect_challenge(
+    gui: &mut ene_local_control::GuiChannel,
+    expected: ControlOp,
+) -> (uuid::Uuid, String) {
+    let frame = tokio::task::spawn_blocking({
+        let mut channel = gui.try_clone().expect("clone");
+        move || channel.recv()
+    })
+    .await
+    .expect("join")
+    .expect("read")
+    .expect("a live channel carries the challenge");
+    match frame {
+        FromConfirmation::ConfirmationChallenge {
+            session_id,
+            op,
+            nonce,
+            ..
+        } => {
+            assert_eq!(
+                op, expected,
+                "the challenge must name the operation asked for"
+            );
+            (session_id, nonce)
+        }
+        other => panic!("expected a challenge, got {other:?}"),
+    }
+}
+
+/// Polls one accepted request until the Owner's boundary settles it.
+///
+/// Completion is asynchronous by design: the requester observes a state, and
+/// a settled state is what the test waits for rather than assuming the answer
+/// arrived in the same turn.
+async fn await_applied(requester: &mut ControlClient, request_id: &str) -> FromHost {
+    for _ in 0..100 {
+        let state = requester
+            .exchange(&ToHost::RequestStatus {
+                request_id: request_id.to_string(),
+            })
+            .await
+            .expect("status");
+        if let FromHost::RequestStatus {
+            state: RequestState::AwaitingOwnerConfirmation,
+            ..
+        } = &state
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        }
+        return state;
+    }
+    panic!("the request never settled");
 }
 
 async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<WirePayload, String> {
@@ -516,108 +576,116 @@ async fn serve_control_only(dir: &Path) -> (Arc<HostHandle>, ServingTask) {
 }
 
 #[tokio::test]
-async fn second_control_connection_is_seat_occupied() {
+async fn a_general_connection_cannot_take_a_seat_or_complete_a_session() {
     let dir = tempfile::tempdir().expect("scratch");
-    let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut first = dial_control(dir.path()).await;
-    assert!(
-        matches!(
-            first.exchange(&ToHost::SeatHello).await,
-            Ok(FromHost::SeatGranted)
-        ),
-        "empty-seat occupancy is accident prevention, not authenticity"
-    );
-    let mut second = dial_control(dir.path()).await;
-    assert!(
-        matches!(
-            second.exchange(&ToHost::SeatHello).await,
-            Ok(FromHost::SeatOccupied)
-        ),
-        "a second speaker must not take the seat"
-    );
-    drop(first);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut third = dial_control(dir.path()).await;
-    assert!(
-        matches!(
-            third.exchange(&ToHost::SeatHello).await,
-            Ok(FromHost::SeatGranted)
-        ),
-        "release must admit a later speaker"
-    );
-    server.shutdown_and_join().await;
-}
+    let (handle, server) = serve_control_only(dir.path()).await;
 
-#[tokio::test]
-async fn session_less_confirmed_true_and_stolen_nonce_are_denied() {
-    let dir = tempfile::tempdir().expect("scratch");
-    let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut first = dial_control(dir.path()).await;
+    // No Host-spawned GUI exists yet, so the listener has no seat to hand out
+    // and every request it accepts says so.
+    let mut requester = dial_control(dir.path()).await;
     assert!(matches!(
-        first.exchange(&ToHost::ConfirmedTrue).await,
+        requester.exchange(&ToHost::ConfirmedTrue).await,
         Ok(FromHost::DeniedByBoundary)
     ));
-    assert!(matches!(
-        first.exchange(&ToHost::SeatHello).await,
-        Ok(FromHost::SeatGranted)
-    ));
-    let challenge = first
-        .exchange(&ToHost::DeviceApprove {
+    let accepted = requester
+        .exchange(&ToHost::RequestDeviceApprove {
             pending_id: String::from("no-such-pending"),
         })
         .await
-        .expect("challenge");
-    let FromHost::ConfirmationChallenge {
-        session_id, nonce, ..
-    } = challenge
-    else {
-        panic!("device approve must mint a challenge, got {challenge:?}");
+        .expect("a request is accepted even with no surface");
+    let FromHost::RequestAccepted { request_id } = accepted else {
+        panic!("expected RequestAccepted, got {accepted:?}");
     };
-
-    let mut thief = dial_control(dir.path()).await;
-    let stolen = thief
-        .exchange(&ToHost::SessionComplete { session_id, nonce })
+    let state = requester
+        .exchange(&ToHost::RequestStatus { request_id })
         .await
-        .expect("stolen complete");
+        .expect("status");
     assert!(
-        matches!(stolen, FromHost::DeniedByBoundary),
-        "a second connection must not complete with a copied nonce, got {stolen:?}"
+        matches!(
+            state,
+            FromHost::RequestStatus {
+                state: RequestState::ConfirmationUnavailable,
+                ..
+            }
+        ),
+        "a request with no confirmation surface must report exactly that, got {state:?}"
+    );
+
+    // The Host spawns its GUI: now a seat exists, and only that child's
+    // private channel can answer the challenge.
+    let mut gui = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
+    let accepted = requester
+        .exchange(&ToHost::RequestDeviceApprove {
+            pending_id: String::from("no-such-pending"),
+        })
+        .await
+        .expect("request");
+    let FromHost::RequestAccepted { request_id } = accepted else {
+        panic!("expected RequestAccepted, got {accepted:?}");
+    };
+    let (session_id, nonce) = expect_challenge(&mut gui, ControlOp::DeviceApprove).await;
+
+    // A second requester connection knows the session id and cannot use it:
+    // completion frames do not exist on this listener at all.
+    let mut thief = dial_control(dir.path()).await;
+    let raw = format!(r#"{{"SessionComplete":{{"session_id":"{session_id}","nonce":"{nonce}"}}}}"#);
+    let refused = thief.exchange_raw(&raw).await;
+    assert!(
+        refused.is_err(),
+        "a requester listener must not even decode a completion frame"
+    );
+    // The Owner's surface completes it, and the requester observes the
+    // non-secret state under the id it was given.
+    gui.send(&ToConfirmation::SessionComplete { session_id, nonce })
+        .expect("send");
+    let state = await_applied(&mut requester, &request_id).await;
+    assert!(
+        matches!(
+            state,
+            FromHost::RequestStatus {
+                state: RequestState::Applied {
+                    outcome: RequesterOutcome::DeviceUnknown { .. }
+                },
+                ..
+            }
+        ),
+        "the Owner's decision must reach the requester as its own state, got {state:?}"
     );
     server.shutdown_and_join().await;
 }
 
 #[tokio::test]
-async fn reconnect_invalidates_outstanding_sessions() {
+async fn a_new_spawned_gui_invalidates_the_previous_seats_sessions() {
     let dir = tempfile::tempdir().expect("scratch");
-    let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut first = dial_control(dir.path()).await;
-    first.exchange(&ToHost::SeatHello).await.expect("hello");
-    let challenge = first
-        .exchange(&ToHost::DeviceApprove {
+    let (handle, server) = serve_control_only(dir.path()).await;
+    let mut first = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
+    let mut requester = dial_control(dir.path()).await;
+    requester
+        .exchange(&ToHost::RequestDeviceApprove {
             pending_id: String::from("no-such-pending"),
         })
         .await
-        .expect("challenge");
-    let FromHost::ConfirmationChallenge {
-        session_id, nonce, ..
-    } = challenge
-    else {
-        panic!("expected challenge, got {challenge:?}");
-    };
-    drop(first);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut second = dial_control(dir.path()).await;
-    assert!(matches!(
-        second.exchange(&ToHost::SeatHello).await,
-        Ok(FromHost::SeatGranted)
-    ));
-    let stale = second
-        .exchange(&ToHost::SessionComplete { session_id, nonce })
+        .expect("request");
+    let (session_id, nonce) = expect_challenge(&mut first, ControlOp::DeviceApprove).await;
+
+    // The Host spawns a new GUI: the old child's session dies with its seat.
+    let second = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
+    let _ = second;
+    let stale = tokio::task::spawn_blocking({
+        let mut channel = first.try_clone().expect("clone");
+        move || channel.send(&ToConfirmation::SessionComplete { session_id, nonce })
+    })
+    .await
+    .expect("join");
+    assert!(stale.is_ok(), "the old channel is still writable");
+    let reply = tokio::task::spawn_blocking(move || first.recv())
         .await
-        .expect("stale complete");
+        .expect("join")
+        .expect("read")
+        .expect("answer");
     assert!(
-        matches!(stale, FromHost::DeniedByBoundary),
-        "reconnect must invalidate the old session, got {stale:?}"
+        matches!(reply, FromConfirmation::DeniedByBoundary),
+        "a session from the previous seat generation must not complete, got {reply:?}"
     );
     server.shutdown_and_join().await;
 }
@@ -633,62 +701,95 @@ async fn serving_time_control_approve_and_credential_put() {
     );
     let pendings = handle.pending_devices().await.expect("pendings");
     let pending_id = pendings[0].pending_id.clone();
-    let secret = host_control::approve_device(dir.path(), &pending_id)
-        .await
-        .expect("serving-time approve must speak control")
-        .expect("pending must approve");
-    assert!(!secret.is_empty());
-    assert!(
-        !format!("{secret:?}").is_empty(),
-        "pairing secret is for Host-local display"
-    );
 
-    // A serving-time put with no staged registration is not a stored
-    // credential: the OS item exists, but the approval sweep and the usable
-    // reference did not commit, so the inlet reports that state instead of
-    // success. The value is not silently discarded either.
-    let uncommitted = host_control::put_credential(dir.path(), "openai", "rotated", PUT_SECRET)
+    // The Host's own GUI holds the seat; the requester asks, and the Owner's
+    // surface confirms. The requester never receives the pairing secret: it
+    // learns the non-secret device identity only.
+    let mut gui = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
+    let mut requester = dial_control(dir.path()).await;
+    let accepted = requester
+        .exchange(&ToHost::RequestDeviceApprove {
+            pending_id: pending_id.clone(),
+        })
         .await
-        .expect_err("a put without a staged registration must not report stored");
-    assert!(
-        uncommitted.to_string().contains("did not commit"),
-        "the refusal must name the missing commit: {uncommitted}"
-    );
-    assert!(
-        handle.credential_contains_for_tests("openai", "rotated"),
-        "the value must still have reached the serving store"
-    );
-    assert!(
-        !uncommitted.to_string().contains(PUT_SECRET),
-        "the refusal must not echo the secret: {uncommitted}"
-    );
-    let stored = ControlOutcome::CredentialStored {
-        provider: String::from("openai"),
-        label: String::from("rotated"),
+        .expect("serving-time approve must speak the requester listener");
+    let FromHost::RequestAccepted { request_id } = accepted else {
+        panic!("expected RequestAccepted, got {accepted:?}");
     };
-    let rendered = format!("{stored:?}");
+    let (session_id, nonce) = expect_challenge(&mut gui, ControlOp::DeviceApprove).await;
+    gui.send(&ToConfirmation::SessionComplete { session_id, nonce })
+        .expect("send");
+    let answer = tokio::task::spawn_blocking({
+        let mut channel = gui.try_clone().expect("clone");
+        move || channel.recv()
+    })
+    .await
+    .expect("join")
+    .expect("read")
+    .expect("answer");
+    let FromConfirmation::Outcome(ControlOutcome::DeviceApproved { pairing_secret, .. }) = &answer
+    else {
+        panic!("expected DeviceApproved, got {answer:?}");
+    };
     assert!(
-        !rendered.contains(PUT_SECRET),
-        "control outcome Debug must not show the secret: {rendered}"
+        !pairing_secret.expose().is_empty(),
+        "the Owner's surface receives the one-time provision"
     );
+    let rendered = format!("{answer:?}");
+    assert!(
+        !rendered.contains(pairing_secret.expose()),
+        "control outcome Debug must not show the provision: {rendered}"
+    );
+    let state = await_applied(&mut requester, &request_id).await;
+    match state {
+        FromHost::RequestStatus { state, .. } => match state {
+            RequestState::Applied {
+                outcome: RequesterOutcome::DeviceApproved { device_id, .. },
+            } => assert!(!device_id.is_empty()),
+            other => panic!("expected the approved device identity, got {other:?}"),
+        },
+        other => panic!("expected RequestStatus, got {other:?}"),
+    }
+
+    // A credential value never travels the requester listener: asking for a
+    // registration names the pair only, and the value arrives on the private
+    // channel. A put with no staged value is refused rather than stored.
+    let accepted = requester
+        .exchange(&ToHost::RequestCredentialPut {
+            provider: String::from("openai"),
+            label: String::from("rotated"),
+        })
+        .await
+        .expect("credential request");
+    let FromHost::RequestAccepted { request_id } = accepted else {
+        panic!("expected RequestAccepted, got {accepted:?}");
+    };
+    let (session_id, nonce) = expect_challenge(&mut gui, ControlOp::CredentialPut).await;
+    gui.send(&ToConfirmation::SessionComplete { session_id, nonce })
+        .expect("send");
+    let answer = tokio::task::spawn_blocking({
+        let mut channel = gui.try_clone().expect("clone");
+        move || channel.recv()
+    })
+    .await
+    .expect("join")
+    .expect("read")
+    .expect("answer");
+    assert!(
+        matches!(
+            answer,
+            FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })
+        ),
+        "completing without a staged value must refuse, got {answer:?}"
+    );
+    assert!(
+        !handle.credential_contains_for_tests("openai", "rotated"),
+        "a refused registration must not leave a usable credential"
+    );
+    let _ = request_id;
+
     let redacted = RedactedSecret::new(PUT_SECRET);
     assert_eq!(format!("{redacted:?}"), "[redacted]");
-    server.shutdown_and_join().await;
-}
-
-#[tokio::test]
-async fn occupied_seat_fails_console_approve_without_client_fallback() {
-    let dir = tempfile::tempdir().expect("scratch");
-    let (_handle, server) = serve_control_only(dir.path()).await;
-    let mut holder = dial_control(dir.path()).await;
-    holder.exchange(&ToHost::SeatHello).await.expect("hello");
-    let error = host_control::approve_device(dir.path(), "anything")
-        .await
-        .expect_err("occupied seat must fail");
-    assert!(
-        matches!(error, CoreError::SeatOccupied),
-        "must not fall through to the Client channel, got {error}"
-    );
     server.shutdown_and_join().await;
 }
 
@@ -815,9 +916,34 @@ async fn deletion_demand_while_waiting_does_not_steal_the_answer() {
         .as_uuid()
         .as_hyphenated()
         .to_string();
-    host_control::confirm_targeted_deletion(dir.path(), &request)
+    // The Owner's confirmation surface is the Host-spawned GUI. The console
+    // asks; the GUI confirms on its private channel.
+    let mut gui = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
+    let mut requester = dial_control(dir.path()).await;
+    requester
+        .exchange(&ToHost::RequestDeletionConfirm {
+            request_id: request,
+        })
         .await
-        .expect("serving-time confirm must speak control");
+        .expect("serving-time confirm must speak the requester listener");
+    let (session_id, nonce) = expect_challenge(&mut gui, ControlOp::DeletionConfirm).await;
+    gui.send(&ToConfirmation::SessionComplete { session_id, nonce })
+        .expect("send");
+    let answer = tokio::task::spawn_blocking({
+        let mut channel = gui.try_clone().expect("clone");
+        move || channel.recv()
+    })
+    .await
+    .expect("join")
+    .expect("read")
+    .expect("answer");
+    assert!(
+        matches!(
+            answer,
+            FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Started { .. }))
+        ),
+        "the Owner's confirmation must start the deletion, got {answer:?}"
+    );
 
     let (round, stream, chat) = send_round(&mut client, "still chatting")
         .await

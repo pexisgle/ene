@@ -26,12 +26,11 @@ use ene_core::conn;
 use ene_core::host_control;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::MemoryCredentialStore;
-use ene_desktop::control::ControlSeat;
 use ene_desktop::i18n::Locale;
 use ene_desktop::ui::{Composer, DesktopRuntime, Page};
 use ene_desktop::{DESKTOP_DESCRIPTOR, session};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
-use ene_local_control::{ControlOutcome, FromHost};
+use ene_local_control::{ControlOutcome, FromConfirmation};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-b-secret-9931";
@@ -158,17 +157,22 @@ async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
-async fn pair_and_seat(desktop: &mut DesktopRuntime) {
+/// Registers this runtime as the GUI the Host spawned, then pairs it.
+///
+/// The private channel is the seat: the test adopts it through the same
+/// registration path the Host uses for its own child, so no test takes a seat
+/// from a public endpoint. The Owner's direct gesture is still the test's.
+async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
+    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
-        .occupy_seat()
-        .await
-        .expect("empty seat occupancy is accident prevention, not authenticity");
+        .attach_confirmation(channel)
+        .expect("the private channel is the seat");
     desktop
         .connect_or_begin_pairing()
         .await
         .expect("pairing must challenge");
     match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromHost::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
         other => panic!("expected DeviceApproved, got {other:?}"),
     }
 }
@@ -181,7 +185,7 @@ async fn register_only_makes_zero_provider_calls() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     desktop.set_secret(String::from(SECRET));
     desktop
         .begin_credential_put()
@@ -192,7 +196,7 @@ async fn register_only_makes_zero_provider_calls() {
         .await
         .expect("owner confirm stores the key")
     {
-        FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
         other => panic!("expected CredentialStored, got {other:?}"),
     }
     desktop.refresh_setup().await.expect("setup view must read");
@@ -225,7 +229,7 @@ async fn assignment_then_chat_and_locale_and_restart() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     desktop.set_secret(String::from(SECRET));
     desktop.begin_credential_put().await.expect("put");
     desktop.confirm_owner().await.expect("store");
@@ -283,7 +287,7 @@ async fn secrets_stay_out_of_gui_state_and_seated_confirm_denies_client_true() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     desktop.set_secret(String::from(SECRET));
     let snap = desktop.snapshot();
     assert!(
@@ -316,7 +320,7 @@ async fn secrets_stay_out_of_gui_state_and_seated_confirm_denies_client_true() {
         .await
         .expect("control ConfirmedTrue");
     assert!(
-        matches!(control_denied, FromHost::DeniedByBoundary),
+        matches!(control_denied, FromConfirmation::DeniedByBoundary),
         "session-less ConfirmedTrue must deny"
     );
     server.shutdown_and_join().await;
@@ -357,7 +361,7 @@ async fn gui_event_loop_is_not_blocked_on_connect_or_provider_wait() {
     connecting.abort();
 
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     desktop.set_secret(String::from(SECRET));
     desktop.begin_credential_put().await.expect("put");
     desktop.confirm_owner().await.expect("store");
@@ -427,8 +431,9 @@ async fn ime_and_about_slint_and_missing_body() {
 }
 
 #[test]
-fn second_control_connection_is_occupied_not_authenticity() {
-    // Compile-time reminder: occupying the empty seat is not an authenticity
-    // proof. The live race is covered by stage7_a1; B reuses that seat.
-    let _ = ControlSeat::occupy;
+fn the_seat_comes_from_the_host_spawn_not_from_a_connection() {
+    // Compile-time reminder: a public connection can no longer take a seat.
+    // The spawn-derived seat and its generation rules are covered by
+    // stage7_a1; B reuses the Host-spawned registration path.
+    let _ = host_control::seat_test_gui_for_tests;
 }

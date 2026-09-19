@@ -26,6 +26,21 @@ use ene_client::{Client, DEFAULT_COMPANION_REF, device};
 use crate::ui::DesktopError;
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
+
+/// The Windows Client pipe name of one data directory: the same FNV-1a fold
+/// the Host uses, so the GUI's requester listener derivation matches.
+#[cfg(any(windows, test))]
+#[must_use]
+pub fn client_pipe_name(data_dir: &Path) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut tag = FNV_OFFSET;
+    for byte in data_dir.as_os_str().as_encoded_bytes() {
+        tag ^= u64::from(*byte);
+        tag = tag.wrapping_mul(FNV_PRIME);
+    }
+    format!(r"\\.\pipe\ene-{tag:016x}")
+}
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 pub const CAPABILITY_DIALOGUE: &str = "dialogue";
 pub const DEFAULT_HISTORY_LIMIT: u64 = 50;

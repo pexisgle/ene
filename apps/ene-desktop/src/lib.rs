@@ -1,10 +1,10 @@
 //! First-party desktop GUI (`apps/ene-desktop`).
 //!
 //! Host is durable authority. This process talks the Client channel
-//! ([`ene_client`]) and, when seated, Host-local control
-//! ([`ene_local_control`]). It does not know the DB schema, does not spawn
-//! Body as a requirement for chat or settings, and does not treat empty-seat
-//! occupancy as authenticity evidence.
+//! ([`ene_client`]) and Host-local control ([`ene_local_control`]). It does
+//! not know the DB schema, does not spawn Body as a requirement for chat or
+//! settings, and holds no confirmation authority unless the Host itself
+//! spawned this process and handed it the private channel.
 //!
 //! Modules match [First-party desktop](../../docs/design/concrete/first-party-desktop.md)
 //! §6: `ui`, `session`, `control`, `body_supervise`, `i18n`, `erasure`.
@@ -18,7 +18,7 @@ pub mod measure;
 pub mod session;
 pub mod ui;
 
-pub(crate) mod host_launch;
+pub mod host_launch;
 pub(crate) mod secret;
 
 pub use i18n::Locale;

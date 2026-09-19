@@ -36,7 +36,7 @@ use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::MemoryCredentialStore;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
-use ene_local_control::{ControlOutcome, FromHost};
+use ene_local_control::{ControlOutcome, FromConfirmation};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-c2-secret-4408";
@@ -199,17 +199,17 @@ async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
-async fn pair_and_seat(desktop: &mut DesktopRuntime) {
+async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
+    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
-        .occupy_seat()
-        .await
-        .expect("empty seat occupancy is accident prevention, not authenticity");
+        .attach_confirmation(channel)
+        .expect("the private channel is the seat");
     desktop
         .connect_or_begin_pairing()
         .await
         .expect("pairing must challenge");
     match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromHost::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
         other => panic!("expected DeviceApproved, got {other:?}"),
     }
 }
@@ -225,7 +225,7 @@ async fn complete_setup(desktop: &mut DesktopRuntime) {
         .await
         .expect("owner confirm stores the key")
     {
-        FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => {}
+        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
         other => panic!("expected CredentialStored, got {other:?}"),
     }
     desktop.set_model(String::from(MODEL));
@@ -304,7 +304,7 @@ async fn acceptance_4_workspace_task_gui_path() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
     desktop.try_spawn_body(&desktop.bundled_ene_asset());
     assert_eq!(desktop.snapshot().body_status, "Absent");
@@ -426,7 +426,7 @@ async fn cancel_admission_is_not_stop_complete() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
     desktop
         .select_workspace_folder(workspace.path())
@@ -496,7 +496,7 @@ async fn gui_close_reconnect_and_ack_only_after_present() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
     desktop
         .select_workspace_folder(workspace.path())
@@ -596,7 +596,7 @@ async fn resume_is_bound_to_the_displayed_premise() {
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport_a));
     assert!(wait_for_control(dir.path()).await);
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop).await;
+    pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
     desktop
         .select_workspace_folder(workspace.path())

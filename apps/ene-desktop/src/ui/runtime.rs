@@ -9,11 +9,11 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
 use ene_api::v1::round::{HistoryItem, PresentationStatus};
 use ene_client::Client;
-use ene_local_control::{ControlOp, ControlOutcome, FromHost};
+use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
 use zeroize::Zeroize as _;
 
 use crate::body_supervise::{BodyStatus, BodySupervisor};
-use crate::control::ControlSeat;
+use crate::control::ConfirmationClient;
 use crate::erasure::{self, GuiOwned};
 use crate::host_launch::{self, DetachedHost};
 use crate::i18n::{self, Label, Locale};
@@ -37,7 +37,7 @@ pub struct DesktopRuntime {
     composer: Composer,
     secret: SecretIntake,
     client: Option<Client>,
-    control: Option<ControlSeat>,
+    control: Option<ConfirmationClient>,
     timeline: Vec<super::presentation::Message>,
     surface_erasure: Option<super::presentation::SurfaceErasure>,
     history: Vec<HistoryItem>,
@@ -146,7 +146,7 @@ impl DesktopRuntime {
             challenge_target: self
                 .control
                 .as_ref()
-                .and_then(ControlSeat::pending_challenge)
+                .and_then(ConfirmationClient::pending_challenge)
                 .map(|challenge| challenge.display_target().to_string()),
             about_slint: true,
             body_status: format!("{:?}", self.body_status),
@@ -259,11 +259,19 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    pub async fn occupy_seat(&mut self) -> Result<(), DesktopError> {
-        if self.control.is_some() {
-            return Ok(());
-        }
-        self.control = Some(ControlSeat::occupy(&self.data_dir).await?);
+    /// Attaches the private confirmation channel the Host handed to this GUI.
+    ///
+    /// Only the Host's own child receives this channel, so attaching it is the
+    /// GUI's entire claim to the seat; no public endpoint can take one.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Transport`] when the channel's reader cannot start.
+    pub fn attach_confirmation(
+        &mut self,
+        channel: ene_local_control::GuiChannel,
+    ) -> Result<(), DesktopError> {
+        self.control = Some(ConfirmationClient::adopt(&self.data_dir, channel)?);
         Ok(())
     }
 
@@ -274,7 +282,7 @@ impl DesktopRuntime {
     /// result, so a restart of an already-paired GUI cannot be reported as a
     /// pending pairing.
     pub async fn connect_or_begin_pairing(&mut self) -> Result<(), DesktopError> {
-        self.occupy_seat().await?;
+        self.require_confirmation()?;
         self.connection = i18n::label(self.locale, Label::Connecting);
         match session::connect_or_pending(&self.data_dir, DESKTOP_DESCRIPTOR).await? {
             session::DesktopConnect::Paired(client) => {
@@ -284,10 +292,7 @@ impl DesktopRuntime {
                 Ok(())
             }
             session::DesktopConnect::PendingOwnerConfirmation(pending) => {
-                let seat = self
-                    .control
-                    .as_mut()
-                    .ok_or(DesktopError::DeniedByBoundary)?;
+                let seat = self.require_confirmation_mut()?;
                 seat.request_device_approve(&pending).await?;
                 self.page = Page::Confirm;
                 Ok(())
@@ -295,8 +300,27 @@ impl DesktopRuntime {
         }
     }
 
+    /// The private confirmation channel, present exactly when the Host
+    /// spawned this process as its GUI.
+    fn require_confirmation(&self) -> Result<(), DesktopError> {
+        match self.control {
+            Some(_) => Ok(()),
+            None => Err(DesktopError::Protocol(String::from(
+                "this process has no Host-issued confirmation channel",
+            ))),
+        }
+    }
+
+    fn require_confirmation_mut(&mut self) -> Result<&mut ConfirmationClient, DesktopError> {
+        self.control.as_mut().ok_or_else(|| {
+            DesktopError::Protocol(String::from(
+                "this process has no Host-issued confirmation channel",
+            ))
+        })
+    }
+
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
-        self.occupy_seat().await?;
+        self.require_confirmation()?;
         self.ensure_client()?;
         // Wire intent stages the pending pair. Control put+approve then
         // makes it usable. Approve without a pending does not create the ref.
@@ -314,17 +338,9 @@ impl DesktopRuntime {
                 "secret intake is empty",
             )));
         }
-        let secret = self.secret.take();
-        let seat = self
-            .control
-            .as_mut()
-            .ok_or(DesktopError::DeniedByBoundary)?;
+        let seat = self.require_confirmation_mut()?;
         let result = seat
-            .request_credential_put(
-                SETUP_PROVIDER_OPENAI,
-                session::SETUP_CREDENTIAL_LABEL,
-                secret,
-            )
+            .request_credential_put(SETUP_PROVIDER_OPENAI, session::SETUP_CREDENTIAL_LABEL)
             .await;
         if result.is_err() {
             self.secret.cancel();
@@ -334,13 +350,28 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    /// Owner gesture on the seated confirmation surface.
-    pub async fn confirm_owner(&mut self) -> Result<FromHost, DesktopError> {
-        let deletion_confirm = self
+    /// Owner gesture on the confirmation surface.
+    pub async fn confirm_owner(&mut self) -> Result<FromConfirmation, DesktopError> {
+        let challenge = self
             .control
             .as_ref()
-            .and_then(ControlSeat::pending_challenge)
+            .and_then(ConfirmationClient::pending_challenge)
+            .cloned();
+        let deletion_confirm = challenge
+            .as_ref()
             .is_some_and(|challenge| matches!(challenge.op, ControlOp::DeletionConfirm));
+        let credential_intake = challenge.as_ref().and_then(|challenge| {
+            matches!(challenge.op, ControlOp::CredentialPut).then(|| challenge.session_id)
+        });
+        let _ = credential_intake;
+        let credential_secret = if challenge
+            .as_ref()
+            .is_some_and(|challenge| matches!(challenge.op, ControlOp::CredentialPut))
+        {
+            Some(self.secret.take())
+        } else {
+            None
+        };
         let reply = {
             let Self {
                 control,
@@ -358,7 +389,11 @@ impl DesktopRuntime {
                 surface_erasure,
                 ..
             } = self;
-            let seat = control.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let seat = control.as_mut().ok_or_else(|| {
+                DesktopError::Protocol(String::from(
+                    "this process has no Host-issued confirmation channel",
+                ))
+            })?;
             if deletion_confirm {
                 let mut copies = GuiOwned {
                     timeline,
@@ -379,13 +414,17 @@ impl DesktopRuntime {
                     surface_erasure.as_ref(),
                 )
                 .await?
+            } else if let Some(secret) = credential_secret {
+                seat.complete_credential(secret).await?
             } else {
                 seat.complete_pending().await?
             }
         };
         self.secret.cancel();
         match &reply {
-            FromHost::Outcome(ControlOutcome::DeviceApproved { pairing_secret, .. }) => {
+            FromConfirmation::Outcome(ControlOutcome::DeviceApproved {
+                pairing_secret, ..
+            }) => {
                 let mut secret = pairing_secret.clone().into_inner();
                 match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR, Some(secret.clone()))
                     .await
@@ -401,30 +440,31 @@ impl DesktopRuntime {
                 secret.zeroize();
                 self.page = Page::Wizard;
             }
-            FromHost::Outcome(ControlOutcome::CredentialStored { .. }) => {
+            FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {
                 self.page = Page::Wizard;
                 self.refresh_setup().await?;
             }
-            FromHost::Outcome(
-                ControlOutcome::DeletionStarted { .. }
-                | ControlOutcome::DeletionAlreadyCoveredBy { .. }
-                | ControlOutcome::DeletionHeldByOperation { .. }
-                | ControlOutcome::DeletionNeedsClarification
-                | ControlOutcome::DeletionMissing,
-            ) => {
+            FromConfirmation::Outcome(ControlOutcome::Deletion(_)) => {
                 self.page = Page::Deletion;
                 match self.refresh_deletion().await {
                     Ok(()) | Err(_) => {}
                 }
             }
-            FromHost::DeniedByBoundary => {
+            FromConfirmation::Outcome(ControlOutcome::CredentialStaged { .. }) => {
+                // Staging is an intermediate step of the intake path; the
+                // Owner's surface continues to the completion that follows.
+            }
+            FromConfirmation::DeniedByBoundary => {
                 self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
-            FromHost::Outcome(
-                ControlOutcome::CredentialRefused { .. } | ControlOutcome::DeviceUnknown { .. },
+            FromConfirmation::Outcome(
+                ControlOutcome::CredentialRefused { .. }
+                | ControlOutcome::CredentialUncommitted { .. }
+                | ControlOutcome::DeviceUnknown { .. }
+                | ControlOutcome::Rejected { .. },
             )
-            | FromHost::Unavailable => {
+            | FromConfirmation::Unavailable => {
                 self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
@@ -436,13 +476,12 @@ impl DesktopRuntime {
         Ok(reply)
     }
 
-    pub async fn send_confirmed_true_on_control(&mut self) -> Result<FromHost, DesktopError> {
-        let seat = self
-            .control
-            .as_mut()
-            .ok_or(DesktopError::DeniedByBoundary)?;
+    pub async fn send_confirmed_true_on_control(
+        &mut self,
+    ) -> Result<FromConfirmation, DesktopError> {
+        let seat = self.require_confirmation_mut()?;
         let reply = seat.send_confirmed_true().await?;
-        if matches!(reply, FromHost::DeniedByBoundary) {
+        if matches!(reply, FromConfirmation::DeniedByBoundary) {
             self.deny_reason = i18n::control_deny(self.locale, &reply);
         }
         Ok(reply)
@@ -954,22 +993,91 @@ impl DesktopRuntime {
     }
 
     pub async fn begin_deletion_confirm(&mut self) -> Result<(), DesktopError> {
-        let seat = self
-            .control
-            .as_mut()
-            .ok_or(DesktopError::DeniedByBoundary)?;
-        self.deletion.begin_confirm(seat).await?;
+        let Self {
+            control, deletion, ..
+        } = self;
+        let seat = control.as_mut().ok_or_else(|| {
+            DesktopError::Protocol(String::from(
+                "this process has no Host-issued confirmation channel",
+            ))
+        })?;
+        deletion.begin_confirm(seat).await?;
         self.page = Page::Confirm;
         Ok(())
     }
 
-    pub async fn resume_deletion(&mut self) -> Result<FromHost, DesktopError> {
+    pub async fn resume_deletion(&mut self) -> Result<FromConfirmation, DesktopError> {
+        let Self {
+            control,
+            client,
+            deletion,
+            timeline,
+            history,
+            composer,
+            search_draft,
+            memory,
+            tasks,
+            usage,
+            chat_receipt,
+            last_erasure,
+            surface_erasure,
+            ..
+        } = self;
         let reply = {
-            let seat = self
-                .control
-                .as_mut()
-                .ok_or(DesktopError::DeniedByBoundary)?;
-            self.deletion.resume(seat).await?
+            let seat = control.as_mut().ok_or_else(|| {
+                DesktopError::Protocol(String::from(
+                    "this process has no Host-issued confirmation channel",
+                ))
+            })?;
+            let (operation, sweep) = deletion.resume_target()?;
+            // The Host drives fan-out on resume, and a Client-incarnation
+            // demand must be answered while the Owner waits: this Client keeps
+            // pumping its own frames, exactly as it does for a confirmed
+            // deletion.
+            let resume = seat.request_deletion_resume(&operation, sweep);
+            tokio::pin!(resume);
+            match client.as_mut() {
+                Some(client) => {
+                    let mut copies = GuiOwned {
+                        timeline,
+                        history,
+                        composer,
+                        search_draft,
+                        memory,
+                        tasks,
+                        usage,
+                        deletion,
+                        chat_receipt,
+                    };
+                    let reply = loop {
+                        tokio::select! {
+                            outcome = &mut resume => break outcome?,
+                            () = tokio::time::sleep(Duration::from_millis(20)) => {
+                                // A read drives this Client's frame pump, so
+                                // the bounded local-erasure demand the Host
+                                // raises during fan-out is answered inline.
+                                match copies.deletion.refresh(client).await {
+                                    Ok(()) | Err(_) => {}
+                                }
+                                apply_pending_erasure(
+                                    client,
+                                    &mut copies,
+                                    last_erasure,
+                                    surface_erasure.as_ref(),
+                                )
+                                .await;
+                            }
+                        }
+                    };
+                    copies.deletion.note_resume(&reply);
+                    reply
+                }
+                None => {
+                    let reply = resume.await?;
+                    deletion.note_resume(&reply);
+                    reply
+                }
+            }
         };
         match self.refresh_deletion().await {
             Ok(()) | Err(_) => {}
@@ -1115,12 +1223,12 @@ async fn apply_pending_erasure(
 }
 
 async fn complete_pending_pumping(
-    seat: &mut ControlSeat,
+    seat: &mut ConfirmationClient,
     client: Option<&mut Client>,
     copies: &mut GuiOwned<'_>,
     last_erasure: &mut Option<LocalErasureResult>,
     surface: Option<&super::presentation::SurfaceErasure>,
-) -> Result<FromHost, DesktopError> {
+) -> Result<FromConfirmation, DesktopError> {
     let Some(client) = client else {
         return seat.complete_pending().await;
     };
@@ -1199,7 +1307,7 @@ impl DesktopRuntime {
             memory_more: self.memory.next_after().is_some(), revisions_more: self.memory.next_revision_after().is_some(),
             usage: self.usage.rows(locale), caps: self.usage.cap_rows(locale), usage_more: self.usage.has_more(),
             deletions: self.deletion.rows(locale), selected_deletion: self.deletion.selected_key(), can_resume_deletion: self.deletion.can_resume(),
-            confirmation: self.control.as_ref().and_then(ControlSeat::pending_challenge).map(|c| {
+            confirmation: self.control.as_ref().and_then(ConfirmationClient::pending_challenge).map(|c| {
                 let (ja, en, ja_desc, en_desc, target) = match c.op {
                     ControlOp::DeviceApprove => ("この端末を接続", "Connect this device", "この端末から会話と管理を行えるようにします。", "Allow this device to use conversation and management.", tr(locale, "このデスクトップ端末", "This desktop device")),
                     ControlOp::CredentialPut => ("API キーを登録", "Register API key", "入力したキーを Host の資格情報ストアへ登録します。", "Store the entered key in the Host credential store.", String::from("OpenAI")),
@@ -1244,11 +1352,11 @@ impl DesktopRuntime {
             .ok_or(DesktopError::DeniedByBoundary)?;
         self.deletion.refresh_pending(seat).await
     }
-    pub async fn confirm_key(&mut self, key: &str) -> Result<FromHost, DesktopError> {
+    pub async fn confirm_key(&mut self, key: &str) -> Result<FromConfirmation, DesktopError> {
         if !self
             .control
             .as_ref()
-            .and_then(ControlSeat::pending_challenge)
+            .and_then(ConfirmationClient::pending_challenge)
             .is_some_and(|c| c.session_id.to_string() == key)
         {
             return Err(DesktopError::Protocol(String::from("stale confirmation")));
