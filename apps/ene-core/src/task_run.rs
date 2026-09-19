@@ -72,7 +72,7 @@ use ene_task::{
 use std::sync::Arc;
 
 use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_workspace_action};
-use crate::serve::HostHandle;
+use crate::serve::{CoreError, HostHandle};
 
 /// The default bound on inference turns per execution.
 ///
@@ -1033,7 +1033,7 @@ pub fn parse_directive(text: &str) -> Result<TaskAgentDirective, TaskAgentProtoc
 /// Starts the existing Task Agent runner in the background for one committed
 /// delegation.
 ///
-/// The launcher only starts the existing runner; it owns no lifecycle, no
+/// The launcher only starts the existing runner; it owns no Task lifecycle, no
 /// durable running state, and no completion decision. The runner's own
 /// per-delegation registration and durable one-shot attempt facts make a
 /// second launch a domain refusal, and a technical runner failure stays a
@@ -1049,11 +1049,15 @@ pub trait TaskAgentLauncher: Send + Sync {
 /// This is the production composition seam: `conn::run` owns both Arcs and
 /// installs one launcher on the handle, so a conversation-accepted Task Agent
 /// execution starts without any test-side runner call. The handle is held
-/// weakly: the launcher is stored on the handle itself, and a strong
-/// reference would form a cycle.
+/// weakly to avoid an idle ownership cycle. Running tasks hold strong Host
+/// references, so the serving owner's drop guard must call `abort`
+/// rather than relying on the last launcher Arc disappearing.
 pub struct BackgroundTaskAgent<T> {
     handle: std::sync::Weak<HostHandle>,
     transport: Arc<T>,
+    tasks: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+    shutdown: tokio::sync::Mutex<()>,
+    failure: std::sync::Mutex<Option<CoreError>>,
 }
 
 impl<T> BackgroundTaskAgent<T> {
@@ -1062,7 +1066,95 @@ impl<T> BackgroundTaskAgent<T> {
         Self {
             handle: Arc::downgrade(&handle),
             transport,
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Emergency close-and-abort for the serving owner's drop guard. The
+    /// guard must call this even while other launcher Arcs remain: a running
+    /// task holds the Host, which itself owns the installed launcher.
+    /// Started blocking work may survive this call; only a graceful join
+    /// establishes quiescence.
+    pub(crate) fn abort(&self) {
+        let tasks = crate::lock_unpoison(&self.tasks).take();
+        drop(tasks);
+    }
+
+    /// Closes launch admission and joins every admitted runner, including its
+    /// awaited Store work. The serving owner calls this after draining the
+    /// handlers that can commit delegations; Client disconnect never calls it.
+    /// No Task cancellation or external-effect outcome is inferred here.
+    ///
+    /// Dropping the join future or the launcher drops its `JoinSet`, aborting
+    /// async runners as an emergency stop only: started blocking work is not
+    /// thereby proven quiescent. Concurrent callers wait for the same drain.
+    /// Do not call this after the emergency `abort` path as evidence of a
+    /// graceful drain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Serving`] for a panicked or cancelled runner,
+    /// after joining all remaining runners. Runner domain and technical
+    /// outcomes keep their existing semantics and are not join failures.
+    pub(crate) async fn shutdown_and_join(&self) -> Result<(), CoreError> {
+        let _shutdown = self.shutdown.lock().await;
+        let tasks = crate::lock_unpoison(&self.tasks).take();
+        let Some(mut tasks) = tasks else {
+            return Ok(());
+        };
+        let mut failure = crate::lock_unpoison(&self.failure).take();
+        while let Some(result) = tasks.join_next().await {
+            if result.is_err() {
+                failure.get_or_insert_with(task_agent_join_failure);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+fn task_agent_join_failure() -> CoreError {
+    // A panic payload may include task or provider content.
+    CoreError::Serving(String::from("Task Agent runner panicked or was cancelled"))
+}
+
+impl<T> BackgroundTaskAgent<T>
+where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    /// Starts a runner under the serving owner's join set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskAgentRunRefusal::ExecutionUnavailable`] when serving has
+    /// closed admission or the Host is gone. A refused launch releases its
+    /// reservation without changing the durable delegation or retrying it.
+    fn try_launch(&self, delegation: ene_task::DelegationId) -> Result<(), TaskAgentRunRefusal> {
+        let mut tasks = crate::lock_unpoison(&self.tasks);
+        let Some(handle) = self.handle.upgrade() else {
+            return Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation });
+        };
+        let Some(tasks) = tasks.as_mut() else {
+            handle.task_executions.release(delegation);
+            return Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation });
+        };
+        // Reap completed runners so a long-lived Host does not retain one
+        // task allocation per delegation until shutdown.
+        while let Some(result) = tasks.try_join_next() {
+            if result.is_err() {
+                crate::lock_unpoison(&self.failure).get_or_insert_with(task_agent_join_failure);
+            }
+        }
+        let transport = Arc::clone(&self.transport);
+        tasks.spawn(async move {
+            // The runner owns every admission and outcome; a technical
+            // failure is dropped as technical and never becomes a Task
+            // failure. The dialogue never awaits execution; serving shutdown
+            // retains responsibility for joining it.
+            drop(handle.run_task_agent(transport.as_ref(), delegation).await);
+        });
+        Ok(())
     }
 }
 
@@ -1071,20 +1163,226 @@ where
     T: ProviderTransport + Send + Sync + 'static,
 {
     fn launch(&self, delegation: ene_task::DelegationId) {
-        let Some(handle) = self.handle.upgrade() else {
-            // The serving process is shutting down; no execution starts.
-            return;
-        };
-        let transport = Arc::clone(&self.transport);
-        tokio::spawn(async move {
-            // The runner owns every admission and outcome; a technical
-            // failure is dropped as technical and never becomes a Task
-            // failure. The launch is fire-and-forget on purpose: the dialogue
-            // turn never awaits the execution.
-            drop(handle.run_task_agent(transport.as_ref(), delegation).await);
-        });
+        // This inlet has no response channel; try_launch releases a refused
+        // reservation, leaving the committed delegation unexecuted.
+        drop(self.try_launch(delegation));
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    struct NoProvider;
+
+    impl ProviderTransport for NoProvider {
+        fn complete(
+            &self,
+            _request: ene_inference::ProviderRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            ene_inference::ProviderResponse,
+                            ene_inference::InferenceTechnicalError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_started_blocking_work_and_closes_launch_admission() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                directory.path(),
+                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let launcher = Arc::new(BackgroundTaskAgent::new(
+            Arc::clone(&handle),
+            Arc::new(NoProvider),
+        ));
+        assert!(handle.install_task_launcher(launcher.clone()));
+        let weak = Arc::downgrade(&handle);
+        let task = ene_task::TaskId::generate();
+        let delegation = ene_task::DelegationId::generate();
+        assert!(handle.task_executions.reserve(delegation, task));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&handle);
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        crate::lock_unpoison(&launcher.tasks)
+            .as_mut()
+            .unwrap()
+            .spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    worker_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await
+                .unwrap();
+                drop(worker);
+            });
+        entered_rx.await.unwrap();
+        let mut joining = std::pin::pin!(launcher.shutdown_and_join());
+        std::future::poll_fn(|cx| {
+            assert!(joining.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            launcher.try_launch(delegation),
+            Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation })
+        );
+        assert!(!handle.task_executions.task_has_reservation_or_running(task));
+        let mut second_join = std::pin::pin!(launcher.shutdown_and_join());
+        std::future::poll_fn(|cx| {
+            assert!(second_join.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(handle);
+        assert!(weak.upgrade().is_some());
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        joining.await.unwrap();
+        second_join.await.unwrap();
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn admitted_launch_is_owned_until_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                directory.path(),
+                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let launcher = Arc::new(BackgroundTaskAgent::new(
+            Arc::clone(&handle),
+            Arc::new(NoProvider),
+        ));
+        assert!(handle.install_task_launcher(launcher.clone()));
+        let weak = Arc::downgrade(&handle);
+        launcher
+            .try_launch(ene_task::DelegationId::generate())
+            .unwrap();
+        assert_eq!(
+            crate::lock_unpoison(&launcher.tasks)
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(handle);
+        assert!(weak.upgrade().is_some());
+        launcher.shutdown_and_join().await.unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_launcher_aborts_owned_async_work() {
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+        };
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        crate::lock_unpoison(&launcher.tasks)
+            .as_mut()
+            .unwrap()
+            .spawn(async move {
+                std::future::pending::<()>().await;
+                drop(held);
+            });
+        drop(launcher);
+        assert!(released.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn emergency_abort_breaks_running_host_ownership_cycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                directory.path(),
+                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let launcher = Arc::new(BackgroundTaskAgent::new(
+            Arc::clone(&handle),
+            Arc::new(NoProvider),
+        ));
+        assert!(handle.install_task_launcher(launcher.clone()));
+        let weak = Arc::downgrade(&handle);
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        crate::lock_unpoison(&launcher.tasks)
+            .as_mut()
+            .unwrap()
+            .spawn(async move {
+                std::future::pending::<()>().await;
+                drop(handle);
+                drop(held);
+            });
+        assert!(weak.upgrade().is_some());
+        launcher.abort();
+        assert!(released.await.is_err());
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn join_failure_is_returned_only_after_remaining_children_finish() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+        };
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let (panicking, panicked) = tokio::sync::oneshot::channel::<()>();
+        {
+            let mut tasks = crate::lock_unpoison(&launcher.tasks);
+            let tasks = tasks.as_mut().unwrap();
+            tasks.spawn(async move {
+                let _panicking = panicking;
+                panic!("test runner panic");
+            });
+            tasks.spawn(async move { wait.await.unwrap() });
+        }
+        assert!(panicked.await.is_err());
+        let mut joining = std::pin::pin!(launcher.shutdown_and_join());
+        std::future::poll_fn(|cx| {
+            assert!(joining.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        assert!(matches!(joining.await, Err(CoreError::Serving(_))));
+    }
+}

@@ -172,12 +172,11 @@ pub(crate) struct ControlListener {
     /// Owner recorded when this process created the socket (inside the
     /// `0700` directory), compared against every peer credential.
     owner_uid: u32,
-    handle: Arc<HostHandle>,
 }
 
 #[cfg(unix)]
 impl ControlListener {
-    pub(crate) async fn bind(data_dir: &Path, handle: Arc<HostHandle>) -> Result<Self, CoreError> {
+    pub(crate) async fn bind(data_dir: &Path) -> Result<Self, CoreError> {
         use std::os::unix::fs::MetadataExt as _;
 
         let path = control_socket_path(data_dir);
@@ -188,27 +187,25 @@ impl ControlListener {
         Ok(Self {
             listener,
             owner_uid,
-            handle,
         })
     }
 
     /// Accepts at most one control connection, checks the peer credential,
-    /// and spawns its one-request handler. An unprovable peer is dropped
-    /// without a byte.
-    pub(crate) async fn accept(&self) {
-        let Ok((stream, _)) = self.listener.accept().await else {
-            return;
-        };
+    /// and returns it for the serving loop to own. An unprovable peer is
+    /// dropped without a byte.
+    pub(crate) async fn accept(&self) -> Result<Option<tokio::net::UnixStream>, CoreError> {
+        let (stream, _) = self
+            .listener
+            .accept()
+            .await
+            .map_err(|error| CoreError::Bind(format!("accept control socket: {error}")))?;
         if !stream
             .peer_cred()
             .is_ok_and(|credential| credential.uid() == self.owner_uid)
         {
-            return;
+            return Ok(None);
         }
-        let handle = Arc::clone(&self.handle);
-        tokio::spawn(async move {
-            serve_connection(stream, handle).await;
-        });
+        Ok(Some(stream))
     }
 }
 
@@ -219,40 +216,33 @@ impl ControlListener {
 pub(crate) struct ControlListener {
     server: tokio::net::windows::named_pipe::NamedPipeServer,
     pipe: String,
-    handle: Arc<HostHandle>,
 }
 
 #[cfg(windows)]
 impl ControlListener {
-    pub(crate) fn bind(data_dir: &Path, handle: Arc<HostHandle>) -> Result<Self, CoreError> {
+    pub(crate) fn bind(data_dir: &Path) -> Result<Self, CoreError> {
         let pipe = control_pipe_name(data_dir);
         let server = crate::conn_pipe::create_first_server(&pipe)?;
-        Ok(Self {
-            server,
-            pipe,
-            handle,
-        })
+        Ok(Self { server, pipe })
     }
 
-    pub(crate) async fn accept(&mut self) -> Result<(), CoreError> {
+    pub(crate) async fn accept(
+        &mut self,
+    ) -> Result<Option<tokio::net::windows::named_pipe::NamedPipeServer>, CoreError> {
         use std::os::windows::io::AsRawHandle as _;
 
         if self.server.connect().await.is_err() {
             // A failed wait leaves this instance unusable; replace it rather
             // than serving half-open state.
             self.server = crate::conn_pipe::create_next_server(&self.pipe)?;
-            return Ok(());
+            return Ok(None);
         }
         let next = crate::conn_pipe::create_next_server(&self.pipe)?;
         let current = std::mem::replace(&mut self.server, next);
         if !crate::conn_pipe::peer_same_user(current.as_raw_handle()) {
-            return Ok(());
+            return Ok(None);
         }
-        let handle = Arc::clone(&self.handle);
-        tokio::spawn(async move {
-            serve_connection(current, handle).await;
-        });
-        Ok(())
+        Ok(Some(current))
     }
 }
 
@@ -263,23 +253,36 @@ impl ControlListener {
 /// state beyond what the confirmation itself committed; the console learns
 /// the transport failure and can retry the same request identity
 /// idempotently.
+///
+/// Shutdown cancels only transport I/O. Once admitted past the request read,
+/// confirmation runs to completion; the serving loop must join this handler
+/// before releasing the Host's single-writer authority.
 #[cfg(any(unix, windows))]
-async fn serve_connection<S>(mut stream: S, handle: Arc<HostHandle>)
-where
+pub(crate) async fn serve_connection<S>(
+    mut stream: S,
+    handle: Arc<HostHandle>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let request = match tokio::time::timeout(
-        CONTROL_READ_TIMEOUT,
-        read_message::<_, HostControlRequest>(&mut stream),
-    )
-    .await
-    {
-        Ok(Ok(Some(request))) => request,
-        // EOF, malformed frame, or a silent peer: nothing honest to answer.
-        Ok(Ok(None) | Err(_)) | Err(_) => return,
+    let request = tokio::select! {
+        biased;
+        () = crate::conn::wait_for_shutdown(&mut shutdown) => return,
+        result = tokio::time::timeout(
+            CONTROL_READ_TIMEOUT,
+            read_message::<_, HostControlRequest>(&mut stream),
+        ) => match result {
+            Ok(Ok(Some(request))) => request,
+            // EOF, malformed frame, or a silent peer: nothing honest to answer.
+            Ok(Ok(None) | Err(_)) | Err(_) => return,
+        },
     };
     let response = match request {
         HostControlRequest::ConfirmTargetedDeletion { request } => {
+            #[cfg(test)]
+            if let Some(gate) = handle.host_control_confirm_gate() {
+                gate.pause().await;
+            }
             match handle.confirm_targeted_deletion(&request).await {
                 Ok(outcome) => HostControlResponse::Confirmed(outcome.into()),
                 Err(_) => HostControlResponse::Unavailable,
@@ -288,7 +291,11 @@ where
     };
     // The durable confirmation state already committed; a lost answer only
     // means the console reports the transport failure.
-    drop(write_message(&mut stream, &response).await);
+    tokio::select! {
+        biased;
+        () = crate::conn::wait_for_shutdown(&mut shutdown) => {}
+        result = write_message(&mut stream, &response) => drop(result),
+    }
 }
 
 /// Dials the serving Host's control endpoint and records the Owner

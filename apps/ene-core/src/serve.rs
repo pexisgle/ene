@@ -137,6 +137,8 @@ pub enum CoreError {
     AlreadyRunning,
     #[error("bind failed: {0}")]
     Bind(String),
+    #[error("serving task failed: {0}")]
+    Serving(String),
     #[error("inference failed: {0}")]
     Inference(String),
     /// Unknown descriptors list the pending descriptors so the Owner can
@@ -556,6 +558,12 @@ pub struct HostHandle {
     /// Test (and graceful-restart) wake for one bounded serving tick without
     /// waiting for [`crate::conn`]'s 15s period.
     pub(crate) deletion_driver_wake: tokio::sync::Notify,
+    /// Deterministic coordination of the real serving composition in tests.
+    #[cfg(test)]
+    pub(crate) serving_test: Arc<crate::conn::shutdown_tests::ServingTest>,
+    /// Parks an admitted control confirmation outside transport cancellation.
+    #[cfg(test)]
+    pub(crate) host_control_confirm_gate: StdMutex<Option<Arc<TestGate>>>,
     /// Invalidation fence for in-flight Host transient payloads (A3c).
     ///
     /// Bumped by the Host-transient erasure demand; a dialogue stream or
@@ -624,6 +632,11 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
+    #[cfg(test)]
+    pub(crate) fn host_control_confirm_gate(&self) -> Option<Arc<TestGate>> {
+        crate::lock_unpoison(&self.host_control_confirm_gate).clone()
+    }
+
     /// Opens (or creates) the Host state under `data_dir` with the production
     /// credential store.
     ///
@@ -756,6 +769,10 @@ impl HostHandle {
             targeted_deletion_drive: AsyncMutex::new(()),
             deletion_drivers: std::sync::atomic::AtomicUsize::new(0),
             deletion_driver_wake: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            serving_test: Arc::default(),
+            #[cfg(test)]
+            host_control_confirm_gate: StdMutex::new(None),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
             #[cfg(test)]
