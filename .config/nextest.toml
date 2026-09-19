@@ -2,4 +2,5 @@
 # TempDir, so binaries can overlap; a per-test hang bound replaces an
 # unbounded `cargo test` wait.
 [profile.default]
+fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 5 }

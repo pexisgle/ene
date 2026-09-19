@@ -49,8 +49,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Integration tests spawn `ene-ctl` / `ene-core` from `target/debug`.
+      # clippy and nextest do not link those product binaries.
+      - name: Build workspace binaries
+        run: cargo build --locked --workspace --bins
       - name: Run tests
-        run: cargo nextest run --locked --workspace
+        run: cargo nextest run --locked --workspace --no-fail-fast
       - name: Build docs
         run: cargo doc --locked --workspace --no-deps
 
@@ -66,5 +70,7 @@ jobs:
           cache-on-failure: false
           save-if: true
       - uses: taiki-e/install-action@nextest
+      - name: Build workspace binaries
+        run: cargo build --locked --workspace --bins
       - name: Run tests
-        run: cargo nextest run --locked --workspace
+        run: cargo nextest run --locked --workspace --no-fail-fast
