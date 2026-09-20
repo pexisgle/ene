@@ -77,7 +77,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 
 use ene_api::v1::envelope::ProtocolVersion;
-use ene_api::v1::handshake::NegotiatedConnection;
+use ene_api::v1::handshake::{NegotiatedConnection, PairingProvision, PairingProvisionSecret};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ConnectionWireId, RoundWireId};
 use ene_api::v1::reject::RejectKind;
@@ -115,8 +115,8 @@ pub(crate) mod lifecycle;
 use lifecycle::ensure_data_dir;
 
 pub(crate) use frames::{
-    invalid_phase_reject, outgoing_envelope, outgoing_fact, outgoing_frame, reject_frame,
-    stale_reject, unpaired_close,
+    invalid_phase_reject, outgoing_envelope, outgoing_fact, outgoing_frame,
+    outgoing_frame_pre_auth, reject_frame, stale_reject, unpaired_close,
 };
 pub(crate) use handshake::attribution_to_wire;
 pub use lifecycle::serve;
@@ -334,10 +334,35 @@ impl ene_credential::VersionedCredentialStore for CredStore {
         }
     }
 
-    fn activate(&self, cred: &CredentialRef, version: u64) {
+    fn prepare_snapshot(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<ene_credential::PreparedCredentialSnapshot, CredentialTechnicalError> {
         match self {
-            Self::Os(inner) => inner.activate(cred, version),
-            Self::MemoryVersioned(inner) => inner.activate(cred, version),
+            Self::Os(inner) => inner.prepare_snapshot(cred, version),
+            Self::MemoryVersioned(inner) => inner.prepare_snapshot(cred, version),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot prepare credential snapshots",
+                    cred.id()
+                ),
+            }),
+        }
+    }
+
+    fn activate(&self, snapshot: ene_credential::PreparedCredentialSnapshot) {
+        match self {
+            Self::Os(inner) => inner.activate(snapshot),
+            Self::MemoryVersioned(inner) => inner.activate(snapshot),
+            Self::Env(_) | Self::Memory(_) => {}
+        }
+    }
+
+    fn deactivate(&self, cred: &CredentialRef) {
+        match self {
+            Self::Os(inner) => inner.deactivate(cred),
+            Self::MemoryVersioned(inner) => inner.deactivate(cred),
             Self::Env(_) | Self::Memory(_) => {}
         }
     }
@@ -552,6 +577,9 @@ pub struct HostHandle {
     pub(crate) open_rounds: StdMutex<HashMap<(String, String), OpenRound>>,
     pub(crate) rounds: Arc<StdMutex<HashMap<String, RoundId>>>,
     pub(crate) cred_store: CredStore,
+    /// Serializes the activation transaction with immutable snapshot
+    /// publication. OS-store reads and candidate preparation happen before it.
+    pub(crate) credential_publication: AsyncMutex<()>,
     /// Exclusive Host-local first-party control seat. At most one live
     /// speaker; reconnect invalidates outstanding confirmation sessions.
     pub(crate) control_seat: crate::host_control::FirstPartyControlSeat,
@@ -575,6 +603,8 @@ pub struct HostHandle {
     /// [`FileDeviceAuthStore`] contract for custody, file protection, and the
     /// backup-exclusion rule.
     pub(crate) auth_store: FileDeviceAuthStore,
+    /// Capacity-one, connection-owned first-pairing provision slots.
+    pub(crate) pairing_deliveries: crate::pairing_delivery::PairingDeliveryRegistry,
     /// In-memory, best-effort queue of pinned Experience premises whose
     /// completed replies await a Learning formation pass.
     ///
@@ -876,15 +906,15 @@ impl HostHandle {
             let Some(version) = active.active else {
                 continue;
             };
-            // Verify the item before pointing reads at it: an activated
-            // version whose value the OS store no longer holds must read as
-            // unavailable, not as an empty or older credential.
-            let readable = self
+            // Prepare from the durable item before publication. An unreadable
+            // committed version clears any process-local fallback; startup may
+            // continue, but authentication for this ref remains unavailable.
+            match self
                 .cred_store
-                .with_version(&credential, version.as_u64(), |_| ())
-                .is_ok();
-            if readable {
-                self.cred_store.activate(&credential, version.as_u64());
+                .prepare_snapshot(&credential, version.as_u64())
+            {
+                Ok(snapshot) => self.cred_store.activate(snapshot),
+                Err(_) => self.cred_store.deactivate(&credential),
             }
         }
         Ok(())
@@ -935,12 +965,14 @@ impl HostHandle {
             open_rounds: StdMutex::new(HashMap::new()),
             rounds: Arc::new(StdMutex::new(HashMap::new())),
             cred_store,
+            credential_publication: AsyncMutex::new(()),
             control_seat: crate::host_control::FirstPartyControlSeat::default(),
             data_dir: data_dir.to_path_buf(),
             gui_open: AsyncMutex::new(()),
             gui_child: StdMutex::new(None),
             confirmation_tasks: StdMutex::new(Vec::new()),
             auth_store,
+            pairing_deliveries: crate::pairing_delivery::PairingDeliveryRegistry::default(),
             learning_queue: Arc::clone(&learning_queue),
             host_transient_arrival: Arc::clone(&host_transient_arrival),
             learning_worker: AsyncMutex::new(()),
@@ -1112,6 +1144,24 @@ impl HostHandle {
     #[must_use]
     pub fn credential_contains_for_tests(&self, provider: &str, label: &str) -> bool {
         CredentialRef::new(provider, label).is_ok_and(|cred| self.cred_store.contains(&cred))
+    }
+
+    /// Whether the immutable active snapshot equals a test value.
+    ///
+    /// This seam returns only equality and never releases credential bytes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn credential_matches_for_tests(
+        &self,
+        provider: &str,
+        label: &str,
+        expected: &str,
+    ) -> bool {
+        CredentialRef::new(provider, label).is_ok_and(|credential| {
+            self.cred_store
+                .with_bearer(&credential, |bearer| bearer == expected)
+                .unwrap_or(false)
+        })
     }
 
     /// How many serving-composition Targeted Deletion drivers currently hold
@@ -2047,60 +2097,51 @@ impl HostHandle {
         RoundWireId(wire)
     }
 
-    /// Records one Owner pairing approval and mints its one-time secret.
+    /// Records one Owner pairing approval and queues its one-time provision for
+    /// the live connection that opened the pending request.
     ///
-    /// Host-local trusted inlet behind the `approve-device` subcommand: it
-    /// records the Owner decision through
-    /// [`approve_pending`](DevicePairingRepository::approve_pending) and never
-    /// decides whether pairing is allowed itself. The approval names the
-    /// opaque pending id plus the connection that sent the request (read back
-    /// from the stored pending row) and compare-and-swaps that row to Paired;
-    /// an unknown id, an already-consumed row, or a mismatched connection
-    /// yields `Ok(None)` (the caller lists [`HostHandle::pending_devices`]).
-    /// Descriptors are display-only and never the approval key (#1389).
-    ///
-    /// The returned secret string is for one-time display on this
-    /// Host-local trusted surface only: the caller shows it once and forgets
-    /// it. It is persisted through `auth_store` for later
-    /// [`ene_api::v1::handshake::AuthProof`] verification.
+    /// The delivery claim supplies the exact origin for the durable compare-and-swap.
+    /// Unknown, disconnected, and already-consumed ids return `Ok(None)`. The
+    /// secret is saved for proof verification and moved directly into the
+    /// authentication-only provision frame; no control outcome receives it.
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Store`] when the durable pairing tables are
-    /// unavailable or the device-auth file cannot be written.
+    /// Returns [`CoreError::Store`] when durable approval or Host secret
+    /// storage fails, and [`CoreError::Approve`] when approval committed but
+    /// the originating connection can no longer accept its provision.
     pub async fn approve_device(
         &self,
         pending_id: &str,
-    ) -> Result<Option<(DeviceRecord, String)>, CoreError> {
-        let origin = DevicePairingRepository::list_pending(&self.store)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?
-            .into_iter()
-            .find(|pending| pending.pending_id == pending_id)
-            .map(|pending| pending.origin_connection);
-        let Some(origin) = origin else {
-            // Unknown id here may still be an already-approved id whose
-            // pending row is gone but whose paired record survives (rotation):
-            // let the store decide from its paired table.
-            let approved = DevicePairingRepository::approve_pending(&self.store, pending_id, "")
-                .await
-                .map_err(|error| CoreError::Store(error.to_string()))?;
-            if let Some((record, secret)) = approved.as_ref() {
-                self.auth_store
-                    .save_secret(&record.id, &record.descriptor, secret)
-                    .map_err(|error| CoreError::Store(error.to_string()))?;
-            }
-            return Ok(approved);
+    ) -> Result<Option<DeviceRecord>, CoreError> {
+        let Some(claim) = self.pairing_deliveries.claim(pending_id) else {
+            return Ok(None);
         };
+        let origin = claim.connection.0.as_hyphenated().to_string();
         let approved = DevicePairingRepository::approve_pending(&self.store, pending_id, &origin)
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        if let Some((record, secret)) = approved.as_ref() {
-            self.auth_store
-                .save_secret(&record.id, &record.descriptor, secret)
-                .map_err(|error| CoreError::Store(error.to_string()))?;
-        }
-        Ok(approved)
+        let Some((record, secret)) = approved else {
+            return Ok(None);
+        };
+        self.auth_store
+            .save_secret(&record.id, &record.descriptor, secret.expose_secret())
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        let device_id = record
+            .wire
+            .parse()
+            .map(ene_api::v1::refs::DeviceWireId)
+            .map_err(|_| CoreError::Store(String::from("invalid paired device wire id")))?;
+        let provision = PairingProvision {
+            device_id,
+            pairing_secret: PairingProvisionSecret::new(secret.into_inner()),
+        };
+        claim.queue(provision).map_err(|_| {
+            CoreError::Approve(String::from(
+                "approval committed but the originating pairing connection is unavailable",
+            ))
+        })?;
+        Ok(Some(record))
     }
 
     /// Host-local trusted inlet surfacing the Owner-visible pending set so an
@@ -2169,28 +2210,6 @@ impl HostHandle {
         }
     }
 
-    /// Serving-time credential intake: stores `secret` through
-    /// [`CredentialStore::put`]. Usable-ref publication remains
-    /// [`HostHandle::approve_credential`]. Errors never carry the secret.
-    ///
-    /// # Errors
-    ///
-    /// [`CoreError::Store`] when the backend refuses the put.
-    pub async fn put_credential(
-        &self,
-        provider: &str,
-        label: &str,
-        secret: &str,
-    ) -> Result<bool, CoreError> {
-        let Ok(credential) = CredentialRef::new(provider, label) else {
-            return Ok(false);
-        };
-        self.cred_store
-            .put(&credential, secret)
-            .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(true)
-    }
-
     /// Publishes one credential through the version protocol and activates it.
     ///
     /// This is the product registration path: a mutation is recorded before
@@ -2218,23 +2237,60 @@ impl HostHandle {
     ) -> Result<ene_credential::MutationOutcome, CoreError> {
         use ene_credential::{
             ActivationOutcome, CredentialPublicationRepository as _, MutationKind, MutationOutcome,
-            SecretVersionId,
+            MutationPhase, SecretVersionId,
         };
 
         let Ok(credential) = CredentialRef::new(provider, label) else {
             return Ok(MutationOutcome::Refused);
         };
-        let mutation = self
+        let (mutation, fresh) = match self
             .store
-            .begin_credential_mutation(
-                mutation_id.to_string(),
-                MutationKind::Register,
-                provider.to_string(),
-                label.to_string(),
-                None,
-            )
+            .credential_mutation(mutation_id)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
+            .map_err(|error| CoreError::Store(error.to_string()))?
+        {
+            Some(stored)
+                if stored.kind == MutationKind::Register
+                    && stored.provider == provider
+                    && stored.label == label =>
+            {
+                (stored, false)
+            }
+            Some(_) => {
+                return Err(CoreError::Store(String::from(
+                    "the mutation id is already bound to another credential premise",
+                )));
+            }
+            None => {
+                let expected_revision =
+                    ene_credential::CredentialSetRepository::current_set_revision(&self.store)
+                        .await
+                        .map_err(|error| CoreError::Store(error.to_string()))?
+                        .as_u64();
+                // The version is a non-secret random item identity, not the
+                // mutable set revision. Prepared records it before the OS write
+                // so a crash leaves an exact item to inspect and two concurrent
+                // writers never share a candidate slot.
+                let random = Uuid::new_v4();
+                let mut bytes = [0_u8; 8];
+                bytes.copy_from_slice(&random.as_bytes()[..8]);
+                let version = (u64::from_be_bytes(bytes) & (i64::MAX as u64)).max(1);
+                (
+                    self.store
+                        .begin_credential_mutation(
+                            mutation_id.to_string(),
+                            MutationKind::Register,
+                            provider.to_string(),
+                            label.to_string(),
+                            Some(expected_revision),
+                            Some(SecretVersionId::from_u64(version)),
+                        )
+                        .await
+                        .map_err(|error| CoreError::Store(error.to_string()))?,
+                    true,
+                )
+            }
+        };
         // A retry of a decided mutation answers from its stored outcome: the
         // decision is never re-applied and the value is never re-sent.
         if let Some(outcome) = mutation.outcome {
@@ -2252,58 +2308,38 @@ impl HostHandle {
             return Ok(outcome);
         }
         let os = &self.cred_store;
-        let version = mutation
-            .candidate_version
-            .map(SecretVersionId::as_u64)
-            .unwrap_or_else(|| {
-                // Version ids come from the monotonic set revision: a version
-                // is never reused, so a retired item keeps its own name.
-                0
-            });
-        let version = if version == 0 {
-            ene_credential::CredentialSetRepository::current_set_revision(&self.store)
-                .await
-                .map_err(|error| CoreError::Store(error.to_string()))?
-                .as_u64()
-                .checked_add(1)
-                .ok_or_else(|| CoreError::Store(String::from("credential version exhausted")))?
-        } else {
-            version
-        };
-        let candidate = SecretVersionId::from_u64(version);
-        match mutation.candidate_version {
-            Some(recorded) if recorded == candidate => {}
-            Some(_) => {}
-            None => {
-                // The OS item is written before the phase records it, so a
-                // crash between the two is reconciled by the read below rather
-                // than by writing again.
-                match os.put_version(&credential, version, secret) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        // "Already published" is the ambiguous case: the value
-                        // may be there from an interrupted attempt, so it is
-                        // verified instead of reported as a failure.
-                        if !os
-                            .with_version(&credential, version, |bearer| bearer == secret)
-                            .unwrap_or(false)
-                        {
-                            let outcome = MutationOutcome::Refused;
-                            self.store
-                                .record_credential_mutation_outcome(mutation_id, outcome.clone())
-                                .await
-                                .map_err(|error| CoreError::Store(error.to_string()))?;
-                            return Ok(outcome);
-                        }
-                        let _ = error;
-                    }
-                }
-                self.store
-                    .mark_credential_staged(mutation_id, candidate)
-                    .await
-                    .map_err(|error| CoreError::Store(error.to_string()))?;
+        let candidate = mutation.candidate_version.ok_or_else(|| {
+            CoreError::Store(String::from(
+                "credential registration mutation has no candidate version",
+            ))
+        })?;
+        let version = candidate.as_u64();
+        if !fresh {
+            // This is an interrupted operation whose confirmation session no
+            // longer exists. Inspect only its recorded item; even a matching
+            // candidate is not activated without a fresh Owner confirmation.
+            match os.prepare_snapshot(&credential, version) {
+                Ok(snapshot) if snapshot.matches(secret) => {}
+                Ok(_) | Err(_) => {}
             }
+            return Ok(MutationOutcome::Unknown);
         }
+        if mutation.phase != MutationPhase::Prepared {
+            return Ok(MutationOutcome::Unknown);
+        }
+        // Even an error may mean the external write happened. The exact
+        // recorded item is inspected below; the effect is never repeated.
+        match os.put_version(&credential, version, secret) {
+            Ok(()) | Err(_) => {}
+        }
+        let snapshot = match os.prepare_snapshot(&credential, version) {
+            Ok(snapshot) if snapshot.matches(secret) => snapshot,
+            Ok(_) | Err(_) => return Ok(MutationOutcome::Unknown),
+        };
+        self.store
+            .mark_credential_staged(mutation_id, candidate)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
         let previous = self
             .store
             .active_credential_version(provider, label)
@@ -2316,14 +2352,22 @@ impl HostHandle {
             os.with_version(&credential, retired.as_u64(), str::to_owned)
                 .ok()
         });
-        let activation = self
-            .store
-            .activate_credential(mutation_id, secret, retired_bearer.as_deref())
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
+        let activation = {
+            let _publication = self.credential_publication.lock().await;
+            let activation = self
+                .store
+                .activate_credential(mutation_id, secret, retired_bearer.as_deref())
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            if matches!(activation, ActivationOutcome::Activated { .. }) {
+                // No OS I/O or secret allocation occurs under the publication
+                // guard: the fully prepared candidate moves into the snapshot.
+                os.activate(snapshot);
+            }
+            activation
+        };
         match activation {
             ActivationOutcome::Activated { revision, retired } => {
-                os.activate(&credential, version);
                 // The retired item is removed after the commit, and the record
                 // says so only once the removal succeeded: a failure leaves the
                 // cleanup pending rather than claiming the value is gone.
@@ -2410,6 +2454,14 @@ impl HostHandle {
         // already refused, so the lifecycle cleanup below cannot race a
         // resurrection (CCT §10.4).
         self.on_connection_closed(&connection);
+        let origin = connection.0.as_hyphenated().to_string();
+        if DevicePairingRepository::abandon_pending_by_origin(&self.store, &origin)
+            .await
+            .is_err()
+        {
+            // Close is already final in memory; startup cleanup will clear an
+            // unapproved durable row if this best-effort removal failed.
+        }
     }
 
     /// The single Host-memory lifecycle boundary for a superseded connection
@@ -2448,6 +2500,7 @@ impl HostHandle {
     /// dropped open round leaves its History rows readable through
     /// `HistoryRequest`.
     fn drop_connection_transient_state(&self, connection: &ConnectionWireId) {
+        self.pairing_deliveries.remove(connection);
         self.drop_presentation_connection_state(connection);
         self.drop_open_rounds_for(connection);
         self.conversation_tasks

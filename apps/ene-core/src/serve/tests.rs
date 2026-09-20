@@ -9,7 +9,8 @@ use ene_api::v1::deletion::{
 };
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{
-    AuthProof, AuthResult, CapabilityAdvertise, NegotiatedConnection, PairingRequest, PairingResult,
+    AuthProof, AuthResult, CapabilityAdvertise, NegotiatedConnection, PairingProvision,
+    PairingRequest, PairingResult,
 };
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, RationaleOrigin,
@@ -98,12 +99,6 @@ fn paired_input(device_wire: &str) -> LiveInput {
 }
 
 fn pairing_frame(descriptor: &str) -> super::WireFrame {
-    pairing_poll(descriptor, None)
-}
-
-/// A pairing poll for a previously issued pending id ([`None`] opens a new
-/// request, [`Some`] re-asks after Owner approval).
-fn pairing_poll(descriptor: &str, pending_id: Option<String>) -> super::WireFrame {
     super::WireFrame {
         envelope: new_outgoing_envelope(
             ProtocolVersion::V1,
@@ -112,9 +107,34 @@ fn pairing_poll(descriptor: &str, pending_id: Option<String>) -> super::WireFram
         ),
         payload: WirePayload::PairingRequest(PairingRequest {
             device_descriptor: descriptor.to_string(),
-            pending_id,
         }),
     }
+}
+
+fn register_pairing(
+    handle: &HostHandle,
+    connection: &ConnectionWireId,
+) -> tokio::sync::mpsc::Receiver<PairingProvision> {
+    handle
+        .pairing_deliveries
+        .register(connection)
+        .expect("the fresh connection must have one pairing slot")
+}
+
+async fn receive_provision_and_pair(
+    table: &ConnectionTable,
+    connection: &ConnectionWireId,
+    receiver: &mut tokio::sync::mpsc::Receiver<PairingProvision>,
+) -> PairingProvision {
+    let provision = receiver
+        .recv()
+        .await
+        .expect("approval must queue one provision");
+    assert!(table.note_paired(
+        connection,
+        &provision.device_id.0.as_hyphenated().to_string()
+    ));
+    provision
 }
 
 /// The opaque pending id of a
@@ -500,69 +520,53 @@ async fn pairing_pends_then_pairs_after_owner_approval() {
     let (handle, _dir) = open_handle("pair-flow").await.unwrap();
     let transport = fake_transport();
     let (table, id) = fresh_conn();
-    let live = live_of(&table, &id);
+    let mut provisions = register_pairing(&handle, &id);
+    let request = pairing_frame("laptop");
+    let expected_reply = request.envelope.message_id;
     let pending = handle
-        .handle_frame(pairing_frame("laptop"), live.clone(), &transport)
+        .handle_frame(request, live_of(&table, &id), &transport)
         .await;
-    assert_eq!(pending.len(), 1, "the request answers once");
-    let first = pending.first().unwrap();
-    let WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { pending_id }) =
-        &first.payload
-    else {
-        panic!("a fresh descriptor pends, never auto-approves");
-    };
+    let answer = pending.first().expect("the request answers once");
+    let pending_id = pending_id_of(answer);
+    assert_eq!(answer.envelope.correlation.reply_to, Some(expected_reply));
+    assert_eq!(table.phase_of(&id), Some(ConnectionPhase::Accepted));
     assert!(
-        !pending_id.is_empty(),
-        "the pending answer carries its opaque approval id"
-    );
-    assert_eq!(
-        table.phase_of(&id),
-        Some(ConnectionPhase::Accepted),
-        "a pending request never advances the phase"
-    );
-    let listed = handle.pending_devices().await;
-    let entries = listed.unwrap();
-    assert!(
-        entries
+        handle
+            .pending_devices()
+            .await
+            .unwrap()
             .iter()
-            .any(|entry| entry.pending_id == *pending_id && entry.descriptor == "laptop"),
-        "the pending id lists for the Owner with its display descriptor"
+            .any(|entry| entry.pending_id == pending_id && entry.descriptor == "laptop")
     );
-    let unknown = handle.approve_device("unknown box").await.unwrap();
-    assert!(unknown.is_none(), "an unknown id approves nothing");
-    let approved = handle.approve_device(pending_id).await.unwrap();
-    assert!(approved.is_some(), "owner approval must pair");
-    let poll = pairing_poll("laptop", Some(pending_id.clone()));
-    let expected_reply = poll.envelope.message_id;
-    let paired = handle.handle_frame(poll, live.clone(), &transport).await;
-    let answer = paired.first().unwrap();
     assert!(
-        matches!(
-            &answer.payload,
-            WirePayload::PairingResult(PairingResult::Paired { .. })
-        ),
-        "an approved pending pairs on poll"
+        handle
+            .approve_device("unknown box")
+            .await
+            .unwrap()
+            .is_none()
     );
+    let record = handle
+        .approve_device(&pending_id)
+        .await
+        .unwrap()
+        .expect("owner approval must pair");
+    let provision = receive_provision_and_pair(&table, &id, &mut provisions).await;
     assert_eq!(
-        answer.envelope.correlation.reply_to,
-        Some(expected_reply),
-        "the reply links back to the request"
+        provision.device_id.0.as_hyphenated().to_string(),
+        record.wire
     );
-    assert_eq!(
-        table.phase_of(&id),
-        Some(ConnectionPhase::Paired),
-        "the issued device key is recorded in the same phase operation"
-    );
+    assert_eq!(table.phase_of(&id), Some(ConnectionPhase::Paired));
+    assert!(handle.approve_device(&pending_id).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn identical_descriptors_on_distinct_connections_get_distinct_pendings() {
     let (handle, _dir) = open_handle("pair-distinct").await.unwrap();
     let transport = fake_transport();
-    // Two live connections sharing one handle (hence one pairing store), as
-    // two sockets would after accept.
     let (first_table, first_id) = fresh_conn();
     let (second_table, second_id) = fresh_conn();
+    let mut first_provisions = register_pairing(&handle, &first_id);
+    let _second_provisions = register_pairing(&handle, &second_id);
     let first = handle
         .handle_frame(
             pairing_frame("laptop"),
@@ -570,9 +574,6 @@ async fn identical_descriptors_on_distinct_connections_get_distinct_pendings() {
             &transport,
         )
         .await;
-    let first_pending = pending_id_of(first.first().expect("the request answers once"));
-    // The identical descriptor on the other connection opens its own pending
-    // (#1389): the descriptor is display-only, never a shared identity.
     let second = handle
         .handle_frame(
             pairing_frame("laptop"),
@@ -580,55 +581,23 @@ async fn identical_descriptors_on_distinct_connections_get_distinct_pendings() {
             &transport,
         )
         .await;
-    let second_pending = pending_id_of(second.first().expect("the request answers once"));
-    assert_ne!(
-        second_pending, first_pending,
-        "same-descriptor requests never share a pending identity"
-    );
-    // A poll for the first pending from the second connection opens yet
-    // another request: the mapping is kept only until the origin connection
-    // ends, so a new connection cannot authenticate against it.
-    let foreign = handle
-        .handle_frame(
-            pairing_poll("laptop", Some(first_pending.clone())),
-            live_of(&second_table, &second_id),
-            &transport,
-        )
-        .await;
-    let foreign_pending = pending_id_of(foreign.first().expect("the poll answers once"));
-    assert_ne!(
-        foreign_pending, first_pending,
-        "a new connection opens a new request instead of resuming the old pending"
-    );
-    // The origin connection still polls its own pending while it waits.
-    let same = handle
-        .handle_frame(
-            pairing_poll("laptop", Some(first_pending.clone())),
-            live_of(&first_table, &first_id),
-            &transport,
-        )
-        .await;
-    assert_eq!(
-        pending_id_of(same.first().expect("the poll answers once")),
-        first_pending,
-        "the origin connection keeps its pending across polls"
-    );
-    // Owner approval names the pending id; each pending pairs its own device.
+    let first_pending = pending_id_of(first.first().expect("the first request answers"));
+    let second_pending = pending_id_of(second.first().expect("the second request answers"));
+    assert_ne!(second_pending, first_pending);
     let approved = handle.approve_device(&first_pending).await.unwrap();
-    assert!(approved.is_some(), "owner approval must pair");
-    let poll = handle
-        .handle_frame(
-            pairing_poll("laptop", Some(first_pending.clone())),
-            live_of(&first_table, &first_id),
-            &transport,
-        )
-        .await;
+    assert!(approved.is_some());
+    let provision =
+        receive_provision_and_pair(&first_table, &first_id, &mut first_provisions).await;
+    assert_eq!(
+        approved.unwrap().wire,
+        provision.device_id.0.as_hyphenated().to_string()
+    );
     assert!(
-        poll.first().is_some_and(|first| matches!(
-            &first.payload,
-            WirePayload::PairingResult(PairingResult::Paired { .. })
-        )),
-        "the approved pending pairs on poll"
+        handle
+            .approve_device(&first_pending)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -774,6 +743,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
     let (handle, _dir) = open_handle("auth-flow").await.unwrap();
     let transport = fake_transport();
     let (table, id) = fresh_conn();
+    let mut provisions = register_pairing(&handle, &id);
     let pending = dispatch(&handle, &table, &id, pairing_frame("laptop"), &transport).await;
     let pending_id = pending_id_of(pending.first().expect("the request answers once"));
     for response in &pending {
@@ -782,31 +752,16 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
             "a pre-accept pairing answer hides the connection id"
         );
     }
-    let approved = handle.approve_device(&pending_id).await;
-    assert!(
-        matches!(approved, Ok(Some(_))),
-        "owner approval must pair, got {approved:?}"
-    );
-    let (record, secret) = approved.unwrap().unwrap();
+    let record = handle
+        .approve_device(&pending_id)
+        .await
+        .unwrap()
+        .expect("owner approval must pair");
+    let provision = receive_provision_and_pair(&table, &id, &mut provisions).await;
     let device_wire = record.wire.clone();
-    let device_uuid = uuid::Uuid::parse_str(&device_wire).unwrap();
-    let paired = dispatch(
-        &handle,
-        &table,
-        &id,
-        pairing_poll("laptop", Some(pending_id)),
-        &transport,
-    )
-    .await;
-    let answer = paired.first().unwrap();
-    let WirePayload::PairingResult(PairingResult::Paired { device_id }) = &answer.payload else {
-        panic!("the approved pending must pair, got {paired:?}");
-    };
-    let device_id = *device_id;
-    assert_eq!(
-        answer.envelope.sender.connection_id, None,
-        "even the Paired answer hides the connection id"
-    );
+    let device_uuid = provision.device_id.0;
+    let device_id = provision.device_id;
+    let secret = provision.pairing_secret;
     assert_eq!(
         device_id.0.as_hyphenated().to_string(),
         device_wire,
@@ -817,11 +772,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
         record.id.0.as_uuid().as_hyphenated().to_string(),
         "the issued key never renders the domain identity"
     );
-    assert_eq!(
-        table.phase_of(&id),
-        Some(ConnectionPhase::Paired),
-        "the table records the issued key"
-    );
+    assert_eq!(table.phase_of(&id), Some(ConnectionPhase::Paired));
     let challenged = dispatch(
         &handle,
         &table,
@@ -852,7 +803,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
         Some(&nonce),
         "the nonce is pending in the connection's challenged phase"
     );
-    let proof = pairing_proof_hex(&secret, &nonce);
+    let proof = pairing_proof_hex(secret.expose_secret(), &nonce);
     let attempt = proof_frame(device_id, &proof);
     let expected_reply = attempt.envelope.message_id;
     let answered = dispatch(&handle, &table, &id, attempt, &transport).await;
@@ -1039,8 +990,14 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
 async fn pre_accept_denials_and_closes_hide_the_connection_id() {
     let (handle, _dir) = open_handle("auth-hidden").await.unwrap();
     let transport = fake_transport();
+    let (pairing_table, pairing_id) = fresh_conn();
+    let _provisions = register_pairing(&handle, &pairing_id);
     let denied = handle
-        .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
+        .handle_frame(
+            pairing_frame("laptop"),
+            live_of(&pairing_table, &pairing_id),
+            &transport,
+        )
         .await;
     // The fresh descriptor pends rather than denying; the peer-mismatch
     // denial and the two closes below are the hiding cases.
@@ -1210,6 +1167,7 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
     .await;
     let first = opened.unwrap();
     let (first_table, first_id) = fresh_conn();
+    let mut provisions = register_pairing(&first, &first_id);
     let pending = dispatch(
         &first,
         &first_table,
@@ -1219,12 +1177,13 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
     )
     .await;
     let pending_id = pending_id_of(pending.first().expect("the request answers once"));
-    let approved = first.approve_device(&pending_id).await;
-    assert!(
-        matches!(approved, Ok(Some(_))),
-        "owner approval must pair, got {approved:?}"
-    );
-    let (record, secret) = approved.unwrap().unwrap();
+    let record = first
+        .approve_device(&pending_id)
+        .await
+        .unwrap()
+        .expect("owner approval must pair");
+    let provision = receive_provision_and_pair(&first_table, &first_id, &mut provisions).await;
+    let secret = provision.pairing_secret;
     assert!(
         dir.path().join("device-auth.json").exists(),
         "approval persists the secret to the device-auth file"
@@ -1253,7 +1212,7 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
     let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
         panic!("the reconnect must challenge, got {challenged:?}");
     };
-    let proof = pairing_proof_hex(&secret, &challenge.nonce);
+    let proof = pairing_proof_hex(secret.expose_secret(), &challenge.nonce);
     let answered = dispatch(
         &second,
         &table,
@@ -1569,6 +1528,7 @@ async fn superseded_connection_replays_are_stale_and_have_no_effect() {
     let transport = fake_transport();
     // Complete one real pairing to obtain an approved device and secret.
     let (probe_table, probe_id) = fresh_conn();
+    let mut provisions = register_pairing(&handle, &probe_id);
     let pending = dispatch(
         &handle,
         &probe_table,
@@ -1578,27 +1538,19 @@ async fn superseded_connection_replays_are_stale_and_have_no_effect() {
     )
     .await;
     let probe_pending = pending_id_of(pending.first().expect("the probe must pend"));
-    let approved = handle.approve_device(&probe_pending).await;
-    let Ok(Some((record, secret))) = approved else {
-        panic!("owner approval must pair, got {approved:?}");
-    };
+    let record = handle
+        .approve_device(&probe_pending)
+        .await
+        .unwrap()
+        .expect("owner approval must pair");
+    let provision = receive_provision_and_pair(&probe_table, &probe_id, &mut provisions).await;
     let device_wire = record.wire.clone();
-    let device = DeviceWireId(uuid::Uuid::parse_str(&device_wire).unwrap());
-    let paired = dispatch(
-        &handle,
-        &probe_table,
-        &probe_id,
-        pairing_poll("laptop", Some(probe_pending)),
-        &transport,
-    )
-    .await;
-    assert!(
-        paired.first().is_some_and(|first| matches!(
-            &first.payload,
-            WirePayload::PairingResult(PairingResult::Paired { .. })
-        )),
-        "the approved pending must pair on poll, got {paired:?}"
+    assert_eq!(
+        record.wire,
+        provision.device_id.0.as_hyphenated().to_string()
     );
+    let secret = provision.pairing_secret;
+    let device = provision.device_id;
 
     // C1 authenticates.
     let (table, c1) = fresh_conn();
@@ -1617,7 +1569,10 @@ async fn superseded_connection_replays_are_stale_and_have_no_effect() {
         &handle,
         &table,
         &c1,
-        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        proof_frame(
+            device,
+            &pairing_proof_hex(secret.expose_secret(), &challenge.nonce),
+        ),
         &transport,
     )
     .await;
@@ -1646,7 +1601,10 @@ async fn superseded_connection_replays_are_stale_and_have_no_effect() {
         &handle,
         &table,
         &c2,
-        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        proof_frame(
+            device,
+            &pairing_proof_hex(secret.expose_secret(), &challenge.nonce),
+        ),
         &transport,
     )
     .await;
@@ -2713,6 +2671,7 @@ async fn supersession_drops_the_replaced_connections_presentation_state() {
     let transport = fake_transport();
     // Pair a device through the real approval flow.
     let (probe_table, probe_id) = fresh_conn();
+    let mut provisions = register_pairing(&handle, &probe_id);
     let pending = dispatch(
         &handle,
         &probe_table,
@@ -2722,27 +2681,18 @@ async fn supersession_drops_the_replaced_connections_presentation_state() {
     )
     .await;
     let probe_pending = pending_id_of(pending.first().expect("the probe must pend"));
-    let approved = handle.approve_device(&probe_pending).await;
-    let Ok(Some((record, secret))) = approved else {
-        panic!("owner approval must pair, got {approved:?}");
-    };
-    let device_wire = record.wire.clone();
-    let device = DeviceWireId(uuid::Uuid::parse_str(&device_wire).unwrap());
-    let paired = dispatch(
-        &handle,
-        &probe_table,
-        &probe_id,
-        pairing_poll("laptop", Some(probe_pending)),
-        &transport,
-    )
-    .await;
-    assert!(
-        paired.first().is_some_and(|first| matches!(
-            &first.payload,
-            WirePayload::PairingResult(PairingResult::Paired { .. })
-        )),
-        "the approved pending must pair on poll"
+    let record = handle
+        .approve_device(&probe_pending)
+        .await
+        .unwrap()
+        .expect("owner approval must pair");
+    let provision = receive_provision_and_pair(&probe_table, &probe_id, &mut provisions).await;
+    let secret = provision.pairing_secret;
+    assert_eq!(
+        record.wire,
+        provision.device_id.0.as_hyphenated().to_string()
     );
+    let device = provision.device_id;
 
     // Seed one Task so the list/report queries mint connection-scoped refs.
     let companion = handle
@@ -2811,7 +2761,10 @@ async fn supersession_drops_the_replaced_connections_presentation_state() {
         &handle,
         &table,
         &c1,
-        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        proof_frame(
+            device,
+            &pairing_proof_hex(secret.expose_secret(), &challenge.nonce),
+        ),
         &transport,
     )
     .await;
@@ -2886,7 +2839,10 @@ async fn supersession_drops_the_replaced_connections_presentation_state() {
         &handle,
         &table,
         &c2,
-        proof_frame(device, &pairing_proof_hex(&secret, &challenge.nonce)),
+        proof_frame(
+            device,
+            &pairing_proof_hex(secret.expose_secret(), &challenge.nonce),
+        ),
         &transport,
     )
     .await;

@@ -8,6 +8,7 @@ use ene_credential::{
 use crate::Store;
 
 async fn staged(store: &Store, mutation_id: &str, version: u64) -> SecretVersionId {
+    let candidate = SecretVersionId::from_u64(version);
     let mutation = store
         .begin_credential_mutation(
             mutation_id.to_owned(),
@@ -15,6 +16,7 @@ async fn staged(store: &Store, mutation_id: &str, version: u64) -> SecretVersion
             String::from("acme"),
             String::from("main"),
             None,
+            Some(candidate),
         )
         .await
         .expect("the mutation must begin");
@@ -23,7 +25,11 @@ async fn staged(store: &Store, mutation_id: &str, version: u64) -> SecretVersion
         MutationPhase::Prepared,
         "a fresh mutation is recorded before any OS write"
     );
-    let candidate = SecretVersionId::from_u64(version);
+    assert_eq!(
+        mutation.candidate_version,
+        Some(candidate),
+        "Prepared must durably name the OS item before it is written"
+    );
     store
         .mark_credential_staged(mutation_id, candidate)
         .await
@@ -129,6 +135,7 @@ async fn a_stale_premise_abandons_the_candidate_and_stays_decided() {
             String::from("acme"),
             String::from("main"),
             Some(7),
+            Some(SecretVersionId::from_u64(3)),
         )
         .await
         .unwrap();
@@ -176,6 +183,7 @@ async fn mutation_ids_are_write_once_and_unknown_ids_are_refused() {
             String::from("acme"),
             String::from("main"),
             None,
+            Some(SecretVersionId::from_u64(4)),
         )
         .await
         .unwrap();
@@ -186,10 +194,25 @@ async fn mutation_ids_are_write_once_and_unknown_ids_are_refused() {
             String::from("acme"),
             String::from("main"),
             None,
+            Some(SecretVersionId::from_u64(4)),
         )
         .await
         .unwrap();
     assert_eq!(first, second, "a retry observes the original attempt");
+    let rebound = store
+        .begin_credential_mutation(
+            String::from("m-dup"),
+            MutationKind::Register,
+            String::from("acme"),
+            String::from("other"),
+            None,
+            Some(SecretVersionId::from_u64(9)),
+        )
+        .await;
+    assert!(
+        rebound.is_err(),
+        "one mutation id must not be rebound to another premise"
+    );
     assert_eq!(
         store
             .activate_credential("m-unknown", "sk-never", None)
@@ -212,6 +235,7 @@ async fn a_refused_mutation_records_its_outcome_without_activating() {
             String::from("acme"),
             String::from("main"),
             None,
+            Some(SecretVersionId::from_u64(5)),
         )
         .await
         .unwrap();
@@ -243,6 +267,7 @@ async fn revocation_is_its_own_mutation_kind() {
             MutationKind::Revoke,
             String::from("acme"),
             String::from("main"),
+            None,
             None,
         )
         .await

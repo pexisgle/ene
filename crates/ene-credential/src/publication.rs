@@ -202,7 +202,8 @@ pub enum ActivationOutcome {
     reason = "Stage 7 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait CredentialPublicationRepository: Send + Sync {
-    /// Records one mutation as `Prepared` before any OS write.
+    /// Records one mutation and its candidate item as `Prepared` before any OS
+    /// write. Revocation has no candidate.
     ///
     /// A repeated call with the same mutation id and the same content returns
     /// the stored record: a retry observes the original attempt instead of
@@ -214,9 +215,10 @@ pub trait CredentialPublicationRepository: Send + Sync {
         provider: String,
         label: String,
         expected_revision: Option<u64>,
+        candidate_version: Option<SecretVersionId>,
     ) -> Result<CredentialMutation, CredentialTechnicalError>;
 
-    /// Records the candidate version the OS store accepted, as `Staged`.
+    /// Marks the already-recorded candidate as accepted by the OS store.
     async fn mark_credential_staged(
         &self,
         mutation_id: &str,

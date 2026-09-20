@@ -66,6 +66,35 @@ pub trait CredentialStore: Send + Sync {
     fn put(&self, cred: &CredentialRef, secret: &str) -> Result<(), CredentialTechnicalError>;
 }
 
+/// Candidate value fully loaded before the publication write guard is taken.
+///
+/// The raw value has no public accessor and is zeroized on drop. Moving this
+/// object into [`VersionedCredentialStore::activate`] publishes the already
+/// prepared value without another OS-store read.
+pub struct PreparedCredentialSnapshot {
+    pub(crate) credential: CredentialRef,
+    pub(crate) version: u64,
+    pub(crate) secret: SecretValue,
+}
+
+impl PreparedCredentialSnapshot {
+    #[must_use]
+    pub(crate) fn new(credential: CredentialRef, version: u64, secret: SecretValue) -> Self {
+        Self {
+            credential,
+            version,
+            secret,
+        }
+    }
+
+    /// Whether the prepared candidate is the value the confirmed operation
+    /// supplied. The value itself never leaves this owner type.
+    #[must_use]
+    pub fn matches(&self, expected: &str) -> bool {
+        self.secret.bytes() == expected.as_bytes()
+    }
+}
+
 /// Version-aware backend for the publication protocol.
 ///
 /// The product OS store implements this alongside [`CredentialStore`]; the
@@ -100,11 +129,23 @@ pub trait VersionedCredentialStore: Send + Sync {
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError>;
 
-    /// Points routine reads at `version`.
+    /// Loads an immutable candidate snapshot before the publication guard.
     ///
-    /// Called only after the activation transaction commits, so a read before
-    /// the commit still resolves the previous version.
-    fn activate(&self, cred: &CredentialRef, version: u64);
+    /// # Errors
+    ///
+    /// [`CredentialTechnicalError::StorageUnavailable`] when the candidate
+    /// version cannot be loaded into the snapshot.
+    fn prepare_snapshot(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<PreparedCredentialSnapshot, CredentialTechnicalError>;
+
+    /// Publishes a prepared snapshot without OS I/O.
+    fn activate(&self, snapshot: PreparedCredentialSnapshot);
+
+    /// Removes an active snapshot after its durable version becomes unusable.
+    fn deactivate(&self, cred: &CredentialRef);
 
     /// Removes one version item.
     ///
@@ -138,8 +179,20 @@ impl VersionedCredentialStore for crate::OsCredentialStore {
         crate::OsCredentialStore::with_version(self, cred, version, f)
     }
 
-    fn activate(&self, cred: &CredentialRef, version: u64) {
-        crate::OsCredentialStore::activate(self, cred, version);
+    fn prepare_snapshot(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<PreparedCredentialSnapshot, CredentialTechnicalError> {
+        crate::OsCredentialStore::prepare_snapshot(self, cred, version)
+    }
+
+    fn activate(&self, snapshot: PreparedCredentialSnapshot) {
+        crate::OsCredentialStore::activate(self, snapshot);
+    }
+
+    fn deactivate(&self, cred: &CredentialRef) {
+        crate::OsCredentialStore::deactivate(self, cred);
     }
 
     fn delete_version(
@@ -159,7 +212,7 @@ impl VersionedCredentialStore for crate::OsCredentialStore {
 /// no version-capable backend is configured.
 pub struct MemoryVersionedStore {
     versions: Mutex<HashMap<(CredentialRef, u64), SecretValue>>,
-    active: Mutex<HashMap<CredentialRef, u64>>,
+    active: Mutex<HashMap<CredentialRef, (u64, SecretValue)>>,
 }
 
 impl core::fmt::Debug for MemoryVersionedStore {
@@ -208,7 +261,10 @@ impl MemoryVersionedStore {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        active.insert(cred, version);
+        active.insert(
+            cred,
+            (version, SecretValue::new(secret.as_bytes().to_vec())),
+        );
     }
 }
 
@@ -256,12 +312,46 @@ impl VersionedCredentialStore for MemoryVersionedStore {
         Ok(f(bearer))
     }
 
-    fn activate(&self, cred: &CredentialRef, version: u64) {
+    fn prepare_snapshot(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<PreparedCredentialSnapshot, CredentialTechnicalError> {
+        let versions = match self.versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(secret) = versions.get(&(cred.clone(), version)) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: version {version} is absent", cred.id()),
+            });
+        };
+        Ok(PreparedCredentialSnapshot::new(
+            cred.clone(),
+            version,
+            SecretValue::new(secret.bytes().to_vec()),
+        ))
+    }
+
+    fn activate(&self, snapshot: PreparedCredentialSnapshot) {
+        let PreparedCredentialSnapshot {
+            credential,
+            version,
+            secret,
+        } = snapshot;
         let mut active = match self.active.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        active.insert(cred.clone(), version);
+        active.insert(credential, (version, secret));
+    }
+
+    fn deactivate(&self, cred: &CredentialRef) {
+        let mut active = match self.active.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        active.remove(cred);
     }
 
     fn delete_version(
@@ -284,19 +374,21 @@ impl CredentialStore for MemoryVersionedStore {
         cred: &CredentialRef,
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError> {
-        let version = {
-            let active = match self.active.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            active.get(cred).copied()
+        let active = match self.active.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         };
-        let Some(version) = version else {
+        let Some((_, secret)) = active.get(cred) else {
             return Err(CredentialTechnicalError::StorageUnavailable {
                 reason: format!("{}: no published version is active", cred.id()),
             });
         };
-        self.with_version(cred, version, f)
+        let bearer = core::str::from_utf8(secret.bytes()).map_err(|_| {
+            CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: the active value is not valid UTF-8", cred.id()),
+            }
+        })?;
+        Ok(f(bearer))
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {

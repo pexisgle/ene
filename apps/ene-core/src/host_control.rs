@@ -130,6 +130,19 @@ impl Default for FirstPartyControlSeat {
 }
 
 impl FirstPartyControlSeat {
+    fn invalidate_sessions(inner: &mut SeatInner, state: RequestState) {
+        let request_ids = inner
+            .sessions
+            .drain()
+            .map(|(_, session)| session.request_id)
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            if let Some(request) = inner.requests.get_mut(&request_id) {
+                request.state = state.clone();
+            }
+        }
+    }
+
     /// Records the Host-spawned GUI as the seat holder, advancing the seat
     /// generation. Any older holder is replaced and its sessions are dropped:
     /// a new child is a new seat, never a continuation.
@@ -145,7 +158,7 @@ impl FirstPartyControlSeat {
             child_id,
             generation,
         });
-        inner.sessions.clear();
+        Self::invalidate_sessions(&mut inner, RequestState::ConfirmationUnavailable);
         inner.outbound = Some(outbound);
         generation
     }
@@ -160,7 +173,7 @@ impl FirstPartyControlSeat {
             .is_some_and(|holder| holder.child_id == child_id)
         {
             inner.holder = None;
-            inner.sessions.clear();
+            Self::invalidate_sessions(&mut inner, RequestState::ConfirmationUnavailable);
             inner.outbound = None;
         }
     }
@@ -232,14 +245,21 @@ impl FirstPartyControlSeat {
             nonce,
         };
         // Deliver it to the Host-spawned GUI's thread. A channel that cannot
-        // take the frame has already ended; the session stays unconsumed and
-        // the next spawn invalidates it.
-        if let Some(outbound) = inner.outbound.as_ref() {
-            match outbound.send(ene_local_control::channel::ChannelEvent::Outbound(
-                challenge.clone(),
-            )) {
-                Ok(()) | Err(_) => {}
+        // take the frame has already ended; it must not leave the requester in
+        // an awaiting state for a challenge no surface can show.
+        let delivered = inner.outbound.as_ref().is_some_and(|outbound| {
+            outbound
+                .send(ene_local_control::channel::ChannelEvent::Outbound(
+                    challenge.clone(),
+                ))
+                .is_ok()
+        });
+        if !delivered {
+            inner.sessions.remove(&session_id);
+            if let Some(request) = inner.requests.get_mut(request_id) {
+                request.state = RequestState::ConfirmationUnavailable;
             }
+            return FromConfirmation::Unavailable;
         }
         challenge
     }
@@ -318,6 +338,20 @@ impl FirstPartyControlSeat {
         let mut inner = lock_unpoison(&self.inner);
         if let Some(request) = inner.requests.get_mut(request_id) {
             request.state = RequestState::Applied { outcome };
+        }
+    }
+
+    fn reject_request(&self, request_id: &str) {
+        let mut inner = lock_unpoison(&self.inner);
+        if let Some(request) = inner.requests.get_mut(request_id) {
+            request.state = RequestState::Rejected;
+        }
+    }
+
+    fn mark_outcome_unavailable(&self, request_id: &str) {
+        let mut inner = lock_unpoison(&self.inner);
+        if let Some(request) = inner.requests.get_mut(request_id) {
+            request.state = RequestState::OutcomeUnavailable;
         }
     }
 }
@@ -606,6 +640,8 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
                     let (reply, outcome) = execute_pending(handle, pending).await;
                     if let Some(outcome) = outcome {
                         handle.control_seat.settle_request(&request_id, outcome);
+                    } else {
+                        handle.control_seat.mark_outcome_unavailable(&request_id);
                     }
                     reply
                 }
@@ -614,7 +650,10 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
         }
         ToConfirmation::SessionReject { session_id, nonce } => {
             match handle.control_seat.reject(session_id, &nonce) {
-                Some(_) => FromConfirmation::Outcome(ControlOutcome::Rejected { session_id }),
+                Some(request_id) => {
+                    handle.control_seat.reject_request(&request_id);
+                    FromConfirmation::Outcome(ControlOutcome::Rejected { session_id })
+                }
                 None => FromConfirmation::DeniedByBoundary,
             }
         }
@@ -669,11 +708,10 @@ async fn execute_pending(
 ) -> (FromConfirmation, Option<RequesterOutcome>) {
     match pending {
         PendingOp::DeviceApprove { pending_id } => match handle.approve_device(&pending_id).await {
-            Ok(Some((record, secret))) => (
+            Ok(Some(record)) => (
                 FromConfirmation::Outcome(ControlOutcome::DeviceApproved {
                     pending_id: pending_id.clone(),
                     device_id: record.wire.clone(),
-                    pairing_secret: RedactedSecret::new(secret),
                 }),
                 Some(RequesterOutcome::DeviceApproved {
                     pending_id,
@@ -1441,7 +1479,8 @@ mod tests {
     #[test]
     fn a_new_spawned_gui_invalidates_the_previous_seat_and_its_sessions() {
         let seat = FirstPartyControlSeat::default();
-        let first = seat.seat_spawned_gui(11, std::sync::mpsc::channel().0);
+        let (first_outbound, _first_inbound) = std::sync::mpsc::channel();
+        let first = seat.seat_spawned_gui(11, first_outbound);
         let (request_id, _) = seat.accept_request();
         let FromConfirmation::ConfirmationChallenge {
             session_id, nonce, ..
@@ -1456,7 +1495,8 @@ mod tests {
         else {
             panic!("a live seat must mint a challenge");
         };
-        let second = seat.seat_spawned_gui(22, std::sync::mpsc::channel().0);
+        let (second_outbound, _second_inbound) = std::sync::mpsc::channel();
+        let second = seat.seat_spawned_gui(22, second_outbound);
         assert_ne!(first, second, "a new child is a new seat generation");
         assert!(
             seat.take(session_id, &nonce).is_none(),
@@ -1491,7 +1531,8 @@ mod tests {
     #[test]
     fn a_foreign_nonce_cannot_complete_a_session() {
         let seat = FirstPartyControlSeat::default();
-        seat.seat_spawned_gui(3, std::sync::mpsc::channel().0);
+        let (outbound, _inbound) = std::sync::mpsc::channel();
+        seat.seat_spawned_gui(3, outbound);
         let (request_id, _) = seat.accept_request();
         let FromConfirmation::ConfirmationChallenge { session_id, .. } = seat.mint(
             &request_id,

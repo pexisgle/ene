@@ -1,12 +1,12 @@
 //! Socket transport: connect, handshake, request/response loop.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::pairing::pairing_proof_hex;
 use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
 #[cfg(any(unix, windows))]
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
-use ene_api::v1::handshake::AuthChallenge;
+use ene_api::v1::handshake::{AuthChallenge, PairingProvisionSecret, PairingResult};
 use ene_api::v1::payload::WirePayload;
 #[cfg(any(unix, windows))]
 use ene_api::v1::refs::WireMessageId;
@@ -20,7 +20,7 @@ use crate::error::ClientError;
 #[cfg(any(unix, windows))]
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, missing_secret_guidance, pairing_frame,
-    pending_guidance, proof_frame, unreadable_device_file_guidance,
+    proof_frame, unreadable_device_file_guidance,
 };
 #[cfg(any(unix, windows))]
 use super::session::{
@@ -33,12 +33,71 @@ use super::socket_path;
 /// pairing and authentication fill in, and the observed [`SessionState`].
 /// Unix dials `ene.sock`; Windows opens the data directory's named pipe
 /// (see `pipe_name`). Everything after the dial — pairing poll, capability,
-/// challenge authentication, request/response correlation — is shared.
+/// provision, capability, challenge authentication, and request/response
+/// correlation — is shared.
 #[cfg(any(unix, windows))]
 pub struct Client {
     stream: Stream,
     sender: WireSender,
     state: SessionState,
+}
+
+/// Result of opening and advancing a Client connection as far as current
+/// credentials permit.
+#[cfg(any(unix, windows))]
+pub enum ConnectProgress {
+    Connected(Client),
+    Pending(PendingPairingClient),
+}
+
+/// Owns the original pairing socket while Owner confirmation is pending.
+#[cfg(any(unix, windows))]
+pub struct PendingPairingClient {
+    stream: Stream,
+    incarnation: ene_api::v1::refs::ClientIncarnationId,
+    data_dir: PathBuf,
+    platform: String,
+    pending_id: String,
+    pairing_message_id: WireMessageId,
+}
+
+#[cfg(any(unix, windows))]
+impl PendingPairingClient {
+    #[must_use]
+    pub fn pending_id(&self) -> &str {
+        &self.pending_id
+    }
+
+    /// Waits for the one-shot provision on this original socket, then proves
+    /// ownership and persists the credentials only after acceptance.
+    pub async fn complete(self) -> Result<Client, ClientError> {
+        let Self {
+            mut stream,
+            incarnation,
+            data_dir,
+            platform,
+            pending_id: _,
+            pairing_message_id,
+        } = self;
+        let provision_frame = read_frame(&mut stream).await?;
+        require_reply_to(&provision_frame, pairing_message_id, "pairing provision")?;
+        let WirePayload::PairingProvision(provision) = provision_frame.payload else {
+            return Err(ClientError::ServerRejected(format!(
+                "unexpected {} while awaiting pairing provision; start a fresh pairing request",
+                provision_frame.payload.message_type()
+            )));
+        };
+        Client::finish_connect(
+            stream,
+            incarnation,
+            &data_dir,
+            &platform,
+            provision.device_id,
+            provision.pairing_secret,
+            true,
+        )
+        .await
+    }
 }
 
 #[cfg(unix)]
@@ -71,69 +130,27 @@ fn pipe_name(data_dir: &Path) -> String {
 
 #[cfg(any(unix, windows))]
 impl Client {
-    /// Dials `ene.sock` under `data_dir` and runs the full handshake: pairing,
-    /// capability advertisement, challenge authentication, and the first
-    /// presence fact.
-    ///
-    /// Pairing runs only without a stored device: a first run opens or polls
-    /// a pending request by its opaque pending id (remembered in the
-    /// `client-pending.json` progress file), while a stored device skips
-    /// pairing and resolves its DeviceWireId at capability time, never by
-    /// descriptor (#1389). Secret resolution is
-    /// [`device::resolve_device_secret`]'s. When pairing succeeds while this
-    /// process holds a secret, the `{device_id, secret}` pair is persisted to
-    /// the `0600` device file before capability runs (fail-closed: a store
-    /// failure aborts the connect rather than running with an unpersisted
-    /// secret). With no secret anywhere, the connect proceeds into capability
-    /// and then fails closed at the mandatory post-negotiation challenge with
-    /// provisioning guidance: an unauthenticated session never reaches domain
-    /// service.
-    ///
-    /// Capability advertises with the paired device ID; exactly one frame is
-    /// read back here and must contain the negotiated terms.
-    ///
-    /// There is no Host "unknown device" outcome on capability — an ID the
-    /// Host no longer knows fails later at the domain gate (close plus
-    /// `DisconnectNotice`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] when the socket cannot be reached, a
-    /// frame cannot be moved, or the device file cannot be persisted;
-    /// [`ClientError::Codec`] when a frame cannot be encoded or decoded;
-    /// [`ClientError::ServerOutcome`] when pairing is still pending Owner
-    /// confirmation or was denied (exit code 2: approve on the Host-local
-    /// trusted surface, provision the shown secret once, then re-run — no
-    /// auto-retry loop); and [`ClientError::ServerRejected`] when the Host
-    /// negotiates an incompatible version or answers with an unexpected
-    /// payload kind.
+    /// Dials the Host and waits through first-pairing approval when needed.
+    /// Call [`Self::begin_connect`] when the caller must surface the pending
+    /// identity while retaining the live socket.
     pub async fn connect(
         data_dir: &Path,
         descriptor: &str,
         platform: &str,
     ) -> Result<Self, ClientError> {
-        Self::connect_with_bootstrap(
-            data_dir,
-            descriptor,
-            platform,
-            device::read_bootstrap_secret(),
-        )
-        .await
+        match Self::begin_connect(data_dir, descriptor, platform).await? {
+            ConnectProgress::Connected(client) => Ok(client),
+            ConnectProgress::Pending(pending) => pending.complete().await,
+        }
     }
 
-    /// Same handshake as [`Self::connect`], with an in-process pairing
-    /// bootstrap instead of `ENE_PAIRING_SECRET`.
-    ///
-    /// First-party GUI uses this after a seated `DeviceApproved` so the
-    /// pairing secret never enters the process environment. The value is
-    /// the env-side input of [`device::resolve_device_secret`] and is not
-    /// logged.
-    pub async fn connect_with_bootstrap(
+    /// Dials the Host and advances either to an authenticated Client or to an
+    /// owned pending pairing connection.
+    pub async fn begin_connect(
         data_dir: &Path,
         descriptor: &str,
         platform: &str,
-        bootstrap_secret: Option<String>,
-    ) -> Result<Self, ClientError> {
+    ) -> Result<ConnectProgress, ClientError> {
         let incarnation = crate::incarnation::boot_incarnation(data_dir)?;
         #[cfg(unix)]
         let mut stream = {
@@ -157,78 +174,65 @@ impl Client {
                     ClientError::Transport(format!("connect to {pipe} failed: {}", error.kind()))
                 })?
         };
-        let file_state = device::load_stored_device(data_dir);
-        let stored_device = file_state.stored().cloned();
-        let (secret, source) = device::resolve_device_secret(
-            stored_device
-                .as_ref()
-                .and_then(|known| known.secret().map(str::to_string)),
-            bootstrap_secret,
-        );
-        // A degraded file (unreadable/corrupt/blank secret) with no bootstrap
-        // secret cannot authenticate with anything: report the degraded state
-        // for recovery instead of taking the first-run provisioning path.
-        if secret.is_none()
-            && matches!(
-                file_state,
-                device::DeviceFileState::Unreadable | device::DeviceFileState::Malformed
-            )
-        {
-            return Err(ClientError::ServerOutcome(unreadable_device_file_guidance()));
-        }
-        // Pairing runs only without a stored device: a first run (or a run
-        // whose device file is gone) opens or polls a pending request by its
-        // opaque id, remembered in the `client-pending.json` progress file,
-        // while a stored device skips pairing and resolves its DeviceWireId
-        // at capability time, never by descriptor (#1389). The remembered id
-        // is kept after success too: it is the durable poll key that lets a
-        // later run with a lost device file re-resolve the same approval
-        // instead of opening a duplicate pending. A stale id (restart clear,
-        // wiped Host) converges on a fresh pending Host-side, so the file is
-        // self-healing and only a denial drops it.
-        let device_id = match (
-            stored_device.as_ref().map(|known| known.device_id),
-            secret.is_some(),
-        ) {
-            (Some(known), true) => known,
-            _ => {
-                let poll = device::load_pending_id(data_dir);
-                write_frame(&mut stream, &pairing_frame(descriptor, incarnation, poll)).await?;
-                match read_frame(&mut stream).await?.payload {
-                    WirePayload::PairingResult(result) => match result {
-                        ene_api::v1::handshake::PairingResult::Paired { device_id } => device_id,
-                        ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation {
-                            pending_id,
-                        } => {
-                            device::store_pending_id(data_dir, &pending_id)?;
-                            return Err(ClientError::ServerOutcome(pending_guidance()));
-                        }
-                        ene_api::v1::handshake::PairingResult::Denied { reason } => {
-                            device::clear_pending_id(data_dir);
-                            return Err(ClientError::ServerOutcome(format!(
-                                "pairing denied: {reason}; approve the pending ID on the \
-                                 Host-local trusted surface, then re-run ene-ctl"
-                            )));
-                        }
-                    },
-                    unexpected => {
-                        return Err(ClientError::ServerRejected(format!(
-                            "unexpected {} during pairing; expected PairingResult",
-                            unexpected.message_type()
-                        )));
+        match device::load_stored_device(data_dir) {
+            device::DeviceFileState::Loaded(stored) => {
+                let device_id = stored.device_id;
+                let secret = stored.pairing_secret;
+                Self::finish_connect(
+                    stream,
+                    incarnation,
+                    data_dir,
+                    platform,
+                    device_id,
+                    secret,
+                    false,
+                )
+                .await
+                .map(ConnectProgress::Connected)
+            }
+            device::DeviceFileState::Missing => {
+                let request = pairing_frame(descriptor, incarnation);
+                let pairing_message_id = request.envelope.message_id;
+                write_frame(&mut stream, &request).await?;
+                let answer = read_frame(&mut stream).await?;
+                require_reply_to(&answer, pairing_message_id, "pairing request")?;
+                match answer.payload {
+                    WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation {
+                        pending_id,
+                    }) => Ok(ConnectProgress::Pending(PendingPairingClient {
+                        stream,
+                        incarnation,
+                        data_dir: data_dir.to_path_buf(),
+                        platform: platform.to_owned(),
+                        pending_id,
+                        pairing_message_id,
+                    })),
+                    WirePayload::PairingResult(PairingResult::Denied { reason }) => {
+                        Err(ClientError::ServerOutcome(format!(
+                            "pairing denied: {reason}; start a fresh pairing request"
+                        )))
                     }
+                    unexpected => Err(ClientError::ServerRejected(format!(
+                        "unexpected {} during pairing; expected PairingResult",
+                        unexpected.message_type()
+                    ))),
                 }
             }
-        };
-        // Whether the effective secret must become durable client state is
-        // decided before authentication but executed only after the Host
-        // accepted the ownership proof: a first provision, a rotation, or a
-        // changed device identity writes; a plain `Stored` reconnect does not.
-        let must_persist = device::must_persist_after_acceptance(
-            source,
-            stored_device.as_ref().map(|known| known.device_id),
-            device_id,
-        );
+            device::DeviceFileState::Unreadable | device::DeviceFileState::Malformed => {
+                Err(ClientError::ServerOutcome(unreadable_device_file_guidance()))
+            }
+        }
+    }
+
+    async fn finish_connect(
+        mut stream: Stream,
+        incarnation: ene_api::v1::refs::ClientIncarnationId,
+        data_dir: &Path,
+        platform: &str,
+        device_id: ene_api::v1::refs::DeviceWireId,
+        secret: PairingProvisionSecret,
+        persist_after_acceptance: bool,
+    ) -> Result<Self, ClientError> {
         write_frame(
             &mut stream,
             &capability_frame(platform, incarnation, Some(device_id)),
@@ -251,9 +255,7 @@ impl Client {
             }
         }
         let mut state = SessionState::default();
-        if let Some(secret_value) = secret {
-            state.set_pairing_secret(secret_value);
-        }
+        state.set_pairing_secret(secret);
         let mut session = Self {
             stream,
             sender: WireSender {
@@ -271,22 +273,16 @@ impl Client {
             )));
         };
         session.authenticate(&challenge).await?;
-        // The ownership proof was Accepted: only now does a newly
-        // provisioned or rotated secret become the current durable client
-        // identity. A rejected proof returned above, so a wrong bootstrap
-        // value can never replace a working file.
-        if must_persist {
-            match session.state.pairing_secret() {
-                Some(secret_value) => device::store_device(
-                    data_dir,
-                    &device::StoredDevice::new(device_id, secret_value.to_owned()),
-                )?,
-                None => {
-                    return Err(ClientError::Transport(String::from(
-                        "accepted authentication lost the client device secret",
-                    )));
-                }
-            }
+        if persist_after_acceptance {
+            let Some(secret_value) = session.state.pairing_secret() else {
+                return Err(ClientError::Transport(String::from(
+                    "accepted authentication lost the client device secret",
+                )));
+            };
+            device::store_device(
+                data_dir,
+                &device::StoredDevice::new(device_id, secret_value.to_owned()),
+            )?;
         }
         let fact = session.next_frame().await?;
         if !matches!(fact, WirePayload::PresenceAttribution(_)) {
@@ -308,15 +304,14 @@ impl Client {
     ///
     /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
     /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when no
-    /// secret is provisioned (approve and provision, then re-run) or the Host
-    /// rejects the proof (exit code 2: re-approve for a fresh secret and
-    /// retry); and [`ClientError::ServerRejected`] when the Host answers with an
-    /// unexpected payload kind.
+    /// secret is available or the Host rejects the proof (both require a fresh
+    /// pairing); and [`ClientError::ServerRejected`] when the Host answers
+    /// with an unexpected payload kind.
     pub async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
-        let Some(secret) = self.state.pairing_secret().map(str::to_string) else {
+        let Some(secret) = self.state.pairing_secret() else {
             return Err(ClientError::ServerOutcome(missing_secret_guidance()));
         };
-        let proof = pairing_proof_hex(&secret, &challenge.nonce);
+        let proof = pairing_proof_hex(secret, &challenge.nonce);
         let Some(device) = self.sender.device_id else {
             return Err(ClientError::ServerRejected(String::from(
                 "cannot prove ownership without a paired device",
@@ -596,8 +591,10 @@ async fn write_frame(
     frame: &WireFrame,
 ) -> Result<(), ClientError> {
     use tokio::io::AsyncWriteExt as _;
-    let bytes = encode_frame(frame)
-        .map_err(|error: CodecError| ClientError::Codec(format!("encode failed: {error}")))?;
+    let bytes = zeroize::Zeroizing::new(
+        encode_frame(frame)
+            .map_err(|error: CodecError| ClientError::Codec(format!("encode failed: {error}")))?,
+    );
     stream.write_all(&bytes).await.map_err(|error| {
         ClientError::Transport(format!("socket write failed: {}", error.kind()))
     })?;
@@ -624,17 +621,32 @@ async fn read_frame(
             "frame body of {claimed} bytes exceeds the 256 KiB cap"
         )));
     }
-    let mut body = vec![0_u8; claimed];
+    let mut body = zeroize::Zeroizing::new(vec![0_u8; claimed]);
     stream
         .read_exact(&mut body)
         .await
         .map_err(|error| ClientError::Transport(format!("socket read failed: {}", error.kind())))?;
-    let mut bytes = Vec::with_capacity(4 + claimed);
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(4 + claimed));
     bytes.extend_from_slice(&prefix);
     bytes.extend_from_slice(&body);
     decode_frame(&bytes)
         .map(|(frame, _consumed)| frame)
         .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))
+}
+
+#[cfg(any(unix, windows))]
+fn require_reply_to(
+    frame: &WireFrame,
+    expected: WireMessageId,
+    stage: &str,
+) -> Result<(), ClientError> {
+    if frame.envelope.correlation.reply_to == Some(expected) {
+        Ok(())
+    } else {
+        Err(ClientError::ServerRejected(format!(
+            "uncorrelated {stage} frame"
+        )))
+    }
 }
 
 /// Unsupported-platform placeholder: same surface, always unsupported.
@@ -643,6 +655,29 @@ async fn read_frame(
 #[cfg(not(any(unix, windows)))]
 pub struct Client {
     _sealed: (),
+}
+
+#[cfg(not(any(unix, windows)))]
+pub enum ConnectProgress {
+    Connected(Client),
+    Pending(PendingPairingClient),
+}
+
+#[cfg(not(any(unix, windows)))]
+pub struct PendingPairingClient {
+    _sealed: (),
+}
+
+#[cfg(not(any(unix, windows)))]
+impl PendingPairingClient {
+    #[must_use]
+    pub fn pending_id(&self) -> &str {
+        ""
+    }
+
+    pub async fn complete(self) -> Result<Client, ClientError> {
+        Err(ClientError::UnsupportedPlatform("no supported transport"))
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -655,12 +690,11 @@ impl Client {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
-    pub async fn connect_with_bootstrap(
+    pub async fn begin_connect(
         _data_dir: &Path,
         _descriptor: &str,
         _platform: &str,
-        _bootstrap_secret: Option<String>,
-    ) -> Result<Self, ClientError> {
+    ) -> Result<ConnectProgress, ClientError> {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 

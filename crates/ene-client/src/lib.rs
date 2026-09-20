@@ -2,16 +2,16 @@
 //!
 //! The CLI dials the Host over a Unix-domain socket at [`socket_path`]
 //! (`ene.sock` inside the resolved data directory). A run without a stored
-//! device pairs first (opening or polling a pending request by its opaque
-//! pending id, remembered in the `client-pending.json` progress file), then
+//! device pairs first while retaining its original connection, then
 //! advertises capability; a run with a stored device skips pairing and
 //! resolves its DeviceWireId at capability time, never by descriptor (#1389).
 //! Device identity and secret provisioning live in [`crate::device`].
 //!
 //! A first run sends [`ene_api::v1::handshake::PairingRequest`]
 //! (display descriptor, pre-pairing sender with no device ID), which must
-//! answer [`Paired`](ene_api::v1::handshake::PairingResult::Paired) before
-//! the client continues in the same session.
+//! answer with a pending identity and later deliver
+//! [`PairingProvision`](ene_api::v1::handshake::PairingProvision) on that same
+//! connection before the client continues.
 //! Then [`ene_api::v1::handshake::CapabilityAdvertise`]
 //! must answer
 //! [`NegotiatedConnection`](ene_api::v1::handshake::NegotiatedConnection)
@@ -54,14 +54,13 @@
 //! answers and never silently dropped. [`session::decide_frame`] is the pure
 //! per-frame step of that loop; the deferred queue holds the rest.
 //!
-//! A still-pending pairing answers
+//! A pairing first answers
 //! [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation)
 //! with the opaque pending ID: the operator approves that ID on the
-//! Host-local trusted surface, re-runs the client once with the shown secret
-//! in the environment so it reaches the `0600` device file (the remembered
-//! pending ID polls the same request and learns the device key), and later
-//! runs read the file. A denied pairing exits 2
-//! with the Host reason plus that guidance. A stored device the Host no longer
+//! Host-local trusted surface while the Client retains the connection. The
+//! Host then provisions that connection and the Client persists only after
+//! authentication succeeds. A denied pairing exits 2 with the Host reason.
+//! A stored device the Host no longer
 //! knows fails later at the domain gate (unknown sender: close plus
 //! `DisconnectNotice`), never with a dedicated capability-time outcome.
 //!
@@ -89,7 +88,7 @@ mod transport;
 pub use error::ClientError;
 pub use frames::PreparedRequest;
 pub use pairing::{pairing_proof_hex, verify_pairing_proof};
-pub use transport::Client;
+pub use transport::{Client, ConnectProgress, PendingPairingClient};
 
 /// Fallback companion projection until the first presence fact arrives.
 /// The Host revalidates this bootstrap rather than attributing through it.

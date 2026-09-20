@@ -18,34 +18,15 @@ use ene_api::v1::handshake::{
     NegotiatedConnection, PairingRequest, PairingResult,
 };
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::DeviceWireId;
 use ene_companion::CompanionRepository;
-use ene_credential::{DevicePairingRepository, DevicePairingStatus};
+use ene_credential::DevicePairingRepository;
 use ene_plugin_ipc::WireFrame;
 use ene_presence::PresenceRepository;
 use uuid::Uuid;
 
 impl HostHandle {
-    /// Handles one [`PairingRequest`]: deny unauthorized or blank peers, else
-    /// record the request durably.
-    ///
-    /// Denial carries an operational reason only. A non-blank descriptor goes
-    /// to
-    /// [`request_pairing`](DevicePairingRepository::request_pairing) with this
-    /// connection as the origin and the request's poll id: a new request
-    /// mints a fresh opaque pending identity (same-descriptor requests never
-    /// share one, #1389), while a poll for an already-approved id re-issues
-    /// its device key as [`Paired`](PairingResult::Paired) (the connection
-    /// table then records the issued device in the same phase operation) and
-    /// a poll for a waiting id returns its stored pending only on its origin
-    /// connection — a new connection opens a new request instead, since the
-    /// mapping is kept only until the origin connection ends. A stale poll id
-    /// (cleared by a restart, or never issued) mints a fresh pending so the
-    /// client converges, and a poll whose body differs is denied. Blank
-    /// descriptors are denied with [`Denied`](PairingResult::Denied):
-    /// the pairing outcome has no `NeedsClarification` variant, so refusal is
-    /// the honest shape. A store failure likewise denies (operational reason
-    /// only); the Client retries the same request, which is idempotent.
+    /// Handles one fresh pairing request and binds its pending identity to the
+    /// live connection that sent it.
     pub(super) async fn pair(
         &self,
         frame: &WireFrame,
@@ -60,57 +41,36 @@ impl HostHandle {
             return vec![denied_pairing(frame, live, "blank device descriptor")];
         }
         let origin = live.connection_id.0.as_hyphenated().to_string();
-        match DevicePairingRepository::request_pairing(
-            &self.store,
-            descriptor,
-            origin,
-            request.pending_id.clone(),
-        )
-        .await
+        match DevicePairingRepository::request_pairing(&self.store, descriptor, origin.clone())
+            .await
         {
-            Ok(DevicePairingStatus::Paired { device }) => {
-                // The issued key is the stored opaque projection, never the
-                // domain identity: the connection layer records this string
-                // verbatim and later frames echo it back for resolution
-                // through `find_device_by_wire`.
-                let Ok(wire) = device.wire.parse() else {
-                    return vec![denied_pairing(frame, live, "pairing store unavailable")];
-                };
-                let device_id = DeviceWireId(wire);
-                if !live
-                    .authority
-                    .note_paired(&live.connection_id, &device.wire)
+            Ok(pending) => {
+                if !self
+                    .pairing_deliveries
+                    .bind_pending(&live.connection_id, &pending.pending_id)
                 {
-                    // The phase moved while the store answered (for example
-                    // the connection was superseded): never report a pairing
-                    // the table did not record.
-                    return vec![phase_rejection(frame, live)];
+                    if DevicePairingRepository::abandon_pending_by_origin(&self.store, &origin)
+                        .await
+                        .is_err()
+                    {
+                        // The denial below remains authoritative; startup
+                        // cleanup will clear an unapproved row if necessary.
+                    }
+                    return vec![denied_pairing(
+                        frame,
+                        live,
+                        "originating pairing connection unavailable",
+                    )];
                 }
                 vec![outgoing_frame_pre_auth(
                     frame,
                     live,
-                    WirePayload::PairingResult(PairingResult::Paired { device_id }),
+                    WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation {
+                        pending_id: pending.pending_id,
+                    }),
                 )]
             }
-            Ok(DevicePairingStatus::Pending { pending }) => vec![outgoing_frame_pre_auth(
-                frame,
-                live,
-                WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation {
-                    pending_id: pending.pending_id,
-                }),
-            )],
-            Err(error) => {
-                let reason = error.to_string();
-                if reason.contains("poll body mismatch") {
-                    vec![denied_pairing(
-                        frame,
-                        live,
-                        "pairing poll body mismatch; open a new request",
-                    )]
-                } else {
-                    vec![denied_pairing(frame, live, "pairing store unavailable")]
-                }
-            }
+            Err(_) => vec![denied_pairing(frame, live, "pairing store unavailable")],
         }
     }
 

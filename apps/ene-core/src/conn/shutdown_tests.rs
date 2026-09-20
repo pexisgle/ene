@@ -459,7 +459,6 @@ async fn shutdown_joins_connection_learning_worker_before_successor() {
     serving.until(seam.device_started.notified()).await;
     let payload = WirePayload::PairingRequest(PairingRequest {
         device_descriptor: "shutdown-learning-device".into(),
-        pending_id: None,
     });
     let frame = ene_plugin_ipc::WireFrame {
         envelope: new_outgoing_envelope(

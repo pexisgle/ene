@@ -2549,8 +2549,7 @@ mod tests {
         use ene_companion::CompanionRepository as _;
         use ene_credential::{
             CredentialIntentRepository as _, CredentialRefRepository as _,
-            CredentialSetRepository as _, DevicePairingRepository as _, DevicePairingStatus,
-            RegistrationFingerprint,
+            CredentialSetRepository as _, DevicePairingRepository as _, RegistrationFingerprint,
         };
         use ene_permission::{
             IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _,
@@ -2629,16 +2628,13 @@ mod tests {
         );
         let pairing = handle
             .store
-            .request_pairing(format!("{target} phone"), String::from("conn-a3d"), None)
+            .request_pairing(format!("{target} phone"), String::from("conn-a3d"))
             .await
             .unwrap();
-        let DevicePairingStatus::Pending { pending } = pairing else {
-            panic!("a fresh pairing request must be pending");
-        };
         assert!(
             handle
                 .store
-                .approve_pending(&pending.pending_id, "conn-a3d")
+                .approve_pending(&pairing.pending_id, "conn-a3d")
                 .await
                 .unwrap()
                 .is_some()

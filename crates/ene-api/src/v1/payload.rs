@@ -11,7 +11,7 @@ use super::deletion::{
 };
 use super::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, DisconnectNotice,
-    NegotiatedConnection, PairingRequest, PairingResult,
+    NegotiatedConnection, PairingProvision, PairingRequest, PairingResult,
 };
 use super::management::{
     ManagementIntent, ManagementOutcome, ManagementView, ManagementViewRequest,
@@ -45,6 +45,7 @@ pub struct BodyStateHint {
 pub enum WirePayload {
     PairingRequest(PairingRequest),
     PairingResult(PairingResult),
+    PairingProvision(PairingProvision),
     AuthChallenge(AuthChallenge),
     AuthProof(AuthProof),
     AuthResult(AuthResult),
@@ -97,6 +98,7 @@ impl WirePayload {
         match self {
             Self::PairingRequest(_) => "PairingRequest",
             Self::PairingResult(_) => "PairingResult",
+            Self::PairingProvision(_) => "PairingProvision",
             Self::AuthChallenge(_) => "AuthChallenge",
             Self::AuthProof(_) => "AuthProof",
             Self::AuthResult(_) => "AuthResult",

@@ -5,6 +5,7 @@
 //! frames only, never general payloads, logs, or Debug output.
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::envelope::ProtocolVersion;
 use super::refs::DeviceWireId;
@@ -13,23 +14,15 @@ use super::refs::DeviceWireId;
 /// Sent pre-pairing, so its envelope carries no device ID (see the bootstrap
 /// rule on [`super::envelope::WireSender`]).
 ///
-/// `pending_id` polls a previously issued pending request: [`None`] opens a
-/// new request (the Host mints a fresh opaque pending identity), [`Some`]
-/// re-asks about that pending after Owner approval. The descriptor stays
-/// display-only in both cases and is never an identity lookup key (#1389).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PairingRequest {
     /// Display only. Never authority.
     pub device_descriptor: String,
-    /// Previously issued pending identity being polled, if any.
-    pub pending_id: Option<String>,
 }
 
 /// Pairing outcome: an Ok-side outcome, never a retryable error.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PairingResult {
-    /// Owner confirmed; the device key is now issued.
-    Paired { device_id: DeviceWireId },
     /// Waiting on the Host-local trusted-surface confirmation. Carries the
     /// opaque pending identity the approval names; the descriptor is not the
     /// approval key (#1389).
@@ -38,6 +31,41 @@ pub enum PairingResult {
         /// Operational reason. Never a secret or a body copy.
         reason: String,
     },
+}
+
+/// One-time device authentication material delivered only to the live Client
+/// connection that opened the pairing request.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct PairingProvisionSecret(String);
+
+impl PairingProvisionSecret {
+    #[must_use]
+    pub fn new(secret: String) -> Self {
+        Self(secret)
+    }
+
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_inner(mut self) -> String {
+        core::mem::take(&mut self.0)
+    }
+}
+
+impl core::fmt::Debug for PairingProvisionSecret {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("[redacted]")
+    }
+}
+
+/// Authentication-only response to the originating pending pairing request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PairingProvision {
+    pub device_id: DeviceWireId,
+    pub pairing_secret: PairingProvisionSecret,
 }
 
 /// Host-minted single-use challenge opening one authentication.
@@ -101,7 +129,7 @@ pub struct DisconnectNotice {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthProof, PairingRequest};
+    use super::{AuthProof, PairingProvisionSecret, PairingRequest};
 
     #[test]
     fn auth_proof_debug_redacts_the_proof() {
@@ -119,12 +147,19 @@ mod tests {
     fn pairing_request_keeps_display_descriptor() {
         let request = PairingRequest {
             device_descriptor: String::from("Owner laptop"),
-            pending_id: None,
         };
         let rendered = format!("{request:?}");
         assert!(
             rendered.contains("Owner laptop"),
             "display descriptor stays visible: {rendered}"
         );
+    }
+
+    #[test]
+    fn pairing_provision_secret_debug_is_redacted() {
+        let secret = PairingProvisionSecret::new(String::from("provision-secret-marker"));
+        let rendered = format!("{secret:?}");
+        assert!(!rendered.contains("provision-secret-marker"));
+        assert!(rendered.contains("redacted"));
     }
 }

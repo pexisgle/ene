@@ -2,7 +2,7 @@
 //! mutated; frames go through the in-memory codec or plain in-memory scripts.
 
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
-use ene_api::v1::handshake::AuthResult;
+use ene_api::v1::handshake::{AuthResult, PairingProvisionSecret};
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin, credential_target,
 };
@@ -17,7 +17,7 @@ use ene_plugin_ipc::WireFrame;
 
 use super::frames::{
     PreparedRequest, auth_rejected_guidance, capability_frame, frame_for, frame_for_session,
-    missing_secret_guidance, pairing_frame, pending_guidance, proof_frame, retry_frame,
+    missing_secret_guidance, pairing_frame, proof_frame, retry_frame,
 };
 use super::session::{AuthDecision, DEFERRED_CAP, SessionState, decide_auth, stale_generation_of};
 use super::{platform_display, socket_path};
@@ -96,7 +96,7 @@ fn platform_display_names_os_and_arch() {
 
 #[test]
 fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
-    let frame = pairing_frame("Owner laptop", incarnation(), None);
+    let frame = pairing_frame("Owner laptop", incarnation());
     let WirePayload::PairingRequest(request) = &frame.payload else {
         return Err(String::from("pairing builder must emit PairingRequest"));
     };
@@ -809,7 +809,7 @@ fn decide_auth_rejection_guides_reprovisioning() -> Result<(), String> {
         "guidance keeps the operational Host reason: {message:?}"
     );
     assert!(
-        message.contains(crate::device::BOOTSTRAP_SECRET_ENV),
+        message.contains("fresh pairing request"),
         "guidance names the provisioning step: {message:?}"
     );
     Ok(())
@@ -880,15 +880,9 @@ fn proof_derives_from_the_secret_and_the_single_use_nonce() -> Result<(), String
 
 #[test]
 fn guidance_names_provisioning_without_secrets() {
-    let pending = pending_guidance();
-    assert!(
-        pending.contains("pending owner confirmation")
-            && pending.contains(crate::device::BOOTSTRAP_SECRET_ENV),
-        "pending guidance must name the approval plus the provisioning step: {pending:?}"
-    );
     let missing = missing_secret_guidance();
     assert!(
-        missing.contains("no pairing secret") && missing.contains("approve"),
+        missing.contains("no pairing secret") && missing.contains("fresh pairing request"),
         "missing-secret guidance must direct approval and provisioning: {missing:?}"
     );
     let rejected = auth_rejected_guidance("unknown proof");
@@ -901,7 +895,9 @@ fn guidance_names_provisioning_without_secrets() {
 #[test]
 fn session_debug_redacts_the_secret() {
     let mut session = SessionState::default();
-    session.set_pairing_secret(String::from("secret-hex-marker-9d4e"));
+    session.set_pairing_secret(PairingProvisionSecret::new(String::from(
+        "secret-hex-marker-9d4e",
+    )));
     let rendered = format!("{session:?}");
     assert!(
         !rendered.contains("secret-hex-marker-9d4e"),

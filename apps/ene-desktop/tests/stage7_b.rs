@@ -1,8 +1,9 @@
 //! Stage 7 B: first-party desktop acceptance §1 against a real Host.
 //!
 //! Provider is fake. GUI toolkit is not displayed; the same [`DesktopRuntime`]
-//! the Slint window projects is driven here. Empty-seat occupancy is not
-//! treated as authenticity. Windows 11 / NixOS 26.11 / IME probes: 未実施.
+//! the Slint window projects is driven here. The confirmation channel uses the
+//! Host registration path; the requester listener cannot acquire an empty
+//! seat. Windows 11 / NixOS 26.11 / IME probes: 未実施.
 
 #![cfg(any(unix, windows))]
 #![allow(
@@ -25,7 +26,9 @@ use ene_api::v1::management::ManagementOutcome;
 use ene_core::conn;
 use ene_core::host_control;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::MemoryVersionedStore;
+use ene_credential::{
+    CredentialPublicationRepository as _, CredentialSetRepository as _, MemoryVersionedStore,
+};
 use ene_desktop::i18n::Locale;
 use ene_desktop::ui::{Composer, DesktopRuntime, Page};
 use ene_desktop::{DESKTOP_DESCRIPTOR, session};
@@ -210,6 +213,20 @@ async fn register_only_makes_zero_provider_calls() {
         handle.credential_contains_for_tests("openai", "main"),
         "control put must store the credential"
     );
+    let revision = handle
+        .store_for_tests()
+        .current_set_revision()
+        .await
+        .expect("publication revision");
+    let active = handle
+        .store_for_tests()
+        .active_credential_version("openai", "main")
+        .await
+        .expect("active publication record");
+    assert!(
+        revision.as_u64() > 0 && active.active.is_some(),
+        "CredentialStored is legal only after sweep, revision commit, active ref, and snapshot publication"
+    );
     let snap = desktop.snapshot();
     assert!(
         !snap.setup_ready,
@@ -249,6 +266,11 @@ async fn a_restarted_gui_reconnects_instead_of_reopening_pairing() {
         first.surface_snapshot().connected,
         "the paired GUI must be connected"
     );
+    first
+        .refresh_setup()
+        .await
+        .expect("the first GUI reads current Host setup state");
+    let before_restart = first.surface_snapshot();
     drop(first);
 
     // Restart: a new process with the same data directory, which is what the
@@ -272,6 +294,10 @@ async fn a_restarted_gui_reconnects_instead_of_reopening_pairing() {
         "Confirm",
         "an already-paired GUI must not ask the Owner to confirm pairing again"
     );
+    let after_restart = restarted.surface_snapshot();
+    assert_eq!(after_restart.credential, before_restart.credential);
+    assert_eq!(after_restart.consent, before_restart.consent);
+    assert_eq!(after_restart.ready, before_restart.ready);
     server.shutdown_and_join().await;
 }
 
@@ -388,7 +414,7 @@ async fn gui_event_loop_is_not_blocked_on_connect_or_provider_wait() {
         let dir = dir.path().to_path_buf();
         async move {
             loop {
-                match session::connect(&dir, DESKTOP_DESCRIPTOR, None).await {
+                match session::connect(&dir, DESKTOP_DESCRIPTOR).await {
                     Ok(client) => return Ok(client),
                     Err(ene_client::error::ClientError::Transport(_)) => {
                         tokio::time::sleep(Duration::from_millis(20)).await;

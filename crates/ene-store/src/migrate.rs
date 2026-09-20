@@ -341,8 +341,7 @@ CREATE TABLE paired_device (
 device_id TEXT PRIMARY KEY,
 descriptor TEXT NOT NULL,
 paired_at TEXT NOT NULL,
-wire TEXT NULL,
-pending_id TEXT NULL UNIQUE
+wire TEXT NULL
 );
 CREATE TABLE pairing_pending (
 pending_id TEXT PRIMARY KEY,

@@ -34,7 +34,7 @@ pub use erasure::{
 };
 pub use os_store::{DEFAULT_NAMESPACE, OsCredentialStore, service_name};
 pub use pairing::{
-    DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord, PendingPairing,
+    DeviceId, DevicePairingRepository, DeviceRecord, PairingSecretMaterial, PendingPairing,
     pairing_proof_hex, verify_pairing_proof,
 };
 pub use publication::{
@@ -53,7 +53,7 @@ pub use scrub::{
 };
 pub use secret::{
     CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, MemoryVersionedStore,
-    SecretValue, VersionedCredentialStore,
+    PreparedCredentialSnapshot, SecretValue, VersionedCredentialStore,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]

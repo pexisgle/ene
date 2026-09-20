@@ -2,8 +2,9 @@
 //! serving-time approve / credential put, Client `confirmed=true` denial.
 //!
 //! Real listener, real [`ene_client`] / `ene-ctl` [`Client`], real Host.
-//! Only the provider is fake. Empty-seat first-come occupancy is accident
-//! prevention and is **not** official GUI authenticity evidence.
+//! Only the provider is fake. A requester can never acquire an empty seat;
+//! tests drive the GUI end of the same private channel the Host creates for
+//! its own spawned child.
 //!
 //! GUI toolkit / overlay probes are out of scope for A1 and remain 未実施.
 
@@ -35,10 +36,13 @@ use ene_api::v1::undelivered::TaskListResponse;
 use ene_core::conn;
 use ene_core::host_control::{self, ControlClient};
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::{CredentialRef, MemoryCredentialStore};
-use ene_ctl::client::{Client, ClientError};
+use ene_credential::{
+    CredentialPublicationRepository as _, CredentialRef, CredentialSetRepository as _,
+    MemoryCredentialStore, MemoryVersionedStore, MutationKind, MutationOutcome, MutationPhase,
+    SecretVersionId, VersionedCredentialStore as _,
+};
+use ene_ctl::client::{Client, ConnectProgress};
 use ene_ctl::cmds;
-use ene_ctl::device::{StoredDevice, store_device};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{
     ControlOp, ControlOutcome, DeletionOutcome, FromConfirmation, FromHost, RedactedSecret,
@@ -244,36 +248,6 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
     }
 }
 
-async fn approve_and_provision(dir: &Path, approver: &HostHandle) -> Result<(), String> {
-    let pendings = approver
-        .pending_devices()
-        .await
-        .map_err(|error| format!("pendings must list: {error:?}"))?;
-    let pending = pendings
-        .first()
-        .ok_or_else(|| String::from("a pending must list"))?;
-    let approval = approver
-        .approve_device(&pending.pending_id)
-        .await
-        .map_err(|error| format!("approve failed: {error:?}"))?;
-    let Some((record, secret)) = approval else {
-        return Err(String::from("approval must pair"));
-    };
-    store_device(
-        dir,
-        &StoredDevice::new(
-            record
-                .wire
-                .parse()
-                .map(ene_api::v1::refs::DeviceWireId)
-                .map_err(|error| format!("opaque wire must stay UUID text: {error:?}"))?,
-            secret,
-        ),
-    )
-    .map_err(|error| format!("device file must store: {error:?}"))?;
-    Ok(())
-}
-
 async fn view_mark(client: &mut Client) -> Result<String, String> {
     let answer = ask(
         client,
@@ -371,18 +345,22 @@ async fn serve_and_setup(
     let handle = open_host(&dir).await;
     let server = ServingTask::start(&dir, Arc::clone(&handle), transport);
     assert!(wait_for_control(&dir).await, "control listener must bind");
-    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
+    let progress = Client::begin_connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("first connection must reach pairing");
+    let ConnectProgress::Pending(pending) = progress else {
+        panic!("first pairing must pend");
+    };
+    let approved = handle
+        .approve_device(pending.pending_id())
+        .await
+        .expect("approval must succeed");
+    assert!(approved.is_some(), "approval must pair");
+    let mut client = pending
+        .complete()
+        .await
+        .expect("provision must authenticate");
     let approver = open_host(&dir).await;
-    approve_and_provision(&dir, &approver)
-        .await
-        .expect("approval must pair");
-    let mut client = Client::connect(&dir, DESCRIPTOR, "test")
-        .await
-        .expect("second connect must succeed");
     setup_flow(&mut client, &approver)
         .await
         .expect("setup must complete");
@@ -660,12 +638,15 @@ async fn a_new_spawned_gui_invalidates_the_previous_seats_sessions() {
     let (handle, server) = serve_control_only(dir.path()).await;
     let mut first = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
     let mut requester = dial_control(dir.path()).await;
-    requester
+    let accepted = requester
         .exchange(&ToHost::RequestDeviceApprove {
             pending_id: String::from("no-such-pending"),
         })
         .await
         .expect("request");
+    let FromHost::RequestAccepted { request_id } = accepted else {
+        panic!("expected RequestAccepted, got {accepted:?}");
+    };
     let (session_id, nonce) = expect_challenge(&mut first, ControlOp::DeviceApprove).await;
 
     // The Host spawns a new GUI: the old child's session dies with its seat.
@@ -687,20 +668,145 @@ async fn a_new_spawned_gui_invalidates_the_previous_seats_sessions() {
         matches!(reply, FromConfirmation::DeniedByBoundary),
         "a session from the previous seat generation must not complete, got {reply:?}"
     );
+    let state = requester
+        .exchange(&ToHost::RequestStatus { request_id })
+        .await
+        .expect("invalidated request status");
+    assert!(
+        matches!(
+            state,
+            FromHost::RequestStatus {
+                state: RequestState::ConfirmationUnavailable,
+                ..
+            }
+        ),
+        "a replaced seat must not leave its requester waiting forever: {state:?}"
+    );
     server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn a_recovered_prepared_credential_write_is_inspected_not_repeated() {
+    let dir = tempfile::tempdir().expect("scratch");
+    let credential = CredentialRef::new("openai", "main").expect("credential ref");
+    let cred_store = MemoryVersionedStore::new();
+    cred_store
+        .put_version(&credential, 77, PUT_SECRET)
+        .expect("simulate the candidate written before the crash");
+    let handle =
+        HostHandle::open_with_cred_store(dir.path(), CredStore::MemoryVersioned(cred_store))
+            .await
+            .expect("versioned host");
+    let revision = handle
+        .store_for_tests()
+        .current_set_revision()
+        .await
+        .expect("revision");
+    handle
+        .store_for_tests()
+        .begin_credential_mutation(
+            String::from("interrupted-put"),
+            MutationKind::Register,
+            String::from("openai"),
+            String::from("main"),
+            Some(revision.as_u64()),
+            Some(SecretVersionId::from_u64(77)),
+        )
+        .await
+        .expect("Prepared is durable before the external write");
+
+    let outcome = handle
+        .publish_credential("openai", "main", "interrupted-put", PUT_SECRET)
+        .await
+        .expect("the unknown write is a domain outcome");
+    assert_eq!(
+        outcome,
+        MutationOutcome::Unknown,
+        "a recovered Prepared mutation must not activate even when inspection finds the item"
+    );
+    assert!(
+        !handle.credential_contains_for_tests("openai", "main"),
+        "an unknown write outcome must not publish a usable snapshot"
+    );
+    let stored = handle
+        .store_for_tests()
+        .credential_mutation("interrupted-put")
+        .await
+        .expect("journal read")
+        .expect("journal row");
+    assert_eq!(stored.phase, MutationPhase::Prepared);
+    assert_eq!(stored.outcome, None);
+}
+
+#[tokio::test]
+async fn concurrent_credential_publications_leave_the_latest_committed_snapshot_active() {
+    let dir = tempfile::tempdir().expect("scratch");
+    let handle = Arc::new(
+        HostHandle::open_with_cred_store(
+            dir.path(),
+            CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+        )
+        .await
+        .expect("versioned host"),
+    );
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..8_u8 {
+        let handle = Arc::clone(&handle);
+        tasks.spawn(async move {
+            let mutation_id = format!("concurrent-{index}");
+            let secret = format!("sk-concurrent-{index}");
+            let outcome = handle
+                .publish_credential("openai", "main", &mutation_id, &secret)
+                .await
+                .expect("publication must return a domain outcome");
+            (mutation_id, secret, outcome)
+        });
+    }
+    let mut latest: Option<(u64, String, String)> = None;
+    while let Some(joined) = tasks.join_next().await {
+        let (mutation_id, secret, outcome) = joined.expect("publication task");
+        if let MutationOutcome::Activated { revision } = outcome
+            && latest
+                .as_ref()
+                .is_none_or(|(current, _, _)| revision > *current)
+        {
+            latest = Some((revision, mutation_id, secret));
+        }
+    }
+    let (revision, mutation_id, secret) = latest.expect("one publication must activate");
+    let mutation = handle
+        .store_for_tests()
+        .credential_mutation(&mutation_id)
+        .await
+        .expect("journal read")
+        .expect("winning mutation");
+    let active = handle
+        .store_for_tests()
+        .active_credential_version("openai", "main")
+        .await
+        .expect("active version");
+    assert_eq!(
+        mutation.outcome,
+        Some(MutationOutcome::Activated { revision })
+    );
+    assert_eq!(active.active, mutation.candidate_version);
+    assert!(
+        handle.credential_matches_for_tests("openai", "main", &secret),
+        "the immutable snapshot must match the latest activation commit"
+    );
 }
 
 #[tokio::test]
 async fn serving_time_control_approve_and_credential_put() {
     let dir = tempfile::tempdir().expect("scratch");
     let (handle, server) = serve_control_only(dir.path()).await;
-    let pending = Client::connect(dir.path(), DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(ClientError::ServerOutcome(_))),
-        "pairing must pend so approve has a target"
-    );
-    let pendings = handle.pending_devices().await.expect("pendings");
-    let pending_id = pendings[0].pending_id.clone();
+    let progress = Client::begin_connect(dir.path(), DESCRIPTOR, "test")
+        .await
+        .expect("pairing must start");
+    let ConnectProgress::Pending(pending) = progress else {
+        panic!("pairing must pend so approve has a target");
+    };
+    let pending_id = pending.pending_id().to_owned();
 
     // The Host's own GUI holds the seat; the requester asks, and the Owner's
     // surface confirms. The requester never receives the pairing secret: it
@@ -727,19 +833,15 @@ async fn serving_time_control_approve_and_credential_put() {
     .expect("join")
     .expect("read")
     .expect("answer");
-    let FromConfirmation::Outcome(ControlOutcome::DeviceApproved { pairing_secret, .. }) = &answer
-    else {
+    let FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) = &answer else {
         panic!("expected DeviceApproved, got {answer:?}");
     };
-    assert!(
-        !pairing_secret.expose().is_empty(),
-        "the Owner's surface receives the one-time provision"
-    );
     let rendered = format!("{answer:?}");
     assert!(
-        !rendered.contains(pairing_secret.expose()),
-        "control outcome Debug must not show the provision: {rendered}"
+        !rendered.contains("pairing_secret"),
+        "control outcome must not contain a provision field: {rendered}"
     );
+    let _client = pending.complete().await.expect("origin receives provision");
     let state = await_applied(&mut requester, &request_id).await;
     match state {
         FromHost::RequestStatus { state, .. } => match state {

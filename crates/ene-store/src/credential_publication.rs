@@ -21,11 +21,11 @@ use crate::codec::{credential_unavailable, lock_shared};
 use crate::credential::{SQL_SELECT_SET_REV, sweep_registered_secret};
 use crate::run_blocking;
 
-const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision, created_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL, NULL, ?7)";
+const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)";
 
 const SQL_SELECT_MUTATION: &str = "SELECT op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision FROM credential_mutation WHERE mutation_id = ?1";
 
-const SQL_MARK_STAGED: &str = "UPDATE credential_mutation SET candidate_version = ?2, phase = ?3 WHERE mutation_id = ?1 AND decided_outcome IS NULL";
+const SQL_MARK_STAGED: &str = "UPDATE credential_mutation SET phase = ?3 WHERE mutation_id = ?1 AND candidate_version = ?2 AND phase = ?4 AND decided_outcome IS NULL";
 
 const SQL_DECIDE_MUTATION: &str = "UPDATE credential_mutation SET phase = ?2, decided_outcome = ?3, decided_revision = ?4 WHERE mutation_id = ?1 AND decided_outcome IS NULL";
 
@@ -111,6 +111,7 @@ impl CredentialPublicationRepository for Store {
         provider: String,
         label: String,
         expected_revision: Option<u64>,
+        candidate_version: Option<SecretVersionId>,
     ) -> Result<ene_credential::CredentialMutation, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
@@ -127,6 +128,16 @@ impl CredentialPublicationRepository for Store {
                 .optional()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             if let Some(Some(stored)) = stored {
+                if stored.kind != kind
+                    || stored.provider != provider
+                    || stored.label != label
+                    || stored.expected_revision != expected_revision
+                    || stored.candidate_version != candidate_version
+                {
+                    return Err(credential_unavailable(
+                        "the mutation id is already bound to another credential premise",
+                    ));
+                }
                 return Ok(stored);
             }
             if let Some(None) = stored {
@@ -142,6 +153,7 @@ impl CredentialPublicationRepository for Store {
                     provider,
                     label,
                     expected_revision.map(|value| value as i64),
+                    candidate_version.map(|value| value.as_u64() as i64),
                     MutationPhase::Prepared.as_str(),
                     ene_primitive::WallClockWithTz::now().to_rfc3339(),
                 ],
@@ -181,6 +193,7 @@ impl CredentialPublicationRepository for Store {
                         mutation_id,
                         candidate.as_u64() as i64,
                         MutationPhase::Staged.as_str(),
+                        MutationPhase::Prepared.as_str(),
                     ],
                 )
                 .map_err(|error| credential_unavailable(error.to_string()))?;

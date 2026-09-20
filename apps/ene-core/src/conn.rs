@@ -83,7 +83,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use ene_inference::ProviderTransport;
 
-use crate::serve::{CoreError, HostHandle, outgoing_frame};
+use crate::serve::{CoreError, HostHandle, outgoing_frame, outgoing_frame_pre_auth};
 
 const SOCKET_NAME: &str = "ene.sock";
 
@@ -161,7 +161,7 @@ pub(crate) enum LiveDecision {
 pub enum ConnectionPhase {
     /// The connection exists; it has not paired or presented a device.
     Accepted,
-    /// A `PairingResult::Paired` issued a device key on this connection, or a
+    /// A `PairingProvision` issued a device key on this connection, or a
     /// reconnect capability frame bound an existing device.
     Paired,
     /// Capability terms and a single-use challenge nonce are pending proof.
@@ -1164,7 +1164,7 @@ async fn write_response(
     if matches!(response.payload, WirePayload::DisconnectNotice(_)) {
         *terminal = true;
     }
-    let Ok(encoded) = encode_frame(&response) else {
+    let Ok(encoded) = encode_frame(&response).map(zeroize::Zeroizing::new) else {
         return false;
     };
     tokio::select! {
@@ -1325,6 +1325,10 @@ async fn serve_connection<S, T>(
 {
     #[cfg(test)]
     handle.serving_test.device_started.notify_one();
+    let Some(mut pairing_provisions) = handle.pairing_deliveries.register(&connection) else {
+        handle.close_connection(&table, connection).await;
+        return;
+    };
     let (read_half, mut write_half) = tokio::io::split(stream);
     let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
     let reader = AbortOnDrop {
@@ -1340,6 +1344,7 @@ async fn serve_connection<S, T>(
     // device binding from the last real frame. No frame yet means the
     // connection is still pre-auth, where nothing may be presented.
     let mut template: Option<(WireFrame, LiveInput)> = None;
+    let mut pairing_delivery_open = true;
     let mut terminal = false;
     // A failed push write stops further pushes but never discards inbound
     // frames the peer already sent; the reader's EOF ends the connection.
@@ -1485,6 +1490,30 @@ async fn serve_connection<S, T>(
                     .await
                 {
                     push_blocked = true;
+                }
+            }
+            provision = pairing_provisions.recv(), if pairing_delivery_open => {
+                let Some(provision) = provision else {
+                    pairing_delivery_open = false;
+                    continue;
+                };
+                let Some((frame, live)) = template.as_ref() else {
+                    break 'connection;
+                };
+                if !matches!(frame.payload, WirePayload::PairingRequest(_)) {
+                    break 'connection;
+                }
+                let device_wire = provision.device_id.0.as_hyphenated().to_string();
+                if !table.note_paired(&connection, &device_wire) {
+                    break 'connection;
+                }
+                let response = outgoing_frame_pre_auth(
+                    frame,
+                    live,
+                    WirePayload::PairingProvision(provision),
+                );
+                if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
+                    break 'connection;
                 }
             }
             changed = wake.changed() => {

@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 
 use ene_api::v1::deletion::{ClientTempClass, DeletionDemand};
-use ene_api::v1::handshake::AuthResult;
+use ene_api::v1::handshake::{AuthResult, PairingProvisionSecret};
 use ene_api::v1::payload::{BodyStateHint, WirePayload};
 use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
@@ -51,7 +51,7 @@ pub struct SessionState {
     /// Host resolves them through its mapping.
     companion: Option<String>,
     connection_id: Option<ConnectionWireId>,
-    pairing_secret: Option<String>,
+    pairing_secret: Option<PairingProvisionSecret>,
     deferred: VecDeque<WireFrame>,
     /// When true, a Host [`DeletionDemand`] is stashed for the GUI erasure
     /// participant instead of auto-answering `wiped`. CLI keeps the default
@@ -95,13 +95,15 @@ impl SessionState {
     }
 
     pub fn pairing_secret(&self) -> Option<&str> {
-        self.pairing_secret.as_deref()
+        self.pairing_secret
+            .as_ref()
+            .map(PairingProvisionSecret::expose_secret)
     }
 
     /// Session-lifetime only, used for proof derivation on demand: never
     /// written anywhere from here (persistence is the device file's job at
     /// connect time).
-    pub fn set_pairing_secret(&mut self, secret: String) {
+    pub fn set_pairing_secret(&mut self, secret: PairingProvisionSecret) {
         self.pairing_secret = Some(secret);
     }
 

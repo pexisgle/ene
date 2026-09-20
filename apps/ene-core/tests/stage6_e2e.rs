@@ -85,9 +85,8 @@ use ene_api::v1::usage::{
 use ene_core::conn;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::{CredentialRef, CredentialSetRepository as _, MemoryCredentialStore};
-use ene_ctl::client::{Client, ClientError};
+use ene_ctl::client::{Client, ClientError, ConnectProgress, PendingPairingClient};
 use ene_ctl::cmds;
-use ene_ctl::device::{StoredDevice, load_pending_id, store_device};
 use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
@@ -372,16 +371,16 @@ async fn open_host_with(dir: &Path, store: MemoryCredentialStore) -> Arc<HostHan
 /// Dials the data directory until the listener takes the pairing request and
 /// requires the typed pending outcome. A failed dial is a bounded
 /// availability wait, never an ordering device.
-async fn dial_until_pending(dir: &Path) -> Result<(), String> {
+async fn dial_until_pending(dir: &Path) -> Result<PendingPairingClient, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let attempt = tokio::time::timeout(
             Duration::from_secs(10),
-            Client::connect(dir, DESCRIPTOR, "test"),
+            Client::begin_connect(dir, DESCRIPTOR, "test"),
         )
         .await;
         match attempt {
-            Ok(Err(ClientError::ServerOutcome(_))) => return Ok(()),
+            Ok(Ok(ConnectProgress::Pending(pending))) => return Ok(pending),
             Ok(Err(ClientError::Transport(reason))) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(format!("the listener never accepted a client: {reason}"));
@@ -389,7 +388,7 @@ async fn dial_until_pending(dir: &Path) -> Result<(), String> {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Ok(Err(other)) => return Err(format!("a first pairing must pend, got {other:?}")),
-            Ok(Ok(_)) => {
+            Ok(Ok(ConnectProgress::Connected(_))) => {
                 return Err(String::from(
                     "a first pairing must not authenticate before Owner approval",
                 ));
@@ -442,45 +441,6 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
         Ok(Err(error)) => Err(format!("stream frame errored: {error:?}")),
         Err(_) => Err(String::from("stream frame timed out")),
     }
-}
-
-/// Host-local Owner approval of every pending pairing plus the one-time secret
-/// handover into the Client's device file, exactly as the trusted surface does
-/// it (the secret never travels a normal payload).
-async fn approve_and_provision(dir: &Path, approver: &HostHandle) -> Result<(), String> {
-    let pendings = approver
-        .pending_devices()
-        .await
-        .map_err(|error| format!("pendings must list: {error:?}"))?;
-    let remembered = load_pending_id(dir);
-    let mut ordered: Vec<_> = pendings.iter().collect();
-    ordered.sort_by_key(|pending| remembered.as_deref() == Some(pending.pending_id.as_str()));
-    assert!(
-        !ordered.is_empty(),
-        "a pairing request must leave a pending for the Owner to approve"
-    );
-    for pending in ordered {
-        let approval = approver
-            .approve_device(&pending.pending_id)
-            .await
-            .map_err(|error| format!("approve failed: {error:?}"))?;
-        let Some((record, secret)) = approval else {
-            return Err(format!("approval of {} must pair", pending.pending_id));
-        };
-        store_device(
-            dir,
-            &StoredDevice::new(
-                record
-                    .wire
-                    .parse()
-                    .map(ene_api::v1::refs::DeviceWireId)
-                    .map_err(|error| format!("opaque wire must stay UUID text: {error:?}"))?,
-                secret,
-            ),
-        )
-        .map_err(|error| format!("device file must store: {error:?}"))?;
-    }
-    Ok(())
 }
 
 async fn view_mark(client: &mut Client) -> Result<String, String> {
@@ -659,14 +619,19 @@ impl Served {
             Arc::clone(&transport),
             shutdown,
         ));
-        dial_until_pending(&dir)
+        let pending = dial_until_pending(&dir)
             .await
             .expect("listener must accept the first pairing");
-        let approver = open_host(&dir).await;
-        approve_and_provision(&dir, &approver)
+        let approved = handle
+            .approve_device(pending.pending_id())
             .await
-            .expect("approval must pair");
-        let mut client = connect(&dir).await;
+            .expect("approval must succeed");
+        assert!(approved.is_some(), "approval must pair");
+        let mut client = pending
+            .complete()
+            .await
+            .expect("provision must authenticate");
+        let approver = open_host(&dir).await;
         setup_flow(&mut client, &approver, capabilities)
             .await
             .expect("setup must complete");
@@ -3107,6 +3072,12 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         .await
         .expect("the unknown round must complete");
     confirm_round(served.client(), &round, stream).await;
+
+    // Learning runs behind the three client-visible rounds. Wait for the
+    // formation and both updates to commit before taking the read-only
+    // baseline; otherwise their legitimate usage settlement can land between
+    // the two reads and look like a mutation caused by the read itself.
+    wait_for_memory_revision_at_least(served.client(), 3).await;
 
     let page = usage_page(served.client()).await;
     // Attribution: one Reported row per consumer, each with the exact

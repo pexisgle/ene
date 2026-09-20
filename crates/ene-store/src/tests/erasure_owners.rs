@@ -343,29 +343,23 @@ async fn credential_erasure_removes_metadata_without_touching_protected_values()
     assert!(matches!(paired, RegistrationApply::Decided(_)));
     // Two paired devices; one descriptor carries the target.
     let device = store
-        .request_pairing(format!("{target} phone"), String::from("conn-1"), None)
+        .request_pairing(format!("{target} phone"), String::from("conn-1"))
         .await
         .unwrap();
-    let DevicePairingStatus::Pending { pending } = device else {
-        panic!("a fresh pairing request must be pending");
-    };
     assert!(
         store
-            .approve_pending(&pending.pending_id, "conn-1")
+            .approve_pending(&device.pending_id, "conn-1")
             .await
             .unwrap()
             .is_some()
     );
     let other_device = store
-        .request_pairing(String::from("laptop"), String::from("conn-2"), None)
+        .request_pairing(String::from("laptop"), String::from("conn-2"))
         .await
         .unwrap();
-    let DevicePairingStatus::Pending { pending } = other_device else {
-        panic!("a fresh pairing request must be pending");
-    };
     assert!(
         store
-            .approve_pending(&pending.pending_id, "conn-2")
+            .approve_pending(&other_device.pending_id, "conn-2")
             .await
             .unwrap()
             .is_some()

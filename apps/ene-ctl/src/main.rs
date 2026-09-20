@@ -588,7 +588,16 @@ async fn run_command(
     command: cmds::Command,
 ) -> Result<(), CliError> {
     let platform = client::platform_display();
-    let mut session = client::Client::connect(data_dir, &platform, &platform).await?;
+    let mut session = match client::Client::begin_connect(data_dir, &platform, &platform).await? {
+        client::ConnectProgress::Connected(session) => session,
+        client::ConnectProgress::Pending(pending) => {
+            emit(&format!(
+                "pairing pending: approve {} on the Host-local trusted surface; waiting on this connection",
+                pending.pending_id()
+            ))?;
+            pending.complete().await?
+        }
+    };
     match command {
         cmds::Command::Setup(mode) => run_setup(&mut session, mode).await,
         cmds::Command::Status => {

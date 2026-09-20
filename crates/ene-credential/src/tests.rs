@@ -4,7 +4,9 @@ use crate::pairing::DeviceId;
 use crate::registry::{
     CredentialRef, CredentialRefError, CredentialRefRepository, available_credential,
 };
-use crate::secret::{CredentialStore, MemoryCredentialStore};
+use crate::secret::{
+    CredentialStore, MemoryCredentialStore, MemoryVersionedStore, VersionedCredentialStore,
+};
 use ene_primitive::RawId;
 
 struct FakeRepo(Vec<CredentialRef>);
@@ -78,6 +80,50 @@ fn bearer_closure_receives_the_inserted_secret() {
     store.insert(cred.clone(), "bearer-token");
     let seen = store.with_bearer(&cred, str::len);
     assert_eq!(seen, Ok("bearer-token".len()));
+}
+
+#[test]
+fn active_version_is_an_immutable_snapshot_not_a_fresh_backend_read() {
+    let store = MemoryVersionedStore::new();
+    let cred = acme_main();
+    store
+        .put_version(&cred, 41, "published-secret")
+        .expect("candidate write");
+    let snapshot = store
+        .prepare_snapshot(&cred, 41)
+        .expect("snapshot preparation");
+    store.activate(snapshot);
+    store
+        .delete_version(&cred, 41)
+        .expect("simulate an external backend change");
+    assert_eq!(
+        store.with_bearer(&cred, str::to_owned),
+        Ok(String::from("published-secret")),
+        "routine use must retain the immutable published snapshot for its revision"
+    );
+}
+
+#[test]
+fn failed_snapshot_publication_does_not_fall_back_to_the_old_version() {
+    let store = MemoryVersionedStore::new();
+    let cred = acme_main();
+    store
+        .put_version(&cred, 41, "old-secret")
+        .expect("old candidate write");
+    let old = store
+        .prepare_snapshot(&cred, 41)
+        .expect("old snapshot preparation");
+    store.activate(old);
+
+    assert!(
+        store.prepare_snapshot(&cred, 42).is_err(),
+        "a missing committed version must fail preparation"
+    );
+    store.deactivate(&cred);
+    assert!(
+        store.with_bearer(&cred, str::to_owned).is_err(),
+        "publication failure must clear the old snapshot instead of falling back"
+    );
 }
 
 #[test]

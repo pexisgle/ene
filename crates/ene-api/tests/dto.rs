@@ -1,6 +1,8 @@
 use ene_api::v1::envelope::WireSender;
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, new_outgoing_envelope};
-use ene_api::v1::handshake::{CapabilityAdvertise, PairingRequest};
+use ene_api::v1::handshake::{
+    CapabilityAdvertise, PairingProvision, PairingProvisionSecret, PairingRequest,
+};
 use ene_api::v1::management::{IntentRationaleWire, RationaleOrigin};
 use ene_api::v1::management::{ManagementIntent, ManagementIntentKind};
 use ene_api::v1::payload::WirePayload;
@@ -8,7 +10,8 @@ use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
 use ene_api::v1::refs::ManagementTargetWire;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId};
 use ene_api::v1::refs::{
-    ClientIncarnationId, ClientWireRef, CompanionWireRef, RoundWireId, WireMessageType,
+    ClientIncarnationId, ClientWireRef, CompanionWireRef, DeviceWireId, RoundWireId,
+    WireMessageType,
 };
 use ene_api::v1::refs::{ClientLocalId, StreamWireId, TextLangWire};
 use ene_api::v1::round::{HistoryResponse, HistoryRole, RoundIntakeOutcomeWire, SubmitTextInput};
@@ -58,12 +61,23 @@ fn envelope_roundtrip() {
 fn handshake_roundtrip() {
     roundtrip(&PairingRequest {
         device_descriptor: String::from("Owner laptop"),
-        pending_id: None,
     });
     roundtrip(&CapabilityAdvertise {
         supported_protocol: [ProtocolVersion::V1].to_vec(),
         platform: String::from("linux"),
     });
+    roundtrip(&PairingProvision {
+        device_id: DeviceWireId(Uuid::new_v4()),
+        pairing_secret: PairingProvisionSecret::new(String::from("one-time-secret")),
+    });
+    assert_eq!(
+        WirePayload::PairingProvision(PairingProvision {
+            device_id: DeviceWireId(Uuid::new_v4()),
+            pairing_secret: PairingProvisionSecret::new(String::from("one-time-secret")),
+        })
+        .message_type(),
+        "PairingProvision"
+    );
 }
 
 #[test]
