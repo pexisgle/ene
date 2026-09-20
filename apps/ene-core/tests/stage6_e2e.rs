@@ -3073,6 +3073,12 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         .expect("the unknown round must complete");
     confirm_round(served.client(), &round, stream).await;
 
+    // Learning runs behind the three client-visible rounds. Wait for the
+    // formation and both updates to commit before taking the read-only
+    // baseline; otherwise their legitimate usage settlement can land between
+    // the two reads and look like a mutation caused by the read itself.
+    wait_for_memory_revision_at_least(served.client(), 3).await;
+
     let page = usage_page(served.client()).await;
     // Attribution: one Reported row per consumer, each with the exact
     // reviewed-rate breakdown.
