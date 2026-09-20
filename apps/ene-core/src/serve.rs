@@ -334,10 +334,35 @@ impl ene_credential::VersionedCredentialStore for CredStore {
         }
     }
 
-    fn activate(&self, cred: &CredentialRef, version: u64) {
+    fn prepare_snapshot(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<ene_credential::PreparedCredentialSnapshot, CredentialTechnicalError> {
         match self {
-            Self::Os(inner) => inner.activate(cred, version),
-            Self::MemoryVersioned(inner) => inner.activate(cred, version),
+            Self::Os(inner) => inner.prepare_snapshot(cred, version),
+            Self::MemoryVersioned(inner) => inner.prepare_snapshot(cred, version),
+            Self::Env(_) | Self::Memory(_) => Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!(
+                    "{}: this backend cannot prepare credential snapshots",
+                    cred.id()
+                ),
+            }),
+        }
+    }
+
+    fn activate(&self, snapshot: ene_credential::PreparedCredentialSnapshot) {
+        match self {
+            Self::Os(inner) => inner.activate(snapshot),
+            Self::MemoryVersioned(inner) => inner.activate(snapshot),
+            Self::Env(_) | Self::Memory(_) => {}
+        }
+    }
+
+    fn deactivate(&self, cred: &CredentialRef) {
+        match self {
+            Self::Os(inner) => inner.deactivate(cred),
+            Self::MemoryVersioned(inner) => inner.deactivate(cred),
             Self::Env(_) | Self::Memory(_) => {}
         }
     }
@@ -552,6 +577,9 @@ pub struct HostHandle {
     pub(crate) open_rounds: StdMutex<HashMap<(String, String), OpenRound>>,
     pub(crate) rounds: Arc<StdMutex<HashMap<String, RoundId>>>,
     pub(crate) cred_store: CredStore,
+    /// Serializes the activation transaction with immutable snapshot
+    /// publication. OS-store reads and candidate preparation happen before it.
+    pub(crate) credential_publication: AsyncMutex<()>,
     /// Exclusive Host-local first-party control seat. At most one live
     /// speaker; reconnect invalidates outstanding confirmation sessions.
     pub(crate) control_seat: crate::host_control::FirstPartyControlSeat,
@@ -878,15 +906,15 @@ impl HostHandle {
             let Some(version) = active.active else {
                 continue;
             };
-            // Verify the item before pointing reads at it: an activated
-            // version whose value the OS store no longer holds must read as
-            // unavailable, not as an empty or older credential.
-            let readable = self
+            // Prepare from the durable item before publication. An unreadable
+            // committed version clears any process-local fallback; startup may
+            // continue, but authentication for this ref remains unavailable.
+            match self
                 .cred_store
-                .with_version(&credential, version.as_u64(), |_| ())
-                .is_ok();
-            if readable {
-                self.cred_store.activate(&credential, version.as_u64());
+                .prepare_snapshot(&credential, version.as_u64())
+            {
+                Ok(snapshot) => self.cred_store.activate(snapshot),
+                Err(_) => self.cred_store.deactivate(&credential),
             }
         }
         Ok(())
@@ -937,6 +965,7 @@ impl HostHandle {
             open_rounds: StdMutex::new(HashMap::new()),
             rounds: Arc::new(StdMutex::new(HashMap::new())),
             cred_store,
+            credential_publication: AsyncMutex::new(()),
             control_seat: crate::host_control::FirstPartyControlSeat::default(),
             data_dir: data_dir.to_path_buf(),
             gui_open: AsyncMutex::new(()),
@@ -1115,6 +1144,24 @@ impl HostHandle {
     #[must_use]
     pub fn credential_contains_for_tests(&self, provider: &str, label: &str) -> bool {
         CredentialRef::new(provider, label).is_ok_and(|cred| self.cred_store.contains(&cred))
+    }
+
+    /// Whether the immutable active snapshot equals a test value.
+    ///
+    /// This seam returns only equality and never releases credential bytes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn credential_matches_for_tests(
+        &self,
+        provider: &str,
+        label: &str,
+        expected: &str,
+    ) -> bool {
+        CredentialRef::new(provider, label).is_ok_and(|credential| {
+            self.cred_store
+                .with_bearer(&credential, |bearer| bearer == expected)
+                .unwrap_or(false)
+        })
     }
 
     /// How many serving-composition Targeted Deletion drivers currently hold
@@ -2163,28 +2210,6 @@ impl HostHandle {
         }
     }
 
-    /// Serving-time credential intake: stores `secret` through
-    /// [`CredentialStore::put`]. Usable-ref publication remains
-    /// [`HostHandle::approve_credential`]. Errors never carry the secret.
-    ///
-    /// # Errors
-    ///
-    /// [`CoreError::Store`] when the backend refuses the put.
-    pub async fn put_credential(
-        &self,
-        provider: &str,
-        label: &str,
-        secret: &str,
-    ) -> Result<bool, CoreError> {
-        let Ok(credential) = CredentialRef::new(provider, label) else {
-            return Ok(false);
-        };
-        self.cred_store
-            .put(&credential, secret)
-            .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(true)
-    }
-
     /// Publishes one credential through the version protocol and activates it.
     ///
     /// This is the product registration path: a mutation is recorded before
@@ -2212,23 +2237,60 @@ impl HostHandle {
     ) -> Result<ene_credential::MutationOutcome, CoreError> {
         use ene_credential::{
             ActivationOutcome, CredentialPublicationRepository as _, MutationKind, MutationOutcome,
-            SecretVersionId,
+            MutationPhase, SecretVersionId,
         };
 
         let Ok(credential) = CredentialRef::new(provider, label) else {
             return Ok(MutationOutcome::Refused);
         };
-        let mutation = self
+        let (mutation, fresh) = match self
             .store
-            .begin_credential_mutation(
-                mutation_id.to_string(),
-                MutationKind::Register,
-                provider.to_string(),
-                label.to_string(),
-                None,
-            )
+            .credential_mutation(mutation_id)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
+            .map_err(|error| CoreError::Store(error.to_string()))?
+        {
+            Some(stored)
+                if stored.kind == MutationKind::Register
+                    && stored.provider == provider
+                    && stored.label == label =>
+            {
+                (stored, false)
+            }
+            Some(_) => {
+                return Err(CoreError::Store(String::from(
+                    "the mutation id is already bound to another credential premise",
+                )));
+            }
+            None => {
+                let expected_revision =
+                    ene_credential::CredentialSetRepository::current_set_revision(&self.store)
+                        .await
+                        .map_err(|error| CoreError::Store(error.to_string()))?
+                        .as_u64();
+                // The version is a non-secret random item identity, not the
+                // mutable set revision. Prepared records it before the OS write
+                // so a crash leaves an exact item to inspect and two concurrent
+                // writers never share a candidate slot.
+                let random = Uuid::new_v4();
+                let mut bytes = [0_u8; 8];
+                bytes.copy_from_slice(&random.as_bytes()[..8]);
+                let version = (u64::from_be_bytes(bytes) & (i64::MAX as u64)).max(1);
+                (
+                    self.store
+                        .begin_credential_mutation(
+                            mutation_id.to_string(),
+                            MutationKind::Register,
+                            provider.to_string(),
+                            label.to_string(),
+                            Some(expected_revision),
+                            Some(SecretVersionId::from_u64(version)),
+                        )
+                        .await
+                        .map_err(|error| CoreError::Store(error.to_string()))?,
+                    true,
+                )
+            }
+        };
         // A retry of a decided mutation answers from its stored outcome: the
         // decision is never re-applied and the value is never re-sent.
         if let Some(outcome) = mutation.outcome {
@@ -2246,57 +2308,37 @@ impl HostHandle {
             return Ok(outcome);
         }
         let os = &self.cred_store;
-        let version = mutation
-            .candidate_version
-            .map(SecretVersionId::as_u64)
-            .unwrap_or_else(|| {
-                // Version ids come from the monotonic set revision: a version
-                // is never reused, so a retired item keeps its own name.
-                0
-            });
-        let version = if version == 0 {
-            ene_credential::CredentialSetRepository::current_set_revision(&self.store)
-                .await
-                .map_err(|error| CoreError::Store(error.to_string()))?
-                .as_u64()
-                .checked_add(1)
-                .ok_or_else(|| CoreError::Store(String::from("credential version exhausted")))?
-        } else {
-            version
+        let candidate = mutation.candidate_version.ok_or_else(|| {
+            CoreError::Store(String::from(
+                "credential registration mutation has no candidate version",
+            ))
+        })?;
+        let version = candidate.as_u64();
+        if mutation.phase == MutationPhase::Prepared && fresh {
+            // Even an error may mean the external write happened. The exact
+            // recorded item is inspected below; the effect is never repeated.
+            match os.put_version(&credential, version, secret) {
+                Ok(()) | Err(_) => {}
+            }
+        }
+        let snapshot = match os.prepare_snapshot(&credential, version) {
+            Ok(snapshot) if snapshot.matches(secret) => snapshot,
+            Ok(_) | Err(_) => return Ok(MutationOutcome::Unknown),
         };
-        let candidate = SecretVersionId::from_u64(version);
-        match mutation.candidate_version {
-            Some(recorded) if recorded == candidate => {}
-            Some(_) => {}
-            None => {
-                // The OS item is written before the phase records it, so a
-                // crash between the two is reconciled by the read below rather
-                // than by writing again.
-                match os.put_version(&credential, version, secret) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        // "Already published" is the ambiguous case: the value
-                        // may be there from an interrupted attempt, so it is
-                        // verified instead of reported as a failure.
-                        if !os
-                            .with_version(&credential, version, |bearer| bearer == secret)
-                            .unwrap_or(false)
-                        {
-                            let outcome = MutationOutcome::Refused;
-                            self.store
-                                .record_credential_mutation_outcome(mutation_id, outcome.clone())
-                                .await
-                                .map_err(|error| CoreError::Store(error.to_string()))?;
-                            return Ok(outcome);
-                        }
-                        let _ = error;
-                    }
-                }
+        match mutation.phase {
+            MutationPhase::Prepared => {
+                // A recovered Prepared mutation reached this point only after
+                // its exact candidate was found. No external write was retried.
                 self.store
                     .mark_credential_staged(mutation_id, candidate)
                     .await
                     .map_err(|error| CoreError::Store(error.to_string()))?;
             }
+            MutationPhase::Staged => {}
+            MutationPhase::Activated
+            | MutationPhase::CleanupPending
+            | MutationPhase::Completed
+            | MutationPhase::Abandoned => return Ok(MutationOutcome::Unknown),
         }
         let previous = self
             .store
@@ -2310,14 +2352,22 @@ impl HostHandle {
             os.with_version(&credential, retired.as_u64(), str::to_owned)
                 .ok()
         });
-        let activation = self
-            .store
-            .activate_credential(mutation_id, secret, retired_bearer.as_deref())
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
+        let activation = {
+            let _publication = self.credential_publication.lock().await;
+            let activation = self
+                .store
+                .activate_credential(mutation_id, secret, retired_bearer.as_deref())
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?;
+            if matches!(activation, ActivationOutcome::Activated { .. }) {
+                // No OS I/O or secret allocation occurs under the publication
+                // guard: the fully prepared candidate moves into the snapshot.
+                os.activate(snapshot);
+            }
+            activation
+        };
         match activation {
             ActivationOutcome::Activated { revision, retired } => {
-                os.activate(&credential, version);
                 // The retired item is removed after the commit, and the record
                 // says so only once the removal succeeded: a failure leaves the
                 // cleanup pending rather than claiming the value is gone.

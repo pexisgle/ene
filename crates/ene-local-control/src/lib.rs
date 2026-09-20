@@ -334,6 +334,11 @@ mod tests {
             as_requester_answer.is_err(),
             "a challenge frame must not decode as a requester answer"
         );
+        let former_seat_hello: Result<ToHost, _> = serde_json::from_str(r#""SeatHello""#);
+        assert!(
+            former_seat_hello.is_err(),
+            "the requester protocol must not retain an empty-seat acquisition frame"
+        );
     }
 
     #[test]

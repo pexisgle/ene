@@ -2,8 +2,9 @@
 //! serving-time approve / credential put, Client `confirmed=true` denial.
 //!
 //! Real listener, real [`ene_client`] / `ene-ctl` [`Client`], real Host.
-//! Only the provider is fake. Empty-seat first-come occupancy is accident
-//! prevention and is **not** official GUI authenticity evidence.
+//! Only the provider is fake. A requester can never acquire an empty seat;
+//! tests drive the GUI end of the same private channel the Host creates for
+//! its own spawned child.
 //!
 //! GUI toolkit / overlay probes are out of scope for A1 and remain 未実施.
 
@@ -35,7 +36,11 @@ use ene_api::v1::undelivered::TaskListResponse;
 use ene_core::conn;
 use ene_core::host_control::{self, ControlClient};
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::{CredentialRef, MemoryCredentialStore};
+use ene_credential::{
+    CredentialPublicationRepository as _, CredentialRef, CredentialSetRepository as _,
+    MemoryCredentialStore, MemoryVersionedStore, MutationKind, MutationOutcome, MutationPhase,
+    SecretVersionId,
+};
 use ene_ctl::client::{Client, ConnectProgress};
 use ene_ctl::cmds;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
@@ -633,12 +638,15 @@ async fn a_new_spawned_gui_invalidates_the_previous_seats_sessions() {
     let (handle, server) = serve_control_only(dir.path()).await;
     let mut first = host_control::seat_test_gui_for_tests(&handle).expect("private channel");
     let mut requester = dial_control(dir.path()).await;
-    requester
+    let accepted = requester
         .exchange(&ToHost::RequestDeviceApprove {
             pending_id: String::from("no-such-pending"),
         })
         .await
         .expect("request");
+    let FromHost::RequestAccepted { request_id } = accepted else {
+        panic!("expected RequestAccepted, got {accepted:?}");
+    };
     let (session_id, nonce) = expect_challenge(&mut first, ControlOp::DeviceApprove).await;
 
     // The Host spawns a new GUI: the old child's session dies with its seat.
@@ -660,7 +668,129 @@ async fn a_new_spawned_gui_invalidates_the_previous_seats_sessions() {
         matches!(reply, FromConfirmation::DeniedByBoundary),
         "a session from the previous seat generation must not complete, got {reply:?}"
     );
+    let state = requester
+        .exchange(&ToHost::RequestStatus { request_id })
+        .await
+        .expect("invalidated request status");
+    assert!(
+        matches!(
+            state,
+            FromHost::RequestStatus {
+                state: RequestState::ConfirmationUnavailable,
+                ..
+            }
+        ),
+        "a replaced seat must not leave its requester waiting forever: {state:?}"
+    );
     server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn a_recovered_prepared_credential_write_is_inspected_not_repeated() {
+    let dir = tempfile::tempdir().expect("scratch");
+    let handle = HostHandle::open_with_cred_store(
+        dir.path(),
+        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+    )
+    .await
+    .expect("versioned host");
+    let revision = handle
+        .store_for_tests()
+        .current_set_revision()
+        .await
+        .expect("revision");
+    handle
+        .store_for_tests()
+        .begin_credential_mutation(
+            String::from("interrupted-put"),
+            MutationKind::Register,
+            String::from("openai"),
+            String::from("main"),
+            Some(revision.as_u64()),
+            Some(SecretVersionId::from_u64(77)),
+        )
+        .await
+        .expect("Prepared is durable before the external write");
+
+    let outcome = handle
+        .publish_credential("openai", "main", "interrupted-put", PUT_SECRET)
+        .await
+        .expect("the unknown write is a domain outcome");
+    assert_eq!(
+        outcome,
+        MutationOutcome::Unknown,
+        "a recovered Prepared mutation must not repeat an external put"
+    );
+    assert!(
+        !handle.credential_contains_for_tests("openai", "main"),
+        "an unknown write outcome must not publish a usable snapshot"
+    );
+    let stored = handle
+        .store_for_tests()
+        .credential_mutation("interrupted-put")
+        .await
+        .expect("journal read")
+        .expect("journal row");
+    assert_eq!(stored.phase, MutationPhase::Prepared);
+    assert_eq!(stored.outcome, None);
+}
+
+#[tokio::test]
+async fn concurrent_credential_publications_leave_the_latest_committed_snapshot_active() {
+    let dir = tempfile::tempdir().expect("scratch");
+    let handle = Arc::new(
+        HostHandle::open_with_cred_store(
+            dir.path(),
+            CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+        )
+        .await
+        .expect("versioned host"),
+    );
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..8_u8 {
+        let handle = Arc::clone(&handle);
+        tasks.spawn(async move {
+            let mutation_id = format!("concurrent-{index}");
+            let secret = format!("sk-concurrent-{index}");
+            let outcome = handle
+                .publish_credential("openai", "main", &mutation_id, &secret)
+                .await
+                .expect("publication must return a domain outcome");
+            (mutation_id, secret, outcome)
+        });
+    }
+    let mut latest: Option<(u64, String, String)> = None;
+    while let Some(joined) = tasks.join_next().await {
+        let (mutation_id, secret, outcome) = joined.expect("publication task");
+        if let MutationOutcome::Activated { revision } = outcome
+            && latest
+                .as_ref()
+                .is_none_or(|(current, _, _)| revision > *current)
+        {
+            latest = Some((revision, mutation_id, secret));
+        }
+    }
+    let (revision, mutation_id, secret) = latest.expect("one publication must activate");
+    let mutation = handle
+        .store_for_tests()
+        .credential_mutation(&mutation_id)
+        .await
+        .expect("journal read")
+        .expect("winning mutation");
+    let active = handle
+        .store_for_tests()
+        .active_credential_version("openai", "main")
+        .await
+        .expect("active version");
+    assert_eq!(
+        mutation.outcome,
+        Some(MutationOutcome::Activated { revision })
+    );
+    assert_eq!(active.active, mutation.candidate_version);
+    assert!(
+        handle.credential_matches_for_tests("openai", "main", &secret),
+        "the immutable snapshot must match the latest activation commit"
+    );
 }
 
 #[tokio::test]

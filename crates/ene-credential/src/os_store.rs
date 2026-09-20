@@ -13,7 +13,7 @@
 
 use crate::CredentialTechnicalError;
 use crate::registry::CredentialRef;
-use crate::secret::{CredentialStore, SecretValue};
+use crate::secret::{CredentialStore, PreparedCredentialSnapshot, SecretValue};
 
 /// Installation namespace: one prefix for every item this installation owns,
 /// so two data directories or two installations never collide and an unrelated
@@ -37,14 +37,15 @@ pub fn service_name(namespace: &str, cred: &CredentialRef, version: u64) -> Stri
 /// The OS protected store of one installation.
 ///
 /// Secrets are read through [`CredentialStore::with_bearer`] and written
-/// through [`OsCredentialStore::put_version`]. The adapter keeps no cache: the
-/// credential owner's immutable snapshot is the only in-memory copy, and a
-/// stale OS read never silently becomes a newer value.
+/// through [`OsCredentialStore::put_version`]. Routine reads use the immutable
+/// active snapshot loaded by the credential owner; they do not re-read the OS
+/// item and silently turn an external change into the same revision.
 pub struct OsCredentialStore {
     namespace: String,
-    /// Version the adapter reads for each ref. The credential owner moves this
-    /// pointer only after the activation transaction commits.
-    active: std::sync::Mutex<std::collections::HashMap<CredentialRef, u64>>,
+    /// Immutable value snapshot published for each ref. The credential owner
+    /// replaces it only after the activation transaction commits; routine use
+    /// never re-reads a mutable external OS item as the same revision.
+    active: std::sync::Mutex<std::collections::HashMap<CredentialRef, (u64, SecretValue)>>,
 }
 
 impl core::fmt::Debug for OsCredentialStore {
@@ -109,16 +110,41 @@ impl OsCredentialStore {
             })
     }
 
-    /// Points this adapter at the version the credential owner published.
-    ///
-    /// Called only after the activation transaction commits, so a read before
-    /// the commit still resolves the previous version.
-    pub fn activate(&self, cred: &CredentialRef, version: u64) {
+    /// Loads one version as a candidate snapshot before publication.
+    pub fn prepare_snapshot(
+        &self,
+        cred: &CredentialRef,
+        version: u64,
+    ) -> Result<PreparedCredentialSnapshot, CredentialTechnicalError> {
+        let snapshot = self.with_version(cred, version, |bearer| bearer.as_bytes().to_vec())?;
+        Ok(PreparedCredentialSnapshot::new(
+            cred.clone(),
+            version,
+            SecretValue::new(snapshot),
+        ))
+    }
+
+    /// Publishes an already-loaded snapshot without another OS-store read.
+    pub fn activate(&self, snapshot: PreparedCredentialSnapshot) {
+        let PreparedCredentialSnapshot {
+            credential,
+            version,
+            secret,
+        } = snapshot;
         let mut active = self
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        active.insert(cred.clone(), version);
+        active.insert(credential, (version, secret));
+    }
+
+    /// Removes a snapshot whose durable active item is unavailable.
+    pub fn deactivate(&self, cred: &CredentialRef) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.remove(cred);
     }
 
     /// Removes one version item. Used by cleanup for retired versions.
@@ -191,36 +217,28 @@ impl CredentialStore for OsCredentialStore {
         cred: &CredentialRef,
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError> {
-        let version = {
-            let active = self
-                .active
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            active.get(cred).copied()
-        };
-        let Some(version) = version else {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((_, secret)) = active.get(cred) else {
             return Err(CredentialTechnicalError::StorageUnavailable {
                 reason: format!("{}: no published version is active", cred.id()),
             });
         };
-        self.with_version(cred, version, f)
+        let bearer = core::str::from_utf8(secret.bytes()).map_err(|_| {
+            CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: the active value is not valid UTF-8", cred.id()),
+            }
+        })?;
+        Ok(f(bearer))
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {
-        let version = {
-            let active = self
-                .active
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            active.get(cred).copied()
-        };
-        let Some(version) = version else {
-            return false;
-        };
-        match self.entry(cred, version) {
-            Ok(entry) => entry.get_password().is_ok(),
-            Err(_) => false,
-        }
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(cred)
     }
 
     /// Serving-time intake through the OS store alone is refused: the product
@@ -328,7 +346,10 @@ mod tests {
                 .expect("the second version must read back"),
             "probe-value-two"
         );
-        store.activate(&cred, 2);
+        let snapshot = store
+            .prepare_snapshot(&cred, 2)
+            .expect("prepare second version");
+        store.activate(snapshot);
         assert_eq!(
             store
                 .with_bearer(&cred, |bearer| bearer.to_string())

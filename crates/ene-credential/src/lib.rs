@@ -53,7 +53,7 @@ pub use scrub::{
 };
 pub use secret::{
     CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, MemoryVersionedStore,
-    SecretValue, VersionedCredentialStore,
+    PreparedCredentialSnapshot, SecretValue, VersionedCredentialStore,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
