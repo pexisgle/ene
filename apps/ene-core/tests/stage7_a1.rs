@@ -39,7 +39,7 @@ use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::{
     CredentialPublicationRepository as _, CredentialRef, CredentialSetRepository as _,
     MemoryCredentialStore, MemoryVersionedStore, MutationKind, MutationOutcome, MutationPhase,
-    SecretVersionId,
+    SecretVersionId, VersionedCredentialStore as _,
 };
 use ene_ctl::client::{Client, ConnectProgress};
 use ene_ctl::cmds;
@@ -688,12 +688,15 @@ async fn a_new_spawned_gui_invalidates_the_previous_seats_sessions() {
 #[tokio::test]
 async fn a_recovered_prepared_credential_write_is_inspected_not_repeated() {
     let dir = tempfile::tempdir().expect("scratch");
-    let handle = HostHandle::open_with_cred_store(
-        dir.path(),
-        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
-    )
-    .await
-    .expect("versioned host");
+    let credential = CredentialRef::new("openai", "main").expect("credential ref");
+    let cred_store = MemoryVersionedStore::new();
+    cred_store
+        .put_version(&credential, 77, PUT_SECRET)
+        .expect("simulate the candidate written before the crash");
+    let handle =
+        HostHandle::open_with_cred_store(dir.path(), CredStore::MemoryVersioned(cred_store))
+            .await
+            .expect("versioned host");
     let revision = handle
         .store_for_tests()
         .current_set_revision()
@@ -719,7 +722,7 @@ async fn a_recovered_prepared_credential_write_is_inspected_not_repeated() {
     assert_eq!(
         outcome,
         MutationOutcome::Unknown,
-        "a recovered Prepared mutation must not repeat an external put"
+        "a recovered Prepared mutation must not activate even when inspection finds the item"
     );
     assert!(
         !handle.credential_contains_for_tests("openai", "main"),

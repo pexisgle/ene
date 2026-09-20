@@ -2314,32 +2314,32 @@ impl HostHandle {
             ))
         })?;
         let version = candidate.as_u64();
-        if mutation.phase == MutationPhase::Prepared && fresh {
-            // Even an error may mean the external write happened. The exact
-            // recorded item is inspected below; the effect is never repeated.
-            match os.put_version(&credential, version, secret) {
-                Ok(()) | Err(_) => {}
+        if !fresh {
+            // This is an interrupted operation whose confirmation session no
+            // longer exists. Inspect only its recorded item; even a matching
+            // candidate is not activated without a fresh Owner confirmation.
+            match os.prepare_snapshot(&credential, version) {
+                Ok(snapshot) if snapshot.matches(secret) => {}
+                Ok(_) | Err(_) => {}
             }
+            return Ok(MutationOutcome::Unknown);
+        }
+        if mutation.phase != MutationPhase::Prepared {
+            return Ok(MutationOutcome::Unknown);
+        }
+        // Even an error may mean the external write happened. The exact
+        // recorded item is inspected below; the effect is never repeated.
+        match os.put_version(&credential, version, secret) {
+            Ok(()) | Err(_) => {}
         }
         let snapshot = match os.prepare_snapshot(&credential, version) {
             Ok(snapshot) if snapshot.matches(secret) => snapshot,
             Ok(_) | Err(_) => return Ok(MutationOutcome::Unknown),
         };
-        match mutation.phase {
-            MutationPhase::Prepared => {
-                // A recovered Prepared mutation reached this point only after
-                // its exact candidate was found. No external write was retried.
-                self.store
-                    .mark_credential_staged(mutation_id, candidate)
-                    .await
-                    .map_err(|error| CoreError::Store(error.to_string()))?;
-            }
-            MutationPhase::Staged => {}
-            MutationPhase::Activated
-            | MutationPhase::CleanupPending
-            | MutationPhase::Completed
-            | MutationPhase::Abandoned => return Ok(MutationOutcome::Unknown),
-        }
+        self.store
+            .mark_credential_staged(mutation_id, candidate)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
         let previous = self
             .store
             .active_credential_version(provider, label)
