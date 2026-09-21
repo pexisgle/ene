@@ -218,7 +218,10 @@ SHA)、`--wayland-feedback-jsonl` (Body の `wp_presentation` presented)、
 - 正式リリース NixOS 26.11 での最終 acceptance (本測定は 26.11.20260911 開発版)。
   26.11 が存在しないため、この probe の記録を最終 acceptance としない。
 - 物理 display の scale=2 での HiDPI acceptance (入れ子 KWin でのみ確認) — #1678。
-- motion pack (`.vrma`) の実描画 (`HealthTick.motion: Unsupported` のまま) — #1679。
+- motion pack (`.vrma`) の実描画 — 最小検証済み (#1679 close)。install script で 7 clip を配置し、
+  実行時 probe で `vrma_motion_pack: true` / 5 pose 割当、実 compositor で
+  `HealthTick.motion: Available` / 全 pose hint で presented 継続 / MotionFail 0 を確認。
+  公式 `ene` での見た目 acceptance は #1651 の範囲。
 - IME 確定後の送信が発火しない疑いの切り分け — #1680。
 - Windows 11 (既存報告の範囲)。
 

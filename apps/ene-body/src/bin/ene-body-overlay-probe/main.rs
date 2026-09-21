@@ -232,9 +232,21 @@ async fn command(line: &str, writer: &mut tokio::io::DuplexStream) -> Result<boo
         "asset" => Some(ParentToBody::AssetRef(AssetRef::Path {
             path: parts.collect::<Vec<_>>().join(" "),
         })),
+        "motions" => {
+            let dir = parts.collect::<Vec<_>>().join(" ");
+            let clips = ene_body::motion::pose_clips_in(std::path::Path::new(&dir));
+            if clips.is_empty() {
+                eprintln!("probe: no mapped motion clips found in {dir}");
+                None
+            } else {
+                Some(ParentToBody::MotionSet(ene_body::ipc::MotionSetInfo {
+                    clips,
+                }))
+            }
+        }
         "help" => {
             eprintln!(
-                "probe commands: show | hide | pose NAME | placement X Y W H SCALE | asset PATH | quit"
+                "probe commands: show | hide | pose NAME | placement X Y W H SCALE | asset PATH | motions DIR | quit"
             );
             None
         }
