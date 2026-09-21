@@ -3136,7 +3136,12 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         cached_input_rate: ene_inference::cost::TokenRate::from_micros_per_million(150_000),
         output_rate: ene_inference::cost::TokenRate::from_micros_per_million(1_200_000),
         effective_at: WallClockWithTz::now(),
-        source_revision: ene_inference::pricing::PricingCatalogRevision::new(2),
+        // Not the reviewed revision: the store keeps one immutable row per
+        // `(provider, model, revision)`, so a changed-price premise must carry a
+        // revision number the reviewed catalog never published.
+        source_revision: ene_inference::pricing::PricingCatalogRevision::new(
+            ene_inference::pricing::FIRST_PARTY_REVISION.as_u64() + 1,
+        ),
     };
     {
         use ene_inference::{
