@@ -277,6 +277,14 @@ fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
 /// The Host-spawned GUI: adopt the inherited confirmation channel and run the
 /// windows.
 fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
+    // Desktop text rendering must remain CPU-only so ene-body is the only
+    // process that owns a GPU device. Skia's software path also provides the
+    // AfterRendering notifier required for interaction evidence.
+    slint::BackendSelector::new()
+        .backend_name(String::from("winit"))
+        .renderer_name(String::from("skia-software"))
+        .select()
+        .map_err(platform_error)?;
     let channel = ene_local_control::GuiChannel::adopt_stdio()
         .map_err(|error| DesktopError::Transport(format!("confirmation channel: {error}")))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

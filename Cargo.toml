@@ -29,7 +29,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 keyring = { version = "4", default-features = false, features = ["v1"] }
 # Provisional preferred text GUI for `apps/ene-desktop` only (winit,
 # Royalty-free Desktop + AboutSlint). Not a Host or Body dependency.
-slint = { version = "1.14", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "unstable-winit-030", "accessibility"] }
+slint = { version = "1.14", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "unstable-winit-030", "accessibility"] }
 slint-build = "1.14"
 hmac = "0.12"
 sha2 = "0.10"
