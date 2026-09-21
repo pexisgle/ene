@@ -287,14 +287,24 @@ impl PricingCatalog {
 
 /// Revision of the compiled-in reviewed catalog. Bump it when any entry
 /// changes; never edit a published revision in place.
-pub const FIRST_PARTY_REVISION: PricingCatalogRevision = PricingCatalogRevision::new(1);
+pub const FIRST_PARTY_REVISION: PricingCatalogRevision = PricingCatalogRevision::new(2);
 
 /// Effective instant of [`FIRST_PARTY_REVISION`].
 const FIRST_PARTY_EFFECTIVE_AT: &str = "2025-06-01T00:00:00Z";
 
 /// Reviewed OpenAI rates in micro-USD per 1,000,000 tokens:
-/// `(model, input, cached input, output)`.
+/// `(model, input, cached input, output)`, Standard processing.
+///
+/// The reviewed rates are the published short-context rates (at most 272K
+/// input tokens). OpenAI charges more above that threshold, and this
+/// single-rate catalog does not model the long-context band; dispatch refuses
+/// prompts over [`crate::MAX_INPUT_CHARS`], far below the boundary.
 const FIRST_PARTY_OPENAI_RATES: &[(&str, u64, u64, u64)] = &[
+    ("gpt-6-astra", 10_000_000, 1_000_000, 50_000_000),
+    ("gpt-5.6-sol", 4_000_000, 400_000, 20_000_000),
+    ("gpt-5.6-terra", 2_000_000, 200_000, 12_000_000),
+    ("gpt-5.6-luna", 200_000, 20_000, 1_200_000),
+    ("gpt-5.5", 5_000_000, 500_000, 30_000_000),
     ("gpt-4o", 2_500_000, 1_250_000, 10_000_000),
     ("gpt-4o-mini", 150_000, 75_000, 600_000),
     ("gpt-4.1", 2_000_000, 500_000, 8_000_000),
@@ -402,6 +412,32 @@ mod tests {
             panic!("a reviewed OpenAI model must resolve");
         };
         assert_eq!(snapshot.reference(), rebuilt.reference());
+    }
+
+    #[test]
+    fn first_party_catalog_prices_the_current_gpt_families() {
+        let catalog = PricingCatalog::first_party().expect("the reviewed table must be valid");
+        let at_value = at("2026-09-21T12:00:00Z");
+        for (model, input, cached_input, output) in [
+            ("gpt-6-astra", 10_000_000, 1_000_000, 50_000_000),
+            ("gpt-5.6-sol", 4_000_000, 400_000, 20_000_000),
+            ("gpt-5.6-terra", 2_000_000, 200_000, 12_000_000),
+            ("gpt-5.6-luna", 200_000, 20_000, 1_200_000),
+            ("gpt-5.5", 5_000_000, 500_000, 30_000_000),
+        ] {
+            let PricingResolution::Priced(snapshot) = catalog.resolve("openai", model, at_value)
+            else {
+                panic!("{model} must resolve its reviewed rate");
+            };
+            assert_eq!(snapshot.input_rate, rate(input), "{model} input rate");
+            assert_eq!(
+                snapshot.cached_input_rate,
+                rate(cached_input),
+                "{model} cached input rate"
+            );
+            assert_eq!(snapshot.output_rate, rate(output), "{model} output rate");
+            assert_eq!(snapshot.source_revision, FIRST_PARTY_REVISION);
+        }
     }
 
     #[test]

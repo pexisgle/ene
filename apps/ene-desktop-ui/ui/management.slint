@@ -47,7 +47,7 @@ component SetupPane inherits Rectangle {
             value <=> root.secret-draft;
             label: "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
         }
-        if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-4.1"; value <=> root.model; enabled: !root.busy; }
+        if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-5.6-luna"; value <=> root.model; enabled: !root.busy; }
         HorizontalLayout {
             spacing: 12px;
             Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { key-field.value = ""; root.back(); } }
@@ -81,7 +81,7 @@ export component ManagementWindow inherits Window {
     in-out property <string> secret-draft;
     in-out property <bool> japanese: true;
     in-out property <int> page: 6;
-    in-out property <string> model: "gpt-4.1";
+    in-out property <string> model: "gpt-5.6-luna";
     in-out property <string> cap-amount: "1";
     in-out property <string> deletion-draft;
     in property <int> step;

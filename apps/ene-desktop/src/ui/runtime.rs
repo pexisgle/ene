@@ -31,7 +31,7 @@ use crate::ui::{Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardSte
 use crate::{BUNDLED_SAMPLE_ASSET, DESKTOP_DESCRIPTOR};
 
 const LOCALE_FILE: &str = "desktop-locale";
-const DEFAULT_MODEL: &str = "gpt-4.1";
+const DEFAULT_MODEL: &str = "gpt-5.6-luna";
 
 /// Headless first-party desktop: the same state the Slint window projects.
 pub struct DesktopRuntime {
