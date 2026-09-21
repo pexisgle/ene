@@ -2,8 +2,8 @@
 
 実施日: 2026-09-21  
 統合 base: `bef697813e9bb10642116d0f1c59a7900fc583f0`  
-実装・自動gate SHA: `7f26f99d3004721be32dfed1aae7e8a12addf3c7`
-環境: Ubuntu 26.04 x86-64、実 GUI session なし（`WAYLAND_DISPLAY` なし）、Windows target は cross-check のみ。
+実装・自動gate SHA: `65625b5453e32ae5e83f759d0ddad05ce364cf1c`
+環境: Ubuntu 26.04 x86-64、isolated X11 software-rendering smoke、Windows desktop なし。
 
 ## 結論
 
@@ -32,7 +32,7 @@ D/F の production candidate と測定経路を実装した。生成 VRM 1.0 fix
 - 全対象PID合算のmachine CPU%、1-core equivalent、PID別0.5-core busy-wait、RSS mean/peakを計算する。Host/Desktop/Bodyの各1 PIDを必須にし、追加常駐processは`--other NAME:PID`で含める。
 - Waylandはsurface commitごとのSubmittedと`wp_presentation` Presented/Discarded/Missingをcorrelation IDで記録する。未解決をMissingへ変換する。frame callbackやrender requestは分子にしない。
 - WindowsはBody PID + swap-chainに限定したPresentMon CSVを読み、warmup後の固定区間だけを選ぶ。標準のms列と旧`TimeInSeconds`を区別し、display timingのない相関行をMissing、drop/`DisplayedTime=NA`行をDiscardedにする。`--presentmon-exe`指定時はBody PID、出力先、計測時間を固定してcapture processも起動・終了確認する。
-- cancel操作はGUI input、Host outcome（intakeより遅い保守的上限）、Slint `AfterRendering`を同じprocess-local monotonic clockで記録する。
+- cancel操作はGUI input、Host outcome（intakeより遅い保守的上限）、Slint `AfterRendering`を同じprocess-local monotonic clockで記録する。DesktopはBody-only GPU境界を守るため明示的にSkia software rendererを選び、paint notifier非対応時はGUIを停止せずevidenceを生成しない（Performance GateはPass不可）。
 - click-throughは実compositor下の窓へ入力が届いた外部raw evidenceを必須にする。自己申告なし、欠測、空evidence、1秒以上のblockはPassにならない。
 - JSONとhuman reportは同じ`MeasurementRecord`から生成する。private verdictにより`evaluate()`以外からPassを構築できない。
 
@@ -98,9 +98,9 @@ click-through JSONは実 compositor 下の別surfaceが透明領域のclickを�
 - `cargo test -p ene-desktop --all-targets -- --test-threads=1`（70 pass）
 - `cargo test -p ene-core --test stage6_e2e -- --test-threads=1`（29 pass）
 - `cargo check -p ene-body --target x86_64-pc-windows-gnu --all-targets`
-- `cargo check -p ene-desktop --target x86_64-pc-windows-gnu`
+- isolated X11で通常起動と`ENE_INTERACTION_TRACE_JSONL`指定起動の両方をsmokeし、Chat / Management window表示とpaint notifier登録エラーが無いことを確認
 
-上記は同じ未commit treeで成功した。integration commit後のCIはPRで別途確認する。
+上記は同じ実装treeで成功した。Windows native CIはPRで別途確認する。
 
 ## 未実施 / blocker
 
