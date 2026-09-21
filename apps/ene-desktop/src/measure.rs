@@ -703,89 +703,91 @@ impl MeasurementRecord {
                 self.elapsed_wall_secs
             ));
         }
-        let Some(cpu) = &self.cpu else {
+        let mut incomplete = false;
+        if let Some(cpu) = &self.cpu {
+            if !cpu.cpu_seconds_sum.is_finite()
+                || cpu.cpu_seconds_sum < 0.0
+                || !cpu.machine_percent.is_finite()
+                || cpu.machine_percent < 0.0
+                || !cpu.one_core_equivalent_sum.is_finite()
+                || cpu.one_core_equivalent_sum < 0.0
+            {
+                self.failures
+                    .push(String::from("CPU aggregate contains invalid values"));
+            } else if cpu.machine_percent > CPU_LIMIT_PERCENT {
+                self.failures.push(format!(
+                    "machine CPU {:.3}% exceeds {CPU_LIMIT_PERCENT}%",
+                    cpu.machine_percent
+                ));
+            }
+            if !cpu.busy_wait_pids.is_empty() {
+                self.failures
+                    .push(format!("busy-wait PIDs: {:?}", cpu.busy_wait_pids));
+            }
+        } else {
             self.failures.push(String::from("CPU is unmeasured"));
-            self.verdict = MeasurementVerdict(VerdictKind::Incomplete);
-            return;
-        };
-        let Some(rss) = &self.rss else {
+            incomplete = true;
+        }
+        if let Some(rss) = &self.rss {
+            if rss.peak_bytes > RSS_LIMIT_BYTES {
+                self.failures.push(format!(
+                    "RSS peak {} exceeds {RSS_LIMIT_BYTES}",
+                    rss.peak_bytes
+                ));
+            }
+        } else {
             self.failures.push(String::from("RSS is unmeasured"));
-            self.verdict = MeasurementVerdict(VerdictKind::Incomplete);
-            return;
-        };
-        let Some(fps) = &self.fps else {
+            incomplete = true;
+        }
+        if let Some(fps) = &self.fps {
+            let expected_body = self
+                .processes
+                .iter()
+                .find(|process| process.role == ProcessRole::Body)
+                .map(|process| process.pid);
+            let measured_body = match &fps.source {
+                PresentationSource::WaylandWpPresentation { body_pid, .. }
+                | PresentationSource::WindowsDisplayTiming { body_pid, .. } => Some(*body_pid),
+            };
+            if measured_body != expected_body {
+                self.failures.push(String::from(
+                    "presentation evidence does not correlate to the measured Body PID",
+                ));
+            }
+            if !fps.passes() {
+                self.failures.push(format!(
+                    "presented FPS {:.3}, missing {}",
+                    fps.actual_fps, fps.missing
+                ));
+            }
+        } else {
             self.failures
                 .push(String::from("presented FPS is unmeasured"));
-            self.verdict = MeasurementVerdict(VerdictKind::Incomplete);
-            return;
-        };
-        let expected_body = self
-            .processes
-            .iter()
-            .find(|process| process.role == ProcessRole::Body)
-            .map(|process| process.pid);
-        let measured_body = match &fps.source {
-            PresentationSource::WaylandWpPresentation { body_pid, .. }
-            | PresentationSource::WindowsDisplayTiming { body_pid, .. } => Some(*body_pid),
-        };
-        if measured_body != expected_body {
-            self.failures.push(String::from(
-                "presentation evidence does not correlate to the measured Body PID",
-            ));
+            incomplete = true;
         }
-        let Some(click_through) = &self.click_through else {
+        if let Some(click_through) = &self.click_through {
+            if !click_through.passes() {
+                self.failures.push(String::from(
+                    "compositor click-through/input-hitch probe failed",
+                ));
+            }
+        } else {
             self.failures
                 .push(String::from("click-through is unmeasured"));
-            self.verdict = MeasurementVerdict(VerdictKind::Incomplete);
-            return;
-        };
+            incomplete = true;
+        }
         if self.interactions.is_empty() {
             self.failures
                 .push(String::from("operation intake is unmeasured"));
-            self.verdict = MeasurementVerdict(VerdictKind::Incomplete);
-            return;
-        }
-        if !self
+            incomplete = true;
+        } else if !self
             .interactions
             .iter()
             .any(|sample| sample.operation == "cancel_task")
         {
             self.failures
                 .push(String::from("cancel_task intake/paint is unmeasured"));
-            self.verdict = MeasurementVerdict(VerdictKind::Incomplete);
-            return;
-        }
-
-        if !cpu.cpu_seconds_sum.is_finite()
-            || cpu.cpu_seconds_sum < 0.0
-            || !cpu.machine_percent.is_finite()
-            || cpu.machine_percent < 0.0
-            || !cpu.one_core_equivalent_sum.is_finite()
-            || cpu.one_core_equivalent_sum < 0.0
-        {
-            self.failures
-                .push(String::from("CPU aggregate contains invalid values"));
-        } else if cpu.machine_percent > CPU_LIMIT_PERCENT {
-            self.failures.push(format!(
-                "machine CPU {:.3}% exceeds {CPU_LIMIT_PERCENT}%",
-                cpu.machine_percent
-            ));
-        }
-        if !cpu.busy_wait_pids.is_empty() {
-            self.failures
-                .push(format!("busy-wait PIDs: {:?}", cpu.busy_wait_pids));
-        }
-        if rss.peak_bytes > RSS_LIMIT_BYTES {
-            self.failures.push(format!(
-                "RSS peak {} exceeds {RSS_LIMIT_BYTES}",
-                rss.peak_bytes
-            ));
-        }
-        if !fps.passes() {
-            self.failures.push(format!(
-                "presented FPS {:.3}, missing {}",
-                fps.actual_fps, fps.missing
-            ));
+            incomplete = true;
         }
         for interaction in &self.interactions {
             if !interaction.passes() {
@@ -795,13 +797,9 @@ impl MeasurementRecord {
                 ));
             }
         }
-        if !click_through.passes() {
-            self.failures.push(String::from(
-                "compositor click-through/input-hitch probe failed",
-            ));
-        }
-
-        self.verdict = if self.failures.is_empty() {
+        self.verdict = if incomplete {
+            MeasurementVerdict(VerdictKind::Incomplete)
+        } else if self.failures.is_empty() {
             MeasurementVerdict(VerdictKind::Pass)
         } else {
             MeasurementVerdict(VerdictKind::Fail)
@@ -1341,6 +1339,46 @@ mod tests {
         assert!(!record.claims_pass());
         record.evaluate();
         assert!(record.claims_pass(), "{:?}", record.failures);
+    }
+
+    #[test]
+    fn missing_evidence_does_not_hide_independent_gate_failures() {
+        let mut record = passing_record();
+        let events = (0..29)
+            .map(|id| PresentationEvent::Presented {
+                correlation_id: id,
+                timestamp_ns: id.saturating_add(1) * 30_000_000,
+                clock_id: 1,
+                output: String::from("fixture-output"),
+            })
+            .collect();
+        record.fps = Some(
+            PresentationRecord::from_events(
+                PresentationSource::WaylandWpPresentation {
+                    body_pid: 3,
+                    surface_id: String::from("wl_surface@7"),
+                },
+                5.0,
+                1.0,
+                events,
+            )
+            .expect("presentation"),
+        );
+        record.click_through = None;
+        record.evaluate();
+        assert_eq!(record.verdict.label(), "Incomplete");
+        assert!(
+            record
+                .failures
+                .iter()
+                .any(|failure| failure == "click-through is unmeasured")
+        );
+        assert!(
+            record
+                .failures
+                .iter()
+                .any(|failure| failure.starts_with("presented FPS 29.000"))
+        );
     }
 
     #[test]

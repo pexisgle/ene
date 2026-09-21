@@ -220,7 +220,12 @@ where
     let mut tmp = [0u8; 4096];
     let mut health = tokio::time::interval(HEALTH_INTERVAL);
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut runtime_tick = tokio::time::interval(std::time::Duration::from_micros(33_333));
+    // The acceptance gate measures displayed frames and requires an average
+    // of at least 30 FPS. Windows display timing observed a scheduler-sized
+    // presentation stall that 30.1 Hz could not absorb in the fixed 60-second
+    // window, so keep a small measured margin without racing the compositor.
+    const RUNTIME_HZ: f32 = 31.0;
+    let mut runtime_tick = tokio::time::interval(std::time::Duration::from_nanos(32_258_065));
     runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut render_paused_until = None;
     let mut seq: u64 = 0;
@@ -288,7 +293,7 @@ where
                 overlay.pump();
                 if overlay.ready_to_render() && !high_load_paused {
                     let started = std::time::Instant::now();
-                    match vrm.update(1.0 / 30.0) {
+                    match vrm.update(1.0 / RUNTIME_HZ) {
                         Ok(meshes) => overlay.render(&meshes),
                         Err(info) => send(&writer, &BodyToParent::AssetFail(info)).await?,
                     }

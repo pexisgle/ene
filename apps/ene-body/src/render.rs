@@ -13,7 +13,10 @@ use std::sync::{
 };
 use wgpu::util::DeviceExt as _;
 
-use crate::vrm::RenderMesh;
+use crate::vrm::{RenderMesh, RenderTexture};
+
+const HIT_TEST_CELL_PIXELS: u32 = 4;
+const VISIBLE_ALPHA_THRESHOLD: f32 = 0.001;
 
 /// A transparent real-surface renderer. VRM deformation stays in
 /// `vrm-runtime`; this deliberately small unlit path is the design-approved
@@ -46,6 +49,362 @@ struct Vertex {
 struct DrawRange {
     indices: Range<u32>,
     texture_id: Option<u64>,
+}
+
+/// Coarse alpha-aware ownership mask for native pointer hit-testing.
+///
+/// Four-pixel cells keep per-frame CPU work bounded while following the
+/// deformed mesh closely enough that transparent desktop space remains owned
+/// by the underlying application. One-cell dilation avoids tiny ungrabbable
+/// gaps around thin geometry and texture-filtered edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HitTestMask {
+    width: u32,
+    height: u32,
+    columns: u32,
+    rows: u32,
+    cells: Vec<bool>,
+    bounds: Option<[u32; 4]>,
+}
+
+impl HitTestMask {
+    pub(crate) fn empty(width: u32, height: u32) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        let columns = width.div_ceil(HIT_TEST_CELL_PIXELS);
+        let rows = height.div_ceil(HIT_TEST_CELL_PIXELS);
+        let len = usize::try_from(u64::from(columns) * u64::from(rows)).unwrap_or(0);
+        Self {
+            width,
+            height,
+            columns,
+            rows,
+            cells: vec![false; len],
+            bounds: None,
+        }
+    }
+
+    pub(crate) fn from_meshes(meshes: &[RenderMesh], width: u32, height: u32) -> Self {
+        let (vertices, indices, draws) = vertices(meshes, width, height);
+        let textures = meshes
+            .iter()
+            .filter_map(|mesh| mesh.texture.as_ref())
+            .map(|texture| (texture.id, texture))
+            .collect::<BTreeMap<_, _>>();
+        Self::from_frame(&vertices, &indices, draws, &textures, width, height)
+    }
+
+    fn from_frame(
+        vertices: &[Vertex],
+        indices: &[u32],
+        draws: Vec<DrawRange>,
+        textures: &BTreeMap<u64, &RenderTexture>,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let mut mask = Self::empty(width, height);
+        for draw in draws {
+            let Ok(start) = usize::try_from(draw.indices.start) else {
+                continue;
+            };
+            let Ok(end) = usize::try_from(draw.indices.end) else {
+                continue;
+            };
+            let Some(draw_indices) = indices.get(start..end) else {
+                continue;
+            };
+            let texture = draw.texture_id.and_then(|id| textures.get(&id).copied());
+            let (triangles, _remainder) = draw_indices.as_chunks::<3>();
+            for triangle in triangles {
+                let Some(a) = vertex_at(vertices, triangle[0]) else {
+                    continue;
+                };
+                let Some(b) = vertex_at(vertices, triangle[1]) else {
+                    continue;
+                };
+                let Some(c) = vertex_at(vertices, triangle[2]) else {
+                    continue;
+                };
+                mask.rasterize_triangle(a, b, c, texture);
+            }
+        }
+        mask.dilate_once();
+        mask
+    }
+
+    pub(crate) fn contains(&self, x: i32, y: i32) -> bool {
+        let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+            return false;
+        };
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        let column = x / HIT_TEST_CELL_PIXELS;
+        let row = y / HIT_TEST_CELL_PIXELS;
+        self.cell(column, row)
+    }
+
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub(crate) fn contains_resize_grip(&self, x: i32, y: i32, grip: u32) -> bool {
+        if !self.contains(x, y) {
+            return false;
+        }
+        let (Ok(x), Ok(y), Some([_, _, _, bottom])) =
+            (u32::try_from(x), u32::try_from(y), self.bounds)
+        else {
+            return false;
+        };
+        let grip_top = bottom.saturating_sub(grip);
+        if y < grip_top {
+            return false;
+        }
+
+        // A character's rightmost and bottommost pixels commonly belong to
+        // different limbs. Requiring their bounding-box corner to be opaque
+        // can therefore leave no resize target at all. Anchor the grip to the
+        // rightmost visible cell in the bottom band instead; the target stays
+        // on rendered character pixels without claiming transparent desktop.
+        let first_row = grip_top / HIT_TEST_CELL_PIXELS;
+        let last_row = bottom
+            .saturating_sub(1)
+            .div_euclid(HIT_TEST_CELL_PIXELS)
+            .min(self.rows.saturating_sub(1));
+        let mut band_right = 0;
+        for row in first_row..=last_row {
+            for column in (0..self.columns).rev() {
+                if self.cell(column, row) {
+                    band_right =
+                        band_right.max(((column + 1) * HIT_TEST_CELL_PIXELS).min(self.width));
+                    break;
+                }
+            }
+        }
+        band_right != 0 && x >= band_right.saturating_sub(grip)
+    }
+
+    /// Returns horizontal runs of owned cells in physical window coordinates.
+    ///
+    /// Windows uses these rectangles to make transparent cells absent from the
+    /// HWND region. Returning row runs instead of one rectangle per cell keeps
+    /// the native region bounded without weakening the alpha-aware mask.
+    pub(crate) fn opaque_rectangles(&self) -> Vec<[u32; 4]> {
+        let mut rectangles = Vec::new();
+        for row in 0..self.rows {
+            let mut column = 0;
+            while column < self.columns {
+                if !self.cell(column, row) {
+                    column += 1;
+                    continue;
+                }
+                let start = column;
+                while column < self.columns && self.cell(column, row) {
+                    column += 1;
+                }
+                rectangles.push([
+                    start * HIT_TEST_CELL_PIXELS,
+                    row * HIT_TEST_CELL_PIXELS,
+                    (column * HIT_TEST_CELL_PIXELS).min(self.width),
+                    ((row + 1) * HIT_TEST_CELL_PIXELS).min(self.height),
+                ]);
+            }
+        }
+        rectangles
+    }
+
+    fn rasterize_triangle(
+        &mut self,
+        a: &Vertex,
+        b: &Vertex,
+        c: &Vertex,
+        texture: Option<&RenderTexture>,
+    ) {
+        let points = [
+            screen_point(a, self.width, self.height),
+            screen_point(b, self.width, self.height),
+            screen_point(c, self.width, self.height),
+        ];
+        let min_x = points
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::INFINITY, f32::min)
+            .max(0.0);
+        let max_x = points
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .min(self.width as f32);
+        let min_y = points
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::INFINITY, f32::min)
+            .max(0.0);
+        let max_y = points
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .min(self.height as f32);
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+        let first_column = (min_x as u32 / HIT_TEST_CELL_PIXELS).min(self.columns - 1);
+        let last_column = (max_x as u32 / HIT_TEST_CELL_PIXELS).min(self.columns - 1);
+        let first_row = (min_y as u32 / HIT_TEST_CELL_PIXELS).min(self.rows - 1);
+        let last_row = (max_y as u32 / HIT_TEST_CELL_PIXELS).min(self.rows - 1);
+        for row in first_row..=last_row {
+            for column in first_column..=last_column {
+                let point = [
+                    (column * HIT_TEST_CELL_PIXELS) as f32 + HIT_TEST_CELL_PIXELS as f32 * 0.5,
+                    (row * HIT_TEST_CELL_PIXELS) as f32 + HIT_TEST_CELL_PIXELS as f32 * 0.5,
+                ];
+                let Some(weights) = barycentric(point, points) else {
+                    continue;
+                };
+                if fragment_alpha(a, b, c, weights, texture) > VISIBLE_ALPHA_THRESHOLD {
+                    self.mark(column, row);
+                }
+            }
+        }
+        // Geometry smaller than one mask cell may not contain a cell center.
+        // Retain its visible vertices before dilation so it remains draggable.
+        for (vertex, point) in [(a, points[0]), (b, points[1]), (c, points[2])] {
+            if vertex_alpha(vertex, texture) > VISIBLE_ALPHA_THRESHOLD {
+                let column =
+                    ((point[0].max(0.0) as u32) / HIT_TEST_CELL_PIXELS).min(self.columns - 1);
+                let row = ((point[1].max(0.0) as u32) / HIT_TEST_CELL_PIXELS).min(self.rows - 1);
+                self.mark(column, row);
+            }
+        }
+    }
+
+    fn dilate_once(&mut self) {
+        let original = self.cells.clone();
+        for row in 0..self.rows {
+            for column in 0..self.columns {
+                let Some(index) = self.index(column, row) else {
+                    continue;
+                };
+                if !original.get(index).copied().unwrap_or(false) {
+                    continue;
+                }
+                for y in row.saturating_sub(1)..=(row + 1).min(self.rows - 1) {
+                    for x in column.saturating_sub(1)..=(column + 1).min(self.columns - 1) {
+                        self.mark(x, y);
+                    }
+                }
+            }
+        }
+    }
+
+    fn mark(&mut self, column: u32, row: u32) {
+        let Some(index) = self.index(column, row) else {
+            return;
+        };
+        let Some(cell) = self.cells.get_mut(index) else {
+            return;
+        };
+        *cell = true;
+        let left = column * HIT_TEST_CELL_PIXELS;
+        let top = row * HIT_TEST_CELL_PIXELS;
+        let right = ((column + 1) * HIT_TEST_CELL_PIXELS).min(self.width);
+        let bottom = ((row + 1) * HIT_TEST_CELL_PIXELS).min(self.height);
+        self.bounds = Some(match self.bounds {
+            Some([old_left, old_top, old_right, old_bottom]) => [
+                old_left.min(left),
+                old_top.min(top),
+                old_right.max(right),
+                old_bottom.max(bottom),
+            ],
+            None => [left, top, right, bottom],
+        });
+    }
+
+    fn cell(&self, column: u32, row: u32) -> bool {
+        self.index(column, row)
+            .and_then(|index| self.cells.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn index(&self, column: u32, row: u32) -> Option<usize> {
+        if column >= self.columns || row >= self.rows {
+            return None;
+        }
+        usize::try_from(u64::from(row) * u64::from(self.columns) + u64::from(column)).ok()
+    }
+}
+
+fn vertex_at(vertices: &[Vertex], index: u32) -> Option<&Vertex> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| vertices.get(index))
+}
+
+fn screen_point(vertex: &Vertex, width: u32, height: u32) -> [f32; 2] {
+    [
+        (vertex.position[0] * 0.5 + 0.5) * width as f32,
+        (0.5 - vertex.position[1] * 0.5) * height as f32,
+    ]
+}
+
+fn barycentric(point: [f32; 2], triangle: [[f32; 2]; 3]) -> Option<[f32; 3]> {
+    let [a, b, c] = triangle;
+    let denominator = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+    if denominator.abs() <= f32::EPSILON {
+        return None;
+    }
+    let first =
+        ((b[1] - c[1]) * (point[0] - c[0]) + (c[0] - b[0]) * (point[1] - c[1])) / denominator;
+    let second =
+        ((c[1] - a[1]) * (point[0] - c[0]) + (a[0] - c[0]) * (point[1] - c[1])) / denominator;
+    let third = 1.0 - first - second;
+    (first >= 0.0 && second >= 0.0 && third >= 0.0).then_some([first, second, third])
+}
+
+fn fragment_alpha(
+    a: &Vertex,
+    b: &Vertex,
+    c: &Vertex,
+    weights: [f32; 3],
+    texture: Option<&RenderTexture>,
+) -> f32 {
+    let vertex_alpha = a.color[3] * weights[0] + b.color[3] * weights[1] + c.color[3] * weights[2];
+    let uv = [
+        a.uv[0] * weights[0] + b.uv[0] * weights[1] + c.uv[0] * weights[2],
+        a.uv[1] * weights[0] + b.uv[1] * weights[1] + c.uv[1] * weights[2],
+    ];
+    vertex_alpha * texture_alpha(texture, uv)
+}
+
+fn vertex_alpha(vertex: &Vertex, texture: Option<&RenderTexture>) -> f32 {
+    vertex.color[3] * texture_alpha(texture, vertex.uv)
+}
+
+fn texture_alpha(texture: Option<&RenderTexture>, uv: [f32; 2]) -> f32 {
+    let Some(texture) = texture else {
+        return 1.0;
+    };
+    if texture.width == 0 || texture.height == 0 {
+        return 0.0;
+    }
+    let x = ((uv[0].rem_euclid(1.0) * texture.width as f32).floor() as u32).min(texture.width - 1);
+    let y =
+        ((uv[1].rem_euclid(1.0) * texture.height as f32).floor() as u32).min(texture.height - 1);
+    let offset = u64::from(y)
+        .checked_mul(u64::from(texture.width))
+        .and_then(|row| row.checked_add(u64::from(x)))
+        .and_then(|pixel| pixel.checked_mul(4))
+        .and_then(|byte| byte.checked_add(3))
+        .and_then(|offset| usize::try_from(offset).ok());
+    offset
+        .and_then(|offset| texture.rgba.get(offset))
+        .map_or(0.0, |alpha| f32::from(*alpha) / 255.0)
 }
 
 /// Surface rendering failure. The platform thread reports this to the parent
@@ -598,4 +957,99 @@ fn create_depth(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn triangle_vertices() -> Vec<Vertex> {
+        vec![
+            Vertex {
+                position: [-0.8, 0.8, 0.5],
+                color: [1.0; 4],
+                uv: [0.5, 0.5],
+            },
+            Vertex {
+                position: [-0.8, -0.8, 0.5],
+                color: [1.0; 4],
+                uv: [0.5, 0.5],
+            },
+            Vertex {
+                position: [0.2, 0.0, 0.5],
+                color: [1.0; 4],
+                uv: [0.5, 0.5],
+            },
+        ]
+    }
+
+    #[test]
+    fn hit_test_mask_owns_visible_triangle_not_its_window() {
+        let mask = HitTestMask::from_frame(
+            &triangle_vertices(),
+            &[0, 1, 2],
+            vec![DrawRange {
+                indices: 0..3,
+                texture_id: None,
+            }],
+            &BTreeMap::new(),
+            100,
+            100,
+        );
+        assert!(mask.contains(25, 50));
+        assert!(!mask.contains(90, 90));
+        assert!(!mask.contains_resize_grip(90, 90, 16));
+    }
+
+    #[test]
+    fn resize_grip_uses_bottom_band_when_right_and_bottom_extents_differ() {
+        let mut mask = HitTestMask::empty(100, 100);
+        mask.mark(24, 5);
+        mask.mark(4, 24);
+
+        assert!(mask.contains_resize_grip(18, 98, 16));
+        assert!(!mask.contains_resize_grip(98, 22, 16));
+        assert!(!mask.contains_resize_grip(40, 98, 16));
+    }
+
+    #[test]
+    fn fully_transparent_texture_does_not_own_pointer_input() {
+        let transparent = RenderTexture {
+            id: 7,
+            width: 1,
+            height: 1,
+            rgba: Arc::<[u8]>::from([255, 255, 255, 0]),
+        };
+        let textures = BTreeMap::from([(transparent.id, &transparent)]);
+        let mask = HitTestMask::from_frame(
+            &triangle_vertices(),
+            &[0, 1, 2],
+            vec![DrawRange {
+                indices: 0..3,
+                texture_id: Some(transparent.id),
+            }],
+            &textures,
+            100,
+            100,
+        );
+        assert!(!mask.contains(25, 50));
+        assert!(mask.opaque_rectangles().is_empty());
+    }
+
+    #[test]
+    fn opaque_rectangles_coalesce_horizontal_cells_and_clip_edges() {
+        let mut mask = HitTestMask::empty(10, 6);
+        mask.mark(0, 0);
+        mask.mark(1, 0);
+        mask.mark(2, 1);
+        assert_eq!(mask.opaque_rectangles(), vec![[0, 0, 8, 4], [8, 4, 10, 6]]);
+    }
+
+    #[test]
+    fn resized_empty_mask_has_no_owned_rectangles() {
+        let mask = HitTestMask::empty(630, 960);
+        assert_eq!(mask.width(), 630);
+        assert_eq!(mask.height(), 960);
+        assert!(mask.opaque_rectangles().is_empty());
+    }
 }

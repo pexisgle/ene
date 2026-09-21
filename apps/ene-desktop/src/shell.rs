@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -12,8 +12,8 @@ use ene_desktop::measure::{InteractionSample, InteractionTraceLine, monotonic_ns
 use ene_desktop::ui::presentation::{SurfaceSnapshot, parse_cap};
 use ene_desktop::ui::{DesktopError, DesktopRuntime};
 use ene_desktop_ui::{ChatWindow, Item, ManagementWindow, Message};
-use slint::winit_030::WinitWindowAccessor;
-use slint::{ComponentHandle, Model, ModelRc, RenderingState, VecModel};
+use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tokio::sync::{Notify, oneshot};
 use zeroize::Zeroizing;
 
@@ -278,11 +278,11 @@ fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
 /// windows.
 fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     // Desktop text rendering must remain CPU-only so ene-body is the only
-    // process that owns a GPU device. Skia's software path also provides the
-    // AfterRendering notifier required for interaction evidence.
+    // process that owns a GPU device. Slint's software renderer also avoids
+    // the blank Windows Skia surface observed before the first native damage.
     slint::BackendSelector::new()
         .backend_name(String::from("winit"))
-        .renderer_name(String::from("skia-software"))
+        .renderer_name(String::from("software"))
         .select()
         .map_err(platform_error)?;
     let channel = ene_local_control::GuiChannel::adopt_stdio()
@@ -315,6 +315,7 @@ fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     bind(&surfaces, &chat, &management);
     attach_erasure(&mut desktop, surfaces.clone());
     management.show().map_err(platform_error)?;
+    request_post_show_redraw(&management);
     surfaces.submit(Command::Startup, 3);
     runtime.spawn(worker(desktop, surfaces));
     let result = slint::run_event_loop().map_err(platform_error);
@@ -332,36 +333,53 @@ fn install_interaction_notifier(chat: &ChatWindow, surfaces: &Surfaces) -> bool 
     else {
         return false;
     };
-    let installed = chat
-        .window()
-        .set_rendering_notifier(move |state, _graphics| {
-            if !matches!(state, RenderingState::AfterRendering) {
-                return;
+    let completion_scheduled = Arc::new(AtomicBool::new(false));
+    chat.window().on_winit_window_event(move |_window, event| {
+        if matches!(event, winit::event::WindowEvent::RedrawRequested) {
+            let has_pending = !pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty();
+            if has_pending && !completion_scheduled.swap(true, Ordering::SeqCst) {
+                let pending = Arc::clone(&pending);
+                let trace_path = trace_path.clone();
+                let scheduled_for_completion = Arc::clone(&completion_scheduled);
+                let queued = slint::invoke_from_event_loop(move || {
+                    // The winit event filter runs before Slint handles
+                    // RedrawRequested. A queued event-loop callback therefore
+                    // runs only after that draw call returned, and records the
+                    // first paint containing the already-applied Host outcome.
+                    let paints = drain_painted_interactions(&pending, monotonic_ns());
+                    for sample in paints {
+                        append_interaction_trace(&trace_path, sample);
+                    }
+                    scheduled_for_completion.store(false, Ordering::SeqCst);
+                });
+                if queued.is_err() {
+                    completion_scheduled.store(false, Ordering::SeqCst);
+                }
             }
-            let paints = {
-                let mut pending = pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pending.drain(..).collect::<Vec<_>>()
-            };
-            let painted = monotonic_ns();
-            for paint in paints {
-                let sample = InteractionSample {
-                    operation: paint.start.operation.to_string(),
-                    input_monotonic_ns: paint.start.input_monotonic_ns,
-                    host_intake_monotonic_ns: paint.host_intake_monotonic_ns,
-                    gui_painted_monotonic_ns: painted,
-                };
-                append_interaction_trace(&trace_path, sample);
-            }
-        });
-    match installed {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("interaction paint evidence unavailable: {error}");
-            false
         }
-    }
+        EventResult::Propagate
+    });
+    true
+}
+
+fn drain_painted_interactions(
+    pending: &Mutex<VecDeque<PendingPaint>>,
+    painted_monotonic_ns: u64,
+) -> Vec<InteractionSample> {
+    pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+        .map(|paint| InteractionSample {
+            operation: paint.start.operation.to_string(),
+            input_monotonic_ns: paint.start.input_monotonic_ns,
+            host_intake_monotonic_ns: paint.host_intake_monotonic_ns,
+            gui_painted_monotonic_ns: painted_monotonic_ns,
+        })
+        .collect()
 }
 
 fn append_interaction_trace(path: &std::path::Path, sample: InteractionSample) {
@@ -388,12 +406,33 @@ fn append_interaction_trace(path: &std::path::Path, sample: InteractionSample) {
     };
     let _result = std::io::Write::write_all(&mut file, &encoded);
 }
-fn show<C: ComponentHandle>(window: &C) {
+fn show<C: ComponentHandle + 'static>(window: &C) {
     match window.show() {
         Ok(_) | Err(_) => {}
     }
     window.window().set_minimized(false);
     window.window().with_winit_window(|w| w.focus_window());
+    // The Windows skia-software surface can retain its white pre-show buffer
+    // when visibility changes before Slint has a damage event. Moving the
+    // native window happens to create damage, but first-party content must be
+    // painted without requiring that unrelated user gesture.
+    request_post_show_redraw(window);
+}
+
+fn request_post_show_redraw<C: ComponentHandle + 'static>(window: &C) {
+    window.window().request_redraw();
+    window
+        .window()
+        .with_winit_window(|window| window.request_redraw());
+    let weak = window.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(32), move || {
+        if let Some(window) = weak.upgrade() {
+            window.window().request_redraw();
+            window
+                .window()
+                .with_winit_window(|window| window.request_redraw());
+        }
+    });
 }
 fn bind(s: &Surfaces, c: &ChatWindow, m: &ManagementWindow) {
     c.on_open_management({
@@ -691,6 +730,7 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         if request.epoch != s.mailbox.epoch.load(Ordering::SeqCst) {
             continue;
         }
+        let startup = matches!(&request.command, Command::Startup);
         let reset_step = matches!(&request.command, Command::Startup | Command::Confirm(_));
         let confirmation_action = matches!(
             &request.command,
@@ -725,6 +765,9 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         if slint::invoke_from_event_loop(move || {
             if let (Some(c),Some(m))=(surfaces.chat.upgrade(),surfaces.management.upgrade()) {
                 apply(&c,&m,&snap,reset_step);
+                if startup {
+                    request_post_show_redraw(&m);
+                }
                 c.set_busy(surfaces.mailbox.pending[1].load(Ordering::SeqCst)>0);
                 c.set_task_busy(surfaces.mailbox.pending[2].load(Ordering::SeqCst)>0);
                 m.set_busy(surfaces.mailbox.pending[3].load(Ordering::SeqCst)>0);
@@ -1088,5 +1131,23 @@ mod tests {
             assert!(mailbox.push(Command::History, 1));
         }
         assert!(!mailbox.push(Command::Send("not accepted".into()), 1));
+    }
+
+    #[test]
+    fn completed_redraw_drains_pending_interaction_with_paint_timestamp() {
+        let pending = Mutex::new(VecDeque::from([PendingPaint {
+            start: InteractionStart {
+                operation: "cancel_task",
+                input_monotonic_ns: 10,
+            },
+            host_intake_monotonic_ns: 20,
+        }]));
+        let samples = drain_painted_interactions(&pending, 30);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].operation, "cancel_task");
+        assert_eq!(samples[0].input_monotonic_ns, 10);
+        assert_eq!(samples[0].host_intake_monotonic_ns, 20);
+        assert_eq!(samples[0].gui_painted_monotonic_ns, 30);
+        assert!(pending.lock().expect("pending paint lock").is_empty());
     }
 }

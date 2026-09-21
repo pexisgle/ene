@@ -10,8 +10,9 @@ mod imp {
     };
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, GetStockObject, HOLLOW_BRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-        MonitorFromWindow, ScreenToClient,
+        CreateRectRgn, DeleteObject, ExtCreateRegion, GetMonitorInfoW, GetStockObject,
+        HOLLOW_BRUSH, HRGN, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, ScreenToClient, SetWindowRgn,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::HiDpi::{
@@ -31,7 +32,7 @@ mod imp {
     use crate::ipc::{
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
     };
-    use crate::render::{RenderFailure, SurfaceRenderer};
+    use crate::render::{HitTestMask, RenderFailure, RenderOutcome, SurfaceRenderer};
     use crate::window::OverlayProbe;
 
     const CLASS_NAME: &[u16] = &[
@@ -111,6 +112,11 @@ mod imp {
                 placement,
                 events: VecDeque::new(),
                 hidden: true,
+                hit_test_mask: HitTestMask::empty(placement.width, placement.height),
+                region_dirty: true,
+                defer_region_refresh_once: false,
+                region_failed: false,
+                dpi_resize_in_progress: false,
             });
             let state_ptr = std::ptr::from_mut::<WindowState>(&mut state);
             // SAFETY: class is registered, state_ptr remains stable in Box for
@@ -150,6 +156,16 @@ mod imp {
                     SWP_NOACTIVATE | SWP_NOZORDER,
                 )
             };
+            let initial_mask = HitTestMask::empty(initial_width, initial_height);
+            if let Err(reason) = apply_input_region(hwnd, &initial_mask) {
+                // SAFETY: hwnd was successfully created and has not yet been
+                // transferred into WindowsOverlay.
+                unsafe { DestroyWindow(hwnd) };
+                return Err(reason);
+            }
+            state.hit_test_mask = initial_mask;
+            state.region_dirty = true;
+            state.region_failed = false;
             // DirectComposition supplies the per-pixel alpha. A layered/GDI
             // redirection bitmap would put an opaque surface behind the visual.
             let mut gpu_failure = None;
@@ -203,9 +219,10 @@ mod imp {
 
         pub fn set_visible(&mut self, visible: bool) {
             self.visible = visible;
-            self.state.hidden = !visible;
+            let show = visible && self.renderer.is_some() && !self.state.region_failed;
+            self.state.hidden = !show;
             // SAFETY: hwnd is live and owned by this object.
-            unsafe { ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+            unsafe { ShowWindow(self.hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
         }
 
         pub fn visible(&self) -> bool {
@@ -233,6 +250,7 @@ mod imp {
             if let Some(renderer) = &mut self.renderer {
                 renderer.resize(physical_width, physical_height);
             }
+            self.state.region_dirty = true;
         }
 
         pub fn placement(&self) -> PlacementBox {
@@ -249,6 +267,9 @@ mod imp {
 
         pub fn pump(&mut self) {
             self.pump_messages();
+            if self.state.region_failed {
+                self.fail_surface();
+            }
         }
 
         pub fn ready_to_render(&self) -> bool {
@@ -259,12 +280,50 @@ mod imp {
             if !self.ready_to_render() {
                 return;
             }
-            if let Some(renderer) = &mut self.renderer
-                && let Err(failure) = renderer.render(meshes)
-            {
-                self.renderer = None;
-                self.gpu_failure = Some(gpu_info(failure));
+            let outcome = self
+                .renderer
+                .as_mut()
+                .map(|renderer| renderer.render(meshes));
+            match outcome {
+                Some(Ok(RenderOutcome::Presented)) => {
+                    if should_refresh_input_region(
+                        self.state.region_dirty,
+                        &mut self.state.defer_region_refresh_once,
+                    ) {
+                        let hit_test_mask = HitTestMask::from_meshes(
+                            meshes,
+                            physical(self.state.placement.width, self.state.placement.scale),
+                            physical(self.state.placement.height, self.state.placement.scale),
+                        );
+                        if self.state.hit_test_mask == hit_test_mask && !self.state.region_dirty {
+                            return;
+                        }
+                        if apply_input_region(self.hwnd, &hit_test_mask).is_err() {
+                            self.fail_surface();
+                        } else {
+                            self.state.hit_test_mask = hit_test_mask;
+                            self.state.region_dirty = false;
+                        }
+                    }
+                }
+                Some(Ok(RenderOutcome::Skipped)) | None => {}
+                Some(Err(failure)) => {
+                    self.renderer = None;
+                    self.gpu_failure = Some(gpu_info(failure));
+                }
             }
+        }
+
+        fn fail_surface(&mut self) {
+            self.renderer = None;
+            self.gpu_failure = Some(GpuFailInfo {
+                reason: GpuFailReason::Surface,
+            });
+            self.state.region_failed = true;
+            self.state.hidden = true;
+            // SAFETY: hwnd is live and hiding it prevents a stale region from
+            // intercepting desktop input after native region failure.
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
         }
 
         fn pump_messages(&mut self) {
@@ -296,6 +355,13 @@ mod imp {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(width, height);
                 }
+                if (
+                    self.state.hit_test_mask.width(),
+                    self.state.hit_test_mask.height(),
+                ) != (width, height)
+                {
+                    self.state.region_dirty = true;
+                }
             }
         }
     }
@@ -312,6 +378,28 @@ mod imp {
         placement: PlacementBox,
         events: VecDeque<LocalUiFact>,
         hidden: bool,
+        hit_test_mask: HitTestMask,
+        region_dirty: bool,
+        defer_region_refresh_once: bool,
+        region_failed: bool,
+        dpi_resize_in_progress: bool,
+    }
+
+    /// Alpha-region rasterization walks every rendered triangle. Refreshing it
+    /// on alternate presented frames caps pointer-region lag at roughly 65 ms
+    /// while leaving the visual presentation cadence unchanged. Dirty geometry
+    /// (startup, resize, or DPI transition) always refreshes immediately.
+    fn should_refresh_input_region(region_dirty: bool, defer_once: &mut bool) -> bool {
+        if region_dirty {
+            *defer_once = true;
+            return true;
+        }
+        if *defer_once {
+            *defer_once = false;
+            return false;
+        }
+        *defer_once = true;
+        true
     }
 
     unsafe extern "system" fn window_proc(
@@ -341,23 +429,16 @@ mod imp {
                 unsafe { ScreenToClient(hwnd, &mut point) };
                 // SAFETY: state pointer validity established above.
                 let placement = unsafe { (*state).placement };
-                let width = f64::from(physical(placement.width, placement.scale));
-                let height = f64::from(physical(placement.height, placement.scale));
-                let resize_width = physical(placement.width, placement.scale);
-                let resize_height = physical(placement.height, placement.scale);
                 let grip = physical(32, placement.scale);
-                if point.x >= i32::try_from(resize_width.saturating_sub(grip)).unwrap_or(i32::MAX)
-                    && point.y
-                        >= i32::try_from(resize_height.saturating_sub(grip)).unwrap_or(i32::MAX)
-                {
+                // SAFETY: state pointer validity established above.
+                let hit_test_mask = unsafe { &(*state).hit_test_mask };
+                if hit_test_mask.contains_resize_grip(point.x, point.y, grip) {
                     return HTBOTTOMRIGHT as LRESULT;
                 }
-                let nx = (f64::from(point.x) - width * 0.5) / (width * 0.38);
-                let ny = (f64::from(point.y) - height * 0.52) / (height * 0.48);
-                if nx * nx + ny * ny > 1.0 {
-                    return HTTRANSPARENT as LRESULT;
+                if hit_test_mask.contains(point.x, point.y) {
+                    return HTCAPTION as LRESULT;
                 }
-                return HTCAPTION as LRESULT;
+                return HTTRANSPARENT as LRESULT;
             }
             WM_NCCALCSIZE if wparam != 0 => return 0,
             WM_MOVE if !state.is_null() => {
@@ -385,9 +466,18 @@ mod imp {
                     let height = logical(physical_height, (*state).placement.scale);
                     (*state).placement.width = width;
                     (*state).placement.height = height;
-                    (*state)
-                        .events
-                        .push_back(LocalUiFact::Resize { width, height });
+                    if !(*state).dpi_resize_in_progress {
+                        (*state)
+                            .events
+                            .push_back(LocalUiFact::Resize { width, height });
+                    }
+                    // SetWindowRgn can fail transiently while Windows is in a
+                    // DPI/interactive-size transaction. Keep the last
+                    // displayed silhouette (automatically clipped to the new
+                    // HWND bounds) and force replacement only after the next
+                    // actual presentation. A skipped frame must not publish a
+                    // region for pixels that were never shown.
+                    (*state).region_dirty = true;
                 }
                 return 0;
             }
@@ -397,18 +487,32 @@ mod imp {
                     // SAFETY: WM_DPICHANGED lparam is a suggested RECT.
                     let rect = unsafe { *suggested };
                     let dpi = (wparam as u32 & 0xffff).max(96);
+                    // Keep the user-selected logical extent stable across
+                    // monitors. Reusing the suggested physical extent and
+                    // then reporting its WM_SIZE as a user resize compounds
+                    // the scale factor on each 100%↔125% transition.
+                    // SAFETY: state pointer validity was established above.
+                    let (width, height) = unsafe {
+                        (
+                            physical((*state).placement.width, dpi as f32 / 96.0),
+                            physical((*state).placement.height, dpi as f32 / 96.0),
+                        )
+                    };
                     // SAFETY: hwnd is live and rectangle is compositor supplied.
                     unsafe {
                         (*state).placement.scale = dpi as f32 / 96.0;
+                        (*state).region_dirty = true;
+                        (*state).dpi_resize_in_progress = true;
                         SetWindowPos(
                             hwnd,
                             std::ptr::null_mut(),
                             rect.left,
                             rect.top,
-                            rect.right - rect.left,
-                            rect.bottom - rect.top,
+                            i32::try_from(width).unwrap_or(i32::MAX),
+                            i32::try_from(height).unwrap_or(i32::MAX),
                             SWP_NOACTIVATE | SWP_NOZORDER,
                         );
+                        (*state).dpi_resize_in_progress = false;
                     }
                 }
                 return 0;
@@ -441,6 +545,107 @@ mod imp {
     fn logical(physical: u32, scale: f32) -> u32 {
         ((physical as f64 / f64::from(scale.max(f32::EPSILON))).round() as u64)
             .clamp(1, u64::from(u32::MAX)) as u32
+    }
+
+    fn apply_input_region(hwnd: HWND, mask: &HitTestMask) -> Result<(), String> {
+        let region = create_input_region(mask)?;
+        // SAFETY: hwnd is live and region is a valid GDI region. On success
+        // Windows takes ownership; on failure this process still owns it.
+        if unsafe { SetWindowRgn(hwnd, region, 1) } == 0 {
+            // SAFETY: SetWindowRgn failed, so ownership was not transferred.
+            unsafe { DeleteObject(region as _) };
+            return Err(String::from("failed to apply alpha-aware window region"));
+        }
+        Ok(())
+    }
+
+    fn create_input_region(mask: &HitTestMask) -> Result<HRGN, String> {
+        create_region_from_rectangles(&mask.opaque_rectangles())
+    }
+
+    fn create_region_from_rectangles(rectangles: &[[u32; 4]]) -> Result<HRGN, String> {
+        if rectangles.is_empty() {
+            // SAFETY: coordinates describe a valid empty region.
+            let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+            return if region.is_null() {
+                Err(String::from("failed to create empty window region"))
+            } else {
+                Ok(region)
+            };
+        }
+
+        let native = rectangles
+            .iter()
+            .map(|rectangle| {
+                Ok(RECT {
+                    left: i32::try_from(rectangle[0])
+                        .map_err(|_| String::from("window region exceeds i32"))?,
+                    top: i32::try_from(rectangle[1])
+                        .map_err(|_| String::from("window region exceeds i32"))?,
+                    right: i32::try_from(rectangle[2])
+                        .map_err(|_| String::from("window region exceeds i32"))?,
+                    bottom: i32::try_from(rectangle[3])
+                        .map_err(|_| String::from("window region exceeds i32"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let rect_bytes = native
+            .len()
+            .checked_mul(std::mem::size_of::<RECT>())
+            .ok_or_else(|| String::from("window region data is too large"))?;
+        let data_bytes = std::mem::size_of::<RGNDATAHEADER>()
+            .checked_add(rect_bytes)
+            .ok_or_else(|| String::from("window region data is too large"))?;
+        let count = u32::try_from(native.len())
+            .map_err(|_| String::from("too many window region rectangles"))?;
+        let rect_bytes_u32 = u32::try_from(rect_bytes)
+            .map_err(|_| String::from("window region data is too large"))?;
+        let data_bytes_u32 = u32::try_from(data_bytes)
+            .map_err(|_| String::from("window region data is too large"))?;
+        let bounds = native.iter().fold(
+            RECT {
+                left: i32::MAX,
+                top: i32::MAX,
+                right: i32::MIN,
+                bottom: i32::MIN,
+            },
+            |bounds, rectangle| RECT {
+                left: bounds.left.min(rectangle.left),
+                top: bounds.top.min(rectangle.top),
+                right: bounds.right.max(rectangle.right),
+                bottom: bounds.bottom.max(rectangle.bottom),
+            },
+        );
+        let header = RGNDATAHEADER {
+            dwSize: u32::try_from(std::mem::size_of::<RGNDATAHEADER>())
+                .map_err(|_| String::from("window region header is too large"))?,
+            iType: RDH_RECTANGLES,
+            nCount: count,
+            nRgnSize: rect_bytes_u32,
+            rcBound: bounds,
+        };
+        let words = data_bytes.div_ceil(std::mem::size_of::<u64>());
+        let mut storage = vec![0_u64; words];
+        let data = storage.as_mut_ptr().cast::<u8>();
+        // SAFETY: the u64 allocation is aligned for RGNDATAHEADER and RECT,
+        // data_bytes reserves the header followed by every native rectangle,
+        // and both destinations are non-overlapping initialized slots.
+        unsafe {
+            std::ptr::write(data.cast::<RGNDATAHEADER>(), header);
+            let destination = data
+                .add(std::mem::size_of::<RGNDATAHEADER>())
+                .cast::<RECT>();
+            std::ptr::copy_nonoverlapping(native.as_ptr(), destination, native.len());
+        }
+        // SAFETY: data points to a complete RGNDATAHEADER followed by nCount
+        // RECT values for the duration of this call.
+        let region =
+            unsafe { ExtCreateRegion(std::ptr::null(), data_bytes_u32, data.cast::<RGNDATA>()) };
+        if region.is_null() {
+            Err(String::from("failed to create alpha-aware window region"))
+        } else {
+            Ok(region)
+        }
     }
 
     fn gpu_info(failure: RenderFailure) -> GpuFailInfo {
@@ -490,6 +695,55 @@ mod imp {
         match WindowsOverlay::open(false) {
             Ok(_) => OverlayProbe::Available,
             Err(reason) => OverlayProbe::Unavailable { reason },
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows_sys::Win32::Graphics::Gdi::PtInRegion;
+
+        #[test]
+        fn native_region_contains_only_supplied_visible_runs() {
+            let region = create_region_from_rectangles(&[[0, 0, 8, 4], [8, 4, 12, 8]])
+                .expect("create region");
+            // SAFETY: region is live until DeleteObject below.
+            unsafe {
+                assert_ne!(PtInRegion(region, 2, 2), 0);
+                assert_ne!(PtInRegion(region, 10, 6), 0);
+                assert_eq!(PtInRegion(region, 10, 2), 0);
+                assert_eq!(PtInRegion(region, 2, 6), 0);
+                assert_ne!(DeleteObject(region as _), 0);
+            }
+        }
+
+        #[test]
+        fn native_empty_region_owns_no_point() {
+            let region = create_region_from_rectangles(&[]).expect("create empty region");
+            // SAFETY: region is live until DeleteObject below.
+            unsafe {
+                assert_eq!(PtInRegion(region, 0, 0), 0);
+                assert_ne!(DeleteObject(region as _), 0);
+            }
+        }
+
+        #[test]
+        fn invalid_native_rectangle_fails_before_ownership_transfer() {
+            let result = create_region_from_rectangles(&[[0, 0, u32::MAX, 4]]);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn input_region_refreshes_immediately_then_on_alternate_presented_frames() {
+            let mut defer_once = false;
+            assert!(should_refresh_input_region(true, &mut defer_once));
+            assert!(defer_once);
+            assert!(!should_refresh_input_region(false, &mut defer_once));
+            assert!(!defer_once);
+            assert!(should_refresh_input_region(false, &mut defer_once));
+            assert!(defer_once);
+            assert!(should_refresh_input_region(true, &mut defer_once));
+            assert!(defer_once);
         }
     }
 }
