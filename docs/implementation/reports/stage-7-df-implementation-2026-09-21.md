@@ -2,7 +2,7 @@
 
 実施日: 2026-09-21  
 統合 base: `bef697813e9bb10642116d0f1c59a7900fc583f0`  
-実装・自動gate SHA: `97f2eff29347fab6a0f0159a47fbe95758faf874`
+実装・自動gate SHA: `7f26f99d3004721be32dfed1aae7e8a12addf3c7`
 環境: Ubuntu 26.04 x86-64、実 GUI session なし（`WAYLAND_DISPLAY` なし）、Windows target は cross-check のみ。
 
 ## 結論
@@ -97,7 +97,7 @@ click-through JSONは実 compositor 下の別surfaceが透明領域のclickを�
 - `cargo test -p ene-body --all-targets`（26 pass）
 - `cargo test -p ene-desktop --all-targets -- --test-threads=1`（70 pass）
 - `cargo test -p ene-core --test stage6_e2e -- --test-threads=1`（29 pass）
-- `cargo check -p ene-body --target x86_64-pc-windows-gnu`
+- `cargo check -p ene-body --target x86_64-pc-windows-gnu --all-targets`
 - `cargo check -p ene-desktop --target x86_64-pc-windows-gnu`
 
 上記は同じ未commit treeで成功した。integration commit後のCIはPRで別途確認する。
