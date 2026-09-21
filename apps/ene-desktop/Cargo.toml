@@ -28,6 +28,13 @@ tokio.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 slint = { workspace = true }
+csv.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_ProcessStatus"] }
 
 [dev-dependencies]
 ene-core = { path = "../ene-core", features = ["test-support"] }

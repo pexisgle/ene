@@ -217,7 +217,7 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 | Issues / PRs | 個別不足、probe 結果、exact tip。pass / fail / 未実施を区別する |
 | `PROGRESS.md` | current / completed / blocker / next の短い index のみ。Stage 6 完了前に Stage 7 を current としない |
 
-次に残る検証は Windows 11、overlay / VRM / IME、Performance Gate。Linux 自動テストと X11 GUI の記録は [reports/stage-7-linux-2026-09-19.md](../reports/stage-7-linux-2026-09-19.md)。NixOS 26.11 を Linux 検証の完了条件にしない。
+次に残る検証は Windows 11、実 KDE Wayland overlay / 公式 VRM / IME、Performance Gate。Linux 自動テストと X11 GUI の記録は [reports/stage-7-linux-2026-09-19.md](../reports/stage-7-linux-2026-09-19.md)。D/F 実装と未実施項目の分離は [reports/stage-7-df-implementation-2026-09-21.md](../reports/stage-7-df-implementation-2026-09-21.md)。NixOS 26.11 を Linux 検証の完了条件にしない。
 
 ### A1 trust boundary の実装状況（2026-09-20）
 
@@ -231,8 +231,16 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 
 Windows Credential Manager での probe は成功（version 作成・読み戻し・上書き拒否・activate・削除）。Linux Secret Service は adapter を実装済みだが、この環境に service が無いため probe は 未実施であり、合格とは書かない。
 
+#### D/F 実装状況（2026-09-21）
+
+`ene-body` は `vrm-runtime` 0.1 の strict VRM 1.0 load、humanoid / expression / LookAt / SpringBone、約30 Hzの Body-local update、wgpu real surface と unlit fallback を実装した。生成 fixture は全 pose と renderer frame data を自動検証し、任意 asset 用の `ene-body-asset-probe` も追加した。これは公式 `ene` の acceptance ではない。
+
+KDE Wayland は `zwlr_layer_shell_v1` + input region + frame callback pacing + `wp_presentation.feedback`、Windows は layered/DWM popup + non-rectangular `WM_NCHITTEST` を実装した。headless fallback は `OverlayUnavailable` で明示し、production success には数えない。Linux build/test と Windows cross-check は通したが、このセッションに実 compositor / Windows desktop が無いため実表示 probe は未実施である。
+
+`ene-measure` は全 PID CPU/RSS、busy-wait、Wayland submitted/presented/discarded/missing、PresentMon CSV、cancel input→Host outcome→Slint `AfterRendering`、外部 compositor click-through evidence を同じ JSON/human reportへ集約する。Pass は再計算 APIだけが生成し、欠測・未解決 feedback・相関不能は Pass にならない。数値 gate 自体は実 desktop で未測定である。
+
 #### 未実施のまま残るもの
 
-- 実 overlay: `apps/ene-body` の overlay backend は Headless のまま（Windows DWM / KDE layer-shell は `NotRun`）。VM runtime / SpringBone / 表情も未実装。
+- KDE Wayland と Windows 11 上の実 overlay / transparency / click-through / drag / resize / HiDPI / hide-restore probe。
 - 公式同梱 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）。
-- Windows 11 実機 acceptance と Performance Gate（idle CPU / resident / 実表示 FPS / 1 秒受付）。
+- Windows 11 実機 acceptance、Linux Secret Service、IME、および Performance Gate（idle CPU / resident / 実表示 FPS / 1 秒受付）。

@@ -88,6 +88,8 @@ export component ManagementWindow inherits Window {
     in property <bool> setup-ready;
     in property <bool> credential-present;
     in property <bool> consent-assigned;
+    in property <bool> avatar-available;
+    in property <bool> avatar-visible;
     in property <bool> memory-more;
     in property <bool> revisions-more;
     in property <bool> usage-more;
@@ -127,6 +129,8 @@ export component ManagementWindow inherits Window {
     callback confirm-owner();
     callback cancel-owner();
     callback draft-changed();
+    callback show-avatar();
+    callback hide-avatar();
     public function clear-secret() { root.secret-draft = ""; }
     public function clear-copies() {
         root.secret-draft = ""; root.deletion-draft = ""; root.memories = []; root.revisions = [];
@@ -205,6 +209,13 @@ export component ManagementWindow inherits Window {
                                 Caption { text: root.japanese ? "表示言語を変えても、会話や記憶の内容は変わりません。" : "Changing the display language leaves your conversations and memories unchanged."; }
                                 if !root.setup-ready: Notice { text: root.japanese ? "会話を始めるには、初回セットアップを完了してください。" : "Finish setup to start a conversation."; }
                                 if !root.setup-ready: Action { text: root.japanese ? "セットアップを続ける" : "Continue setup"; primary: true; clicked => { root.navigate(6); } }
+                                Caption { text: root.japanese ? "デスクトップアバター" : "Desktop avatar"; }
+                                if !root.avatar-available: Notice { text: root.japanese ? "アバターは利用できません。会話と設定は引き続き使えます。" : "The avatar is unavailable. Chat and settings remain available."; }
+                                if root.avatar-available: HorizontalLayout {
+                                    spacing: 12px;
+                                    Action { text: root.japanese ? "表示" : "Show"; enabled: !root.avatar-visible && !root.busy; clicked => { root.show-avatar(); } }
+                                    Action { text: root.japanese ? "一時的に隠す" : "Hide temporarily"; enabled: root.avatar-visible && !root.busy; clicked => { root.hide-avatar(); } }
+                                }
                             }
                             if root.page == 1: VerticalLayout {
                                 spacing: 16px;

@@ -4,13 +4,16 @@
 //! MessagePack on `--ipc-stdio`. Commands are [`ene_body::ParentToBody`]
 //! only — secrets, chat text, and Task commands have no variant.
 
+use std::collections::VecDeque;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-use ene_body::ipc::{BodyToParent, ParentToBody, decode_body, encode_parent};
+use ene_body::ipc::{
+    BodyToParent, LocalUiFact, ParentToBody, PresentationFeedback, decode_body, encode_parent,
+};
 
 /// Health of the overlay child as observed by desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +32,10 @@ pub struct BodySupervisor {
     events: Option<Receiver<BodyToParent>>,
     exe: Option<PathBuf>,
     last_event: Option<String>,
+    local_ui: VecDeque<LocalUiFact>,
+    presentations: VecDeque<PresentationFeedback>,
+    native_ready: bool,
+    asset_ready: bool,
 }
 
 impl Drop for BodySupervisor {
@@ -83,10 +90,9 @@ impl BodySupervisor {
         self.shutdown();
         match Command::new(exe)
             .arg("--ipc-stdio")
-            .env("ENE_BODY_SKIP_GPU", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
         {
             Ok(mut child) => {
@@ -120,6 +126,10 @@ impl BodySupervisor {
                 self.events = Some(rx);
                 self.exe = Some(exe.to_path_buf());
                 self.last_event = None;
+                self.local_ui.clear();
+                self.presentations.clear();
+                self.native_ready = false;
+                self.asset_ready = false;
                 BodyStatus::Spawned
             }
             Err(_) => BodyStatus::Absent,
@@ -166,6 +176,24 @@ impl BodySupervisor {
         self.last_event.as_deref()
     }
 
+    /// Takes an overlay-local settings candidate.
+    pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
+        self.drain_events();
+        self.local_ui.pop_front()
+    }
+
+    /// Takes compositor/display timing evidence from Body.
+    pub fn take_presentation(&mut self) -> Option<PresentationFeedback> {
+        self.drain_events();
+        self.presentations.pop_front()
+    }
+
+    /// True only after native overlay/GPU readiness and a strict asset load.
+    #[must_use]
+    pub fn available(&self) -> bool {
+        self.native_ready && self.asset_ready && self.child.is_some()
+    }
+
     pub fn shutdown(&mut self) {
         if self.stdin.is_some() {
             match self.send_projection(&ParentToBody::Shutdown) {
@@ -194,7 +222,25 @@ impl BodySupervisor {
         if let Some(events) = self.events.as_mut() {
             loop {
                 match events.try_recv() {
-                    Ok(message) => last = Some(event_kind(&message).to_string()),
+                    Ok(message) => {
+                        last = Some(event_kind(&message).to_string());
+                        match message {
+                            BodyToParent::Ready(info) => {
+                                self.native_ready = info.overlay
+                                    != ene_body::ipc::OverlayKind::Headless
+                                    && info.gpu == ene_body::ipc::GpuInitStatus::Ok;
+                            }
+                            BodyToParent::GpuFail(_) | BodyToParent::OverlayUnavailable(_) => {
+                                self.native_ready = false;
+                            }
+                            BodyToParent::AssetReady(_) => self.asset_ready = true,
+                            BodyToParent::LocalUi(fact) => self.local_ui.push_back(fact),
+                            BodyToParent::Presentation(feedback) => {
+                                self.presentations.push_back(feedback);
+                            }
+                            _ => {}
+                        }
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         disconnected = true;
@@ -221,9 +267,12 @@ fn event_kind(message: &BodyToParent) -> &'static str {
     match message {
         BodyToParent::Ready(_) => "Ready",
         BodyToParent::GpuFail(_) => "GpuFail",
+        BodyToParent::OverlayUnavailable(_) => "OverlayUnavailable",
+        BodyToParent::AssetReady(_) => "AssetReady",
         BodyToParent::AssetFail(_) => "AssetFail",
         BodyToParent::HealthTick(_) => "HealthTick",
         BodyToParent::LocalUi(_) => "LocalUi",
+        BodyToParent::Presentation(_) => "Presentation",
         BodyToParent::CleanExit => "CleanExit",
     }
 }

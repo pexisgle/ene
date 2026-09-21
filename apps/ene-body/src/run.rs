@@ -12,9 +12,9 @@ use tokio::sync::Mutex;
 
 use crate::error::BodyError;
 use crate::ipc::{
-    AssetRef, BodyToParent, HEALTH_INTERVAL, ParentToBody, ReadyInfo, decode_parent, encode_body,
+    AssetReadyInfo, AssetRef, BodyToParent, HEALTH_INTERVAL, ParentToBody, ReadyInfo,
+    decode_parent, encode_body,
 };
-use crate::render::Gpu;
 use crate::vrm::VrmSession;
 use crate::window::Overlay;
 
@@ -32,11 +32,17 @@ pub enum IpcEndpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions {
     pub try_gpu: bool,
+    /// Production selects the native backend. Tests disable this instead of
+    /// depending on the machine's GUI session.
+    pub try_native_overlay: bool,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
-        Self { try_gpu: true }
+        Self {
+            try_gpu: true,
+            try_native_overlay: true,
+        }
     }
 }
 
@@ -185,32 +191,38 @@ where
     W: AsyncWrite + Unpin + Send,
 {
     let writer = Mutex::new(writer);
-    let gpu = if options.try_gpu {
-        Gpu::init().await
+    let mut overlay = if options.try_native_overlay {
+        Overlay::open(options.try_gpu)
     } else {
-        Gpu::skipped()
+        Overlay::unavailable("native overlay disabled by test options")
     };
-    let mut overlay = Overlay::open();
     let mut vrm = VrmSession::new();
 
     send(
         &writer,
         &BodyToParent::Ready(ReadyInfo {
             overlay: overlay.kind(),
-            gpu: gpu.status(),
+            gpu: overlay.gpu_status(),
             expressions: vrm.expressions(),
             spring_bone: vrm.spring_bone(),
         }),
     )
     .await?;
-    if let Some(info) = gpu.fail_info() {
+    let mut reported_gpu_failure = overlay.gpu_failure();
+    if let Some(info) = reported_gpu_failure {
         send(&writer, &BodyToParent::GpuFail(info)).await?;
+    }
+    if let Some(info) = overlay.unavailable_info() {
+        send(&writer, &BodyToParent::OverlayUnavailable(info)).await?;
     }
 
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let mut health = tokio::time::interval(HEALTH_INTERVAL);
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut runtime_tick = tokio::time::interval(std::time::Duration::from_micros(33_333));
+    runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut render_paused_until = None;
     let mut seq: u64 = 0;
 
     loop {
@@ -227,7 +239,6 @@ where
                             &mut buf,
                             &mut overlay,
                             &mut vrm,
-                            &gpu,
                             &writer,
                         )
                         .await?
@@ -243,9 +254,18 @@ where
             }
             _ = health.tick() => {
                 seq = seq.saturating_add(1);
-                gpu.present_tick(overlay.visible());
                 if let Some(fact) = overlay.take_local_ui() {
                     send(&writer, &BodyToParent::LocalUi(fact)).await?;
+                }
+                while let Some(feedback) = overlay.take_presentation() {
+                    send(&writer, &BodyToParent::Presentation(feedback)).await?;
+                }
+                let current_gpu_failure = overlay.gpu_failure();
+                if current_gpu_failure != reported_gpu_failure {
+                    if let Some(info) = current_gpu_failure {
+                        send(&writer, &BodyToParent::GpuFail(info)).await?;
+                    }
+                    reported_gpu_failure = current_gpu_failure;
                 }
                 send(
                     &writer,
@@ -253,13 +273,33 @@ where
                         seq,
                         visible: overlay.visible(),
                         pose: vrm.pose(),
-                        gpu_ok: gpu.ok(),
+                        gpu_ok: overlay.gpu_status() == crate::ipc::GpuInitStatus::Ok,
                         overlay: overlay.kind(),
                         expressions: vrm.expressions(),
                         spring_bone: vrm.spring_bone(),
                     }),
                 )
                 .await?;
+            }
+            _ = runtime_tick.tick() => {
+                let now = tokio::time::Instant::now();
+                let high_load_paused = render_paused_until.is_some_and(|until| now < until);
+                overlay.pump();
+                if overlay.ready_to_render() && !high_load_paused {
+                    let started = std::time::Instant::now();
+                    match vrm.update(1.0 / 30.0) {
+                        Ok(meshes) => overlay.render(&meshes),
+                        Err(info) => send(&writer, &BodyToParent::AssetFail(info)).await?,
+                    }
+                    if started.elapsed() >= std::time::Duration::from_millis(100) {
+                        render_paused_until = Some(now + std::time::Duration::from_secs(1));
+                    } else {
+                        render_paused_until = None;
+                    }
+                }
+                while let Some(feedback) = overlay.take_presentation() {
+                    send(&writer, &BodyToParent::Presentation(feedback)).await?;
+                }
             }
         }
     }
@@ -269,7 +309,6 @@ async fn drain_commands<W>(
     buf: &mut Vec<u8>,
     overlay: &mut Overlay,
     vrm: &mut VrmSession,
-    gpu: &Gpu,
     writer: &Mutex<W>,
 ) -> Result<bool, BodyError>
 where
@@ -279,7 +318,7 @@ where
         match decode_parent(buf) {
             Ok((command, used)) => {
                 buf.drain(..used);
-                if handle_command(command, overlay, vrm, gpu, writer).await? {
+                if handle_command(command, overlay, vrm, writer).await? {
                     return Ok(true);
                 }
             }
@@ -310,7 +349,6 @@ async fn handle_command<W>(
     command: ParentToBody,
     overlay: &mut Overlay,
     vrm: &mut VrmSession,
-    gpu: &Gpu,
     writer: &Mutex<W>,
 ) -> Result<bool, BodyError>
 where
@@ -327,7 +365,6 @@ where
         ParentToBody::PoseHint(pose) => vrm.set_pose(pose),
         ParentToBody::AssetRef(asset) => apply_asset(asset, vrm, writer).await?,
         ParentToBody::Shutdown => {
-            gpu.present_tick(false);
             send(writer, &BodyToParent::CleanExit).await?;
             return Ok(true);
         }
@@ -344,7 +381,20 @@ where
     W: AsyncWrite + Unpin,
 {
     match vrm.set_asset(asset) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let stats = vrm.stats().ok_or_else(|| {
+                BodyError::Runtime(String::from("loaded VRM has no retained statistics"))
+            })?;
+            send(
+                writer,
+                &BodyToParent::AssetReady(AssetReadyInfo {
+                    primitives: stats.primitives,
+                    expressions: stats.expressions,
+                    spring_chains: stats.spring_chains,
+                }),
+            )
+            .await
+        }
         Err(info) => send(writer, &BodyToParent::AssetFail(info)).await,
     }
 }
@@ -436,14 +486,23 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn in_process_ipc_show_hide_pose_asset_and_shutdown() {
+        tokio::task::LocalSet::new()
+            .run_until(in_process_ipc_show_hide_pose_asset_and_shutdown_local())
+            .await;
+    }
+
+    async fn in_process_ipc_show_hide_pose_asset_and_shutdown_local() {
         let (mut parent, child) = tokio::io::duplex(4096);
         let (child_read, child_write) = tokio::io::split(child);
-        let body = tokio::spawn(run_with_io(
+        let body = tokio::task::spawn_local(run_with_io(
             child_read,
             child_write,
-            RunOptions { try_gpu: false },
+            RunOptions {
+                try_gpu: false,
+                try_native_overlay: false,
+            },
         ));
 
         let mut leftover = Vec::new();
@@ -451,13 +510,18 @@ mod tests {
         match ready {
             BodyToParent::Ready(info) => {
                 assert_eq!(info.overlay, OverlayKind::Headless);
-                assert_eq!(info.expressions, FeatureSupport::Unsupported);
-                assert_eq!(info.spring_bone, FeatureSupport::Unsupported);
+                assert_eq!(info.expressions, FeatureSupport::Available);
+                assert_eq!(info.spring_bone, FeatureSupport::Available);
             }
             other => panic!("expected Ready, got {other:?}"),
         }
         let gpu = read_event(&mut parent, &mut leftover).await;
         assert!(matches!(gpu, BodyToParent::GpuFail(_)), "{gpu:?}");
+        let unavailable = read_event(&mut parent, &mut leftover).await;
+        assert!(
+            matches!(unavailable, BodyToParent::OverlayUnavailable(_)),
+            "{unavailable:?}"
+        );
 
         parent
             .write_all(&encode_parent(&ParentToBody::Show).expect("show"))
@@ -479,8 +543,8 @@ mod tests {
                     if tick.pose == PoseHint::Listening {
                         saw_listening = true;
                     }
-                    assert_eq!(tick.expressions, FeatureSupport::Unsupported);
-                    assert_eq!(tick.spring_bone, FeatureSupport::Unsupported);
+                    assert_eq!(tick.expressions, FeatureSupport::Available);
+                    assert_eq!(tick.spring_bone, FeatureSupport::Available);
                     if saw_visible && saw_listening {
                         break;
                     }
@@ -537,6 +601,7 @@ mod tests {
             .expect("write hide");
 
         let mut saw_hidden_health = false;
+        let mut saw_invalid_asset = false;
         for _ in 0..12 {
             match read_event(&mut parent, &mut leftover).await {
                 BodyToParent::HealthTick(tick) => {
@@ -545,13 +610,20 @@ mod tests {
                         break;
                     }
                 }
-                BodyToParent::AssetFail(_) => panic!("placeholder ref must not AssetFail"),
+                BodyToParent::AssetFail(info) => {
+                    assert_eq!(info.reason, AssetFailReason::InvalidVrm);
+                    saw_invalid_asset = true;
+                }
                 other => panic!("unexpected {other:?}"),
             }
         }
         assert!(
             saw_hidden_health,
             "hide keeps the process alive and still ticks"
+        );
+        assert!(
+            saw_invalid_asset,
+            "invalid VRM must not be accepted by path only"
         );
 
         parent
@@ -573,14 +645,23 @@ mod tests {
         body.await.expect("join").expect("run");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn parent_disconnect_ends_without_host_commands() {
+        tokio::task::LocalSet::new()
+            .run_until(parent_disconnect_ends_without_host_commands_local())
+            .await;
+    }
+
+    async fn parent_disconnect_ends_without_host_commands_local() {
         let (parent, child) = tokio::io::duplex(1024);
         let (child_read, child_write) = tokio::io::split(child);
-        let body = tokio::spawn(run_with_io(
+        let body = tokio::task::spawn_local(run_with_io(
             child_read,
             child_write,
-            RunOptions { try_gpu: false },
+            RunOptions {
+                try_gpu: false,
+                try_native_overlay: false,
+            },
         ));
         drop(parent);
         body.await.expect("join").expect("clean disconnect");
