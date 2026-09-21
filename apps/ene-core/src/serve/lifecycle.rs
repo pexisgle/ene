@@ -4,8 +4,32 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{CoreError, HostHandle};
-use ene_credential::EnvCredentialStore;
+use ene_credential::{CredentialRef, CredentialStore, CredentialTechnicalError};
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
+
+/// The transport borrows the same published snapshot used for admission.
+/// Keeping the Host alive also preserves updates from later key rotations.
+struct ServingCredentials(Arc<HostHandle>);
+
+impl CredentialStore for ServingCredentials {
+    fn with_bearer<R>(
+        &self,
+        cred: &CredentialRef,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError> {
+        self.0.cred_store.with_bearer(cred, f)
+    }
+
+    fn contains(&self, cred: &CredentialRef) -> bool {
+        self.0.cred_store.contains(cred)
+    }
+
+    fn put(&self, _cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
+        Err(CredentialTechnicalError::StorageUnavailable {
+            reason: String::from("transport credentials are read-only; use Host publication"),
+        })
+    }
+}
 
 #[cfg(unix)]
 pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
@@ -78,12 +102,51 @@ pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    let transport = OpenAiResponsesTransport::new(base_url, EnvCredentialStore::new())
-        .map_err(|error| CoreError::Inference(error.to_string()))?;
-    crate::conn::run(
-        data_dir.to_path_buf(),
-        Arc::new(handle),
-        Arc::new(transport),
-    )
-    .await
+    let handle = Arc::new(handle);
+    let transport =
+        OpenAiResponsesTransport::new(base_url, ServingCredentials(Arc::clone(&handle)))
+            .map_err(|error| CoreError::Inference(error.to_string()))?;
+    crate::conn::run(data_dir.to_path_buf(), handle, Arc::new(transport)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serve::CredStore;
+    use ene_credential::{MemoryVersionedStore, VersionedCredentialStore};
+
+    #[tokio::test]
+    async fn transport_reads_host_publications_and_rotations() {
+        let dir = tempfile::tempdir().expect("data directory");
+        let host = Arc::new(
+            HostHandle::open_with_cred_store(
+                dir.path(),
+                CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+            )
+            .await
+            .expect("Host"),
+        );
+        let transport_store = ServingCredentials(Arc::clone(&host));
+        let cred = CredentialRef::new("openai", "main").expect("reference");
+        assert!(!transport_store.contains(&cred));
+        let CredStore::MemoryVersioned(store) = &host.cred_store else {
+            panic!("versioned store");
+        };
+        for (version, secret) in [(1, "first-test-value"), (2, "rotated-test-value")] {
+            store
+                .put_version(&cred, version, secret)
+                .expect("candidate");
+            store.activate(store.prepare_snapshot(&cred, version).expect("snapshot"));
+            assert!(transport_store.contains(&cred));
+            assert!(
+                transport_store
+                    .with_bearer(&cred, |value| value == secret)
+                    .expect("borrow")
+            );
+        }
+        assert!(transport_store.put(&cred, "unauthorized-write").is_err());
+        store.deactivate(&cred);
+        assert!(!transport_store.contains(&cred));
+        assert!(transport_store.with_bearer(&cred, |_| ()).is_err());
+    }
 }

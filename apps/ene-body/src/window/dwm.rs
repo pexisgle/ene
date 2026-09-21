@@ -9,26 +9,23 @@ mod imp {
         RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
     };
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-    use windows_sys::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, GetStockObject, HOLLOW_BRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
         MonitorFromWindow, ScreenToClient,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::Controls::MARGINS;
     use windows_sys::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
         DispatchMessageW, GWLP_USERDATA, GetClientRect, GetForegroundWindow, GetWindowLongPtrW,
-        GetWindowRect, HTBOTTOMRIGHT, HTCAPTION, HTTRANSPARENT, IDC_ARROW, LWA_ALPHA, LoadCursorW,
-        MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE,
-        SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetLayeredWindowAttributes,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CLOSE, WM_DESTROY,
-        WM_DPICHANGED, WM_ERASEBKGND, WM_MOVE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_SIZE,
-        WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-        WS_THICKFRAME,
+        GetWindowRect, HTBOTTOMRIGHT, HTCAPTION, HTTRANSPARENT, IDC_ARROW, LoadCursorW, MSG,
+        PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE,
+        SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        TranslateMessage, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_MOVE,
+        WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_SIZE, WNDCLASSEXW, WS_EX_NOACTIVATE,
+        WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_THICKFRAME,
     };
 
     use crate::ipc::{
@@ -120,7 +117,7 @@ mod imp {
             // the HWND lifetime, and dimensions are bounded u32→i32 below.
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                     CLASS_NAME.as_ptr(),
                     CLASS_NAME.as_ptr(),
                     WS_POPUP | WS_THICKFRAME,
@@ -153,22 +150,8 @@ mod imp {
                     SWP_NOACTIVATE | SWP_NOZORDER,
                 )
             };
-            // SAFETY: hwnd is live; a -1 margin asks DWM for full client glass.
-            let margins = MARGINS {
-                cxLeftWidth: -1,
-                cxRightWidth: -1,
-                cyTopHeight: -1,
-                cyBottomHeight: -1,
-            };
-            let _dwm = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
-            // SAFETY: hwnd is layered and alpha 255 preserves per-pixel swap
-            // chain alpha while avoiding a global fade.
-            let alpha_ok = unsafe { SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA) };
-            if alpha_ok == 0 {
-                // SAFETY: hwnd was created above and is owned here.
-                unsafe { DestroyWindow(hwnd) };
-                return Err(std::io::Error::last_os_error().to_string());
-            }
+            // DirectComposition supplies the per-pixel alpha. A layered/GDI
+            // redirection bitmap would put an opaque surface behind the visual.
             let mut gpu_failure = None;
             let renderer = if try_gpu {
                 let hwnd_value =
@@ -276,11 +259,11 @@ mod imp {
             if !self.ready_to_render() {
                 return;
             }
-            if let Some(renderer) = &mut self.renderer {
-                if let Err(failure) = renderer.render(meshes) {
-                    self.renderer = None;
-                    self.gpu_failure = Some(gpu_info(failure));
-                }
+            if let Some(renderer) = &mut self.renderer
+                && let Err(failure) = renderer.render(meshes)
+            {
+                self.renderer = None;
+                self.gpu_failure = Some(gpu_info(failure));
             }
         }
 
@@ -306,14 +289,12 @@ mod imp {
                 let height = (client.bottom - client.top).max(1) as u32;
                 let logical_width = logical(width, self.state.placement.scale);
                 let logical_height = logical(height, self.state.placement.scale);
-                if (logical_width, logical_height)
-                    != (self.state.placement.width, self.state.placement.height)
-                {
-                    self.state.placement.width = logical_width;
-                    self.state.placement.height = logical_height;
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.resize(width, height);
-                    }
+                self.state.placement.width = logical_width;
+                self.state.placement.height = logical_height;
+                // WM_SIZE already updates placement. The renderer compares its
+                // own physical extent, including changes of DPI at equal DIPs.
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.resize(width, height);
                 }
             }
         }
@@ -362,11 +343,6 @@ mod imp {
                 let placement = unsafe { (*state).placement };
                 let width = f64::from(physical(placement.width, placement.scale));
                 let height = f64::from(physical(placement.height, placement.scale));
-                let nx = (f64::from(point.x) - width * 0.5) / (width * 0.38);
-                let ny = (f64::from(point.y) - height * 0.52) / (height * 0.48);
-                if nx * nx + ny * ny > 1.0 {
-                    return HTTRANSPARENT as LRESULT;
-                }
                 let resize_width = physical(placement.width, placement.scale);
                 let resize_height = physical(placement.height, placement.scale);
                 let grip = physical(32, placement.scale);
@@ -375,6 +351,11 @@ mod imp {
                         >= i32::try_from(resize_height.saturating_sub(grip)).unwrap_or(i32::MAX)
                 {
                     return HTBOTTOMRIGHT as LRESULT;
+                }
+                let nx = (f64::from(point.x) - width * 0.5) / (width * 0.38);
+                let ny = (f64::from(point.y) - height * 0.52) / (height * 0.48);
+                if nx * nx + ny * ny > 1.0 {
+                    return HTTRANSPARENT as LRESULT;
                 }
                 return HTCAPTION as LRESULT;
             }
