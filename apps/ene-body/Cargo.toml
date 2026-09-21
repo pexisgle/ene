@@ -18,6 +18,10 @@ path = "src/main.rs"
 name = "ene-body-asset-probe"
 path = "src/bin/ene-body-asset-probe.rs"
 
+[[bin]]
+name = "ene-body-overlay-probe"
+path = "src/bin/ene-body-overlay-probe/main.rs"
+
 [dependencies]
 clap.workspace = true
 rmp-serde.workspace = true

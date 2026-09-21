@@ -13,13 +13,9 @@ use std::sync::{
 };
 use wgpu::util::DeviceExt as _;
 
-use crate::vrm::RenderMesh;
-#[cfg(target_os = "windows")]
-use crate::vrm::RenderTexture;
+use crate::vrm::{RenderMesh, RenderTexture};
 
-#[cfg(target_os = "windows")]
 const HIT_TEST_CELL_PIXELS: u32 = 4;
-#[cfg(target_os = "windows")]
 const VISIBLE_ALPHA_THRESHOLD: f32 = 0.001;
 
 /// A transparent real-surface renderer. VRM deformation stays in
@@ -61,7 +57,6 @@ struct DrawRange {
 /// deformed mesh closely enough that transparent desktop space remains owned
 /// by the underlying application. One-cell dilation avoids tiny ungrabbable
 /// gaps around thin geometry and texture-filtered edges.
-#[cfg(target_os = "windows")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HitTestMask {
     width: u32,
@@ -72,7 +67,6 @@ pub(crate) struct HitTestMask {
     bounds: Option<[u32; 4]>,
 }
 
-#[cfg(target_os = "windows")]
 impl HitTestMask {
     pub(crate) fn empty(width: u32, height: u32) -> Self {
         let width = width.max(1);
@@ -148,14 +142,6 @@ impl HitTestMask {
         let column = x / HIT_TEST_CELL_PIXELS;
         let row = y / HIT_TEST_CELL_PIXELS;
         self.cell(column, row)
-    }
-
-    pub(crate) fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub(crate) fn height(&self) -> u32 {
-        self.height
     }
 
     pub(crate) fn contains_resize_grip(&self, x: i32, y: i32, grip: u32) -> bool {
@@ -346,14 +332,28 @@ impl HitTestMask {
     }
 }
 
-#[cfg(target_os = "windows")]
+/// Pixel extent of the alpha-aware cells.
+///
+/// The Wayland overlay sets its input region from [`HitTestMask::opaque_rectangles`]
+/// and does not need the raw dimensions; the Windows DWM hit-test path and
+/// this module's unit tests do.
+#[cfg(any(target_os = "windows", test))]
+impl HitTestMask {
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+}
+
 fn vertex_at(vertices: &[Vertex], index: u32) -> Option<&Vertex> {
     usize::try_from(index)
         .ok()
         .and_then(|index| vertices.get(index))
 }
 
-#[cfg(target_os = "windows")]
 fn screen_point(vertex: &Vertex, width: u32, height: u32) -> [f32; 2] {
     [
         (vertex.position[0] * 0.5 + 0.5) * width as f32,
@@ -361,7 +361,6 @@ fn screen_point(vertex: &Vertex, width: u32, height: u32) -> [f32; 2] {
     ]
 }
 
-#[cfg(target_os = "windows")]
 fn barycentric(point: [f32; 2], triangle: [[f32; 2]; 3]) -> Option<[f32; 3]> {
     let [a, b, c] = triangle;
     let denominator = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
@@ -376,7 +375,6 @@ fn barycentric(point: [f32; 2], triangle: [[f32; 2]; 3]) -> Option<[f32; 3]> {
     (first >= 0.0 && second >= 0.0 && third >= 0.0).then_some([first, second, third])
 }
 
-#[cfg(target_os = "windows")]
 fn fragment_alpha(
     a: &Vertex,
     b: &Vertex,
@@ -392,12 +390,10 @@ fn fragment_alpha(
     vertex_alpha * texture_alpha(texture, uv)
 }
 
-#[cfg(target_os = "windows")]
 fn vertex_alpha(vertex: &Vertex, texture: Option<&RenderTexture>) -> f32 {
     vertex.color[3] * texture_alpha(texture, vertex.uv)
 }
 
-#[cfg(target_os = "windows")]
 fn texture_alpha(texture: Option<&RenderTexture>, uv: [f32; 2]) -> f32 {
     let Some(texture) = texture else {
         return 1.0;
@@ -971,7 +967,7 @@ fn create_depth(
     (texture, view)
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

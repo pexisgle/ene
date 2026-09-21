@@ -48,7 +48,7 @@ raw-window-handle = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }
-wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 smithay-client-toolkit = { version = "0.19", default-features = false }
 csv = "1"
