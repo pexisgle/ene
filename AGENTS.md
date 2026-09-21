@@ -80,12 +80,10 @@ in completed changes.
 
 ## Agent workflow
 
-* Prefer narrow semantic or symbol queries over bulk-reading source files.
-  Use Serena for definitions, references, and implementations when available;
-  use exact-text search for literals, configuration, and protocol strings.
-* Use repository graph/index tools for cross-crate architecture or impact
-  analysis when available, but verify inferred relationships against source,
-  semantic tooling, the compiler, and tests.
+* Prefer narrow symbol queries over bulk-reading source files.
+  Use exact-text search for literals, configuration, and protocol strings.
+* Verify cross-crate architecture or impact claims against source,
+  the compiler, and tests.
 * Read only the relevant files and ranges needed for the task.
 
 ## Comments and documentation
