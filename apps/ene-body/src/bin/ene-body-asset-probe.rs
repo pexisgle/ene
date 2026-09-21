@@ -1,12 +1,15 @@
 //! Machine-readable VRM runtime probe.
 //!
+//! Usage: `ene-body-asset-probe PATH.vrm [MOTION_DIR]`
+//!
 //! This validates runtime capability only. It does not claim that the avatar
 //! was displayed by a real compositor or accepted as the official `ene`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use ene_body::ipc::{AssetRef, PoseHint};
+use ene_body::ipc::{AssetRef, FeatureSupport, MotionSetInfo, PoseHint};
+use ene_body::motion::pose_clips_in;
 use ene_body::vrm::{AssetStats, VrmSession};
 use serde::Serialize;
 
@@ -21,6 +24,9 @@ struct ProbeReport {
     look_at: bool,
     spring_bone: bool,
     renderer_frame_data: bool,
+    motion_dir: Option<String>,
+    vrma_motion_pack: bool,
+    pose_motions: Vec<String>,
     stats: AssetStats,
     note: &'static str,
 }
@@ -46,10 +52,13 @@ fn run() -> Result<ProbeReport, String> {
     let _program = args.next();
     let path = PathBuf::from(
         args.next()
-            .ok_or_else(|| String::from("usage: ene-body-asset-probe PATH.vrm"))?,
+            .ok_or_else(|| String::from("usage: ene-body-asset-probe PATH.vrm [MOTION_DIR]"))?,
     );
+    let motion_dir = args.next().map(PathBuf::from);
     if args.next().is_some() {
-        return Err(String::from("usage: ene-body-asset-probe PATH.vrm"));
+        return Err(String::from(
+            "usage: ene-body-asset-probe PATH.vrm [MOTION_DIR]",
+        ));
     }
     let mut session = VrmSession::new();
     session
@@ -60,6 +69,18 @@ fn run() -> Result<ProbeReport, String> {
     let stats = session
         .stats()
         .ok_or_else(|| String::from("runtime did not retain asset statistics"))?;
+    let mut pose_motions = Vec::new();
+    if let Some(dir) = motion_dir.as_deref() {
+        let set = pose_motion_set(dir)?;
+        session
+            .set_motions(&set)
+            .map_err(|error| std::format!("{:?}: {}", error.reason, error.detail))?;
+        pose_motions = session
+            .motion_poses()
+            .iter()
+            .map(|pose| std::format!("{pose:?}"))
+            .collect();
+    }
     let mut renderer_frame_data = true;
     for pose in [
         PoseHint::Idle,
@@ -100,7 +121,22 @@ fn run() -> Result<ProbeReport, String> {
         look_at: true,
         spring_bone: stats.spring_chains > 0,
         renderer_frame_data,
+        motion_dir: motion_dir.map(|dir| dir.display().to_string()),
+        vrma_motion_pack: session.motion() == FeatureSupport::Available,
+        pose_motions,
         stats,
         note: "runtime probe only; real compositor and official ene acceptance are separate",
     })
+}
+
+/// Assigns the documented pack clips found in `dir` to their activity hints.
+fn pose_motion_set(dir: &Path) -> Result<MotionSetInfo, String> {
+    let clips = pose_clips_in(dir);
+    if clips.is_empty() {
+        return Err(std::format!(
+            "no bundled clip files found in {}",
+            dir.display()
+        ));
+    }
+    Ok(MotionSetInfo { clips })
 }

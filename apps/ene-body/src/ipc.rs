@@ -23,6 +23,14 @@ const LEN_PREFIX_LEN: usize = 4;
 /// Maximum MessagePack body length, exclusive of the length prefix.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
+/// Maximum number of pose clips one [`MotionSetInfo`] may carry. Five pose
+/// hints exist today; the bound keeps a parent from streaming paths without
+/// end and is enforced before any file is opened.
+pub const MAX_MOTION_CLIPS: usize = 16;
+
+/// Maximum accepted byte length of one clip path.
+pub const MAX_MOTION_PATH_BYTES: usize = 4096;
+
 /// Health ticks are a liveness signal, not presented-FPS evidence.
 pub const HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -49,6 +57,7 @@ pub enum ParentToBody {
     Placement(PlacementBox),
     PoseHint(PoseHint),
     AssetRef(AssetRef),
+    MotionSet(MotionSetInfo),
     Shutdown,
 }
 
@@ -60,6 +69,7 @@ pub enum BodyToParent {
     OverlayUnavailable(OverlayUnavailableInfo),
     AssetReady(AssetReadyInfo),
     AssetFail(AssetFailInfo),
+    MotionFail(MotionFailInfo),
     HealthTick(HealthTick),
     LocalUi(LocalUiFact),
     Presentation(PresentationFeedback),
@@ -130,6 +140,85 @@ impl AssetRef {
         match self {
             Self::Path { path } | Self::BytesTemp { path } => path,
         }
+    }
+}
+
+/// One activity hint's animation clip. The path is a filesystem reference;
+/// clip bytes are never in the frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoseClip {
+    pub pose: PoseHint,
+    pub path: String,
+}
+
+/// Pose → clip assignment for body-local `.vrma` playback.
+///
+/// A set replaces the previous assignment; it is not merged into it. Which
+/// clip file backs an activity hint is an asset fact the parent supplies.
+/// Joint-level staging stays inside the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionSetInfo {
+    pub clips: Vec<PoseClip>,
+}
+
+impl MotionSetInfo {
+    #[must_use]
+    pub fn clip_for(&self, pose: PoseHint) -> Option<&PoseClip> {
+        self.clips.iter().find(|clip| clip.pose == pose)
+    }
+
+    /// Structural checks that run before any clip file is opened, so a
+    /// malformed set cannot partially replace playback state.
+    ///
+    /// # Errors
+    ///
+    /// [`MotionFailReason::EmptySet`], [`MotionFailReason::TooManyClips`],
+    /// [`MotionFailReason::DuplicatePose`], [`MotionFailReason::EmptyPath`],
+    /// or [`MotionFailReason::PathTooLong`].
+    pub fn validate(&self) -> Result<(), MotionFailInfo> {
+        if self.clips.is_empty() {
+            return Err(MotionFailInfo::new(
+                MotionFailReason::EmptySet,
+                "motion set carries no clips",
+            ));
+        }
+        if self.clips.len() > MAX_MOTION_CLIPS {
+            return Err(MotionFailInfo::new(
+                MotionFailReason::TooManyClips,
+                std::format!(
+                    "motion set carries {} clips; the cap is {MAX_MOTION_CLIPS}",
+                    self.clips.len()
+                ),
+            ));
+        }
+        let mut seen: Vec<PoseHint> = Vec::with_capacity(self.clips.len());
+        for clip in &self.clips {
+            if clip.path.is_empty() {
+                return Err(MotionFailInfo::new(
+                    MotionFailReason::EmptyPath,
+                    "motion clip path is empty",
+                ));
+            }
+            if clip.path.len() > MAX_MOTION_PATH_BYTES {
+                return Err(MotionFailInfo::new(
+                    MotionFailReason::PathTooLong,
+                    std::format!(
+                        "motion clip path of {} bytes exceeds the {MAX_MOTION_PATH_BYTES} byte cap",
+                        clip.path.len()
+                    ),
+                ));
+            }
+            if seen.contains(&clip.pose) {
+                return Err(MotionFailInfo::new(
+                    MotionFailReason::DuplicatePose,
+                    std::format!("pose {:?} is assigned more than one clip", clip.pose),
+                ));
+            }
+            seen.push(clip.pose);
+        }
+        Ok(())
     }
 }
 
@@ -207,6 +296,38 @@ pub struct AssetFailInfo {
     pub detail: String,
 }
 
+/// Why a [`MotionSetInfo`] was not adopted as playback state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MotionFailReason {
+    EmptySet,
+    TooManyClips,
+    DuplicatePose,
+    EmptyPath,
+    PathTooLong,
+    Missing,
+    NotAFile,
+    InvalidVrma,
+}
+
+/// Rejected motion set. The previous assignment stays live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionFailInfo {
+    pub reason: MotionFailReason,
+    /// Sanitized loader detail. It never contains clip bytes.
+    pub detail: String,
+}
+
+impl MotionFailInfo {
+    #[must_use]
+    pub fn new(reason: MotionFailReason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
 /// A strict VRM load completed and produced renderer/runtime inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -226,6 +347,9 @@ pub struct HealthTick {
     pub overlay: OverlayKind,
     pub expressions: FeatureSupport,
     pub spring_bone: FeatureSupport,
+    /// Whether a validated clip set is loaded. Layout capability is not
+    /// claimed here; a playable clip per pose is what this reports.
+    pub motion: FeatureSupport,
 }
 
 /// Overlay-local user facts. Parent may later treat these as settings
@@ -346,8 +470,9 @@ mod tests {
     use super::{
         AssetFailInfo, AssetFailReason, AssetRef, BodyToParent, FeatureSupport, GpuFailInfo,
         GpuFailReason, GpuInitStatus, HEALTH_INTERVAL, HealthTick, IpcError, LocalUiFact,
-        MAX_FRAME_BYTES, OverlayKind, OverlayUnavailableInfo, ParentToBody, PlacementBox, PoseHint,
-        PresentationFeedback, PresentationOutcome, ReadyInfo, decode_body, decode_parent,
+        MAX_FRAME_BYTES, MAX_MOTION_CLIPS, MAX_MOTION_PATH_BYTES, MotionFailInfo, MotionFailReason,
+        MotionSetInfo, OverlayKind, OverlayUnavailableInfo, ParentToBody, PlacementBox, PoseClip,
+        PoseHint, PresentationFeedback, PresentationOutcome, ReadyInfo, decode_body, decode_parent,
         encode_body, encode_parent,
     };
 
@@ -384,6 +509,18 @@ mod tests {
         roundtrip_parent(ParentToBody::AssetRef(AssetRef::BytesTemp {
             path: "/tmp/bytes.vrm".into(),
         }));
+        roundtrip_parent(ParentToBody::MotionSet(MotionSetInfo {
+            clips: vec![
+                PoseClip {
+                    pose: PoseHint::Idle,
+                    path: "/tmp/VRMA_06.vrma".into(),
+                },
+                PoseClip {
+                    pose: PoseHint::Speaking,
+                    path: "/tmp/VRMA_01.vrma".into(),
+                },
+            ],
+        }));
     }
 
     #[test]
@@ -405,6 +542,10 @@ mod tests {
             reason: AssetFailReason::Missing,
             detail: String::from("fixture"),
         }));
+        roundtrip_body(BodyToParent::MotionFail(MotionFailInfo {
+            reason: MotionFailReason::InvalidVrma,
+            detail: String::from("fixture"),
+        }));
         roundtrip_body(BodyToParent::HealthTick(HealthTick {
             seq: 3,
             visible: true,
@@ -413,6 +554,7 @@ mod tests {
             overlay: OverlayKind::Headless,
             expressions: FeatureSupport::Unsupported,
             spring_bone: FeatureSupport::Unsupported,
+            motion: FeatureSupport::Available,
         }));
         roundtrip_body(BodyToParent::LocalUi(LocalUiFact::Hide));
         roundtrip_body(BodyToParent::LocalUi(LocalUiFact::Drag { x: 1, y: 2 }));
@@ -515,5 +657,119 @@ mod tests {
     #[test]
     fn health_interval_is_a_few_hertz() {
         assert_eq!(HEALTH_INTERVAL.as_millis(), 250);
+    }
+
+    #[test]
+    fn motion_set_shape_is_checked_before_any_file_is_opened() {
+        assert!(MotionSetInfo { clips: Vec::new() }.validate().is_err());
+        assert_eq!(
+            MotionSetInfo { clips: Vec::new() }
+                .validate()
+                .expect_err("empty set")
+                .reason,
+            MotionFailReason::EmptySet
+        );
+        let too_many = MotionSetInfo {
+            clips: (0..=MAX_MOTION_CLIPS)
+                .map(|index| PoseClip {
+                    pose: PoseHint::Idle,
+                    path: std::format!("/tmp/{index}.vrma"),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            too_many.validate().expect_err("cap").reason,
+            MotionFailReason::TooManyClips
+        );
+        let duplicated = MotionSetInfo {
+            clips: vec![
+                PoseClip {
+                    pose: PoseHint::Idle,
+                    path: String::from("/tmp/a.vrma"),
+                },
+                PoseClip {
+                    pose: PoseHint::Idle,
+                    path: String::from("/tmp/b.vrma"),
+                },
+            ],
+        };
+        assert_eq!(
+            duplicated.validate().expect_err("duplicate").reason,
+            MotionFailReason::DuplicatePose
+        );
+        let empty_path = MotionSetInfo {
+            clips: vec![PoseClip {
+                pose: PoseHint::Idle,
+                path: String::new(),
+            }],
+        };
+        assert_eq!(
+            empty_path.validate().expect_err("empty path").reason,
+            MotionFailReason::EmptyPath
+        );
+        let long_path = MotionSetInfo {
+            clips: vec![PoseClip {
+                pose: PoseHint::Idle,
+                path: "x".repeat(MAX_MOTION_PATH_BYTES + 1),
+            }],
+        };
+        assert_eq!(
+            long_path.validate().expect_err("long path").reason,
+            MotionFailReason::PathTooLong
+        );
+    }
+
+    #[test]
+    fn motion_set_lookup_is_pose_scoped() {
+        let set = MotionSetInfo {
+            clips: vec![PoseClip {
+                pose: PoseHint::Attention,
+                path: String::from("/tmp/VRMA_03.vrma"),
+            }],
+        };
+        set.validate().expect("valid set");
+        assert_eq!(
+            set.clip_for(PoseHint::Attention)
+                .map(|clip| clip.path.as_str()),
+            Some("/tmp/VRMA_03.vrma")
+        );
+        assert!(set.clip_for(PoseHint::Idle).is_none());
+    }
+
+    #[test]
+    fn unknown_motion_pose_and_extra_fields_are_rejected() {
+        // The parent encodes named maps; an unknown pose or an added field
+        // must fail decoding rather than being interpreted as something else.
+        let unknown_pose = rmp_serde::to_vec_named(&serde_json::json!({
+            "MotionSet": { "clips": [{ "pose": "Dancing", "path": "/tmp/x.vrma" }] }
+        }))
+        .expect("encode unknown pose");
+        assert!(decode_parent(&framed(&unknown_pose)).is_err());
+        let extra_field = rmp_serde::to_vec_named(&serde_json::json!({
+            "MotionSet": { "clips": [], "unexpected": 1 }
+        }))
+        .expect("encode extra field");
+        assert!(decode_parent(&framed(&extra_field)).is_err());
+        let known = rmp_serde::to_vec_named(&serde_json::json!({
+            "MotionSet": { "clips": [{ "pose": "Idle", "path": "/tmp/VRMA_06.vrma" }] }
+        }))
+        .expect("encode known pose");
+        let (decoded, _) = decode_parent(&framed(&known)).expect("known pose decodes");
+        assert_eq!(
+            decoded,
+            ParentToBody::MotionSet(MotionSetInfo {
+                clips: vec![PoseClip {
+                    pose: PoseHint::Idle,
+                    path: String::from("/tmp/VRMA_06.vrma"),
+                }],
+            })
+        );
+    }
+
+    fn framed(body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&u32::try_from(body.len()).expect("len").to_be_bytes());
+        bytes.extend_from_slice(body);
+        bytes
     }
 }

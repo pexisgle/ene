@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 
 use crate::error::BodyError;
 use crate::ipc::{
-    AssetReadyInfo, AssetRef, BodyToParent, HEALTH_INTERVAL, ParentToBody, ReadyInfo,
-    decode_parent, encode_body,
+    AssetReadyInfo, AssetRef, BodyToParent, HEALTH_INTERVAL, MotionSetInfo, ParentToBody,
+    ReadyInfo, decode_parent, encode_body,
 };
 use crate::vrm::VrmSession;
 use crate::window::Overlay;
@@ -277,6 +277,7 @@ where
                         overlay: overlay.kind(),
                         expressions: vrm.expressions(),
                         spring_bone: vrm.spring_bone(),
+                        motion: vrm.motion(),
                     }),
                 )
                 .await?;
@@ -364,6 +365,7 @@ where
         }
         ParentToBody::PoseHint(pose) => vrm.set_pose(pose),
         ParentToBody::AssetRef(asset) => apply_asset(asset, vrm, writer).await?,
+        ParentToBody::MotionSet(set) => apply_motions(&set, vrm, writer).await?,
         ParentToBody::Shutdown => {
             send(writer, &BodyToParent::CleanExit).await?;
             return Ok(true);
@@ -396,6 +398,22 @@ where
             .await
         }
         Err(info) => send(writer, &BodyToParent::AssetFail(info)).await,
+    }
+}
+
+/// A rejected set is a fact the parent must see; it never takes the process
+/// down and never clears a working assignment.
+async fn apply_motions<W>(
+    set: &MotionSetInfo,
+    vrm: &mut VrmSession,
+    writer: &Mutex<W>,
+) -> Result<(), BodyError>
+where
+    W: AsyncWrite + Unpin,
+{
+    match vrm.set_motions(set) {
+        Ok(()) => Ok(()),
+        Err(info) => send(writer, &BodyToParent::MotionFail(info)).await,
     }
 }
 
@@ -435,9 +453,10 @@ fn peer_gone(error: &std::io::Error) -> bool {
 mod tests {
     use super::{IpcEndpoint, RunOptions, parse_endpoint, run_with_io};
     use crate::ipc::{
-        AssetFailReason, AssetRef, BodyToParent, FeatureSupport, OverlayKind, ParentToBody,
-        PoseHint, decode_body, encode_parent,
+        AssetFailReason, AssetRef, BodyToParent, FeatureSupport, MotionFailReason, MotionSetInfo,
+        OverlayKind, ParentToBody, PoseClip, PoseHint, decode_body, encode_parent,
     };
+    use crate::testing::{MotionFixture, write_generated_vrm, write_generated_vrma};
     use std::io::Write as _;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -545,6 +564,7 @@ mod tests {
                     }
                     assert_eq!(tick.expressions, FeatureSupport::Available);
                     assert_eq!(tick.spring_bone, FeatureSupport::Available);
+                    assert_eq!(tick.motion, FeatureSupport::Unsupported);
                     if saw_visible && saw_listening {
                         break;
                     }
@@ -624,6 +644,102 @@ mod tests {
         assert!(
             saw_invalid_asset,
             "invalid VRM must not be accepted by path only"
+        );
+
+        let generated_dir = tempfile::tempdir().expect("temp");
+        let generated_asset = generated_dir.path().join("generated.vrm");
+        write_generated_vrm(&generated_asset).expect("vrm fixture");
+        let clip = generated_dir.path().join("VRMA_06.vrma");
+        write_generated_vrma(
+            &clip,
+            MotionFixture {
+                bone: "head",
+                yaw_degrees: 120.0,
+                duration_secs: 0.5,
+            },
+        )
+        .expect("vrma fixture");
+        parent
+            .write_all(
+                &encode_parent(&ParentToBody::AssetRef(AssetRef::Path {
+                    path: generated_asset.to_string_lossy().into_owned(),
+                }))
+                .expect("generated asset"),
+            )
+            .await
+            .expect("write generated asset");
+        parent
+            .write_all(
+                &encode_parent(&ParentToBody::MotionSet(MotionSetInfo {
+                    clips: vec![PoseClip {
+                        pose: PoseHint::Idle,
+                        path: clip.to_string_lossy().into_owned(),
+                    }],
+                }))
+                .expect("motion set"),
+            )
+            .await
+            .expect("write motion set");
+
+        let mut saw_asset_ready = false;
+        let mut saw_motion_available = false;
+        for _ in 0..12 {
+            match read_event(&mut parent, &mut leftover).await {
+                BodyToParent::AssetReady(info) => {
+                    assert!(info.primitives >= 1);
+                    saw_asset_ready = true;
+                }
+                BodyToParent::HealthTick(tick) => {
+                    if tick.motion == FeatureSupport::Available {
+                        saw_motion_available = true;
+                    }
+                    if saw_asset_ready && saw_motion_available {
+                        break;
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(saw_asset_ready, "generated VRM must load by path");
+        assert!(
+            saw_motion_available,
+            "an adopted clip set must appear on health"
+        );
+
+        // A rejected set is reported once and keeps the working assignment.
+        parent
+            .write_all(
+                &encode_parent(&ParentToBody::MotionSet(MotionSetInfo {
+                    clips: vec![PoseClip {
+                        pose: PoseHint::Idle,
+                        path: String::from("/no/such/clip.vrma"),
+                    }],
+                }))
+                .expect("missing motion set"),
+            )
+            .await
+            .expect("write missing motion set");
+        let mut saw_motion_fail = false;
+        let mut kept_available = false;
+        for _ in 0..12 {
+            match read_event(&mut parent, &mut leftover).await {
+                BodyToParent::MotionFail(info) => {
+                    assert_eq!(info.reason, MotionFailReason::Missing);
+                    saw_motion_fail = true;
+                }
+                BodyToParent::HealthTick(tick) => {
+                    if saw_motion_fail && tick.motion == FeatureSupport::Available {
+                        kept_available = true;
+                        break;
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(saw_motion_fail, "a missing clip must be reported");
+        assert!(
+            kept_available,
+            "a rejected set must not clear the adopted one"
         );
 
         parent

@@ -6,8 +6,11 @@
 
 pub mod error;
 pub mod ipc;
+pub mod motion;
 pub mod render;
 pub mod run;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 pub mod vrm;
 pub mod window;
 
