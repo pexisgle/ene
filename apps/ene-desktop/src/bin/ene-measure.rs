@@ -197,6 +197,9 @@ fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError
         .arg(body_pid.to_string())
         .arg("--output_file")
         .arg(output)
+        // The importer requires explicit display duration; newer PresentMon
+        // releases default to a different set of columns.
+        .arg("--v2_metrics")
         .arg("--timed")
         .arg(args.duration.as_secs().to_string())
         .arg("--terminate_after_timed")

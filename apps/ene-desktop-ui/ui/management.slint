@@ -48,7 +48,6 @@ component SetupPane inherits Rectangle {
             label: "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
         }
         if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-4.1"; value <=> root.model; enabled: !root.busy; }
-        if root.step == 4 && !root.credential-present: Notice { text: root.japanese ? "モデルの割り当てには、API キーの登録が必要です。" : "Register an API key before assigning a model."; }
         HorizontalLayout {
             spacing: 12px;
             Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { key-field.value = ""; root.back(); } }
@@ -58,7 +57,10 @@ component SetupPane inherits Rectangle {
                     root.step == 3 ? (root.japanese ? "キーを登録" : "Register key") :
                     root.step == 4 ? (root.japanese ? "同意して割り当て" : "Agree and assign") : (root.japanese ? "次へ" : "Continue");
                 primary: true;
-                enabled: !root.busy && (root.step != 3 || key-field.value != "") && (root.step != 4 || (root.credential-present && root.model != ""));
+                // Credential presence in the setup view describes the assigned
+                // route. Before the first assignment it is false even after
+                // registration; the Host validates the selected credential.
+                enabled: !root.busy && (root.step != 3 || key-field.value != "") && (root.step != 4 || root.model != "");
                 clicked => {
                     if root.step == 3 { root.credential(key-field.value); key-field.value = ""; }
                     else if root.step == 4 { root.assign(root.model); }

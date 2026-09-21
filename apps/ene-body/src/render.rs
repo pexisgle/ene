@@ -80,6 +80,21 @@ impl SurfaceRenderer {
         width: u32,
         height: u32,
     ) -> Result<Self, RenderFailure> {
+        // HWND swap chains expose only opaque alpha on DX12. The native
+        // Windows overlay needs a DirectComposition visual for per-pixel alpha.
+        #[cfg(target_os = "windows")]
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            backend_options: wgpu::BackendOptions {
+                dx12: wgpu::Dx12BackendOptions {
+                    presentation_system: wgpu::wgt::Dx12SwapchainKind::DxgiFromVisual,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        #[cfg(not(target_os = "windows"))]
         let instance = wgpu::Instance::default();
         // SAFETY: upheld by this method's caller contract. Platform backends
         // own the native objects and renderer together on one thread.
@@ -311,6 +326,9 @@ struct VertexOut {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        if (self.config.width, self.config.height) == (width.max(1), height.max(1)) {
+            return;
+        }
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);

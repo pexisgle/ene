@@ -1207,9 +1207,11 @@ mod os {
         let mut exit = FILETIME::default();
         let mut kernel = FILETIME::default();
         let mut user = FILETIME::default();
-        let mut memory = PROCESS_MEMORY_COUNTERS::default();
-        memory.cb = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>())
-            .map_err(|_| MeasurementError::NumericOverflow)?;
+        let mut memory = PROCESS_MEMORY_COUNTERS {
+            cb: u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>())
+                .map_err(|_| MeasurementError::NumericOverflow)?,
+            ..Default::default()
+        };
         // SAFETY: all output pointers refer to initialized, writable values;
         // `handle` remains valid until CloseHandle.
         let times_ok =
