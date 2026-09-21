@@ -312,7 +312,7 @@ async fn acceptance_4_workspace_task_gui_path() {
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
-    desktop.try_spawn_body(&desktop.bundled_ene_asset());
+    desktop.try_spawn_body(&desktop.bundled_sample_asset());
     assert_eq!(desktop.snapshot().body_status, "Absent");
 
     desktop.open_tasks().await.expect("empty tasks page");

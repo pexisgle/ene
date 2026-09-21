@@ -27,12 +27,13 @@ pub use ui::{
     DesktopRuntime, GuiSnapshot, MemoryPage, MemoryRevisionRow, MemoryRow, Page, WizardStep,
 };
 
-/// Install-asset path for the bundled character `ene`.
+/// Install-asset path for the bundled VRM 1.0 sample model.
 ///
-/// The official VRM is not in this repository (GitHub issue #1651). Body
-/// spawn is optional; a missing file is `BodyStatus::Absent`, never a
-/// substitute character and never Alicia.
-pub const BUNDLED_ENE_ASSET: &str = "assets/ene.vrm";
+/// The bundled asset is Seed-san, not the official `ene` character; its
+/// attribution and license are recorded in `assets/README.md`. Body spawn is
+/// optional; a missing file is `BodyStatus::Absent`, never a substitute
+/// character.
+pub const BUNDLED_SAMPLE_ASSET: &str = "assets/seed-san.vrm";
 
 /// Device descriptor this GUI presents at pairing. Display only.
 pub const DESKTOP_DESCRIPTOR: &str = "ene-desktop";

@@ -27,7 +27,7 @@ use crate::ui::deletion::DeletionPanel;
 use crate::ui::tasks::TaskPanel;
 use crate::ui::usage::UsagePanel;
 use crate::ui::{Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep, history_lines};
-use crate::{BUNDLED_ENE_ASSET, DESKTOP_DESCRIPTOR};
+use crate::{BUNDLED_SAMPLE_ASSET, DESKTOP_DESCRIPTOR};
 
 const LOCALE_FILE: &str = "desktop-locale";
 const DEFAULT_MODEL: &str = "gpt-4.1";
@@ -274,7 +274,7 @@ impl DesktopRuntime {
     }
 
     pub fn try_spawn_body(&mut self, exe: &Path) {
-        let asset = self.bundled_ene_asset();
+        let asset = self.bundled_sample_asset();
         if !asset.is_file() {
             self.body.shutdown();
             self.body_status = BodyStatus::Absent;
@@ -373,14 +373,14 @@ impl DesktopRuntime {
         self.body_status = self.body.poll();
     }
 
-    pub fn bundled_ene_asset(&self) -> PathBuf {
+    pub fn bundled_sample_asset(&self) -> PathBuf {
         if let Some(path) = std::env::var_os("ENE_BUNDLED_ASSET_PATH")
             .map(PathBuf::from)
             .filter(|path| path.is_file())
         {
             return path;
         }
-        let data_candidate = self.data_dir.join(BUNDLED_ENE_ASSET);
+        let data_candidate = self.data_dir.join(BUNDLED_SAMPLE_ASSET);
         if data_candidate.is_file() {
             return data_candidate;
         }
@@ -388,9 +388,9 @@ impl DesktopRuntime {
             && let Some(bin) = executable.parent()
         {
             for candidate in [
-                bin.join(BUNDLED_ENE_ASSET),
+                bin.join(BUNDLED_SAMPLE_ASSET),
                 bin.parent()
-                    .map(|prefix| prefix.join("share/ene").join(BUNDLED_ENE_ASSET))
+                    .map(|prefix| prefix.join("share/ene").join(BUNDLED_SAMPLE_ASSET))
                     .unwrap_or_default(),
             ] {
                 if candidate.is_file() {
@@ -400,7 +400,7 @@ impl DesktopRuntime {
         }
         let workspace_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join(BUNDLED_ENE_ASSET);
+            .join(BUNDLED_SAMPLE_ASSET);
         if workspace_candidate.is_file() {
             return workspace_candidate;
         }

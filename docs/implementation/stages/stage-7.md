@@ -242,5 +242,5 @@ KDE Wayland は `zwlr_layer_shell_v1` + input region + frame callback pacing + `
 #### 未実施のまま残るもの
 
 - KDE Wayland と Windows 11 上の実 overlay / transparency / click-through / drag / resize / HiDPI / hide-restore probe。
-- 公式同梱 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）。
+- VRM 1.0 サンプル `assets/seed-san.vrm`（Seed-san。公式 `ene` ではない）を同梱済み。公式同梱 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）は未解決。
 - Windows 11 実機 acceptance、Linux Secret Service、IME、および Performance Gate（idle CPU / resident / 実表示 FPS / 1 秒受付）。

@@ -390,7 +390,7 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
-    desktop.try_spawn_body(&desktop.bundled_ene_asset());
+    desktop.try_spawn_body(&desktop.bundled_sample_asset());
     assert_eq!(desktop.snapshot().body_status, "Absent");
 
     desktop.open_page(Page::Memory);
