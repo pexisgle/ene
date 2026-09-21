@@ -156,6 +156,7 @@ struct Surfaces {
     management: slint::Weak<ManagementWindow>,
     mailbox: Arc<Mailbox>,
     pending_paints: Arc<Mutex<VecDeque<PendingPaint>>>,
+    interaction_paint_evidence: bool,
 }
 impl Surfaces {
     fn submit(&self, command: Command, lane: usize) -> bool {
@@ -290,13 +291,14 @@ fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     management
         .window()
         .set_size(slint::LogicalSize::new(1000., 720.));
-    let surfaces = Surfaces {
+    let mut surfaces = Surfaces {
         chat: chat.as_weak(),
         management: management.as_weak(),
         mailbox: Arc::default(),
         pending_paints: Arc::default(),
+        interaction_paint_evidence: false,
     };
-    install_interaction_notifier(&chat, &surfaces)?;
+    surfaces.interaction_paint_evidence = install_interaction_notifier(&chat, &surfaces);
     let initial = desktop.surface_snapshot();
     chat.set_japanese(initial.japanese);
     management.set_japanese(initial.japanese);
@@ -315,13 +317,15 @@ fn platform_error(e: slint::PlatformError) -> DesktopError {
     DesktopError::Protocol(e.to_string())
 }
 
-fn install_interaction_notifier(
-    chat: &ChatWindow,
-    surfaces: &Surfaces,
-) -> Result<(), DesktopError> {
+fn install_interaction_notifier(chat: &ChatWindow, surfaces: &Surfaces) -> bool {
     let pending = Arc::clone(&surfaces.pending_paints);
-    let trace_path = std::env::var_os("ENE_INTERACTION_TRACE_JSONL").map(std::path::PathBuf::from);
-    chat.window()
+    let Some(trace_path) =
+        std::env::var_os("ENE_INTERACTION_TRACE_JSONL").map(std::path::PathBuf::from)
+    else {
+        return false;
+    };
+    let installed = chat
+        .window()
         .set_rendering_notifier(move |state, _graphics| {
             if !matches!(state, RenderingState::AfterRendering) {
                 return;
@@ -340,12 +344,16 @@ fn install_interaction_notifier(
                     host_intake_monotonic_ns: paint.host_intake_monotonic_ns,
                     gui_painted_monotonic_ns: painted,
                 };
-                if let Some(path) = &trace_path {
-                    append_interaction_trace(path, sample);
-                }
+                append_interaction_trace(&trace_path, sample);
             }
-        })
-        .map_err(|error| DesktopError::Protocol(error.to_string()))
+        });
+    match installed {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("interaction paint evidence unavailable: {error}");
+            false
+        }
+    }
 }
 
 fn append_interaction_trace(path: &std::path::Path, sample: InteractionSample) {
@@ -691,12 +699,14 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         let result = execute(&mut desktop, request.command).await;
         // The Host outcome is a conservative upper bound on intake: the Host
         // necessarily accepted or refused the operation before this point.
-        let measured = result.as_ref().ok().and_then(|_| {
+        let measured = if s.interaction_paint_evidence && result.is_ok() {
             request.interaction.map(|start| PendingPaint {
                 start,
                 host_intake_monotonic_ns: monotonic_ns(),
             })
-        });
+        } else {
+            None
+        };
         s.mailbox.complete(request.lane, request.epoch);
         if request.generation != s.mailbox.generation.load(Ordering::SeqCst) {
             desktop.cancel_secret();
