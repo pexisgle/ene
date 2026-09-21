@@ -486,11 +486,17 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn in_process_ipc_show_hide_pose_asset_and_shutdown() {
+        tokio::task::LocalSet::new()
+            .run_until(in_process_ipc_show_hide_pose_asset_and_shutdown_local())
+            .await;
+    }
+
+    async fn in_process_ipc_show_hide_pose_asset_and_shutdown_local() {
         let (mut parent, child) = tokio::io::duplex(4096);
         let (child_read, child_write) = tokio::io::split(child);
-        let body = tokio::spawn(run_with_io(
+        let body = tokio::task::spawn_local(run_with_io(
             child_read,
             child_write,
             RunOptions {
@@ -639,11 +645,17 @@ mod tests {
         body.await.expect("join").expect("run");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn parent_disconnect_ends_without_host_commands() {
+        tokio::task::LocalSet::new()
+            .run_until(parent_disconnect_ends_without_host_commands_local())
+            .await;
+    }
+
+    async fn parent_disconnect_ends_without_host_commands_local() {
         let (parent, child) = tokio::io::duplex(1024);
         let (child_read, child_write) = tokio::io::split(child);
-        let body = tokio::spawn(run_with_io(
+        let body = tokio::task::spawn_local(run_with_io(
             child_read,
             child_write,
             RunOptions {
