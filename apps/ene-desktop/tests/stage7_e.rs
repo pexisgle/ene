@@ -515,7 +515,7 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     let handle = open_host(dir.path()).await;
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
-    let asset = dir.path().join(ene_desktop::BUNDLED_ENE_ASSET);
+    let asset = dir.path().join(ene_desktop::BUNDLED_SAMPLE_ASSET);
     std::fs::create_dir_all(asset.parent().expect("asset parent")).expect("asset directory");
     // This deliberately invalid test-only file opens the process/isolation
     // path. AssetFail is expected and is not VRM or product acceptance.

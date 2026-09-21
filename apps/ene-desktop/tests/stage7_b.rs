@@ -495,7 +495,7 @@ async fn ime_and_about_slint_and_missing_body() {
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     desktop.open_page(Page::About);
     assert!(desktop.snapshot().about_slint);
-    desktop.try_spawn_body(&desktop.bundled_ene_asset());
+    desktop.try_spawn_body(&desktop.bundled_sample_asset());
     assert_eq!(desktop.snapshot().body_status, "Absent");
     desktop.wizard_next();
     desktop.wizard_next();
