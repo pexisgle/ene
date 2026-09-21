@@ -2,6 +2,7 @@
 
 実施日: 2026-09-21  
 統合 base: `bef697813e9bb10642116d0f1c59a7900fc583f0`  
+実装・自動gate SHA: `97f2eff29347fab6a0f0159a47fbe95758faf874`
 環境: Ubuntu 26.04 x86-64、実 GUI session なし（`WAYLAND_DISPLAY` なし）、Windows target は cross-check のみ。
 
 ## 結論
