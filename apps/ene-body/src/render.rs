@@ -13,7 +13,9 @@ use std::sync::{
 };
 use wgpu::util::DeviceExt as _;
 
-use crate::vrm::{RenderMesh, RenderTexture};
+use crate::vrm::RenderMesh;
+#[cfg(target_os = "windows")]
+use crate::vrm::RenderTexture;
 
 #[cfg(target_os = "windows")]
 const HIT_TEST_CELL_PIXELS: u32 = 4;
