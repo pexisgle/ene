@@ -31,6 +31,7 @@ fn run_main() -> Result<(), ene_body::BodyError> {
         endpoint,
         ene_body::RunOptions {
             try_gpu: std::env::var_os("ENE_BODY_SKIP_GPU").is_none(),
+            try_native_overlay: true,
         },
     ))
 }

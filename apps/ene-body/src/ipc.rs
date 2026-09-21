@@ -3,7 +3,7 @@
 //! This is **not** the Host↔Client protocol (`ene-api` / `ene-plugin-ipc`) and
 //! not plugin IPC. `ene-desktop` will match this byte layout later; it does
 //! not need to link this crate. See `apps/ene-body/README.md` for the table
-//! of flags and the 未実施 overlay/VRM probes.
+//! of flags and the separation between automated checks and real probes.
 //!
 //! Frame:
 //!
@@ -57,9 +57,12 @@ pub enum ParentToBody {
 pub enum BodyToParent {
     Ready(ReadyInfo),
     GpuFail(GpuFailInfo),
+    OverlayUnavailable(OverlayUnavailableInfo),
+    AssetReady(AssetReadyInfo),
     AssetFail(AssetFailInfo),
     HealthTick(HealthTick),
     LocalUi(LocalUiFact),
+    Presentation(PresentationFeedback),
     CleanExit,
 }
 
@@ -97,8 +100,7 @@ impl Default for PlacementBox {
     }
 }
 
-/// Activity class only. Joint angles and blendshapes stay inside the body
-/// once a VRM runtime is adopted.
+/// Activity class only. Joint angles and blendshapes stay inside the body.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PoseHint {
     #[default]
@@ -131,7 +133,7 @@ impl AssetRef {
     }
 }
 
-/// Overlay backend actually in use. Production Wayland/DWM are 未実施.
+/// Overlay backend actually in use. Headless is never production acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OverlayKind {
     Headless,
@@ -146,9 +148,7 @@ pub enum GpuInitStatus {
     Failed,
 }
 
-/// Expression / SpringBone / LookAt availability. Unsupported is a design
-/// holding state until `vrm-runtime` is probe-adopted — not a decision to
-/// drop SpringBone.
+/// Expression / SpringBone / LookAt runtime availability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeatureSupport {
     Available,
@@ -168,7 +168,9 @@ pub struct ReadyInfo {
 pub enum GpuFailReason {
     NoAdapter,
     RequestDevice,
-    InitTimeout,
+    Surface,
+    DeviceLost,
+    OutOfMemory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,17 +179,41 @@ pub struct GpuFailInfo {
     pub reason: GpuFailReason,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverlayUnavailableInfo {
+    pub requested: OverlayKind,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetFailReason {
     Missing,
     NotAFile,
     EmptyPath,
+    InvalidVrm,
+    MissingPrimitives,
+    MissingExpressions,
+    MissingLookAt,
+    MissingSpringBone,
+    RuntimeEvaluation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetFailInfo {
     pub reason: AssetFailReason,
+    /// Sanitized loader/runtime detail. It never contains asset bytes.
+    pub detail: String,
+}
+
+/// A strict VRM load completed and produced renderer/runtime inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetReadyInfo {
+    pub primitives: usize,
+    pub expressions: usize,
+    pub spring_chains: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -210,6 +236,30 @@ pub enum LocalUiFact {
     Drag { x: i32, y: i32 },
     Resize { width: u32, height: u32 },
     Hide,
+}
+
+/// Compositor/display outcome for one surface commit. This is FPS evidence;
+/// health ticks and render requests are not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresentationFeedback {
+    pub surface_id: String,
+    pub correlation_id: u64,
+    pub outcome: PresentationOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PresentationOutcome {
+    Submitted,
+    Presented {
+        timestamp_ns: u64,
+        clock_id: i32,
+        output: String,
+    },
+    Discarded,
+    Missing {
+        reason: String,
+    },
 }
 
 /// Encode a parent→body command (tests and dummy parents).
@@ -296,8 +346,9 @@ mod tests {
     use super::{
         AssetFailInfo, AssetFailReason, AssetRef, BodyToParent, FeatureSupport, GpuFailInfo,
         GpuFailReason, GpuInitStatus, HEALTH_INTERVAL, HealthTick, IpcError, LocalUiFact,
-        MAX_FRAME_BYTES, OverlayKind, ParentToBody, PlacementBox, PoseHint, ReadyInfo, decode_body,
-        decode_parent, encode_body, encode_parent,
+        MAX_FRAME_BYTES, OverlayKind, OverlayUnavailableInfo, ParentToBody, PlacementBox, PoseHint,
+        PresentationFeedback, PresentationOutcome, ReadyInfo, decode_body, decode_parent,
+        encode_body, encode_parent,
     };
 
     fn roundtrip_parent(message: ParentToBody) {
@@ -346,8 +397,13 @@ mod tests {
         roundtrip_body(BodyToParent::GpuFail(GpuFailInfo {
             reason: GpuFailReason::NoAdapter,
         }));
+        roundtrip_body(BodyToParent::OverlayUnavailable(OverlayUnavailableInfo {
+            requested: OverlayKind::KdeLayerShell,
+            reason: String::from("fixture"),
+        }));
         roundtrip_body(BodyToParent::AssetFail(AssetFailInfo {
             reason: AssetFailReason::Missing,
+            detail: String::from("fixture"),
         }));
         roundtrip_body(BodyToParent::HealthTick(HealthTick {
             seq: 3,
@@ -363,6 +419,20 @@ mod tests {
         roundtrip_body(BodyToParent::LocalUi(LocalUiFact::Resize {
             width: 8,
             height: 9,
+        }));
+        roundtrip_body(BodyToParent::Presentation(PresentationFeedback {
+            surface_id: String::from("wl_surface@9"),
+            correlation_id: 4,
+            outcome: PresentationOutcome::Submitted,
+        }));
+        roundtrip_body(BodyToParent::Presentation(PresentationFeedback {
+            surface_id: String::from("wl_surface@9"),
+            correlation_id: 5,
+            outcome: PresentationOutcome::Presented {
+                timestamp_ns: 99,
+                clock_id: 1,
+                output: String::from("DP-1"),
+            },
         }));
         roundtrip_body(BodyToParent::CleanExit);
     }

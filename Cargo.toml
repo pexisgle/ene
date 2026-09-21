@@ -38,9 +38,21 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # Windows-only volume identity for the Action filesystem boundary, plus the
 # Stage 5 named-pipe transport (explicit DACL, peer token check).
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
-# Stage 7 D: Body is the only process that owns a GPU device. Overlay OS
-# backends stay stubbed; this crate is not a Host/desktop dependency.
+# Stage 7 D: Body is the only process that owns a GPU device. OS overlay
+# dependencies remain confined to that package.
 wgpu = "27"
+libc = "0.2"
+glam = "0.29"
+vrm-runtime = "0.1.0"
+raw-window-handle = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+wayland-client = { version = "0.31", features = ["system", "dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+smithay-client-toolkit = { version = "0.19", default-features = false }
+csv = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [workspace.lints.clippy]
 allow_attributes = "forbid"
@@ -61,4 +73,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-

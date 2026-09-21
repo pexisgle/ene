@@ -8,11 +8,12 @@ use std::time::Duration;
 use ene_api::v1::management::ManagementOutcome;
 use ene_config::{Config, resolve_data_dir};
 use ene_desktop::i18n::Locale;
+use ene_desktop::measure::{InteractionSample, InteractionTraceLine, monotonic_ns};
 use ene_desktop::ui::presentation::{SurfaceSnapshot, parse_cap};
 use ene_desktop::ui::{DesktopError, DesktopRuntime};
 use ene_desktop_ui::{ChatWindow, Item, ManagementWindow, Message};
 use slint::winit_030::WinitWindowAccessor;
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, RenderingState, VecModel};
 use tokio::sync::{Notify, oneshot};
 use zeroize::Zeroizing;
 
@@ -26,6 +27,8 @@ enum Command {
     Workspace(String),
     Resume(String, String),
     CancelTask(String),
+    ShowBody,
+    HideBody,
     Locale(bool),
     Next,
     Back,
@@ -47,6 +50,7 @@ impl Command {
     fn management_page(&self) -> Option<i32> {
         match self {
             Self::Refresh(page) => Some(*page),
+            Self::ShowBody | Self::HideBody => Some(0),
             Self::Startup | Self::Next | Self::Back | Self::Secret(_) | Self::Assign(_) => Some(6),
             Self::Memory(_) | Self::MoreMemory | Self::MoreRevisions => Some(2),
             Self::MoreUsage | Self::Cap(_) => Some(3),
@@ -58,6 +62,22 @@ impl Command {
             _ => None,
         }
     }
+
+    fn measured_operation(&self) -> Option<&'static str> {
+        match self {
+            Self::CancelTask(_) => Some("cancel_task"),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct InteractionStart {
+    operation: &'static str,
+    input_monotonic_ns: u64,
+}
+struct PendingPaint {
+    start: InteractionStart,
+    host_intake_monotonic_ns: u64,
 }
 struct Request {
     command: Command,
@@ -65,6 +85,7 @@ struct Request {
     management_page: Option<i32>,
     epoch: u64,
     generation: u64,
+    interaction: Option<InteractionStart>,
 }
 #[derive(Default)]
 struct Mailbox {
@@ -84,12 +105,19 @@ impl Mailbox {
             return false;
         }
         self.pending[lane].fetch_add(1, Ordering::SeqCst);
+        let interaction = command
+            .measured_operation()
+            .map(|operation| InteractionStart {
+                operation,
+                input_monotonic_ns: monotonic_ns(),
+            });
         queue.push_back(Request {
             management_page: command.management_page(),
             command,
             lane,
             epoch: self.epoch.load(Ordering::SeqCst),
             generation: self.generation.load(Ordering::SeqCst),
+            interaction,
         });
         self.wake.notify_one();
         true
@@ -127,6 +155,7 @@ struct Surfaces {
     chat: slint::Weak<ChatWindow>,
     management: slint::Weak<ManagementWindow>,
     mailbox: Arc<Mailbox>,
+    pending_paints: Arc<Mutex<VecDeque<PendingPaint>>>,
 }
 impl Surfaces {
     fn submit(&self, command: Command, lane: usize) -> bool {
@@ -265,7 +294,9 @@ fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
         chat: chat.as_weak(),
         management: management.as_weak(),
         mailbox: Arc::default(),
+        pending_paints: Arc::default(),
     };
+    install_interaction_notifier(&chat, &surfaces)?;
     let initial = desktop.surface_snapshot();
     chat.set_japanese(initial.japanese);
     management.set_japanese(initial.japanese);
@@ -282,6 +313,64 @@ fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
 }
 fn platform_error(e: slint::PlatformError) -> DesktopError {
     DesktopError::Protocol(e.to_string())
+}
+
+fn install_interaction_notifier(
+    chat: &ChatWindow,
+    surfaces: &Surfaces,
+) -> Result<(), DesktopError> {
+    let pending = Arc::clone(&surfaces.pending_paints);
+    let trace_path = std::env::var_os("ENE_INTERACTION_TRACE_JSONL").map(std::path::PathBuf::from);
+    chat.window()
+        .set_rendering_notifier(move |state, _graphics| {
+            if !matches!(state, RenderingState::AfterRendering) {
+                return;
+            }
+            let paints = {
+                let mut pending = pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pending.drain(..).collect::<Vec<_>>()
+            };
+            let painted = monotonic_ns();
+            for paint in paints {
+                let sample = InteractionSample {
+                    operation: paint.start.operation.to_string(),
+                    input_monotonic_ns: paint.start.input_monotonic_ns,
+                    host_intake_monotonic_ns: paint.host_intake_monotonic_ns,
+                    gui_painted_monotonic_ns: painted,
+                };
+                if let Some(path) = &trace_path {
+                    append_interaction_trace(path, sample);
+                }
+            }
+        })
+        .map_err(|error| DesktopError::Protocol(error.to_string()))
+}
+
+fn append_interaction_trace(path: &std::path::Path, sample: InteractionSample) {
+    let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let Ok(observed_unix_ns) = u64::try_from(since_epoch.as_nanos()) else {
+        return;
+    };
+    let line = InteractionTraceLine {
+        observed_unix_ns,
+        sample,
+    };
+    let Ok(mut encoded) = serde_json::to_vec(&line) else {
+        return;
+    };
+    encoded.push(b'\n');
+    let opened = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
+    let Ok(mut file) = opened else {
+        return;
+    };
+    let _result = std::io::Write::write_all(&mut file, &encoded);
 }
 fn show<C: ComponentHandle>(window: &C) {
     match window.show() {
@@ -336,6 +425,18 @@ fn bind(s: &Surfaces, c: &ChatWindow, m: &ManagementWindow) {
             if let Some(m) = s.management.upgrade() {
                 s.submit(Command::Refresh(m.get_page()), 3);
             }
+        }
+    });
+    m.on_show_avatar({
+        let s = s.clone();
+        move || {
+            s.submit(Command::ShowBody, 3);
+        }
+    });
+    m.on_hide_avatar({
+        let s = s.clone();
+        move || {
+            s.submit(Command::HideBody, 3);
         }
     });
     c.on_refresh_history({
@@ -588,6 +689,14 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
             continue;
         }
         let result = execute(&mut desktop, request.command).await;
+        // The Host outcome is a conservative upper bound on intake: the Host
+        // necessarily accepted or refused the operation before this point.
+        let measured = result.as_ref().ok().and_then(|_| {
+            request.interaction.map(|start| PendingPaint {
+                start,
+                host_intake_monotonic_ns: monotonic_ns(),
+            })
+        });
         s.mailbox.complete(request.lane, request.epoch);
         if request.generation != s.mailbox.generation.load(Ordering::SeqCst) {
             desktop.cancel_secret();
@@ -606,6 +715,14 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
                 c.set_notice_error(failed); m.set_notice_error(failed);
                 let notice=result.unwrap_or_else(|_| local(ja, "処理を完了できませんでした。接続や現在の状態を確認してください。送信済みの操作は自動再送しません。", "The action could not complete. Check the connection and current state. Submitted actions are not automatically retried.").into());
                 match request.lane { 1 => { c.set_notice(notice.into()); }, 2 => { c.set_task_notice(notice.into()); }, _ => { if request.management_page==Some(m.get_page()) { m.set_notice(notice.into()); } } }
+                if let Some(measured) = measured {
+                    surfaces
+                        .pending_paints
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push_back(measured);
+                    c.window().request_redraw();
+                }
                 if request.generation == surfaces.mailbox.generation.load(Ordering::SeqCst) {
                     if let Some(confirm)=&snap.confirmation {
                         if confirmation_action {
@@ -628,7 +745,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
     let outcome = match command {
         Command::Startup => {
             d.ensure_host(None)?;
-            d.try_spawn_body(&d.bundled_ene_asset());
+            d.try_spawn_located_body();
             d.connect_or_begin_pairing().await?;
             None
         }
@@ -671,6 +788,14 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::CancelTask(key) => {
             d.check_task_key(&key)?;
             Some(d.cancel_displayed_task().await?)
+        }
+        Command::ShowBody => {
+            d.show_body();
+            None
+        }
+        Command::HideBody => {
+            d.hide_body();
+            None
         }
         Command::Locale(ja) => {
             d.set_locale(if ja { Locale::Ja } else { Locale::En });
@@ -858,6 +983,8 @@ fn apply(c: &ChatWindow, m: &ManagementWindow, s: &SurfaceSnapshot, reset_step: 
     m.set_connected(s.connected);
     c.set_status(s.status.as_str().into());
     m.set_status(s.status.as_str().into());
+    m.set_avatar_available(s.body_available);
+    m.set_avatar_visible(s.body_visible);
     let messages: Vec<Message> = s
         .messages
         .iter()

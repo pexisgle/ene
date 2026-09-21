@@ -8,7 +8,8 @@
 //!
 //! Modules match [First-party desktop](../../docs/design/concrete/first-party-desktop.md)
 //! §6: `ui`, `session`, `control`, `body_supervise`, `i18n`, `erasure`.
-//! `measure` is the slice F recording format only; it does not claim a gate.
+//! `measure` owns slice F raw records and gate evaluation. A default or
+//! incomplete record never claims a pass.
 
 pub mod body_supervise;
 pub mod control;

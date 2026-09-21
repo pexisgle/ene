@@ -10,6 +10,7 @@ pub struct HeadlessOverlay {
     visible: bool,
     placement: PlacementBox,
     local_ui: Option<LocalUiFact>,
+    unavailable_reason: Option<String>,
 }
 
 impl HeadlessOverlay {
@@ -19,7 +20,21 @@ impl HeadlessOverlay {
             visible: false,
             placement: PlacementBox::default(),
             local_ui: None,
+            unavailable_reason: None,
         }
+    }
+
+    #[must_use]
+    pub fn unavailable(reason: String) -> Self {
+        Self {
+            unavailable_reason: Some(reason),
+            ..Self::new()
+        }
+    }
+
+    #[must_use]
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        self.unavailable_reason.as_deref()
     }
 
     pub fn set_visible(&mut self, visible: bool) {

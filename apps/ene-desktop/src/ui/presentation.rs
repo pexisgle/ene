@@ -45,6 +45,8 @@ pub struct SurfaceSnapshot {
     pub step: i32,
     pub model: String,
     pub status: String,
+    pub body_available: bool,
+    pub body_visible: bool,
     pub messages: Vec<Message>,
     pub tasks: Vec<Row>,
     pub details: Vec<Row>,

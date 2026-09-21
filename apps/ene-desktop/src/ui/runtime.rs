@@ -1,13 +1,17 @@
 //! Testable desktop runtime. Host I/O never runs inside [`DesktopRuntime::tick`].
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ene_api::v1::deletion::LocalErasureResult;
 use ene_api::v1::management::{ManagementOutcome, ManagementViewRequest};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
 use ene_api::v1::round::{HistoryItem, PresentationStatus};
+use ene_body::ipc::{
+    AssetRef, LocalUiFact, ParentToBody, PlacementBox, PoseHint, PresentationFeedback,
+};
 use ene_client::{Client, PendingPairingClient};
 use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
 
@@ -16,6 +20,7 @@ use crate::control::ConfirmationClient;
 use crate::erasure::{self, GuiOwned};
 use crate::host_launch::{self, DetachedHost};
 use crate::i18n::{self, Label, Locale};
+use crate::measure::WaylandFeedbackTraceLine;
 use crate::secret::SecretIntake;
 use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
 use crate::ui::deletion::DeletionPanel;
@@ -49,6 +54,11 @@ pub struct DesktopRuntime {
     ui_ticks: u64,
     body: BodySupervisor,
     body_status: BodyStatus,
+    body_placement: PlacementBox,
+    body_hidden: bool,
+    body_presentations: Vec<PresentationFeedback>,
+    body_pose_deadline: Option<Instant>,
+    presentation_trace: Option<std::fs::File>,
     model: String,
     detached_host: Option<DetachedHost>,
     memory: MemoryPage,
@@ -90,6 +100,23 @@ impl DesktopRuntime {
             ui_ticks: 0,
             body: BodySupervisor::new(),
             body_status: BodyStatus::Absent,
+            body_placement: PlacementBox {
+                x: 24,
+                y: 24,
+                width: 420,
+                height: 640,
+                scale: 1.0,
+            },
+            body_hidden: false,
+            body_presentations: Vec::new(),
+            body_pose_deadline: None,
+            presentation_trace: std::env::var_os("ENE_PRESENTATION_TRACE_JSONL").and_then(|path| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .ok()
+            }),
             model: String::from(DEFAULT_MODEL),
             detached_host: None,
             memory: MemoryPage::default(),
@@ -106,6 +133,33 @@ impl DesktopRuntime {
     pub fn tick(&mut self) {
         self.ui_ticks = self.ui_ticks.saturating_add(1);
         self.body_status = self.body.poll();
+        while let Some(fact) = self.body.take_local_ui() {
+            match fact {
+                LocalUiFact::Drag { x, y } => {
+                    self.body_placement.x = x;
+                    self.body_placement.y = y;
+                }
+                LocalUiFact::Resize { width, height } => {
+                    self.body_placement.width = width;
+                    self.body_placement.height = height;
+                }
+                LocalUiFact::Hide => self.body_hidden = true,
+            }
+        }
+        while let Some(feedback) = self.body.take_presentation() {
+            self.append_presentation_trace(&feedback);
+            if self.body_presentations.len() >= 4096 {
+                self.body_presentations.remove(0);
+            }
+            self.body_presentations.push(feedback);
+        }
+        if self
+            .body_pose_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.body_pose_deadline = None;
+            self.project_body_pose(PoseHint::Idle);
+        }
     }
 
     #[must_use]
@@ -220,7 +274,97 @@ impl DesktopRuntime {
     }
 
     pub fn try_spawn_body(&mut self, exe: &Path) {
+        let asset = self.bundled_ene_asset();
+        if !asset.is_file() {
+            self.body.shutdown();
+            self.body_status = BodyStatus::Absent;
+            return;
+        }
         self.body_status = self.body.spawn_if_present(exe);
+        if self.body_status != BodyStatus::Spawned {
+            return;
+        }
+        let commands = [
+            ParentToBody::AssetRef(AssetRef::Path {
+                path: asset.to_string_lossy().into_owned(),
+            }),
+            ParentToBody::Placement(self.body_placement),
+            ParentToBody::PoseHint(PoseHint::Idle),
+            ParentToBody::Show,
+        ];
+        for command in commands {
+            if self.body.send_projection(&command).is_err() {
+                self.body_status = BodyStatus::Exited;
+                break;
+            }
+        }
+        self.body_hidden = self.body_status != BodyStatus::Spawned;
+    }
+
+    pub fn try_spawn_located_body(&mut self) {
+        if let Some(executable) = BodySupervisor::locate_binary() {
+            self.try_spawn_body(&executable);
+        } else {
+            self.body.shutdown();
+            self.body_status = BodyStatus::Absent;
+        }
+    }
+
+    /// Projects an activity class only; no text, joint data, command, or
+    /// credential crosses the Body IPC.
+    pub fn project_body_pose(&mut self, pose: PoseHint) {
+        self.body_pose_deadline = matches!(pose, PoseHint::Speaking | PoseHint::Attention)
+            .then(|| Instant::now() + Duration::from_secs(2));
+        if self.body_status == BodyStatus::Spawned {
+            let _result = self.body.send_projection(&ParentToBody::PoseHint(pose));
+        }
+    }
+
+    pub fn show_body(&mut self) {
+        if self.body_status == BodyStatus::Spawned
+            && self.body.available()
+            && self.body.send_projection(&ParentToBody::Show).is_ok()
+        {
+            self.body_hidden = false;
+        }
+    }
+
+    pub fn hide_body(&mut self) {
+        if self.body_status == BodyStatus::Spawned
+            && self.body.available()
+            && self.body.send_projection(&ParentToBody::Hide).is_ok()
+        {
+            self.body_hidden = true;
+        }
+    }
+
+    /// Takes retained compositor presentation evidence for the measurement
+    /// recorder. Health ticks are intentionally not exposed here.
+    pub fn take_body_presentations(&mut self) -> Vec<PresentationFeedback> {
+        std::mem::take(&mut self.body_presentations)
+    }
+
+    fn append_presentation_trace(&mut self, feedback: &PresentationFeedback) {
+        let Some(file) = &mut self.presentation_trace else {
+            return;
+        };
+        let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        else {
+            return;
+        };
+        let Ok(observed_unix_ns) = u64::try_from(since_epoch.as_nanos()) else {
+            return;
+        };
+        let line = WaylandFeedbackTraceLine {
+            observed_unix_ns,
+            feedback: feedback.clone(),
+        };
+        let Ok(encoded) = serde_json::to_vec(&line) else {
+            return;
+        };
+        if file.write_all(&encoded).is_ok() {
+            let _result = file.write_all(b"\n");
+        }
     }
 
     /// Kills the overlay child. Chat, settings, and cancel stay on this process.
@@ -230,7 +374,37 @@ impl DesktopRuntime {
     }
 
     pub fn bundled_ene_asset(&self) -> PathBuf {
-        self.data_dir.join(BUNDLED_ENE_ASSET)
+        if let Some(path) = std::env::var_os("ENE_BUNDLED_ASSET_PATH")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+        {
+            return path;
+        }
+        let data_candidate = self.data_dir.join(BUNDLED_ENE_ASSET);
+        if data_candidate.is_file() {
+            return data_candidate;
+        }
+        if let Ok(executable) = std::env::current_exe()
+            && let Some(bin) = executable.parent()
+        {
+            for candidate in [
+                bin.join(BUNDLED_ENE_ASSET),
+                bin.parent()
+                    .map(|prefix| prefix.join("share/ene").join(BUNDLED_ENE_ASSET))
+                    .unwrap_or_default(),
+            ] {
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+        let workspace_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(BUNDLED_ENE_ASSET);
+        if workspace_candidate.is_file() {
+            return workspace_candidate;
+        }
+        data_candidate
     }
 
     /// Detach `ene-core serve` when the Client listener is down.
@@ -628,6 +802,7 @@ impl DesktopRuntime {
             return Ok(());
         };
         self.ensure_client()?;
+        self.project_body_pose(PoseHint::Listening);
         let lang = self.locale.as_tag().to_string();
         let collected = {
             let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
@@ -635,6 +810,7 @@ impl DesktopRuntime {
         };
         match collected {
             Ok(turn) => {
+                self.project_body_pose(PoseHint::Speaking);
                 self.timeline.push(super::presentation::Message {
                     round: turn.round.clone(),
                     owner: true,
@@ -666,6 +842,7 @@ impl DesktopRuntime {
                 Ok(())
             }
             Err(error) => {
+                self.project_body_pose(PoseHint::Attention);
                 self.deny_reason = error.to_string();
                 self.timeline.push(super::presentation::Message {
                     owner: true,
@@ -1296,6 +1473,10 @@ impl DesktopRuntime {
             model: self.facts.model.clone().unwrap_or_else(|| self.model.clone()),
             step: match self.wizard_step { WizardStep::Language => 0, WizardStep::BundledEne => 1, WizardStep::CloudCost => 2, WizardStep::Credential => 3, WizardStep::Assignment => 4 },
             status: if self.client.is_some() { tr(locale, "接続済み", "Connected") } else { tr(locale, "未接続 · セットアップを確認してください", "Disconnected · review setup") },
+            body_available: self.body_status == BodyStatus::Spawned && self.body.available(),
+            body_visible: self.body_status == BodyStatus::Spawned
+                && self.body.available()
+                && !self.body_hidden,
             messages, tasks: self.tasks.rows(locale), details: self.tasks.details(locale), selected_task: self.tasks.selected_key(),
             memories: self.memory.rows().iter().map(|m| Row { key: memory_key(&m.id, &m.revision), title: tr(locale, "記憶", "Memory"), body: m.content.clone(), meta: m.created_at.clone(), state: m.importance.clone() }).collect(),
             revisions: self.memory.revisions().iter().map(|m| Row { title: format!("{} {}", tr(locale, "履歴", "Revision"), m.revision), body: m.content.clone(), meta: [m.at.clone(), m.grounds_summary.clone().unwrap_or_default(), m.grounds.clone().unwrap_or_default()].join("

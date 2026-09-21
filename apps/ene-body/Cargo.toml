@@ -9,13 +9,34 @@ publish.workspace = true
 name = "ene-body"
 path = "src/main.rs"
 
+[[bin]]
+name = "ene-body-asset-probe"
+path = "src/bin/ene-body-asset-probe.rs"
+
 [dependencies]
 clap.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std"] }
 wgpu.workspace = true
+glam.workspace = true
+vrm-runtime.workspace = true
+raw-window-handle.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+image.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
+smithay-client-toolkit.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile.workspace = true
