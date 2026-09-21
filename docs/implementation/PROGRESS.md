@@ -24,8 +24,8 @@
 
 ## 未解決のブロッカー (Blockers)
 
-- Stage 7 D の製品キャラクター完成には公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）と、実 KDE Wayland / Windows 11 overlay probe が必要。実装と生成 fixture probeだけでは完了しない。
-- **上記アセット以外に現在ブロッカーはありません。**
+- Stage 7 D の製品キャラクター完成に対する外部 blocker は、公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）のみ。
+- Stage 7 完了には、KDE Wayland / Windows 11 の実 overlay probe、Linux Secret Service、両 OS の日英・IME acceptance、Performance Gate が別途必要。これらは未実施の acceptance 作業であり、実装を進める上での外部 blocker とは扱わない。
 - 個別の非ブロッキングな設計・実装フォローアップは GitHub Issues で管理します。
 - Stage 7 の Linux 自動テストと X11 GUI 操作は [Linux 報告](reports/stage-7-linux-2026-09-19.md) にある。Windows 11 / KDE Wayland 実 desktop の日英・IME、overlay / 公式 VRM、Linux Secret Service、Performance Gate は未実施。
 
