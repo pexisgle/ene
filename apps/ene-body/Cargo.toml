@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes `ene_body::testing` (generated VRM/VRMA fixtures) to sibling crate
+# tests. Fixtures are synthetic; they are never product acceptance.
+test-support = []
+
 [[bin]]
 name = "ene-body"
 path = "src/main.rs"

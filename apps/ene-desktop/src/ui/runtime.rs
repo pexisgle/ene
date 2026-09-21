@@ -21,6 +21,7 @@ use crate::erasure::{self, GuiOwned};
 use crate::host_launch::{self, DetachedHost};
 use crate::i18n::{self, Label, Locale};
 use crate::measure::WaylandFeedbackTraceLine;
+use crate::motion::{self, MotionEnvironment, MotionPlan};
 use crate::secret::SecretIntake;
 use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
 use crate::ui::deletion::DeletionPanel;
@@ -284,14 +285,18 @@ impl DesktopRuntime {
         if self.body_status != BodyStatus::Spawned {
             return;
         }
-        let commands = [
-            ParentToBody::AssetRef(AssetRef::Path {
-                path: asset.to_string_lossy().into_owned(),
-            }),
-            ParentToBody::Placement(self.body_placement),
-            ParentToBody::PoseHint(PoseHint::Idle),
-            ParentToBody::Show,
-        ];
+        let mut commands = vec![ParentToBody::AssetRef(AssetRef::Path {
+            path: asset.to_string_lossy().into_owned(),
+        })];
+        // The assignment travels next to the avatar path as asset data. A
+        // missing pack is not an error: the body keeps its staged pose.
+        let motion = self.motion_plan();
+        if let Some(set) = motion.set() {
+            commands.push(ParentToBody::MotionSet(set));
+        }
+        commands.push(ParentToBody::Placement(self.body_placement));
+        commands.push(ParentToBody::PoseHint(PoseHint::Idle));
+        commands.push(ParentToBody::Show);
         for command in commands {
             if self.body.send_projection(&command).is_err() {
                 self.body_status = BodyStatus::Exited;
@@ -299,6 +304,13 @@ impl DesktopRuntime {
             }
         }
         self.body_hidden = self.body_status != BodyStatus::Spawned;
+    }
+
+    /// Resolves the motion pack for this spawn. Placement is the install
+    /// script's job; nothing placed leaves the body on its staged pose.
+    #[must_use]
+    pub fn motion_plan(&self) -> MotionPlan {
+        motion::resolve(&MotionEnvironment::from_process(&self.data_dir))
     }
 
     pub fn try_spawn_located_body(&mut self) {
@@ -371,6 +383,13 @@ impl DesktopRuntime {
     pub fn kill_body(&mut self) {
         self.body.shutdown();
         self.body_status = self.body.poll();
+    }
+
+    /// Whether the overlay child reports a validated clip set. This is a fact
+    /// for tests and measurement; the window does not display it.
+    #[must_use]
+    pub fn body_motion_ready(&mut self) -> bool {
+        self.body.motion_ready()
     }
 
     pub fn bundled_sample_asset(&self) -> PathBuf {

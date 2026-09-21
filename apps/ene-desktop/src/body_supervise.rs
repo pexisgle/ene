@@ -36,6 +36,7 @@ pub struct BodySupervisor {
     presentations: VecDeque<PresentationFeedback>,
     native_ready: bool,
     asset_ready: bool,
+    motion_ready: bool,
 }
 
 impl Drop for BodySupervisor {
@@ -130,6 +131,7 @@ impl BodySupervisor {
                 self.presentations.clear();
                 self.native_ready = false;
                 self.asset_ready = false;
+                self.motion_ready = false;
                 BodyStatus::Spawned
             }
             Err(_) => BodyStatus::Absent,
@@ -194,6 +196,14 @@ impl BodySupervisor {
         self.native_ready && self.asset_ready && self.child.is_some()
     }
 
+    /// Whether the body reports a validated clip set. A missing motion pack
+    /// leaves this false and the body keeps its staged pose.
+    #[must_use]
+    pub fn motion_ready(&mut self) -> bool {
+        self.drain_events();
+        self.motion_ready
+    }
+
     pub fn shutdown(&mut self) {
         if self.stdin.is_some() {
             match self.send_projection(&ParentToBody::Shutdown) {
@@ -234,6 +244,10 @@ impl BodySupervisor {
                                 self.native_ready = false;
                             }
                             BodyToParent::AssetReady(_) => self.asset_ready = true,
+                            BodyToParent::HealthTick(tick) => {
+                                self.motion_ready =
+                                    tick.motion == ene_body::ipc::FeatureSupport::Available;
+                            }
                             BodyToParent::LocalUi(fact) => self.local_ui.push_back(fact),
                             BodyToParent::Presentation(feedback) => {
                                 self.presentations.push_back(feedback);
@@ -270,6 +284,7 @@ fn event_kind(message: &BodyToParent) -> &'static str {
         BodyToParent::OverlayUnavailable(_) => "OverlayUnavailable",
         BodyToParent::AssetReady(_) => "AssetReady",
         BodyToParent::AssetFail(_) => "AssetFail",
+        BodyToParent::MotionFail(_) => "MotionFail",
         BodyToParent::HealthTick(_) => "HealthTick",
         BodyToParent::LocalUi(_) => "LocalUi",
         BodyToParent::Presentation(_) => "Presentation",

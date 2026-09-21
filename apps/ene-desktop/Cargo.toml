@@ -37,6 +37,7 @@ libc.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_ProcessStatus"] }
 
 [dev-dependencies]
+ene-body = { path = "../ene-body", features = ["test-support"] }
 ene-core = { path = "../ene-core", features = ["test-support"] }
 ene-credential = { path = "../../crates/ene-credential" }
 ene-inference = { path = "../../crates/ene-inference" }
