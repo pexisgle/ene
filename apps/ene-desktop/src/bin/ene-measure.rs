@@ -294,7 +294,13 @@ fn read_wayland_feedback(
                 selected.push(trace.feedback);
             }
             ene_body::ipc::PresentationOutcome::Submitted => {}
-            _ if submitted.contains(&trace.feedback.correlation_id) && observed < window_end => {
+            // The window is defined by the commit/submission time. A terminal
+            // feedback line is written when the Body's event reaches the
+            // desktop's tick (up to ~250 ms later), so filtering terminal
+            // lines by their observed write time would misreport the last
+            // frames of the window as unresolved. A feedback that never
+            // resolves still has no terminal line and stays Missing.
+            _ if submitted.contains(&trace.feedback.correlation_id) => {
                 selected.push(trace.feedback);
             }
             _ => {}
@@ -452,7 +458,37 @@ fn parse_f64(name: &'static str, value: &str) -> Result<f64, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_args;
+    use super::{parse_args, read_wayland_feedback};
+
+    use ene_body::ipc::{PresentationFeedback, PresentationOutcome};
+    use ene_desktop::measure::{WaylandFeedbackTraceLine, wayland_presentation_record};
+
+    fn write_trace(lines: &[WaylandFeedbackTraceLine]) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().expect("temp trace");
+        for line in lines {
+            let encoded = serde_json::to_string(line).expect("encode");
+            file.write_all(encoded.as_bytes()).expect("write");
+            file.write_all(b"\n").expect("newline");
+        }
+        file.flush().expect("flush");
+        file
+    }
+
+    fn line(
+        observed_unix_ns: u64,
+        correlation_id: u64,
+        outcome: PresentationOutcome,
+    ) -> WaylandFeedbackTraceLine {
+        WaylandFeedbackTraceLine {
+            observed_unix_ns,
+            feedback: PresentationFeedback {
+                surface_id: String::from("wl_surface@1"),
+                correlation_id,
+                outcome,
+            },
+        }
+    }
 
     #[test]
     fn mandatory_processes_and_outputs_parse() {
@@ -479,5 +515,55 @@ mod tests {
         .expect("args");
         assert_eq!(args.targets.len(), 3);
         assert_eq!(args.duration.as_secs(), 300);
+    }
+
+    /// Window: started 1000 ms after epoch, warmup 0 s, wall 10 s, so the
+    /// submission window is [1e9, 11e9) ns. The terminal line arrives after
+    /// the window end (the desktop writes Body events on its tick) and must
+    /// still count as presented, not missing.
+    #[test]
+    fn terminal_feedback_after_the_window_end_still_counts() {
+        let trace = write_trace(&[
+            line(5_000_000_000, 7, PresentationOutcome::Submitted),
+            line(
+                12_000_000_000,
+                7,
+                PresentationOutcome::Presented {
+                    timestamp_ns: 9_000_000_000,
+                    clock_id: 1,
+                    output: String::from("DP-1"),
+                },
+            ),
+        ]);
+        let feedback =
+            read_wayland_feedback(trace.path(), 0, 1_000, 0.0, 10.0).expect("read trace");
+        let record = wayland_presentation_record(1, 0.0, 10.0, feedback).expect("record");
+        assert_eq!(record.presented, 1);
+        assert_eq!(record.missing, 0);
+        assert_eq!(record.discarded, 0);
+    }
+
+    /// A submission inside the window with no terminal line is unresolved and
+    /// stays missing; the window must not silently drop it.
+    #[test]
+    fn unresolved_submission_inside_the_window_is_missing() {
+        let trace = write_trace(&[line(5_000_000_000, 9, PresentationOutcome::Submitted)]);
+        let feedback =
+            read_wayland_feedback(trace.path(), 0, 1_000, 0.0, 10.0).expect("read trace");
+        let record = wayland_presentation_record(1, 0.0, 10.0, feedback).expect("record");
+        assert_eq!(record.presented, 0);
+        assert_eq!(record.missing, 1);
+    }
+
+    /// Submissions outside the window are not part of the campaign at all.
+    #[test]
+    fn submissions_outside_the_window_are_ignored() {
+        let trace = write_trace(&[
+            line(500_000_000, 1, PresentationOutcome::Submitted),
+            line(20_000_000_000, 2, PresentationOutcome::Submitted),
+        ]);
+        let feedback =
+            read_wayland_feedback(trace.path(), 0, 1_000, 0.0, 10.0).expect("read trace");
+        assert!(feedback.is_empty());
     }
 }
