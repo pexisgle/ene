@@ -3,6 +3,8 @@
 //! Full chat/settings survival is `ene-desktop`'s job. This test only proves
 //! the overlay child can die without taking the parent process with it, and
 //! that the parent observes a disconnect (EOF) rather than a Host command.
+//! GPU initialization is outside this IPC/process-lifetime contract; child
+//! processes skip it so adapter startup cannot consume the protocol deadlines.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -14,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn dummy_parent_sees_disconnect_and_keeps_running_after_body_kill() {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ene-body"))
         .arg("--ipc-stdio")
+        .env("ENE_BODY_SKIP_GPU", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -57,6 +60,7 @@ async fn dummy_parent_sees_disconnect_and_keeps_running_after_body_kill() {
 async fn dummy_parent_receives_ready_and_clean_exit_on_shutdown() {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ene-body"))
         .arg("--ipc-stdio")
+        .env("ENE_BODY_SKIP_GPU", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -143,6 +147,7 @@ async fn unix_path_ipc_connects() {
 
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ene-body"))
         .arg("--ipc-unix")
+        .env("ENE_BODY_SKIP_GPU", "1")
         .arg(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
