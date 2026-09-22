@@ -23,7 +23,7 @@ use ene_api::v1::round::{
 use ene_client::error::ClientError;
 use ene_client::{Client, ConnectProgress, DEFAULT_COMPANION_REF, PendingPairingClient};
 
-use crate::ui::DesktopError;
+use crate::ui::{DesktopError, IntakeRefusal, StreamEnd};
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
@@ -237,27 +237,17 @@ pub async fn submit_and_collect(
         }),
     )
     .await?;
-    let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) = send
-    else {
-        return Err(DesktopError::Protocol(format!(
-            "intake was not accepted: {}",
-            send.message_type()
-        )));
-    };
+    let round = intake_round(send)?;
     let mut reply = String::new();
     let mut stream_id = None;
     loop {
         match ask_stream(client).await? {
             WirePayload::TextStreamOpen(open) => stream_id = Some(open.stream),
             WirePayload::TextStreamFrame(frame) => reply.push_str(&frame.delta),
-            WirePayload::TextStreamClose(close) => {
-                if close.status != StreamClose::Completed {
-                    return Err(DesktopError::Protocol(String::from(
-                        "stream closed without completion",
-                    )));
-                }
-                break;
-            }
+            WirePayload::TextStreamClose(close) => match stream_end(close.status) {
+                None => break,
+                Some(end) => return Err(DesktopError::StreamIncomplete(end)),
+            },
             other => {
                 return Err(DesktopError::Protocol(format!(
                     "unexpected stream {}",
@@ -267,10 +257,47 @@ pub async fn submit_and_collect(
         }
     }
     Ok(ChatTurn {
-        round: round.0,
+        round,
         stream: stream_id,
         reply,
     })
+}
+
+/// One intake answer: the round to submit into, or the refusal to explain.
+/// Host acceptance and the three refusals are matched separately, so a
+/// refusal can never be reported as an accepted round and a non-intake
+/// payload stays a protocol failure rather than a guessed domain outcome.
+fn intake_round(answer: WirePayload) -> Result<String, DesktopError> {
+    match answer {
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) => {
+            Ok(round.0)
+        }
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound { .. }) => {
+            Err(DesktopError::IntakeRejected(IntakeRefusal::StaleRound))
+        }
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::HeldForTransition) => Err(
+            DesktopError::IntakeRejected(IntakeRefusal::HeldForTransition),
+        ),
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation { .. }) => Err(
+            DesktopError::IntakeRejected(IntakeRefusal::NeedsRevalidation),
+        ),
+        other => Err(DesktopError::Protocol(format!(
+            "expected RoundIntakeOutcome, got {}",
+            other.message_type()
+        ))),
+    }
+}
+
+/// A non-completed stream end to report, or [`None`] when the turn completed
+/// and the collection loop stops successfully.
+#[must_use]
+fn stream_end(status: StreamClose) -> Option<StreamEnd> {
+    match status {
+        StreamClose::Completed => None,
+        StreamClose::Interrupted => Some(StreamEnd::Interrupted),
+        StreamClose::Cancelled => Some(StreamEnd::Cancelled),
+        StreamClose::Stale => Some(StreamEnd::Stale),
+    }
 }
 
 /// Presentation ACK for one collected chat turn. Call only from the path
@@ -346,9 +373,14 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, DesktopError> {
 
 #[cfg(test)]
 mod tests {
-    use super::SetupFacts;
+    use super::{SetupFacts, intake_round, stream_end};
+    use crate::ui::{DesktopError, IntakeRefusal, StreamEnd};
     use ene_api::v1::management::{ManagementView, ViewSection};
-    use ene_api::v1::refs::ViewMarkWire;
+    use ene_api::v1::payload::WirePayload;
+    use ene_api::v1::refs::{RevalidationReasonWire, RoundWireId, ViewMarkWire};
+    use ene_api::v1::round::{
+        ConfirmPresentationWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
+    };
 
     #[test]
     fn setup_ready_requires_host_facts_not_a_local_flag() {
@@ -376,5 +408,69 @@ mod tests {
         assert!(facts.credential_present);
         assert!(!facts.consent_assigned);
         assert!(!facts.setup_ready());
+    }
+
+    #[test]
+    fn each_intake_refusal_is_reported_as_its_own_domain_outcome() {
+        let accepted = WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
+            round: RoundWireId(String::from("round-1")),
+        });
+        let round = intake_round(accepted).expect("Host accepted the round");
+        assert_eq!(round, "round-1");
+
+        let refusals = [
+            (
+                RoundIntakeOutcomeWire::StaleRound {
+                    current_round: None,
+                    current_generation: 3,
+                },
+                IntakeRefusal::StaleRound,
+            ),
+            (
+                RoundIntakeOutcomeWire::HeldForTransition,
+                IntakeRefusal::HeldForTransition,
+            ),
+            (
+                RoundIntakeOutcomeWire::NeedsRevalidation {
+                    reason: RevalidationReasonWire(String::from("stopped-companion")),
+                },
+                IntakeRefusal::NeedsRevalidation,
+            ),
+        ];
+        for (outcome, expected) in refusals {
+            let error = intake_round(WirePayload::RoundIntakeOutcome(outcome))
+                .expect_err("a refusal never accepts a round");
+            assert!(
+                matches!(error, DesktopError::IntakeRejected(refusal) if refusal == expected),
+                "the refusal keeps its own remedy, got {error:?}"
+            );
+        }
+
+        let unrelated = WirePayload::ConfirmPresentation(ConfirmPresentationWire {
+            round: RoundWireId(String::from("round-1")),
+            stream: None,
+            status: PresentationStatus::Presented,
+            detail: None,
+        });
+        let error = intake_round(unrelated)
+            .expect_err("a payload that is not an intake outcome cannot accept a round");
+        assert!(
+            matches!(error, DesktopError::Protocol(_)),
+            "an unexpected payload stays a protocol failure, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_completed_stream_ends_collection_and_any_other_end_is_reportable() {
+        assert_eq!(stream_end(StreamClose::Completed), None);
+        assert_eq!(
+            stream_end(StreamClose::Interrupted),
+            Some(StreamEnd::Interrupted)
+        );
+        assert_eq!(
+            stream_end(StreamClose::Cancelled),
+            Some(StreamEnd::Cancelled)
+        );
+        assert_eq!(stream_end(StreamClose::Stale), Some(StreamEnd::Stale));
     }
 }

@@ -10,7 +10,7 @@ use ene_config::{Config, resolve_data_dir};
 use ene_desktop::i18n::Locale;
 use ene_desktop::measure::{InteractionSample, InteractionTraceLine, monotonic_ns};
 use ene_desktop::ui::presentation::{SurfaceSnapshot, parse_cap};
-use ene_desktop::ui::{DesktopError, DesktopRuntime};
+use ene_desktop::ui::{DesktopError, DesktopRuntime, IntakeRefusal, StreamEnd};
 use ene_desktop_ui::{ChatWindow, Item, ManagementWindow, Message};
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -763,19 +763,40 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         let surfaces = s.clone();
         let (tx, rx) = oneshot::channel();
         if slint::invoke_from_event_loop(move || {
-            if let (Some(c),Some(m))=(surfaces.chat.upgrade(),surfaces.management.upgrade()) {
-                apply(&c,&m,&snap,reset_step);
+            if let (Some(c), Some(m)) = (surfaces.chat.upgrade(), surfaces.management.upgrade()) {
+                apply(&c, &m, &snap, reset_step);
                 if startup {
                     request_post_show_redraw(&m);
                 }
-                c.set_busy(surfaces.mailbox.pending[1].load(Ordering::SeqCst)>0);
-                c.set_task_busy(surfaces.mailbox.pending[2].load(Ordering::SeqCst)>0);
-                m.set_busy(surfaces.mailbox.pending[3].load(Ordering::SeqCst)>0);
-                let ja=m.get_japanese();
-                let failed=result.is_err();
-                c.set_notice_error(failed); m.set_notice_error(failed);
-                let notice=result.unwrap_or_else(|_| local(ja, "処理を完了できませんでした。接続や現在の状態を確認してください。送信済みの操作は自動再送しません。", "The action could not complete. Check the connection and current state. Submitted actions are not automatically retried.").into());
-                match request.lane { 1 => { c.set_notice(notice.into()); }, 2 => { c.set_task_notice(notice.into()); }, _ => { if request.management_page==Some(m.get_page()) { m.set_notice(notice.into()); } } }
+                c.set_busy(surfaces.mailbox.pending[1].load(Ordering::SeqCst) > 0);
+                c.set_task_busy(surfaces.mailbox.pending[2].load(Ordering::SeqCst) > 0);
+                m.set_busy(surfaces.mailbox.pending[3].load(Ordering::SeqCst) > 0);
+                let ja = m.get_japanese();
+                let failed = result.is_err();
+                c.set_notice_error(failed);
+                m.set_notice_error(failed);
+                // The notice states the failure in plain language; the
+                // internal detail goes to stderr, never to the normal UI.
+                let notice = match result {
+                    Ok(notice) => notice,
+                    Err(error) => {
+                        log_failure(&error);
+                        failure_notice(ja, &error)
+                    }
+                };
+                match request.lane {
+                    1 => {
+                        c.set_notice(notice.into());
+                    }
+                    2 => {
+                        c.set_task_notice(notice.into());
+                    }
+                    _ => {
+                        if request.management_page == Some(m.get_page()) {
+                            m.set_notice(notice.into());
+                        }
+                    }
+                }
                 if let Some(measured) = measured {
                     surfaces
                         .pending_paints
@@ -785,17 +806,31 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
                     c.window().request_redraw();
                 }
                 if request.generation == surfaces.mailbox.generation.load(Ordering::SeqCst) {
-                    if let Some(confirm)=&snap.confirmation {
+                    if let Some(confirm) = &snap.confirmation {
                         if confirmation_action {
-                            m.set_confirmation_key(confirm.key.as_str().into()); m.set_confirmation_title(confirm.title.as_str().into());
-                            m.set_confirmation_description(confirm.description.as_str().into()); m.set_confirmation_target(confirm.target.as_str().into());
-                            m.set_can_confirm(true); m.set_page(7); show(&m);
+                            m.set_confirmation_key(confirm.key.as_str().into());
+                            m.set_confirmation_title(confirm.title.as_str().into());
+                            m.set_confirmation_description(confirm.description.as_str().into());
+                            m.set_confirmation_target(confirm.target.as_str().into());
+                            m.set_can_confirm(true);
+                            m.set_page(7);
+                            show(&m);
                         }
-                    } else if m.get_page()==7 { m.set_page(6); m.set_can_confirm(false); m.set_confirmation_key("".into()); }
+                    } else if m.get_page() == 7 {
+                        m.set_page(6);
+                        m.set_can_confirm(false);
+                        m.set_confirmation_key("".into());
+                    }
                 }
             }
-            match tx.send(()) { Ok(_) | Err(_) => {} }
-        }).is_err() { return; }
+            match tx.send(()) {
+                Ok(_) | Err(_) => {}
+            }
+        })
+        .is_err()
+        {
+            return;
+        }
         if rx.await.is_err() {
             return;
         }
@@ -1023,6 +1058,77 @@ fn resume_notice(ja: bool, result: &ene_api::v1::undelivered::ResumeTaskOutcomeW
         R::Unavailable=>local(ja,"現在、再開できるか確認できません。","The task's availability could not be determined."),
     }.into()
 }
+/// Plain-language notice for one failed command: what failed, whether state
+/// is intact, and what to do next. Internal error text never reaches the
+/// normal UI; [`log_failure`] keeps it for diagnosis.
+fn failure_notice(ja: bool, error: &DesktopError) -> String {
+    match error {
+        DesktopError::NotConnected => local(
+            ja,
+            "Host に接続していません。接続が回復したことを確認してから、もう一度操作してください。会話の履歴や設定は変更されていません。",
+            "Not connected to Host. Confirm the connection is back, then try again. History and settings were not changed.",
+        ),
+        DesktopError::Transport(_) | DesktopError::Client(_) => local(
+            ja,
+            "Host との通信で問題が起きました。接続状態を確認して、もう一度操作してください。結果が確定していない操作は自動では繰り返しません。",
+            "Communication with Host failed. Check the connection and try again. Actions with an unknown result are never retried automatically.",
+        ),
+        DesktopError::IntakeRejected(IntakeRefusal::StaleRound) => local(
+            ja,
+            "状態が更新されていたため送信を受け付けませんでした。画面を更新して、もう一度送信してください。会話の履歴は保たれています。",
+            "The state changed, so the message was not accepted. Refresh the view and send it again. Conversation history is intact.",
+        ),
+        DesktopError::IntakeRejected(IntakeRefusal::HeldForTransition) => local(
+            ja,
+            "状態の切り替わり中で送信を保留しました。少し待ってから、もう一度送信してください。会話の履歴は保たれています。",
+            "The message is on hold while state is transitioning. Wait a moment, then send it again. Conversation history is intact.",
+        ),
+        DesktopError::IntakeRejected(IntakeRefusal::NeedsRevalidation) => local(
+            ja,
+            "接続や在席の状態を確認できないため送信を受け付けませんでした。設定で接続を確認して、もう一度送信してください。会話の履歴は保たれています。",
+            "The connection or presence state could not be verified, so the message was not accepted. Check the connection in settings, then send it again. Conversation history is intact.",
+        ),
+        DesktopError::StreamIncomplete(StreamEnd::Interrupted) => local(
+            ja,
+            "返答の生成が途中で中断されました。会話の履歴は保たれています。接続やセットアップを確認して、もう一度送信してください。",
+            "Generating the reply was interrupted. Conversation history is intact. Check the connection and the setup, then send it again.",
+        ),
+        DesktopError::StreamIncomplete(StreamEnd::Cancelled) => local(
+            ja,
+            "会話が中断されたため返答を受け取れませんでした。会話の履歴は保たれています。もう一度送信してください。",
+            "The conversation was cancelled before a reply arrived. Conversation history is intact. Send it again.",
+        ),
+        DesktopError::StreamIncomplete(StreamEnd::Stale) => local(
+            ja,
+            "完了していない古い会話への送信は受け付けません。履歴を更新して、もう一度送信してください。",
+            "A message cannot join an older unfinished conversation. Refresh history and send it again.",
+        ),
+        DesktopError::HistoryRefreshAfterTurn(_) => local(
+            ja,
+            "返答は表示済みですが、履歴の更新に失敗しました。「履歴を更新」で確認できます。送信のやり直しは不要です。",
+            "The reply is already shown, but refreshing history failed. Use \"Refresh history\" to check it. Do not send it again.",
+        ),
+        _ => local(
+            ja,
+            "処理を完了できませんでした。接続や現在の状態を確認してください。送信済みの操作は自動再送しません。",
+            "The action could not complete. Check the connection and current state. Submitted actions are not automatically retried.",
+        ),
+    }
+    .into()
+}
+
+/// The internal failure behind a localized notice. The UI shows plain
+/// language only (friendly error guidance), so the technical detail goes to
+/// stderr. A GUI process may have no stderr at all, so a failed write is
+/// dropped instead of panicking the worker.
+fn log_failure(error: &DesktopError) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    match writeln!(stderr, "ene-desktop: command failed: {error}") {
+        Ok(()) | Err(_) => {}
+    }
+}
+
 fn set_items(current: ModelRc<Item>, next: Vec<Item>, set: impl FnOnce(ModelRc<Item>)) {
     if current.iter().collect::<Vec<_>>() != next {
         set(ModelRc::new(VecModel::from(next)));
@@ -1131,6 +1237,68 @@ mod tests {
             assert!(mailbox.push(Command::History, 1));
         }
         assert!(!mailbox.push(Command::Send("not accepted".into()), 1));
+    }
+
+    #[test]
+    fn each_known_failure_gets_its_own_plain_language_notice() {
+        let failures = [
+            DesktopError::NotConnected,
+            DesktopError::Transport(String::from("client request timed out")),
+            DesktopError::IntakeRejected(IntakeRefusal::StaleRound),
+            DesktopError::IntakeRejected(IntakeRefusal::HeldForTransition),
+            DesktopError::IntakeRejected(IntakeRefusal::NeedsRevalidation),
+            DesktopError::StreamIncomplete(StreamEnd::Interrupted),
+            DesktopError::StreamIncomplete(StreamEnd::Cancelled),
+            DesktopError::StreamIncomplete(StreamEnd::Stale),
+            DesktopError::HistoryRefreshAfterTurn(Box::new(DesktopError::Transport(String::from(
+                "client request timed out",
+            )))),
+        ];
+        let mut notices = std::collections::HashSet::new();
+        for failure in failures {
+            let ja = failure_notice(true, &failure);
+            let en = failure_notice(false, &failure);
+            assert_ne!(ja, en, "the notice follows the locale: {failure:?}");
+            for internal in [
+                "transport:",
+                "intake was not accepted",
+                "stream closed without completion",
+                "client request timed out",
+            ] {
+                assert!(
+                    !ja.contains(internal) && !en.contains(internal),
+                    "internal error text stays out of the notice: {ja} / {en}"
+                );
+            }
+            assert!(
+                notices.insert(ja),
+                "two failures shared one notice, so the cause cannot be told apart: {failure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_delivered_turn_is_never_reported_as_a_failed_send() {
+        let delivered = DesktopError::HistoryRefreshAfterTurn(Box::new(DesktopError::Transport(
+            String::from("client request timed out"),
+        )));
+        let ja = failure_notice(true, &delivered);
+        let en = failure_notice(false, &delivered);
+        assert!(ja.contains("やり直しは不要"), "{ja}");
+        assert!(!ja.contains("もう一度送信"), "{ja}");
+        assert!(en.contains("Do not send it again"), "{en}");
+        assert!(en.contains("Refresh history"), "{en}");
+    }
+
+    #[test]
+    fn an_unexpected_failure_keeps_the_generic_guidance() {
+        let unexpected = DesktopError::Protocol(String::from("unexpected stream TextStreamOpen"));
+        let ja = failure_notice(true, &unexpected);
+        let en = failure_notice(false, &unexpected);
+        assert!(ja.contains("処理を完了できませんでした"), "{ja}");
+        assert!(!ja.contains("unexpected stream"), "{ja}");
+        assert!(en.contains("The action could not complete"), "{en}");
+        assert!(!en.contains("unexpected stream"), "{en}");
     }
 
     #[test]

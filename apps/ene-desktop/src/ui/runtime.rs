@@ -857,7 +857,9 @@ impl DesktopRuntime {
                     }
                 }
                 self.flush_pending_erasure().await;
-                self.refresh_history().await?;
+                self.refresh_history()
+                    .await
+                    .map_err(|error| DesktopError::HistoryRefreshAfterTurn(Box::new(error)))?;
                 Ok(())
             }
             Err(error) => {
@@ -1354,13 +1356,14 @@ impl DesktopRuntime {
         .await;
     }
 
+    /// A send or a read needs a live Client. Reports [`DesktopError::NotConnected`]
+    /// rather than a transport failure: nothing was submitted on this path,
+    /// which the notice may state as fact.
     fn ensure_client(&self) -> Result<(), DesktopError> {
         if self.client.is_some() {
             Ok(())
         } else {
-            Err(DesktopError::Transport(String::from(
-                "client is not connected",
-            )))
+            Err(DesktopError::NotConnected)
         }
     }
 

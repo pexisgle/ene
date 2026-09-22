@@ -199,6 +199,36 @@ impl GuiSnapshot {
     }
 }
 
+/// Why Host refused round intake. A refusal is a domain outcome, not a
+/// technical failure: the connection stays usable, the input is never
+/// rebound onto another round, and each variant carries its own remedy.
+/// Acceptance is not a refusal and never reaches this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeRefusal {
+    /// The premise (round, generation, active client, live connection) is no
+    /// longer current. Remedy: refresh the view, then send again.
+    StaleRound,
+    /// Presence is transitioning, so intake waits instead of answering now.
+    HeldForTransition,
+    /// Companion or presence could not be verified. Remedy: check the
+    /// connection and the companion lifecycle, then send again.
+    NeedsRevalidation,
+}
+
+/// How a reply stream ended before a completed turn. No reply was adopted,
+/// so partial text is never presented as an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// Host could not keep the stream alive, for example an unreadable
+    /// dialogue consent or a failed inference dispatch.
+    Interrupted,
+    /// Host or the owner stopped the stream; the partial reply is dropped.
+    Cancelled,
+    /// The stream belongs to a superseded premise; old streams are never
+    /// rebound to a new round.
+    Stale,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DesktopError {
     #[error("transport: {0}")]
@@ -211,10 +241,27 @@ pub enum DesktopError {
     SeatOccupied,
     #[error("denied by the control boundary")]
     DeniedByBoundary,
+    /// No Client connection exists. Distinct from a request that failed on
+    /// an established connection: nothing was submitted, so the notice may
+    /// say that no state changed.
+    #[error("client is not connected")]
+    NotConnected,
     #[error("{0}")]
     Protocol(String),
     #[error(transparent)]
     Client(#[from] ClientError),
+    /// Host refused round intake. Carries the domain refusal so the notice
+    /// can name its remedy instead of reporting a technical failure.
+    #[error("intake was not accepted: {0:?}")]
+    IntakeRejected(IntakeRefusal),
+    /// The reply stream ended without completion; no reply was adopted.
+    #[error("stream closed without completion: {0:?}")]
+    StreamIncomplete(StreamEnd),
+    /// The turn was delivered and presented, and only the history refresh
+    /// that follows it failed. Never collapses into a failed send: telling
+    /// the user to resend would duplicate a turn Host already holds.
+    #[error("history refresh after a delivered turn failed: {0}")]
+    HistoryRefreshAfterTurn(Box<DesktopError>),
 }
 
 pub(crate) fn history_lines(items: &[HistoryItem]) -> Vec<String> {
