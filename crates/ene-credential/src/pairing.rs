@@ -3,7 +3,7 @@
 //! one-time pairing secret.
 
 use ene_primitive::{RawId, WallClockWithTz};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit as _, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};

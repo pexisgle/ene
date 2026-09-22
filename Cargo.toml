@@ -20,7 +20,7 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rmp-serde = "1"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 # Real OS credential store adapter for the first-party GUI setup path
 # (Windows Credential Manager, Linux Secret Service). Provisional per
@@ -29,10 +29,10 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 keyring = { version = "4", default-features = false, features = ["v1"] }
 # Provisional preferred text GUI for `apps/ene-desktop` only (winit,
 # Royalty-free Desktop + AboutSlint). Not a Host or Body dependency.
-slint = { version = "1.14", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "renderer-software", "unstable-winit-030", "accessibility"] }
-slint-build = "1.14"
-hmac = "0.12"
-sha2 = "0.10"
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "renderer-software", "unstable-winit-030", "accessibility"] }
+slint-build = "1.18"
+hmac = "0.13"
+sha2 = "0.11"
 subtle = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # Windows-only volume identity for the Action filesystem boundary, plus the
@@ -46,7 +46,7 @@ glam = "0.29"
 vrm-runtime = "0.1.0"
 raw-window-handle = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
-pollster = "0.4"
+pollster = "1.0"
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
