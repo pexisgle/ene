@@ -418,6 +418,12 @@ fn parse_status(name: Option<&str>) -> Option<Option<UsageSummaryStatus>> {
     }
 }
 
+/// The cap slots the response reports: the system scope always (it budgets
+/// every provider), plus the provider the query names (its slots appear even
+/// without a stored cap, so the Client receives the none-state mark it must
+/// echo to create the first cap). Stored caps of every provider are included
+/// with their slots in an unfiltered read; a read that names a provider
+/// reports only the system scope and that provider.
 fn build_cap_views(
     provider_filter: Option<&str>,
     statuses: &[UsageCapStatus],

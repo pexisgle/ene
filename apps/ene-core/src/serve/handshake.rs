@@ -3,6 +3,7 @@ use super::frames::{
 };
 use super::{HostHandle, LiveInput, device_client};
 use crate::conn::{ChallengeOutcome, ConnectionPhase, InstallOutcome, NonceAdmission};
+use crate::pairing_delivery::PendingResend;
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, DisconnectNotice,
@@ -29,22 +30,43 @@ impl HostHandle {
         if descriptor.is_empty() {
             return vec![denied_pairing(frame, live, "blank device descriptor")];
         }
+        if let Some(resend) = self.pairing_deliveries.resend_match(
+            &live.connection_id,
+            frame.envelope.correlation.request_id,
+            &descriptor,
+        ) {
+            // A repeat on this connection answers the live pending instead of
+            // minting a second one (IPC §9.3); the device identity is never
+            // re-issued and the first pending stays approveable. A reused
+            // request id with a different body is a conflict, not a retry.
+            return match resend {
+                PendingResend::Answer(pending_id) => vec![outgoing_frame_pre_auth(
+                    frame,
+                    live,
+                    WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation {
+                        pending_id,
+                    }),
+                )],
+                PendingResend::Conflicting => vec![denied_pairing(
+                    frame,
+                    live,
+                    "pairing request id reused with a different body",
+                )],
+            };
+        }
         let origin = live.connection_id.0.as_hyphenated().to_string();
-        match DevicePairingRepository::request_pairing(&self.store, descriptor, origin.clone())
+        match DevicePairingRepository::request_pairing(&self.store, descriptor.clone(), origin)
             .await
         {
             Ok(pending) => {
-                if !self
-                    .pairing_deliveries
-                    .bind_pending(&live.connection_id, &pending.pending_id)
-                {
-                    if DevicePairingRepository::abandon_pending_by_origin(&self.store, &origin)
-                        .await
-                        .is_err()
-                    {
-                        // The denial below remains authoritative; startup
-                        // cleanup will clear an unapproved row if necessary.
-                    }
+                if !self.pairing_deliveries.bind_pending(
+                    &live.connection_id,
+                    &pending.pending_id,
+                    frame.envelope.correlation.request_id,
+                    &descriptor,
+                ) {
+                    // The denial below remains authoritative; the connection's
+                    // own cleanup owns the unapproved row.
                     return vec![denied_pairing(
                         frame,
                         live,

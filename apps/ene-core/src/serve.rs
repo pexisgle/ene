@@ -67,8 +67,12 @@ pub enum CoreError {
     Deletion(String),
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(&'static str),
-    #[error("first-party control seat occupied; do not fall through to the Client channel")]
-    SeatOccupied,
+    /// No Host is serving this data directory. The CLI guides an explicit
+    /// start and never falls back to an offline mutation (first-party-desktop §5.1.5).
+    #[error(
+        "the Host is not serving; start `ene-core serve` and retry — the Owner's confirmation surface runs there, and an offline command cannot record one"
+    )]
+    HostUnavailable,
 }
 
 pub trait FrameSink: Send {
@@ -1178,14 +1182,18 @@ impl HostHandle {
             .copied()
     }
 
+    /// Installs an open round for `live`'s connection under the ownership
+    /// section (CCT §10.4).
+    ///
+    /// Returns `false` — installing nothing — when the connection was
+    /// superseded or closed before the section: an operation cannot resurrect
+    /// an open-round binding after the replacement cleanup removed it.
     pub(crate) fn record_open_round(
         &self,
         live: &LiveInput,
-        client_ref: &str,
         companion_key: &str,
         open: OpenRound,
     ) -> bool {
-        let _ = client_ref;
         self.with_current_connection(live, || {
             crate::lock_unpoison(&self.open_rounds).insert(
                 (
@@ -1388,10 +1396,13 @@ impl HostHandle {
         })?;
         let version = candidate.as_u64();
         if !fresh {
-            match os.prepare_snapshot(&credential, version) {
-                Ok(snapshot) if snapshot.matches(secret) => {}
-                Ok(_) | Err(_) => {}
-            }
+            // This is an interrupted operation whose confirmation session no
+            // longer exists. Reconciliation read only (design §5 row 1): the
+            // recorded item is inspected so the unknown external write is
+            // never repeated, and the outcome stays Unknown whether or not it
+            // matches — a match is never activated without a fresh Owner
+            // confirmation.
+            let _inspection = os.prepare_snapshot(&credential, version);
             return Ok(MutationOutcome::Unknown);
         }
         if mutation.phase != MutationPhase::Prepared {

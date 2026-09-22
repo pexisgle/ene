@@ -20,8 +20,11 @@ use std::sync::Arc;
 #[cfg(any(unix, windows))]
 const MAX_CONTROL_FRAME_BYTES: u32 = 16 * 1024;
 
+/// Bound on each inbound read from a control peer. Every request on a
+/// requester connection is covered, not only the first: a peer that stops
+/// sending is dropped instead of holding a serving task forever.
 #[cfg(any(unix, windows))]
-const CONTROL_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(unix)]
 const CONTROL_SOCKET_NAME: &str = "host-control.sock";
@@ -163,10 +166,16 @@ impl FirstPartyControlSeat {
         pending: PendingOp,
     ) -> FromConfirmation {
         let mut inner = lock_unpoison(&self.inner);
-        let Some(holder) = inner.holder.as_ref() else {
+        let Some(seat_generation) = inner.holder.as_ref().map(|holder| holder.generation) else {
+            // The holder vanished between admission and mint: the request can
+            // never reach a surface, so report it exactly like a delivery
+            // failure instead of leaving it awaiting a decision that cannot
+            // come.
+            if let Some(request) = inner.requests.get_mut(request_id) {
+                request.state = RequestState::ConfirmationUnavailable;
+            }
             return FromConfirmation::DeniedByBoundary;
         };
-        let seat_generation = holder.generation;
         let session_id = Uuid::new_v4();
         let nonce = Uuid::new_v4().as_hyphenated().to_string();
         let premise_generation = seat_generation;
@@ -423,7 +432,7 @@ pub(crate) async fn serve_requester<S>(
             biased;
             () = crate::conn::wait_for_shutdown(&mut shutdown) => break,
             result = tokio::time::timeout(
-                CONTROL_HELLO_TIMEOUT,
+                CONTROL_READ_TIMEOUT,
                 read_message::<_, ToHost>(&mut stream),
             ) => match result {
                 Ok(Ok(Some(request))) => request,
@@ -896,10 +905,16 @@ impl HostHandle {
                                     Ok(()) | Err(_) => {}
                                 }
                             });
-                            host.confirmation_tasks
+                            // The Host joins these on shutdown: an operation the
+                            // Owner's surface already admitted runs to
+                            // completion before the serving authority goes
+                            // away, and no task outlives the handle it borrows.
+                            let mut tasks = host
+                                .confirmation_tasks
                                 .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .push(dispatched);
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            tasks.retain(|task| !task.is_finished());
+                            tasks.push(dispatched);
                         }
                         ChannelEvent::Closed => break,
                     }

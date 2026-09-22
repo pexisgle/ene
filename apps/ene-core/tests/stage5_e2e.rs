@@ -1225,7 +1225,7 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     server.abort();
 }
 
-#[expect(clippy::expect_used, reason = "test fixture helper")]
+/// Delegation ids for one task, in creation order.
 fn delegation_ids(dir: &std::path::Path, task: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     let mut statement = conn

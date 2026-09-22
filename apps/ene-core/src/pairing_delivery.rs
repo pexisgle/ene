@@ -2,11 +2,25 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ene_api::v1::handshake::PairingProvision;
-use ene_api::v1::refs::ConnectionWireId;
+use ene_api::v1::refs::{ConnectionWireId, RequestWireId};
 
 struct Slot {
     pending_id: Option<String>,
+    /// The request id and body of the `PairingRequest` that minted
+    /// `pending_id`, kept so a repeat can be told from a conflicting reuse
+    /// (IPC §9.3).
+    request_id: Option<RequestWireId>,
+    descriptor: Option<String>,
     sender: tokio::sync::mpsc::Sender<PairingProvision>,
+}
+
+/// How a repeated `PairingRequest` relates to the pending already bound to
+/// its connection (IPC §9.3).
+pub(crate) enum PendingResend {
+    /// The same request id and body: answer the live pending.
+    Answer(String),
+    /// The request id was reused with a different body: refuse.
+    Conflicting,
 }
 
 #[derive(Default)]
@@ -22,6 +36,11 @@ struct RegistryState {
 
 pub(crate) struct PairingDeliveryClaim {
     pub(crate) connection: ConnectionWireId,
+    /// Binding the claim took from the slot, so a claim whose durable
+    /// approval did not commit can be put back.
+    pending_id: String,
+    request_id: Option<RequestWireId>,
+    descriptor: String,
     sender: tokio::sync::mpsc::Sender<PairingProvision>,
 }
 
@@ -47,13 +66,21 @@ impl PairingDeliveryRegistry {
             *connection,
             Slot {
                 pending_id: None,
+                request_id: None,
+                descriptor: None,
                 sender,
             },
         );
         Some(receiver)
     }
 
-    pub(crate) fn bind_pending(&self, connection: &ConnectionWireId, pending_id: &str) -> bool {
+    pub(crate) fn bind_pending(
+        &self,
+        connection: &ConnectionWireId,
+        pending_id: &str,
+        request_id: Option<RequestWireId>,
+        descriptor: &str,
+    ) -> bool {
         let mut state = crate::lock_unpoison(&self.inner);
         if state.by_pending.contains_key(pending_id) {
             return false;
@@ -65,8 +92,31 @@ impl PairingDeliveryRegistry {
             return false;
         }
         slot.pending_id = Some(pending_id.to_owned());
+        slot.request_id = request_id;
+        slot.descriptor = Some(descriptor.to_owned());
         state.by_pending.insert(pending_id.to_owned(), *connection);
         true
+    }
+
+    /// Matches a repeated `PairingRequest` against the pending already bound
+    /// to `connection`, `None` when the connection holds no pending.
+    ///
+    /// A reused request id whose body changed is refused; a differently
+    /// identified request still sees the live pending, because one pending
+    /// is held per connection until it ends (IPC §9.3).
+    pub(crate) fn resend_match(
+        &self,
+        connection: &ConnectionWireId,
+        request_id: Option<RequestWireId>,
+        descriptor: &str,
+    ) -> Option<PendingResend> {
+        let state = crate::lock_unpoison(&self.inner);
+        let slot = state.by_connection.get(connection)?;
+        let pending_id = slot.pending_id.clone()?;
+        if slot.request_id == request_id && slot.descriptor.as_deref() != Some(descriptor) {
+            return Some(PendingResend::Conflicting);
+        }
+        Some(PendingResend::Answer(pending_id))
     }
 
     pub(crate) fn claim(&self, pending_id: &str) -> Option<PairingDeliveryClaim> {
@@ -76,11 +126,37 @@ impl PairingDeliveryRegistry {
         if slot.pending_id.as_deref() != Some(pending_id) {
             return None;
         }
+        let request_id = slot.request_id.take();
+        let descriptor = slot.descriptor.take().unwrap_or_default();
         slot.pending_id = None;
         Some(PairingDeliveryClaim {
             connection,
+            pending_id: pending_id.to_string(),
+            request_id,
+            descriptor,
             sender: slot.sender.clone(),
         })
+    }
+
+    /// Re-binds a claimed pending whose durable approval did not commit
+    /// (a technical `approve_pending` error), so a later retry can still name
+    /// it instead of a terminal unknown-id answer. No-op when the connection
+    /// slot already holds a newer pending or the connection ended.
+    pub(crate) fn release(&self, claim: PairingDeliveryClaim) {
+        let mut state = crate::lock_unpoison(&self.inner);
+        if state.by_pending.contains_key(&claim.pending_id) {
+            return;
+        }
+        let Some(slot) = state.by_connection.get_mut(&claim.connection) else {
+            return;
+        };
+        if slot.pending_id.is_some() {
+            return;
+        }
+        slot.pending_id = Some(claim.pending_id.clone());
+        slot.request_id = claim.request_id;
+        slot.descriptor = Some(claim.descriptor);
+        state.by_pending.insert(claim.pending_id, claim.connection);
     }
 
     pub(crate) fn remove(&self, connection: &ConnectionWireId) {
@@ -91,5 +167,35 @@ impl PairingDeliveryRegistry {
         if let Some(pending_id) = slot.pending_id {
             state.by_pending.remove(&pending_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PairingDeliveryRegistry;
+    use ene_api::v1::refs::ConnectionWireId;
+    use uuid::Uuid;
+
+    #[test]
+    fn one_pending_has_one_claim_on_one_registered_connection() {
+        let registry = PairingDeliveryRegistry::default();
+        let connection = ConnectionWireId(Uuid::new_v4());
+        let receiver = registry.register(&connection);
+        assert!(receiver.is_some());
+        assert!(registry.bind_pending(&connection, "pending-1", None, "laptop"));
+        let claim = registry.claim("pending-1");
+        assert!(claim.is_some());
+        assert!(registry.claim("pending-1").is_none());
+    }
+
+    #[test]
+    fn ended_connection_cannot_be_claimed() {
+        let registry = PairingDeliveryRegistry::default();
+        let connection = ConnectionWireId(Uuid::new_v4());
+        let receiver = registry.register(&connection);
+        assert!(receiver.is_some());
+        assert!(registry.bind_pending(&connection, "pending-1", None, "laptop"));
+        registry.remove(&connection);
+        assert!(registry.claim("pending-1").is_none());
     }
 }

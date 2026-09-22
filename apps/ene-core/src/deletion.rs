@@ -319,11 +319,27 @@ impl HostHandle {
         &self,
         record: &DeletionOperationRecord,
     ) -> Result<DeletionParticipantReportWire, CoreError> {
-        let participants = self
-            .store
-            .deletion_participants(record.current.operation, None, 100)
-            .await
-            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        // The durable registry can exceed one page (nine fixed owners plus one
+        // entry per Client incarnation with durable delivery evidence), so walk
+        // it to a short page instead of truncating at 100 and under-reporting.
+        let mut participants = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .store
+                .deletion_participants(record.current.operation, after, 100)
+                .await
+                .map_err(|error| CoreError::Deletion(error.to_string()))?;
+            if page.is_empty() {
+                break;
+            }
+            let short = page.len() < 100;
+            after = page.last().map(|entry| entry.participant.owner);
+            participants.extend(page);
+            if short {
+                break;
+            }
+        }
         Ok(DeletionParticipantReportWire::Reported(
             participants
                 .iter()

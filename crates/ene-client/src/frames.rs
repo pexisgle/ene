@@ -108,8 +108,15 @@ pub fn observed_frame(
     frame
 }
 
+/// Pre-pairing sender: the Host issues the device ID and secret on this same
+/// connection after Owner confirmation.
+///
+/// The frame carries a Client-minted `request_id` so a retry of the same
+/// logical request can be told from a conflicting reuse: the Host answers the
+/// live pending for the same id and body, and refuses an id reused with a
+/// different body (IPC §9.3).
 pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> WireFrame {
-    frame_for(
+    let mut frame = frame_for(
         WirePayload::PairingRequest(PairingRequest {
             device_descriptor: String::from(descriptor),
         }),
@@ -118,7 +125,9 @@ pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> Wire
             incarnation_id: incarnation,
             connection_id: None,
         },
-    )
+    );
+    frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+    frame
 }
 
 pub fn capability_frame(

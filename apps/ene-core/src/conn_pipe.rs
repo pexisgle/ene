@@ -208,19 +208,6 @@ pub fn peer_same_user(pipe: RawHandle) -> bool {
     peer_same_user_pid(pid)
 }
 
-#[must_use]
-pub fn peer_process_id(pipe: RawHandle) -> Option<u32> {
-    let mut pid = 0u32;
-    // SAFETY: `pipe` is a live server instance owned by the listener loop;
-    // `pid` is a valid out-pointer for the call.
-    let known = unsafe { GetNamedPipeClientProcessId(pipe as HANDLE, &raw mut pid) };
-    if known == 0 || pid == 0 {
-        None
-    } else {
-        Some(pid)
-    }
-}
-
 fn peer_same_user_pid(pid: u32) -> bool {
     // SAFETY: `PROCESS_QUERY_LIMITED_INFORMATION` is the least privilege that
     // still admits `OpenProcessToken(TOKEN_QUERY)` on the result.

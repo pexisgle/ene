@@ -1,3 +1,61 @@
+//! Stage 6 slice D: first-party E2E over the real transport for Targeted
+//! Deletion, usage / cost / cap, and credential secret non-exposure.
+//!
+//! Every leg starts from the production composition: a real listener
+//! ([`ene_core::conn::run`]), the real `ene-ctl` [`Client`], the real store,
+//! the real management inlets and the real preservation fan-out. Only the
+//! provider transport is a controllable fake (scripted replies, per-call
+//! barriers, injected usage and failures), never a substitute for a
+//! first-party boundary.
+//!
+//! The file is platform-neutral on purpose: the transport-generic
+//! `serve_connection` loop is what the Unix socket and the Windows named pipe
+//! both drive, so the same suite runs on both required CI operating systems
+//! over their own OS transport.
+//!
+//! Determinism: provider call order is controlled by per-call barriers and
+//! observation (`wait_parked`), never by sleeps that assume ordering; race
+//! legs park a supplier at a barrier and commit the other premise while it is
+//! held.
+//!
+//! Coverage map:
+//!
+//! - E2E 1 (Targeted Deletion): request → Host-local confirmation → bounded
+//!   fan-out → finalizing → completed through the real socket, with the
+//!   target planted in History, Learning Summary / Memory current + past
+//!   revision, Task instruction / result / report, the control/metadata
+//!   journal, the workspace path copies, and an undelivered presentation
+//!   transient; completed-state scans, search-material destruction, and the
+//!   fresh-origin acceptance are asserted after the operation.
+//! - E2E 1 Client participant: a Client that received a target-bearing copy
+//!   is snapshotted as a required `ClientIncarnation` by the serving Host's
+//!   first-party confirmation inlet; its local-erasure answer verifies the
+//!   participant, an unreachable Client keeps the operation `Held`, a
+//!   disconnect or replacement connection alone completes nothing, and an
+//!   already-snapshotted participant survives a Host restart until the
+//!   Client's own local erasure (lifecycle §8.1).
+//! - E2E 1 races: provider wait and deletion condition in both orders;
+//!   Learning formation and deletion condition in both orders; presentation
+//!   ACK after the condition is a domain hold, not a Presented write.
+//! - E2E 1 restart: an unfinished operation survives Host restart in
+//!   `active` and in `finalizing` and is never completed by the restart.
+//! - E2E 2 (Usage / Cost / Cap): Reported input/cached/output tokens and the
+//!   cost breakdown from the first-party query for dialogue, learning and
+//!   Task Agent calls, Unknown distinct from Reported, concurrent admission
+//!   for the last cap slot with a zero-byte refusal, `ResponseLost` Unknown
+//!   counted across restart, and cap update currentness / replay.
+//! - E2E 3 (Credential safety): a registered secret never reaches provider
+//!   request bodies, History, Memory, Task data, presentation bodies, or the
+//!   frames, errors, and debug renderings this process captures; a rotation
+//!   during a parked provider wait leaves no raw value durable.
+
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
+)]
+
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -26,7 +84,7 @@ use ene_api::v1::usage::{
 };
 use ene_core::conn;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::{CredentialRef, MemoryCredentialStore};
+use ene_credential::{CredentialRef, CredentialSetRepository as _, MemoryCredentialStore};
 use ene_ctl::client::{Client, ClientError, ConnectProgress, PendingPairingClient};
 use ene_ctl::cmds;
 use ene_inference::cost::UsageEstimate;
@@ -121,6 +179,14 @@ fn on_task_agent_turn(tool_calls: usize) -> Matcher {
     })
 }
 
+/// Controllable provider fake: content-matched scripted calls, per-call
+/// barriers, captured inputs, a send counter, and one fixed safe usage upper
+/// bound.
+///
+/// A barrier is membership-only (it shrinks), so removing a call from
+/// `blocks` releases it without a lost-wakeup race. Observation polls
+/// (`wait_parked`) observe a call held at a barrier; they are never an ordering
+/// device for a race, which uses the barriers.
 struct ScriptedTransport {
     scripts: Mutex<Vec<(Matcher, Call)>>,
     default_call: Mutex<Call>,
@@ -189,14 +255,15 @@ impl ScriptedTransport {
 }
 
 impl ProviderTransport for ScriptedTransport {
-    fn complete(
-        &self,
+    fn complete_streaming<'a>(
+        &'a self,
         req: ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
     ) -> Pin<
         Box<
             dyn Future<Output = Result<ProviderResponse, ene_inference::InferenceTechnicalError>>
                 + Send
-                + '_,
+                + 'a,
         >,
     > {
         Box::pin(async move {
@@ -249,10 +316,18 @@ impl ProviderTransport for ScriptedTransport {
             if call_script.lost {
                 return Err(ene_inference::InferenceTechnicalError::ResponseLost);
             }
-            Ok(ProviderResponse {
+            let response = ProviderResponse {
                 text: call_script.reply,
                 usage: call_script.usage,
-            })
+            };
+            match sink.push_delta(&response.text).await {
+                ene_inference::DeltaFlow::Continue => Ok(response),
+                ene_inference::DeltaFlow::Abort(reason) => {
+                    Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    })
+                }
+            }
         })
     }
 
@@ -493,17 +568,22 @@ struct Served {
     shutdown: Option<tokio::sync::watch::Sender<bool>>,
     client: Option<Client>,
     transport: Arc<ScriptedTransport>,
+    /// Reconstructs the configured credential store for a restart. A
+    /// `MemoryCredentialStore` is not `Clone` and `open_host_with` consumes it,
+    /// so the configured value has to be rebuilt from its description rather
+    /// than carried by value.
+    cred_store: Box<dyn Fn() -> MemoryCredentialStore + Send + Sync>,
 }
 
 impl Served {
     #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn start(
         dir: PathBuf,
-        cred_store: MemoryCredentialStore,
+        cred_store: impl Fn() -> MemoryCredentialStore + Send + Sync + 'static,
         transport: Arc<ScriptedTransport>,
         capabilities: &[&str],
     ) -> Self {
-        let handle = open_host_with(&dir, cred_store).await;
+        let handle = open_host_with(&dir, cred_store()).await;
         let (stop, shutdown) = tokio::sync::watch::channel(false);
         let server = tokio::spawn(conn::run_until_shutdown(
             dir.clone(),
@@ -523,8 +603,9 @@ impl Served {
             .complete()
             .await
             .expect("provision must authenticate");
-        let approver = open_host(&dir).await;
-        setup_flow(&mut client, &approver, capabilities)
+        // Approve the registration through the serving handle so the sweep
+        // uses the configured credential store, not a default one.
+        setup_flow(&mut client, &handle, capabilities)
             .await
             .expect("setup must complete");
         wait_until_deletion_drivers(&handle, 1).await;
@@ -535,6 +616,7 @@ impl Served {
             shutdown: Some(stop),
             client: Some(client),
             transport,
+            cred_store: Box::new(cred_store),
         }
     }
 
@@ -576,7 +658,9 @@ impl Served {
             tokio::spawn(async { Ok::<(), CoreError>(()) }),
         );
         match finished.await {
-            Ok(Ok(())) | Err(_) => {}
+            Ok(Ok(())) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => panic!("the listener panicked: {error}"),
             Ok(Err(error)) => panic!("the listener failed: {error}"),
         }
     }
@@ -595,7 +679,7 @@ impl Served {
         wait_until_deletion_drivers(self.handle(), 0).await;
         wait_until_deletion_blocking(self.handle(), 0).await;
         drop(self.handle.take());
-        let handle = open_host(&self.dir).await;
+        let handle = open_host_with(&self.dir, (self.cred_store)()).await;
         handle
             .run_startup_mutations()
             .await
@@ -649,7 +733,7 @@ async fn serve_and_setup(
     transport: Arc<ScriptedTransport>,
     capabilities: &[&str],
 ) -> Served {
-    Served::start(dir, memory_store(), transport, capabilities).await
+    Served::start(dir, memory_store, transport, capabilities).await
 }
 
 async fn send_round_raw(
@@ -1017,6 +1101,40 @@ fn assert_absent_all(label: &str, texts: &[String], needle: &str) {
     }
 }
 
+/// Commits one Owner History message and returns its identity.
+async fn seed_owner_message(
+    store: &ene_store::Store,
+    companion: ene_companion::CompanionId,
+    generation: ene_presence::PresenceGeneration,
+    text: &str,
+) -> RawId {
+    use ene_companion::HistoryRepository as _;
+    match store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: text.to_owned(),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: None,
+            expected_owner_message: None,
+            command_id: None,
+            round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .expect("the History append must commit")
+    {
+        ene_companion::HistoryAppendOutcome::CommittedAs { message } => message,
+        other => panic!("the History append must commit, got {other:?}"),
+    }
+}
+
 fn formation_create_with(needle: &str) -> String {
     format!(
         r##"{{"summary":"The owner asked to keep {needle} for later.","memories":[{{"action":"create","content":"The owner cares about {needle}.","importance":4,"temporal":"enduring"}}]}}"##
@@ -1356,6 +1474,21 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     served.server.abort();
 }
 
+/// A target that only the finalizing-restart leg uses: it is never planted in
+/// the store, so the leg can build the crash-consistent `finalizing` marker
+/// through the sealed repository boundary without claiming an erasure.
+const FINALIZING_TARGET: &str = "TS6-FINALIZING-CANARY-2201";
+
+/// E2E 1 race (design R2): a dialogue provider call already claimed when the
+/// deletion condition commits must not publish or adopt its covered reply, a
+/// fresh target-bearing submit is held with zero provider bytes while the
+/// operation is unfinished, and the completed surface stays clean.
+///
+/// The reachable incarnation participates as `more_work` while the
+/// single-frame connection loop is inside the parked provider call, so this
+/// leg drives the fence without parking on a Client demand the loop cannot
+/// deliver mid-frame; the Client-incarnation demand path has its own legs
+/// below.
 #[tokio::test]
 async fn stage6_deletion_races_provider_wait_and_delayed_result() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1407,11 +1540,13 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
             }
         }
         if confirmed && !driven {
-            let pass = handle
+            // One bounded pass collects the durable owner surfaces and moves
+            // the Host transient fence; the parked provider call stays held
+            // until the pass returns.
+            handle
                 .run_targeted_deletion_tick()
                 .await
                 .expect("the serving tick must run");
-            assert_eq!(pass.held, 0, "no participant holds a reachable owner");
             barrier.release_blocked();
             driven = true;
         }
@@ -1542,11 +1677,7 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
     confirm_deletion(served.handle()).await;
     transport.release_blocked();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        !memory_view(served.client()).await.contains(TARGET),
-        "a covered formation never writes target Memory"
-    );
+    wait_for_usage_consumer(served.client(), "companion_learning").await;
     let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
@@ -1559,8 +1690,14 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
             .any(|input| input.contains("learning formation pass") && input.contains(TARGET)),
         "the fixture must reach the formation provider call"
     );
+    // The durable scan is the ordering guard: the completed surface must hold
+    // no target after the fan-out and every current condition closed.
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    assert!(
+        !memory_view(served.client()).await.contains(TARGET),
+        "a covered formation never writes target Memory"
+    );
     served.server.abort();
 }
 
@@ -1605,13 +1742,16 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
     transport.release_blocked();
     wait_for_usage_consumer(served.client(), "companion_learning").await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The durable scan is the ordering guard: once the completed surface is
+    // free of the target, the refused formation must not write it back.
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
     assert!(
         !memory_view(served.client()).await.contains(TARGET),
         "a formation claimed before the interval never writes target Memory after completion"
     );
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    // The completed operation is not a permanent ban: a fresh Owner origin
+    // after completion is learned as a new experience.
     let (_round, _stream, reply) = send_round(served.client(), &fresh)
         .await
         .expect("a fresh origin must be accepted");
@@ -1713,6 +1853,82 @@ async fn stage6_delayed_task_result_after_completion_is_collected() {
     served.server.abort();
 }
 
+/// E2E 1 restart: an unfinished operation survives a Host restart in `active`,
+/// keeps its current condition, and resumes to completion; a restart never
+/// completes it by itself.
+#[tokio::test]
+async fn stage6_deletion_restart_during_active_resumes() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let (_round, _stream, _reply) = send_round(served.client(), &first)
+        .await
+        .expect("the first round must complete");
+    let current = {
+        let outcome = request_deletion(served.client(), TARGET)
+            .await
+            .expect("the request inlet must answer");
+        assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+        confirm_deletion(served.handle()).await
+    };
+    // Restart while the operation is unfinished. The confirmation already
+    // kicked one bounded pass, so the durable phase may be Active or Held on
+    // an unreachable holder; the restart must neither lose the operation nor
+    // complete it by itself.
+    let mut client = served.restart().await;
+    let page = deletion_page(&mut client)
+        .await
+        .expect("status must answer");
+    assert_eq!(page.operations.len(), 1, "the operation is never lost");
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "a restart never completes a deletion operation by itself"
+    );
+    assert_eq!(
+        page.operations[0].operation.0,
+        current
+            .operation
+            .as_raw()
+            .as_uuid()
+            .as_hyphenated()
+            .to_string(),
+        "the operation identity survives the restart"
+    );
+    assert_eq!(page.operations[0].sweep, current.sweep.as_u64());
+    // The current condition survived too: a fresh target submit is still held
+    // with zero provider bytes.
+    let sends_before = transport.sends();
+    submit_expect_hold(&mut client, &format!("still {TARGET}"))
+        .await
+        .expect("the condition survives the restart");
+    assert_eq!(transport.sends(), sends_before);
+    // The restarted Host resumes and completes the operation through the
+    // production fan-out.
+    let page = drive_until(served.handle(), &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the restarted Host must complete the operation");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    served.server.abort();
+}
+
+/// Aborting `conn::run` still stops the async Targeted Deletion driver as an
+/// emergency path. Restart correctness uses graceful shutdown instead.
 #[tokio::test]
 async fn listener_abort_stops_the_deletion_driver() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1868,6 +2084,159 @@ async fn shutdown_waits_for_started_deletion_store_work() {
         .expect("successor startup must complete once predecessor Store work is gone");
 }
 
+/// After graceful shutdown returns, neither the async driver nor started
+/// deletion Store work from the predecessor remains.
+#[tokio::test]
+async fn graceful_shutdown_leaves_no_detached_deletion_work() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
+    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
+    wait_until_deletion_drivers(served.handle(), 1).await;
+    served.stop().await;
+    assert_eq!(
+        served.handle().live_targeted_deletion_drivers_for_tests(),
+        0
+    );
+    assert_eq!(
+        served
+            .handle()
+            .store_for_tests()
+            .live_deletion_blocking_sections_for_tests(),
+        0
+    );
+}
+
+/// E2E 1 restart: a durable `finalizing` marker (the crash-consistent state
+/// between the two sealed completion calls, built here through the public
+/// preservation repository because only a real crash can interleave them)
+/// survives the restart and resumes to completion; the restart itself never
+/// completes it.
+#[tokio::test]
+async fn stage6_deletion_restart_during_finalizing_resumes() {
+    use ene_preservation::{
+        DeletionFinalizationOutcome, ParticipantCompletionFact, PreservationRepository as _,
+    };
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    // The Host is stopped, and the operation is built through the canonical
+    // store producer (the same admission the Host-local confirmation runs)
+    // because the serving composition's driver would otherwise finish the
+    // operation before the crash point can be staged. Only a real crash can
+    // interleave the two sealed completion calls, so the marker is a fixture.
+    served.stop().await;
+    let store = ene_store::Store::open(&dir.join("app.db"))
+        .await
+        .expect("the state database opens for the crash fixture");
+    let staged = store
+        .stage_targeted_deletion(ene_preservation::StageTargetedDeletionRequestCommand::new(
+            ene_preservation::TargetedDeletionTarget {
+                mechanical: ene_preservation::MechanicalDeletionTarget::ExactText(
+                    ene_preservation::DeletionSearchMaterial::new(FINALIZING_TARGET.to_owned()),
+                ),
+                semantic_hints: Vec::new(),
+            },
+            ene_preservation::DeletionPurpose::Privacy,
+            WallClockWithTz::now(),
+        ))
+        .await
+        .expect("the canonical staged request must commit");
+    let request = match staged {
+        ene_preservation::StageTargetedDeletionRequestOutcome::Staged(request)
+        | ene_preservation::StageTargetedDeletionRequestOutcome::AlreadyStaged(request)
+        | ene_preservation::StageTargetedDeletionRequestOutcome::Confirmed(request) => request,
+        other => panic!("the request must be staged, got {other:?}"),
+    };
+    let current = match store
+        .confirm_targeted_deletion(
+            request,
+            ene_core::targeted_deletion::current_product_surface_owners(),
+        )
+        .await
+        .expect("the canonical confirmation must answer")
+    {
+        ConfirmTargetedDeletionOutcome::Started(current) => current,
+        other => panic!("the confirmation must start one operation, got {other:?}"),
+    };
+
+    // Build the crash point: every required participant is verified for the
+    // current sweep, then the durable `finalizing` marker commits and the
+    // process would have crashed before the completion commit.
+    let participants = store
+        .deletion_participants(current.operation, None, 100)
+        .await
+        .expect("the participant snapshot must read");
+    assert!(!participants.is_empty());
+    for record in &participants {
+        store
+            .record_participant_completion(ParticipantCompletionFact::verified(
+                current.condition(),
+                record.participant.owner,
+                0,
+                WallClockWithTz::now(),
+            ))
+            .await
+            .expect("the verified fact must record");
+    }
+    assert_eq!(
+        store
+            .begin_deletion_finalizing(current)
+            .await
+            .expect("the finalizing marker must commit"),
+        DeletionFinalizationOutcome::Finalizing
+    );
+    drop(store);
+
+    // Restart: the startup recovery reads the durable `finalizing` marker and
+    // finishes the remaining completion steps (lifecycle §14). It resumes the
+    // completion boundary, never a phase guess and never a second sweep.
+    let mut client = served.serve().await;
+    let page = deletion_page(&mut client)
+        .await
+        .expect("status must answer");
+    assert_eq!(page.operations.len(), 1, "the operation is never lost");
+    assert_eq!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "the finalizing marker must resume to the sealed completion"
+    );
+    assert_eq!(
+        page.operations[0].operation.0,
+        current
+            .operation
+            .as_raw()
+            .as_uuid()
+            .as_hyphenated()
+            .to_string()
+    );
+    // The resume is a completion step, not a second participant sweep.
+    let before = transport.sends();
+    let page = drive_until(served.handle(), &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the finalizing marker must resume to completion");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    assert_eq!(
+        transport.sends(),
+        before,
+        "the resume demands no new provider call"
+    );
+    served.server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// E2E 1: the Client-incarnation required participant (lifecycle §8.1)
+// ---------------------------------------------------------------------------
+
+/// The Client-incarnation participant row of the first operation in one
+/// status page, when the durable snapshot named one (lifecycle §8.1).
 fn client_incarnation_participant(
     page: &DeletionStatusPage,
 ) -> Option<&DeletionParticipantStatusWire> {
@@ -2027,6 +2396,10 @@ async fn wait_for_target_memory_row(served: &Served) {
     }
 }
 
+/// The Owner confirmation runs in the serving Host, so the
+/// Client that received a target-bearing copy is snapshotted as a required
+/// participant; its own local-erasure confirmation is what verifies the
+/// participant and lets global completion commit.
 #[tokio::test]
 async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2082,6 +2455,11 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
     served.server.abort();
 }
 
+/// An unreachable Client that received a target-bearing
+/// copy keeps the operation `Held`; a disconnect, a replacement connection,
+/// and a Host restart alone never verify it or complete the operation. The
+/// snapshotted Client participant survives the restart, and only its own
+/// local-erasure confirmation lets completion commit.
 #[tokio::test]
 async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2164,6 +2542,13 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     served.server.abort();
 }
 
+/// The management Memory view is a
+/// body-bearing first-party read. After a Host restart cleared the in-memory
+/// delivery evidence of the earlier non-target round, an incarnation that
+/// receives the target-bearing Memory only through the management view must
+/// still be snapshotted as a required participant by the serving Host's
+/// control inlet, and its own local erasure is what verifies it and lets
+/// global completion commit.
 #[tokio::test]
 async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2244,7 +2629,22 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     served.server.abort();
 }
 
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
+// ---------------------------------------------------------------------------
+// E2E 2: usage / cost / cap
+// ---------------------------------------------------------------------------
+
+/// One reviewed-route usage report: `(input, cached, output)` token counts
+/// whose cost under the first-party `gpt-4o-mini` rates is exactly
+/// representable in micro-USD.
+fn reported_cost_micros(input: u64, cached: u64, output: u64) -> u64 {
+    // Reviewed rates are micro-USD per 1,000,000 tokens:
+    // input 150_000, cached 75_000, output 600_000.
+    (input - cached) * 150_000 / 1_000_000
+        + cached * 75_000 / 1_000_000
+        + output * 600_000 / 1_000_000
+}
+
+/// One bounded first-party usage read over the socket.
 async fn usage_page(client: &mut Client) -> UsageSummaryPage {
     let answer = ask(
         client,
@@ -2326,7 +2726,6 @@ async fn set_provider_monthly_cap(
         WirePayload::ManagementIntent(cmds::usage_cap_intent(
             intent_id,
             &mark,
-            "provider",
             Some(provider),
             "monthly_utc",
             "USD",
@@ -2357,7 +2756,6 @@ async fn set_system_daily_cap(
         WirePayload::ManagementIntent(cmds::usage_cap_intent(
             intent_id,
             &mark,
-            "system",
             None,
             "daily_utc",
             "USD",
@@ -2373,6 +2771,291 @@ async fn set_system_daily_cap(
     outcome
 }
 
+/// The usage page's first row for one consumer.
+fn row_for<'a>(
+    page: &'a UsageSummaryPage,
+    consumer: &str,
+) -> &'a ene_api::v1::usage::UsageSummaryRowView {
+    page.rows
+        .iter()
+        .find(|row| row.consumer == consumer)
+        .unwrap_or_else(|| panic!("a {consumer} row exists: {:?}", page.rows))
+}
+
+fn assert_reported_cost(row: &ene_api::v1::usage::UsageSummaryRowView, label: &str) {
+    let tokens = row.tokens.as_ref().expect("a reported row carries tokens");
+    assert_eq!(row.status, "reported", "{label} must be Reported");
+    let cost = row.cost.as_ref().expect("a reported row carries a cost");
+    let expected = reported_cost_micros(
+        tokens.input_tokens,
+        tokens.cached_input_tokens,
+        tokens.output_tokens,
+    );
+    assert_eq!(cost.total.micros, expected, "{label} total cost");
+    assert_eq!(
+        cost.input.micros + cost.cached_input.micros + cost.output.micros,
+        cost.total.micros,
+        "{label} cost components must sum to the total"
+    );
+    assert_eq!(cost.total.currency, "USD");
+}
+
+/// E2E 2: dialogue, Learning and Task Agent provider calls appear in the
+/// first-party usage / cost surface with their Reported token split and cost
+/// breakdown, an Unknown settlement is never rendered as zero, and the
+/// historical cost is bound to the admission pricing snapshot (a later
+/// admission under a different snapshot does not reprice it).
+#[tokio::test]
+async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let proposal = task_reply(serde_json::json!({
+        "kind": "propose_task",
+        "purpose": "write a report from input.txt",
+    }));
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner("please read input.txt and write report.md"),
+                Call::text(proposal),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(r#"{"tool":"read","path":"input.txt"}"#, 1_000, 0, 500),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::reported(
+                    r##"{"tool":"create","path":"report.md","content":"# Report\nnotes"}"##,
+                    2_000,
+                    1_000,
+                    500,
+                ),
+            ),
+            (
+                on_task_agent_turn(2),
+                Call::reported(r##"{"final":"created report.md"}"##, 1_000, 0, 500),
+            ),
+            (
+                on_learning_formation(true),
+                Call::reported(formation_create(), 2_000, 0, 500),
+            ),
+            (
+                on_learning_formation(false),
+                Call::reported(formation_update(), 200, 0, 40),
+            ),
+            (
+                on_latest_owner("please remember the kettle"),
+                Call::reported("Noted the kettle.", 1_000, 400, 200),
+            ),
+            (
+                on_latest_owner("what about the kettle"),
+                Call::text("The provider reported no usage for this one."),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let workspace = dir.join("usage-workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    let (round, stream, _) = send_round(served.client(), "please remember the kettle")
+        .await
+        .expect("the reported round must complete");
+    confirm_round(served.client(), &round, stream).await;
+    let (round, stream, _) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    confirm_round(served.client(), &round, stream).await;
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the task must complete");
+    let (round, stream, _) = send_round(served.client(), "what about the kettle")
+        .await
+        .expect("the unknown round must complete");
+    confirm_round(served.client(), &round, stream).await;
+
+    // Learning runs behind the three client-visible rounds. Wait for the
+    // formation and both updates to commit before taking the read-only
+    // baseline; otherwise their legitimate usage settlement can land between
+    // the two reads and look like a mutation caused by the read itself.
+    wait_for_memory_revision_at_least(served.client(), 3).await;
+
+    let page = usage_page(served.client()).await;
+    // Attribution: one Reported row per consumer, each with the exact
+    // reviewed-rate breakdown.
+    let dialogue = page
+        .rows
+        .iter()
+        .find(|row| row.consumer == "companion_dialogue" && row.status == "reported")
+        .expect("a Reported dialogue row");
+    assert_eq!(dialogue.purpose, "dialogue_response");
+    assert_eq!(dialogue.provider, "openai");
+    assert_eq!(dialogue.model, MODEL);
+    assert_eq!(
+        dialogue.tokens.as_ref().map(|tokens| (
+            tokens.input_tokens,
+            tokens.cached_input_tokens,
+            tokens.output_tokens
+        )),
+        Some((1_000, 400, 200))
+    );
+    assert_reported_cost(dialogue, "dialogue");
+    let learning = page
+        .rows
+        .iter()
+        .find(|row| row.consumer == "companion_learning" && row.status == "reported")
+        .expect("a Reported learning row");
+    assert_eq!(learning.purpose, "memory_formation");
+    assert_reported_cost(learning, "learning");
+    let task = row_for(&page, "task_agent");
+    assert_eq!(task.purpose, "task_agent_turn");
+    assert_reported_cost(task, "task agent");
+    // Reported and Unknown are distinct states: the Unknown row carries no
+    // token counts and no zero cost.
+    let unknown = page
+        .rows
+        .iter()
+        .find(|row| row.status == "unknown")
+        .expect("an Unknown row");
+    assert_eq!(unknown.consumer, "companion_dialogue");
+    assert!(unknown.tokens.is_none(), "Unknown is never zero tokens");
+    assert!(unknown.cost.is_none(), "Unknown is never a zero cost");
+    // Read-only: a second read answers the same rows and settles nothing.
+    let again = usage_page(served.client()).await;
+    assert_eq!(again.rows, page.rows, "the read changes nothing durable");
+
+    // Historical pricing: a settlement admitted under a different reviewed
+    // snapshot keeps its own rate. The current milestone has no runtime
+    // catalog-update producer, so the changed-price premise is constructed as
+    // a durable fixture through the production claim/settlement boundary (the
+    // same shape the store's `usage_query` suite injects).
+    let synthetic = ene_inference::pricing::PricingSnapshot {
+        provider: String::from("openai"),
+        model: String::from(MODEL),
+        currency: ene_primitive::CurrencyCode::Usd,
+        input_rate: ene_inference::cost::TokenRate::from_micros_per_million(300_000),
+        cached_input_rate: ene_inference::cost::TokenRate::from_micros_per_million(150_000),
+        output_rate: ene_inference::cost::TokenRate::from_micros_per_million(1_200_000),
+        effective_at: WallClockWithTz::now(),
+        // Not the reviewed revision: the store keeps one immutable row per
+        // `(provider, model, revision)`, so a changed-price premise must carry a
+        // revision number the reviewed catalog never published.
+        source_revision: ene_inference::pricing::PricingCatalogRevision::new(
+            ene_inference::pricing::FIRST_PARTY_REVISION.as_u64() + 1,
+        ),
+    };
+    {
+        use ene_inference::{
+            AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _,
+            InferenceTicketId, UsageFact, UsageRepository as _, UsageSource,
+        };
+        use ene_permission::{CapabilityKind, ConsentRepository as _, ConsumerKind, PurposeKind};
+        let store = ene_store::Store::open(&dir.join("app.db"))
+            .await
+            .expect("the state database opens for the pricing fixture");
+        let consent = store
+            .load_current(CapabilityKind::Dialogue)
+            .await
+            .expect("the consent read must answer")
+            .expect("the dialogue consent exists");
+        let credential_set = store
+            .current_set_revision()
+            .await
+            .expect("the credential-set revision must read");
+        let ticket = InferenceTicketId(RawId::new());
+        assert_eq!(
+            store
+                .begin_inference_attempt(InferenceAttempt {
+                    ticket,
+                    consumer: ConsumerKind::CompanionDialogue,
+                    capability: CapabilityKind::Dialogue,
+                    purpose: PurposeKind::DialogueResponse,
+                    expected_consent: (consent.id.clone(), consent.rev),
+                    expected_credential_set: credential_set,
+                    provider: String::from("openai"),
+                    model: String::from(MODEL),
+                    data_use: Vec::new(),
+                    task_agent: None,
+                    pricing: Some(synthetic.clone()),
+                    usage_estimate: Some(UsageEstimate {
+                        input_tokens_upper_bound: 1_000,
+                        output_tokens_upper_bound: 1_000,
+                    }),
+                })
+                .await
+                .expect("the synthetic claim must answer"),
+            AttemptBeginOutcome::Started
+        );
+        store
+            .record_usage(UsageFact {
+                ticket,
+                provider: String::from("openai"),
+                model: String::from(MODEL),
+                input_tokens: Some(1_000),
+                cached_input_tokens: Some(0),
+                output_tokens: Some(100),
+                source: UsageSource::Reported,
+            })
+            .await
+            .expect("the synthetic settlement must record");
+    }
+    let after = usage_page(served.client()).await;
+    // The synthetic ticket settled at the revision-2 rates
+    // (1000 x 300_000 + 100 x 1_200_000 per million tokens = 300 + 120).
+    let synthetic_row = after
+        .rows
+        .iter()
+        .find(|row| {
+            row.consumer == "companion_dialogue"
+                && row
+                    .cost
+                    .as_ref()
+                    .is_some_and(|cost| cost.total.micros == 420)
+        })
+        .expect("the revision-2 settlement keeps its own rate");
+    assert!(synthetic_row.cost.is_some());
+    // Every pre-existing row keeps the exact cost it was admitted under.
+    for before_row in &page.rows {
+        let same = after
+            .rows
+            .iter()
+            .find(|row| {
+                row.started_at == before_row.started_at
+                    && row.consumer == before_row.consumer
+                    && row.purpose == before_row.purpose
+            })
+            .expect("the pre-existing row is still present");
+        assert_eq!(
+            same.cost, before_row.cost,
+            "a later snapshot never reprices a historical row"
+        );
+    }
+    assert_eq!(
+        after
+            .caps
+            .iter()
+            .filter(|cap| cap.scope == "system")
+            .count(),
+        2,
+        "the system daily and monthly slots are always reported"
+    );
+    served.server.abort();
+}
+
+/// The safe upper bound the cap tests reserve: 1,000,000 input tokens at the
+/// non-cached input rate plus 100,000 output tokens at the output rate under
+/// the reviewed `gpt-4o-mini` snapshot plus the one-micro-unit allowance for
+/// the separately rounded input components = 210,001 micro-USD.
 fn cap_estimate() -> UsageEstimate {
     UsageEstimate {
         input_tokens_upper_bound: 1_000_000,
@@ -2795,7 +3478,6 @@ async fn set_system_daily_cap_mark(
         WirePayload::ManagementIntent(cmds::usage_cap_intent(
             intent_id,
             mark,
-            "system",
             None,
             "daily_utc",
             "USD",
@@ -2811,6 +3493,430 @@ async fn set_system_daily_cap_mark(
     outcome
 }
 
+// ---------------------------------------------------------------------------
+// E2E 3: credential secret non-exposure
+// ---------------------------------------------------------------------------
+
+/// E2E 3: a registered secret never reaches provider request bodies, History,
+/// Memory, Task data, presentation bodies, the management view, or the
+/// structured errors the first-party client observes — across dialogue,
+/// Learning, Task Agent, management, and provider-failure paths.
+#[tokio::test]
+async fn stage6_registered_secret_absent_from_every_first_party_surface() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let redacted = format!(
+        "please remember the passphrase {}",
+        ene_credential::REDACTED_CREDENTIAL
+    );
+    let proposal = task_reply(serde_json::json!({
+        "kind": "propose_task",
+        "purpose": format!("write a report about {SECRET}"),
+    }));
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_learning_formation(true),
+                Call::reported(formation_create_with(SECRET), 2_000, 0, 500),
+            ),
+            (
+                on_learning_formation(false),
+                Call::reported(formation_update_with(SECRET), 200, 0, 40),
+            ),
+            (
+                on_latest_owner(&redacted),
+                Call::reported(
+                    format!("Noted; the passphrase {SECRET} stays with you."),
+                    1_000,
+                    400,
+                    200,
+                ),
+            ),
+            (
+                on_latest_owner("please read input.txt and write report.md"),
+                Call::text(proposal),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::text(format!(
+                    r##"{{"tool":"create","path":"report.md","content":"# Report {SECRET}"}}"##
+                )),
+            ),
+            (
+                on_task_agent_turn(2),
+                Call::text(format!(
+                    r##"{{"final":"created report.md quoting {SECRET}"}}"##
+                )),
+            ),
+            (
+                on_latest_owner(&format!(
+                    "an error path with {}",
+                    ene_credential::REDACTED_CREDENTIAL
+                )),
+                Call::lost(),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = Served::start(
+        dir.clone(),
+        || memory_store_with(SECRET),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let workspace = dir.join("secret-workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    // Dialogue + Learning: the owner input, the provider reply, and the
+    // formation answer all quote the registered value.
+    let (round, stream, _reply) = send_round(
+        served.client(),
+        &format!("please remember the passphrase {SECRET}"),
+    )
+    .await
+    .expect("the secret round must complete");
+    // The provider answer is synthetic (a real model never sees the scrubbed
+    // value), so only the durable adoption is the invariant: the History row
+    // must carry the redaction marker instead of the value.
+    confirm_round(served.client(), &round, stream).await;
+    // Task Agent: the directive purpose and the final answer quote it.
+    let (round, stream, _) =
+        send_round(served.client(), "please read input.txt and write report.md")
+            .await
+            .expect("the propose round must complete");
+    confirm_round(served.client(), &round, stream).await;
+    wait_task_progress(served.client(), "completed", 1)
+        .await
+        .expect("the task must complete");
+    // Provider failure: the request must already be scrubbed.
+    let errored = send_round_raw(served.client(), &format!("an error path with {SECRET}")).await;
+    match errored {
+        Ok((_, _, text, _)) => assert_absent("errored round text", &text, SECRET),
+        Err(rendered) => assert_absent("errored round rendering", &rendered, SECRET),
+    }
+    // Provider captures: every request body is scrubbed.
+    assert_absent_all("provider request", &transport.input_texts(), SECRET);
+    // Durable surfaces: History, Memory, the Task report and its sources, the
+    // undelivered excerpts, and the whole state database.
+    let history = history_texts(served.client()).await;
+    assert_absent_all("history", &history, SECRET);
+    assert_absent("memory view", &memory_view(served.client()).await, SECRET);
+    let summary = fetch_summary(served.client(), "secret subscription")
+        .await
+        .expect("the subscription must answer");
+    for item in &summary.items {
+        assert_absent("presentation excerpt", &item.excerpt, SECRET);
+    }
+    assert_absent(
+        "presentation summary debug",
+        &format!("{summary:?}"),
+        SECRET,
+    );
+    let tasks = list_tasks(served.client()).await.expect("tasks must list");
+    let task = tasks.tasks.first().expect("the task exists");
+    let report = ask(
+        served.client(),
+        WirePayload::GetTaskReport(cmds::task_report_request(&task.task.0, None, None)),
+        "secret report",
+    )
+    .await
+    .expect("the report must answer");
+    assert_absent("task report debug", &format!("{report:?}"), SECRET);
+    let WirePayload::TaskReportResponse(ene_api::v1::undelivered::TaskReportResponse::Page(page)) =
+        report
+    else {
+        panic!("the report must answer a page: {report:?}");
+    };
+    // Every report source body (the purpose and the result rows) is scrubbed.
+    for row in &page.rows {
+        let Some(source) = row.source.as_ref() else {
+            continue;
+        };
+        let body = ask(
+            served.client(),
+            WirePayload::GetReportSource(cmds::report_source_request(&source.0, None, None)),
+            "secret report source",
+        )
+        .await
+        .expect("the report source must answer");
+        assert_absent("report source debug", &format!("{body:?}"), SECRET);
+        if let WirePayload::ReportSourceResponse(
+            ene_api::v1::undelivered::ReportSourceResponse::Page(source_page),
+        ) = body
+        {
+            assert_absent("report source body", &source_page.text, SECRET);
+        }
+    }
+    // Management view: credential/consent metadata renders refs, never values.
+    let view = ask(
+        served.client(),
+        WirePayload::ManagementViewRequest(cmds::setup_view_request()),
+        "secret view",
+    )
+    .await
+    .expect("the view must answer");
+    let WirePayload::ManagementView(view) = view else {
+        panic!("the view must answer a view");
+    };
+    for section in &view.sections {
+        assert_absent("management section", &section.body, SECRET);
+    }
+    assert_absent("management view debug", &format!("{view:?}"), SECRET);
+    assert!(
+        db_target_hits(&dir.join("app.db"), SECRET).is_empty(),
+        "no durable table may carry the registered value: {:?}",
+        db_target_hits(&dir.join("app.db"), SECRET)
+    );
+    served.server.abort();
+}
+
+/// E2E 3: registering a value sweeps its prior durable occurrences, and a
+/// registration that commits while a provider call is parked leaves no raw
+/// value durable anywhere.
+#[tokio::test]
+async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked_send() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let rotated_round = format!("please remember the old passphrase {ROTATED_SECRET}");
+    let parked_round = format!("please remember the passphrase {SECRET}");
+    let rotated_redacted = format!(
+        "please remember the old passphrase {}",
+        ene_credential::REDACTED_CREDENTIAL
+    );
+    let parked_redacted = format!(
+        "please remember the passphrase {}",
+        ene_credential::REDACTED_CREDENTIAL
+    );
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(&rotated_redacted),
+                Call::text("Noted the old passphrase."),
+            ),
+            (
+                on_latest_owner(&parked_redacted),
+                Call::reported("Noted the passphrase.", 1_000, 400, 200),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = Served::start(
+        dir.clone(),
+        || memory_store_with_rotated(SECRET, ROTATED_SECRET),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    // The rotated value is not yet registered: the round's durable History
+    // legitimately carries it raw, and the registration's approval sweep must
+    // redact it.
+    let (round, stream, _) = send_round(served.client(), &rotated_round)
+        .await
+        .expect("the pre-registration round must complete");
+    confirm_round(served.client(), &round, stream).await;
+    assert!(
+        !db_target_hits(&dir.join("app.db"), ROTATED_SECRET).is_empty(),
+        "the fixture must plant the not-yet-registered value"
+    );
+    // Stage the rotation; the Host-local approval commits it while the next
+    // provider call is parked.
+    let mark = view_mark(served.client()).await.expect("show");
+    let staged = ask(
+        served.client(),
+        WirePayload::ManagementIntent(ManagementIntent {
+            intent_id: CommandWireId(uuid::Uuid::new_v4()),
+            kind: ManagementIntentKind::ConfigureCredentialIntent,
+            target: ene_api::v1::management::credential_target("openai", "rotated"),
+            base_view: BaseViewMark(mark),
+            rationale: IntentRationaleWire {
+                origin: RationaleOrigin::ManagementSurface,
+                quote: None,
+            },
+            confirmed: false,
+        }),
+        "rotate",
+    )
+    .await
+    .expect("the rotation intent must answer");
+    assert!(
+        matches!(
+            staged,
+            WirePayload::ManagementOutcome(ManagementOutcome::HeldByOperation)
+        ),
+        "the rotation waits for the Host-local approval, got {staged:?}"
+    );
+    transport.block_input(on_latest_owner(&parked_redacted));
+    let handle = served.handle_arc();
+    let barrier = Arc::clone(&transport);
+    let mut parked = Box::pin(send_round_raw(served.client(), &parked_round));
+    tokio::select! {
+        result = parked.as_mut() => panic!("the parked round cannot finish before the sweep: {result:?}"),
+        () = barrier.wait_parked(1) => {}
+    }
+    assert!(
+        matches!(
+            handle.approve_credential("openai", "rotated").await,
+            Ok(true)
+        ),
+        "the Host-local approval must register the rotated value"
+    );
+    barrier.release_blocked();
+    let (_round, _stream, reply, _close) = parked.await.expect("the parked round must answer");
+    assert_absent("parked reply", &reply, SECRET);
+    // The approval sweep removed the prior durable occurrence; nothing keeps
+    // either value raw.
+    assert!(
+        db_target_hits(&dir.join("app.db"), ROTATED_SECRET).is_empty(),
+        "the registration sweep must redact prior occurrences: {:?}",
+        db_target_hits(&dir.join("app.db"), ROTATED_SECRET)
+    );
+    assert!(db_target_hits(&dir.join("app.db"), SECRET).is_empty());
+    assert_absent_all("provider request", &transport.input_texts(), SECRET);
+    assert_absent_all(
+        "history",
+        &history_texts(served.client()).await,
+        ROTATED_SECRET,
+    );
+    served.server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// E2E 1: durable Client body-delivery evidence across a Host restart
+// ---------------------------------------------------------------------------
+
+/// M1: a Client that received a target-bearing copy before a Host restart must
+/// still be snapshotted as a required `ClientIncarnation` by a later
+/// serving-Host confirmation — the delivery evidence is durable, so the
+/// restart must not clear it. The unreachable old incarnation is an explicit
+/// hold, and only the same incarnation's reconnected, verified local erasure
+/// lets the sealed global completion commit; the verified wipe then clears the
+/// durable evidence.
+#[tokio::test]
+async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    // 1: the target-bearing copy reaches the Client in the first Host process.
+    deliver_target_copy(&mut served).await;
+
+    // 2: the Host restarts before any deletion exists. The in-memory delivery
+    // tracking is gone; only the durable evidence can survive.
+    let mut client = served.restart().await;
+
+    // 3: stage the request through the reconnected Client, then drop the
+    // connection so the confirmation meets the old incarnation unreachable.
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(
+        outcome,
+        ManagementOutcome::NeedsClarification,
+        "the Client intent only stages"
+    );
+    served.client = None;
+    drop(client);
+
+    // 4: the serving Host's trusted confirmation snapshots the durable
+    // evidence and names the incarnation that received the copy before the
+    // restart.
+    let current = confirm_deletion_via_serving_control(&mut served).await;
+    let page = local_deletion_page(served.handle()).await;
+    let participant = client_incarnation_participant(&page)
+        .expect("the pre-restart delivery must stay a required participant");
+    assert!(
+        participant.sweep >= current.sweep.as_u64(),
+        "the Client participant belongs to the current sweep: {participant:?}"
+    );
+
+    // 5: the unreachable incarnation is an explicit hold, never a completion.
+    let page = drive_until_local(served.handle(), DeletionPhaseWire::Held).await;
+    assert_ne!(
+        page.operations[0].phase,
+        DeletionPhaseWire::Completed,
+        "an unreachable Client must never be presumed erased"
+    );
+    let participant =
+        client_incarnation_participant(&page).expect("the snapshotted Client stays required");
+    assert_eq!(
+        participant.progress, "held:unavailable",
+        "a disconnected incarnation is an explicit unreachable hold"
+    );
+    assert_eq!(
+        served
+            .handle()
+            .required_deletion_participants()
+            .await
+            .expect("the required snapshot must read")
+            .iter()
+            .filter(|owner| matches!(
+                owner,
+                ene_preservation::ParticipantOwnerRef::ClientIncarnation(_)
+            ))
+            .count(),
+        1,
+        "the restart keeps exactly the delivered incarnation's evidence"
+    );
+
+    // 6: the same Client boot incarnation reconnects (a new connection, same
+    // identity). Only its verified local erasure lets the operation reach the
+    // sealed global completion.
+    let mut client = connect(&served.dir).await;
+    let handle = served.handle_arc();
+    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the reconnected Client must let the operation complete");
+    let participant = client_incarnation_participant(&page)
+        .expect("the completed operation still reports the Client participant");
+    assert_eq!(
+        participant.progress, "verified",
+        "the Client's own local erasure pass is the verification premise"
+    );
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    // The verified full-class wipe cleared the durable evidence: no later
+    // admission claims a copy that no longer exists. Read it over the same
+    // fresh store connection the canonical remainder probe uses.
+    let store = ene_store::Store::open(&served.dir.join("app.db"))
+        .await
+        .expect("the state database opens");
+    assert_eq!(
+        store
+            .client_delivery_evidence_incarnations(None, 100)
+            .await
+            .expect("the durable evidence must read"),
+        Vec::new(),
+        "a verified local erasure clears the delivery evidence"
+    );
+    served.server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// E2E 1 dialogue currentness
+// ---------------------------------------------------------------------------
+
+/// The delayed reply's paraphrase: it never quotes the target, so only the
+/// durable old-claim provenance can refuse it.
 const DIALOGUE_RACE_PARAPHRASE: &str = "I still keep that detail in mind.";
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
@@ -3059,6 +4165,254 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
     served.server.abort();
 }
 
+// ---------------------------------------------------------------------------
+// E2E 1: exhaustive source reconciliation beyond the admission page
+// ---------------------------------------------------------------------------
+
+/// M3 regression over the real composition: strictly more covered source
+/// identities than one reconciliation page, with the already-committed
+/// inference claim naming the canonical last one.
+///
+/// The served Host must walk every page through the durable cursor before the
+/// participant sweeps redact the identity bodies, complete only after the
+/// walk, keep the claim durably held after completion, refuse the delayed
+/// result, and accept a fresh post-completion origin.
+#[tokio::test]
+async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
+    use ene_companion::CompanionRepository as _;
+    use ene_inference::InferenceAttemptRepository as _;
+    use ene_learning::{
+        ChangeKind, ExperienceSourceKind, Importance, LearningClaimRef, LearningRepository as _,
+        LearningScope, MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, SourceRangeRef,
+        SummaryId, SummaryRecord, TemporalMeaning,
+    };
+    use ene_permission::{CapabilityKind, ConsentRepository as _};
+    use ene_presence::PresenceRepository as _;
+
+    /// One clean delayed formation carrying the durable claim handle.
+    fn delayed_formation(
+        companion: RawId,
+        claim: ene_learning::LearningClaimRef,
+    ) -> MemoryChangeCommit {
+        let bound = RawId::new();
+        MemoryChangeCommit {
+            summary: Some(SummaryRecord {
+                id: SummaryId::generate(),
+                scope: LearningScope::companion(companion),
+                content: String::from("a clean paraphrase"),
+                source: SourceRangeRef {
+                    kind: ExperienceSourceKind::Dialogue,
+                    start: bound,
+                    end: bound,
+                },
+                formed_at: WallClockWithTz::now(),
+            }),
+            secret_premise: None,
+            claim: Some(claim),
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope: LearningScope::companion(companion),
+                content: String::from("a clean recall"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        }
+    }
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    // Quiesce the serving Host, then seed the fixture directly: more covered
+    // identities than one reconciliation page, and one already-committed
+    // Learning formation claim naming the canonical last identity.
+    served.stop().await;
+    let (ticket, companion_raw) = {
+        let store = ene_store::Store::open(&dir.join("app.db"))
+            .await
+            .expect("the state database opens for seeding");
+        let consent = store
+            .load_current(CapabilityKind::Learning)
+            .await
+            .expect("the Learning consent must read")
+            .expect("the setup flow assigns Learning");
+        let credential_set = store
+            .current_set_revision()
+            .await
+            .expect("the credential-set revision must read");
+        let companion = store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        let mut sources = Vec::new();
+        for index in 0..(ene_preservation::DELETION_RECONCILIATION_PAGE_SIZE + 6) {
+            sources.push(
+                seed_owner_message(
+                    &store,
+                    companion,
+                    generation,
+                    &format!("note {index} carries {TARGET}"),
+                )
+                .await,
+            );
+        }
+        let last = *sources
+            .iter()
+            .max_by_key(|source| source.as_uuid())
+            .expect("the fixture has sources");
+        let ticket = ene_inference::InferenceTicketId(RawId::new());
+        let claimed = store
+            .begin_inference_attempt(ene_inference::InferenceAttempt {
+                ticket,
+                consumer: ene_permission::ConsumerKind::CompanionLearning,
+                capability: CapabilityKind::Learning,
+                purpose: ene_permission::PurposeKind::MemoryFormation,
+                expected_consent: (consent.id.clone(), consent.rev),
+                expected_credential_set: credential_set,
+                provider: consent.provider.clone(),
+                model: consent.model.clone(),
+                task_agent: None,
+                data_use: vec![last],
+                pricing: None,
+                usage_estimate: None,
+            })
+            .await
+            .expect("the formation claim must answer");
+        assert_eq!(
+            claimed,
+            ene_inference::AttemptBeginOutcome::Started,
+            "the pre-condition claim must start"
+        );
+        (ticket, companion.as_raw())
+    };
+
+    // The production first-party path: request, trusted confirmation, bounded
+    // fan-out. The walk must cover every page before completion.
+    let mut client = served.serve().await;
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    let handle = served.handle_arc();
+    confirm_deletion(&handle).await;
+    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must reconcile every page and complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "no durable table keeps the target: {:?}",
+        db_target_hits(&served.dir.join("app.db"), TARGET)
+    );
+
+    // The durable correspondence names the claim whose source fell past the
+    // admission page.
+    served.stop().await;
+    let store = ene_store::Store::open(&dir.join("app.db"))
+        .await
+        .expect("the state database reopens for the delayed arrival");
+    let ticket_text = ticket.0.as_uuid().as_hyphenated().to_string();
+    let held: i64 = {
+        let conn = rusqlite::Connection::open(dir.join("app.db"))
+            .expect("the state database opens for inspection");
+        conn.query_row(
+            "SELECT COUNT(*) FROM erasure_use_hold WHERE use_kind='inference_attempt' AND use_id=?1",
+            [&ticket_text],
+            |row| row.get(0),
+        )
+        .expect("the hold probe must answer")
+    };
+    assert_eq!(held, 1, "the last-page claim is durably associated");
+
+    // The delayed result arrives after completion: refused by the durable
+    // correspondence even though no current condition is readable.
+    let delayed = delayed_formation(companion_raw, LearningClaimRef::from_raw(ticket.0));
+    assert_eq!(
+        store
+            .commit_memory_change(delayed)
+            .await
+            .expect("the delayed commit must answer"),
+        ene_learning::MemoryChangeOutcome::HeldForErasure,
+        "a formation claimed before the interval stays stale after completion"
+    );
+
+    // The completed operation is not a permanent ban: a fresh claim from a
+    // fresh source after completion is accepted as a new origin. The
+    // serving Host's startup normalization may have moved the credential-set
+    // revision since the fixture was seeded, so the fresh claim reads the
+    // current premise instead of reusing the seeding snapshot.
+    let fresh_consent = store
+        .load_current(CapabilityKind::Learning)
+        .await
+        .expect("the Learning consent must read")
+        .expect("the Learning consent stays assigned");
+    let fresh_credential_set = store
+        .current_set_revision()
+        .await
+        .expect("the credential-set revision must read");
+    let fresh_ticket = ene_inference::InferenceTicketId(RawId::new());
+    assert_eq!(
+        store
+            .begin_inference_attempt(ene_inference::InferenceAttempt {
+                ticket: fresh_ticket,
+                consumer: ene_permission::ConsumerKind::CompanionLearning,
+                capability: CapabilityKind::Learning,
+                purpose: ene_permission::PurposeKind::MemoryFormation,
+                expected_consent: (fresh_consent.id, fresh_consent.rev),
+                expected_credential_set: fresh_credential_set,
+                provider: String::from("openai"),
+                model: String::from(MODEL),
+                task_agent: None,
+                data_use: vec![RawId::new()],
+                pricing: None,
+                usage_estimate: None,
+            })
+            .await
+            .expect("the fresh claim must answer"),
+        ene_inference::AttemptBeginOutcome::Started
+    );
+    assert!(
+        matches!(
+            store
+                .commit_memory_change(delayed_formation(
+                    companion_raw,
+                    LearningClaimRef::from_raw(fresh_ticket.0)
+                ))
+                .await
+                .expect("the fresh commit must answer"),
+            ene_learning::MemoryChangeOutcome::Committed { .. }
+        ),
+        "a post-completion origin is accepted"
+    );
+}
+
+/// E2E 1 race (design R2, post-completion): a Task Agent execution observed a
+/// target-bearing workspace source as execution-local tool output (no
+/// canonical source identity), the following provider claim consumed that
+/// observation and parked, the mutable workspace path was then rewritten so
+/// the current file no longer carries the target, and Targeted Deletion
+/// started only after that rewrite. Re-reading the path at admission cannot
+/// prove the discarded observation body was unrelated to the target, so the
+/// occurrence stays deletion-relevant, the unsealed delegation is held, and
+/// the delayed clean paraphrase is collected. A fresh Owner origin after
+/// completion remains allowed.
 #[tokio::test]
 async fn stage6_task_transient_observation_after_completion_is_collected() {
     const LEG_TARGET: &str = TARGET;
@@ -3314,6 +4668,11 @@ async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rew
     served.server.abort();
 }
 
+/// Action result body is in memory, the occurrence row is not yet
+/// durable, and Targeted Deletion runs to completion in that window. The
+/// in-flight read/list correspondence keeps the delayed body old-origin, so
+/// it cannot re-enter the next provider turn or a durable result. A later
+/// fresh Owner origin of the same string is accepted.
 #[tokio::test]
 async fn stage6_observation_write_across_deletion_stays_old_origin() {
     const LEG_TARGET: &str = TARGET;
@@ -3466,47 +4825,18 @@ async fn stage6_observation_write_across_deletion_stays_old_origin() {
     served.server.abort();
 }
 
+/// A paraphrase Summary whose History pin sits past the
+/// admission page is erased with that source. Exact-text remainder of 0 is
+/// not enough; the semantic derived Summary/Memory must actually disappear.
 #[tokio::test]
 async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
-    use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
     use ene_learning::{
         ChangeKind, ExperienceSourceKind, Importance, LearningRepository as _, LearningScope,
         MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, SourceRangeRef, SummaryId,
         SummaryRecord, TemporalMeaning,
     };
     use ene_presence::PresenceRepository as _;
-
-    async fn seed_owner_message(
-        store: &ene_store::Store,
-        companion: ene_companion::CompanionId,
-        generation: ene_presence::PresenceGeneration,
-        text: &str,
-    ) -> RawId {
-        match store
-            .append_message(ene_companion::AppendHistoryCommand {
-                companion,
-                round: RawId::new(),
-                role: HistoryRole::Owner,
-                text: text.to_owned(),
-                lang: String::from("en"),
-                at: WallClockWithTz::now(),
-                expected_generation: generation,
-                expected_consent: None,
-                expected_credential_set: None,
-                expected_owner_message: None,
-                command_id: None,
-                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
-                round_intent: None,
-                incarnation: None,
-                local_id: None,
-            })
-            .await
-            .expect("the History append must commit")
-        {
-            ene_companion::HistoryAppendOutcome::CommittedAs { message } => message,
-            other => panic!("the History append must commit, got {other:?}"),
-        }
-    }
 
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
@@ -3736,6 +5066,17 @@ fn transient_sole_result_body(db: &Path) -> String {
     .expect("the result body must read")
 }
 
+/// E2E 4 (credential revision currentness, docs/implementation/stages/stage-6.md C3): a credential rotation that commits while the Task
+/// Agent's final provider call is parked is current at the result commit, so
+/// the final answer is scrubbed under the advanced set: the durable result
+/// body carries only the redaction marker, the raw value is absent from every
+/// durable surface and every provider request, and no diagnostic carries it.
+///
+/// The stale-refusal half of the same premise is driven deterministically at
+/// the execution boundary in `task_run::tests`, where a delegating scrubber
+/// can advance the set between the scrub and the commit; the serving
+/// composition reads the revision immediately before its own commit, so this
+/// E2E pins the current-premise path end to end.
 #[tokio::test]
 async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scrub() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -3770,7 +5111,7 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
     transport.block_input(on_task_agent_turn(2));
     let mut served = Served::start(
         dir.clone(),
-        memory_store_with_rotated(SECRET, ROTATED_SECRET),
+        || memory_store_with_rotated(SECRET, ROTATED_SECRET),
         Arc::clone(&transport),
         &[cmds::CAPABILITY_DIALOGUE],
     )

@@ -16,12 +16,14 @@
 //!
 //! `Stage 2` wire reason vocabulary for
 //! [`NeedsRevalidation`](ene_api::v1::round::RoundIntakeOutcomeWire::NeedsRevalidation)
-//! outcomes: `"missing-generation-view"`, `"unknown-companion"`,
-//! `"stopped-companion"` (all straight from
-//! [`ene_presentation::RevalidationReason`]), plus `"setup-incomplete"` and
-//! `"consent-stale"` for the admission gates and `"not-in-allowlist"` as a
-//! defensive closed-world denial. `"unknown-reason"` is defensive only:
-//! [`ene_presentation::check_intake`] never emits its source variant.
+//! outcomes: `intake_reason` maps [`ene_presentation::RevalidationReason`]
+//! to `"missing-generation-view"`, `"unknown-companion"`,
+//! `"stopped-companion"`, `"missing-command-id"`, `"input-over-limit"`, and
+//! the defensive `"unknown-reason"`; `admission_reason` maps the admission
+//! declines to `"setup-incomplete"`, `"consent-stale"`,
+//! `"not-in-allowlist"`, and `"evaluation-consumed"`. `"unknown-reason"` is
+//! defensive only: [`ene_presentation::check_intake`] never emits its source
+//! variant.
 //!
 //! Infallible-frame mapping used here (no `Result`: [`HostHandle::handle_frame`]
 //! answers every frame):
@@ -448,14 +450,10 @@ impl HostHandle {
             round_intent: round_intent.clone(),
         };
         match classify_replay(&self.store, companion, &command, incoming_fingerprint).await {
-            ReplayClassification::Replay { round, round_wire } => {
-                for response in self.replay_frames(
-                    frame,
-                    live,
-                    round,
-                    round_wire,
-                    attribution.generation.as_u64(),
-                ) {
+            ReplayClassification::Replay { round_wire, .. } => {
+                for response in
+                    self.replay_frames(frame, live, round_wire, attribution.generation.as_u64())
+                {
                     if sink.emit(response).is_err() {
                         break;
                     }
@@ -613,10 +611,13 @@ impl HostHandle {
         };
         let accepted = match check_intake(premise) {
             RoundIntakeOutcome::AcceptedForRound { round } => round,
-            RoundIntakeOutcome::StaleRound { .. } => {
+            RoundIntakeOutcome::StaleRound { current_round, .. } => {
+                let current_round = current_round
+                    .and_then(|round| self.wire_for_round(&round))
+                    .map(RoundWireId);
                 return emit_end(
                     sink,
-                    self.stale_frame(frame, live, &companion_key, attribution.generation.as_u64()),
+                    stale_frame_with(frame, live, current_round, attribution.generation.as_u64()),
                 );
             }
             RoundIntakeOutcome::HeldForTransition => {
@@ -692,7 +693,6 @@ impl HostHandle {
             DialogueBegin::Ready(turn) => {
                 let installed = self.record_open_round(
                     live,
-                    &live.client_ref,
                     &companion_key,
                     OpenRound {
                         companion: companion.as_raw(),
@@ -795,10 +795,8 @@ impl HostHandle {
                     }
                 }
             }
-            DialogueBegin::Replayed { round, round_wire } => {
-                for response in
-                    self.replay_frames(frame, live, round, round_wire, generation_number)
-                {
+            DialogueBegin::Replayed { round_wire, .. } => {
+                for response in self.replay_frames(frame, live, round_wire, generation_number) {
                     if sink.emit(response).is_err() {
                         break;
                     }
@@ -944,42 +942,42 @@ impl HostHandle {
             .load_timeline(companion, since, round, request.limit)
             .await
         {
-            Ok(items) => HistoryResponse::Items(
-                items
-                    .iter()
-                    .map(|item| HistoryItem {
-                        round: RoundWireId(
-                            item.round_wire
-                                .clone()
-                                .or_else(|| self.wire_for_round_value(item.round))
-                                .unwrap_or_else(|| item.round.as_uuid().to_string()),
-                        ),
+            Ok(items) => {
+                let mut mapped = Vec::with_capacity(items.len());
+                for item in &items {
+                    // The current writers always persist the wire; a row
+                    // without one is unreadable, never a license to publish
+                    // the domain id as a wire ref.
+                    let Some(wire) = item.round_wire.clone() else {
+                        return HistoryResponse::Unavailable;
+                    };
+                    mapped.push(HistoryItem {
+                        round: RoundWireId(wire),
                         role: match item.role {
                             HistoryRole::Owner => HistoryRoleWire::Owner,
                             HistoryRole::Companion => HistoryRoleWire::Companion,
                         },
                         text: item.text.clone(),
                         at: item.at.to_rfc3339(),
-                    })
-                    .collect(),
-            ),
+                    });
+                }
+                HistoryResponse::Items(mapped)
+            }
             Err(_) => HistoryResponse::Unavailable,
         }
     }
 
-    fn wire_for_round_value(&self, round: RawId) -> Option<String> {
-        self.wire_for_round(&RoundId::from_raw(round))
-    }
-
+    /// The stored round wire travels verbatim, so a retry after a restart
+    /// replays instead of going stale on the dropped transient map; a missing
+    /// wire is stale, and the Client recovers missed items through history.
     fn replay_frames(
         &self,
         frame: &WireFrame,
         live: &LiveInput,
-        round: RawId,
         stored_wire: Option<String>,
         generation: u64,
     ) -> Vec<WireFrame> {
-        let wire = stored_wire.or_else(|| self.wire_for_round_value(round));
+        let wire = stored_wire;
         match wire {
             Some(wire) => vec![accept_frame(frame, live, &RoundWireId(wire))],
             None => vec![stale_frame_with(frame, live, None, generation)],
@@ -1334,6 +1332,11 @@ impl DeltaSink for StreamGate<'_> {
         delta: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
         Box::pin(async move {
+            // Fast path: read the premise before reserving, so an
+            // already-stale stream never reserves capacity. The permit is
+            // then deliberately held across the post-reserve re-checks
+            // (dropped on any refusal) so the bounded channel paces the
+            // provider while still refusing a stale delta.
             if !self.opened || !self.current().await {
                 return DeltaFlow::Abort("the presentation premise went stale");
             }

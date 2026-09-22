@@ -195,6 +195,27 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
     }
 }
 
+/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop,
+/// serve, or approve.
+///
+/// Without a subcommand this keeps the `Stage 1` behavior: [`Config::load`]
+/// (which validates), and [`ene_config::resolve_data_dir`] proof with no
+/// effects. With `serve` it resolves the data directory (which must exist
+/// as a value: an unresolvable directory is a [`CoreError::Store`] failure,
+/// since serving without durable state is meaningless) and blocks on
+/// [`serve::serve`] under a multi-threaded `Tokio` runtime. With
+/// `approve-device` it resolves the data directory the same way and approves
+/// one pending pairing by its exact `--pending` id (surrounding whitespace
+/// trimmed), or lists `pending-id descriptor` lines when `--pending` is
+/// omitted.
+///
+/// `--help` and `--version` are standard successful exits handled by `clap`
+/// before configuration is loaded, so they have no side effects.
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] for argument misuse, [`CliError::Config`] when
+/// [`Config::load`] fails, and [`CliError::Serve`] when `serve` mode fails.
 fn main() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let matches = match ene_core_command()
@@ -332,6 +353,23 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
     block_on(serve::serve(data_dir))
 }
 
+/// An unknown pending id fails with the pending id set so the Owner
+/// can retry with the exact value; descriptors are display strings only.
+///
+/// No serving Host means refusal: this command never mutates the store
+/// offline (first-party-desktop §5.1.5). While a Host is serving, the
+/// approval is recorded in the serving process through the Host-local
+/// control inlet. The one-time pairing provision travels only on the
+/// authentication frame to the originating pairing connection, never to
+/// this command's stdout, and an occupied seat never falls through to the
+/// Client channel.
+///
+/// # Errors
+///
+/// [`CoreError::HostUnavailable`] when no Host is serving,
+/// [`CoreError::Deletion`] when the requester inlet is unreachable,
+/// [`CoreError::Approve`] when the settled outcome cannot be shown, and
+/// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
@@ -349,10 +387,7 @@ fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError
 }
 
 fn host_not_serving() -> CoreError {
-    CoreError::Approve(String::from(
-        "the Host is not serving; start `ene-core serve` and retry — the Owner's \
-         confirmation surface runs there, and an offline command cannot record one",
-    ))
+    CoreError::HostUnavailable
 }
 
 fn show_requester_state(
@@ -410,6 +445,17 @@ fn show_requester_state(
         .map_err(|error| CoreError::Approve(format!("the outcome could not be shown: {error}")))
 }
 
+/// Unknown pairs fail with the pending set so the Owner can retry exactly.
+///
+/// The pair is named only; the raw value is entered on the Owner's
+/// confirmation surface and never on this command line. No serving Host means
+/// refusal, never an offline store open (`host_control::request_credential_put`).
+///
+/// # Errors
+///
+/// [`CoreError::Deletion`] when the requester inlet is unreachable,
+/// [`CoreError::Approve`] when the settled outcome cannot be shown, and
+/// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
@@ -434,6 +480,11 @@ fn run_pending_deletions(
 ) -> Result<(), CoreError> {
     use std::io::Write as _;
 
+    if !(1..=100).contains(&limit) {
+        return Err(CoreError::Deletion(String::from(
+            "pending-deletions limit must be 1..=100",
+        )));
+    }
     let after = match after {
         None => None,
         Some(raw) => Some(parse_deletion_request_id(raw)?),
