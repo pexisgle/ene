@@ -8,7 +8,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{credential_unavailable, lock_shared};
-use crate::credential::{SQL_SELECT_SET_REV, sweep_registered_secret};
+use crate::credential::{SQL_SELECT_SET_REV, advance_credential_set, sweep_registered_secret};
 use crate::run_blocking;
 
 const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)";
@@ -225,6 +225,12 @@ impl CredentialPublicationRepository for Store {
             let Some(candidate) = mutation.candidate_version else {
                 return Ok(ActivationOutcome::Missing);
             };
+            // Design §3 step 4: the commit transaction re-verifies the
+            // operation phase, so a mutation that was never staged through
+            // the OS `put` is not activated here.
+            if mutation.phase != MutationPhase::Staged {
+                return Ok(ActivationOutcome::Missing);
+            }
             let current: i64 = tx
                 .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
                 .map_err(|error| credential_unavailable(error.to_string()))?;
@@ -253,9 +259,9 @@ impl CredentialPublicationRepository for Store {
                     current_revision: current,
                 });
             }
-            let next = current
-                .checked_add(1)
-                .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
+            // Sweep first: the new value and any value it replaces are removed
+            // from stored content in this same transaction, so a premise taken
+            // before the commit is covered by it.
             sweep_registered_secret(&tx, &candidate_bearer)?;
             if let Some(retired) = retired_bearer.as_deref() {
                 sweep_registered_secret(&tx, retired)?;
@@ -289,11 +295,7 @@ impl CredentialPublicationRepository for Store {
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.execute(
-                "UPDATE credential_set SET rev = ?1 WHERE id = 1",
-                params![next as i64],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
+            let next = advance_credential_set(&tx)?;
             tx.execute(
                 SQL_DECIDE_MUTATION,
                 params![

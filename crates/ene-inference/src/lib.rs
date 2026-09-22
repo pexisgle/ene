@@ -13,8 +13,7 @@ use ene_credential::{
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRepository, ConsentRevision,
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
-    PermissionEvaluationId, PurposeKind, UsageCapRef, UsageReservationRef, UsageReservationState,
-    check_live_authorization,
+    PurposeKind, UsageCapRef, UsageReservationRef, UsageReservationState, check_live_authorization,
 };
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use pricing::{PricingCatalog, PricingResolution, PricingSnapshot, PricingSnapshotRef};
@@ -291,6 +290,7 @@ pub trait InferenceAttemptRepository: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admission {
+    /// Authorized; the single-use decision is already consumed.
     Admitted(Box<AuthorizedInference>),
     Declined(NotSentReason),
 }
@@ -321,7 +321,6 @@ impl AdmissionRequest {
                         model: self.consent.model,
                         credential: self.credential,
                         candidate: self.candidate,
-                        authorization,
                         task_agent: self.task_agent,
                         data_use: self.data_use,
                     }))
@@ -475,7 +474,6 @@ pub struct AuthorizedInference {
     model: String,
     credential: CredentialRef,
     candidate: InferenceUseCandidate,
-    authorization: PermissionEvaluationId,
     task_agent: Option<TaskAgentAttemptPremise>,
     data_use: Vec<RawId>,
 }
@@ -841,10 +839,10 @@ mod dispatch_tests {
     use super::{
         AttemptBeginOutcome, AuthorizedInference, DiscardSink, DispatchAbort, InferenceAttempt,
         InferenceAttemptRecord, InferenceAttemptRepository, InferenceDispatchOutcome,
-        InferenceTechnicalError, InferenceTicketId, NotSentReason, PermissionEvaluationId,
-        ProviderRequest, ProviderResponse, ProviderTransport, RawUsage, TaskAgentAttemptPremise,
-        UsageCostRecord, UsageFact, UsageRepository, UsageReservation, UsageSource,
-        dispatch_authorized,
+        InferenceResultArrival, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
+        NotSentReason, ProviderRequest, ProviderResponse, ProviderTransport, RawUsage,
+        TaskAgentAttemptPremise, UsageCostRecord, UsageEstimate, UsageFact, UsageRepository,
+        UsageReservation, UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -1167,7 +1165,6 @@ mod dispatch_tests {
                 model: String::from("dialogue-1"),
                 purpose: PurposeKind::DialogueResponse,
             },
-            authorization: PermissionEvaluationId(RawId::new()),
             task_agent: None,
             data_use: Vec::new(),
         }
@@ -1198,7 +1195,6 @@ mod dispatch_tests {
                 model: String::from("dialogue-1"),
                 purpose: PurposeKind::TaskAgentTurn,
             },
-            authorization: PermissionEvaluationId(RawId::new()),
             task_agent: Some(premise),
             data_use,
         }

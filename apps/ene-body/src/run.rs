@@ -227,7 +227,7 @@ where
             }
             _ = health.tick() => {
                 seq = seq.saturating_add(1);
-                if let Some(fact) = overlay.take_local_ui() {
+                while let Some(fact) = overlay.take_local_ui() {
                     send(&writer, &BodyToParent::LocalUi(fact)).await?;
                 }
                 while let Some(feedback) = overlay.take_presentation() {
@@ -298,18 +298,17 @@ where
             }
             Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
             Err(_) => {
-                if buf.len() >= 4 {
-                    let claimed = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-                    let need = 4usize.saturating_add(claimed);
-                    if claimed > crate::ipc::MAX_FRAME_BYTES {
-                        buf.drain(..4);
-                    } else if buf.len() >= need {
+                // Unknown / corrupt body: drop the framed bytes whole if the
+                // length is readable, otherwise drop the prefix so we do not
+                // spin. Never decode leftover bytes as conversation text.
+                match crate::ipc::frame_len(buf) {
+                    Ok(need) => {
                         buf.drain(..need);
-                    } else {
-                        return Ok(false);
                     }
-                } else {
-                    return Ok(false);
+                    Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
+                    Err(_) => {
+                        buf.drain(..4);
+                    }
                 }
             }
         }

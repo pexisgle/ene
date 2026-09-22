@@ -37,7 +37,6 @@ mod imp {
         PresentationOutcome,
     };
     use crate::render::{HitTestMask, RenderFailure, RenderOutcome, SurfaceRenderer};
-    use crate::window::OverlayProbe;
 
     const LEFT_BUTTON: u32 = 0x110;
     const RIGHT_BUTTON: u32 = 0x111;
@@ -120,6 +119,7 @@ mod imp {
                 relative_pointer: None,
                 configured: false,
                 frame_ready: true,
+                closed: false,
                 scale: 1,
                 size: (placement.width, placement.height),
                 pointer_position: (0.0, 0.0),
@@ -207,19 +207,31 @@ mod imp {
                 self.state.frame_ready = true;
                 return;
             }
-            if self.renderer.is_some() {
-                self.render_frame(&[], true);
-            } else {
-                self.state.layer.wl_surface().attach(None, 0, 0);
-                self.state.layer.commit();
-                self.state
-                    .missing_all("surface hidden before presentation feedback");
+            // Hide by presenting one transparent frame and keeping the
+            // surface mapped. Unmapping (`attach(None)` + commit) makes KWin
+            // require a new configure before the next buffer attach, and that
+            // configure is not sent for a null-buffer commit, so a later show
+            // would never render again (observed on KWin 6.7.5: protocol
+            // error 0 "a buffer has been attached to a layer surface prior to
+            // the first layer_surface.configure event" and a dead renderer).
+            // The transparent frame also makes the alpha-aware input region
+            // empty, so the hidden overlay claims no input. A surface the
+            // compositor already closed must not be committed again.
+            if !self.state.closed {
+                if self.renderer.is_some() {
+                    self.render_frame(&[], true);
+                } else {
+                    self.state.layer.wl_surface().attach(None, 0, 0);
+                    self.state.layer.commit();
+                    self.state
+                        .missing_all("surface hidden before presentation feedback");
+                }
             }
             self.visible = false;
         }
 
         pub fn visible(&self) -> bool {
-            self.visible
+            self.visible && !self.state.closed
         }
 
         pub fn set_placement(&mut self, placement: PlacementBox) {
@@ -286,7 +298,7 @@ mod imp {
         }
 
         pub fn ready_to_render(&self) -> bool {
-            self.visible && self.state.frame_ready && self.renderer.is_some()
+            self.visible && !self.state.closed && self.state.frame_ready && self.renderer.is_some()
         }
 
         pub fn render(&mut self, meshes: &[crate::vrm::RenderMesh]) {
@@ -419,13 +431,6 @@ mod imp {
         }
     }
 
-    impl Drop for WaylandOverlay {
-        fn drop(&mut self) {
-            self.state
-                .missing_all("body exited before presentation feedback");
-        }
-    }
-
     fn require_kde_layer_shell(globals: &GlobalList) -> Result<(), String> {
         let has_layer_shell = globals.contents().with_list(|list| {
             list.iter()
@@ -537,6 +542,9 @@ mod imp {
         relative_pointer: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
         configured: bool,
         frame_ready: bool,
+        /// Set when the compositor sends `layer_surface.closed`; the surface
+        /// must not be committed or presented again.
+        closed: bool,
         scale: i32,
         size: (u32, u32),
         pointer_position: (f64, f64),
@@ -688,6 +696,7 @@ mod imp {
             _qh: &QueueHandle<Self>,
             _layer: &LayerSurface,
         ) {
+            self.closed = true;
             self.events.push_back(Event::LocalUi(LocalUiFact::Hide));
             self.missing_all("layer surface was closed");
         }
@@ -1051,13 +1060,6 @@ mod imp {
         }
     }
 
-    pub fn probe() -> OverlayProbe {
-        match WaylandOverlay::open(false) {
-            Ok(_) => OverlayProbe::Available,
-            Err(reason) => OverlayProbe::Unavailable { reason },
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         use super::presentation_output;
@@ -1077,19 +1079,3 @@ mod imp {
 
 #[cfg(target_os = "linux")]
 pub use imp::WaylandOverlay;
-
-use super::OverlayProbe;
-
-#[must_use]
-pub fn kde_layer_shell_probe() -> OverlayProbe {
-    #[cfg(target_os = "linux")]
-    {
-        imp::probe()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        OverlayProbe::Unavailable {
-            reason: String::from("not Linux"),
-        }
-    }
-}

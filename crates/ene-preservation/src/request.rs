@@ -67,7 +67,7 @@ impl TargetedDeletionRequest {
     #[must_use]
     pub fn owner_review_text(&self) -> &str {
         let MechanicalDeletionTarget::ExactText(material) = &self.target.mechanical;
-        material.expose_for_owner_review()
+        material.expose_for_erasure()
     }
 
     #[must_use]

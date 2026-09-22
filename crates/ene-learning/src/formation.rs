@@ -17,7 +17,11 @@ pub const MAX_FORMATION_CHANGES: usize = 5;
 
 pub const MAX_FORMATION_TURNS: usize = 24;
 
-pub const FORMATION_SCAN_LIMIT: u64 = 200;
+/// Most current memories one formation reads before selecting candidates.
+///
+/// The read is a bounded newest-first scan: an environment with more
+/// memories than this needs an indexed or embedding selection instead.
+pub(crate) const FORMATION_SCAN_LIMIT: u64 = 200;
 
 const RECENT_MEMORY_LIMIT: usize = 12;
 
@@ -106,12 +110,38 @@ impl LearningInferencePremise {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One inference answer together with the durable claim it ran under.
+///
+/// The claim is the opaque identity of the provider attempt (the inference
+/// ticket). The formation carries it into every commit so the store can
+/// refuse a delayed formation whose provenance was associated with a deletion
+/// operation, even after that operation completed.
+#[derive(Clone, PartialEq, Eq)]
 pub struct LearningInferenceAnswer {
+    /// Provider output text; redacted from `core::fmt::Debug` because it may
+    /// quote owner speech or secret-bearing material before scrubbing.
     pub answer: String,
     pub claim: LearningClaimRef,
 }
 
+impl core::fmt::Debug for LearningInferenceAnswer {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("LearningInferenceAnswer")
+            .field("answer", &"[redacted]")
+            .field("claim", &self.claim)
+            .finish()
+    }
+}
+
+/// The model boundary used to judge one Experience.
+///
+/// Kept as a port so this crate does not depend on inference or permission
+/// crates: the Host supplies an implementation through the inference boundary
+/// with its own consumer and purpose. The premise carries the formation's
+/// canonical source correlation, and the prompt carries the credential-set
+/// premise it was scrubbed under, so the send claim can refuse a prompt that
+/// predates a credential registration or derives from covered data.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract style uses native async fn; Send bounds settle with the Host adapter"
@@ -271,7 +301,11 @@ async fn build_prompt(
         }
     }
     prompt.push_str("\nNew experience:\n");
-    for turn in candidate.transcript.iter().take(MAX_FORMATION_TURNS) {
+    let first_turn = candidate
+        .transcript
+        .len()
+        .saturating_sub(MAX_FORMATION_TURNS);
+    for turn in &candidate.transcript[first_turn..] {
         let text = scrubber
             .scrub(&turn.text)
             .await
@@ -314,9 +348,9 @@ fn select_existing(scanned: Vec<Memory>, transcript: &[ExperienceTurn]) -> Vec<M
         return scanned;
     }
     let mut selected: Vec<Memory> = scanned[..RECENT_MEMORY_LIMIT].to_vec();
-    let experience = transcript
+    let first_turn = transcript.len().saturating_sub(MAX_FORMATION_TURNS);
+    let experience = transcript[first_turn..]
         .iter()
-        .take(MAX_FORMATION_TURNS)
         .map(|turn| turn.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");

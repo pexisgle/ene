@@ -514,6 +514,7 @@ async fn ack_summary(
                 PresentationStatus::Presented,
             )),
             Some(summary.round.clone()),
+            Some(summary.presence_generation),
         )
         .await
         .map_err(|error| format!("ack errored: {error:?}"))?;
@@ -724,6 +725,7 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
                 PresentationStatus::Presented,
             )),
             Some(pushed_summary.round.clone()),
+            Some(pushed_summary.presence_generation),
         )
         .await;
     assert!(
@@ -986,6 +988,7 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
             Some(ene_api::v1::refs::RoundWireId(String::from(
                 "forged-old-round",
             ))),
+            Some(completion.presence_generation),
         )
         .await
         .expect("forged ACK must answer");

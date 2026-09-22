@@ -163,27 +163,6 @@ impl MemoryVersionedStore {
             active: Mutex::new(HashMap::new()),
         }
     }
-
-    pub fn provision(&self, cred: CredentialRef, secret: &str) {
-        let version = 1;
-        let mut versions = match self.versions.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        versions.insert(
-            (cred.clone(), version),
-            SecretValue::new(secret.as_bytes().to_vec()),
-        );
-        drop(versions);
-        let mut active = match self.active.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        active.insert(
-            cred,
-            (version, SecretValue::new(secret.as_bytes().to_vec())),
-        );
-    }
 }
 
 impl VersionedCredentialStore for MemoryVersionedStore {

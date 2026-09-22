@@ -2,6 +2,7 @@ use crate::ipc::{
     AssetFailInfo, AssetFailReason, AssetRef, FeatureSupport, MotionFailInfo, MotionFailReason,
     MotionSetInfo, PoseHint,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use vrm_runtime::{PlaybackMode, PlaybackOptions, VrmAnimation};
@@ -27,6 +28,11 @@ pub struct AssetStats {
     pub spring_chains: usize,
 }
 
+/// One CPU-deformed primitive plus its expression-evaluated PBR base color.
+/// Base-color texture sampling and the evaluated base-color factor are
+/// implemented; MToon shading terms (shade, matcap, rim, outline) remain
+/// renderer quality work. Geometry, skinning, morphs, and vertex colors are
+/// retained.
 #[derive(Debug, Clone)]
 pub struct RenderMesh {
     pub mesh: vrm_runtime::CpuMesh,
@@ -245,18 +251,12 @@ impl VrmSession {
         let asset_generation = self.asset_generation.saturating_add(1);
         let material_textures = decode_material_textures(&avatar, asset_generation)?;
         let mut runtime = vrm_runtime::AvatarRuntime::new(avatar);
-        let frame = runtime.update(0.0).map_err(|error| {
+        runtime.update(0.0).map_err(|error| {
             fail(
                 AssetFailReason::RuntimeEvaluation,
                 format!("initial runtime evaluation failed: {error}"),
             )
         })?;
-        if frame.gpu().draws().len() == 0 {
-            return Err(fail(
-                AssetFailReason::MissingPrimitives,
-                "runtime produced no renderer draws",
-            ));
-        }
         self.current = Some(asset);
         self.runtime = Some(runtime);
         self.playing = None;
@@ -377,8 +377,20 @@ fn decode_material_textures(
     avatar: &vrm_runtime::AvatarAsset,
     asset_generation: u32,
 ) -> Result<Vec<Option<MaterialTexture>>, AssetFailInfo> {
+    let needed: BTreeSet<usize> = avatar
+        .materials()
+        .iter()
+        .filter_map(|material| {
+            material
+                .base_color_texture()
+                .map(|info| info.texture_id().index())
+        })
+        .collect();
     let mut decoded = vec![None; avatar.textures().len()];
     for (id, texture) in avatar.textures().iter().enumerate() {
+        if !needed.contains(&id) {
+            continue;
+        }
         let image = avatar.image(texture.image_id()).ok_or_else(|| {
             fail(
                 AssetFailReason::InvalidVrm,

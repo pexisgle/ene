@@ -13,11 +13,6 @@ impl SecretVersionId {
     pub fn as_u64(self) -> u64 {
         self.0
     }
-
-    #[must_use]
-    pub fn checked_next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,13 +87,7 @@ pub enum MutationOutcome {
     Unknown,
 }
 
-impl MutationOutcome {
-    #[must_use]
-    pub fn is_committed(&self) -> bool {
-        matches!(self, Self::Activated { .. } | Self::Revoked { .. })
-    }
-}
-
+/// Durable record of one credential mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialMutation {
     pub mutation_id: String,
@@ -182,4 +171,28 @@ pub trait CredentialPublicationRepository: Send + Sync {
         label: &str,
         version: SecretVersionId,
     ) -> Result<(), CredentialTechnicalError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MutationKind, MutationPhase};
+
+    #[test]
+    fn phases_and_kinds_round_trip_their_durable_text() {
+        for phase in [
+            MutationPhase::Prepared,
+            MutationPhase::Staged,
+            MutationPhase::Activated,
+            MutationPhase::CleanupPending,
+            MutationPhase::Completed,
+            MutationPhase::Abandoned,
+        ] {
+            assert_eq!(MutationPhase::parse(phase.as_str()), Some(phase));
+        }
+        for kind in [MutationKind::Register, MutationKind::Revoke] {
+            assert_eq!(MutationKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(MutationPhase::parse("invented"), None);
+        assert_eq!(MutationKind::parse("invented"), None);
+    }
 }

@@ -35,7 +35,6 @@ export component ChatWindow inherits Window {
     callback workspace(string);
     callback resume(string);
     callback cancel-task();
-    callback drafts-changed();
     public function clear-copies() {
         root.draft = ""; root.workspace-draft = ""; root.instruction-draft = "";
         root.messages = []; root.tasks = []; root.details = []; root.selected-task = "";
@@ -64,7 +63,7 @@ export component ChatWindow inherits Window {
         if root.notice != "": Notice { text: root.notice; error: root.notice-error; }
         if root.progress-summary != "" && !root.tasks-open: HorizontalLayout {
           Action {
-            text: root.progress-summary; selected: root.tasks-open;
+            text: root.progress-summary;
             clicked => { root.tasks-open = true; root.refresh-tasks(); }
           }
           Rectangle { horizontal-stretch: 1; }
@@ -118,7 +117,6 @@ export component ChatWindow inherits Window {
                                 placeholder-text: root.japanese ? "ene にメッセージ…" : "Message ene…";
                                 font-size: 14px;
                                 enabled: true;
-                                edited => { root.drafts-changed(); }
                                 accepted => { if !root.busy && root.connected && root.draft != "" { root.send(root.draft); } }
                             }
                             Action {
@@ -155,9 +153,9 @@ export component ChatWindow inherits Window {
                             }
                             for task in root.tasks: RowCard { item: task; selected: root.selected-task == task.key; clicked(key) => { if !root.task-busy { root.select-task(key); } } }
                             for detail in root.details: RowCard { item: detail; }
-                            Field { label: root.japanese ? "作業フォルダ" : "Workspace folder"; hint: root.japanese ? "フォルダのパス" : "Folder path"; value <=> root.workspace-draft; edited => { root.drafts-changed(); } }
+                            Field { label: root.japanese ? "作業フォルダ" : "Workspace folder"; hint: root.japanese ? "フォルダのパス" : "Folder path"; value <=> root.workspace-draft; }
                             Action { text: root.japanese ? "フォルダを選択" : "Use folder"; enabled: !root.task-busy && root.connected && root.workspace-draft != ""; clicked => { root.workspace(root.workspace-draft); } }
-                            Field { label: root.japanese ? "再開時の指示" : "Instructions for resuming"; hint: root.japanese ? "続きをどう進めるか" : "How should the task continue?"; value <=> root.instruction-draft; edited => { root.drafts-changed(); } }
+                            Field { label: root.japanese ? "再開時の指示" : "Instructions for resuming"; hint: root.japanese ? "続きをどう進めるか" : "How should the task continue?"; value <=> root.instruction-draft; }
                             HorizontalLayout {
                                 spacing: 8px;
                                 Action { text: root.japanese ? "再開" : "Resume"; primary: true; enabled: root.has-task && !root.task-busy && root.instruction-draft != ""; clicked => { root.resume(root.instruction-draft); } }

@@ -48,6 +48,9 @@ impl core::fmt::Debug for WorkspaceActionCommand {
     }
 }
 
+/// Why one request never started. Every variant means zero attempt rows and
+/// zero execution; the `DataUseHeld` variant may additionally commit the
+/// durable erasure-use hold that the coverage probe materialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionNotStarted {
     StalePremise,

@@ -26,6 +26,12 @@ pub use usage_cap::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PermissionEvaluationId(pub RawId);
 
+/// Monotonic order of one consent identity's revisions.
+///
+/// Follows the [`RevisionInner`] discipline: a revision is meaningful only
+/// together with its consent identity, and [`Self::checked_next`] reports
+/// exhaustion instead of aliasing `u64::MAX`, so a new revision can never
+/// silently share the previous one's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConsentRevision(RevisionInner);
 
@@ -259,6 +265,10 @@ pub enum IntentResolution<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IntentFingerprint {
     pub intent_id: String,
+    /// Opaque, Host-composed intent-kind discriminator (for example `assign`,
+    /// `register`, `complete`, `cancel-task`, `resume-task`, `select-workspace`,
+    /// `usage-cap`, or `deletion-targeted`). The permission owner compares it for
+    /// equality only and never enumerates or validates it.
     pub kind: String,
     pub target: String,
     pub base: String,
@@ -306,18 +316,18 @@ pub fn consent_view_mark(dialogue_rev: Option<u64>, learning_rev: Option<u64>) -
     )
 }
 
+/// Parses the state one base-view mark names for `capability`.
+///
+/// Accepts the combined view mark and a single-capability segment. An
+/// unparseable or differently-qualified segment is skipped, never treated as
+/// the answer, so a later well-formed segment can still match. Returns `None`
+/// when no segment for `capability` parses.
 #[must_use]
 pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Option<u64>> {
     let qualified = format!("consent-{}-", capability.as_str());
     for segment in mark.split(';').map(str::trim) {
         if let Some(state) = segment.strip_prefix(&qualified) {
             return parse_consent_state(state);
-        }
-        if capability == CapabilityKind::Dialogue
-            && let Some(state) = segment.strip_prefix("consent-")
-            && let Some(parsed) = parse_consent_state(state)
-        {
-            return Some(parsed);
         }
     }
     None
@@ -360,6 +370,29 @@ impl EvaluationTracker {
     }
 }
 
+/// Pure closed-world policy for one live authorization query.
+///
+/// Gates, in order:
+///
+/// 1. A `(consumer, capability, purpose)` triple outside the closed world
+///    denies with [`DenyCode::NotInAllowlist`]. The current world is
+///    `(CompanionDialogue, Dialogue, DialogueResponse)`,
+///    `(CompanionLearning, Learning, MemoryFormation)`, and
+///    `(TaskAgent, Dialogue, TaskAgentTurn)`.
+/// 2. With no stored consent, or a stored record for a different capability,
+///    the decision denies with [`DenyCode::ConsentStale`]. A record
+///    authorizes only the capability it names.
+/// 3. Consent comparison: when the stored record differs from
+///    `expected_consent`, the caller's view is stale and the decision is
+///    [`LiveAuthorizationDecision::NeedsRevalidation`].
+/// 4. A provider/model mismatch against the stored record denies with
+///    [`DenyCode::ConsentStale`].
+/// 5. Otherwise the candidate is allowed for exactly one use: a fresh id is
+///    minted from `tracker` and returned in
+///    [`LiveAuthorizationDecision::AllowForThisUse`].
+///
+/// Setup completeness is not checked here: only the caller that resolved a
+/// registered credential ref and confirmed its bearer exists builds a query.
 pub fn check_live_authorization(
     query: &CheckLiveAuthorizationQuery,
     current: Option<&ConsentRecord>,
@@ -795,27 +828,39 @@ mod tests {
             )
         );
         assert_eq!(
-            base_view_expectation(CapabilityKind::Dialogue, "consent-none", None),
+            base_view_expectation(CapabilityKind::Dialogue, "consent-dialogue-none", None),
             BaseViewExpectation::ExpectEmpty
         );
         assert_eq!(
-            base_view_expectation(CapabilityKind::Dialogue, "consent-rev-3", Some(&dialogue)),
+            base_view_expectation(
+                CapabilityKind::Dialogue,
+                "consent-dialogue-rev-3",
+                Some(&dialogue)
+            ),
             BaseViewExpectation::ExpectRevision(
                 String::from("consent-1"),
                 ConsentRevision::from_u64(3)
             )
         );
         assert_eq!(
-            base_view_expectation(CapabilityKind::Learning, "consent-rev-3", Some(&learning)),
+            base_view_expectation(
+                CapabilityKind::Learning,
+                "consent-dialogue-rev-3",
+                Some(&learning)
+            ),
             BaseViewExpectation::FaceStale,
-            "a legacy dialogue mark must never name learning"
+            "a dialogue-qualified mark must never name learning"
         );
         assert_eq!(
-            base_view_expectation(CapabilityKind::Dialogue, "consent-rev-2", None),
+            base_view_expectation(CapabilityKind::Dialogue, "consent-dialogue-rev-2", None),
             BaseViewExpectation::FaceStale
         );
         assert_eq!(
-            base_view_expectation(CapabilityKind::Dialogue, "consent-rev-x", Some(&dialogue)),
+            base_view_expectation(
+                CapabilityKind::Dialogue,
+                "consent-dialogue-rev-x",
+                Some(&dialogue)
+            ),
             BaseViewExpectation::FaceStale
         );
         assert_eq!(
@@ -845,11 +890,11 @@ mod tests {
             Some(Some(4))
         );
         assert_eq!(
-            parse_consent_mark("consent-none", CapabilityKind::Dialogue),
+            parse_consent_mark("consent-dialogue-none", CapabilityKind::Dialogue),
             Some(None)
         );
         assert_eq!(
-            parse_consent_mark("consent-none", CapabilityKind::Learning),
+            parse_consent_mark("consent-dialogue-none", CapabilityKind::Learning),
             None
         );
         let reordered = "consent-learning-rev-4;consent-dialogue-rev-3";

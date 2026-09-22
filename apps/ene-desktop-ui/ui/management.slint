@@ -6,7 +6,6 @@ component SetupPane inherits Rectangle {
     in property <bool> japanese;
     in-out property <int> step;
     in property <bool> busy;
-    in property <bool> credential-present;
     in-out property <string> model;
     in-out property <string> secret-draft;
     callback next();
@@ -14,7 +13,6 @@ component SetupPane inherits Rectangle {
     callback language(bool);
     callback credential(string);
     callback assign(string);
-    public function clear-secret() { root.secret-draft = ""; }
     VerticalLayout {
         spacing: 24px; alignment: start;
         Caption { text: root.japanese ? "はじめの設定 · " + (root.step + 1) + " / 5" : "GETTING STARTED · " + (root.step + 1) + " / 5"; }
@@ -130,7 +128,6 @@ export component ManagementWindow inherits Window {
     callback resume-deletion();
     callback confirm-owner();
     callback cancel-owner();
-    callback draft-changed();
     callback show-avatar();
     callback hide-avatar();
     public function clear-secret() { root.secret-draft = ""; }
@@ -185,7 +182,6 @@ export component ManagementWindow inherits Window {
                         secret-draft <=> root.secret-draft;
                         max-width: 560px; horizontal-stretch: 1;
                         japanese: root.japanese; step: root.step; busy: root.busy;
-                        credential-present: root.credential-present;
                         model <=> root.model;
                         next => { root.wizard-next(); }
                         back => { root.wizard-back(); }
@@ -265,7 +261,7 @@ export component ManagementWindow inherits Window {
                             if root.page == 4: VerticalLayout {
                                 spacing: 16px;
                                 Notice { text: root.japanese ? "指定した情報を履歴や記憶から完全に削除します。会話で「忘れて」と伝える操作とは異なり、取り消せません。" : "Permanently remove matching information from history and memory. This differs from asking ene to forget and cannot be undone."; }
-                                Field { label: root.japanese ? "完全に削除する文字列" : "Exact text to erase"; hint: root.japanese ? "対象の文字列を入力" : "Enter the exact text"; value <=> root.deletion-draft; enabled: !root.busy; edited => { root.draft-changed(); } }
+                                Field { label: root.japanese ? "完全に削除する文字列" : "Exact text to erase"; hint: root.japanese ? "対象の文字列を入力" : "Enter the exact text"; value <=> root.deletion-draft; enabled: !root.busy; }
                                 HorizontalLayout {
                                     spacing: 12px;
                                     Action { text: root.japanese ? "削除を要求" : "Request deletion"; danger: true; enabled: !root.busy && root.connected && root.deletion-draft != ""; clicked => { root.request-deletion(root.deletion-draft); root.deletion-draft = ""; } }

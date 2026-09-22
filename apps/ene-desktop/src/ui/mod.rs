@@ -147,15 +147,11 @@ impl Composer {
 pub struct GuiSnapshot {
     pub locale: String,
     pub page: String,
-    pub wizard_step: String,
     pub timeline: Vec<String>,
     pub history: Vec<String>,
     pub draft: String,
     pub composing: bool,
-    pub connection: String,
-    pub presence: String,
     pub deny_reason: String,
-    pub challenge_target: Option<String>,
     pub tasks: Vec<String>,
     pub task_detail: String,
     pub about_slint: bool,
@@ -165,12 +161,8 @@ pub struct GuiSnapshot {
     pub credential_present: bool,
     pub consent_assigned: bool,
     pub secret_visible: bool,
-    pub wizard_body: String,
     pub memories: Vec<MemoryRow>,
     pub memory_revisions: Vec<MemoryRevisionRow>,
-    pub memory_next: Option<String>,
-    pub memory_revisions_of: Option<String>,
-    pub memory_revisions_next: Option<u64>,
     pub memory_panel: String,
     pub usage_body: String,
     pub deletion_body: String,
@@ -196,8 +188,6 @@ pub enum DesktopError {
     Control(String),
     #[error("host launch: {0}")]
     HostLaunch(String),
-    #[error("confirmation seat is occupied")]
-    SeatOccupied,
     #[error("denied by the control boundary")]
     DeniedByBoundary,
     #[error("{0}")]

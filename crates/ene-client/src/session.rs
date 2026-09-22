@@ -12,15 +12,43 @@ use super::frames::auth_rejected_guidance;
 
 pub const DEFERRED_CAP: usize = 32;
 
+/// Beyond this cap the oldest stashed Host demand is discarded to make room,
+/// never the newest; the Host holds and re-demands a dropped condition.
+pub const PENDING_ERASURE_CAP: usize = 32;
+
+/// Observed session: latest presence generation, companion projection,
+/// pairing secret, and the deferred out-of-order answer queue.
+///
+/// Latest value supersedes: each new fact or stale answer overwrites. A
+/// missing generation is never read as current — a [`None`]-stamped input
+/// answered with `NeedsRevalidation` is the correct outcome; defaulting it
+/// (zero) would claim a generation the client never observed, and the Host
+/// would treat that stale claim as currentness evidence it is not.
+///
+/// The pairing secret lives here for the session lifetime only (loaded from
+/// the device file or the one-shot bootstrap at connect time) and is never
+/// logged; the custom [`core::fmt::Debug`] below renders it as `[redacted]`
+/// so a debug dump cannot leak key material.
+///
+/// The deferred queue holds whole [`WireFrame`]s (payload plus envelope, so
+/// the `reply_to` link survives for later correlation), never facts (absorbed
+/// on arrival); it is session-lifetime only, never persisted, and capped at
+/// [`DEFERRED_CAP`] with oldest-drop.
+///
+/// `Eq` is deliberately absent: [`WireFrame`] is `PartialEq`-only, and
+/// whole-session equality beyond tests is meaningless; callers compare
+/// dimensions.
 #[derive(Clone, PartialEq, Default)]
 pub struct SessionState {
     generation: Option<u64>,
     presence: Option<PresenceStateWire>,
     companion: Option<String>,
-    connection_id: Option<ConnectionWireId>,
     pairing_secret: Option<PairingProvisionSecret>,
     deferred: VecDeque<WireFrame>,
     defer_erasure: bool,
+    /// Host erasure demands stashed for the GUI participant, bounded at
+    /// [`PENDING_ERASURE_CAP`] with oldest-drop so a chatty or hostile Host
+    /// cannot grow the session without bound.
     pending_erasure: VecDeque<DeletionDemand>,
 }
 
@@ -31,7 +59,6 @@ impl core::fmt::Debug for SessionState {
             .field("generation", &self.generation)
             .field("presence", &self.presence)
             .field("companion", &self.companion)
-            .field("connection_id", &self.connection_id)
             .field(
                 "pairing_secret",
                 &self.pairing_secret.as_ref().map(|_| "[redacted]"),
@@ -51,10 +78,6 @@ impl SessionState {
     #[must_use]
     pub fn presence_state(&self) -> Option<PresenceStateWire> {
         self.presence
-    }
-
-    pub fn set_connection(&mut self, connection_id: ConnectionWireId) {
-        self.connection_id = Some(connection_id);
     }
 
     pub fn pairing_secret(&self) -> Option<&str> {
@@ -112,6 +135,9 @@ impl SessionState {
     }
 
     pub fn push_pending_erasure(&mut self, demand: DeletionDemand) {
+        if self.pending_erasure.len() >= PENDING_ERASURE_CAP {
+            let _ = self.pending_erasure.pop_front();
+        }
         self.pending_erasure.push_back(demand);
     }
 

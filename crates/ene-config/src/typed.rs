@@ -28,6 +28,8 @@ impl Default for Config {
 pub enum ConfigError {
     #[error("language must not be empty")]
     EmptyLanguage,
+    #[error("data_dir must not be empty")]
+    EmptyDataDir,
     #[error("configuration read failed: {0}")]
     Read(#[from] std::io::Error),
     #[error("configuration JSON failed: {0}")]
@@ -35,14 +37,30 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::EmptyLanguage`] when [`Config::language`] is
+    /// empty or whitespace-only, or [`ConfigError::EmptyDataDir`] when an
+    /// explicit [`Config::data_dir`] is the empty path.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.language.trim().is_empty() {
-            Err(ConfigError::EmptyLanguage)
-        } else {
-            Ok(())
+            return Err(ConfigError::EmptyLanguage);
         }
+        if let Some(dir) = &self.data_dir
+            && dir.as_os_str().is_empty()
+        {
+            return Err(ConfigError::EmptyDataDir);
+        }
+        Ok(())
     }
 
+    /// Loads defaults, an optional JSON file, then ENE_LANGUAGE and ENE_DATA_DIR.
+    /// Missing files and non-Unicode environment values are ignored.
+    ///
+    /// # Errors
+    /// Returns a read or JSON error for an unreadable or malformed file, or
+    /// EmptyLanguage when the final language is blank, or EmptyDataDir when
+    /// the final data directory is the empty path.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
         load_with_env(path, |key| std::env::var(key).ok())
     }

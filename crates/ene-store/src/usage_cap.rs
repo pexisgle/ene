@@ -187,6 +187,17 @@ pub(crate) struct WindowConsumption {
     pub(crate) committed_unknown: u64,
 }
 
+/// Sums one scope's consumption breakdown over the UTC period containing
+/// `at`.
+///
+/// Only rows whose state is not `released` count. `committed_reported`
+/// contributes the actual committed cost (the reserved upper bound is
+/// released); `reserved` and `committed_unknown` contribute the reserved
+/// upper bound, so an unknown external consumption can never free a cap slot.
+/// `Ok(None)` is indeterminate: an unrepresentable period, a currency the cap
+/// cannot be compared in, or a sum that does not fit the money representation.
+/// An unknown stored state or a malformed stored amount is a technical error,
+/// never a guessed number.
 pub(crate) fn consumption_breakdown(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,

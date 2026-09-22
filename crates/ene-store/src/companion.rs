@@ -32,8 +32,10 @@ const SQL_INSERT_COMPANION: &str =
 
 const SQL_SELECT_LIFECYCLE: &str = "SELECT lifecycle FROM companion WHERE companion_id = ?1";
 
-pub(crate) const SQL_SELECT_COMPANION_LIFECYCLE: &str =
-    "SELECT lifecycle FROM companion WHERE companion_id = ?1";
+/// The companion lifecycle read for the Task resume commit (AU17): the same
+/// row the History appends compare, read inside the resume transaction so
+/// the `Running` requirement linearizes with the revision forward.
+pub(crate) const SQL_SELECT_COMPANION_LIFECYCLE: &str = SQL_SELECT_LIFECYCLE;
 
 pub(crate) const SQL_SELECT_HISTORY_PREMISE: &str =
     "SELECT role, companion_id FROM history_message WHERE message_id = ?1";
@@ -274,6 +276,12 @@ fn append_history(
         )
         .map_err(|error| companion_unavailable(error.to_string()))?
     {
+        // `held_use`'s direct-correlation fallback may have written the
+        // durable hold for an unreconciled operation; commit it even though
+        // the reply is refused, so the correspondence survives this arrival
+        // instead of rolling back with the refused try.
+        tx.commit()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
         return Ok((HistoryAppendOutcome::HeldForErasure, None));
     }
     let (client_counter, client_random) = match cmd.incarnation {
@@ -507,30 +515,9 @@ impl HistoryRepository for Store {
         companion: CompanionId,
         command: &CommandId,
     ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
-        let conn = Arc::clone(&self.conn);
+        let store = self.clone();
         let command = *command;
-        run_blocking(move || {
-            let key = encode_id(companion.as_raw());
-            let command_key = encode_id(command.0);
-            let guard = lock_shared(&conn);
-            let found: Option<HistoryRow> = guard
-                .query_row(
-                    SQL_SELECT_HISTORY_BY_COMMAND,
-                    params![key, command_key],
-                    HistoryRow::from_row,
-                )
-                .optional()
-                .map_err(|error| companion_unavailable(error.to_string()))?;
-            match found {
-                Some(row) => {
-                    let message =
-                        decode_history_message(companion, row).map_err(companion_unavailable)?;
-                    Ok(Some(message))
-                }
-                None => Ok(None),
-            }
-        })
-        .await
+        run_blocking(move || store.lookup_command_sync(companion, &command)).await
     }
 
     async fn load_message(

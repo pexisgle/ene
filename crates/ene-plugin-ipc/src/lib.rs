@@ -1,3 +1,21 @@
+//! Length-prefixed `MessagePack` transport frames (IPC §10.1), shared by the
+//! Host listener and the Client dialer.
+//!
+//! This is a pure byte codec: it frames one domain message ([`WireFrame`]) as
+//! a 4-byte big-endian exclusive length prefix followed by the canonical
+//! `MessagePack` body (IPC §7), and parses such bytes back. It performs no
+//! I/O, owns no sockets, and runs no async tasks; socket read/write loops
+//! live in the applications that embed it.
+//!
+//! One frame carries exactly one domain message. Text streaming chunking
+//! happens at the DTO level ([`ene_api::v1::round::TextStreamFrameWire`]),
+//! never here: this layer never splits, merges, or otherwise interprets
+//! payloads. It never inspects envelope or payload semantics either; domain
+//! meaning (routing, validation, authority) stays in `ene-api` and the
+//! Host. Unknown-field tolerance comes from the named `MessagePack`
+//! encoding (structs as maps) together with the `ene-api` DTOs, not from
+//! any logic here.
+
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::payload::WirePayload;
 use serde::{Deserialize, Serialize};
@@ -22,7 +40,11 @@ pub enum CodecError {
 }
 
 pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
-    let body = rmp_serde::to_vec(frame).map_err(|error| CodecError::DecodeFailed {
+    let body = rmp_serde::to_vec_named(frame).map_err(|error| CodecError::DecodeFailed {
+        // `rmp-serde` writing into a `Vec` cannot fail in practice; there is
+        // no encode-dedicated variant because the failure is uninhabited for
+        // these types, so the single codec error carries it with the stage
+        // named in the reason.
         reason: std::format!("encode: {error}"),
     })?;
     if body.len() > MAX_FRAME_BYTES {
@@ -110,7 +132,7 @@ mod tests {
     #[test]
     fn prefix_is_big_endian_body_length() {
         let frame = sample_frame();
-        let body = rmp_serde::to_vec(&frame).expect("encode body");
+        let body = rmp_serde::to_vec_named(&frame).expect("encode body");
         let encoded = encode_frame(&frame).expect("encode frame");
         let body_len = u32::try_from(body.len()).expect("sample body fits in u32");
         let mut expected = body_len.to_be_bytes().to_vec();

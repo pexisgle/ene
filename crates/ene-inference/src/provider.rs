@@ -18,8 +18,29 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const MAX_OUTPUT_TOKENS: u64 = 4_096;
 
+/// Protocol-framing allowance added to the request text's byte length for the
+/// input side of the reservation upper bound.
+///
+/// A byte-level BPE token never encodes fewer than one byte, so the token
+/// count cannot exceed the UTF-8 byte length; the allowance covers
+/// server-side framing (special tokens and request formatting) that the
+/// local body does not spell out.
 pub const INPUT_TOKENS_FRAMING_ALLOWANCE: u64 = 1_024;
 
+/// Hard cap on one provider response body/stream, independent of the
+/// request timeout. A larger response is malformed external input: fail
+/// closed and let dispatch record the unknown-usage fact.
+pub const MAX_PROVIDER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// HTTPS transport for the `OpenAI` Responses API (`POST /v1/responses`).
+///
+/// No field ever holds key material or a fixed credential: the bearer is
+/// resolved per request from the [`ene_credential::CredentialRef`] the authorized dispatch
+/// carries, and borrowed transiently inside [`CredentialStore::with_bearer`].
+///
+/// The store is a generic `S: CredentialStore` rather than a trait object
+/// because [`CredentialStore::with_bearer`] is generic over its closure return
+/// type, which makes the trait not dyn-compatible.
 pub struct OpenAiResponsesTransport<S> {
     base_url: String,
     http: reqwest::Client,
@@ -109,10 +130,26 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
             .await
             .map_err(|err| io_error(&err, "send failed"))?;
         let status = response.status().as_u16();
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_PROVIDER_RESPONSE_BYTES as u64)
+        {
+            return Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider response too large".to_owned(),
+            ));
+        }
         let bytes = response
             .bytes()
             .await
             .map_err(|err| io_error(&err, "read failed"))?;
+        if bytes.len() > MAX_PROVIDER_RESPONSE_BYTES {
+            return Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider response too large".to_owned(),
+            ));
+        }
+        // Status-class errors take priority over body shape: an error page
+        // that is not JSON must still report its status, while a malformed
+        // success body is a decode failure.
         let is_success = (200..300).contains(&status);
         let body: serde_json::Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
@@ -169,12 +206,19 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
 
         let mut assembler = StreamAssembler::default();
         let mut pending = Vec::<u8>::new();
+        let mut received = 0_usize;
         while let Some(chunk) = response
             .chunk()
             .await
             .map_err(|err| io_error(&err, "read failed"))?
         {
             pending.extend_from_slice(&chunk);
+            received = received.saturating_add(chunk.len());
+            if received > MAX_PROVIDER_RESPONSE_BYTES {
+                return Err(InferenceTechnicalError::ProviderTransportFailed(
+                    "provider response too large".to_owned(),
+                ));
+            }
             while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
                 let raw: Vec<u8> = pending.drain(..=newline).collect();
                 let line = String::from_utf8_lossy(&raw);

@@ -12,8 +12,10 @@ pub enum ChannelEvent {
 use crate::{FromConfirmation, ToConfirmation};
 
 pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
-    let body = serde_json::to_vec(value)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let body = zeroize::Zeroizing::new(
+        serde_json::to_vec(value)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    );
     if body.len() > MAX_CONFIRMATION_FRAME_BYTES as usize {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -26,6 +28,16 @@ pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> 
     Ok(out)
 }
 
+/// Reads one framed message.
+///
+/// `Ok(None)` is terminal for the channel and means the peer closed or the
+/// length prefix was zero or over [`MAX_CONFIRMATION_FRAME_BYTES`].
+///
+/// # Errors
+///
+/// Propagates transport failures, including a truncated body, and returns
+/// `InvalidData` for a body that fails to decode; both are terminal for the
+/// channel, and a malformed frame never becomes a guessed message.
 pub fn read_frame<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
 where
     R: std::io::Read,
@@ -41,7 +53,7 @@ where
     if length == 0 || length > MAX_CONFIRMATION_FRAME_BYTES {
         return Ok(None);
     }
-    let mut body = vec![0_u8; length as usize];
+    let mut body = zeroize::Zeroizing::new(vec![0_u8; length as usize]);
     reader.read_exact(&mut body)?;
     serde_json::from_slice(&body)
         .map(Some)
@@ -53,8 +65,8 @@ where
     W: std::io::Write,
     T: serde::Serialize,
 {
-    let encoded = encode_frame(value)?;
-    writer.write_all(&encoded)?;
+    let bytes = zeroize::Zeroizing::new(encode_frame(value)?);
+    writer.write_all(&bytes)?;
     writer.flush()
 }
 

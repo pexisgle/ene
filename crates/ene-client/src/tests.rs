@@ -9,8 +9,14 @@ use ene_api::v1::refs::{
 use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
 use ene_plugin_ipc::WireFrame;
 
-use super::frames::{PreparedRequest, frame_for, proof_frame, retry_frame};
-use super::session::SessionState;
+use super::frames::{
+    PreparedRequest, auth_rejected_guidance, capability_frame, frame_for, frame_for_session,
+    missing_secret_guidance, pairing_frame, proof_frame,
+};
+use super::session::{
+    AuthDecision, DEFERRED_CAP, PENDING_ERASURE_CAP, SessionState, decide_auth, stale_generation_of,
+};
+use super::{platform_display, socket_path};
 
 fn incarnation() -> ClientIncarnationId {
     ClientIncarnationId {
@@ -98,18 +104,25 @@ fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
     };
 
     let mut session = SessionState::default();
-    session.push_deferred(crate::frames::frame_for(
-        WirePayload::PresenceAttribution(presence_fact(1)),
-        WireSender {
-            device_id: None,
-            incarnation_id: incarnation(),
-            connection_id: None,
-        },
-    ));
-    assert!(
-        session.take_undelivered().is_empty(),
-        "the deferred queue holds the frame before the demand"
+    let response_frame = || {
+        crate::frames::frame_for(
+            WirePayload::UndeliveredResponse(
+                ene_api::v1::undelivered::UndeliveredResponse::FrameTooLarge,
+            ),
+            WireSender {
+                device_id: None,
+                incarnation_id: incarnation(),
+                connection_id: None,
+            },
+        )
+    };
+    session.push_deferred(response_frame());
+    assert_eq!(
+        session.take_undelivered().len(),
+        1,
+        "the deferred queue holds the response before the demand"
     );
+    session.push_deferred(response_frame());
     let drained = session.wipe_transient();
     assert_eq!(
         drained,
@@ -328,17 +341,6 @@ fn prepared_retry_reuses_command_with_fresh_transport_ids() {
         second.envelope.observed.presence_generation_view,
         "retries preserve the observed premise"
     );
-    let raw = retry_frame(input(), sender, Some(3), command);
-    assert_eq!(
-        raw.envelope.correlation.command_id,
-        Some(command),
-        "retry_frame keeps the caller's command identity"
-    );
-    assert!(
-        raw.envelope.message_id != first.envelope.message_id
-            && raw.envelope.message_id != second.envelope.message_id,
-        "retry_frame stays transport-fresh"
-    );
 }
 
 #[test]
@@ -378,6 +380,124 @@ fn decide_frame_classifies_facts_answers_and_deferrals() {
         "BodyStateHint is a fact, never an answer, even with matching reply_to"
     );
 }
+
+/// Carries `limit` so out-of-order answers stay distinguishable by payload.
+fn history_answer(limit: u64) -> WirePayload {
+    WirePayload::HistoryRequest(history_request("companion-1", limit))
+}
+
+#[test]
+fn deferred_queue_drops_the_oldest_frame_at_capacity() {
+    let mut session = SessionState::default();
+    for index in 0..DEFERRED_CAP {
+        let reply_to = u128::try_from(index).map_or(0, |value| value + 1000);
+        session.push_deferred(script_frame(
+            history_answer(7),
+            message_id(reply_to + 500),
+            Some(message_id(reply_to)),
+        ));
+    }
+    let overflow = message_id(9999);
+    session.push_deferred(script_frame(history_answer(8), overflow, Some(overflow)));
+    assert!(
+        session.take_deferred_reply(message_id(1000)).is_none(),
+        "the oldest frame drops first"
+    );
+    assert!(
+        session.take_deferred_reply(overflow) == Some(history_answer(8)),
+        "the overflow frame is queued"
+    );
+}
+
+#[test]
+fn pending_erasure_queue_drops_the_oldest_demand_at_capacity() {
+    use ene_api::v1::deletion::{
+        ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
+    };
+
+    let demand = |name: String| DeletionDemand {
+        demand: DeletionDemandWireId(name),
+        operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-1")),
+        sweep: 1,
+        targets: vec![DeletionTargetWire::WipeClass {
+            class: ClientTempClass::PresentationBuffer,
+        }],
+    };
+    let mut session = SessionState::default();
+    for index in 0..PENDING_ERASURE_CAP {
+        session.push_pending_erasure(demand(format!("demand-{index}")));
+    }
+    session.push_pending_erasure(demand(String::from("demand-overflow")));
+    assert_eq!(
+        session.take_pending_erasure().map(|item| item.demand.0),
+        Some(String::from("demand-1")),
+        "the oldest demand drops first"
+    );
+}
+
+#[test]
+fn decide_auth_rejection_guides_reprovisioning() -> Result<(), String> {
+    let decision = decide_auth(&WirePayload::AuthResult(AuthResult::Rejected {
+        reason: String::from("unknown proof"),
+    }));
+    let AuthDecision::Guidance { message } = decision else {
+        return Err(String::from("rejection must guide reprovisioning"));
+    };
+    assert!(
+        message.contains("unknown proof"),
+        "guidance keeps the operational Host reason: {message:?}"
+    );
+    assert!(
+        message.contains("fresh pairing request"),
+        "guidance names the provisioning step: {message:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn decide_auth_names_unexpected_kinds() -> Result<(), String> {
+    let decision = decide_auth(&answer_payload());
+    let AuthDecision::Unexpected { message } = decision else {
+        return Err(String::from("foreign kinds must be unexpected"));
+    };
+    assert!(
+        message.contains("HistoryRequest") && message.contains("AuthResult"),
+        "the refusal must name both kinds: {message:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proof_frame_names_the_paired_device() -> Result<(), String> {
+    use ene_api::v1::refs::DeviceWireId;
+    let device = DeviceWireId(uuid::Uuid::new_v4());
+    let frame = proof_frame("proof-hex-abc", incarnation(), device);
+    let WirePayload::AuthProof(proof) = &frame.payload else {
+        return Err(String::from("proof builder must emit AuthProof"));
+    };
+    assert!(
+        proof.proof == "proof-hex-abc",
+        "the proof value travels in the auth frame"
+    );
+    assert!(
+        frame.envelope.sender.device_id == Some(device)
+            && frame.envelope.sender.connection_id.is_none()
+            && frame.envelope.sender.incarnation_id == incarnation(),
+        "the proof names the paired device but no connection: {:?}",
+        frame.envelope.sender
+    );
+    let rendered = format!("{frame:?}");
+    assert!(
+        !rendered.contains("proof-hex-abc"),
+        "frame Debug must not leak the proof: {rendered:?}"
+    );
+    let encoded = (ene_plugin_ipc::encode_frame(&frame)).expect("encode proof frame");
+    let (decoded, _consumed) =
+        (ene_plugin_ipc::decode_frame(&encoded)).expect("decode proof frame");
+    assert!(decoded == frame, "codec must preserve the proof frame");
+    Ok(())
+}
+
 #[test]
 fn proof_derives_from_the_secret_and_the_single_use_nonce() -> Result<(), String> {
     use ene_api::v1::refs::DeviceWireId;

@@ -571,17 +571,20 @@ pub(crate) fn select_intent_row_tx(
         .transpose()
 }
 
+/// Decodes one `paired_device` row. The wire projection is non-null: an
+/// approval always stores a freshly minted opaque wire, so a row without one
+/// is unreadable rather than a legacy identity rendering.
 pub(crate) fn decode_device_record(
     device_text: &str,
     descriptor: String,
     paired_text: &str,
-    wire: Option<String>,
+    wire: String,
 ) -> Result<DeviceRecord, String> {
     let paired_at = WallClockWithTz::parse_rfc3339(paired_text)
         .map_err(|_| String::from("malformed device pairing timestamp"))?;
     Ok(DeviceRecord {
         id: DeviceId(decode_id(device_text)?),
-        wire: wire.unwrap_or_else(|| device_text.to_owned()),
+        wire,
         descriptor,
         paired_at,
     })

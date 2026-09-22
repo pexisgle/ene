@@ -142,7 +142,7 @@ pub async fn route_available_result(
     };
     let current = record.task.reference;
     let mut after = None;
-    for _ in 0..4 {
+    loop {
         let page = repository
             .list_task_report_rows_after(task, after, crate::report::REPORT_PAGE_MAX)
             .await?;

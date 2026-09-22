@@ -347,7 +347,14 @@ fn encode_named<T: Serialize>(message: &T) -> Result<Vec<u8>, IpcError> {
     Ok(out)
 }
 
-fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize), IpcError> {
+/// Total byte length of the frame at the front of `bytes` (prefix + body).
+/// Returns the boundary without decoding so a rejected frame can still be
+/// discarded whole. `Truncated` means more bytes are needed.
+///
+/// # Errors
+///
+/// Truncated input or an oversize claimed length.
+pub fn frame_len(bytes: &[u8]) -> Result<usize, IpcError> {
     if bytes.len() < LEN_PREFIX_LEN {
         return Err(IpcError::Truncated {
             have: bytes.len(),
@@ -365,6 +372,11 @@ fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize)
             need,
         });
     }
+    Ok(need)
+}
+
+fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize), IpcError> {
+    let need = frame_len(bytes)?;
     let message = rmp_serde::from_slice(&bytes[LEN_PREFIX_LEN..need]).map_err(|error| {
         IpcError::DecodeFailed {
             reason: std::format!("{error}"),

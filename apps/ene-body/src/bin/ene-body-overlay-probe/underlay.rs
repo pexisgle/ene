@@ -1,3 +1,11 @@
+//! Probe-only top-layer surface that records real pointer input.
+//!
+//! The Body overlay is an `Overlay` layer surface with an alpha-aware input
+//! region. This underlay is a `Top` layer surface (immediately below the
+//! `Overlay` layer) covering the whole output: a click that the overlay does
+//! not claim lands here and is written as raw evidence. It is not a product
+//! surface.
+
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -41,8 +49,6 @@ enum UnderlayError {
     Wayland(String),
     #[error("shm: {0}")]
     Shm(String),
-    #[error("log: {0}")]
-    Log(#[from] std::io::Error),
 }
 
 fn run(path: PathBuf) -> Result<(), UnderlayError> {
@@ -90,7 +96,6 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
         layer,
         pool,
         buffer: None,
-        configured: false,
         surface_size: (width, height),
         log: Mutex::new(()),
         log_path: path,
@@ -116,7 +121,7 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
     state.layer.commit();
     state.buffer = Some(buffer);
     eprintln!(
-        "underlay: {}x{} bottom layer ready (evidence {})",
+        "underlay: {}x{} top layer ready (evidence {})",
         state.surface_size.0,
         state.surface_size.1,
         state.log_path.display()
@@ -150,7 +155,6 @@ struct State {
     layer: LayerSurface,
     pool: SlotPool,
     buffer: Option<smithay_client_toolkit::shm::slot::Buffer>,
-    configured: bool,
     surface_size: (u32, u32),
     log: Mutex<()>,
     log_path: PathBuf,
@@ -275,7 +279,6 @@ impl LayerShellHandler for State {
         if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
             self.surface_size = configure.new_size;
         }
-        self.configured = true;
     }
 }
 

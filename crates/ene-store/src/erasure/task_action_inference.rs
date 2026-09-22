@@ -241,7 +241,13 @@ impl ErasureCore {
                 ParticipantHoldClass::Failed,
                 observed_at,
             ),
+            // Not-current work mutates nothing and cannot verify the demanded
+            // condition; the durable record refuses it as stale or completed.
+            // A closed generation is terminal and can never become current
+            // again, so its cursor is dead state rather than unfinished work:
+            // drop it instead of leaking one entry per raced demand.
             Err(ErasurePageError::NotCurrent) => {
+                sweeps.remove(&key);
                 ParticipantCompletionFact::local_complete(condition, self.owner, 0, 0, observed_at)
             }
         }
@@ -450,6 +456,17 @@ fn page_sql(stage: &ErasureStage) -> String {
     )
 }
 
+/// Plans the redactions of one row. Nothing is written until the whole page
+/// has been read and planned, so an unrepresentable value fails the page
+/// closed instead of leaving it half-swept.
+///
+/// `provenance_linked` is the observation-hold path for `task_result`: the
+/// whole body is replaced by the body-free marker because a paraphrase of a
+/// discarded observation cannot be proven unrelated to the target by
+/// mechanical search. An already-collected marker is left untouched only when
+/// the marker itself is target-free; a target that overlaps the marker is
+/// redacted out of it so the verify pass stays a clean pass. The execution
+/// seal itself is the row's existence and is never rewritten.
 fn plan_redactions(
     stage: &ErasureStage,
     row: &RawErasureRow,
@@ -462,10 +479,18 @@ fn plan_redactions(
             continue;
         };
         if provenance_linked && column.name == "body" {
-            if text != super::ERASED_MARKER {
+            // The fixed marker is target-free only when the target is not a
+            // substring of it. A target that overlaps the marker must go
+            // through the same mechanical predicate as every other value
+            // instead of being certified clean by identity.
+            let replacement = erase_exact(super::ERASED_MARKER, target).map_or_else(
+                || String::from(super::ERASED_MARKER),
+                |(redacted, _)| redacted,
+            );
+            if replacement.as_str() != text {
                 planned.push(ValueRedaction {
                     column: column.name,
-                    value: String::from(super::ERASED_MARKER),
+                    value: replacement,
                     removed: 1,
                 });
             }

@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 37;
+const CURRENT_VERSION: i64 = 38;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -273,7 +273,7 @@ consent_rev INTEGER NOT NULL,
 provider TEXT NOT NULL,
 model TEXT NOT NULL,
 started_at TEXT NOT NULL,
-capability TEXT NOT NULL DEFAULT 'dialogue',
+capability TEXT NOT NULL,
 consumer TEXT NULL,
 purpose TEXT NULL,
 credential_set_rev INTEGER NULL,
@@ -653,7 +653,7 @@ mod tests {
             7
         );
         for version in [
-            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,
         ] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());

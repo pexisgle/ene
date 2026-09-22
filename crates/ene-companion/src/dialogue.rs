@@ -1,3 +1,35 @@
+//! One dialogue turn: admission, durable append, inference, reply.
+//!
+//! Wire mapping, presentation intake, and composition stay in the Host;
+//! this module owns the companion-side turn order. A turn starts after
+//! presentation accepts the input: [`assemble_dialogue_input`] reads the
+//! bounded recent History and recall, admission resolves and authorizes the
+//! inference premise carrying that read-set, the owner row commits durably,
+//! the provider call runs under the claimed attempt, and an adopted reply
+//! registers with the same atomic append. `ene-inference` owns permission,
+//! credential, attempt, and usage ordering behind [`InferenceExecutor`]; this
+//! module never sees those types.
+//!
+//! Durable replay precedes acceptance and stays outside a turn (see
+//! [`classify_replay`]): an exact retry answers from the stored marker
+//! without opening a turn, while a conflicting reuse rejects just as
+//! early.
+//!
+//! Task control follows the same caller-proposes split: [`propose_task`] and
+//! [`propose_steering`] map accepted conversation commands onto the Task
+//! owner's value premises and return the owner's outcomes unchanged. Adoption
+//! decisions and identities stay with `ene-task`, and [`TaskReport`] renders
+//! user-facing facts the composition root read from the durable owners.
+//!
+//! [`finish_turn`] also interprets the companion's own provider output for
+//! one closed-world [`DialogueTaskCommand`] (`[task-control] {json}`, final
+//! line): the companion-owned interpretation reaches the Task owner only
+//! through the composition root's [`DialogueTaskControlPort`], the directive
+//! line is never stored, and the stored reply is the owner-derived text. A
+//! malformed directive closes the stream interrupted without storing a reply,
+//! and a technical failure closes the stream interrupted instead of storing a
+//! fabricated reply.
+
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
     Admission, AuthorizedInference, DeltaFlow, DeltaSink, DiscardSink, InferenceDispatchOutcome,
@@ -58,6 +90,15 @@ impl core::fmt::Debug for AcceptedDialogueInput {
     }
 }
 
+/// A turn whose owner row committed; dispatch and reply are still pending.
+///
+/// The Host records the open round between [`begin_turn_committed`] and
+/// [`finish_turn`], so nothing in here is inspected outside this module.
+///
+/// `prompt` is assembled before admission (the prompt's read-set rides the
+/// admission as the attempt's `data_use`) and carried here so the exact bytes
+/// admitted are the bytes dispatched; the turn never re-reads History or
+/// Memory after its claim.
 #[derive(Clone, PartialEq, Eq)]
 pub struct DialogueTurn {
     input: AcceptedDialogueInput,
@@ -155,74 +196,15 @@ pub async fn classify_replay(
     }
 }
 
-pub async fn begin_turn(
-    input: AcceptedDialogueInput,
-    prompt: DialogueInput,
-    history: &impl HistoryRepository,
-    inference: &impl InferenceExecutor,
-) -> DialogueBegin {
-    let authorized = match inference.admit_dialogue(prompt.data_use().to_vec()).await {
-        Ok(Admission::Admitted(authorized)) => *authorized,
-        Ok(Admission::Declined(reason)) => return DialogueBegin::Declined(reason),
-        Err(_) => return DialogueBegin::Held,
-    };
-    let (consent_id, consent_rev) = {
-        let (id, rev) = authorized.consent_premise();
-        (id.to_owned(), rev)
-    };
-    let owner = AppendHistoryCommand {
-        companion: input.companion,
-        round: input.round,
-        role: HistoryRole::Owner,
-        text: input.text.clone(),
-        lang: input.lang.clone(),
-        at: WallClockWithTz::now(),
-        expected_generation: input.generation,
-        expected_consent: Some((consent_id, consent_rev)),
-        expected_credential_set: Some(input.credential_set),
-        expected_owner_message: None,
-        local_id: input.local_id.clone(),
-        command_id: Some(input.command),
-        round_wire: Some(input.round_wire.clone()),
-        round_intent: Some(input.round_intent.clone()),
-        incarnation: input.incarnation,
-    };
-    match history.append_message(owner).await {
-        Ok(HistoryAppendOutcome::CommittedAs { message }) => {
-            DialogueBegin::Ready(Box::new(DialogueTurn {
-                input,
-                message,
-                prompt,
-                authorized,
-            }))
-        }
-        Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. }) => {
-            match history
-                .lookup_command(input.companion, &input.command)
-                .await
-            {
-                Ok(Some(found)) => DialogueBegin::Replayed {
-                    round: found.round,
-                    round_wire: found.round_wire,
-                },
-                _ => DialogueBegin::Held,
-            }
-        }
-        Ok(HistoryAppendOutcome::StaleExpected { current }) => {
-            DialogueBegin::StaleExpected { current }
-        }
-        Ok(HistoryAppendOutcome::StaleConsent) => DialogueBegin::StaleConsent,
-        Ok(HistoryAppendOutcome::StaleCredentialSet) => DialogueBegin::StaleCredentialSet,
-        Ok(HistoryAppendOutcome::StaleOwnerInput) => DialogueBegin::Held,
-        Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
-        Ok(HistoryAppendOutcome::HeldForErasure) => DialogueBegin::HeldForErasure,
-        Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
-            DialogueBegin::HeldByLifecycle(lifecycle)
-        }
-        Err(_) => DialogueBegin::Held,
-    }
-}
-
+/// [`begin_turn_committed`] with the durable Owner append supplied by the caller.
+///
+/// The Host runs the Client-dependent admission (CCT §10.4) as a guarded
+/// synchronous section: `commit` executes inside the connection-ownership
+/// section through the store's sync append, so a supersession that wins the
+/// section cannot leave an Owner row behind, and `lookup` resolves a
+/// concurrent same-command commit without leaving the section. This function
+/// is synchronous by construction — it never awaits — so the caller can run
+/// it on the blocking pool while holding the connection table.
 pub fn begin_turn_committed<C, L>(
     input: AcceptedDialogueInput,
     prompt: DialogueInput,
@@ -288,9 +270,7 @@ where
     }
 }
 
-const TASK_CONTROL_CLARIFICATION: &str =
-    "I could not interpret the task instruction; nothing was changed.";
-
+/// How the presentation sink classified one provider reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlPresentation {
     Ordinary,
@@ -307,7 +287,8 @@ enum ControlMode {
 }
 
 struct ControlHoldingSink<'a> {
-    inner: Option<&'a mut (dyn DeltaSink + Send)>,
+    inner: &'a mut (dyn DeltaSink + Send),
+    /// Undecided: all buffered text. Ordinary: the held marker-prefix tail.
     buffer: String,
     mode: ControlMode,
 }
@@ -315,17 +296,14 @@ struct ControlHoldingSink<'a> {
 impl<'a> ControlHoldingSink<'a> {
     fn new(inner: &'a mut (dyn DeltaSink + Send)) -> Self {
         Self {
-            inner: Some(inner),
+            inner,
             buffer: String::new(),
             mode: ControlMode::Undecided,
         }
     }
 
     async fn push_raw(&mut self, text: &str) -> DeltaFlow {
-        let Some(inner) = self.inner.as_mut() else {
-            return DeltaFlow::Continue;
-        };
-        inner.push_delta(text).await
+        self.inner.push_delta(text).await
     }
 
     async fn flush_ordinary(&mut self) -> DeltaFlow {
@@ -424,6 +402,42 @@ impl DeltaSink for ControlHoldingSink<'_> {
     }
 }
 
+/// Dispatches the turn's already-assembled inference call and registers an
+/// adopted reply.
+///
+/// The prompt was built by [`assemble_dialogue_input`] before admission from
+/// bounded recent History and the memories recall offers (retrieval is
+/// derived and best-effort: a history or recall read failure degrades to less
+/// context rather than failing a reply, and a suppressed Memory is simply
+/// absent), and it is carried by the turn unchanged. A secret-boundary
+/// failure is not degraded: the owner input and the provider output both pass
+/// through the scrubber before they reach a model or durable History, and an
+/// unprovable boundary closes the stream interrupted instead of sending or
+/// storing raw text. The dispatch carries the prompt's credential-set
+/// premise, so the send claim refuses a prompt that predates a credential
+/// registration. A never-sent or technical outcome closes the stream
+/// interrupted; usage accounting is already decided inside the inference
+/// boundary. An adopted reply appends with its undelivered registration in
+/// the same atomic section; any other reply outcome is interrupted. Provider
+/// deltas are pushed to `sink` as they arrive, each gated on a current
+/// presentation premise; a delta shown before an invalidation stays as
+/// historical partial presentation, never rewound. `is_current` runs once
+/// more after provider completion as an early, best-effort refusal of a
+/// superseded reply: it only avoids a doomed append attempt. Durable adoption
+/// authority stays inside the append transaction — the reply carries the
+/// turn's Owner message identity as its premise, and the store refuses the
+/// append when a newer accepted Owner input committed first, even inside
+/// the same round, or when the provider claim it was produced under is
+/// already associated with a deletion interval. After the durable append, the
+/// Experience premise is pinned for the post-response Learning pass. A reply
+/// carrying the reserved
+/// `[task-control]` protocol is interpreted before the append: a valid
+/// first-line-only command runs through the composition root's port and the
+/// stored reply is the scrubbed owner outcome, while a marker that is not a
+/// valid first-line command is a reserved-protocol violation — no command
+/// executes, no reply is stored, and the stream closes interrupted. A
+/// technical failure (`Unavailable`) closes interrupted instead of storing a
+/// reply no operation produced.
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
@@ -473,7 +487,7 @@ pub async fn finish_turn(
                             }
                         }
                         DialogueTaskInterpretation::Invalid => {
-                            TASK_CONTROL_CLARIFICATION.to_owned()
+                            return DialogueOutcome::Interrupted;
                         }
                         DialogueTaskInterpretation::Conversation { .. } => {
                             return DialogueOutcome::Interrupted;
@@ -905,6 +919,9 @@ impl core::fmt::Debug for DialogueTaskCommand {
 pub enum DialogueTaskInterpretation {
     Conversation { text: String },
     Command { command: DialogueTaskCommand },
+    /// The reply begins with the marker but is not exactly one well-formed
+    /// command line; nothing may be executed and the caller fails closed by
+    /// closing the stream interrupted without storing a reply.
     Invalid,
 }
 

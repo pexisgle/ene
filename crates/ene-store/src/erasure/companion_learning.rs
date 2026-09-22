@@ -14,10 +14,15 @@ use crate::{Store, run_blocking};
 
 pub const ERASURE_SCAN_ROWS: u32 = 64;
 
-pub(crate) const COMPANION_CONTENT: &[(&str, &str)] =
+/// Content columns of the Companion owner. The system-wide remainder probe
+/// (`remainder.rs` `SYSTEM_CONTENT`) mirrors this list independently, so a
+/// Companion column added here must also be added there.
+const COMPANION_CONTENT: &[(&str, &str)] =
     &[("history_message", "body"), ("activity_record", "body")];
 
-pub(crate) const LEARNING_CONTENT: &[(&str, &str)] = &[
+/// Content columns of the Learning owner, plus the derived token index whose
+/// membership is matched by token equality (not substring).
+const LEARNING_CONTENT: &[(&str, &str)] = &[
     ("learning_summary", "content"),
     ("learning_memory", "content"),
     ("learning_memory_revision", "content"),
@@ -29,7 +34,7 @@ const UNDELIVERED_KEY: &str = "undelivered_id";
 const SUMMARY_KEY: &str = "summary_id";
 const MEMORY_KEY: &str = "memory_id";
 const REVISION_KEY: &str = "revision";
-pub(crate) const TERM_TABLE: &str = "learning_memory_term";
+const TERM_TABLE: &str = "learning_memory_term";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepPhase {

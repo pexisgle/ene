@@ -810,6 +810,7 @@ async fn ack_summary(
                 PresentationStatus::Presented,
             )),
             Some(summary.round.clone()),
+            Some(summary.presence_generation),
         )
         .await
         .map_err(|error| format!("ack errored: {error:?}"))?;

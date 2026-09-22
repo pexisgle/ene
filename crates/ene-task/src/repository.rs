@@ -34,6 +34,9 @@ pub enum TaskCommitOutcome {
         current: TaskRef,
     },
     Superseded,
+    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); the revision and the
+    /// context are unchanged. Absorbing, so it is distinct from revision
+    /// staleness.
     TaskTerminal {
         task: TaskId,
         progress: TaskProgress,

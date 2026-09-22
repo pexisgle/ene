@@ -266,6 +266,19 @@ impl Client {
         Ok(session)
     }
 
+    /// Answers one authentication challenge using the session secret, storing
+    /// the accepted connection key into the sender (for all later frames).
+    /// [`Client::connect`] calls this for the
+    /// post-negotiation challenge; call it only with a Host-minted
+    /// [`AuthChallenge`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
+    /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when no
+    /// secret is available or the Host rejects the proof (both require a fresh
+    /// pairing); and [`ClientError::ServerRejected`] when the Host answers
+    /// with an unexpected payload kind.
     pub async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
         let Some(secret) = self.state.pairing_secret() else {
             return Err(ClientError::ServerOutcome(missing_secret_guidance()));
@@ -285,7 +298,6 @@ impl Client {
         match decide_auth(&answer) {
             AuthDecision::Accepted { connection_id } => {
                 self.sender.connection_id = Some(connection_id);
-                self.state.set_connection(connection_id);
                 Ok(())
             }
             AuthDecision::Guidance { message } => Err(ClientError::ServerOutcome(message)),
@@ -332,11 +344,12 @@ impl Client {
         &mut self,
         payload: WirePayload,
         round: Option<ene_api::v1::refs::RoundWireId>,
+        generation: Option<u64>,
     ) -> Result<WirePayload, ClientError> {
         use super::frames::observed_frame;
         use ene_api::v1::refs::RequestWireId;
 
-        let mut frame = observed_frame(payload, self.sender, self.state.generation(), round);
+        let mut frame = observed_frame(payload, self.sender, generation, round);
         let own_message_id = frame.envelope.message_id;
         frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
         self.pump(frame, own_message_id).await
@@ -506,6 +519,11 @@ fn require_reply_to(
     }
 }
 
+/// Unsupported-platform placeholder: connection and I/O methods return
+/// [`ClientError::UnsupportedPlatform`] (transport needs a Unix-domain socket
+/// or a Windows named pipe); state-only accessors report the empty/default
+/// value. The supported-only helpers (`prepare`/`execute`/`retry`/
+/// `request_observed`/`take_undelivered`) are not available on this platform.
 #[cfg(not(any(unix, windows)))]
 pub struct Client {
     _sealed: (),

@@ -1,3 +1,23 @@
+//! SQLite-backed implementations of the repository contracts owned by
+//! [`ene_presence`], [`ene_companion`], [`ene_permission`],
+//! [`ene_credential`], [`ene_inference`], [`ene_learning`], [`ene_task`], and
+//! [`ene_action`]; those owners never depend on this crate and program against
+//! their own traits. It also implements the preservation-owned local-erasure
+//! participants for the owners whose durable master lives here
+//! ([`CompanionErasureParticipant`], [`LearningErasureParticipant`],
+//! [`TaskErasureParticipant`], [`ActionErasureParticipant`], and
+//! [`InferenceErasureParticipant`]); the Host composition registers them.
+//!
+//! Concurrency shape: the connection is `Send` but not `Sync`, so an
+//! `Arc<std::sync::Mutex<Connection>>` shares it across callers. Each
+//! repository method hands its whole critical section — lock, one short
+//! [`rusqlite::TransactionBehavior::Immediate`] transaction (or one plain
+//! statement for pure loads), drop the guard — to `run_blocking`, so the
+//! synchronous `rusqlite` work happens on the blocking pool instead of on an
+//! async worker. The guard and any transaction never cross an `.await`: they
+//! live and die inside the blocking closure. Values that cross the boundary
+//! are bound parameters, never interpolated into SQL text.
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -167,6 +187,19 @@ impl Store {
         Ok(Self::from_connection(conn))
     }
 
+    /// Mechanical exact-text remainder probe over the closed system-wide
+    /// canonical content surface the A5 completion boundary verifies, plus
+    /// the derived token index and the undelivered references whose canonical
+    /// source is gone.
+    ///
+    /// Test-support only: tests assert `0` after an erasure instead of
+    /// re-implementing the column list. The list is the same closed surface
+    /// `crate::erasure::system_remainder` uses, so a probe cannot check a
+    /// different column set than the completion boundary verifies.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::OpenFailed`] when the mechanical remainder probe cannot run.
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub async fn count_exact_text_remainder_for_tests(

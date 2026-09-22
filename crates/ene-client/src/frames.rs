@@ -42,19 +42,19 @@ pub fn auth_rejected_guidance(reason: &str) -> String {
     )
 }
 
-pub fn retry_frame(
-    payload: WirePayload,
-    sender: WireSender,
-    generation: Option<u64>,
-    command: CommandWireId,
-) -> WireFrame {
-    PreparedRequest {
-        command_id: Some(command),
-        payload,
-    }
-    .frame(sender, generation)
-}
-
+/// A logical send prepared before I/O: the payload plus the command identity a
+/// transport retry must reuse. Prepare through [`super::Client::prepare`] and
+/// keep the handle; [`super::Client::execute`] and [`super::Client::retry`]
+/// send it without rebuilding the identity.
+///
+/// The command identity is [`None`] for a pure request/response payload
+/// (`HistoryRequest`, `ManagementViewRequest`): those pair by `request_id` and
+/// `reply_to` only and have no command saga to replay.
+///
+/// A prepared command is bound to the sender incarnation that prepared it.
+/// The Host keys command idempotency on the authenticated sender epoch, so
+/// after a reconnect (new incarnation) the same handle can no longer be
+/// replayed — re-prepare under the new incarnation instead of retrying.
 pub struct PreparedRequest {
     command_id: Option<CommandWireId>,
     payload: WirePayload,

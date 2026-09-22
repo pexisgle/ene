@@ -25,10 +25,15 @@ pub fn recall_index_terms(content: &str) -> Vec<String> {
     terms(content)
 }
 
-pub(crate) fn overlap(terms: &[String], content: &str) -> usize {
-    let content = content.to_lowercase();
-    terms
+/// Counts how many of `query_terms` occur in `content` as whole tokens.
+pub(crate) fn overlap(query_terms: &[String], content: &str) -> usize {
+    let content_terms = terms(content);
+    query_terms
         .iter()
-        .filter(|term| content.contains(term.as_str()))
+        .filter(|term| {
+            content_terms
+                .iter()
+                .any(|content_term| content_term == *term)
+        })
         .count()
 }

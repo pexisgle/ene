@@ -87,11 +87,9 @@ export component Field inherits Rectangle {
     in property <bool> enabled: true;
     in-out property <string> value;
     callback edited(string);
-    callback accepted();
     min-height: 72px;
     vertical-stretch: 0;
     forward-focus: editor;
-    public function focus-input() { editor.focus(); }
     VerticalLayout {
         spacing: 8px;
         Caption { text: root.label; }
@@ -103,7 +101,6 @@ export component Field inherits Rectangle {
             input-type: root.password ? InputType.password : InputType.text;
             placeholder-text: root.hint;
             edited(t) => { root.edited(t); }
-            accepted => { root.accepted(); }
         }
     }
 }

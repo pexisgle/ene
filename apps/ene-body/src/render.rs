@@ -1,5 +1,5 @@
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::{
     Arc,
@@ -15,7 +15,6 @@ const VISIBLE_ALPHA_THRESHOLD: f32 = 0.001;
 pub struct SurfaceRenderer {
     _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
-    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
@@ -640,7 +639,6 @@ struct VertexOut {
         Ok(Self {
             _instance: instance,
             surface,
-            adapter,
             device,
             queue,
             pipeline,
@@ -670,6 +668,14 @@ struct VertexOut {
         if self.lost.load(Ordering::Acquire) {
             return Err(RenderFailure::DeviceLost);
         }
+        // Bind groups for textures no longer referenced by the current asset
+        // own their GPU texture; drop them so replacing the asset does not
+        // accumulate resident memory.
+        let live: BTreeSet<u64> = meshes
+            .iter()
+            .filter_map(|mesh| mesh.texture.as_ref().map(|texture| texture.id))
+            .collect();
+        self.textures.retain(|id, _| live.contains(id));
         for texture in meshes.iter().filter_map(|mesh| mesh.texture.as_ref()) {
             if !self.textures.contains_key(&texture.id) {
                 let binding = create_texture_binding(
@@ -762,11 +768,6 @@ struct VertexOut {
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
         Ok(RenderOutcome::Presented)
-    }
-
-    #[must_use]
-    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
-        self.adapter.get_info()
     }
 }
 

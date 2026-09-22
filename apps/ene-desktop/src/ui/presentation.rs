@@ -42,7 +42,6 @@ pub struct SurfaceSnapshot {
     pub credential: bool,
     pub consent: bool,
     pub step: i32,
-    pub model: String,
     pub status: String,
     pub body_available: bool,
     pub body_visible: bool,

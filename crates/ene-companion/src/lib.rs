@@ -24,6 +24,13 @@ impl CompanionId {
     }
 }
 
+/// Command-scoped idempotency identity for history appends.
+///
+/// Carries a public [`RawId`]: the wire `CommandWireId` maps 1:1 at ingress
+/// when the Host parses its UUID text into this domain newtype. The client
+/// mints one per send; a transport retry reuses the same command id with a
+/// fresh message id. Non-secret correspondence, visible in
+/// [`core::fmt::Debug`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub RawId);
 

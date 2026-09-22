@@ -31,7 +31,6 @@ mod imp {
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
     };
     use crate::render::{HitTestMask, RenderFailure, RenderOutcome, SurfaceRenderer};
-    use crate::window::OverlayProbe;
 
     const CLASS_NAME: &[u16] = &[
         b'e' as u16,
@@ -669,13 +668,6 @@ mod imp {
         }
     }
 
-    pub fn probe() -> OverlayProbe {
-        match WindowsOverlay::open(false) {
-            Ok(_) => OverlayProbe::Available,
-            Err(reason) => OverlayProbe::Unavailable { reason },
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -728,19 +720,3 @@ mod imp {
 
 #[cfg(target_os = "windows")]
 pub use imp::WindowsOverlay;
-
-use super::OverlayProbe;
-
-#[must_use]
-pub fn windows_dwm_probe() -> OverlayProbe {
-    #[cfg(target_os = "windows")]
-    {
-        imp::probe()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        OverlayProbe::Unavailable {
-            reason: String::from("not Windows"),
-        }
-    }
-}

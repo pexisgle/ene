@@ -24,6 +24,7 @@ fn ene_ctl_command() -> clap::Command {
                 .long("config")
                 .value_name("PATH")
                 .global(true)
+                .value_parser(clap::value_parser!(PathBuf))
                 .overrides_with("config")
                 .help("Configuration file path"),
         )
@@ -286,11 +287,13 @@ run `ene-ctl --help`",
 }
 
 fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
-    let config = matches.get_one::<String>("config").map(PathBuf::from);
+    let config = matches.get_one::<PathBuf>("config").cloned();
     let Some((name, sub)) = matches.subcommand() else {
         return Err(usage_error("missing command"));
     };
-    let config = config.or_else(|| sub.get_one::<String>("config").map(PathBuf::from));
+    // A global `--config` after the subcommand lands on the subcommand's
+    // matches; either placement selects the same file.
+    let config = config.or_else(|| sub.get_one::<PathBuf>("config").cloned());
     let command = match name {
         "setup" => cmds::Command::Setup(setup_mode(sub)?),
         "status" => cmds::Command::Status,
@@ -513,9 +516,9 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), CliError> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = std::env::args_os().skip(1);
     let matches = match ene_ctl_command()
-        .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args))
+        .try_get_matches_from(std::iter::once(std::ffi::OsString::from("ene-ctl")).chain(args))
     {
         Ok(matches) => matches,
         Err(error)
@@ -566,7 +569,7 @@ async fn run_command(
         cmds::Command::Setup(mode) => run_setup(&mut session, mode).await,
         cmds::Command::Status => {
             let view = request_view(&mut session, cmds::setup_view_request()).await?;
-            emit(&cmds::render_view(&view))
+            emit_setup_view(&view)
         }
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
         cmds::Command::Watch { round } => {
@@ -633,11 +636,21 @@ async fn run_command(
         }
         cmds::Command::DeletionStatus { cursor, limit } => {
             let response = request_deletion_status(&mut session, cursor.as_deref(), limit).await?;
-            emit(&cmds::render_deletion_status(&response))
+            if let ene_api::v1::deletion::DeletionStatusResponse::Page(_) = response {
+                emit(&cmds::render_deletion_status(&response))
+            } else {
+                Err(CliError::ServerOutcome(cmds::render_deletion_status(
+                    &response,
+                )))
+            }
         }
         cmds::Command::Usage(args) => {
             let response = request_usage(&mut session, &args).await?;
-            emit(&cmds::render_usage_page(&response))
+            if let ene_api::v1::usage::UsageSummaryResponse::Page(_) = response {
+                emit(&cmds::render_usage_page(&response))
+            } else {
+                Err(CliError::ServerOutcome(cmds::render_usage_page(&response)))
+            }
         }
         cmds::Command::UsageCap {
             scope,
@@ -718,23 +731,8 @@ async fn run_usage_cap(
         currency,
         limit_micros,
     );
-    let outcome = match session
-        .request(WirePayload::ManagementIntent(intent))
-        .await?
-    {
-        WirePayload::ManagementOutcome(outcome) => outcome,
-        unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while applying an intent; expected ManagementOutcome",
-                unexpected.message_type()
-            )));
-        }
-    };
-    match cmds::describe_management(&outcome) {
-        cmds::ManagementAction::Applied { detail } => emit(&detail),
-        cmds::ManagementAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
-        cmds::ManagementAction::Terminal { message } => Err(CliError::ServerRejected(message)),
-    }
+    let detail = apply_intent(session, intent).await?;
+    emit(&detail)
 }
 
 async fn run_deletion(
@@ -759,26 +757,14 @@ async fn run_deletion(
         purpose,
         text,
     );
-    let outcome = match session
-        .request(WirePayload::ManagementIntent(intent))
-        .await?
-    {
-        WirePayload::ManagementOutcome(outcome) => outcome,
-        unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while applying an intent; expected ManagementOutcome",
-                unexpected.message_type()
-            )));
-        }
-    };
-    match cmds::describe_management(&outcome) {
-        cmds::ManagementAction::Applied { detail } => emit(&format!(
+    match apply_intent(session, intent).await {
+        Ok(detail) => emit(&format!(
             "{detail}; confirm it on the Host PC (`ene-core pending-deletions`)"
         )),
-        cmds::ManagementAction::Retryable { message } => Err(CliError::ServerOutcome(format!(
+        Err(CliError::ServerOutcome(message)) => Err(CliError::ServerOutcome(format!(
             "{message}; confirm it on the Host PC (`ene-core pending-deletions`)"
         ))),
-        cmds::ManagementAction::Terminal { message } => Err(CliError::ServerRejected(message)),
+        Err(other) => Err(other),
     }
 }
 
@@ -820,6 +806,18 @@ fn emit(text: &str) -> Result<(), CliError> {
         .flush()
         .map_err(|error| CliError::Transport(format!("stdout flush failed: {}", error.kind())))?;
     Ok(())
+}
+
+/// A setup/status view always carries the five Host setup sections when the
+/// stores are readable; an empty section set is `unavailable_view()`, the only
+/// signal the view path has for an unreadable store (`ene-core` `setup.rs`).
+fn emit_setup_view(view: &ene_api::v1::management::ManagementView) -> Result<(), CliError> {
+    if view.sections.is_empty() {
+        return Err(CliError::ServerOutcome(String::from(
+            "setup view is unavailable; retry later",
+        )));
+    }
+    emit(&cmds::render_view(view))
 }
 
 async fn request_view(
@@ -913,8 +911,7 @@ async fn request_task_report(
     cursor: Option<&str>,
     limit: Option<u32>,
 ) -> Result<ene_api::v1::undelivered::TaskReportPage, CliError> {
-    use ene_api::v1::undelivered::TaskReportResponse;
-    let page = match session
+    let response = match session
         .request(WirePayload::GetTaskReport(cmds::task_report_request(
             task,
             cursor.map(str::to_owned),
@@ -930,16 +927,8 @@ async fn request_task_report(
             )));
         }
     };
-    match cmds::describe_report(&page) {
-        cmds::ReportAction::Show => match page {
-            TaskReportResponse::Page(page) => Ok(page),
-            TaskReportResponse::UnknownRef | TaskReportResponse::StaleBaseView { .. } => Err(
-                CliError::ServerOutcome(String::from("task report moved underneath the request")),
-            ),
-            TaskReportResponse::Unavailable => Err(CliError::ServerOutcome(String::from(
-                "task report is unavailable; retry later",
-            ))),
-        },
+    match cmds::describe_report(response) {
+        cmds::ReportAction::Show(page) => Ok(page),
         cmds::ReportAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
     }
 }
@@ -998,6 +987,8 @@ async fn request_select_task(
     }
 }
 
+/// Explicit first-party resume through the wire command; the Host keys
+/// idempotency on the command id.
 async fn run_resume_task(
     session: &mut client::Client,
     task: &str,
@@ -1005,13 +996,15 @@ async fn run_resume_task(
     purpose: &str,
     instruction: String,
 ) -> Result<(), CliError> {
-    let prepared = session.prepare(WirePayload::ResumeTask(cmds::resume_task_request(
-        task,
-        revision,
-        purpose,
-        instruction,
-    )));
-    let outcome = match session.execute(&prepared).await? {
+    let outcome = match session
+        .request(WirePayload::ResumeTask(cmds::resume_task_request(
+            task,
+            revision,
+            purpose,
+            instruction,
+        )))
+        .await?
+    {
         WirePayload::ResumeTaskOutcome(outcome) => outcome,
         unexpected => {
             return Err(CliError::ServerRejected(format!(
@@ -1033,7 +1026,6 @@ async fn run_undelivered(
     limit: Option<u32>,
     redisplay: bool,
 ) -> Result<(), CliError> {
-    use ene_api::v1::undelivered::UndeliveredResponse;
     let response = match session
         .request(WirePayload::UndeliveredRequest(cmds::undelivered_request(
             cursor.map(str::to_owned),
@@ -1050,16 +1042,11 @@ async fn run_undelivered(
             )));
         }
     };
-    match cmds::describe_fetch(&response) {
-        cmds::FetchAction::Paint => {}
+    let summary = match cmds::describe_fetch(response) {
+        cmds::FetchAction::Paint(summary) => summary,
         cmds::FetchAction::Retryable { message } => {
             return Err(CliError::ServerOutcome(message));
         }
-    }
-    let UndeliveredResponse::Summary(summary) = response else {
-        return Err(CliError::ServerOutcome(String::from(
-            "undelivered fetch moved underneath the request",
-        )));
     };
     emit(&cmds::render_summary(&summary))?;
     ack_summary(session, &summary).await
@@ -1077,6 +1064,7 @@ async fn ack_summary(
         .request_observed(
             WirePayload::UndeliveredAck(ack),
             Some(summary.round.clone()),
+            Some(summary.presence_generation),
         )
         .await?
     {
@@ -1089,7 +1077,7 @@ async fn ack_summary(
         }
     };
     match cmds::describe_ack(&outcome) {
-        cmds::AckAction::Confirmed { .. } => Ok(()),
+        cmds::AckAction::Confirmed => Ok(()),
         cmds::AckAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
     }
 }
@@ -1121,7 +1109,7 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
     match mode {
         cmds::SetupMode::Show => {
             let view = request_view(session, cmds::setup_view_request()).await?;
-            emit(&cmds::render_view(&view))
+            emit_setup_view(&view)
         }
         cmds::SetupMode::Assign {
             provider,

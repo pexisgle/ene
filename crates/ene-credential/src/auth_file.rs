@@ -11,6 +11,72 @@ use crate::CredentialTechnicalError;
 use crate::pairing::{DeviceId, decode_hex_lower, encode_hex_lower, verify_pairing_proof};
 use crate::secret::SecretValue;
 
+/// File-backed custody for device-auth verification material.
+///
+/// Pairing secrets minted at approval must survive both process boundaries
+/// (a separate `approve-device` process persists them while the serving
+/// process verifies proofs) and Host restarts, so verification material
+/// cannot live only in the serving process's memory. This store keeps one
+/// entry per paired device in a protected file shared across processes and
+/// restarts. Reads are read-through on every call: nothing is cached, so a
+/// verifier always observes the latest persisted rotation.
+/// Authentication stays per-connection-once, so the extra file read costs
+/// correctness nothing it cannot afford.
+///
+/// The whole file is one JSON document mapping canonical device UUID text to
+/// an entry holding the secret (lowercase hex), the owner-visible
+/// descriptor, and the entry write time as RFC 3339:
+///
+/// ```json
+/// {"devices": {"123e4567-e89b-12d3-a456-426614174000": {"secret_hex": "00ab",
+/// "descriptor": "phone", "paired_at": "2026-09-08T12:00:00+09:00"}}}
+/// ```
+///
+/// Secret custody: generation stays with the caller (the pairing repository
+/// approve path mints the secret); this store only persists and returns
+/// custody via [`load_secret`](FileDeviceAuthStore::load_secret), which hands
+/// back an owned [`SecretValue`]. Secrets and descriptors are never logged and
+/// never appear in this type's `Debug` output, which shows the path and the
+/// entry count only.
+///
+/// File protection: on Unix the file at rest must be mode `0600`. Opening an
+/// existing file with any other mode attempts to tighten it to `0600` and
+/// fails when tightening does not stick; newly written files (including the
+/// staging temp) are created `0600`. On non-Unix platforms there is no mode
+/// check: the OS-specific protection story is documented at the call site
+/// instead, and the file must still live in a directory only the owner can
+/// read.
+///
+/// Caller-owned directory: the caller creates the parent directory. Opening
+/// fails when the parent directory is missing, so a misconfigured data
+/// directory can never silently redirect the store. A missing file is not an
+/// error: opening succeeds empty and the file is created lazily on the first
+/// save. A malformed file is always an error, never a silent default.
+///
+/// Atomicity story: every mutation rewrites the whole file by staging the
+/// new bytes to a temp file in the same directory (created `0600` on Unix,
+/// flushed with `sync_all`) and renaming it over the target. The rename is
+/// the atomic replace: concurrent readers observe the old or the new
+/// document whole, so torn reads are impossible. Atomic replacement does
+/// not order writers, so every read-modify-write cycle additionally holds an
+/// exclusive OS advisory lock on the sidecar `device-auth.json.lock` for
+/// its whole duration: concurrent approves of different devices serialize
+/// instead of dropping each other's entry, and concurrent rotations of one
+/// device leave exactly one current secret. The kernel releases the lock
+/// when the holder exits or drops it, so a crashed approval never leaves a
+/// permanent lock.
+///
+/// Backup-exclusion contract: this file holds Group K verification material
+/// with E classification. It must never enter backups or exports and must
+/// never live inside `app.db`: a future backup stage walks the data
+/// directory and must exclude every sibling whose name starts with
+/// `device-auth` — the `device-auth.json` file, its `.lock` sidecar, and the
+/// `device-auth.json.tmp.*` staging temps that briefly hold the same secret
+/// material before the rename. Restore must not replace it, reset wipes it
+/// only on full-data reset, and a Host without this file authenticates
+/// nothing until fresh pairing mints new material. The mutation sidecar
+/// `device-auth.json.lock` carries no secret material; backups may ignore it
+/// and restore must not replace it.
 pub struct FileDeviceAuthStore {
     path: PathBuf,
 }
@@ -240,7 +306,14 @@ impl FileDeviceAuthStore {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
-        let tmp = self.path.with_extension(format!("tmp.{pid}.{nanos}"));
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("device-auth.json");
+        let tmp = self
+            .path
+            .with_file_name(format!("{file_name}.tmp.{pid}.{nanos}"));
         let rendered = render_device_auth_file(entries)?;
         if let Err(err) = stage_file(&tmp, rendered.as_bytes()) {
             remove_best_effort(&tmp);

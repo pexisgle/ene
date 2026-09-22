@@ -88,9 +88,12 @@ pub enum TaskProposalOutcome {
     AcceptedAsTask(TaskRef),
     AcceptedAsSteering(TaskRef),
     Superseded,
-    StalePremise {
-        current: TaskRef,
-    },
+    /// The relied-on revision or purpose does not match the durable current
+    /// state; nothing was changed and the caller re-evaluates.
+    StalePremise { current: TaskRef },
+    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); the revision and
+    /// context are unchanged. Absorbing, so it is distinct from revision
+    /// staleness.
     TaskTerminal {
         task: TaskId,
         progress: TaskProgress,
@@ -152,18 +155,18 @@ async fn prepare_steering(
             },
         ));
     };
-    if record.task.reference != expected || record.task.purpose != proposal.premise.purpose {
-        return Ok(SteeringPreparation::Refused(
-            TaskProposalOutcome::StalePremise {
-                current: record.task.reference,
-            },
-        ));
-    }
     if record.task.progress.is_terminal() {
         return Ok(SteeringPreparation::Refused(
             TaskProposalOutcome::TaskTerminal {
                 task: expected.task,
                 progress: record.task.progress,
+            },
+        ));
+    }
+    if record.task.reference != expected || record.task.purpose != proposal.premise.purpose {
+        return Ok(SteeringPreparation::Refused(
+            TaskProposalOutcome::StalePremise {
+                current: record.task.reference,
             },
         ));
     }

@@ -168,6 +168,8 @@ pub enum TaskAgentTurnOutcome {
     MissingDelegation {
         delegation: DelegationId,
     },
+    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); no inference is
+    /// claimed and no provider I/O happens.
     TaskTerminal {
         task: TaskId,
         progress: TaskProgress,
@@ -201,17 +203,26 @@ pub async fn orchestrate_task_agent_turn(
             return Ok(TaskAgentTurnOutcome::MissingTask { task });
         }
     };
-    if record.task.reference != delegation.task {
-        return Ok(TaskAgentTurnOutcome::StaleTaskRevision {
-            current: record.task.reference,
-        });
-    }
+    // The precheck reads the same durable Task unit the claim will compare
+    // again; a terminal progress refuses before the scrub or the port call.
+    // The claim remains the authoritative gate, so a race that commits after
+    // this read is still refused there.
     if record.task.progress.is_terminal() {
         return Ok(TaskAgentTurnOutcome::TaskTerminal {
             task: delegation.task.task,
             progress: record.task.progress,
         });
     }
+    if record.task.reference != delegation.task {
+        return Ok(TaskAgentTurnOutcome::StaleTaskRevision {
+            current: record.task.reference,
+        });
+    }
+    // The precheck matched, so `record.revision` is the relied revision's
+    // snapshot. The context walk carries the load-time ordering and
+    // provenance invariants instead of re-deriving them: `load_task` returns
+    // the in-force adopted-purpose entry first, followed by the adopted
+    // instruction entries in `(revision, entry_id)` order.
     let mut purpose_text = None;
     let mut instruction_texts = Vec::new();
     let mut data_use = Vec::with_capacity(record.context.len());

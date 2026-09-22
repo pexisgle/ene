@@ -33,11 +33,6 @@ async fn dummy_parent_sees_disconnect_and_keeps_running_after_body_kill() {
         .expect("parent read must not hang")
         .expect("read");
 
-    let mut parent_still_serving = 0u32;
-    for _ in 0..8 {
-        parent_still_serving = parent_still_serving.saturating_add(1);
-    }
-    assert_eq!(parent_still_serving, 8);
     assert!(
         decode_body(&buf)
             .ok()

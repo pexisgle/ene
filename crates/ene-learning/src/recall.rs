@@ -7,13 +7,33 @@ pub const RECALL_CANDIDATE_LIMIT: u64 = 200;
 
 const RECALL_MAX_TERMS: usize = 8;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A query for the Memory one use can draw on.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecallQuery {
     pub companion: RawId,
+    /// Text the recall is for, typically the current owner input; redacted
+    /// from [`core::fmt::Debug`].
     pub text: String,
     pub limit: usize,
 }
 
+impl core::fmt::Debug for RecallQuery {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RecallQuery")
+            .field("companion", &self.companion)
+            .field("text", &"[redacted]")
+            .field("limit", &self.limit)
+            .finish()
+    }
+}
+
+/// One recalled Memory, projected for use in a context.
+///
+/// The identity travels with the content: a caller that puts the content into
+/// a logical input can name the canonical Memory it consumed, so a deletion
+/// admission can associate the use with the interval its provenance belongs
+/// to (`erasure_use_hold`). It is an opaque correlation, never a body.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecalledMemory {
     pub id: MemoryId,

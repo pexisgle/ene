@@ -128,13 +128,16 @@ fn run() -> Result<bool, CliError> {
             .find(|target| target.role == ProcessRole::Body)
             .map(|target| target.pid)
             .ok_or(CliError::Usage)?;
-        record.fps = Some(import_presentmon_csv(
+        let fps = import_presentmon_csv(
             &path,
             body_pid,
             args.swap_chain.as_deref().ok_or(CliError::Usage)?,
             args.fps_warmup_secs,
             args.fps_wall_secs,
-        )?);
+        )?;
+        if !fps.events.is_empty() {
+            record.fps = Some(fps);
+        }
     } else if let Some(path) = args.wayland_feedback {
         let body_pid = args
             .targets
@@ -149,12 +152,14 @@ fn run() -> Result<bool, CliError> {
             args.fps_warmup_secs,
             args.fps_wall_secs,
         )?;
-        record.fps = Some(wayland_presentation_record(
-            body_pid,
-            args.fps_warmup_secs,
-            args.fps_wall_secs,
-            feedback,
-        )?);
+        if !feedback.is_empty() {
+            record.fps = Some(wayland_presentation_record(
+                body_pid,
+                args.fps_warmup_secs,
+                args.fps_wall_secs,
+                feedback,
+            )?);
+        }
     }
     if let Some(path) = args.interactions {
         record.interactions = read_json(&path)?;
@@ -212,10 +217,16 @@ fn read_interaction_trace(
     path: &Path,
     offset: u64,
 ) -> Result<Vec<ene_desktop::measure::InteractionSample>, CliError> {
-    let mut file = std::fs::File::open(path).map_err(|source| CliError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(CliError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
     file.seek(std::io::SeekFrom::Start(offset))
         .map_err(|source| CliError::Read {
             path: path.to_path_buf(),
@@ -256,10 +267,16 @@ fn read_wayland_feedback(
     warmup_secs: f64,
     wall_secs: f64,
 ) -> Result<Vec<ene_body::ipc::PresentationFeedback>, CliError> {
-    let mut file = std::fs::File::open(path).map_err(|source| CliError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(CliError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
     file.seek(std::io::SeekFrom::Start(offset))
         .map_err(|source| CliError::Read {
             path: path.to_path_buf(),

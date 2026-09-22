@@ -333,3 +333,44 @@ async fn report_source_pages_are_byte_bounded_on_utf8_boundaries() {
     assert_eq!(purpose.text, "write the A");
     assert_eq!(purpose.next, Some(11));
 }
+
+#[tokio::test]
+async fn report_source_pages_advance_under_sub_character_limits() {
+    let store = open_memory().await.unwrap();
+    let (_, delegation, _) = seed_workspace_execution(&store).await;
+    let result = finalize(&store, delegation, "日本語").await.result;
+
+    // A limit below one UTF-8 code unit must not produce an empty page that
+    // re-points at its own cursor.
+    for limit in 1u32..=3 {
+        let mut cursor = 0u64;
+        let mut pages = 0u32;
+        loop {
+            let page = store
+                .load_report_source_bounded(TaskReportSourceRef::ResultBody(result), cursor, limit)
+                .await
+                .unwrap()
+                .expect("the result exists");
+            assert!(
+                !page.text.is_empty(),
+                "a page on a character boundary must carry a whole character at limit {limit}"
+            );
+            match page.next {
+                Some(next) => {
+                    assert!(
+                        next > cursor,
+                        "the cursor must strictly advance at limit {limit}"
+                    );
+                    cursor = next;
+                }
+                None => {
+                    cursor += page.text.len() as u64;
+                    break;
+                }
+            }
+            pages += 1;
+            assert!(pages <= 3, "three characters drain in at most three pages");
+        }
+        assert_eq!(cursor, 9, "all nine bytes drain at limit {limit}");
+    }
+}

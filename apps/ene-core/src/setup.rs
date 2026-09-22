@@ -1093,7 +1093,13 @@ fn short_id(id: RawId) -> String {
 
 fn render_memory(memory: &Memory, coverage: &CurrentCoverage) -> (String, bool) {
     let covered = coverage.covers(&memory.content);
-    let content = if covered { "" } else { memory.content.as_str() };
+    // One field per line: an embedded newline in the body would split the
+    // parser's line-oriented framing, so it is flattened to spaces.
+    let content = if covered {
+        String::new()
+    } else {
+        memory.content.replace(['\r', '\n'], " ")
+    };
     (
         format!(
             "memory {} scope=companion importance={} temporal={} recall={} revision={} updated={}\ncontent: {content}\n",
@@ -1114,10 +1120,12 @@ fn render_memory(memory: &Memory, coverage: &CurrentCoverage) -> (String, bool) 
 
 fn render_revision(revision: &MemoryRevisionRecord, coverage: &CurrentCoverage) -> (String, bool) {
     let covered = coverage.covers(&revision.content);
+    // Same one-field-per-line framing as [`render_memory`]: a newline in the
+    // body must not become a spurious `grounds` continuation line.
     let content = if covered {
-        ""
+        String::new()
     } else {
-        revision.content.as_str()
+        revision.content.replace(['\r', '\n'], " ")
     };
     (
         format!(

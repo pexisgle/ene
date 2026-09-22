@@ -161,21 +161,27 @@ pub(crate) fn sweep_registered_secret(
     Ok(())
 }
 
-fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), CredentialTechnicalError> {
+/// Advances the credential-set revision inside the caller's transaction and
+/// returns the new revision.
+pub(crate) fn advance_credential_set(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<u64, CredentialTechnicalError> {
     let current: i64 = tx
         .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
         .map_err(|error| credential_unavailable(error.to_string()))?;
     let next = current
         .checked_add(1)
         .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
-    u64::try_from(next)
+    // Refuse a stored count that cannot be a revision (a corrupt negative
+    // value) before it can persist.
+    let revision = u64::try_from(next)
         .map_err(|_| credential_unavailable("credential set revision out of range"))?;
     tx.execute(
         "UPDATE credential_set SET rev = ?1 WHERE id = 1",
         params![next],
     )
     .map_err(|error| credential_unavailable(error.to_string()))?;
-    Ok(())
+    Ok(revision)
 }
 
 pub(crate) fn current_set_revision(
@@ -331,6 +337,11 @@ impl DevicePairingRepository for Store {
             if stored_origin != origin_connection {
                 return Ok(None);
             }
+            // The pending delete and the paired insert share one transaction
+            // keyed on both columns (compare-and-swap), so an approval never
+            // strands a pending in both tables or neither. The wire projection
+            // is minted fresh here, unrelated to the device identity bytes: it
+            // is the only device string that ever crosses the wire.
             let wire = RawId::new().as_uuid().to_string();
             let deleted = tx
                 .execute(SQL_DELETE_PENDING, params![stored_id, stored_origin])
@@ -381,7 +392,7 @@ impl DevicePairingRepository for Store {
         let wire = wire.to_owned();
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let found: Option<(String, String, String, Option<String>)> = guard
+            let found: Option<(String, String, String, String)> = guard
                 .query_row(SQL_SELECT_DEVICE_BY_WIRE, params![wire], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })

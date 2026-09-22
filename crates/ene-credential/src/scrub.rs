@@ -4,6 +4,14 @@ use crate::{
 use ene_primitive::RevisionInner;
 use thiserror::Error;
 
+/// Monotonic identity of the registered credential set.
+///
+/// Bumped atomically with a usable credential ref becoming registered, with a
+/// successful approval/re-approval, and with the Host startup sweep of the
+/// effective values. It is non-secret metadata: it names a state of the set
+/// without naming or deriving any value, and is safe to persist, compare, and
+/// log. Follows the [`RevisionInner`] discipline: the inner count travels
+/// only inside this newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CredentialSetRevision(RevisionInner);
 
@@ -21,11 +29,6 @@ impl CredentialSetRevision {
     #[must_use]
     pub fn as_u64(&self) -> u64 {
         self.0.as_u64()
-    }
-
-    #[must_use]
-    pub fn checked_next(&self) -> Option<Self> {
-        self.0.checked_next().map(Self)
     }
 }
 
@@ -115,14 +118,28 @@ where
         }
         known.sort_by_key(|(length, _)| std::cmp::Reverse(*length));
         let mut scrubbed = text.to_owned();
-        for (_, credential) in known {
-            let replaced = self.store.with_bearer(&credential, |bearer| {
+        for (_, credential) in &known {
+            let replaced = self.store.with_bearer(credential, |bearer| {
                 scrubbed.replace(bearer, REDACTED_CREDENTIAL)
             });
             let Ok(next) = replaced else {
                 return Err(SecretScrubError::SecretUnavailable);
             };
             scrubbed = next;
+        }
+        // The redaction marker itself contains no bearer text, but a
+        // registered value that is a substring of the marker, or a value
+        // re-formed across a marker boundary, can survive the sequential
+        // replacement. Absence must be proven on the final text: any
+        // surviving occurrence means the scrubber cannot claim removal.
+        for (_, credential) in &known {
+            let still_present = self
+                .store
+                .with_bearer(credential, |bearer| scrubbed.contains(bearer))
+                .map_err(|_| SecretScrubError::SecretUnavailable)?;
+            if still_present {
+                return Err(SecretScrubError::SecretUnavailable);
+            }
         }
         Ok(ScrubbedText {
             text: scrubbed,
@@ -275,23 +292,6 @@ mod scrub_tests {
                 .credential_set(),
             CredentialSetRevision::from_u64(9),
             "a prior premise never raises the revision"
-        );
-    }
-}
-
-#[cfg(test)]
-mod revision_tests {
-    use super::CredentialSetRevision;
-
-    #[test]
-    fn revision_exhaustion_reports_none_instead_of_aliasing() {
-        assert_eq!(
-            CredentialSetRevision::from_u64(0).checked_next(),
-            Some(CredentialSetRevision::from_u64(1))
-        );
-        assert_eq!(
-            CredentialSetRevision::from_u64(u64::MAX).checked_next(),
-            None
         );
     }
 }

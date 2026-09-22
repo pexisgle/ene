@@ -323,7 +323,7 @@ impl HostHandle {
     /// Order: companion mapping, mandatory command key, durable idempotent
     /// replay, presence attach, presentation intake, dialogue prompt
     /// assembly, then the companion-owned turn
-    /// (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
+    /// (`ene_companion::dialogue::begin_turn_committed`/`finish_turn`) with its
     /// inference boundary. The assembled prompt's canonical read-set rides
     /// the admission as the attempt's `data_use`, so the claim gate and the
     /// deletion admission see the exact provenance the provider input was

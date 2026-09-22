@@ -2,18 +2,12 @@ mod dwm;
 mod headless;
 mod wayland;
 
-pub use dwm::windows_dwm_probe;
 pub use headless::HeadlessOverlay;
-pub use wayland::kde_layer_shell_probe;
 
 use crate::ipc::{LocalUiFact, OverlayKind, PlacementBox};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OverlayProbe {
-    Available,
-    Unavailable { reason: String },
-}
-
+/// Overlay in this process. Production attempts the native backend and reports
+/// an explicit unavailable outcome before using Headless.
 #[derive(Debug)]
 pub enum Overlay {
     Headless(HeadlessOverlay),
@@ -106,6 +100,8 @@ impl Overlay {
         }
     }
 
+    /// Native backends report overlay-local drag/resize/hide as `LocalUiFact`;
+    /// Headless never synthesizes them.
     #[must_use]
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         match self {

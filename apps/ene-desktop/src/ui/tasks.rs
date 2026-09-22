@@ -50,6 +50,7 @@ pub(crate) struct DisplayedTask {
 struct PresentedReceipt {
     receipt: String,
     round: RoundWireId,
+    generation: u64,
 }
 
 impl TaskPanel {
@@ -397,8 +398,9 @@ impl TaskPanel {
         &mut self,
         client: &mut Client,
     ) -> Result<(), DesktopError> {
-        let mut summary = take_pushed_summary(client);
-        if summary.is_none() {
+        let summary = if let Some(summary) = take_pushed_summary(client) {
+            summary
+        } else {
             let answer = request(
                 client,
                 WirePayload::UndeliveredRequest(UndeliveredRequest {
@@ -410,9 +412,7 @@ impl TaskPanel {
             )
             .await?;
             match answer {
-                WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(page)) => {
-                    summary = Some(page);
-                }
+                WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(page)) => page,
                 WirePayload::UndeliveredResponse(other) => {
                     return Err(DesktopError::Protocol(format!(
                         "undelivered was not a summary: {other:?}"
@@ -425,11 +425,6 @@ impl TaskPanel {
                     )));
                 }
             }
-        }
-        let Some(summary) = summary else {
-            self.undelivered_lines.clear();
-            self.presented = None;
-            return Ok(());
         };
         self.undelivered_lines = summary
             .items
@@ -452,6 +447,7 @@ impl TaskPanel {
         self.presented = Some(PresentedReceipt {
             receipt: summary.receipt.0,
             round: summary.round,
+            generation: summary.presence_generation,
         });
         Ok(())
     }
@@ -475,6 +471,7 @@ impl TaskPanel {
                     status: PresentationStatus::Presented,
                 }),
                 Some(presented.round),
+                Some(presented.generation),
             ),
         )
         .await
@@ -543,9 +540,7 @@ impl TaskPanel {
                     "task report premise changed",
                 )));
             }
-            shown.revision = page.revision;
             shown.progress = page.progress.clone();
-            shown.purpose = page.purpose.clone();
         }
         self.purpose_text = load_source(client, &page.purpose_source).await?;
         self.result_text.clear();

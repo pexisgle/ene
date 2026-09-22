@@ -1,3 +1,11 @@
+//! Canonical Group J admission and unfinished lifecycle. All mutations share
+//! SQLite's Immediate writer boundary with AU14 and Task resume; no I/O or
+//! participant erase runs under the transaction. The `PreservationRepository`
+//! read methods are SELECT-only and bound their validation to the rows they
+//! actually return; the Store coverage predicates fill the durable
+//! `erasure_use_hold` correspondence through `held_use` and are therefore not
+//! side-effect free.
+
 use std::sync::Arc;
 
 use ene_preservation::*;
@@ -2778,15 +2786,12 @@ impl PreservationRepository for Store {
                 .map(DeletionSearchMaterial::new)
                 .collect();
             Ok(DeletionMaterialOutcome::Material(
-                DeletionOperationMaterial::new(
-                    TargetedDeletionTarget {
-                        mechanical: MechanicalDeletionTarget::ExactText(
-                            DeletionSearchMaterial::new(exact),
-                        ),
-                        semantic_hints: hints,
-                    },
-                    Vec::new(),
-                ),
+                DeletionOperationMaterial::new(TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        exact,
+                    )),
+                    semantic_hints: hints,
+                }),
             ))
         })
         .await

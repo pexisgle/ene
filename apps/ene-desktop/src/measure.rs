@@ -227,6 +227,14 @@ pub fn wayland_presentation_record(
     wall_secs: f64,
     feedback: Vec<ene_body::ipc::PresentationFeedback>,
 ) -> Result<PresentationRecord, MeasurementError> {
+    let Some(surface_id) = feedback
+        .first()
+        .map(|feedback| feedback.surface_id.as_str())
+    else {
+        return Err(MeasurementError::PresentationTrace(String::from(
+            "Wayland feedback is empty",
+        )));
+    };
     let surfaces = feedback
         .iter()
         .map(|feedback| feedback.surface_id.as_str())
@@ -236,12 +244,7 @@ pub fn wayland_presentation_record(
             "Wayland feedback must correlate to exactly one surface",
         )));
     }
-    let surface_id = surfaces
-        .first()
-        .map(|surface| (*surface).to_string())
-        .ok_or_else(|| {
-            MeasurementError::PresentationTrace(String::from("Wayland feedback is empty"))
-        })?;
+    let surface_id = surface_id.to_string();
     let mut correlated = BTreeMap::<u64, Option<PresentationEvent>>::new();
     for feedback in feedback {
         match feedback.outcome {
@@ -315,6 +318,16 @@ pub fn wayland_presentation_record(
     )
 }
 
+/// Imports a PresentMon CSV while retaining the raw trace path and requiring
+/// every row to correlate to the selected Body PID and swap chain.
+/// `DisplayedTime` must show a positive display duration; the display timestamp
+/// is reconstructed from `TimeInSeconds + MsUntilDisplayed` (or the equivalent
+/// `CPUStartTime + DisplayLatency`). An explicit dropped row is discarded,
+/// while a row without complete display timing is missing.
+///
+/// # Errors
+///
+/// Missing required columns, malformed values, or I/O.
 pub fn import_presentmon_csv(
     path: &Path,
     body_pid: u32,
@@ -387,7 +400,10 @@ pub fn import_presentmon_csv(
         let dropped = dropped_column
             .and_then(|index| row.get(index))
             .is_some_and(|value| {
-                value.eq_ignore_ascii_case("true") || value == "1" || value == "dropped"
+                let value = value.trim();
+                value.eq_ignore_ascii_case("true")
+                    || value == "1"
+                    || value.eq_ignore_ascii_case("dropped")
             });
         let displayed_text = row.get(displayed_column).unwrap_or_default().trim();
         if dropped || displayed_text.eq_ignore_ascii_case("NA") {
@@ -426,11 +442,6 @@ pub fn import_presentmon_csv(
                 reason: String::from("PresentMon row has no correlated display timing"),
             });
         }
-    }
-    if events.is_empty() {
-        return Err(MeasurementError::PresentationTrace(format!(
-            "no rows correlate to Body PID {body_pid} swap chain {swap_chain}"
-        )));
     }
     PresentationRecord::from_events(
         PresentationSource::WindowsDisplayTiming {
@@ -643,14 +654,20 @@ impl MeasurementRecord {
                 "reproducible environment facts are incomplete",
             ));
         }
-        if !self.elapsed_wall_secs.is_finite()
-            || self.elapsed_wall_secs < IDLE_GATE_SECS
-            || self.logical_cpus == 0
-        {
+        if !self.elapsed_wall_secs.is_finite() {
+            self.failures.push(format!(
+                "idle wall {}s is not a finite duration",
+                self.elapsed_wall_secs
+            ));
+        } else if self.elapsed_wall_secs < IDLE_GATE_SECS {
             self.failures.push(format!(
                 "idle wall {:.3}s is shorter than {IDLE_GATE_SECS:.0}s",
                 self.elapsed_wall_secs
             ));
+        }
+        if self.logical_cpus == 0 {
+            self.failures
+                .push(String::from("online logical CPU count is zero"));
         }
         let mut incomplete = false;
         if let Some(cpu) = &self.cpu {

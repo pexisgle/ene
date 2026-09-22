@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ene_inference::cost::{Money, TokenRate, UsageCostFact, project_cost};
+use ene_inference::cost::{CostProjectionError, Money, TokenRate, UsageCostFact, project_cost};
 use ene_inference::pricing::{PricingCatalogRevision, PricingSnapshot};
 use ene_inference::{
     AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
@@ -9,7 +9,6 @@ use ene_inference::{
     UsageSummaryRepository, UsageSummaryRow, UsageSummaryStatus,
 };
 use ene_permission::{CapabilityKind, ConsumerKind, PurposeKind, UsageReservationState};
-use ene_preservation::ErasureConditionRef;
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -112,7 +111,7 @@ impl InferenceAttemptRepository for Store {
             }
             match check_data_use_currentness(&tx, &correlation.data_use)? {
                 DataUseCheck::Clear => {}
-                DataUseCheck::Covered(_condition) => {
+                DataUseCheck::Covered => {
                     return Ok(AttemptBeginOutcome::DataUseHeld);
                 }
             }
@@ -299,7 +298,7 @@ fn encode_correlation(
 
 enum DataUseCheck {
     Clear,
-    Covered(ErasureConditionRef),
+    Covered,
 }
 
 fn check_data_use_currentness(
@@ -307,10 +306,11 @@ fn check_data_use_currentness(
     data_use: &[String],
 ) -> Result<DataUseCheck, InferenceTechnicalError> {
     for source in data_use {
-        if let Some(condition) = crate::preservation::covering_condition(tx, source)
+        if crate::preservation::covering_condition(tx, source)
             .map_err(|error| inference_unavailable(error.to_string()))?
+            .is_some()
         {
-            return Ok(DataUseCheck::Covered(condition));
+            return Ok(DataUseCheck::Covered);
         }
     }
     Ok(DataUseCheck::Clear)
@@ -1065,6 +1065,16 @@ fn raw_usage_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawUsageSu
     })
 }
 
+/// Decodes one joined row into the owner-level usage summary.
+///
+/// The shapes that agree are the three legal combinations of fact and
+/// reservation state; anything else (a reported fact beside a
+/// non-reported reservation, a dangling pricing reference, or a committed
+/// amount that disagrees with the projected cost) is unreadable and fails
+/// closed, never a guessed status or amount. A `reported` fact beside a
+/// `CommittedUnknown` reservation is legal: the reservation settled with an
+/// unknown amount, as happens when a reported usage's cost cannot be
+/// represented, and the row stays viewable as an unknown cost.
 fn decode_usage_summary(
     raw: &RawUsageSummaryRow,
 ) -> Result<UsageSummaryRow, InferenceTechnicalError> {
@@ -1119,7 +1129,13 @@ fn decode_usage_summary(
     }
     match source {
         Some(UsageSource::Reported) => {
-            if !matches!(state, None | Some(UsageReservationState::CommittedReported)) {
+            if !matches!(
+                state,
+                None | Some(
+                    UsageReservationState::CommittedReported
+                        | UsageReservationState::CommittedUnknown
+                )
+            ) {
                 return Err(inference_unavailable(String::from(
                     "reported usage carries a non-reported reservation",
                 )));
@@ -1174,11 +1190,22 @@ fn decode_usage_summary(
                 output_tokens: Some(output_tokens),
                 source: UsageSource::Reported,
             };
-            let cost = project_cost(&fact, snapshot.as_ref()).map_err(|error| {
-                InferenceTechnicalError::CostProjectionFailed {
-                    reason: error.to_string(),
+            let cost = match project_cost(&fact, snapshot.as_ref()) {
+                Ok(cost) => cost,
+                // The provider call already ran; an unrepresentable amount is
+                // an unknown cost, never a reason to hide the usage row.
+                Err(CostProjectionError::AmountOverflow) => UsageCostFact::Unknown {
+                    pricing: snapshot.as_ref().map(PricingSnapshot::reference),
+                },
+                Err(error) => {
+                    return Err(InferenceTechnicalError::CostProjectionFailed {
+                        reason: error.to_string(),
+                    });
                 }
-            })?;
+            };
+            // The cap accounting of a reported settlement is the committed
+            // total; a row whose committed amount disagrees with the
+            // projected cost cannot be displayed as both.
             if let (UsageCostFact::Reported(projected), Some(currency), Some(micros)) = (
                 &cost,
                 raw.committed_currency.as_deref(),
@@ -1207,7 +1234,10 @@ fn decode_usage_summary(
                     output_tokens,
                 }),
                 cost: Some(cost),
-                reserved: None,
+                reserved: match state {
+                    Some(UsageReservationState::CommittedUnknown) => upper_bound,
+                    _ => None,
+                },
                 started_at,
             })
         }
@@ -1228,7 +1258,19 @@ fn decode_usage_summary(
             let pricing = match raw.usage_pricing.as_deref() {
                 None => None,
                 Some(reference_text) => {
-                    Some(decode_pricing_reference(reference_text).map_err(inference_unavailable)?)
+                    let reference =
+                        decode_pricing_reference(reference_text).map_err(inference_unavailable)?;
+                    let stored = raw.pricing.clone().ok_or_else(|| {
+                        inference_unavailable(String::from(
+                            "usage fact references a missing pricing snapshot",
+                        ))
+                    })?;
+                    if decode_pricing(stored)?.reference() != reference {
+                        return Err(inference_unavailable(String::from(
+                            "stored pricing snapshot does not match its reference",
+                        )));
+                    }
+                    Some(reference)
                 }
             };
             Ok(UsageSummaryRow {

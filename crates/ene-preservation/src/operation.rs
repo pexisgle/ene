@@ -30,11 +30,6 @@ impl DeletionSearchMaterial {
     pub fn expose_for_erasure(&self) -> &str {
         &self.0
     }
-
-    #[must_use]
-    pub fn expose_for_owner_review(&self) -> &str {
-        &self.0
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +85,8 @@ pub struct StartTargetedDeletionCommand {
 }
 
 impl StartTargetedDeletionCommand {
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
     #[must_use]
     pub fn new(
         target: TargetedDeletionTarget,
@@ -178,6 +175,28 @@ pub enum DeletionOperationPhase {
 pub enum DeletionHoldReason {
     Unavailable,
     GenerationExhausted,
+}
+
+impl DeletionHoldReason {
+    /// Storage and display token of the closed hold-reason set. Unknown stored
+    /// or incoming tokens are outside the set and fail closed at their parse
+    /// boundary, never defaulted.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::GenerationExhausted => "generation_exhausted",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "unavailable" => Self::Unavailable,
+            "generation_exhausted" => Self::GenerationExhausted,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

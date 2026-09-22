@@ -118,7 +118,10 @@ const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
 
 const ORIGIN_KIND_OWNER_MANAGEMENT: &str = "owner_management";
 
-const SQL_UNADOPTED_RESULTS_AT_REVISION: &str = "SELECT result_id, delegation_id FROM task_result WHERE task_id = ?1 AND task_revision = ?2 AND adopted_revision IS NULL ORDER BY result_id";
+/// The current-revision sealed-but-unadopted results for the resume
+/// availability check: `adopted_revision IS NULL` on the relied revision is
+/// the durable "may still adopt" marker. Bodies are never read here.
+const SQL_UNADOPTED_RESULTS_AT_REVISION: &str = "SELECT delegation_id FROM task_result WHERE task_id = ?1 AND task_revision = ?2 AND adopted_revision IS NULL ORDER BY result_id";
 
 const SQL_PAST_FACT_ROWS: &str = "SELECT row_kind, row_id FROM (SELECT 'action_attempt' AS row_kind, attempt_id AS row_id, 0 AS rank, rowid AS seq FROM action_attempt WHERE task_id = ?1 UNION ALL SELECT 'task_result', result_id, 1, rowid FROM task_result WHERE task_id = ?1) ORDER BY rank, seq LIMIT ?2";
 
@@ -2003,7 +2006,12 @@ fn load_report_source_bounded_sync(
     cursor_bytes: u64,
     limit_bytes: u32,
 ) -> Result<Option<TaskReportSourcePage>, TaskTechnicalError> {
-    let cap = i64::from(limit_bytes.max(1));
+    // 4 is the maximum UTF-8 code-unit length, so any page starting on a
+    // character boundary contains at least one whole character and `next`
+    // strictly advances even at the smallest requested limit.
+    let cap = i64::from(limit_bytes.max(4));
+    // SQLite `substr` is 1-based; a cursor at or past the end reads empty and
+    // reports no next page.
     let start = i64::try_from(cursor_bytes)
         .map_err(|_| task_unavailable("report source cursor out of range"))?
         .saturating_add(1);
@@ -2524,13 +2532,12 @@ fn has_adoptable_sealed_result(
         .map_err(task_unavailable)?;
     let rows = statement
         .query_map(params![encode_id(task.as_raw()), current_raw], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            row.get::<_, String>(0)
         })
         .map_err(task_unavailable)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(task_unavailable)?;
-    for (result_text, delegation_text) in rows {
-        let _ = result_text;
+    for delegation_text in rows {
         let delegation =
             DelegationId::from_raw(decode_id(&delegation_text).map_err(task_unavailable)?);
         let authoritative = enumerate_delegation_attempts(tx, delegation, task, current_revision)?;
@@ -2702,13 +2709,32 @@ fn commit_task_resume_sync(
         .ok_or_else(|| {
             task_unavailable("task revision snapshot missing for the current revision")
         })?;
+    // A revision forward resolves its new rows from the transaction's current
+    // rows, so an inconsistent durable snapshot is a technical error, never a
+    // normalized unit.
+    if decode_revision(snapshot.purpose_adopted_revision)? != current_purpose {
+        return Err(task_unavailable(
+            "task revision purpose does not match the current purpose",
+        ));
+    }
+    if decode_assignee(&snapshot.assignee)? != decode_assignee(&current.assignee)? {
+        return Err(task_unavailable(
+            "task revision assignee does not match the current assignee",
+        ));
+    }
+    // The purpose is carried over: the adopted identity stays, the text
+    // stays the snapshot's, and only the entry identity is new. A purpose
+    // under a canonical current condition is materialized body-free instead
+    // of being re-adopted verbatim.
+    let purpose_text = crate::preservation::redact_covered_text(&tx, &snapshot.purpose_text)
+        .map_err(|error| task_unavailable(error.to_string()))?;
     tx.execute(
         SQL_INSERT_TASK_REVISION,
         params![
             task_text,
             next_raw,
             current.purpose_adopted_revision,
-            snapshot.purpose_text,
+            purpose_text,
             current.assignee
         ],
     )
@@ -2755,7 +2781,7 @@ fn commit_task_resume_sync(
             task_text,
             next_raw,
             current.purpose_adopted_revision,
-            snapshot.purpose_text
+            purpose_text
         ],
     )
     .map_err(task_unavailable)?;
@@ -2779,11 +2805,16 @@ fn commit_task_resume_sync(
         None => (None, None, None),
         Some(workspace) => (
             Some(encode_id(workspace.assoc.as_raw())),
-            Some(workspace.folder.path.as_str()),
+            Some(
+                crate::preservation::redact_covered_text(&tx, &workspace.folder.path)
+                    .map_err(|error| task_unavailable(error.to_string()))?,
+            ),
             workspace
                 .save_target
                 .as_ref()
-                .map(|target| target.path.as_str()),
+                .map(|target| crate::preservation::redact_covered_text(&tx, &target.path))
+                .transpose()
+                .map_err(|error| task_unavailable(error.to_string()))?,
         ),
     };
     tx.execute(
@@ -2834,6 +2865,19 @@ fn commit_task_resume_sync(
     })
 }
 
+/// Prompt-only rendering: a raw newline in a path would break the fixed
+/// one-fact-per-line framing documented on `PastExecutedFact::line`.
+fn prompt_safe_field(text: &str) -> String {
+    text.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+/// Reads the Task's past-executed facts for the every-turn prompt block.
+///
+/// The walk is Task-scoped and bounded: attempts first, then results, each
+/// oldest first, capped one past
+/// [`PAST_FACTS_ENTRY_CAP`](ene_task::PAST_FACTS_ENTRY_CAP) so truncation
+/// is reported instead of reasoned from. Each row contributes attribution
+/// only — never a body. SELECT-only.
 fn load_past_executed_facts_sync(
     conn: &Mutex<Connection>,
     task: TaskId,
@@ -2880,7 +2924,7 @@ fn load_past_executed_facts_sync(
                         "action {} {} {} {}",
                         id.as_uuid(),
                         operation.as_str(),
-                        target,
+                        prompt_safe_field(&target),
                         certainty.as_str()
                     ),
                 });

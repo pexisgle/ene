@@ -6,7 +6,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use ene_body::ipc::{
-    BodyToParent, LocalUiFact, ParentToBody, PresentationFeedback, decode_body, encode_parent,
+    BodyToParent, IpcError, LocalUiFact, ParentToBody, PresentationFeedback, decode_body,
+    encode_parent, frame_len,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,10 +97,23 @@ impl BodySupervisor {
                                 Ok(0) => break,
                                 Ok(n) => {
                                     buf.extend_from_slice(&chunk[..n]);
-                                    while let Ok((message, used)) = decode_body(&buf) {
-                                        buf.drain(..used);
-                                        if tx.send(message).is_err() {
-                                            return;
+                                    loop {
+                                        match decode_body(&buf) {
+                                            Ok((message, used)) => {
+                                                buf.drain(..used);
+                                                if tx.send(message).is_err() {
+                                                    return;
+                                                }
+                                            }
+                                            Err(IpcError::Truncated { .. }) => break,
+                                            Err(_) => match frame_len(&buf) {
+                                                Ok(len) => {
+                                                    buf.drain(..len);
+                                                }
+                                                Err(_) => {
+                                                    buf.drain(..4);
+                                                }
+                                            },
                                         }
                                     }
                                 }

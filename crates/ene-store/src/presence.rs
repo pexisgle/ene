@@ -129,12 +129,17 @@ impl Store {
                 "missing presence attribution",
             )));
         };
-        if current.generation != transitioning_generation
-            || current.state != PresenceState::InTransition
-        {
-            if current.state == PresenceState::Stopped {
-                return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
-            }
+        // Only the transitioning generation's `InTransition` row may move. A
+        // different generation is a newer begin/normalization that superseded
+        // this transition, and a stopped row outranks the transition, so
+        // neither may be read as this confirmation's own success.
+        if current.generation != transitioning_generation {
+            return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
+        }
+        if current.state == PresenceState::Stopped {
+            return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
+        }
+        if current.state != PresenceState::InTransition {
             return Ok(ConfirmTransitionOutcome::Confirmed(current));
         }
         if live.connection_live && current.active_client != Some(live.client) {
