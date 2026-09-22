@@ -74,66 +74,6 @@ async fn seed_delegation(store: &Store) -> (TaskRef, DelegationId) {
 }
 
 #[tokio::test]
-async fn task_agent_claim_records_the_durable_correlation() {
-    let store = open_memory().await.unwrap();
-    seed_dialogue_consent(&store).await;
-    let (created, delegation) = seed_delegation(&store).await;
-    let premise = task_agent_attempt_premise(delegation, created);
-    let ticket = InferenceTicketId(RawId::new());
-    assert_eq!(
-        store
-            .begin_inference_attempt(task_agent_claim(ticket, 1, premise.clone()))
-            .await,
-        Ok(AttemptBeginOutcome::Started)
-    );
-    let record = store
-        .load_inference_attempt(ticket)
-        .await
-        .expect("the attempt row must read")
-        .expect("the claimed attempt must exist");
-    assert_eq!(record.consumer, ConsumerKind::TaskAgent);
-    assert_eq!(record.capability, CapabilityKind::Dialogue);
-    assert_eq!(record.purpose, PurposeKind::TaskAgentTurn);
-    assert_eq!(
-        record.task_agent,
-        Some(premise),
-        "the durable correlation keeps the delegation and the relied TaskRef"
-    );
-    // The chain a delayed result walks: ticket -> attempt -> delegation ->
-    // delegator. The delegator is read from the delegation row, not copied
-    // onto the attempt.
-    let loaded_delegation = store
-        .load_delegation(delegation)
-        .await
-        .unwrap()
-        .expect("the delegation correspondence must load");
-    assert_eq!(loaded_delegation.task, created);
-    let task = store
-        .load_task(created.task)
-        .await
-        .unwrap()
-        .expect("the task must load");
-    assert_eq!(
-        loaded_delegation.delegator, task.task.assignee,
-        "the attribution walks back to the delegator"
-    );
-    store
-        .record_usage(UsageFact {
-            ticket,
-            provider: String::from("openai"),
-            model: String::from("dialogue-1"),
-            input_tokens: Some(7),
-            cached_input_tokens: Some(1),
-            output_tokens: Some(3),
-            source: UsageSource::Reported,
-        })
-        .await
-        .expect("usage follows the claimed attempt");
-    assert_eq!(task_table_count(&store, "usage_fact"), 1);
-    assert_eq!(task_table_count(&store, "inference_attempt"), 1);
-}
-
-#[tokio::test]
 async fn dialogue_attempt_reads_back_without_task_correlation() {
     let store = open_memory().await.unwrap();
     seed_dialogue_consent(&store).await;
@@ -376,19 +316,19 @@ async fn task_agent_correlation_survives_reopen_without_replay() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attempt-restart.db");
     let ticket = InferenceTicketId(RawId::new());
-    let premise;
-    {
+    let (premise, delegation, created) = {
         let store = Store::open(&path).await.unwrap();
         seed_dialogue_consent(&store).await;
         let (created, delegation) = seed_delegation(&store).await;
-        premise = task_agent_attempt_premise(delegation, created);
+        let premise = task_agent_attempt_premise(delegation, created);
         assert_eq!(
             store
                 .begin_inference_attempt(task_agent_claim(ticket, 1, premise.clone()))
                 .await,
             Ok(AttemptBeginOutcome::Started)
         );
-    }
+        (premise, delegation, created)
+    };
     let reopened = Store::open(&path).await.expect("reopen must succeed");
     let record = reopened
         .load_inference_attempt(ticket)
@@ -396,7 +336,44 @@ async fn task_agent_correlation_survives_reopen_without_replay() {
         .expect("the correlation must read after restart")
         .expect("the claimed attempt survives restart");
     assert_eq!(record.consumer, ConsumerKind::TaskAgent);
-    assert_eq!(record.task_agent, Some(premise));
+    assert_eq!(record.capability, CapabilityKind::Dialogue);
+    assert_eq!(record.purpose, PurposeKind::TaskAgentTurn);
+    assert_eq!(
+        record.task_agent,
+        Some(premise),
+        "the durable correlation keeps the delegation and the relied TaskRef"
+    );
+    // The chain a delayed result walks: ticket -> attempt -> delegation ->
+    // delegator. The delegator is read from the delegation row, not copied
+    // onto the attempt.
+    let loaded_delegation = reopened
+        .load_delegation(delegation)
+        .await
+        .unwrap()
+        .expect("the delegation correspondence must load");
+    assert_eq!(loaded_delegation.task, created);
+    let task = reopened
+        .load_task(created.task)
+        .await
+        .unwrap()
+        .expect("the task must load");
+    assert_eq!(
+        loaded_delegation.delegator, task.task.assignee,
+        "the attribution walks back to the delegator"
+    );
+    reopened
+        .record_usage(UsageFact {
+            ticket,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            input_tokens: Some(7),
+            cached_input_tokens: Some(1),
+            output_tokens: Some(3),
+            source: UsageSource::Reported,
+        })
+        .await
+        .expect("usage follows the claimed attempt");
+    assert_eq!(task_table_count(&reopened, "usage_fact"), 1);
     assert_eq!(
         task_table_count(&reopened, "inference_attempt"),
         1,

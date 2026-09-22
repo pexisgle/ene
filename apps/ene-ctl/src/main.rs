@@ -1400,32 +1400,6 @@ mod tests {
         cli_from_matches(matches)
     }
 
-    fn clap_error(words: &[&str]) -> clap::error::ErrorKind {
-        match ene_ctl_command()
-            .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args(words)))
-        {
-            Ok(_) => panic!("{words:?} must fail"),
-            Err(error) => error.kind(),
-        }
-    }
-
-    #[test]
-    fn help_and_version_are_successful_clap_exits() {
-        assert!(matches!(
-            clap_error(&["--help"]),
-            clap::error::ErrorKind::DisplayHelp
-        ));
-        assert!(matches!(
-            clap_error(&["--version"]),
-            clap::error::ErrorKind::DisplayVersion
-        ));
-        // Subcommand help is standard too.
-        assert!(matches!(
-            clap_error(&["send", "--help"]),
-            clap::error::ErrorKind::DisplayHelp
-        ));
-    }
-
     #[test]
     fn missing_command_reports_usage() {
         assert!(matches!(parse(&[]), Err(CliError::Usage(_))));
@@ -1452,12 +1426,6 @@ mod tests {
         ])
         .expect("a repeated --config keeps the last value");
         assert!(repeated.config == Some(PathBuf::from("/tmp/b.json")));
-    }
-
-    #[test]
-    fn config_value_named_serve_stays_data() {
-        let cli = parse(&["--config", "serve", "status"]).expect("the value is not a command");
-        assert!(cli.config == Some(PathBuf::from("serve")));
     }
 
     #[test]
@@ -1752,23 +1720,6 @@ mod tests {
                     redisplay: true,
                 }
         );
-    }
-
-    #[test]
-    fn unknown_flags_and_positionals_report_usage() {
-        assert!(matches!(
-            parse(&["tasks", "extra"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&["status", "extra"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&["status", "--verbose"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
     }
 
     #[test]

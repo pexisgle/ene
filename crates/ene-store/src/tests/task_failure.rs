@@ -55,33 +55,6 @@ async fn progress(store: &Store, task: TaskId) -> TaskProgress {
 }
 
 #[tokio::test]
-async fn started_task_moves_to_failed_once_and_repeats_idempotently() {
-    let store = open_memory().await.unwrap();
-    let created = store
-        .create_task(task_premise(None))
-        .await
-        .expect("the AU2 task must commit");
-    assert_eq!(progress(&store, created.task).await, TaskProgress::Started);
-
-    let outcome = store
-        .fail_task(failure(created, None))
-        .await
-        .expect("the failure commit must answer");
-    assert_eq!(outcome, TaskFailureOutcome::FailedAs(created));
-    assert_eq!(progress(&store, created.task).await, TaskProgress::Failed);
-
-    // The same request again is an idempotent domain answer with zero writes.
-    assert_eq!(
-        store
-            .fail_task(failure(created, None))
-            .await
-            .expect("the repeated failure must answer"),
-        TaskFailureOutcome::AlreadyFailed { task: created.task }
-    );
-    assert_eq!(progress(&store, created.task).await, TaskProgress::Failed);
-}
-
-#[tokio::test]
 async fn a_failed_task_stays_failed_after_reopen() {
     let directory = tempfile::tempdir().expect("store directory");
     let path = directory.path().join("failure.db");

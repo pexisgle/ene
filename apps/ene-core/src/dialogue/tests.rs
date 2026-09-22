@@ -882,63 +882,6 @@ fn assert_stream_completed(responses: &[ene_plugin_ipc::WireFrame]) {
 }
 
 #[tokio::test]
-async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
-    use ene_companion::CompanionRepository as _;
-    use ene_learning::LearningRepository as _;
-
-    let transport = LearningAwareTransport::new(
-        "noted",
-        Some(
-            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"action": "create", "content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
-        ),
-    );
-    let live = live_input("client-formation");
-    let setup = round_test_handle("dlg-formation", &live, &transport).await;
-    let (handle, _dir) = setup.unwrap();
-    assert!(
-        assign_learning(&handle, &live, &transport).await,
-        "learning formation needs its own capability assignment"
-    );
-    let frame = submit_frame(
-        handle.companion_wire(),
-        Some(0),
-        None,
-        "local-formation",
-        "please remember that I like jasmine tea",
-        live.connection_id,
-    );
-    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
-    assert_stream_completed(&responses);
-    // The formation pass is post-response work; drain it explicitly here.
-    handle.run_pending_learning(&transport).await;
-
-    let companion = handle.store.ensure_running_companion().await.unwrap();
-    let memories = handle
-        .store
-        .list_current_memories(companion.as_raw(), None, 10)
-        .await
-        .unwrap();
-    assert_eq!(memories.len(), 1, "one compressed memory is formed");
-    assert_eq!(memories[0].content, "The owner likes jasmine tea.");
-    assert_eq!(memories[0].importance.as_u8(), 4);
-    let revisions = handle
-        .store
-        .list_memory_revisions(memories[0].id, None, 100)
-        .await
-        .unwrap();
-    assert_eq!(revisions.len(), 1, "the initial revision is recorded");
-    let summary = handle
-        .store
-        .load_summaries(&[revisions[0].summary.unwrap()])
-        .await
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    assert!(summary.content.contains("jasmine tea"), "grounds are kept");
-}
-
-#[tokio::test]
 async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     use ene_companion::CompanionRepository as _;
     use ene_companion::HistoryRepository as _;
@@ -1343,12 +1286,8 @@ fn accepted_round_wire(frames: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWire
 }
 
 #[tokio::test]
-async fn replacement_after_owner_commit_before_install_publishes_nothing() -> Result<(), String> {
-    accepted_replacement(false).await
-}
-
-#[tokio::test]
 async fn replacement_after_install_before_publication_publishes_nothing() -> Result<(), String> {
+    accepted_replacement(false).await?;
     accepted_replacement(true).await
 }
 

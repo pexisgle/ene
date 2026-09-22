@@ -69,56 +69,13 @@ async fn seed_workspace_delegation(store: &Store) -> (TaskRef, DelegationId, Wor
 }
 
 #[tokio::test]
-async fn action_attempt_records_the_durable_correlation() {
-    let store = open_memory().await.unwrap();
-    let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
-    let attempt = ActionAttemptId::generate();
-    let target = target_path("report.md");
-    let premise = attempt_premise(
-        attempt,
-        delegation,
-        created,
-        assoc,
-        &target,
-        OperationKind::Create,
-    );
-    let evaluation = premise.relied_evaluation;
-    assert_eq!(
-        store.insert_attempt_if_current(premise).await,
-        Ok(ActionStartOutcome::Started)
-    );
-    let record = store
-        .load_attempt(attempt)
-        .await
-        .expect("the attempt row must read")
-        .expect("the inserted attempt must exist");
-    assert_eq!(record.attempt, attempt);
-    assert_eq!(record.delegation, delegation.as_raw());
-    assert_eq!(record.task, created.task.as_raw());
-    assert_eq!(record.task_revision.as_u64(), created.revision.as_u64());
-    assert_eq!(record.workspace, assoc.as_raw());
-    assert_eq!(record.real_target.as_path(), target.as_str());
-    assert_eq!(record.operation, OperationKind::Create);
-    assert_eq!(
-        record.relied_evaluation, evaluation,
-        "the raw evaluation identity is part of the durable correlation"
-    );
-    assert_eq!(
-        record.certainty,
-        ActionCertainty::Unknown,
-        "a started attempt is unknown until an observation is recorded"
-    );
-    assert_eq!(record.grounds, None);
-    assert_eq!(task_table_count(&store, "action_attempt"), 1);
-}
-
-#[tokio::test]
 async fn action_attempt_correlation_survives_reopen_without_replay() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("action-restart.db");
     let attempt = ActionAttemptId::generate();
     let evaluation = RawId::new();
-    {
+    let target = target_path("report.md");
+    let (delegation_raw, task_raw, revision_val, workspace_raw) = {
         let store = Store::open(&path).await.unwrap();
         let (created, delegation, assoc) = seed_workspace_delegation(&store).await;
         let mut premise = attempt_premise(
@@ -126,7 +83,7 @@ async fn action_attempt_correlation_survives_reopen_without_replay() {
             delegation,
             created,
             assoc,
-            &target_path("report.md"),
+            &target,
             OperationKind::Create,
         );
         premise.relied_evaluation = evaluation;
@@ -134,18 +91,36 @@ async fn action_attempt_correlation_survives_reopen_without_replay() {
             store.insert_attempt_if_current(premise).await,
             Ok(ActionStartOutcome::Started)
         );
-    }
+        (
+            delegation.as_raw(),
+            created.task.as_raw(),
+            created.revision.as_u64(),
+            assoc.as_raw(),
+        )
+    };
     let reopened = Store::open(&path).await.expect("reopen must succeed");
     let record = reopened
         .load_attempt(attempt)
         .await
         .expect("the correlation must read after restart")
         .expect("the started attempt survives restart");
-    assert_eq!(record.certainty, ActionCertainty::Unknown);
+    assert_eq!(record.attempt, attempt);
+    assert_eq!(record.delegation, delegation_raw);
+    assert_eq!(record.task, task_raw);
+    assert_eq!(record.task_revision.as_u64(), revision_val);
+    assert_eq!(record.workspace, workspace_raw);
+    assert_eq!(record.real_target.as_path(), target.as_str());
+    assert_eq!(record.operation, OperationKind::Create);
     assert_eq!(
         record.relied_evaluation, evaluation,
         "the evaluation correlation survives restart as the same opaque raw identity"
     );
+    assert_eq!(
+        record.certainty,
+        ActionCertainty::Unknown,
+        "a started attempt is unknown until an observation is recorded"
+    );
+    assert_eq!(record.grounds, None);
     assert_eq!(
         task_table_count(&reopened, "action_attempt"),
         1,
