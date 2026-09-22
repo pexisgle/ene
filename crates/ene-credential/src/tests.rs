@@ -127,7 +127,7 @@ fn failed_snapshot_publication_does_not_fall_back_to_the_old_version() {
 }
 
 #[test]
-fn pairing_proof_matches_rfc4231_case_1() {
+fn pairing_proof_conforms_to_rfc4231_and_rejects_mismatch() {
     let key = "\x0b".repeat(20);
     let proof = crate::pairing::pairing_proof_hex(&key, "Hi There");
     assert_eq!(
@@ -137,10 +137,7 @@ fn pairing_proof_matches_rfc4231_case_1() {
     assert!(crate::pairing::verify_pairing_proof(
         &key, "Hi There", &proof
     ));
-}
 
-#[test]
-fn pairing_proof_round_trips_and_rejects_mismatch() {
     let proof = crate::pairing::pairing_proof_hex("pairing-secret", "single-use-nonce");
     assert!(crate::pairing::verify_pairing_proof(
         "pairing-secret",
@@ -190,6 +187,12 @@ fn device_auth_roundtrip_preserves_secret_bytes() {
     let device = DeviceId(RawId::new());
     let saved = store.save_secret(&device, "phone", "pairing-secret-value");
     assert!(saved.is_ok(), "save must succeed");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
     let loaded = store.load_secret(&device);
     let secret = loaded.unwrap().unwrap();
     assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
@@ -273,20 +276,6 @@ fn device_auth_open_tightens_lax_permissions() {
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     let loaded = store.load_secret(&DeviceId(RawId::new()));
     assert!(matches!(loaded, Ok(None)));
-}
-
-#[cfg(unix)]
-#[test]
-fn device_auth_saved_file_is_owner_only() {
-    use std::os::unix::fs::PermissionsExt;
-    let temp = fresh_tempdir();
-    let path = temp.path().join("device-auth.json");
-    let store = open_device_auth_store(&path);
-    let saved = store.save_secret(&DeviceId(RawId::new()), "phone", "pairing-secret");
-    assert!(saved.is_ok(), "save must succeed");
-    let meta = std::fs::metadata(&path);
-    let meta = meta.unwrap();
-    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
 }
 
 #[test]
@@ -483,7 +472,7 @@ mod env_credential_store_tests {
     use std::cell::Cell;
 
     #[test]
-    fn lookup_gates_on_provider_before_reading_env() {
+    fn lookup_respects_provider_gating_and_presence() {
         let calls = Cell::new(0_u32);
         let resolved = resolve_for("acme", |_| {
             calls.set(calls.get() + 1);
@@ -491,19 +480,13 @@ mod env_credential_store_tests {
         });
         assert!(resolved.is_none());
         assert_eq!(calls.get(), 0);
-    }
 
-    #[test]
-    fn lookup_accepts_a_present_non_empty_value() {
         let resolved = resolve_for("openai", |name| {
             assert_eq!(name, ENV_API_KEY);
             Some("test-key".to_owned())
         });
         assert_eq!(resolved.as_deref(), Some("test-key"));
-    }
 
-    #[test]
-    fn lookup_treats_a_missing_value_as_absent() {
         let resolved = resolve_for("openai", |_| None);
         assert!(resolved.is_none());
     }
