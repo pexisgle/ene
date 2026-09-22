@@ -39,17 +39,12 @@ pub fn host_is_serving(data_dir: &Path) -> bool {
 
 #[cfg(windows)]
 fn probe_windows_client_pipe(data_dir: &Path) -> bool {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0100_0000_01b3;
-    let mut tag = FNV_OFFSET;
-    for byte in data_dir.as_os_str().as_encoded_bytes() {
-        tag ^= u64::from(*byte);
-        tag = tag.wrapping_mul(FNV_PRIME);
-    }
-    let pipe = format!(r"\\.\pipe\ene-{tag:016x}");
+    let pipe = crate::session::client_pipe_name(data_dir);
     std::fs::metadata(pipe).is_ok()
 }
 
+/// Resolves `ENE_CORE_PATH` when it names a file, then falls back to `ene-core`
+/// next to this binary.
 #[must_use]
 pub fn locate_host_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("ENE_CORE_PATH") {

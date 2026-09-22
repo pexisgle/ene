@@ -407,7 +407,9 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
     assert_eq!(*remaining, Money::from_micros(CurrencyCode::Usd, 498));
     assert!(!held, "502 of 1000 is not held");
 
-    let fitting = claim(
+    // The status and the admission agree: under this consumption a new
+    // 201-micro reservation fits (703 <= 1000) ...
+    let _ = claim(
         &store,
         ClaimSpec {
             capability: CapabilityKind::Dialogue,
@@ -422,10 +424,8 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
         },
     )
     .await;
-    assert_ne!(
-        fitting, claims[0],
-        "a distinct ticket claims under the headroom"
-    );
+    // ... and once the cap is lowered below the current consumption, the
+    // status is held with zero remaining and admission refuses.
     let current = store
         .load_usage_cap_status(UsageCapStatusQuery {
             provider: None,

@@ -443,6 +443,40 @@ impl DesktopRuntime {
         })
     }
 
+    /// True once the Host's private channel ended. The GUI must then discard
+    /// its sessions and temporary secrets, stop Body, and close.
+    #[must_use]
+    pub fn confirmation_lost(&self) -> bool {
+        self.control
+            .as_ref()
+            .is_some_and(ConfirmationClient::is_closed)
+    }
+
+    /// Discards session and temporary-secret state after the private channel
+    /// ended, then stops the Body child. The GUI is no longer the Host's
+    /// confirmation surface.
+    pub fn close_after_confirmation_loss(&mut self) {
+        self.cancel_secret();
+        self.client = None;
+        self.pending_pairing = None;
+        self.body.shutdown();
+        self.body_status = self.body.poll();
+    }
+
+    /// The Owner's refusal of the currently displayed challenge. Applies
+    /// nothing; a no-op when no challenge is live.
+    pub async fn reject_pending_challenge(&mut self) {
+        let Some(seat) = self.control.as_mut() else {
+            return;
+        };
+        if seat.pending_challenge().is_none() {
+            return;
+        }
+        match seat.reject_pending().await {
+            Ok(_) | Err(_) => {}
+        }
+    }
+
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
         self.require_confirmation()?;
         self.ensure_client()?;

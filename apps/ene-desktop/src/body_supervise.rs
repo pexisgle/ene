@@ -24,7 +24,6 @@ pub struct BodySupervisor {
     reader: Option<JoinHandle<()>>,
     events: Option<Receiver<BodyToParent>>,
     exe: Option<PathBuf>,
-    last_event: Option<String>,
     local_ui: VecDeque<LocalUiFact>,
     presentations: VecDeque<PresentationFeedback>,
     native_ready: bool,
@@ -127,7 +126,6 @@ impl BodySupervisor {
                 self.reader = reader;
                 self.events = Some(rx);
                 self.exe = Some(exe.to_path_buf());
-                self.last_event = None;
                 self.local_ui.clear();
                 self.presentations.clear();
                 self.native_ready = false;
@@ -168,11 +166,7 @@ impl BodySupervisor {
         }
     }
 
-    #[must_use]
-    pub fn last_event_kind(&self) -> Option<&str> {
-        self.last_event.as_deref()
-    }
-
+    /// Takes an overlay-local settings candidate.
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         self.drain_events();
         self.local_ui.pop_front()
@@ -218,33 +212,29 @@ impl BodySupervisor {
 
     fn drain_events(&mut self) {
         let mut disconnected = false;
-        let mut last = None;
         if let Some(events) = self.events.as_mut() {
             loop {
                 match events.try_recv() {
-                    Ok(message) => {
-                        last = Some(event_kind(&message).to_string());
-                        match message {
-                            BodyToParent::Ready(info) => {
-                                self.native_ready = info.overlay
-                                    != ene_body::ipc::OverlayKind::Headless
-                                    && info.gpu == ene_body::ipc::GpuInitStatus::Ok;
-                            }
-                            BodyToParent::GpuFail(_) | BodyToParent::OverlayUnavailable(_) => {
-                                self.native_ready = false;
-                            }
-                            BodyToParent::AssetReady(_) => self.asset_ready = true,
-                            BodyToParent::HealthTick(tick) => {
-                                self.motion_ready =
-                                    tick.motion == ene_body::ipc::FeatureSupport::Available;
-                            }
-                            BodyToParent::LocalUi(fact) => self.local_ui.push_back(fact),
-                            BodyToParent::Presentation(feedback) => {
-                                self.presentations.push_back(feedback);
-                            }
-                            _ => {}
+                    Ok(message) => match message {
+                        BodyToParent::Ready(info) => {
+                            self.native_ready = info.overlay
+                                != ene_body::ipc::OverlayKind::Headless
+                                && info.gpu == ene_body::ipc::GpuInitStatus::Ok;
                         }
-                    }
+                        BodyToParent::GpuFail(_) | BodyToParent::OverlayUnavailable(_) => {
+                            self.native_ready = false;
+                        }
+                        BodyToParent::AssetReady(_) => self.asset_ready = true,
+                        BodyToParent::HealthTick(tick) => {
+                            self.motion_ready =
+                                tick.motion == ene_body::ipc::FeatureSupport::Available;
+                        }
+                        BodyToParent::LocalUi(fact) => self.local_ui.push_back(fact),
+                        BodyToParent::Presentation(feedback) => {
+                            self.presentations.push_back(feedback);
+                        }
+                        _ => {}
+                    },
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         disconnected = true;
@@ -252,9 +242,6 @@ impl BodySupervisor {
                     }
                 }
             }
-        }
-        if let Some(kind) = last {
-            self.last_event = Some(kind);
         }
         if disconnected {
             self.events = None;
@@ -264,21 +251,9 @@ impl BodySupervisor {
     fn drop_io(&mut self) {
         self.stdin = None;
         self.events = None;
-    }
-}
-
-fn event_kind(message: &BodyToParent) -> &'static str {
-    match message {
-        BodyToParent::Ready(_) => "Ready",
-        BodyToParent::GpuFail(_) => "GpuFail",
-        BodyToParent::OverlayUnavailable(_) => "OverlayUnavailable",
-        BodyToParent::AssetReady(_) => "AssetReady",
-        BodyToParent::AssetFail(_) => "AssetFail",
-        BodyToParent::MotionFail(_) => "MotionFail",
-        BodyToParent::HealthTick(_) => "HealthTick",
-        BodyToParent::LocalUi(_) => "LocalUi",
-        BodyToParent::Presentation(_) => "Presentation",
-        BodyToParent::CleanExit => "CleanExit",
+        self.native_ready = false;
+        self.asset_ready = false;
+        self.motion_ready = false;
     }
 }
 

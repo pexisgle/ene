@@ -41,9 +41,13 @@ impl RequesterClient {
     }
 
     pub async fn request(&self, message: &ToHost) -> Result<FromHost, DesktopError> {
-        let mut stream = connect_requester(&self.data_dir).await?;
-        write_requester_frame(&mut stream, message).await?;
-        read_requester_frame(&mut stream).await
+        tokio::time::timeout(CONFIRMATION_WAIT, async {
+            let mut stream = connect_requester(&self.data_dir).await?;
+            write_requester_frame(&mut stream, message).await?;
+            read_requester_frame(&mut stream).await
+        })
+        .await
+        .map_err(|_| DesktopError::Transport(String::from("requester listener stayed silent")))?
     }
 
     pub async fn open_desktop(&self) -> Result<bool, DesktopError> {
@@ -77,24 +81,6 @@ impl RequesterClient {
             ))),
         }
     }
-
-    pub async fn request_status(
-        &self,
-        request_id: &str,
-    ) -> Result<ene_local_control::RequestState, DesktopError> {
-        match self
-            .request(&ToHost::RequestStatus {
-                request_id: request_id.to_string(),
-            })
-            .await?
-        {
-            FromHost::RequestStatus { state, .. } => Ok(state),
-            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
-            other => Err(DesktopError::Control(format!(
-                "expected request status, got {other:?}"
-            ))),
-        }
-    }
 }
 
 pub struct ConfirmationClient {
@@ -103,6 +89,7 @@ pub struct ConfirmationClient {
     incoming: mpsc::Receiver<FromConfirmation>,
     closed: bool,
     challenge: Option<PendingChallenge>,
+    deferred: std::collections::VecDeque<PendingChallenge>,
 }
 
 impl ConfirmationClient {
@@ -132,17 +119,18 @@ impl ConfirmationClient {
             incoming,
             closed: false,
             challenge: None,
+            deferred: std::collections::VecDeque::new(),
         })
     }
 
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.closed
+        self.closed || self.incoming.is_closed()
     }
 
     #[must_use]
     pub fn pending_challenge(&self) -> Option<&PendingChallenge> {
-        self.challenge.as_ref()
+        self.challenge.as_ref().or_else(|| self.deferred.front())
     }
 
     pub async fn list_pending_deletions(
@@ -164,7 +152,7 @@ impl ConfirmationClient {
     }
 
     pub(crate) fn discard_pending(&mut self) {
-        self.challenge = None;
+        let _discarded = self.take_challenge();
     }
 
     pub async fn request_device_approve(&mut self, pending_id: &str) -> Result<(), DesktopError> {
@@ -199,35 +187,73 @@ impl ConfirmationClient {
         self.await_challenge(ControlOp::DeletionConfirm).await
     }
 
+    /// Waits for the Host to push the challenge of the operation just
+    /// requested.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Control`] when a frame other than a challenge arrives,
+    /// and [`DesktopError::Transport`] when none does.
     async fn await_challenge(&mut self, expected: ControlOp) -> Result<(), DesktopError> {
-        let frame = self.next_frame().await?;
-        match frame {
-            FromConfirmation::ConfirmationChallenge {
-                session_id,
-                op,
-                target,
-                nonce,
-                ..
-            } if op == expected => {
-                self.challenge = Some(PendingChallenge {
+        loop {
+            let frame = self.next_frame().await?;
+            match frame {
+                FromConfirmation::ConfirmationChallenge {
                     session_id,
                     op,
                     target,
                     nonce,
-                });
-                Ok(())
+                    ..
+                } if op == expected => {
+                    self.challenge = Some(PendingChallenge {
+                        session_id,
+                        op,
+                        target,
+                        nonce,
+                    });
+                    return Ok(());
+                }
+                // A different request's challenge may be pushed first when a
+                // concurrent requester races this GUI's own request. Keep it
+                // for its own Owner gesture instead of dropping the only
+                // surface that can complete it.
+                FromConfirmation::ConfirmationChallenge {
+                    session_id,
+                    op,
+                    target,
+                    nonce,
+                    ..
+                } => {
+                    self.deferred.push_back(PendingChallenge {
+                        session_id,
+                        op,
+                        target,
+                        nonce,
+                    });
+                }
+                other => {
+                    return Err(DesktopError::Control(format!(
+                        "expected a challenge, got {other:?}"
+                    )));
+                }
             }
-            FromConfirmation::ConfirmationChallenge { op, .. } => Err(DesktopError::Protocol(
-                format!("expected a {expected:?} challenge, got {op:?}"),
-            )),
-            other => Err(DesktopError::Control(format!(
-                "expected a challenge, got {other:?}"
-            ))),
         }
     }
 
+    /// Takes the challenge currently presented to the Owner, whether it was
+    /// the most recently awaited one or an earlier deferred one.
+    fn take_challenge(&mut self) -> Option<PendingChallenge> {
+        self.challenge.take().or_else(|| self.deferred.pop_front())
+    }
+
+    /// The Owner's direct confirmation on a non-secret challenge surface.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Protocol`] when no challenge is live, and
+    /// [`DesktopError::Transport`] when the boundary does not answer.
     pub async fn complete_pending(&mut self) -> Result<FromConfirmation, DesktopError> {
-        let Some(challenge) = self.challenge.take() else {
+        let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
                 "no live confirmation session",
             )));
@@ -243,7 +269,7 @@ impl ConfirmationClient {
         &mut self,
         secret: String,
     ) -> Result<FromConfirmation, DesktopError> {
-        let Some(challenge) = self.challenge.take() else {
+        let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
                 "no live confirmation session",
             )));
@@ -283,7 +309,7 @@ impl ConfirmationClient {
     }
 
     pub async fn reject_pending(&mut self) -> Result<FromConfirmation, DesktopError> {
-        let Some(challenge) = self.challenge.take() else {
+        let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
                 "no live confirmation session",
             )));

@@ -1,3 +1,25 @@
+//! Host-composition Targeted Deletion participant registry and fan-out.
+//!
+//! `ene-preservation` owns the participant vocabulary; each semantic owner
+//! implements [`ErasureParticipant`] in its own crate, and this module is the
+//! only place that knows the concrete implementations (lifecycle §9). The
+//! fan-out reads the durable operation and participant snapshot, issues one
+//! bounded demand at a time, and records each returned fact through the
+//! canonical store — it never invents a second participant registry and never
+//! treats a missing implementation, an unreachable holder, or a local
+//! completion as global completion.
+//!
+//! A demand for an owner with no registered implementation is driven as an
+//! explicit unsupported participant whose durable hold keeps the operation
+//! unfinished.
+//!
+//! The production entry points over this module are bounded: Host startup
+//! restores unfinished operations (resuming a retryable hold once, lifecycle
+//! §14), the serving composition runs a periodic tick (one pass plus a
+//! backed-off retry of a retryable hold), and a first-party confirmation kicks
+//! a bounded drive immediately after admission. None of them decides
+//! completion: only the sealed store boundary does.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -3184,13 +3206,15 @@ mod tests {
         handle: &HostHandle,
         expected: u32,
     ) -> TargetedDeletionPassOutcome {
+        let mut total = TargetedDeletionPassOutcome::default();
         for _ in 0..8 {
             let outcome = handle
                 .drive_targeted_deletion(TargetedDeletionPass::default())
                 .await
                 .unwrap();
-            if outcome.verified == expected {
-                return outcome;
+            total.accumulate(outcome);
+            if total.verified == expected {
+                return total;
             }
         }
         panic!("the bounded participants must settle");

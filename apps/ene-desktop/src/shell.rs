@@ -698,6 +698,13 @@ fn attach_erasure(desktop: &mut DesktopRuntime, surfaces: Surfaces) {
 }
 async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
     loop {
+        if desktop.confirmation_lost() {
+            desktop.close_after_confirmation_loss();
+            match slint::quit_event_loop() {
+                Ok(_) | Err(_) => {}
+            }
+            return;
+        }
         let notified = s.mailbox.wake.notified();
         let Some(request) = s.mailbox.pop() else {
             tokio::select! { ()=notified => {}, ()=tokio::time::sleep(Duration::from_millis(250)) => desktop.tick() }
@@ -906,6 +913,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             return Ok(control_notice(ja, &result));
         }
         Command::Dismiss => {
+            d.reject_pending_challenge().await;
             d.cancel_secret();
             None
         }

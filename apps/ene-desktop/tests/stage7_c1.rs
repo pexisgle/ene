@@ -793,13 +793,15 @@ async fn learning_barrier_gui_does_not_invent_formation() {
     );
     let release = transport.park_learning();
     say(&mut desktop, "I like green tea").await;
+    let before = desktop.ui_ticks();
     for _ in 0..8 {
         desktop.tick();
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
-    assert!(
-        desktop.ui_ticks() >= 8,
-        "ticks advance while learning waits"
+    assert_eq!(
+        desktop.ui_ticks() - before,
+        8,
+        "each tick must advance the counter while learning waits"
     );
     desktop.refresh_memory().await.expect("list during park");
     assert!(

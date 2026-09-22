@@ -29,30 +29,12 @@ impl Locale {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Label {
     Chat,
-    History,
     Memory,
-    Tasks,
-    Settings,
-    About,
-    Usage,
-    Deletion,
-    Refresh,
-    Resume,
-    RequestDeletion,
-    ApplyCap,
     WizardLanguage,
     WizardBundledEne,
     WizardCloudCost,
     WizardCredential,
     WizardAssignment,
-    Send,
-    Confirm,
-    Cancel,
-    Next,
-    Back,
-    CompanionStopped,
-    ProviderDown,
-    AvatarAbsent,
     Connecting,
     Connected,
     Disconnected,
@@ -63,28 +45,8 @@ pub fn label(locale: Locale, key: Label) -> &'static str {
     match (locale, key) {
         (Locale::Ja, Label::Chat) => "会話",
         (Locale::En, Label::Chat) => "Chat",
-        (Locale::Ja, Label::History) => "履歴",
-        (Locale::En, Label::History) => "History",
         (Locale::Ja, Label::Memory) => "記憶",
         (Locale::En, Label::Memory) => "Memory",
-        (Locale::Ja, Label::Tasks) => "タスク",
-        (Locale::En, Label::Tasks) => "Tasks",
-        (Locale::Ja, Label::Settings) => "設定",
-        (Locale::En, Label::Settings) => "Settings",
-        (Locale::Ja, Label::About) => "情報",
-        (Locale::En, Label::About) => "About",
-        (Locale::Ja, Label::Usage) => "利用量",
-        (Locale::En, Label::Usage) => "Usage",
-        (Locale::Ja, Label::Deletion) => "削除",
-        (Locale::En, Label::Deletion) => "Deletion",
-        (Locale::Ja, Label::Refresh) => "更新",
-        (Locale::En, Label::Refresh) => "Refresh",
-        (Locale::Ja, Label::Resume) => "再開",
-        (Locale::En, Label::Resume) => "Resume",
-        (Locale::Ja, Label::RequestDeletion) => "削除を要求",
-        (Locale::En, Label::RequestDeletion) => "Request deletion",
-        (Locale::Ja, Label::ApplyCap) => "上限を更新",
-        (Locale::En, Label::ApplyCap) => "Apply cap",
         (Locale::Ja, Label::WizardLanguage) => "UI言語を選んでください",
         (Locale::En, Label::WizardLanguage) => "Choose a UI language",
         (Locale::Ja, Label::WizardBundledEne) => {
@@ -108,28 +70,6 @@ pub fn label(locale: Locale, key: Label) -> &'static str {
         (Locale::Ja, Label::WizardAssignment) => "使用モデルを割り当てるとセットアップが完了します",
         (Locale::En, Label::WizardAssignment) => {
             "Assign a model to finish setup. This is the consent step."
-        }
-        (Locale::Ja, Label::Send) => "送信",
-        (Locale::En, Label::Send) => "Send",
-        (Locale::Ja, Label::Confirm) => "確認する",
-        (Locale::En, Label::Confirm) => "Confirm",
-        (Locale::Ja, Label::Cancel) => "キャンセル",
-        (Locale::En, Label::Cancel) => "Cancel",
-        (Locale::Ja, Label::Next) => "次へ",
-        (Locale::En, Label::Next) => "Next",
-        (Locale::Ja, Label::Back) => "戻る",
-        (Locale::En, Label::Back) => "Back",
-        (Locale::Ja, Label::CompanionStopped) => "パートナーは停止中です。管理は利用できます。",
-        (Locale::En, Label::CompanionStopped) => {
-            "Companion is stopped. Management remains available."
-        }
-        (Locale::Ja, Label::ProviderDown) => "プロバイダーに到達できません。管理は利用できます。",
-        (Locale::En, Label::ProviderDown) => {
-            "Provider is unreachable. Management remains available."
-        }
-        (Locale::Ja, Label::AvatarAbsent) => "アバターはありません。会話と設定は利用できます。",
-        (Locale::En, Label::AvatarAbsent) => {
-            "Avatar is absent. Chat and settings remain available."
         }
         (Locale::Ja, Label::Connecting) => "接続中",
         (Locale::En, Label::Connecting) => "Connecting",

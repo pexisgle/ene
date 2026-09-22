@@ -514,9 +514,9 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     desktop.try_spawn_body(&exe);
     desktop.tick();
     let spawned = desktop.snapshot().body_status;
-    assert!(
-        spawned == "Spawned" || spawned == "Exited" || spawned == "Absent",
-        "spawn outcome is observed, got {spawned}"
+    assert_ne!(
+        spawned, "Absent",
+        "the Body binary must launch rather than be missing: {spawned}"
     );
     if spawned == "Spawned" {
         desktop.kill_body();
@@ -537,10 +537,49 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
         .await
         .expect("settings survive Body kill");
     desktop.open_page(Page::Settings);
-    let _cancel = tokio::time::timeout(Duration::from_secs(5), desktop.cancel_displayed_task())
-        .await
-        .expect("cancel path remains responsive");
+    let cancel = desktop.cancel_displayed_task().await;
+    assert!(
+        matches!(
+            cancel,
+            Err(ene_desktop::ui::DesktopError::Protocol(ref message))
+                if message.contains("displayed task")
+        ),
+        "cancel path stays reachable and refuses without a displayed task: {cancel:?}"
+    );
     assert_eq!(transport.sends(), 1);
+    server.shutdown_and_join().await;
+}
+
+#[test]
+fn unmeasured_record_is_not_a_gate_pass() {
+    let record = measure::MeasurementRecord::default();
+    assert!(!record.claims_pass());
+    assert_eq!(record.verdict.label(), "Unmeasured");
+}
+
+#[tokio::test]
+async fn send_text_presents_its_collected_turn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["ack me"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+
+    desktop.composer_mut().set_draft(String::from("ack me"));
+    desktop.send_text().await.expect("send_text");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if unpresented_count(&handle).await == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "send_text must present its collected turn"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     server.shutdown_and_join().await;
 }
 

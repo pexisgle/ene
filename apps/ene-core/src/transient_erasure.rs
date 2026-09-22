@@ -109,9 +109,16 @@ pub(crate) const HOST_TRANSIENT_LEARNING_QUEUE_PAGE: usize = 32;
 
 pub(crate) const LEARNING_FORMATION_QUEUE_CAP: usize = 256;
 
+/// Process-local continuation of one HostTransient Learning-queue sweep.
+///
+/// This is not a canonical deletion registry. Restart loses it and the next
+/// demand starts a new cycle from the live pending queue. `remaining` is the
+/// number of pending entries still owed in the current stable generation,
+/// never `queue.len() > PAGE`. Demands for different conditions keep separate
+/// entries so one operation's demand cannot restart or overwrite another's
+/// cursor.
 #[derive(Debug, Clone, Copy)]
 struct HostTransientLearningSweep {
-    condition: ErasureConditionRef,
     queue_generation: u64,
     remaining: usize,
 }
@@ -476,7 +483,9 @@ pub(crate) struct HostTransientParticipant {
     learning_queue: Arc<std::sync::Mutex<LearningFormationQueue>>,
     arrival: Arc<HostTransientArrival>,
     demand_lock: tokio::sync::Mutex<()>,
-    sweep: std::sync::Mutex<Option<HostTransientLearningSweep>>,
+    sweep: std::sync::Mutex<HashMap<ErasureConditionRef, HostTransientLearningSweep>>,
+    #[cfg(test)]
+    last_scanned: std::sync::atomic::AtomicUsize,
 }
 
 impl HostTransientParticipant {
@@ -495,7 +504,9 @@ impl HostTransientParticipant {
             learning_queue,
             arrival,
             demand_lock: tokio::sync::Mutex::new(()),
-            sweep: std::sync::Mutex::new(None),
+            sweep: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            last_scanned: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -520,6 +531,13 @@ impl HostTransientParticipant {
             .await
     }
 
+    /// Records a HostTransient Verified fact only while the examined queue
+    /// generation is still live, no body-bearing pin is in flight, and the
+    /// fact's own operation has no unpublished TARGET-bearing arrival owed.
+    ///
+    /// The park sits *before* the arrival gate so a test can enqueue G+1
+    /// while the in-memory fact exists and the durable row is still
+    /// `running`. The gate then serializes that enqueue against this commit.
     pub(crate) async fn commit_verified(
         &self,
         fact: ParticipantCompletionFact,
@@ -541,7 +559,26 @@ impl HostTransientParticipant {
                     + u64::from(unpublished),
             )
         };
-        if inflight > 0 || unpublished || live_generation != self.arrival.verified_generation() {
+        if inflight > 0 || live_generation != self.arrival.verified_generation() {
+            return self
+                .store
+                .record_participant_completion(ParticipantCompletionFact::more_work(
+                    fact.condition(),
+                    ParticipantOwnerRef::HostTransient,
+                    fact.erased_count(),
+                    remainder.max(1),
+                    WallClockWithTz::now(),
+                ))
+                .await;
+        }
+        if self.arrival.has_unpublished()
+            && self
+                .unpublished_blocks_finalizing(DeletionOperationRef {
+                    operation: fact.condition().operation,
+                    sweep: fact.condition().sweep,
+                })
+                .await
+        {
             return self
                 .store
                 .record_participant_completion(ParticipantCompletionFact::more_work(
@@ -557,11 +594,13 @@ impl HostTransientParticipant {
     }
 
     fn rebase_sweep(&self, condition: ErasureConditionRef, generation: u64, remaining: usize) {
-        *crate::lock_unpoison(&self.sweep) = Some(HostTransientLearningSweep {
+        crate::lock_unpoison(&self.sweep).insert(
             condition,
-            queue_generation: generation,
-            remaining,
-        });
+            HostTransientLearningSweep {
+                queue_generation: generation,
+                remaining,
+            },
+        );
     }
 }
 
@@ -603,22 +642,22 @@ impl ErasureParticipant for HostTransientParticipant {
                 let queue = crate::lock_unpoison(&self.learning_queue);
                 let generation = queue.mutation_generation();
                 let mut sweep = crate::lock_unpoison(&self.sweep);
-                let restart = !matches!(
-                    *sweep,
-                    Some(HostTransientLearningSweep {
-                        condition,
-                        queue_generation,
-                        ..
-                    }) if condition == command.condition() && queue_generation == generation
-                );
+                let entry = sweep.get(&command.condition()).copied();
+                let restart = entry.is_none_or(|item| item.queue_generation != generation);
                 if restart {
-                    *sweep = Some(HostTransientLearningSweep {
-                        condition: command.condition(),
-                        queue_generation: generation,
-                        remaining: queue.len(),
-                    });
+                    sweep.insert(
+                        command.condition(),
+                        HostTransientLearningSweep {
+                            queue_generation: generation,
+                            remaining: queue.len(),
+                        },
+                    );
                 }
-                let remaining = sweep.as_ref().map_or(0, |item| item.remaining);
+                let remaining = if restart {
+                    queue.len()
+                } else {
+                    entry.map_or(queue.len(), |item| item.remaining)
+                };
                 let page_len = remaining.min(HOST_TRANSIENT_LEARNING_QUEUE_PAGE);
                 let mut identities = queue
                     .iter()
@@ -667,10 +706,14 @@ impl ErasureParticipant for HostTransientParticipant {
                         queue.apply_examined_page(page_len, &exact, &identities, &covered);
                     let remaining = {
                         let mut sweep = crate::lock_unpoison(&self.sweep);
-                        if let Some(item) = sweep.as_mut() {
+                        let remaining = sweep.get_mut(&command.condition()).map_or(0, |item| {
                             item.remaining = item.remaining.saturating_sub(page_len);
+                            item.remaining
+                        });
+                        if remaining == 0 {
+                            sweep.remove(&command.condition());
                         }
-                        sweep.as_ref().map_or(0, |item| item.remaining)
+                        remaining
                     };
                     let taken_covered = queue.taken().is_some_and(|experience| {
                         experience_covered(experience, &exact, &covered, &identities)
@@ -998,14 +1041,25 @@ impl ClientIncarnationParticipant {
         result: &LocalErasureResult,
     ) -> ParticipantCompletionFact {
         let wiped = result.wiped.len() as u64;
-        if result.unverified.is_empty() {
+        if verified_full_class_wipe(result) {
             ParticipantCompletionFact::verified(condition, owner, wiped, WallClockWithTz::now())
         } else {
+            // A report that does not cover the whole demanded class set keeps
+            // the bounded pass at local completion with a remainder: a class
+            // absent from both lists is as unproven as a reported unverified
+            // one, and the Host never upgrades either to verified.
+            let missing = current_client_targets()
+                .iter()
+                .filter(|target| {
+                    let DeletionTargetWire::WipeClass { class } = target;
+                    !result.wiped.contains(class) && !result.unverified.contains(class)
+                })
+                .count() as u64;
             ParticipantCompletionFact::local_complete(
                 condition,
                 owner,
                 wiped,
-                result.unverified.len() as u64,
+                result.unverified.len() as u64 + missing,
                 WallClockWithTz::now(),
             )
         }
@@ -1861,6 +1915,32 @@ mod tests {
         assert_eq!(fact.remainder_count(), 1);
     }
 
+    /// A narrow report that omits a demanded class is not proof of its
+    /// erasure: the participant stays locally complete with a remainder, and
+    /// the Host never upgrades it to Verified.
+    #[tokio::test]
+    async fn a_narrow_client_report_is_never_upgraded_to_verified() {
+        let fixture = client_fixture("a3c-client-narrow").await;
+        let payload = demand_on_wire(&fixture).await;
+        let owner = ParticipantOwnerRef::ClientIncarnation(fixture.identity);
+        for (wiped, unverified) in [
+            (Vec::new(), Vec::new()),
+            (vec![ClientTempClass::InputDraft], Vec::new()),
+        ] {
+            let result = wipe_result(&payload, wiped, unverified);
+            let fact = ClientIncarnationParticipant::completion(fixture.condition, owner, &result);
+            assert_eq!(
+                fact.status(),
+                ParticipantCompletionStatus::LocalComplete,
+                "a report missing a demanded class is never a verified wipe"
+            );
+            assert!(
+                fact.remainder_count() >= 1,
+                "a demanded class absent from both lists is a remainder"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_delivered_silent_client_demand_holds_after_the_wait_bound() {
         let fixture = client_fixture("a3c-client-timeout").await;
@@ -2357,6 +2437,74 @@ mod tests {
                 .iter()
                 .all(|item| !item.transcript[0].text.contains("secret body")),
             "no remaining entry may carry the target"
+        );
+    }
+
+    /// A second operation's demand must not reset the first's continuation
+    /// cursor: with a queue longer than one pass's demand budget, interleaved
+    /// demands for two live operations must each keep their own `remaining`
+    /// and both reach Verified.
+    #[tokio::test]
+    async fn a_second_operation_does_not_reset_the_first_sweep_cursor() {
+        let (handle, _dir) = memory_handle("a3c-host-transient-sweep-map")
+            .await
+            .expect("the handle opens");
+        let page = super::HOST_TRANSIENT_LEARNING_QUEUE_PAGE;
+        // One more than a whole pass's demand budget (`demands_per_participant
+        // * PAGE`), so a single-slot cursor is overwritten before it empties.
+        let queued = 4 * page + 1;
+        for _ in 0..queued {
+            crate::lock_unpoison(&handle.learning_queue).push_back(experience("unrelated text"));
+        }
+        let participant = host_transient(&handle);
+        let a = admit(
+            &handle,
+            "secret-a",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let b = admit(
+            &handle,
+            "secret-b",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let mut verified_a = false;
+        let mut verified_b = false;
+        let mut demands = 0usize;
+        while !(verified_a && verified_b) {
+            demands += 1;
+            assert!(
+                demands < 64,
+                "both operations must settle within a bounded number of demands"
+            );
+            if !verified_a {
+                verified_a = participant
+                    .demand_local_erasure(command(
+                        a.condition(),
+                        ParticipantOwnerRef::HostTransient,
+                        ParticipantErasureScope::local(target("secret-a")),
+                    ))
+                    .await
+                    .status()
+                    == ParticipantCompletionStatus::Verified;
+            }
+            if !verified_b {
+                verified_b = participant
+                    .demand_local_erasure(command(
+                        b.condition(),
+                        ParticipantOwnerRef::HostTransient,
+                        ParticipantErasureScope::local(target("secret-b")),
+                    ))
+                    .await
+                    .status()
+                    == ParticipantCompletionStatus::Verified;
+            }
+        }
+        assert_eq!(
+            crate::lock_unpoison(&handle.learning_queue).len(),
+            queued,
+            "unrelated premises are rotated, never dropped"
         );
     }
 
@@ -3371,6 +3519,59 @@ mod tests {
         assert_ne!(
             deletion_phase(&handle, c.operation).await,
             DeletionOperationPhase::Completed
+        );
+        assert!(handle.host_transient_arrival.scan_incomplete());
+    }
+
+    /// An operation admitted while the arrival walk is stuck incomplete must
+    /// still verify and Complete through `commit_verified`: the global
+    /// `scan_incomplete` flag fail-closes only the operation whose
+    /// classification failed.
+    #[tokio::test]
+    async fn an_unrelated_operation_verifies_through_commit_while_scan_is_incomplete() {
+        let (handle, _dir) = memory_handle("a3c-commit-unrelated")
+            .await
+            .expect("the handle opens");
+        let b = admit(
+            &handle,
+            "secret-b",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        let c = admit(
+            &handle,
+            "secret-c",
+            vec![ParticipantOwnerRef::HostTransient],
+        )
+        .await;
+        // Only C is unreadable, so the walk stays globally incomplete. B is
+        // never pre-verified: it must reach Verified through the production
+        // `commit_verified` path despite the global flag.
+        handle
+            .store
+            .fail_deletion_operation_material_for_tests(c.operation);
+        handle
+            .queue_learning_formation(experience("contains nothing related"))
+            .await;
+        assert!(handle.host_transient_arrival.scan_incomplete());
+        for _ in 0..32 {
+            handle
+                .drive_targeted_deletion(TargetedDeletionPass::default())
+                .await
+                .expect("the fan-out must not fail");
+            if deletion_phase(&handle, b.operation).await == DeletionOperationPhase::Completed {
+                break;
+            }
+        }
+        assert_eq!(
+            deletion_phase(&handle, b.operation).await,
+            DeletionOperationPhase::Completed,
+            "an unrelated operation must Complete through commit_verified while C's classification fails"
+        );
+        assert_ne!(
+            deletion_phase(&handle, c.operation).await,
+            DeletionOperationPhase::Completed,
+            "C must stay fail-closed on its own classification failure"
         );
         assert!(handle.host_transient_arrival.scan_incomplete());
     }

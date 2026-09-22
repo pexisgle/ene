@@ -35,11 +35,8 @@ use ene_task::{
 use rusqlite::params;
 
 fn fixture_clock() -> WallClockWithTz {
-    if let Ok(at) = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00") {
-        at
-    } else {
-        WallClockWithTz::now()
-    }
+    WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
+        .expect("fixture timestamp must parse")
 }
 
 fn registration_fingerprint(
@@ -161,6 +158,350 @@ async fn supersession_probe_is_index_backed_not_a_scan() {
     );
 }
 
+#[tokio::test]
+async fn append_with_moved_consent_is_rejected() {
+    use ene_companion::HistoryRepository as _;
+
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let mut cmd = history_command(companion, generation, "consent body");
+    cmd.expected_consent = Some((String::from("consent-1"), 999));
+    let appended = store.append_message(cmd).await;
+    let outcome = appended.unwrap();
+    assert_eq!(
+        outcome,
+        HistoryAppendOutcome::StaleConsent,
+        "moved consent must answer stale-consent"
+    );
+    let loaded = store.load_timeline(companion, None, None, 10).await;
+    assert!(
+        matches!(&loaded, Ok(items) if items.is_empty()),
+        "stale-consent append must store nothing"
+    );
+}
+
+#[tokio::test]
+async fn append_while_stopped_is_held_by_lifecycle() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let stopped = guard.execute(
+            "UPDATE companion SET lifecycle = ?1 WHERE companion_id = ?2",
+            params![
+                crate::codec::encode_lifecycle(CompanionLifecycle::Stopped),
+                crate::codec::encode_id(companion.as_raw())
+            ],
+        );
+        assert!(stopped.is_ok(), "lifecycle update must succeed");
+    }
+    let appended = store
+        .append_message(history_command(companion, generation, "held body"))
+        .await;
+    let outcome = appended.unwrap();
+    assert_eq!(
+        outcome,
+        HistoryAppendOutcome::HeldByLifecycle {
+            lifecycle: CompanionLifecycle::Stopped
+        },
+        "stopped companion must hold appends"
+    );
+}
+
+#[tokio::test]
+async fn undelivered_register_mark_and_stale_mark() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let appended = store
+        .append_reply_with_undelivered(
+            history_command(companion, generation, "reply body"),
+            true,
+            None,
+        )
+        .await;
+    let (outcome, registered) = appended.unwrap();
+    assert!(
+        matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
+        "reply must commit"
+    );
+    let entry = registered.expect("registration must return the entry");
+    assert_eq!(entry.status, ReportStatus::Pending);
+    assert!(entry.round.is_some(), "conversation sources carry a round");
+    assert!(entry.presence_generation.is_some());
+    let round = entry.round.unwrap();
+
+    let listed = store
+        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+        .await
+        .unwrap();
+    assert_eq!(listed.entries.len(), 1, "one entry must be unpresented");
+    assert_eq!(listed.entries[0].id, entry.id);
+    assert_eq!(listed.next, None, "a short page drains the pass");
+
+    // Presentation start: Pending -> PresentationUnknown, still re-listed.
+    let started = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::Pending,
+            PresentationMark {
+                round,
+                presented: false,
+            },
+        )
+        .await;
+    assert_eq!(
+        started,
+        Ok(ReportStatusTransition::MarkedPresentationUnknown)
+    );
+    let relisted = store
+        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+        .await
+        .unwrap();
+    assert_eq!(relisted.entries.len(), 1, "Unknown must be re-listed");
+    assert_eq!(
+        relisted.entries[0].status,
+        ReportStatus::PresentationUnknown
+    );
+
+    // A current not-presented receipt returns the row to Pending.
+    let failed = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round,
+                presented: false,
+            },
+        )
+        .await;
+    assert_eq!(failed, Ok(ReportStatusTransition::FailedToPending));
+
+    // A mismatched expected status on the pending row is stale.
+    let stale = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round,
+                presented: true,
+            },
+        )
+        .await;
+    assert_eq!(
+        stale,
+        Ok(ReportStatusTransition::StaleSource),
+        "a mismatched expected status must be stale"
+    );
+
+    // Confirmed presentation is absorbing.
+    let presented = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::Pending,
+            PresentationMark {
+                round,
+                presented: true,
+            },
+        )
+        .await;
+    assert_eq!(presented, Ok(ReportStatusTransition::PendingToPresented));
+    let duplicate = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round,
+                presented: true,
+            },
+        )
+        .await;
+    assert_eq!(
+        duplicate,
+        Ok(ReportStatusTransition::AlreadyPresented),
+        "duplicate ACK writes nothing"
+    );
+    let downgrade = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::PresentationUnknown,
+            PresentationMark {
+                round,
+                presented: false,
+            },
+        )
+        .await;
+    assert_eq!(
+        downgrade,
+        Ok(ReportStatusTransition::AlreadyPresented),
+        "presented absorbs a later not-presented receipt"
+    );
+    let drained = store
+        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
+        .await
+        .unwrap();
+    assert!(
+        drained.entries.is_empty(),
+        "presented entries leave the unpresented list"
+    );
+
+    let stale = store
+        .compare_and_mark_reported(
+            entry.id,
+            ReportStatus::Pending,
+            PresentationMark {
+                round,
+                presented: true,
+            },
+        )
+        .await;
+    assert_eq!(
+        stale,
+        Ok(ReportStatusTransition::AlreadyPresented),
+        "a presented row absorbs every later mark, stale premise included"
+    );
+}
+
+#[tokio::test]
+async fn presence_begin_mismatch_is_rejected_as_stale() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let raw = companion.as_raw();
+    let check = PresenceCheckRef {
+        expected_generation: PresenceGeneration::from_u64(generation.as_u64() + 1),
+        expected_state: PresenceState::NoActive,
+        expected_active: None,
+    };
+    let rejected = store
+        .compare_and_begin_transition(
+            raw,
+            check,
+            Some(ClientId::generate()),
+            ThinMoveReason::InitialAttach,
+        )
+        .await;
+    let decision = rejected.unwrap();
+    let MoveDecision::RejectedAsStalePresence { current } = decision else {
+        panic!("generation mismatch must reject as stale, got {decision:?}");
+    };
+    assert_eq!(current.generation, generation);
+    assert_eq!(current.state, PresenceState::NoActive);
+    let client = ClientId::generate();
+    let begin = store
+        .compare_and_begin_transition(
+            raw,
+            PresenceCheckRef {
+                expected_generation: generation,
+                expected_state: PresenceState::NoActive,
+                expected_active: None,
+            },
+            Some(client),
+            ThinMoveReason::InitialAttach,
+        )
+        .await;
+    let MoveDecision::TransitioningToNew { generation: next } = begin.unwrap() else {
+        panic!("unexpected variant");
+    };
+    let confirmed = store
+        .confirm_transition(
+            raw,
+            next,
+            LiveReachabilityRef {
+                client,
+                connection_live: true,
+            },
+        )
+        .await;
+    let ConfirmTransitionOutcome::Confirmed(fact) = confirmed.unwrap() else {
+        panic!("unexpected variant");
+    };
+    assert_eq!(fact.state, PresenceState::Present);
+    assert_eq!(fact.active_client, Some(client));
+    assert_eq!(fact.generation, next);
+}
+
+#[tokio::test]
+async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let raw = companion.as_raw();
+    let pinned = ClientId::generate();
+    let intruder = ClientId::generate();
+    let begin = store
+        .compare_and_begin_transition(
+            raw,
+            PresenceCheckRef {
+                expected_generation: generation,
+                expected_state: PresenceState::NoActive,
+                expected_active: None,
+            },
+            Some(pinned),
+            ThinMoveReason::InitialAttach,
+        )
+        .await;
+    let MoveDecision::TransitioningToNew { generation: next } = begin.unwrap() else {
+        panic!("unexpected variant");
+    };
+    let rejected = store
+        .confirm_transition(
+            raw,
+            next,
+            LiveReachabilityRef {
+                client: intruder,
+                connection_live: true,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            rejected,
+            Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { .. })
+        ),
+        "unpinned confirm must reject, got {rejected:?}"
+    );
+    let current = store.load_attribution(raw).await;
+    assert!(
+        matches!(&current, Ok(Some(fact)) if fact.state == PresenceState::InTransition
+            && fact.generation == next
+            && fact.active_client == Some(pinned)),
+        "rejected confirm must leave the row untouched, got {current:?}"
+    );
+    let confirmed = store
+        .confirm_transition(
+            raw,
+            next,
+            LiveReachabilityRef {
+                client: pinned,
+                connection_live: true,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            confirmed,
+            Ok(ConfirmTransitionOutcome::Confirmed(ref fact))
+                if fact.state == PresenceState::Present
+                    && fact.active_client == Some(pinned)
+        ),
+        "pinned confirm must succeed, got {confirmed:?}"
+    );
+}
+
+fn consent_record(id: &str, rev: u64) -> ConsentRecord {
+    ConsentRecord {
+        capability: CapabilityKind::Dialogue,
+        id: String::from(id),
+        rev: ConsentRevision::from_u64(rev),
+        provider: String::from("acme"),
+        model: String::from("dialogue-1"),
+        credential_id: String::from("cred-1"),
+    }
+}
+
+/// Commits one consent row through the intent-atomic write path, minting a
+/// fresh intent id per call so nothing replays.
 async fn save_consent(
     store: &Store,
     expected: Option<(String, ConsentRevision)>,
@@ -184,6 +525,478 @@ async fn save_consent(
             panic!("a fresh intent id must decide")
         }
     }
+}
+
+#[tokio::test]
+async fn consent_assign_with_intent_commit_and_stale_matrix() {
+    let store = open_memory().await.unwrap();
+    let empty = store.load_current(CapabilityKind::Dialogue).await;
+    assert!(matches!(empty, Ok(None)), "fresh store holds no consent");
+    let first = consent_record("consent-1", 3);
+    let committed = save_consent(&store, None, first.clone()).await;
+    assert!(
+        matches!(
+            committed,
+            ConsentCommitOutcome::Committed { ref record } if *record == first
+        ),
+        "empty store with no expectation must commit"
+    );
+    let loaded = store.load_current(CapabilityKind::Dialogue).await;
+    assert!(matches!(loaded, Ok(Some(ref current)) if *current == first));
+    let intruder = consent_record("consent-9", 1);
+    let unexpected = save_consent(&store, None, intruder).await;
+    assert!(
+        matches!(
+            unexpected,
+            ConsentCommitOutcome::StaleCurrent { ref current } if *current == Some(first.clone())
+        ),
+        "existing row with no expectation must be stale"
+    );
+    let next = consent_record("consent-1", 4);
+    let recommitted = save_consent(
+        &store,
+        Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
+        next.clone(),
+    )
+    .await;
+    assert!(
+        matches!(
+            recommitted,
+            ConsentCommitOutcome::Committed { ref record } if *record == next
+        ),
+        "matching expectation must commit the replacement"
+    );
+    let replay = consent_record("consent-1", 5);
+    let stale_rev = save_consent(
+        &store,
+        Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
+        replay,
+    )
+    .await;
+    assert!(
+        matches!(
+            stale_rev,
+            ConsentCommitOutcome::StaleCurrent { ref current } if *current == Some(next.clone())
+        ),
+        "revision mismatch must be stale"
+    );
+    let fork = consent_record("consent-2", 4);
+    let stale_id = save_consent(
+        &store,
+        Some((String::from("consent-2"), ConsentRevision::from_u64(4))),
+        fork,
+    )
+    .await;
+    assert!(
+        matches!(
+            stale_id,
+            ConsentCommitOutcome::StaleCurrent { ref current } if *current == Some(next.clone())
+        ),
+        "id mismatch must be stale"
+    );
+    let kept = store.load_current(CapabilityKind::Dialogue).await;
+    assert!(
+        matches!(kept, Ok(Some(ref current)) if *current == next),
+        "stale attempts must leave the stored row untouched"
+    );
+}
+
+#[tokio::test]
+async fn consent_assign_with_intent_expected_but_empty_is_stale() {
+    let store = open_memory().await.unwrap();
+    let record = consent_record("consent-1", 1);
+    let outcome = save_consent(
+        &store,
+        Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
+        record,
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            ConsentCommitOutcome::StaleCurrent { current: None }
+        ),
+        "an expectation against an empty store must be stale"
+    );
+    let empty = store.load_current(CapabilityKind::Dialogue).await;
+    assert!(matches!(empty, Ok(None)), "stale save must store nothing");
+}
+
+#[tokio::test]
+async fn credential_register_and_list() {
+    let store = open_memory().await.unwrap();
+    let listed_empty = store.list_refs().await;
+    assert!(
+        matches!(listed_empty, Ok(ref refs) if refs.is_empty()),
+        "fresh store holds no refs"
+    );
+    let cred = CredentialRef::new("acme", "main").expect("valid test fixture");
+    approve_pair(&store, "acme", "main", "sk-main", "reg-list-1").await;
+    let second = CredentialRef::new("acme", "backup").expect("valid test fixture");
+    approve_pair(&store, "acme", "backup", "sk-backup", "reg-list-2").await;
+    let listed = store.list_refs().await;
+    let refs = listed.unwrap();
+    assert_eq!(refs.len(), 2, "both refs must list");
+    assert!(refs.contains(&cred), "first ref must list");
+    assert!(refs.contains(&second), "second ref must list");
+}
+
+#[tokio::test]
+async fn local_id_is_correspondence_metadata_not_a_replay_key() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let first = store
+        .append_message(history_command_with_ids(
+            companion,
+            generation,
+            "first body",
+            None,
+            Some("send-1"),
+        ))
+        .await;
+    assert!(
+        matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "first append must commit"
+    );
+    let second = store
+        .append_message(history_command_with_ids(
+            companion,
+            generation,
+            "second body",
+            None,
+            Some("send-1"),
+        ))
+        .await;
+    assert!(
+        matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "repeating a local id must append, not replay"
+    );
+    let first_outcome = first.unwrap();
+    let second_outcome = second.unwrap();
+    assert_ne!(
+        first_outcome, second_outcome,
+        "local id repeats must mint distinct messages"
+    );
+    let loaded = store.load_timeline(companion, None, None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 2, "both local id repeats must persist");
+    assert!(
+        timeline
+            .iter()
+            .all(|item| item.local_id.as_deref() == Some("send-1")),
+        "local id must round-trip as correspondence metadata"
+    );
+    assert!(timeline.iter().all(|item| item.command_id.is_none()));
+}
+
+#[tokio::test]
+async fn command_replay_returns_original_accept_without_duplicate_row() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let command = CommandId(RawId::new());
+    let base = history_command_with_ids(
+        companion,
+        generation,
+        "original body",
+        Some(command),
+        Some("send-1"),
+    );
+    let first = store
+        .append_reply_with_undelivered(base.clone(), true, None)
+        .await;
+    let (first_outcome, first_registered) = first.unwrap();
+    let HistoryAppendOutcome::CommittedAs { message: first_id } = first_outcome else {
+        panic!("the first append must commit, got {first_outcome:?}");
+    };
+    assert!(
+        first_registered.is_some(),
+        "first commit registers undelivered"
+    );
+    let retry = store
+        .append_reply_with_undelivered(base.clone(), true, None)
+        .await;
+    let (retry_outcome, retry_registered) = retry.unwrap();
+    let HistoryAppendOutcome::AlreadyCommittedAs { message, round } = retry_outcome else {
+        assert!(
+            format!("{retry_outcome:?}").is_empty(),
+            "retry must replay the original accept, got {retry_outcome:?}"
+        );
+        return;
+    };
+    assert_eq!(
+        message, first_id,
+        "retry must replay the original message identity"
+    );
+    let looked_up = store.lookup_command(companion, &command).await;
+    let original = looked_up.unwrap().unwrap();
+    assert_eq!(original.round, round, "replay must name the original round");
+    assert!(
+        retry_registered.is_none(),
+        "replay must not re-register undelivered"
+    );
+    let count = history_row_count(&store, companion);
+    assert_eq!(count, Some(1), "replay must not append a second row");
+    let pending = UndeliveredRepository::list_unpresented(
+        &store,
+        companion,
+        None,
+        ene_companion::UNDELIVERED_PAGE_MAX,
+    )
+    .await;
+    let items = pending.unwrap().entries;
+    assert_eq!(items.len(), 1, "replay must not duplicate undelivered");
+    let looked_up = store.lookup_command(companion, &command).await;
+    let item = looked_up.unwrap().unwrap();
+    assert_eq!(item.id, first_id);
+    assert_eq!(item.text, "original body");
+}
+
+#[tokio::test]
+async fn command_reuse_with_different_request_is_declined() -> Result<(), String> {
+    let store = open_memory().await.ok_or_else(|| String::from("open"))?;
+    let (companion, generation) = running_companion(&store)
+        .await
+        .ok_or_else(|| String::from("companion"))?;
+    let command = CommandId(RawId::new());
+    let base = history_command_with_ids(
+        companion,
+        generation,
+        "original body",
+        Some(command),
+        Some("send-1"),
+    );
+    let first = store.append_message(base.clone()).await;
+    assert!(
+        matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "first command append must commit"
+    );
+    // Every request-semantics field decides: body, language, incarnation,
+    // and the canonical client round intent.
+    for (label, mut conflicting) in [
+        ("body", {
+            let mut cmd = base.clone();
+            cmd.text = String::from("other body");
+            cmd
+        }),
+        ("lang", {
+            let mut cmd = base.clone();
+            cmd.lang = String::from("fr");
+            cmd
+        }),
+        ("incarnation", {
+            let mut cmd = base.clone();
+            cmd.incarnation = Some((9, 9));
+            cmd
+        }),
+        ("round intent: auto to force-new", {
+            let mut cmd = base.clone();
+            cmd.round_intent = Some(RoundIntentMark::New);
+            cmd
+        }),
+        ("round intent: auto to explicit join", {
+            let mut cmd = base.clone();
+            cmd.round_intent = Some(RoundIntentMark::Existing(String::from("round-wire-9")));
+            cmd
+        }),
+    ] {
+        let attempt = store.append_message(conflicting.clone()).await;
+        assert!(
+            matches!(attempt, Ok(HistoryAppendOutcome::CommandConflict)),
+            "{label} mismatch must decline without side effects"
+        );
+        conflicting.text = String::from("original body");
+        conflicting.lang = String::from("en");
+        conflicting.incarnation = base.incarnation;
+        conflicting.round_intent = base.round_intent.clone();
+        let replayed = store.append_message(conflicting).await;
+        assert!(
+            matches!(
+                replayed,
+                Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. })
+            ),
+            "{label} restored request must replay the original accept"
+        );
+    }
+    // Round identity and its wire projection are the accepted result, not
+    // the request: a newer round on the same send replays instead of
+    // conflicting.
+    let mut drifted = base.clone();
+    drifted.round = RawId::new();
+    drifted.round_wire = Some(String::from("rotated-wire"));
+    let replayed = store.append_message(drifted).await;
+    assert!(
+        matches!(
+            replayed,
+            Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. })
+        ),
+        "round/wire drift on the same request must replay, got {replayed:?}"
+    );
+    let count = history_row_count(&store, companion);
+    assert_eq!(count, Some(1), "conflicts must never append rows");
+    Ok(())
+}
+
+/// A keyed command without a stored round intent proves nothing: replay
+/// fails closed (declined, never guessed) whether the stored row or the
+/// incoming command is the one missing the intent.
+#[tokio::test]
+async fn unprovable_round_intent_fails_closed() -> Result<(), String> {
+    let store = open_memory().await.ok_or_else(|| String::from("open"))?;
+    let (companion, generation) = running_companion(&store)
+        .await
+        .ok_or_else(|| String::from("companion"))?;
+    let command = CommandId(RawId::new());
+    let keyed = history_command_with_ids(
+        companion,
+        generation,
+        "original body",
+        Some(command),
+        Some("send-1"),
+    );
+    let first = store.append_message(keyed.clone()).await;
+    assert!(
+        matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "keyed append must commit, got {first:?}"
+    );
+    let mut no_intent = keyed.clone();
+    no_intent.round_intent = None;
+    let attempt = store.append_message(no_intent).await;
+    assert!(
+        matches!(attempt, Ok(HistoryAppendOutcome::CommandConflict)),
+        "a keyed command without a round intent must not exact-replay, got {attempt:?}"
+    );
+    let legacy = CommandId(RawId::new());
+    let mut unmarked = history_command_with_ids(
+        companion,
+        generation,
+        "legacy body",
+        Some(legacy),
+        Some("send-2"),
+    );
+    unmarked.round_intent = None;
+    let stored = store.append_message(unmarked.clone()).await;
+    assert!(
+        matches!(stored, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "the unmarked row still stores, got {stored:?}"
+    );
+    let mut retry = keyed;
+    retry.command_id = Some(legacy);
+    retry.text = String::from("legacy body");
+    retry.lang = String::from("en");
+    retry.incarnation = unmarked.incarnation;
+    retry.round_intent = Some(RoundIntentMark::Auto);
+    let attempt = store.append_message(retry).await;
+    assert!(
+        matches!(attempt, Ok(HistoryAppendOutcome::CommandConflict)),
+        "a stored row without an intent must not exact-replay, got {attempt:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn different_commands_append_separately() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let first = store
+        .append_message(history_command_with_ids(
+            companion,
+            generation,
+            "first body",
+            Some(CommandId(RawId::new())),
+            None,
+        ))
+        .await;
+    assert!(
+        matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "first command must commit"
+    );
+    let second = store
+        .append_message(history_command_with_ids(
+            companion,
+            generation,
+            "second body",
+            Some(CommandId(RawId::new())),
+            None,
+        ))
+        .await;
+    assert!(
+        matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "distinct command must commit separately"
+    );
+    let first_outcome = first.unwrap();
+    let second_outcome = second.unwrap();
+    assert_ne!(
+        first_outcome, second_outcome,
+        "distinct commands must mint distinct messages"
+    );
+    let count = history_row_count(&store, companion);
+    assert_eq!(count, Some(2), "distinct commands must persist twice");
+}
+
+#[tokio::test]
+async fn null_command_appends_never_collide() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let first = store
+        .append_message(history_command(companion, generation, "first body"))
+        .await;
+    assert!(
+        matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "first NULL command must commit"
+    );
+    let second = store
+        .append_message(history_command(companion, generation, "second body"))
+        .await;
+    assert!(
+        matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+        "second NULL command must commit without colliding"
+    );
+    let first_outcome = first.unwrap();
+    let second_outcome = second.unwrap();
+    assert_ne!(
+        first_outcome, second_outcome,
+        "NULL commands must mint distinct messages"
+    );
+    let count = history_row_count(&store, companion);
+    assert_eq!(count, Some(2), "NULL commands must persist twice");
+}
+
+#[tokio::test]
+async fn lookup_command_roundtrip_returns_both_ids() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let command = CommandId(RawId::new());
+    let appended = store
+        .append_message(history_command_with_ids(
+            companion,
+            generation,
+            "command body",
+            Some(command),
+            Some("send-9"),
+        ))
+        .await;
+    let HistoryAppendOutcome::CommittedAs { message } = appended.unwrap() else {
+        panic!("unexpected variant");
+    };
+    let found = store.lookup_command(companion, &command).await;
+    let item = found.unwrap().unwrap();
+    assert_eq!(item.id, message);
+    assert_eq!(item.command_id, Some(command));
+    assert_eq!(item.local_id.as_deref(), Some("send-9"));
+    assert_eq!(item.text, "command body");
+    let missing = store
+        .lookup_command(companion, &CommandId(RawId::new()))
+        .await;
+    assert!(
+        matches!(missing, Ok(None)),
+        "unknown command must find nothing"
+    );
+    let loaded = store.load_timeline(companion, None, None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 1, "one item must read back");
+    assert_eq!(timeline[0].id, message);
+    assert_eq!(timeline[0].command_id, Some(command));
+    assert_eq!(timeline[0].local_id.as_deref(), Some("send-9"));
 }
 
 #[tokio::test]
@@ -1841,8 +2654,17 @@ async fn credential_sweep_rebuild_is_atomic_with_the_redaction() {
             .execute_batch("DROP TRIGGER sweep_abort;")
             .expect("the fault trigger must drop");
     }
-    // The rolled-back registration left no pending row, so the pair
-    // registers again before the retry can approve it.
+    // The pending row from the committed request survives the rolled-back
+    // approval, so the retry request answers from the same pending entry
+    // before the approval is repeated.
+    assert_eq!(
+        CredentialApprovalRepository::list_pending(&store)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the faulted approval must not remove the committed pending row"
+    );
     let retried = store
         .request_registration_with_intent(
             String::from("acme"),

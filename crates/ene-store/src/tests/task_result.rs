@@ -9,7 +9,76 @@ use ene_task::{
     TaskResultId, TaskResultRecord,
 };
 
-fn target_path(name: &str) -> String {
+/// One Task Agent attempt premise for the sealed/terminal claim checks.
+pub(super) fn task_agent_claim_for(delegation: DelegationId, task: TaskRef) -> InferenceAttempt {
+    let data_use = vec![RawId::new()];
+    InferenceAttempt {
+        ticket: InferenceTicketId(RawId::new()),
+        consumer: ConsumerKind::TaskAgent,
+        capability: CapabilityKind::Dialogue,
+        purpose: PurposeKind::TaskAgentTurn,
+        expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+        expected_credential_set: CredentialSetRevision::initial(),
+        provider: String::from("openai"),
+        model: String::from("dialogue-1"),
+        data_use: data_use.clone(),
+        task_agent: Some(TaskAgentAttemptPremise {
+            delegation: delegation.as_raw(),
+            task: task.task.as_raw(),
+            task_revision: RevisionInner::from_u64(task.revision.as_u64()),
+            data_use,
+        }),
+        pricing: None,
+        usage_estimate: None,
+    }
+}
+
+/// One Task Agent claim over an explicit attempt premise, shared by the
+/// inference-attempt fixtures.
+pub(super) fn task_agent_claim(
+    ticket: InferenceTicketId,
+    consent_rev: u64,
+    premise: TaskAgentAttemptPremise,
+) -> InferenceAttempt {
+    InferenceAttempt {
+        ticket,
+        consumer: ConsumerKind::TaskAgent,
+        capability: CapabilityKind::Dialogue,
+        purpose: PurposeKind::TaskAgentTurn,
+        expected_consent: (
+            String::from("consent-1"),
+            ConsentRevision::from_u64(consent_rev),
+        ),
+        expected_credential_set: CredentialSetRevision::initial(),
+        provider: String::from("openai"),
+        model: String::from("dialogue-1"),
+        data_use: premise.data_use.clone(),
+        task_agent: Some(premise),
+        pricing: None,
+        usage_estimate: None,
+    }
+}
+
+pub(super) async fn seed_dialogue_consent(store: &Store) {
+    let saved = save_consent(
+        store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(matches!(saved, ConsentCommitOutcome::Committed { .. }));
+}
+
+/// A platform-absolute fixture target. `Path::is_absolute` requires a Windows
+/// prefix, so fixtures cannot hardcode a Unix path.
+pub(super) fn target_path(name: &str) -> String {
     std::env::temp_dir()
         .join(name)
         .to_string_lossy()
@@ -20,6 +89,38 @@ async fn open_store() -> Store {
     open_memory().await.unwrap()
 }
 
+pub(super) async fn progress(store: &Store, task: TaskId) -> TaskProgress {
+    store
+        .load_task(task)
+        .await
+        .unwrap()
+        .expect("the task must load")
+        .task
+        .progress
+}
+
+/// One Task creation premise with a fresh confirmed workspace association,
+/// returned so a delegation and Action start can rely on exactly that
+/// boundary. Each call mints a new association identity: one assoc belongs to
+/// one Task.
+pub(super) fn workspace_task_premise() -> (TaskCreationPremise, WorkspaceAssocId) {
+    let assoc = WorkspaceAssocId::generate();
+    (
+        task_premise(Some(WorkspaceAssociationPremise {
+            assoc,
+            need: WorkspaceNeedRef {
+                folder: WorkspaceFolderRef {
+                    path: String::from("/srv/workspace/ene"),
+                },
+                save_target: None,
+            },
+        })),
+        assoc,
+    )
+}
+
+/// Seeds one Task with a confirmed workspace association and one delegation
+/// whose copied scope relies on exactly that association.
 pub(super) async fn seed_workspace_execution(
     store: &Store,
 ) -> (TaskRef, DelegationId, WorkspaceAssocId) {
@@ -33,7 +134,7 @@ pub(super) async fn seed_workspace_execution(
     (created, delegation, assoc)
 }
 
-async fn create_workspace_delegation(
+pub(super) async fn create_workspace_delegation(
     store: &Store,
     task: TaskRef,
     assoc: WorkspaceAssocId,

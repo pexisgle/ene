@@ -429,6 +429,13 @@ impl HostHandle {
     }
 
     fn mint_task_ref(state: &mut PresentationState, conn: &str, task: TaskId) -> TaskWireRef {
+        if let Some(((_, wire), _)) = state
+            .task_refs
+            .iter()
+            .find(|((owner, _), mapped)| owner == conn && **mapped == task)
+        {
+            return TaskWireRef(wire.clone());
+        }
         let wire = Uuid::new_v4().as_hyphenated().to_string();
         state
             .task_refs
@@ -441,6 +448,13 @@ impl HostHandle {
         conn: &str,
         source: TaskReportSourceRef,
     ) -> ReportSourceWireRef {
+        if let Some(((_, wire), _)) = state
+            .source_refs
+            .iter()
+            .find(|((owner, _), mapped)| owner == conn && **mapped == source)
+        {
+            return ReportSourceWireRef(wire.clone());
+        }
         let wire = Uuid::new_v4().as_hyphenated().to_string();
         state
             .source_refs
@@ -633,9 +647,6 @@ impl HostHandle {
             self.forget_carried(conn, &items).await;
             return None;
         }
-        if items.is_empty() && !carried.is_empty() {
-            return Some(UndeliveredResponse::FrameTooLarge);
-        }
         if estimate_summary_bytes(&items) > self.frame_budget() {
             return Some(UndeliveredResponse::FrameTooLarge);
         }
@@ -659,6 +670,13 @@ impl HostHandle {
         UndeliveredResponse::StaleBaseView { current: None }
     }
 
+    /// Begins or continues one pass: fetches the longest fitting prefix of
+    /// one bounded fetch, commits it, installs the receipt.
+    ///
+    /// Returns `None` when the pass installed nothing: the connection was
+    /// superseded or closed before the commit, or the commit landed but the
+    /// connection was superseded before the report refs were attached (see
+    /// [`Self::commit_install`]).
     #[expect(
         clippy::too_many_arguments,
         reason = "pass state is intentionally explicit"
@@ -798,6 +816,14 @@ impl HostHandle {
         let (entries, items, fetched_next, upper, pending_only) = fitted;
         if entries.is_empty() {
             if matches!(start, PlanStart::Continued { .. }) && trigger != PassTrigger::Push {
+                // The continued cursor is consumed by this drained pass: the
+                // recurrence below is an explicit head re-display under
+                // `None`, so without this the stored cursor would survive
+                // every repeat request and the map would grow with the page
+                // count (take_cursor's contract).
+                self.with_presentation_state(live, |state| {
+                    Self::take_cursor(state, conn, from_cursor);
+                })?;
                 return Box::pin(self.begin_pass(
                     live,
                     conn,
@@ -859,6 +885,23 @@ impl HostHandle {
         .await
     }
 
+    /// Commits the carried prefix (Pending→PresentationUnknown), installs
+    /// the receipt, advances the cursor past the carried prefix only.
+    ///
+    /// The whole commit — the per-row presentation-start CAS and the
+    /// receipt/cursor/subscription install — runs inside one
+    /// connection-ownership section (CCT §10.4): a replacement that wins the
+    /// table commits no row transition and installs no receipt, and a
+    /// commit that wins the table survives the later lifecycle sweep as a
+    /// durable row (CCT §10.5).
+    ///
+    /// Returns `None` in two distinct cases: (a) the ownership section
+    /// refused — no receipt, cursor, or subscription entry is created for a
+    /// superseded connection and the attempt's carried refs are dropped; or
+    /// (b) the section committed but the connection was superseded before
+    /// [`Self::attach_reports`] installed the report refs, so the durable
+    /// marks, round mapping, receipt, cursor, and subscription install all
+    /// stand and are released by the supersession sweep.
     #[expect(
         clippy::too_many_arguments,
         reason = "commit state is intentionally explicit"
@@ -968,7 +1011,9 @@ impl HostHandle {
                 let (next_cursor, drained) = match fetched_next {
                     Some(next) => {
                         let resume = (next, pending_only, limit);
-                        if let Some(sub) = state.subs.get_mut(conn) {
+                        if let Some(sub) = state.subs.get_mut(conn)
+                            && sub.companion == companion.as_raw()
+                        {
                             sub.resume = Some(resume);
                         }
                         (
@@ -1205,8 +1250,10 @@ impl HostHandle {
     }
 
     fn empty_attributed(&self, attribution: &PresenceAttribution) -> UndeliveredSummary {
-        let round = ene_presentation::RoundId::from_raw(RawId::new());
-        let round_wire = self.round_wire_or_mint(&round);
+        // A receipt-less shell has nothing to ACK, so its round is never
+        // resolved back: mint an opaque wire without registering a
+        // process-lifetime `rounds` mapping.
+        let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
         UndeliveredSummary {
             receipt: PresentationReceiptWireRef(String::new()),
             round: round_wire,
@@ -1219,8 +1266,10 @@ impl HostHandle {
     }
 
     fn empty_shell(&self) -> UndeliveredSummary {
-        let round = ene_presentation::RoundId::from_raw(RawId::new());
-        let round_wire = self.round_wire_or_mint(&round);
+        // A receipt-less shell has nothing to ACK, so its round is never
+        // resolved back: mint an opaque wire without registering a
+        // process-lifetime `rounds` mapping.
+        let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
         UndeliveredSummary {
             receipt: PresentationReceiptWireRef(String::new()),
             round: round_wire,

@@ -195,6 +195,47 @@ async fn report_reads_are_read_only_over_a_running_and_stopped_store() {
 }
 
 #[tokio::test]
+async fn task_headlines_page_in_canonical_id_order_with_a_sql_bound() {
+    let store = open_memory().await.unwrap();
+    let mut created: Vec<TaskId> = Vec::new();
+    for _ in 0..=REPORT_PAGE_MAX {
+        created.push(store.create_task(task_premise(None)).await.unwrap().task);
+    }
+    let mut expected: Vec<String> = created
+        .iter()
+        .map(|task| crate::codec::encode_id(task.as_raw()))
+        .collect();
+    expected.sort();
+
+    let mut seen: Vec<TaskHeadline> = Vec::new();
+    let mut after: Option<TaskId> = None;
+    loop {
+        let page = store.list_tasks_after(after, 2).await.unwrap();
+        assert!(page.len() <= 2, "the SQL bound holds");
+        if page.is_empty() {
+            break;
+        }
+        after = Some(page.last().unwrap().task);
+        seen.extend(page);
+    }
+    let listed: Vec<String> = seen
+        .iter()
+        .map(|headline| crate::codec::encode_id(headline.task.as_raw()))
+        .collect();
+    assert_eq!(listed, expected, "keyset paging covers every Task in order");
+
+    // The limit clamp bounds the rows read, not only the returned vector.
+    let clamped_low = store.list_tasks_after(None, 0).await.unwrap();
+    assert_eq!(clamped_low.len(), 1);
+    let clamped_high = store.list_tasks_after(None, 1000).await.unwrap();
+    assert_eq!(
+        clamped_high.len(),
+        REPORT_PAGE_MAX as usize,
+        "the upper clamp bounds the page to REPORT_PAGE_MAX"
+    );
+}
+
+#[tokio::test]
 async fn report_rows_order_attempts_before_results_and_page_by_keyset() {
     let store = open_memory().await.unwrap();
     let (task, delegation, assoc) = seed_workspace_execution(&store).await;
