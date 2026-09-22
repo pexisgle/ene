@@ -20,7 +20,9 @@
 //! - [`HostHandle::settle_action_certainty`] is the late-evidence settlement
 //!   entry: it commits the Action owner's certainty CAS and then re-evaluates
 //!   the same execution's sealed-but-unadopted result through the Task
-//!   owner's adoption gate.
+//!   owner's adoption gate. The settlement is durable before the
+//!   re-evaluation, so a re-evaluation failure is a retryable partial
+//!   outcome, never a reported loss of the settlement.
 //! - [`HostHandle::reconcile_sealed_results`] is the explicit bounded startup
 //!   reconciliation producer for results sealed after AU15a but not adopted
 //!   before a stop. It never resumes an execution.
@@ -67,10 +69,32 @@ pub enum TaskControlError {
 
 /// The Action owner's settled certainty together with the adoption
 /// re-evaluation it may have triggered.
+///
+/// The two steps are ordered but not atomic: the certainty compare-and-set
+/// commits first and stays durable even when the follow-up re-evaluation
+/// fails. A re-evaluation failure is therefore a retryable partial outcome on
+/// `Ok` ([`Self::adoption_error`]), never an `Err`: `Err` means the settlement
+/// itself did not commit and nothing changed. Re-calling
+/// [`HostHandle::settle_action_certainty`] with the same arguments is the
+/// retry that converges on the re-evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSettlementOutcome {
+    /// The Action owner's compare-and-set answer. `Updated` means this call
+    /// committed the settlement; `StaleCurrent` means an earlier settlement is
+    /// already durable and this call changed nothing.
     pub certainty: CertaintyUpdateOutcome,
+    /// The re-evaluation of the execution's sealed-but-unadopted result, when
+    /// the attempt exists, exactly one such result existed, and the
+    /// re-evaluation answered.
     pub adoption: Option<TaskResultAcceptance>,
+    /// The re-evaluation's technical failure, when it ran and failed.
+    ///
+    /// `Some` means the settlement (this call's or an earlier one's) is
+    /// durable and the re-evaluation is still pending: retry the same call to
+    /// converge. `None` alongside `Updated` / `StaleCurrent` means the
+    /// re-evaluation answered; `adoption == None` then means no
+    /// sealed-but-unadopted result was left to evaluate.
+    pub adoption_error: Option<TaskControlError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -821,6 +845,37 @@ impl HostHandle {
         Ok(outcome)
     }
 
+    /// Settles one Action attempt's late objective evidence and, when the
+    /// settlement commits, re-evaluates the execution's sealed result.
+    ///
+    /// This composes two owner operations without merging them: the Action
+    /// owner's certainty compare-and-set commits first (it alone may change
+    /// certainty), and only then does a bounded read of the attempt's
+    /// delegation and its sealed result run through the Task owner's
+    /// [`ene_task::reevaluate_result_adoption`]. A still-present blocker
+    /// legitimately answers `WithheldByEffectFacts`; no busy retry loop
+    /// exists. Nothing here re-executes a provider call or a filesystem
+    /// Action.
+    ///
+    /// The two steps are ordered, not atomic: a failure in the re-evaluation
+    /// can never retract a committed settlement, so it is reported as the
+    /// partial outcome [`EffectSettlementOutcome::adoption_error`] and the
+    /// same call is its retry. Re-invoking after a committed settlement is
+    /// idempotent: the compare-and-set answers `StaleCurrent` (or
+    /// `MissingAttempt` when the row is gone), certainty is never rewritten,
+    /// and an already-adopted result is never adopted twice. `StaleCurrent`
+    /// is not a dead end — the re-evaluation still runs against current
+    /// durable facts, so an attempt settled before its blocker cleared
+    /// converges without restart. Only an `Err` means nothing was committed.
+    /// After a restart, the bounded
+    /// [`HostHandle::reconcile_sealed_results`] pass covers the same
+    /// sealed-but-unadopted result.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskControlError`] only when the certainty compare-and-set itself
+    /// cannot answer; a re-evaluation failure is reported on the returned
+    /// outcome.
     pub async fn settle_action_certainty(
         &self,
         attempt: ActionAttemptId,
@@ -831,14 +886,20 @@ impl HostHandle {
             .store
             .compare_and_set_certainty(attempt, ActionCertainty::Unknown, new, grounds)
             .await?;
-        let adoption = if certainty == CertaintyUpdateOutcome::Updated {
-            self.reevaluate_sealed_result_for_attempt(attempt).await?
+        let (adoption, adoption_error) = if certainty == CertaintyUpdateOutcome::MissingAttempt {
+            // No attempt row means no delegation to correlate a sealed result
+            // with: nothing was committed and nothing is left to re-evaluate.
+            (None, None)
         } else {
-            None
+            match self.reevaluate_sealed_result_for_attempt(attempt).await {
+                Ok(adoption) => (adoption, None),
+                Err(error) => (None, Some(error)),
+            }
         };
         Ok(EffectSettlementOutcome {
             certainty,
             adoption,
+            adoption_error,
         })
     }
 
