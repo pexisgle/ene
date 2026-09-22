@@ -220,12 +220,10 @@ where
     let mut tmp = [0u8; 4096];
     let mut health = tokio::time::interval(HEALTH_INTERVAL);
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The acceptance gate measures displayed frames and requires an average
-    // of at least 30 FPS. Windows display timing observed a scheduler-sized
-    // presentation stall that 30.1 Hz could not absorb in the fixed 60-second
-    // window, so keep a small measured margin without racing the compositor.
-    const RUNTIME_HZ: f32 = 31.0;
-    let mut runtime_tick = tokio::time::interval(std::time::Duration::from_nanos(32_258_065));
+    // Run animation at the conventional 60 Hz cadence. Native presentation
+    // pacing still prevents this loop from racing a slower compositor.
+    const RUNTIME_HZ: f32 = 60.0;
+    let mut runtime_tick = tokio::time::interval(std::time::Duration::from_nanos(16_666_667));
     runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut render_paused_until = None;
     let mut seq: u64 = 0;
