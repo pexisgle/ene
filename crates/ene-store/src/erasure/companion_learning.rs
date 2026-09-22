@@ -12,7 +12,13 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use crate::codec::{SOURCE_KIND_ACTIVITY_RECORD, SOURCE_KIND_HISTORY_MESSAGE, lock_shared};
 use crate::{Store, run_blocking};
 
-pub const ERASURE_SCAN_ROWS: u32 = 64;
+/// The public name of the shared per-demand scanned-row bound.
+///
+/// The bound is on scanned rows, not matched rows: a table without a match is
+/// still walked one page at a time, so no demand performs an unbounded scan
+/// and the remainder check is a bounded traversal rather than one query that
+/// reads the whole table.
+pub const ERASURE_SCAN_ROWS: u32 = super::ROWS_PER_DEMAND;
 
 /// Content columns of the Companion owner. The system-wide remainder probe
 /// (`remainder.rs` `SYSTEM_CONTENT`) mirrors this list independently, so a
@@ -265,12 +271,17 @@ fn count_keys(
     Ok(u64::try_from(counted).unwrap_or(u64::MAX))
 }
 
-fn exact_page(
+/// One exact-content page over a single-key table: walks `key > after` in key
+/// order, matches `instr(content, target) > 0`, and deletes the matches
+/// through `delete` when erasing. The delete action is the only per-owner
+/// difference, so the paging loop has one implementation.
+fn exact_page_with(
     tx: &Transaction<'_>,
     table: &str,
     key_column: &str,
     content_column: &str,
     request: &PageRequest<'_>,
+    delete: impl FnOnce(&[String]) -> Result<u64, rusqlite::Error>,
 ) -> Result<PageOutcome, rusqlite::Error> {
     let sql = format!(
         "SELECT {key_column}, instr({content_column}, ?2) > 0 FROM {table} \
@@ -293,11 +304,7 @@ fn exact_page(
         }
         (keys, scanned, last)
     };
-    let deleted = if request.delete {
-        delete_keys(tx, table, key_column, &keys)?
-    } else {
-        0
-    };
+    let deleted = if request.delete { delete(&keys)? } else { 0 };
     Ok(PageOutcome {
         scanned,
         matched: u64::try_from(keys.len()).unwrap_or(u64::MAX),
@@ -306,6 +313,23 @@ fn exact_page(
     })
 }
 
+/// One exact-content page that deletes only the matching rows.
+fn exact_page(
+    tx: &Transaction<'_>,
+    table: &str,
+    key_column: &str,
+    content_column: &str,
+    request: &PageRequest<'_>,
+) -> Result<PageOutcome, rusqlite::Error> {
+    exact_page_with(tx, table, key_column, content_column, request, |keys| {
+        delete_keys(tx, table, key_column, keys)
+    })
+}
+
+/// One page of the `undelivered` reference table: a row matches when its
+/// canonical History or activity source no longer exists. The row itself
+/// carries no body, so the source side's erasure governs the content and only
+/// the dangling reference is removed here.
 fn undelivered_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
@@ -406,6 +430,38 @@ fn companion_step(
     )
 }
 
+/// One local-owner demand: the shared parking, protected-material, hold, and
+/// blocking-section envelope both local participants apply. Only the owner's
+/// step function differs, so every owner's currentness/cursor contract has one
+/// implementation.
+async fn local_demand(
+    store: Store,
+    sweep: Arc<Mutex<HashMap<ErasureConditionRef, SweepCursor>>>,
+    command: DemandLocalErasureCommand,
+    step: LocalStep,
+) -> ParticipantCompletionFact {
+    #[cfg(any(test, feature = "test-support"))]
+    store.test_parks.erasure_mutation.pause_if_armed().await;
+    let condition = command.condition();
+    let owner = command.participant();
+    let held =
+        |reason| ParticipantCompletionFact::held(condition, owner, reason, WallClockWithTz::now());
+    let Some(target) = exact_text(&command) else {
+        // A local owner must receive the protected material. Without it no
+        // mechanical sweep exists, so this is an explicit retryable hold,
+        // never a fabricated completion.
+        return held(ParticipantHoldClass::Failed);
+    };
+    match run_blocking(move || run_local_demand(&store, &sweep, condition, owner, &target, step))
+        .await
+    {
+        Ok(fact) => fact,
+        Err(_) => held(ParticipantHoldClass::Failed),
+    }
+}
+
+/// Companion-owned local erasure (SO §4.3/4.4): History bodies, activity
+/// records, and the undelivered references that name an erased source.
 pub struct CompanionErasureParticipant {
     store: Store,
     /// One continuation per unfinished condition, so concurrent operations do
@@ -432,28 +488,12 @@ impl ErasureParticipant for CompanionErasureParticipant {
         &self,
         command: DemandLocalErasureCommand,
     ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        let store = self.store.clone();
-        let sweep = Arc::clone(&self.sweep);
-        Box::pin(async move {
-            #[cfg(any(test, feature = "test-support"))]
-            store.test_parks.erasure_mutation.pause_if_armed().await;
-            let condition = command.condition();
-            let owner = command.participant();
-            let held = |reason| {
-                ParticipantCompletionFact::held(condition, owner, reason, WallClockWithTz::now())
-            };
-            let Some(target) = exact_text(&command) else {
-                return held(ParticipantHoldClass::Failed);
-            };
-            match run_blocking(move || {
-                run_local_demand(&store, &sweep, condition, owner, &target, companion_step)
-            })
-            .await
-            {
-                Ok(fact) => fact,
-                Err(_) => held(ParticipantHoldClass::Failed),
-            }
-        })
+        Box::pin(local_demand(
+            self.store.clone(),
+            Arc::clone(&self.sweep),
+            command,
+            companion_step,
+        ))
     }
 }
 
@@ -639,38 +679,14 @@ fn memory_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
 ) -> Result<PageOutcome, rusqlite::Error> {
-    let (table, content_column) = ("learning_memory", "content");
-    let (keys, scanned, last) = {
-        let mut statement = tx.prepare(&format!(
-            "SELECT {MEMORY_KEY}, instr({content_column}, ?2) > 0 FROM {table} \
-             WHERE {MEMORY_KEY} > ?1 ORDER BY {MEMORY_KEY} LIMIT ?3"
-        ))?;
-        let mut rows = statement.query(params![request.after, request.target, request.limit])?;
-        let mut keys: Vec<String> = Vec::new();
-        let mut scanned = 0u32;
-        let mut last: Option<(String, i64)> = None;
-        while let Some(row) = rows.next()? {
-            scanned += 1;
-            let key: String = row.get(0)?;
-            let hit: bool = row.get(1)?;
-            if hit {
-                keys.push(key.clone());
-            }
-            last = Some((key, 0));
-        }
-        (keys, scanned, last)
-    };
-    let deleted = if request.delete {
-        delete_memories(tx, &keys)?
-    } else {
-        0
-    };
-    Ok(PageOutcome {
-        scanned,
-        matched: u64::try_from(keys.len()).unwrap_or(u64::MAX),
-        deleted,
-        last,
-    })
+    exact_page_with(
+        tx,
+        "learning_memory",
+        MEMORY_KEY,
+        "content",
+        request,
+        |keys| delete_memories(tx, keys),
+    )
 }
 
 fn term_page(
@@ -764,27 +780,11 @@ impl ErasureParticipant for LearningErasureParticipant {
         &self,
         command: DemandLocalErasureCommand,
     ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        let store = self.store.clone();
-        let sweep = Arc::clone(&self.sweep);
-        Box::pin(async move {
-            #[cfg(any(test, feature = "test-support"))]
-            store.test_parks.erasure_mutation.pause_if_armed().await;
-            let condition = command.condition();
-            let owner = command.participant();
-            let held = |reason| {
-                ParticipantCompletionFact::held(condition, owner, reason, WallClockWithTz::now())
-            };
-            let Some(target) = exact_text(&command) else {
-                return held(ParticipantHoldClass::Failed);
-            };
-            match run_blocking(move || {
-                run_local_demand(&store, &sweep, condition, owner, &target, learning_step)
-            })
-            .await
-            {
-                Ok(fact) => fact,
-                Err(_) => held(ParticipantHoldClass::Failed),
-            }
-        })
+        Box::pin(local_demand(
+            self.store.clone(),
+            Arc::clone(&self.sweep),
+            command,
+            learning_step,
+        ))
     }
 }

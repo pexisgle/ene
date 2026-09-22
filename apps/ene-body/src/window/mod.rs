@@ -28,6 +28,21 @@ pub(crate) fn gpu_info(failure: RenderFailure) -> crate::ipc::GpuFailInfo {
     }
 }
 
+/// Logical-pixel extent of the resize target, anchored to the rightmost
+/// visible character pixels in the bottom band (mirrors the Windows
+/// `WM_NCHITTEST` grip).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) const RESIZE_GRIP_LOGICAL_PX: u32 = 32;
+
+/// Initial overlay placement shared by the native backends.
+pub const DEFAULT_PLACEMENT: PlacementBox = PlacementBox {
+    x: 24,
+    y: 24,
+    width: 420,
+    height: 640,
+    scale: 1.0,
+};
+
 /// Overlay in this process. Production attempts the native backend and reports
 /// an explicit unavailable outcome before using Headless.
 #[derive(Debug)]
@@ -146,12 +161,12 @@ impl Overlay {
         }
     }
 
+    /// Headless attempts no surface creation, so there is no GPU failure to
+    /// report; [`Self::unavailable_info`] carries the overlay's reason.
     #[must_use]
     pub fn gpu_failure(&self) -> Option<crate::ipc::GpuFailInfo> {
         match self {
-            Self::Headless(_) => Some(crate::ipc::GpuFailInfo {
-                reason: crate::ipc::GpuFailReason::Surface,
-            }),
+            Self::Headless(_) => None,
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.gpu_failure(),
             #[cfg(target_os = "windows")]

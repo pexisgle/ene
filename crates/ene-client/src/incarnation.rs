@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -10,8 +9,6 @@ use crate::error::ClientError;
 
 pub const COUNTER_FILE_NAME: &str = "client-incarnation.counter";
 pub const LOCK_FILE_NAME: &str = "client-incarnation.lock";
-
-static STAGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn cache() -> &'static Mutex<HashMap<PathBuf, ClientIncarnationId>> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, ClientIncarnationId>>> = OnceLock::new();
@@ -66,7 +63,13 @@ pub fn advance_counter(data_dir: &Path) -> Result<u64, ClientError> {
     let next = current.checked_add(1).ok_or_else(|| {
         ClientError::Transport(String::from("client incarnation counter exhausted"))
     })?;
-    stage_and_replace(data_dir, next)?;
+    crate::device::atomic_replace(
+        &counter_path(data_dir),
+        next.to_string().as_bytes(),
+        None,
+        "client incarnation counter store failed",
+    )?;
+    // The OS lock releases when `lock_file` drops.
     Ok(next)
 }
 
@@ -132,56 +135,4 @@ fn read_counter(data_dir: &Path) -> Result<u64, ClientError> {
     text.trim()
         .parse::<u64>()
         .map_err(|_| ClientError::Transport(String::from("client incarnation counter corrupt")))
-}
-
-fn stage_and_replace(data_dir: &Path, next: u64) -> Result<(), ClientError> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
-    let staged = data_dir.join(format!(
-        ".{}.{}.{nanos}.{}.tmp",
-        COUNTER_FILE_NAME,
-        std::process::id(),
-        STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let staged_result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)
-            .map_err(|error| {
-                ClientError::Transport(format!(
-                    "client incarnation counter store failed: {}",
-                    error.kind()
-                ))
-            })?;
-        file.write_all(next.to_string().as_bytes())
-            .map_err(|error| {
-                ClientError::Transport(format!(
-                    "client incarnation counter store failed: {}",
-                    error.kind()
-                ))
-            })?;
-        file.sync_all().map_err(|error| {
-            ClientError::Transport(format!(
-                "client incarnation counter store failed: {}",
-                error.kind()
-            ))
-        })?;
-        drop(file);
-        std::fs::rename(&staged, counter_path(data_dir)).map_err(|error| {
-            ClientError::Transport(format!(
-                "client incarnation counter store failed: {}",
-                error.kind()
-            ))
-        })
-    })();
-    if staged_result.is_err() {
-        // Best effort: the temp holds only the counter, but leave no litter
-        // behind without masking the real error.
-        if std::fs::remove_file(&staged).is_err() {
-            // Best effort only.
-        }
-    }
-    staged_result
 }

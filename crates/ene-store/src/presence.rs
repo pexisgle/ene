@@ -17,6 +17,7 @@ use crate::codec::{
     decode_id, decode_lifecycle, encode_id, encode_move_reason, encode_presence_state, encode_u64,
     lock_shared, presence_unavailable, select_attribution, select_hint,
 };
+use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
@@ -495,8 +496,10 @@ impl PresenceRepository for Store {
     }
 }
 
-const ERASURE_BATCH_ROWS: i64 = 500;
-
+/// A companion identity that is the target is erased whole: the identity is
+/// the row's primary fact, so a redaction would be a silent rename. The
+/// companion itself belongs to its own owner; presence only removes its
+/// attribution.
 const SQL_ERASE_ATTRIBUTION_IDENTITY: &str = "DELETE FROM presence_attribution
      WHERE companion_id IN (
          SELECT companion_id FROM presence_attribution
@@ -552,10 +555,6 @@ const SQL_COUNT_PRESENCE_TARGET: &str = "SELECT
          OR instr(COALESCE(recovery_destination, ''), ?1) > 0)
    + (SELECT COUNT(*) FROM presence_transition_log
       WHERE instr(companion_id, ?1) > 0)";
-
-fn erasure_count(value: i64) -> Result<u64, PresenceTechnicalError> {
-    u64::try_from(value).map_err(|_| presence_unavailable(String::from("count out of range")))
-}
 
 impl PresenceErasureRepository for Store {
     fn erase_target_text(
@@ -618,12 +617,10 @@ impl PresenceErasureRepository for Store {
                     .query_row(SQL_COUNT_PRESENCE_TARGET, params![target], |row| row.get(0))
                     .map_err(|error| presence_unavailable(error.to_string()))?;
                 let erased = erasure_count(
-                    i64::try_from(
-                        attribution + stopped + hints + last_clients + destinations + transitions,
-                    )
-                    .map_err(|_| presence_unavailable(String::from("count out of range")))?,
-                )?;
-                let remainder = erasure_count(remainder)?;
+                    attribution + stopped + hints + last_clients + destinations + transitions,
+                )
+                .map_err(presence_unavailable)?;
+                let remainder = erasure_count(remainder).map_err(presence_unavailable)?;
                 tx.commit()
                     .map_err(|error| presence_unavailable(error.to_string()))?;
                 Ok(PresenceErasureOutcome::Applied { erased, remainder })

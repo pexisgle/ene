@@ -31,7 +31,7 @@ mod imp {
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
     };
     use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
-    use crate::window::{gpu_info, physical};
+    use crate::window::{DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_info, physical};
 
     const CLASS_NAME: &[u16] = &[
         b'e' as u16,
@@ -97,13 +97,7 @@ mod imp {
             };
             // SAFETY: class is fully initialized.
             let _atom = unsafe { RegisterClassExW(&class) };
-            let placement = PlacementBox {
-                x: 24,
-                y: 24,
-                width: 420,
-                height: 640,
-                scale: 1.0,
-            };
+            let placement = DEFAULT_PLACEMENT;
             let mut state = Box::new(WindowState {
                 placement,
                 events: VecDeque::new(),
@@ -417,7 +411,7 @@ mod imp {
                 unsafe { ScreenToClient(hwnd, &mut point) };
                 // SAFETY: state pointer validity established above.
                 let placement = unsafe { (*state).placement };
-                let grip = physical(32, placement.scale);
+                let grip = physical(RESIZE_GRIP_LOGICAL_PX, placement.scale);
                 // SAFETY: state pointer validity established above.
                 let hit_test_mask = unsafe { &(*state).hit_test_mask };
                 if hit_test_mask.contains_resize_grip(point.x, point.y, grip) {

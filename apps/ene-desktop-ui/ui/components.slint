@@ -140,13 +140,12 @@ component RowCardBody inherits VerticalLayout {
 /// no affordance an operator could activate.
 export component StaticRowCard inherits Rectangle {
     in property <Item> item;
-    in property <bool> selected: false;
     min-height: content.min-height;
     vertical-stretch: 0;
     border-radius: Theme.radius;
-    background: selected ? Theme.raised : Theme.surface;
+    background: Theme.surface;
     border-width: 1px;
-    border-color: selected ? Theme.accent : Theme.border;
+    border-color: Theme.border;
     content := RowCardBody { item: root.item; }
 }
 export component RowCard inherits Rectangle {

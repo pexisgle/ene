@@ -39,7 +39,7 @@ component SetupPane inherits Rectangle {
             Action { text: "日本語"; selected: root.japanese; clicked => { root.language(true); } }
             Action { text: "English"; selected: !root.japanese; clicked => { root.language(false); } }
         }
-        if root.step == 3: key-field := Field {
+        if root.step == 3: Field {
             height: 76px;
             value <=> root.secret-draft;
             label: "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
@@ -172,12 +172,12 @@ export component ManagementWindow inherits Window {
                     if root.page > 0 && root.page < 5: Action { text: root.busy ? (root.japanese ? "取得中…" : "Loading…") : (root.japanese ? "更新" : "Refresh"); enabled: !root.busy && root.connected; clicked => { root.refresh(); } }
                 }
                 if root.notice != "": Notice { text: root.notice; error: root.notice-error; }
-                content := Rectangle {
+                Rectangle {
                     vertical-stretch: 1;
                     if root.page == 6: ScrollView {
                       content-width: self.width;
                       VerticalLayout { alignment: start;
-                       setup := SetupPane {
+                       SetupPane {
                         secret-draft <=> root.secret-draft;
                         max-width: 560px; horizontal-stretch: 1;
                         japanese: root.japanese; step: root.step; busy: root.busy;
@@ -263,7 +263,7 @@ export component ManagementWindow inherits Window {
                                 Field { label: root.japanese ? "完全に削除する文字列" : "Exact text to erase"; hint: root.japanese ? "対象の文字列を入力" : "Enter the exact text"; value <=> root.deletion-draft; enabled: !root.busy; }
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Action { text: root.japanese ? "削除を要求" : "Request deletion"; danger: true; enabled: !root.busy && root.connected && root.deletion-draft != ""; clicked => { root.request-deletion(root.deletion-draft); root.deletion-draft = ""; } }
+                                    Action { text: root.japanese ? "削除を要求" : "Request deletion"; danger: true; enabled: !root.busy && root.connected && root.deletion-draft != ""; clicked => { root.request-deletion(root.deletion-draft); } }
                                     Action { text: root.japanese ? "確認へ進む" : "Review request"; enabled: !root.busy && root.connected && root.selected-deletion != ""; clicked => { root.confirm-deletion(); } }
                                 }
                                 Heading { text: root.japanese ? "処理の状況" : "Operation status"; font-size: 18px; }

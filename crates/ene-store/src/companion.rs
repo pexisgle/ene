@@ -46,16 +46,45 @@ const SQL_INSERT_HINT: &str = "INSERT INTO relocation_hint (companion_id, last_c
 
 const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
 
-const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND (?2 IS NULL OR round_id = ?2) AND (?3 IS NULL OR at_utc >= ?3) ORDER BY rowid ASC LIMIT ?4";
+/// The one column list every History read decodes with, in the exact order
+/// [`HistoryRow`] consumes it. Single-sourced so a column cannot be added to
+/// one read and missed in another.
+macro_rules! history_projection {
+    () => {
+        "message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random"
+    };
+}
+
+const SQL_SELECT_TIMELINE: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    " FROM history_message WHERE companion_id = ?1 AND (?2 IS NULL OR round_id = ?2) AND (?3 IS NULL OR at_utc >= ?3) ORDER BY rowid ASC LIMIT ?4"
+);
 
 const SQL_SELECT_ROUND_BY_WIRE: &str =
     "SELECT round_id FROM history_message WHERE companion_id = ?1 AND round_wire = ?2 LIMIT 1";
 
-const SQL_SELECT_RECENT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2";
+const SQL_SELECT_RECENT_TIMELINE: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    " FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2"
+);
 
-const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_BY_COMMAND: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    " FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1"
+);
 
-pub(crate) const SQL_SELECT_HISTORY_BY_MESSAGE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random, companion_id FROM history_message WHERE message_id = ?1";
+/// The single-message bounded read: `message_id` is the primary key, so the
+/// lookup touches exactly the addressed row and never scans the table. The
+/// companion column is appended after the shared [`HistoryRow`] column list
+/// so one decoder serves every History read.
+pub(crate) const SQL_SELECT_HISTORY_BY_MESSAGE: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    ", companion_id FROM history_message WHERE message_id = ?1"
+);
 
 pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
     "SELECT rowid FROM history_message WHERE message_id = ?1";
@@ -509,12 +538,8 @@ impl HistoryRepository for Store {
         &self,
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let (outcome, _) = append_history(&conn, &cmd, false, None)?;
-            Ok(outcome)
-        })
-        .await
+        let store = self.clone();
+        run_blocking(move || store.append_message_sync(cmd)).await
     }
 
     async fn append_reply_with_undelivered(

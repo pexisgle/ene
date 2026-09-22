@@ -36,7 +36,7 @@ use std::process::ExitCode;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId, RoundWireId, StreamWireId};
 use ene_api::v1::round::{ConfirmPresentationWire, PresentationStatus, StreamClose};
-use ene_api::v1::undelivered::{UndeliveredResponse, UndeliveredSummary};
+use ene_api::v1::undelivered::{UndeliveredAck, UndeliveredResponse, UndeliveredSummary};
 use ene_config::paths::resolve_data_dir;
 use ene_config::typed::Config;
 
@@ -1123,23 +1123,30 @@ async fn run_undelivered(
         }
     };
     emit(&cmds::render_summary(&summary))?;
-    ack_summary(session, &summary).await
+    if summary.items.is_empty() {
+        return Ok(());
+    }
+    ack_summary(
+        session,
+        cmds::undelivered_ack(&summary.receipt.0, PresentationStatus::Presented),
+        summary.round.clone(),
+        summary.presence_generation,
+    )
+    .await
 }
 
 async fn ack_summary(
     session: &mut client::Client,
-    summary: &ene_api::v1::undelivered::UndeliveredSummary,
+    ack: UndeliveredAck,
+    round: RoundWireId,
+    generation: u64,
 ) -> Result<(), CliError> {
-    if summary.items.is_empty() {
-        return Ok(());
-    }
-    let ack = cmds::undelivered_ack(&summary.receipt.0, PresentationStatus::Presented);
     let outcome = match answer(
         session
             .request_observed(
                 WirePayload::UndeliveredAck(ack),
-                Some(summary.round.clone()),
-                Some(summary.presence_generation),
+                Some(round),
+                Some(generation),
             )
             .await?,
         "presentation confirmation",
@@ -1232,7 +1239,7 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
 fn paint_auto(
     stdout: &mut std::io::Stdout,
     summary: UndeliveredSummary,
-    auto: &mut Vec<UndeliveredSummary>,
+    auto: &mut Vec<(UndeliveredAck, RoundWireId, u64)>,
 ) -> Result<(), CliError> {
     let text = cmds::render_summary(&summary);
     if !text.is_empty() {
@@ -1243,7 +1250,13 @@ fn paint_auto(
             CliError::Transport(format!("stdout flush failed: {}", error.kind()))
         })?;
     }
-    auto.push(summary);
+    if !summary.items.is_empty() {
+        auto.push((
+            cmds::undelivered_ack(&summary.receipt.0, PresentationStatus::Presented),
+            summary.round,
+            summary.presence_generation,
+        ));
+    }
     Ok(())
 }
 
@@ -1284,7 +1297,11 @@ async fn run_send(
     let mut stdout = std::io::stdout();
     writeln!(stdout, "AcceptedForRound {round}")
         .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
-    let mut auto: Vec<UndeliveredSummary> = Vec::new();
+    // Backlog the Host auto-presented at attach (recovery/summon, no Owner
+    // query): paint it before the new reply and ACK it with the stream's
+    // presentation observation below. A stdio failure here sends no ACK, so
+    // the Host keeps the batch Unknown.
+    let mut auto: Vec<(UndeliveredAck, RoundWireId, u64)> = Vec::new();
     for frame in session.take_undelivered() {
         if let WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) =
             frame.payload
@@ -1354,8 +1371,11 @@ async fn run_send(
             detail: None,
         }))
         .await?;
-    for summary in &auto {
-        ack_summary(session, summary).await?;
+    // The backlog painted above (attach-time and in-stream auto-presents)
+    // is ACKed only now, after its final frame painted: a partial batch
+    // would have returned early above with no ACK, keeping it Unknown.
+    for (ack, round, generation) in auto {
+        ack_summary(session, ack, round, generation).await?;
     }
     if success {
         Ok(())

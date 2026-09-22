@@ -178,6 +178,8 @@ fn decode_revision(raw: i64) -> Result<TaskRevision, TaskTechnicalError> {
     ))
 }
 
+/// Decodes the stored progress, closed world: an unknown name or a stored
+/// NULL (nullable in the schema) is an unreadable row, never a default.
 fn decode_progress(raw: Option<&str>) -> Result<TaskProgress, TaskTechnicalError> {
     let text = raw.ok_or_else(|| task_unavailable("task progress is missing"))?;
     TaskProgress::from_name(text).ok_or_else(|| task_unavailable("unknown task progress"))
@@ -875,6 +877,8 @@ fn create_delegation_sync(
 struct RawTask {
     revision: i64,
     purpose_adopted_revision: i64,
+    /// Nullable in the schema; reads fail closed on NULL and new writes
+    /// always name a value.
     progress: Option<String>,
     assignee: String,
 }
@@ -1386,11 +1390,23 @@ fn compose_result(
             ));
         }
     }
+    let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
+    let delegation_id = DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
+    let relied_revision = decode_revision(task_revision)?;
+    // Re-derive the authoritative set from the sealed delegation for the exact
+    // comparison. Only a stored non-empty set (or an adopted stamp) is
+    // compared, so the documented ambiguity of an all-empty unstamped first
+    // evaluation stays untouched.
+    let authoritative = || -> Result<Vec<RawId>, TaskTechnicalError> {
+        let attempts =
+            enumerate_delegation_attempts(conn, delegation_id, task_id, relied_revision)?;
+        Ok(attempts.into_iter().map(|(attempt, _)| attempt).collect())
+    };
     if let Some(adopted_stamp) = adopted_revision {
-        let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
-        let delegation_id =
-            DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
-        let relied_revision = decode_revision(task_revision)?;
+        // The adopted stamp only means the completed unit is readable while
+        // the current Task still agrees with it; the same checks the retry and
+        // `load_task` apply, so a bounded read never answers success from a
+        // stale stamp after an adopted-unit corruption.
         require_adopted_result_current_unit(
             conn,
             result,
@@ -1398,20 +1414,26 @@ fn compose_result(
             relied_revision,
             decode_revision(adopted_stamp)?,
         )?;
-        let authoritative: Vec<RawId> =
-            enumerate_delegation_attempts(conn, delegation_id, task_id, relied_revision)?
-                .into_iter()
-                .map(|(attempt, _)| attempt)
-                .collect();
-        require_stamped_attempts_exact(&attempt_refs, &authoritative)?;
+        // An adopted result's stamp committed in the same transaction as its
+        // adoption, so `adopted_revision = Some` proves the set is not an
+        // unstamped first evaluation. A fully wiped set (here and in the retry
+        // path) is durable corruption, never an initial empty evaluation, and
+        // an extra row is equally unreadable.
+        require_stamped_attempts_exact(&attempt_refs, &authoritative()?)?;
+    } else if !attempt_refs.is_empty() {
+        // A non-adopted acceptance stamps the result-local set to the
+        // authoritative set, so a stored non-empty set that no longer matches
+        // is a truncated or extended durable set, never an empty first
+        // evaluation.
+        require_stamped_attempts_exact(&attempt_refs, &authoritative()?)?;
     }
     Ok(TaskResultRecord {
         result,
         task: TaskRef {
-            task: TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?),
-            revision: decode_revision(task_revision)?,
+            task: task_id,
+            revision: relied_revision,
         },
-        delegation: DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?),
+        delegation: delegation_id,
         body: TaskAgentOutput::new(body),
         attempt_refs,
         adopted_revision: adopted_revision.map(decode_revision).transpose()?,
@@ -2259,6 +2281,16 @@ fn require_stamped_attempts_exact(
     Ok(())
 }
 
+/// Verifies and stamps the result-local fixed set.
+///
+/// A stored non-empty set is durable and fixed: it must equal the
+/// authoritative set exactly and is never extended or repaired. An empty
+/// stored set is inserted whole as a first evaluation — for a non-adopted
+/// result (`adopted_revision = None`) a fully wiped set is indistinguishable
+/// from an unstamped first evaluation, so this insert may refill it; that
+/// residual ambiguity is out of this slice's guarantee. An
+/// adopted result never reaches the empty branch: its retry and the bounded
+/// reads use [`require_stamped_attempts_exact`] and fail closed on a wipe.
 fn stamp_result_attempts(
     tx: &rusqlite::Transaction<'_>,
     result_text: &str,
@@ -2381,10 +2413,7 @@ fn adopt_result_sync(
             revision: relied_revision,
         }));
     }
-    if current_revision != relied_revision
-        || relied_purpose != current_purpose
-        || current_progress.is_terminal()
-    {
+    if current_revision != relied_revision || current_progress.is_terminal() {
         stamp_result_attempts(&tx, &result_text, &local)?;
         tx.commit().map_err(task_unavailable)?;
         return Ok(TaskResultAcceptance::RecordedToOriginalOnly);

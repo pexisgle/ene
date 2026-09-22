@@ -164,18 +164,11 @@ impl WorkspaceRoot {
             OperationKind::List => self.list_directory(target),
             OperationKind::Read => {
                 let destination = Path::new(target.as_path());
-                if self
-                    .verified_existing_metadata(destination, false)
-                    .is_none()
-                {
+                if !self.verified_existing_metadata(destination, false) {
                     return refused();
                 }
                 match fs::read(destination) {
-                    Ok(bytes) => ObservedEffect {
-                        certainty: ActionCertainty::ConfirmedSuccess,
-                        grounds: EffectGrounds::ObservedAtTarget,
-                        output: Some(ActionOutput::Bytes(bytes)),
-                    },
+                    Ok(bytes) => confirmed(ActionOutput::Bytes(bytes)),
                     Err(_) => refused(),
                 }
             }
@@ -196,7 +189,7 @@ impl WorkspaceRoot {
 
     fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
         let destination = Path::new(target.as_path());
-        if self.verified_existing_metadata(destination, true).is_none() {
+        if !self.verified_existing_metadata(destination, true) {
             return refused();
         }
         let Ok(entries) = fs::read_dir(destination) else {
@@ -214,11 +207,7 @@ impl WorkspaceRoot {
             listing.push(ListEntry { name, kind });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
-        ObservedEffect {
-            certainty: ActionCertainty::ConfirmedSuccess,
-            grounds: EffectGrounds::ObservedAtTarget,
-            output: Some(ActionOutput::Listing(listing)),
-        }
+        confirmed(ActionOutput::Listing(listing))
     }
 
     fn listable_child(&self, path: &Path) -> Option<ListEntryKind> {
@@ -281,83 +270,67 @@ impl WorkspaceRoot {
             Err(_) => return refused(),
         };
         if persisted.sync_all().is_err() {
-            return ObservedEffect {
-                certainty: ActionCertainty::Unknown,
-                grounds: EffectGrounds::OutcomeUnverified,
-                output: None,
-            };
+            // The rename landed but the content durability is unconfirmed.
+            return unverified();
         }
         match fs::read(destination) {
-            Ok(read_back) if read_back == bytes => ObservedEffect {
-                certainty: ActionCertainty::ConfirmedSuccess,
-                grounds: EffectGrounds::ObservedAtTarget,
-                output: Some(if replace {
-                    ActionOutput::Updated
-                } else {
-                    ActionOutput::Created {
-                        target: target.clone(),
-                    }
-                }),
-            },
-            _ => ObservedEffect {
-                certainty: ActionCertainty::Unknown,
-                grounds: EffectGrounds::OutcomeUnverified,
-                output: None,
-            },
+            Ok(read_back) if read_back == bytes => confirmed(if replace {
+                ActionOutput::Updated
+            } else {
+                ActionOutput::Created {
+                    target: target.clone(),
+                }
+            }),
+            // Something is at the destination but not what we intended; an
+            // effect occurred, but it cannot be confirmed as the intended one.
+            _ => unverified(),
         }
     }
 
-    fn verified_existing_metadata(
-        &self,
-        destination: &Path,
-        want_directory: bool,
-    ) -> Option<fs::Metadata> {
-        let canonical = fs::canonicalize(destination).ok()?;
+    /// Best-effort re-verification immediately before the effect.
+    ///
+    /// Edit requires the target to still canonicalize to itself inside the
+    /// root and remain on the root's filesystem entity; create requires the
+    /// canonical parent to still be inside the root and on the same entity,
+    /// and the destination to still be absent.
+    ///
+    /// Read and list use [`Self::verified_existing_metadata`]: the stored
+    /// target must still canonicalize to itself, stay inside the root, and
+    /// remain on the root's filesystem entity. A forged [`RealTargetRef`]
+    /// pointing outside the workspace (even on the same device) is refused.
+    fn verified_existing_metadata(&self, destination: &Path, want_directory: bool) -> bool {
+        let Ok(canonical) = fs::canonicalize(destination) else {
+            return false;
+        };
         if canonical != destination || !canonical.starts_with(&self.root) {
-            return None;
+            return false;
         }
-        let metadata = fs::metadata(&canonical).ok()?;
-        if metadata.is_dir() != want_directory {
-            return None;
-        }
-        if !self.boundary_holds(&canonical, &metadata) {
-            return None;
-        }
-        Some(metadata)
+        let Ok(metadata) = fs::metadata(&canonical) else {
+            return false;
+        };
+        metadata.is_dir() == want_directory && self.boundary_holds(&canonical, &metadata)
     }
 
     fn reverifies_at_effect(&self, destination: &Path, replace: bool) -> bool {
         if replace {
-            match (fs::canonicalize(destination), fs::metadata(destination)) {
-                (Ok(canonical), Ok(metadata)) => {
-                    canonical == destination
-                        && canonical.starts_with(&self.root)
-                        && self.boundary_holds(&canonical, &metadata)
-                }
-                _ => false,
-            }
-        } else {
-            let Some(parent) = destination.parent() else {
-                return false;
-            };
-            match (fs::canonicalize(parent), fs::metadata(parent)) {
-                (Ok(canonical_parent), Ok(metadata)) => {
-                    canonical_parent == parent
-                        && canonical_parent.starts_with(&self.root)
-                        && self.boundary_holds(&canonical_parent, &metadata)
-                        && fs::symlink_metadata(destination).is_err()
-                }
-                _ => false,
-            }
+            return self.verified_existing_metadata(destination, false);
         }
+        let Some(parent) = destination.parent() else {
+            return false;
+        };
+        self.verified_existing_metadata(parent, true) && fs::symlink_metadata(destination).is_err()
     }
 
-    fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
-        self.boundary_holds_impl(target, metadata)
-    }
-
+    /// Whether `target` is on the same filesystem entity as the workspace root
+    /// and no nested mount/reparse boundary lies between them.
+    ///
+    /// Linux: root and target must share a device, and no mount point from
+    /// `/proc/self/mountinfo` may sit strictly below the root on the target's
+    /// path (an unreadable mount table fails closed). Other Unix: device
+    /// equality. Windows: volume serial number equality. Undeterminable
+    /// boundaries are refused, never assumed inside.
     #[cfg(unix)]
-    fn boundary_holds_impl(&self, target: &Path, metadata: &fs::Metadata) -> bool {
+    fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
         use std::os::unix::fs::MetadataExt;
 
         let Ok(root_metadata) = fs::metadata(&self.root) else {
@@ -381,7 +354,10 @@ impl WorkspaceRoot {
     }
 
     #[cfg(windows)]
-    fn boundary_holds_impl(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
+    fn boundary_holds(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
+        // A nested mounted volume or reparse target lives on a different
+        // volume serial; an undeterminable serial fails closed. Create passes
+        // its canonical parent, so the same equality covers it.
         match (
             Self::volume_serial_of(&self.root),
             Self::volume_serial_of(target),
@@ -500,6 +476,22 @@ fn refused() -> ObservedEffect {
     ObservedEffect {
         certainty: ActionCertainty::ConfirmedFailure,
         grounds: EffectGrounds::RefusedBeforeEffect,
+        output: None,
+    }
+}
+
+fn confirmed(output: ActionOutput) -> ObservedEffect {
+    ObservedEffect {
+        certainty: ActionCertainty::ConfirmedSuccess,
+        grounds: EffectGrounds::ObservedAtTarget,
+        output: Some(output),
+    }
+}
+
+fn unverified() -> ObservedEffect {
+    ObservedEffect {
+        certainty: ActionCertainty::Unknown,
+        grounds: EffectGrounds::OutcomeUnverified,
         output: None,
     }
 }
@@ -953,6 +945,9 @@ mod tests {
         let canonical =
             fs::canonicalize(directory.path().join("input.txt")).expect("canonical fixture");
         let target_metadata = fs::metadata(&canonical).expect("target metadata");
+        // A nested mounted volume presents a different volume serial, so the
+        // same equality refuses it; an undeterminable serial (None) fails
+        // closed by the matches! guard in boundary_holds.
         assert_eq!(
             WorkspaceRoot::volume_serial_of(root.as_path()),
             WorkspaceRoot::volume_serial_of(&canonical),

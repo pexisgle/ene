@@ -445,19 +445,24 @@ impl HostHandle {
         PageCursorWire(wire)
     }
 
-    fn mint_task_ref(state: &mut PresentationState, conn: &str, task: TaskId) -> TaskWireRef {
-        if let Some(((_, wire), _)) = state
-            .task_refs
+    fn mint_conn_ref<V: PartialEq + Clone>(
+        map: &mut HashMap<(String, String), V>,
+        conn: &str,
+        value: &V,
+    ) -> String {
+        if let Some(((_, wire), _)) = map
             .iter()
-            .find(|((owner, _), mapped)| owner == conn && **mapped == task)
+            .find(|((owner, _), mapped)| owner == conn && *mapped == value)
         {
-            return TaskWireRef(wire.clone());
+            return wire.clone();
         }
         let wire = Uuid::new_v4().as_hyphenated().to_string();
-        state
-            .task_refs
-            .insert((conn.to_string(), wire.clone()), task);
-        TaskWireRef(wire)
+        map.insert((conn.to_string(), wire.clone()), value.clone());
+        wire
+    }
+
+    fn mint_task_ref(state: &mut PresentationState, conn: &str, task: TaskId) -> TaskWireRef {
+        TaskWireRef(Self::mint_conn_ref(&mut state.task_refs, conn, &task))
     }
 
     fn mint_source_ref(
@@ -465,18 +470,7 @@ impl HostHandle {
         conn: &str,
         source: TaskReportSourceRef,
     ) -> ReportSourceWireRef {
-        if let Some(((_, wire), _)) = state
-            .source_refs
-            .iter()
-            .find(|((owner, _), mapped)| owner == conn && **mapped == source)
-        {
-            return ReportSourceWireRef(wire.clone());
-        }
-        let wire = Uuid::new_v4().as_hyphenated().to_string();
-        state
-            .source_refs
-            .insert((conn.to_string(), wire.clone()), source);
-        ReportSourceWireRef(wire)
+        ReportSourceWireRef(Self::mint_conn_ref(&mut state.source_refs, conn, &source))
     }
 
     fn sweep_carried(state: &mut PresentationState, conn: &str) {
@@ -489,6 +483,17 @@ impl HostHandle {
         }
     }
 
+    /// Drops this connection's in-flight usage-summary walk. A cursor-less
+    /// request starts a fresh walk, so its predecessor wire is superseded
+    /// rather than left behind while a new one is minted on every head read;
+    /// a supplied cursor still consumes only itself (`take_cursor`).
+    pub(crate) fn supersede_usage_cursors(state: &mut PresentationState, conn: &str) {
+        state.cursors.retain(|(owner, _), stored| {
+            owner != conn || !matches!(stored, StoredCursor::UsageSummary { .. })
+        });
+    }
+
+    /// Dispatch entry: one undelivered subscription/page request.
     pub(crate) async fn request_undelivered(
         &self,
         frame: &WireFrame,
@@ -775,7 +780,11 @@ impl HostHandle {
                 if sub.companion != companion.as_raw() {
                     sub.scan_floor = 0;
                     sub.drained_once = false;
-                    sub.resume = None;
+                    // A retarget never crosses companions: drop the abandoned
+                    // continuation wire with its resume slot.
+                    if let Some((_, _, _, wire)) = sub.resume.take() {
+                        state.cursors.remove(&(conn.to_string(), wire));
+                    }
                 }
                 let continuation = (trigger != PassTrigger::Redisplay)
                     .then_some(sub.resume.as_ref())
@@ -805,6 +814,16 @@ impl HostHandle {
                 } else {
                     Some(PlanStart::Explicit { upper: bound })
                 };
+                // A plan that abandons the stored continuation (explicit
+                // redisplay) must also drop its wire: otherwise the wire
+                // outlives its resume slot, still passes
+                // `valid_undelivered_cursor`, and the map grows once per
+                // abandoned page (forward-only paging contract).
+                if !matches!(plan, Some(PlanStart::Continued { .. }))
+                    && let Some((_, _, _, wire)) = sub.resume.take()
+                {
+                    state.cursors.remove(&(conn.to_string(), wire));
+                }
                 sub.companion = companion.as_raw();
                 plan
             })?;
@@ -2134,7 +2153,9 @@ impl HostHandle {
                 sub.companion = companion.as_raw();
                 sub.scan_floor = 0;
                 sub.drained_once = false;
-                sub.resume = None;
+                if let Some((_, _, _, wire)) = sub.resume.take() {
+                    state.cursors.remove(&(conn.clone(), wire));
+                }
             })
             .is_some();
         if !prepared {

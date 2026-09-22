@@ -11,7 +11,7 @@ fn main() -> ExitCode {
             if writeln!(stderr, "{error}").is_err() {
                 return ExitCode::FAILURE;
             }
-            ExitCode::from(error.exit_code())
+            ExitCode::FAILURE
         }
     }
 }

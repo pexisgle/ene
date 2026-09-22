@@ -227,13 +227,15 @@ fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError
     Ok(Some(child))
 }
 
-fn read_interaction_trace(
+/// Opens one JSONL trace at the campaign's captured offset. A trace that does
+/// not exist is unmeasured evidence, not a failed campaign.
+fn open_trace(
     path: &Path,
     offset: u64,
-) -> Result<Vec<ene_desktop::measure::InteractionSample>, CliError> {
+) -> Result<Option<std::io::BufReader<std::fs::File>>, CliError> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(CliError::Read {
                 path: path.to_path_buf(),
@@ -246,7 +248,17 @@ fn read_interaction_trace(
             path: path.to_path_buf(),
             source,
         })?;
-    std::io::BufReader::new(file)
+    Ok(Some(std::io::BufReader::new(file)))
+}
+
+fn read_interaction_trace(
+    path: &Path,
+    offset: u64,
+) -> Result<Vec<ene_desktop::measure::InteractionSample>, CliError> {
+    let Some(reader) = open_trace(path, offset)? else {
+        return Ok(Vec::new());
+    };
+    reader
         .lines()
         .map(|line| {
             let line = line.map_err(|source| CliError::Read {
@@ -281,28 +293,16 @@ fn read_wayland_feedback(
     warmup_secs: f64,
     wall_secs: f64,
 ) -> Result<Vec<ene_body::ipc::PresentationFeedback>, CliError> {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(CliError::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+    let Some(reader) = open_trace(path, offset)? else {
+        return Ok(Vec::new());
     };
-    file.seek(std::io::SeekFrom::Start(offset))
-        .map_err(|source| CliError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
     let window_start = started_unix_ms
         .saturating_mul(1_000_000)
         .saturating_add((warmup_secs * 1_000_000_000.0).round() as u128);
     let window_end = window_start.saturating_add((wall_secs * 1_000_000_000.0).round() as u128);
     let mut selected = Vec::new();
     let mut submitted = std::collections::BTreeSet::new();
-    for line in std::io::BufReader::new(file).lines() {
+    for line in reader.lines() {
         let line = line.map_err(|source| CliError::Read {
             path: path.to_path_buf(),
             source,

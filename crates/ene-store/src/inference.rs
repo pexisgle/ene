@@ -179,12 +179,6 @@ impl InferenceAttemptRepository for Store {
                 ],
             ) {
                 Ok(_) => {}
-                Err(error)
-                    if error.sqlite_error_code()
-                        == Some(rusqlite::ErrorCode::ConstraintViolation) =>
-                {
-                    return Ok(AttemptBeginOutcome::Stale);
-                }
                 Err(error) => return Err(inference_unavailable(error.to_string())),
             }
             for (ordinal, source) in correlation.data_use.iter().enumerate() {

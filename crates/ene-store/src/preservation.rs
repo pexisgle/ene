@@ -300,10 +300,18 @@ pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
          AND NOT EXISTS(SELECT 1 FROM erasure_condition c
              WHERE c.operation_id=o.operation_id AND c.sweep=o.sweep))";
 
-fn directly_covered_source(
+/// The unfinished operations whose current-sweep reconciliation is still
+/// walking, as `(operation_id, sweep)` in `operation_id` order.
+///
+/// The published current-sweep correlation is the fast path; while a sweep is
+/// incomplete, a covered identity may legitimately not be published yet. The
+/// direct-fallback probes share this candidate set so the fast-skip probe and
+/// the enumeration cannot drift. An empty result means no active/held
+/// operation is mid-reconciliation, so the published correlation set is
+/// already exhaustive.
+fn unreconciled_operations(
     conn: &Connection,
-    source: &str,
-) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
+) -> Result<Vec<(String, i64)>, PreservationTechnicalError> {
     let pending: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
@@ -314,7 +322,7 @@ fn directly_covered_source(
         )
         .map_err(storage)?;
     if !pending {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let mut statement = conn
         .prepare(
@@ -331,7 +339,24 @@ fn directly_covered_source(
         .collect::<Result<_, _>>()
         .map_err(storage)?;
     drop(statement);
-    for (id, sweep) in candidates {
+    Ok(candidates)
+}
+
+/// Direct mechanical coverage of one source identity by an operation whose
+/// current-sweep reconciliation is still walking.
+///
+/// The published current-sweep correlation is the fast path; while a sweep is
+/// incomplete, a covered identity may legitimately not be published yet. The
+/// identity's own stored body is durable evidence independent of any page
+/// bound, so it is compared directly against each unreconciled operation's
+/// protected target. This keeps a new send or adoption from starting on a
+/// covered source between the condition commit and the end of the walk; after
+/// the walk the published correlation answers the same way.
+fn directly_covered_source(
+    conn: &Connection,
+    source: &str,
+) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
+    for (id, sweep) in unreconciled_operations(conn)? {
         validate(conn, &id)?;
         let target: Option<String> = conn
             .query_row(
@@ -373,53 +398,104 @@ pub(crate) fn covering_condition(
     directly_covered_source(conn, source)
 }
 
+/// One traversal of the canonical current conditions with their protected
+/// mechanical targets (lifecycle §7/§11).
+///
+/// Returns `(condition, target)` in `operation_id` order; `target` is `None`
+/// when the operation's protected material row is absent. Every unfinished
+/// operation is Owner-confirmed and validated here, so an operation whose
+/// structural rows are torn fails the read closed instead of being read as
+/// "not covering".
+fn current_operation_targets(
+    conn: &Connection,
+) -> Result<Vec<(ErasureConditionRef, Option<String>)>, PreservationTechnicalError> {
+    let orphan: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM erasure_condition c
+                 LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+                 WHERE o.operation_id IS NULL)",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if orphan {
+        return Err(corrupt());
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT operation_id, sweep FROM deletion_operation
+             WHERE phase!='completed' ORDER BY operation_id",
+        )
+        .map_err(storage)?;
+    let ids: Vec<(String, i64)> = statement
+        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    drop(statement);
+    let mut targets = Vec::with_capacity(ids.len());
+    for (id, sweep) in ids {
+        validate(conn, &id)?;
+        let target: Option<String> = conn
+            .query_row(
+                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        targets.push((decode_ref(&id, sweep)?.condition(), target));
+    }
+    Ok(targets)
+}
+
+/// One mechanical text verdict against the canonical current conditions
+/// (lifecycle §7/§11).
+///
+/// [`Self::Target`] carries the protected exact target that matched; it is
+/// compared in place by the owning boundary and never rendered into a log, an
+/// outcome, a completion fact, or an audit row. [`Self::Unreadable`] is a
+/// current condition with no readable protected target: production never
+/// observes this shape (the completion wipe runs in the same transaction that
+/// commits `completed`), so it is a defensive branch for torn state. Should a
+/// wipe ever be observable before the completed commit, the condition still
+/// covers, but no target remains to redact mechanically, so callers fail
+/// closed (refuse; a collecting owner stores a body-free marker) rather than
+/// treating an unreadable target as "not covering".
 pub(crate) enum TextCoverage {
     Target(String),
     Unreadable,
 }
 
+/// The exact-target premise of one bounded read pass (lifecycle §7/§11).
+///
+/// This is the page-shaped companion of [`covering_text`]: one canonical read
+/// of the unfinished operations' protected mechanical targets, reused for
+/// every row of one read. The premise is read from the canonical store inside
+/// the caller's transaction, so an empty target set across every current
+/// condition is the authoritative "not covered" (no sentinel, no cached
+/// verdict). A completed operation is excluded by the canonical
+/// `phase`/`closed_at` invariant: its condition stopped covering text (§7:
+/// completion is not a permanent keyword ban). Unfinished operations are the
+/// bounded candidate set: they are Owner-confirmed and validated here, so an
+/// operation whose structural rows are torn fails the read closed instead of
+/// being read as "not covering".
+///
+/// [`Self::covers`] is the same mechanical predicate the A3 owner sweeps apply
+/// — an exact substring match of a protected target. A current condition with
+/// no readable target at all (defensive: should a wipe ever be observable
+/// before the completed commit) leaves nothing to compare, so the premise is
+/// unreadable and every body is covered (fail closed) rather than served as
+/// uncovered.
 pub(crate) struct TextCoveragePremise {
     targets: Option<Vec<String>>,
 }
 
 impl TextCoveragePremise {
     pub(crate) fn read(conn: &Connection) -> Result<Self, PreservationTechnicalError> {
-        let orphan: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM erasure_condition c
-                     LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
-                     WHERE o.operation_id IS NULL)",
-                (),
-                |row| row.get(0),
-            )
-            .map_err(storage)?;
-        if orphan {
-            return Err(corrupt());
-        }
-        let mut statement = conn
-            .prepare(
-                "SELECT operation_id FROM deletion_operation
-                 WHERE phase!='completed' ORDER BY operation_id",
-            )
-            .map_err(storage)?;
-        let ids: Vec<String> = statement
-            .query_map((), |row| row.get(0))
-            .map_err(storage)?
-            .collect::<Result<_, _>>()
-            .map_err(storage)?;
-        drop(statement);
-        let mut targets = Vec::with_capacity(ids.len());
-        for id in ids {
-            validate(conn, &id)?;
-            let exact: Option<String> = conn
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some(target) = exact else {
+        let mut targets = Vec::new();
+        for (_, target) in current_operation_targets(conn)? {
+            let Some(target) = target else {
                 return Ok(Self { targets: None });
             };
             if !target.is_empty() {
@@ -458,42 +534,12 @@ pub(crate) fn covering_text_condition(
     conn: &Connection,
     text: &str,
 ) -> Result<Option<(ErasureConditionRef, TextCoverage)>, PreservationTechnicalError> {
-    let orphan: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM erasure_condition c
-                 LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
-                 WHERE o.operation_id IS NULL)",
-            (),
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if orphan {
-        return Err(corrupt());
-    }
-    let mut statement = conn
-        .prepare(
-            "SELECT operation_id, sweep FROM deletion_operation
-             WHERE phase!='completed' ORDER BY operation_id",
-        )
-        .map_err(storage)?;
-    let ids: Vec<(String, i64)> = statement
-        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
-    drop(statement);
-    for (id, sweep) in ids {
-        validate(conn, &id)?;
-        let exact: Option<String> = conn
-            .query_row(
-                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let condition = decode_ref(&id, sweep)?.condition();
-        match exact {
+    for (condition, target) in current_operation_targets(conn)? {
+        match target {
+            // Defensive: production commits the completed phase and the wipe
+            // in one transaction, so an unfinished condition keeps its
+            // material. Should a wipe ever be observable first, the body is
+            // covered with no readable target.
             None => return Ok(Some((condition, TextCoverage::Unreadable))),
             Some(target) if !target.is_empty() && text.contains(&target) => {
                 return Ok(Some((condition, TextCoverage::Target(target))));
@@ -519,8 +565,8 @@ pub(crate) fn covering_sources(
 /// Collects one covered body instead of persisting it: redacts every current
 /// condition's mechanical target out of the text and returns the body-free
 /// result, or [`crate::erasure::ERASED_MARKER`] when a current condition's
-/// protected target is no longer readable (a finalizing wipe) so no
-/// mechanical comparison is possible at all.
+/// protected target is unreadable (defensive: see [`TextCoverage::Unreadable`])
+/// so no mechanical comparison is possible at all.
 ///
 /// This is the "erase collection" side of the A4 boundary contract for bodies
 /// whose objective fact must survive (a Task result arrival seals its
@@ -1265,35 +1311,8 @@ fn directly_covered_uses(
     use_kind: &str,
     use_id: RawId,
 ) -> Result<Vec<String>, PreservationTechnicalError> {
-    let pending: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
-                 JOIN deletion_operation o ON o.operation_id=r.operation_id
-                 WHERE r.complete=0 AND r.sweep=o.sweep AND o.phase IN ('active','held'))",
-            (),
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if !pending {
-        return Ok(Vec::new());
-    }
-    let mut statement = conn
-        .prepare(
-            "SELECT o.operation_id FROM deletion_operation o
-             WHERE o.phase IN ('active','held') AND EXISTS
-                 (SELECT 1 FROM deletion_reconciliation r
-                  WHERE r.operation_id=o.operation_id AND r.complete=0)
-             ORDER BY o.operation_id",
-        )
-        .map_err(storage)?;
-    let candidates: Vec<String> = statement
-        .query_map((), |row| row.get(0))
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
-    drop(statement);
     let mut matched = Vec::new();
-    for id in candidates {
+    for (id, _sweep) in unreconciled_operations(conn)? {
         validate(conn, &id)?;
         let target: Option<String> = conn
             .query_row(
@@ -2726,7 +2745,6 @@ impl PreservationRepository for Store {
                     let current = decode_ref(id, sweep)?;
                     Ok(CurrentErasureCondition {
                         condition: current.condition(),
-                        scope: current.operation,
                         opened_at: parse_time(&opened)?,
                     })
                 })

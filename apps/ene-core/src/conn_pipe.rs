@@ -20,6 +20,10 @@ use windows_sys::core::{PCWSTR, PWSTR};
 
 use crate::serve::CoreError;
 
+/// `SE_GROUP_LOGON_ID` (`WinNT.h`): marks the logon SID inside a token's
+/// group list. windows-sys exposes this only under the
+/// `Win32_System_SystemServices` feature, which this crate does not enable,
+/// so it is redeclared here and kept equal to the SDK value.
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
 #[must_use]

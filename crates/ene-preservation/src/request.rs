@@ -50,20 +50,14 @@ impl TargetedDeletionRequest {
     }
 
     #[must_use]
-    pub fn target(&self) -> &TargetedDeletionTarget {
-        &self.target
-    }
-
-    #[must_use]
     pub fn purpose(&self) -> DeletionPurpose {
         self.purpose
     }
 
-    #[must_use]
-    pub fn requested_at(&self) -> WallClockWithTz {
-        self.requested_at
-    }
-
+    /// Protected target text for the Host-local Owner review surface (IPC
+    /// §18.1 preview): the trusted console shows exactly what would be
+    /// deleted before the Owner confirms. Never a log, `Debug`, or wire
+    /// representation.
     #[must_use]
     pub fn owner_review_text(&self) -> &str {
         let MechanicalDeletionTarget::ExactText(material) = &self.target.mechanical;
@@ -104,11 +98,6 @@ impl OwnerConfirmationFact {
     #[must_use]
     pub fn from_durable(request: DeletionRequestId) -> Self {
         Self { request }
-    }
-
-    #[must_use]
-    pub fn request(self) -> DeletionRequestId {
-        self.request
     }
 }
 
@@ -190,12 +179,6 @@ impl DeletionSurfaceMark {
     }
 }
 
-impl core::fmt::Display for DeletionSurfaceMark {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ene_primitive::{RawId, WallClockWithTz};
@@ -239,7 +222,6 @@ mod tests {
         let request = staged();
         let identity = request.request();
         let fact = OwnerConfirmationFact::from_durable(identity);
-        assert_eq!(fact.request(), identity);
         let command = request
             .clone()
             .into_command(

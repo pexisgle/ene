@@ -78,16 +78,42 @@ pub fn load_stored_device(data_dir: &Path) -> DeviceFileState {
     DeviceFileState::Loaded(stored)
 }
 
+/// Atomically replaces the device file: the new document is staged to an
+/// owner-only temp in the same directory, synced, and renamed over the
+/// target, so a crash or write failure leaves either the old or the new
+/// document whole, never a torn or empty file.
+///
+/// Callers persist only after the Host accepted the ownership proof, so a
+/// failed pairing attempt never replaces a working file.
 pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), ClientError> {
-    let path = device_file_path(data_dir);
     let bytes = Zeroizing::new(serde_json::to_vec(device).map_err(|error| {
         ClientError::Transport(format!("client device encode failed: {error}"))
     })?);
-    let parent = match path.parent() {
+    atomic_replace(
+        &device_file_path(data_dir),
+        &bytes,
+        Some(0o600),
+        "client device store failed",
+    )
+}
+
+/// Atomically replaces `target` with `bytes`: staged to a temp in the same
+/// directory, synced, and renamed over the target, so concurrent writers and
+/// crashes publish only whole content. `mode` is the Unix permission applied
+/// to the staging temp (secret material uses `0o600`); other platforms ignore
+/// it. Failure messages carry `context` and the I/O kind only, never content
+/// or paths, and the temp is removed best-effort after a failure.
+pub(crate) fn atomic_replace(
+    target: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+    context: &str,
+) -> Result<(), ClientError> {
+    let parent = match target.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         Some(_) | None => PathBuf::from("."),
     };
-    let file_name = path
+    let file_name = target
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| String::from(DEVICE_FILE_NAME));
@@ -99,31 +125,36 @@ pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), Client
         ".{file_name}.{}.{nanos}.{seq}.tmp",
         std::process::id()
     ));
-    if let Err(error) = stage_and_replace(&staged, &path, &bytes) {
-        if std::fs::remove_file(&staged).is_err() {
-            // Best effort: the file lives in the owner-only data directory,
-            // and the reported store failure stays authoritative.
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            if let Some(mode) = mode {
+                options.mode(mode);
+            }
         }
-        return Err(error);
+        let mut file = options
+            .open(&staged)
+            .map_err(|error| store_error(context, &error))?;
+        file.write_all(bytes)
+            .map_err(|error| store_error(context, &error))?;
+        file.sync_all()
+            .map_err(|error| store_error(context, &error))?;
+        drop(file);
+        std::fs::rename(&staged, target).map_err(|error| store_error(context, &error))
+    })();
+    if result.is_err() {
+        // The temp can carry secret material; best-effort removal without
+        // masking the real error.
+        if std::fs::remove_file(&staged).is_err() {
+            // Best effort only.
+        }
     }
-    Ok(())
+    result
 }
 
-fn stage_and_replace(staged: &Path, target: &Path, bytes: &[u8]) -> Result<(), ClientError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(staged).map_err(|error| store_error(&error))?;
-    file.write_all(bytes).map_err(|error| store_error(&error))?;
-    file.sync_all().map_err(|error| store_error(&error))?;
-    drop(file);
-    std::fs::rename(staged, target).map_err(|error| store_error(&error))
-}
-
-fn store_error(error: &std::io::Error) -> ClientError {
-    ClientError::Transport(format!("client device store failed: {}", error.kind()))
+fn store_error(context: &str, error: &std::io::Error) -> ClientError {
+    ClientError::Transport(format!("{context}: {}", error.kind()))
 }

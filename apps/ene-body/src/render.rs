@@ -10,6 +10,9 @@ use wgpu::util::DeviceExt as _;
 use crate::vrm::{RenderMesh, RenderTexture};
 
 const HIT_TEST_CELL_PIXELS: u32 = 4;
+/// Alpha cutoff shared by the CPU input-region mask and the WGSL fragment
+/// shader in this module: the shader must discard exactly the pixels the mask
+/// treats as transparent, so visible and clickable stay the same set.
 const VISIBLE_ALPHA_THRESHOLD: f32 = 0.001;
 
 pub struct SurfaceRenderer {
@@ -570,12 +573,16 @@ struct VertexOut {
 }
 @fragment fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
     let color = input.color * textureSample(base_color_texture, base_color_sampler, input.uv);
-    if color.a <= 0.001 {
+    if color.a <= {VISIBLE_ALPHA_THRESHOLD} {
         discard;
     }
     return color;
 }
 "#
+                .replace(
+                    "{VISIBLE_ALPHA_THRESHOLD}",
+                    &VISIBLE_ALPHA_THRESHOLD.to_string(),
+                )
                 .into(),
             ),
         });

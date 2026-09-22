@@ -4,7 +4,8 @@ use ene_permission::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
     IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
     IntentResolution, PermissionErasureOutcome, PermissionErasureRepository,
-    PermissionTechnicalError, ShortcutIntentOutcome, consent_mark, parse_consent_mark,
+    PermissionTechnicalError, ShortcutIntentOutcome, consent_current_mark, consent_mark,
+    parse_consent_mark,
 };
 use ene_preservation::ErasureConditionRef;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -15,6 +16,7 @@ use crate::codec::{
     insert_decided_row_tx, lock_shared, permission_unavailable, replay_or_conflict, select_consent,
     select_intent_row_tx,
 };
+use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
@@ -22,10 +24,10 @@ const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (capability, id, re
 
 const SQL_UPDATE_CONSENT: &str = "UPDATE consent_record SET id = ?2, rev = ?3, provider = ?4, model = ?5, credential_id = ?6 WHERE capability = ?1";
 
-fn current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> String {
-    consent_mark(capability, current.map(|record| record.rev.as_u64()))
-}
-
+/// Used by the intent-atomic assign so the premise check and the write
+/// cannot drift apart. The row is selected and written under the record's
+/// own capability, so a dialogue assignment can never overwrite or borrow
+/// the learning assignment.
 fn compare_and_save_row(
     tx: &Transaction<'_>,
     expected: Option<(&str, &ConsentRevision)>,
@@ -171,7 +173,7 @@ impl IntentOutcomeRepository for Store {
                     revision: consent_mark(record.capability, Some(record.rev.as_u64())),
                 },
                 ConsentCommitOutcome::StaleCurrent { current } => IntentOutcome::StaleBaseView {
-                    current: current_mark(record.capability, current.as_ref()),
+                    current: consent_current_mark(record.capability, current.as_ref()),
                 },
             };
             insert_decided_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
@@ -205,7 +207,7 @@ impl IntentOutcomeRepository for Store {
             let current_state = current.as_ref().map(|record| record.rev.as_u64());
             let outcome = if expected != Some(current_state) {
                 IntentOutcome::StaleBaseView {
-                    current: current_mark(CapabilityKind::Dialogue, current.as_ref()),
+                    current: consent_current_mark(CapabilityKind::Dialogue, current.as_ref()),
                 }
             } else if current.is_some() && bearer_present {
                 IntentOutcome::AppliedAsOneTime
@@ -269,8 +271,12 @@ impl IntentOutcomeRepository for Store {
     }
 }
 
-const ERASURE_BATCH_ROWS: i64 = 500;
-
+/// Redacts the caller-supplied text columns of the decision journal.
+///
+/// The journal row itself is never deleted: deleting a decided intent would
+/// reopen its identity, so a retried id could re-execute a decision the Owner
+/// already received. The erased span is removed (`''`, never a marker), so no
+/// marker text can itself become a target match or a target-derived value.
 const SQL_REDACT_INTENT_JOURNAL: &str = "UPDATE management_intent
      SET target = replace(target, ?1, ''),
          rationale_quote = replace(rationale_quote, ?1, '')
@@ -295,10 +301,6 @@ const SQL_COUNT_JOURNAL_TARGET: &str = "SELECT COUNT(*) FROM management_intent
 const SQL_COUNT_CONSENT_TARGET: &str = "SELECT COUNT(*) FROM consent_record
      WHERE instr(id, ?1) > 0 OR instr(provider, ?1) > 0
         OR instr(model, ?1) > 0 OR instr(credential_id, ?1) > 0";
-
-fn erasure_count(value: i64) -> Result<u64, PermissionTechnicalError> {
-    u64::try_from(value).map_err(|_| permission_unavailable(String::from("count out of range")))
-}
 
 impl PermissionErasureRepository for Store {
     fn erase_target_text(
@@ -340,17 +342,16 @@ impl PermissionErasureRepository for Store {
                 let consent_remainder: i64 = tx
                     .query_row(SQL_COUNT_CONSENT_TARGET, params![target], |row| row.get(0))
                     .map_err(|error| permission_unavailable(error.to_string()))?;
-                let erased = erasure_count(
-                    i64::try_from(journal_redacted + consents_invalidated)
-                        .map_err(|_| permission_unavailable(String::from("count out of range")))?,
-                )?;
+                let erased = erasure_count(journal_redacted + consents_invalidated)
+                    .map_err(permission_unavailable)?;
                 let remainder = erasure_count(
                     journal_remainder
                         .checked_add(consent_remainder)
                         .ok_or_else(|| {
                             permission_unavailable(String::from("count out of range"))
                         })?,
-                )?;
+                )
+                .map_err(permission_unavailable)?;
                 tx.commit()
                     .map_err(|error| permission_unavailable(error.to_string()))?;
                 Ok(PermissionErasureOutcome::Applied { erased, remainder })

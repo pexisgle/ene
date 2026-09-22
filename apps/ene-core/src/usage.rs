@@ -2,7 +2,7 @@ use ene_api::v1::management::{
     ManagementIntent, ManagementOutcome, USAGE_CAP_TARGET_PREFIX, parse_usage_cap_target,
 };
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::UsageCursorWire;
+use ene_api::v1::refs::{UsageCursorWire, ViewMarkWire};
 use ene_api::v1::usage::{
     USAGE_PAGE_LIMIT_DEFAULT, USAGE_PAGE_LIMIT_MAX, UsageCapConsumptionView, UsageCapStoredView,
     UsageCapView, UsageCostView, UsageMoneyView, UsageSummaryPage, UsageSummaryRequest,
@@ -174,6 +174,9 @@ impl HostHandle {
                 &conn,
                 request.cursor.as_ref().map(|cursor| cursor.0.as_str()),
             );
+            if request.cursor.is_none() {
+                Self::supersede_usage_cursors(state, &conn);
+            }
             if rows.len() as u32 == limit
                 && let Some(last) = rows.last()
             {
@@ -484,7 +487,7 @@ fn cap_view(
         None => (usage_cap_mark(scope, window, None), None),
     };
     UsageCapView {
-        mark,
+        mark: ViewMarkWire(mark),
         scope: scope.as_str().to_string(),
         provider,
         window: window.as_str().to_string(),

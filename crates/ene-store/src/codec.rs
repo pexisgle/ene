@@ -282,6 +282,17 @@ fn resolve_source_task(
     decode_id(&task_text)
 }
 
+/// Decodes one stored source key back to its typed form.
+///
+/// An unknown kind, an undecodable identity, a phase that is not the kind's
+/// canonical rendering (a non-canonical revision decimal, a phase present for
+/// a kind that has none, an unknown certainty, an unknown terminal phase) are
+/// unreadable rows and fail closed. Delegation-, attempt-, and result-owned
+/// facts resolve
+/// their owning task from the canonical rows at read time (the delegation
+/// row, the attempt's delegation row, the result row): the `task` field is
+/// the owning task, never the source identity itself, so report composition
+/// finds the task behind every fact.
 pub(crate) fn decode_undelivered_source(
     conn: &Connection,
     kind: &str,
@@ -294,6 +305,9 @@ pub(crate) fn decode_undelivered_source(
             let revision = phase
                 .parse::<u64>()
                 .map_err(|_| String::from("malformed task revision source phase"))?;
+            if phase != revision.to_string() {
+                return Err(String::from("malformed task revision source phase"));
+            }
             Ok(UndeliveredSource::TaskRecord {
                 task: raw,
                 fact: TaskFact::TaskRevision {
@@ -303,6 +317,9 @@ pub(crate) fn decode_undelivered_source(
             })
         }
         SOURCE_KIND_DELEGATION => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed delegation source phase"));
+            }
             let task = resolve_source_task(conn, SQL_SOURCE_DELEGATION_TASK, id, "delegation")?;
             Ok(UndeliveredSource::TaskRecord {
                 task,
@@ -322,6 +339,9 @@ pub(crate) fn decode_undelivered_source(
             })
         }
         SOURCE_KIND_RESULT_RECORDED => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed recorded result source phase"));
+            }
             let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "recorded result")?;
             Ok(UndeliveredSource::TaskRecord {
                 task,
@@ -329,6 +349,9 @@ pub(crate) fn decode_undelivered_source(
             })
         }
         SOURCE_KIND_RESULT_ADOPTED => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed adopted result source phase"));
+            }
             let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "adopted result")?;
             Ok(UndeliveredSource::TaskRecord {
                 task,
@@ -346,8 +369,18 @@ pub(crate) fn decode_undelivered_source(
                 },
             })
         }
-        SOURCE_KIND_HISTORY_MESSAGE => Ok(UndeliveredSource::HistoryMessage(raw)),
-        SOURCE_KIND_ACTIVITY_RECORD => Ok(UndeliveredSource::ActivityRecord(raw)),
+        SOURCE_KIND_HISTORY_MESSAGE => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed history message source phase"));
+            }
+            Ok(UndeliveredSource::HistoryMessage(raw))
+        }
+        SOURCE_KIND_ACTIVITY_RECORD => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed activity record source phase"));
+            }
+            Ok(UndeliveredSource::ActivityRecord(raw))
+        }
         _ => Err(String::from("unknown undelivered source kind")),
     }
 }
@@ -593,7 +626,7 @@ pub(crate) fn decode_device_record(
     paired_text: &str,
     wire: String,
 ) -> Result<DeviceRecord, String> {
-    let paired_at = WallClockWithTz::parse_rfc3339(paired_text)
+    let paired_at = decode_wall_clock(paired_text)
         .map_err(|_| String::from("malformed device pairing timestamp"))?;
     Ok(DeviceRecord {
         id: DeviceId(decode_id(device_text)?),
@@ -609,7 +642,7 @@ pub(crate) fn decode_pending_pairing(
     requested_text: &str,
     origin_connection: String,
 ) -> Result<PendingPairing, String> {
-    let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
+    let requested_at = decode_wall_clock(requested_text)
         .map_err(|_| String::from("malformed pairing request timestamp"))?;
     Ok(PendingPairing {
         pending_id,
@@ -628,7 +661,7 @@ pub(crate) fn decode_pending_credential(
     label: String,
     requested_text: &str,
 ) -> Result<PendingCredentialApproval, String> {
-    let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
+    let requested_at = decode_wall_clock(requested_text)
         .map_err(|_| String::from("malformed credential approval timestamp"))?;
     Ok(PendingCredentialApproval {
         provider,
@@ -657,8 +690,8 @@ pub(crate) fn decode_history_message(
         client_counter,
         client_random,
     } = row;
-    let at = WallClockWithTz::parse_rfc3339(&at_text)
-        .map_err(|_| String::from("malformed timeline timestamp"))?;
+    let at =
+        decode_wall_clock(&at_text).map_err(|_| String::from("malformed timeline timestamp"))?;
     let mut command_id = None;
     if let Some(text) = command_text.as_deref() {
         command_id = Some(CommandId(decode_id(text)?));

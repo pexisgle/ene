@@ -309,11 +309,9 @@ impl Client {
         self.state.companion_ref()
     }
 
-    #[must_use]
-    pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
-        self.state.presence_state()
-    }
-
+    /// Drains deferred auto-presented summaries the Host pushed without
+    /// `reply_to`. The caller paints each and ACKs the receipts it fully
+    /// painted.
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         self.state.take_undelivered()
     }
@@ -627,11 +625,6 @@ impl Client {
 
     pub fn companion_ref(&self) -> String {
         String::from(crate::DEFAULT_COMPANION_REF)
-    }
-
-    #[must_use]
-    pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
-        None
     }
 }
 

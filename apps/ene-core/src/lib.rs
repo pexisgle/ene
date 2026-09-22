@@ -19,6 +19,13 @@ pub mod usage;
 
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
+/// Locks a `std` mutex, recovering from poisoning.
+///
+/// Poisoning only follows a panic inside a critical section; the mutex's own
+/// map and queue operations cannot panic while holding the guard, so recovery
+/// preserves the committed state, but callers may run callbacks under a guard
+/// that panic and poison it (for example `ConnectionTable::note_closed`).
+/// Recovery then restores the maps as committed before the callback ran.
 pub(crate) fn lock_unpoison<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()

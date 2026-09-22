@@ -1,3 +1,18 @@
+//! Bounded lexical term overlap for selecting what one use can draw on.
+//!
+//! This is a derived selection heuristic, never a Memory's stored meaning:
+//! semantic importance stays on the Memory, while overlap exists only for the
+//! duration of one formation candidate selection or one recall. No embedding
+//! and no per-query score is persisted; only the derived token set is indexed.
+
+/// Splits text into lowercase terms.
+///
+/// Latin words are matched whole; runs containing non-ASCII characters (for
+/// example Japanese) also contribute character bigrams, because they rarely
+/// appear as whitespace-delimited words.
+///
+/// [`recall_index_terms`] exposes the same split for the durable derived
+/// token index, so one tokenizer defines both query terms and indexed terms.
 pub(crate) fn terms(text: &str) -> Vec<String> {
     let mut terms = Vec::new();
     for run in text.split(|character: char| !character.is_alphanumeric()) {

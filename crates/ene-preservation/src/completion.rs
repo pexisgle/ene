@@ -21,11 +21,6 @@ impl DeletionCompletionSummary {
     pub const fn all_verified(&self) -> bool {
         self.required > 0 && self.verified == self.required
     }
-
-    #[must_use]
-    pub const fn is_well_formed(&self) -> bool {
-        self.local_complete + self.in_progress + self.held + self.verified == self.required
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,11 +71,4 @@ pub struct DeletionCompletionAudit {
     pub sweep_count: u64,
     pub erased_count: u64,
     pub participants: Vec<DeletionAuditParticipant>,
-}
-
-impl DeletionCompletionAudit {
-    #[must_use]
-    pub fn verified_count(&self) -> u64 {
-        u64::try_from(self.participants.len()).unwrap_or(u64::MAX)
-    }
 }

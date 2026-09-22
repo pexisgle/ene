@@ -37,11 +37,10 @@ mod imp {
         PresentationOutcome,
     };
     use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
-    use crate::window::{gpu_info, physical};
+    use crate::window::{DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_info, physical};
 
     const LEFT_BUTTON: u32 = 0x110;
     const RIGHT_BUTTON: u32 = 0x111;
-    const RESIZE_GRIP_LOGICAL_PX: u32 = 32;
 
     pub struct WaylandOverlay {
         renderer: Option<SurfaceRenderer>,
@@ -49,6 +48,10 @@ mod imp {
         event_queue: EventQueue<State>,
         state: State,
         visible: bool,
+        /// A hide frame was requested but the renderer skipped it; the last
+        /// visible buffer is still on screen and [`Self::render`] must retry
+        /// the transparent present instead of presenting meshes.
+        hide_pending: bool,
         placement: PlacementBox,
         gpu_failure: Option<GpuFailInfo>,
         next_commit: u64,
@@ -101,13 +104,7 @@ mod imp {
                 Some("ene-body"),
                 None,
             );
-            let placement = PlacementBox {
-                x: 24,
-                y: 24,
-                width: 420,
-                height: 640,
-                scale: 1.0,
-            };
+            let placement = DEFAULT_PLACEMENT;
             layer.set_anchor(Anchor::TOP | Anchor::LEFT);
             layer.set_exclusive_zone(-1);
             layer.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -188,6 +185,7 @@ mod imp {
                 state,
                 renderer,
                 visible: false,
+                hide_pending: false,
                 placement,
                 gpu_failure,
                 next_commit: 1,
@@ -208,10 +206,11 @@ mod imp {
         }
 
         pub fn set_visible(&mut self, visible: bool) {
-            if self.visible == visible {
+            if self.visible == visible && !self.hide_pending {
                 return;
             }
             if visible {
+                self.hide_pending = false;
                 self.visible = true;
                 self.state.frame_ready = true;
                 return;
@@ -228,16 +227,13 @@ mod imp {
             // compositor already closed must not be committed again.
             if !self.state.closed {
                 if self.renderer.is_some() {
-                    self.render_frame(&[], true);
-                    // The transparent frame commits the previous visible
-                    // frame's mask; set_input_region is double-buffered, so
-                    // apply the empty region with a second state-only commit.
-                    let wanted_size = (
-                        physical(self.state.size.0, self.state.scale as f32),
-                        physical(self.state.size.1, self.state.scale as f32),
-                    );
-                    self.refresh_input_region(&[], wanted_size);
-                    self.state.layer.commit();
+                    if !self.present_hidden() {
+                        // Nothing was submitted, so the last visible buffer is
+                        // still on screen: stay logically visible and retry
+                        // rather than presenting the avatar again.
+                        self.hide_pending = true;
+                        return;
+                    }
                 } else {
                     self.state.layer.wl_surface().attach(None, 0, 0);
                     self.state.layer.commit();
@@ -246,6 +242,25 @@ mod imp {
                 }
             }
             self.visible = false;
+        }
+
+        /// Presents the transparent hide frame and empties the input region.
+        /// Returns false when the surface submitted no buffer, which leaves
+        /// the previous buffer on screen.
+        fn present_hidden(&mut self) -> bool {
+            if !self.render_frame(&[], true) {
+                return false;
+            }
+            // The transparent frame commits the previous visible frame's mask;
+            // set_input_region is double-buffered, so apply the empty region
+            // with a second state-only commit.
+            let wanted_size = (
+                physical(self.state.size.0, self.state.scale as f32),
+                physical(self.state.size.1, self.state.scale as f32),
+            );
+            self.refresh_input_region(&[], wanted_size);
+            self.state.layer.commit();
+            true
         }
 
         pub fn visible(&self) -> bool {
@@ -329,22 +344,34 @@ mod imp {
         }
 
         pub fn render(&mut self, meshes: &[crate::vrm::RenderMesh]) {
+            if self.hide_pending {
+                // Retry the transparent hide frame until the surface submits
+                // one. The mesh path must not present the avatar again.
+                if self.present_hidden() {
+                    self.hide_pending = false;
+                    self.visible = false;
+                }
+                return;
+            }
             self.render_frame(meshes, false);
         }
 
-        fn render_frame(&mut self, meshes: &[crate::vrm::RenderMesh], force: bool) {
+        /// Presents one frame, returning whether a buffer was submitted.
+        /// `force` skips the visible/frame pacing gate so the hide path can
+        /// present the transparent unmapping frame.
+        fn render_frame(&mut self, meshes: &[crate::vrm::RenderMesh], force: bool) -> bool {
             if self.renderer.is_none() {
-                return;
+                return false;
             }
             if !force && !self.ready_to_render() {
-                return;
+                return false;
             }
             let wanted_size = (
                 physical(self.state.size.0, self.state.scale as f32),
                 physical(self.state.size.1, self.state.scale as f32),
             );
             let Some(renderer) = &mut self.renderer else {
-                return;
+                return false;
             };
             if wanted_size != self.renderer_size {
                 renderer.resize(wanted_size.0, wanted_size.1);
@@ -375,6 +402,7 @@ mod imp {
             match outcome {
                 Ok(RenderOutcome::Presented) => {
                     self.refresh_input_region(meshes, wanted_size);
+                    true
                 }
                 Ok(RenderOutcome::Skipped) => {
                     let _ = (frame_callback, presentation_feedback);
@@ -392,6 +420,7 @@ mod imp {
                                 ),
                             },
                         }));
+                    false
                 }
                 Err(failure) => {
                     let _ = (frame_callback, presentation_feedback);
@@ -401,6 +430,7 @@ mod imp {
                     self.gpu_failure = Some(gpu_info(failure));
                     self.state
                         .missing_all("renderer failed before feedback resolved");
+                    false
                 }
             }
         }
@@ -570,6 +600,10 @@ mod imp {
         /// Set when the Wayland connection is unusable; the surface can no
         /// longer be committed or presented.
         dead: bool,
+        /// Surface buffer scale. Only [`CompositorHandler::scale_factor_changed`]
+        /// writes it: SCTK invokes that handler when the surface enters or
+        /// leaves an output with a different scale, so per-output scale
+        /// tracking must not be duplicated in the output handlers.
         scale: i32,
         size: (u32, u32),
         position: (i32, i32),
@@ -646,13 +680,6 @@ mod imp {
             output: &wl_output::WlOutput,
         ) {
             let name = output_name(&self.output_state, output);
-            if let Some(info) = self.output_state.info(output) {
-                let scale = info.scale_factor.max(1);
-                if self.scale != scale {
-                    self.scale = scale;
-                    self.region_dirty = true;
-                }
-            }
             self.surface_output = Some((output.id().protocol_id(), name));
         }
 
@@ -693,13 +720,6 @@ mod imp {
             output: wl_output::WlOutput,
         ) {
             let name = output_name(&self.output_state, &output);
-            if let Some(info) = self.output_state.info(&output) {
-                let scale = info.scale_factor.max(1);
-                if self.scale != scale {
-                    self.scale = scale;
-                    self.region_dirty = true;
-                }
-            }
             if let Some((id, tracked)) = &mut self.surface_output
                 && *id == output.id().protocol_id()
             {
@@ -1007,11 +1027,7 @@ mod imp {
         ) {
             match event {
                 wp_presentation_feedback::Event::SyncOutput { output } => {
-                    let output_name = state
-                        .output_state
-                        .info(&output)
-                        .and_then(|info| info.name.clone())
-                        .unwrap_or_else(|| format!("wl_output@{}", output.id().protocol_id()));
+                    let output_name = output_name(&state.output_state, &output);
                     if let Ok(mut inner) = data.inner.lock() {
                         inner.output = output_name;
                     }

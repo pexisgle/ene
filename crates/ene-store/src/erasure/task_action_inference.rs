@@ -13,11 +13,11 @@ use crate::Store;
 use crate::codec::{encode_id, lock_shared};
 use crate::run_blocking;
 
-use super::redact_exact;
+use super::{ROWS_PER_DEMAND, redact_exact};
 
-pub(crate) const ROWS_PER_DEMAND: u32 = 64;
-
-const PAGE_ROWS: u32 = 32;
+/// Rows fetched by one SQL page. Smaller than [`ROWS_PER_DEMAND`] so a demand
+/// never depends on one statement reading its whole budget.
+const PAGE_ROWS: u32 = ROWS_PER_DEMAND / 2;
 
 #[cfg(windows)]
 pub(crate) const ERASED_LOCATOR: &str = r"C:\erased";
@@ -161,6 +161,11 @@ struct ErasePage {
     redacted: u64,
 }
 
+/// Failure of one bounded page. [`Self::Storage`] and
+/// [`Self::Unrepresentable`] become explicit holds; [`Self::NotCurrent`]
+/// mutates nothing, drops the cursor, and returns `LocalComplete`, so the
+/// canonical record refuses the stale generation. No variant is a silent
+/// success and none carries row content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErasurePageError {
     Storage,
@@ -190,6 +195,9 @@ impl ErasureCore {
         }
     }
 
+    /// Runs one bounded demand and reports the fact. Storage and
+    /// unrepresentable failures are explicit holds: the caller's durable
+    /// progress stays what it was.
     async fn demand(&self, command: DemandLocalErasureCommand) -> ParticipantCompletionFact {
         #[cfg(any(test, feature = "test-support"))]
         self.store

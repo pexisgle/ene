@@ -8,13 +8,14 @@ use std::pin::Pin;
 
 use cost::UsageEstimate;
 use ene_credential::{
-    CredentialRef, CredentialRefRepository, CredentialSetRevision, CredentialStore, ScrubbedText,
-    available_credential,
+    CredentialRef, CredentialRefRepository, CredentialSetRevision, CredentialStore,
+    CredentialTechnicalError, ScrubbedText, available_credential,
 };
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRepository, ConsentRevision,
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
-    PurposeKind, UsageCapRef, UsageReservationRef, UsageReservationState, check_live_authorization,
+    PermissionTechnicalError, PurposeKind, UsageReservationRef, UsageReservationState,
+    check_live_authorization,
 };
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use pricing::{PricingCatalog, PricingResolution, PricingSnapshot, PricingSnapshotRef};
@@ -144,31 +145,33 @@ pub struct RawUsage {
 }
 
 pub trait ProviderTransport: Send + Sync {
-    fn complete(
-        &self,
-        req: ProviderRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>;
-
+    /// The safe upper bound of the token usage this adapter's request can
+    /// bill (`usage-cost-cap` §8), or `None` when the adapter cannot build a
+    /// finite bound.
+    ///
+    /// The admission converts the estimate into a cap reservation under the
+    /// admission pricing snapshot, so it must cover every token the provider
+    /// contract can charge: the input bound must be tokenizer-safe for the
+    /// request body, and the output bound must be the explicit maximum the
+    /// adapter sets on the request itself (not an average). A `None` answer
+    /// keeps uncapped sends working and refuses cap-enabled sends
+    /// ([`NotSentReason::UsageCapIndeterminate`]) instead of guessing.
     fn usage_estimate(&self, _req: &ProviderRequest) -> Option<UsageEstimate> {
         None
     }
 
+    /// Runs one completion, pushing incremental output to `sink`.
+    ///
+    /// Deltas are pushed in provider order and the transport stops reading
+    /// on [`DeltaFlow::Abort`], reporting [`InferenceTechnicalError::StreamAborted`]:
+    /// no delta produced after the consumer stopped is presented, and the
+    /// call never completes normally with a delivery gap. The returned
+    /// response carries the full text for adoption and History.
     fn complete_streaming<'a>(
         &'a self,
         req: ProviderRequest,
         sink: &'a mut (dyn DeltaSink + Send),
-    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let response = self.complete(req).await?;
-            if let DeltaFlow::Abort(reason) = sink.push_delta(&response.text).await {
-                return Err(InferenceTechnicalError::StreamAborted {
-                    reason: reason.to_owned(),
-                });
-            }
-            Ok(response)
-        })
-    }
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,7 +277,17 @@ pub enum AttemptBeginOutcome {
     Stale,
     TaskPremiseStale,
     DataUseHeld,
-    HeldByCap(UsageCapRef),
+    /// A current cap's window consumption plus this request's safe upper
+    /// bound would exceed the limit: the caller must NOT issue provider I/O
+    /// for this ticket, and neither the attempt nor a reservation is
+    /// recorded.
+    HeldByCap,
+    /// At least one current cap applies to the route, but the claim cannot
+    /// construct a finite safe upper bound under it (no reviewed rate, no
+    /// provider estimate, a cap currency the request cannot be compared in,
+    /// or an unrepresentable sum): the caller must NOT issue provider I/O.
+    /// The cap is never treated as satisfied and the bound is never assumed
+    /// zero.
     CapIndeterminate,
 }
 
@@ -319,12 +332,10 @@ impl AdmissionRequest {
         };
         match check_live_authorization(&query, Some(&self.consent), tracker) {
             LiveAuthorizationDecision::AllowForThisUse(authorization) => {
-                if tracker.consume(&authorization, &self.candidate.fingerprint()) {
+                if tracker.consume(&authorization, &self.candidate) {
                     Admission::Admitted(Box::new(AuthorizedInference {
                         ticket: InferenceTicketId(RawId::new()),
                         consent: (self.consent.id, self.consent.rev),
-                        provider: self.consent.provider,
-                        model: self.consent.model,
                         credential: self.credential,
                         candidate: self.candidate,
                         task_agent: self.task_agent,
@@ -433,11 +444,11 @@ async fn prepare_admission(
         task_agent,
         data_use,
     } = binding;
-    let record = consent.load_current(capability).await.map_err(|_| {
-        InferenceTechnicalError::StorageUnavailable {
-            reason: String::from("load consent"),
-        }
-    })?;
+    let record = consent.load_current(capability).await.map_err(
+        |PermissionTechnicalError::StorageUnavailable { reason }| {
+            InferenceTechnicalError::StorageUnavailable { reason }
+        },
+    )?;
     let Some(record) = record else {
         return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
     };
@@ -448,8 +459,8 @@ async fn prepare_admission(
         credential_store,
     )
     .await
-    .map_err(|_| InferenceTechnicalError::StorageUnavailable {
-        reason: String::from("resolve credential"),
+    .map_err(|CredentialTechnicalError::StorageUnavailable { reason }| {
+        InferenceTechnicalError::StorageUnavailable { reason }
     })?;
     let Some(credential) = credential else {
         return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
@@ -474,8 +485,6 @@ async fn prepare_admission(
 pub struct AuthorizedInference {
     ticket: InferenceTicketId,
     consent: (String, ConsentRevision),
-    provider: String,
-    model: String,
     credential: CredentialRef,
     candidate: InferenceUseCandidate,
     task_agent: Option<TaskAgentAttemptPremise>,
@@ -491,16 +500,6 @@ impl AuthorizedInference {
     #[must_use]
     pub fn ticket(&self) -> InferenceTicketId {
         self.ticket
-    }
-
-    #[must_use]
-    pub fn task_agent_premise(&self) -> Option<&TaskAgentAttemptPremise> {
-        self.task_agent.as_ref()
-    }
-
-    #[must_use]
-    pub fn data_use(&self) -> &[RawId] {
-        &self.data_use
     }
 }
 
@@ -599,7 +598,10 @@ pub async fn dispatch_authorized(
     let capability = authorized.candidate.capability;
     let purpose = authorized.candidate.purpose;
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
-    let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
+    let (provider, model) = (
+        authorized.candidate.provider_ref.clone(),
+        authorized.candidate.model.clone(),
+    );
     let credential_set = prompt.credential_set();
     let credential = authorized.credential;
     let task_agent = authorized.task_agent;
@@ -650,7 +652,7 @@ pub async fn dispatch_authorized(
                 NotSentReason::DataUseHeld,
             ));
         }
-        Ok(AttemptBeginOutcome::HeldByCap(_)) => {
+        Ok(AttemptBeginOutcome::HeldByCap) => {
             return Ok(InferenceDispatchOutcome::NotSent(
                 NotSentReason::UsageCapReached,
             ));
@@ -716,11 +718,11 @@ async fn consent_matches(
     id: &str,
     revision: ConsentRevision,
 ) -> Result<bool, InferenceTechnicalError> {
-    let current = consent.load_current(capability).await.map_err(|_| {
-        InferenceTechnicalError::StorageUnavailable {
-            reason: String::from("load consent"),
-        }
-    })?;
+    let current = consent.load_current(capability).await.map_err(
+        |PermissionTechnicalError::StorageUnavailable { reason }| {
+            InferenceTechnicalError::StorageUnavailable { reason }
+        },
+    )?;
     let Some(current) = current else {
         return Ok(false);
     };
@@ -752,8 +754,8 @@ pub mod fake {
 
     use super::RawUsage;
     use super::{
-        InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
-        UsageEstimate,
+        DeltaFlow, DeltaSink, InferenceTechnicalError, ProviderRequest, ProviderResponse,
+        ProviderTransport, UsageEstimate,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -799,26 +801,35 @@ pub mod fake {
     }
 
     impl ProviderTransport for FakeProviderTransport {
-        fn complete(
-            &self,
+        fn complete_streaming<'a>(
+            &'a self,
             _req: ProviderRequest,
+            sink: &'a mut (dyn DeltaSink + Send),
         ) -> Pin<
-            Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>,
+            Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + 'a>,
         > {
-            let result = if let Some(fail) = &self.fail {
-                Err(match fail {
-                    FakeFailure::Transport(reason) => {
-                        InferenceTechnicalError::ProviderTransportFailed(reason.clone())
-                    }
-                    FakeFailure::ResponseLost => InferenceTechnicalError::ResponseLost,
-                })
-            } else {
-                Ok(ProviderResponse {
-                    text: self.text.clone(),
-                    usage: self.usage,
-                })
-            };
-            Box::pin(async move { result })
+            Box::pin(async move {
+                let result = if let Some(fail) = &self.fail {
+                    Err(match fail {
+                        FakeFailure::Transport(reason) => {
+                            InferenceTechnicalError::ProviderTransportFailed(reason.clone())
+                        }
+                        FakeFailure::ResponseLost => InferenceTechnicalError::ResponseLost,
+                    })
+                } else {
+                    Ok(ProviderResponse {
+                        text: self.text.clone(),
+                        usage: self.usage,
+                    })
+                };
+                let response = result?;
+                if let DeltaFlow::Abort(reason) = sink.push_delta(&response.text).await {
+                    return Err(InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    });
+                }
+                Ok(response)
+            })
         }
 
         fn usage_estimate(&self, _req: &ProviderRequest) -> Option<UsageEstimate> {
@@ -833,12 +844,12 @@ mod dispatch_tests {
 
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
-        AttemptBeginOutcome, AuthorizedInference, DiscardSink, DispatchAbort, InferenceAttempt,
-        InferenceAttemptRecord, InferenceAttemptRepository, InferenceDispatchOutcome,
-        InferenceResultArrival, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
-        NotSentReason, ProviderRequest, ProviderResponse, ProviderTransport, RawUsage,
-        TaskAgentAttemptPremise, UsageCostRecord, UsageEstimate, UsageFact, UsageRepository,
-        UsageReservation, UsageSource, dispatch_authorized,
+        AttemptBeginOutcome, AuthorizedInference, DeltaSink, DiscardSink, DispatchAbort,
+        InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
+        InferenceDispatchOutcome, InferenceResultArrival, InferenceTechnicalError,
+        InferenceTicketId, MAX_INPUT_CHARS, NotSentReason, ProviderRequest, ProviderResponse,
+        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageCostRecord, UsageEstimate,
+        UsageFact, UsageRepository, UsageReservation, UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -890,6 +901,37 @@ mod dispatch_tests {
             Ok(AttemptBeginOutcome::Started)
         }
 
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    struct RecordingAttempts(Mutex<usize>);
+
+    impl InferenceAttemptRepository for RecordingAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            *self.0.lock().expect("attempt count lock") += 1;
+            Ok(AttemptBeginOutcome::Started)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
         async fn load_inference_attempt(
             &self,
             _ticket: InferenceTicketId,
@@ -924,7 +966,66 @@ mod dispatch_tests {
         }
     }
 
-    struct HeldByCapAttempts(ene_permission::UsageCapRef);
+    /// An attempt repository whose claim answers a moved Task Agent premise,
+    /// modelling steering landing between admission and the claim.
+    struct TaskPremiseStaleAttempts;
+
+    impl InferenceAttemptRepository for TaskPremiseStaleAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::TaskPremiseStale)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// An attempt repository whose claim finds a covering erasure condition,
+    /// modelling a Targeted Deletion condition landing after the History read
+    /// but before the send admission.
+    struct DataUseHeldAttempts;
+
+    impl InferenceAttemptRepository for DataUseHeldAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::DataUseHeld)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// An attempt repository whose claim always answers that a cap would be
+    /// exceeded, modelling a send the reservation refuses.
+    struct HeldByCapAttempts;
 
     impl InferenceAttemptRepository for HeldByCapAttempts {
         #[expect(
@@ -935,7 +1036,7 @@ mod dispatch_tests {
             &self,
             _attempt: InferenceAttempt,
         ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
-            Ok(AttemptBeginOutcome::HeldByCap(self.0.clone()))
+            Ok(AttemptBeginOutcome::HeldByCap)
         }
 
         #[expect(
@@ -1003,21 +1104,106 @@ mod dispatch_tests {
         }
     }
 
+    /// An attempt repository that raises the caller's abort signal from
+    /// inside the claim, modelling a stop that lands while the claim commits.
+    struct AbortingAttempts(DispatchAbort);
+
+    impl InferenceAttemptRepository for AbortingAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            self.0.abort();
+            Ok(AttemptBeginOutcome::Started)
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_inference_attempt(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<InferenceAttemptRecord>, InferenceTechnicalError> {
+            Ok(None)
+        }
+    }
+
+    /// Usage repository that fails every write, modelling a storage failure
+    /// at settlement time.
+    struct FailingUsage;
+
+    impl UsageRepository for FailingUsage {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn record_usage(&self, _fact: UsageFact) -> Result<(), InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_cost(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_usage_reservation(
+            &self,
+            _ticket: InferenceTicketId,
+        ) -> Result<Option<UsageReservation>, InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn reconcile_orphaned_usage_reservations(
+            &self,
+        ) -> Result<u64, InferenceTechnicalError> {
+            Err(InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("usage store down"),
+            })
+        }
+    }
+
+    /// Transport that counts calls without performing I/O.
     struct CountingTransport(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
     impl ProviderTransport for CountingTransport {
-        fn complete(
-            &self,
+        fn complete_streaming<'a>(
+            &'a self,
             _req: ProviderRequest,
+            _sink: &'a mut (dyn DeltaSink + Send),
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
                     + Send
-                    + '_,
+                    + 'a,
             >,
         > {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(ProviderResponse {
                     text: String::new(),
                     usage: None,
@@ -1041,14 +1227,15 @@ mod dispatch_tests {
     }
 
     impl ProviderTransport for DroppingTransport {
-        fn complete(
-            &self,
+        fn complete_streaming<'a>(
+            &'a self,
             _req: ProviderRequest,
+            _sink: &'a mut (dyn DeltaSink + Send),
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = Result<ProviderResponse, InferenceTechnicalError>>
                     + Send
-                    + '_,
+                    + 'a,
             >,
         > {
             let started = std::sync::Arc::clone(&self.started);
@@ -1151,8 +1338,6 @@ mod dispatch_tests {
         AuthorizedInference {
             ticket: InferenceTicketId(RawId::new()),
             consent: (consent.id, consent.rev),
-            provider: consent.provider,
-            model: consent.model,
             credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
             candidate: InferenceUseCandidate {
                 consumer: ConsumerKind::CompanionDialogue,
@@ -1181,8 +1366,6 @@ mod dispatch_tests {
         AuthorizedInference {
             ticket: InferenceTicketId(RawId::new()),
             consent: (consent.id, consent.rev),
-            provider: consent.provider,
-            model: consent.model,
             credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
             candidate: InferenceUseCandidate {
                 consumer: ConsumerKind::TaskAgent,
@@ -1198,8 +1381,8 @@ mod dispatch_tests {
 
     fn authorized_route(provider: &str, model: &str) -> AuthorizedInference {
         let mut authorized = authorized();
-        authorized.provider = provider.to_owned();
-        authorized.model = model.to_owned();
+        authorized.candidate.provider_ref = provider.to_owned();
+        authorized.candidate.model = model.to_owned();
         authorized
     }
 
@@ -1244,13 +1427,7 @@ mod dispatch_tests {
         let consent = FixedConsent(Some(record(1)));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let transport = CountingTransport(std::sync::Arc::clone(&calls));
-        let held = HeldByCapAttempts(ene_permission::UsageCapRef::new(
-            ene_permission::UsageCapId::new(
-                ene_permission::UsageCapScope::System,
-                ene_permission::UsageCapWindow::DailyUtc,
-            ),
-            ene_permission::UsageCapRevision::from_u64(1),
-        ));
+        let held = HeldByCapAttempts;
         let outcome = dispatch_authorized(
             authorized(),
             prompt("hello").await,
@@ -1297,6 +1474,64 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
+    async fn provider_estimate_travels_with_the_claimed_attempt() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let estimate = UsageEstimate {
+            input_tokens_upper_bound: 120,
+            output_tokens_upper_bound: 40,
+        };
+        let transport =
+            FakeProviderTransport::new(String::from("ok"), None).with_usage_estimate(estimate);
+        dispatch_authorized(
+            authorized_route("openai", "gpt-4o"),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(
+            claimed[0].usage_estimate,
+            Some(estimate),
+            "the adapter's safe bound must reach the cap-admission transaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpriced_route_claims_without_a_guessed_rate() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert!(
+            claimed[0].pricing.is_none(),
+            "an unreviewed route must claim with no rate, never another model's"
+        );
+    }
+
+    #[tokio::test]
     async fn transport_failure_records_unknown_counts() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
         let consent = FixedConsent(Some(record(1)));
@@ -1319,6 +1554,100 @@ mod dispatch_tests {
         assert_eq!(facts[0].input_tokens, None);
         assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn usage_failure_on_completed_call_propagates_not_a_clean_success() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(
+            String::from("hi there"),
+            Some(RawUsage {
+                input_tokens: 4,
+                cached_input_tokens: 1,
+                output_tokens: 2,
+            }),
+        );
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a claimed call whose settlement fails must not answer Completed"
+        );
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "the storage failure propagates: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_failure_on_transport_error_propagates_not_a_clean_technical_error() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        )
+        .await;
+        // The transport error already proves the call may have run, so losing
+        // its accounting too would report a technical failure with no durable
+        // fact; the settlement failure takes precedence.
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "the usage failure must not be swallowed by the transport error: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn never_sent_records_no_fact() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("hi"), None);
+        let attempts = RecordingAttempts(Mutex::new(0));
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("x".repeat(MAX_INPUT_CHARS + 1)).await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await;
+        assert_eq!(
+            result.expect("dispatch answers an outcome"),
+            InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit)
+        );
+        assert_eq!(
+            *attempts.0.lock().expect("attempt count lock"),
+            0,
+            "an over-limit input never claims a durable attempt"
+        );
+        assert!(
+            usage.0.lock().expect("usage capture lock").is_empty(),
+            "a definitely-never-sent call spends nothing"
+        );
     }
 
     #[tokio::test]
@@ -1389,6 +1718,157 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
+    async fn missing_usage_maps_to_unknown_not_zero() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("hi there"), None);
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let InferenceDispatchOutcome::Completed { arrival, .. } = outcome else {
+            panic!("a provider success completes");
+        };
+        assert_eq!(arrival.output_text, "hi there");
+        assert_eq!(arrival.usage.input_tokens, None);
+        assert_eq!(arrival.usage.cached_input_tokens, None);
+        assert_eq!(arrival.usage.output_tokens, None);
+        assert_eq!(arrival.usage.source, UsageSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn explicit_zero_cached_tokens_stays_reported() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        // A provider that decodes cache detail and reports zero hits yields a
+        // legitimate reported fact: zero here is evidence, not a filler.
+        let transport = FakeProviderTransport::new(
+            String::from("hi there"),
+            Some(RawUsage {
+                input_tokens: 7,
+                cached_input_tokens: 0,
+                output_tokens: 3,
+            }),
+        );
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let InferenceDispatchOutcome::Completed { arrival, .. } = outcome else {
+            panic!("a provider success completes");
+        };
+        assert_eq!(arrival.usage.source, UsageSource::Reported);
+        assert_eq!(arrival.usage.cached_input_tokens, Some(0));
+    }
+
+    #[tokio::test]
+    async fn lost_response_records_unknown_counts() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
+        let result = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await;
+        assert!(matches!(result, Err(InferenceTechnicalError::ResponseLost)));
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(
+            facts.len(),
+            1,
+            "a lost response may have run, so it records an unknown fact"
+        );
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+        assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].cached_input_tokens, None);
+        assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn task_premise_stale_never_calls_the_provider() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let outcome = dispatch_authorized(
+            authorized_task_agent(task_agent_premise()),
+            prompt("delegated work").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &TaskPremiseStaleAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::TaskPremiseStale),
+            "a moved task premise is a task-stale refusal, not consent staleness"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a task-stale claim must not reach the provider"
+        );
+        assert!(usage.0.lock().expect("usage capture lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn data_use_hold_never_calls_the_provider_and_records_no_fact() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let outcome = dispatch_authorized(
+            authorized_task_agent(task_agent_premise()),
+            prompt("delegated work").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &DataUseHeldAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::DataUseHeld),
+            "a covered source is a data-use hold, not consent or task staleness"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a data-use hold sends zero bytes"
+        );
+        assert!(usage.0.lock().expect("usage capture lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn task_agent_claim_carries_the_durable_correlation() {
         let attempts = CapturedAttempts(Mutex::new(Vec::new()));
         let usage = CapturedUsage(Mutex::new(Vec::new()));
@@ -1432,6 +1912,69 @@ mod dispatch_tests {
         assert_eq!(facts[0].input_tokens, None);
         assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn dialogue_claim_carries_no_task_agent_correlation() {
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("ok"), None);
+        dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let claimed = attempts.0.lock().expect("attempt capture lock");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].task_agent, None);
+    }
+
+    #[tokio::test]
+    async fn abort_before_the_claim_claims_nothing_and_records_nothing() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let attempts = RecordingAttempts(Mutex::new(0));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let abort = DispatchAbort::default();
+        abort.abort();
+
+        let outcome = dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut DiscardSink,
+            Some(&abort),
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("an abort is a domain outcome");
+
+        assert_eq!(outcome, InferenceDispatchOutcome::Aborted);
+        assert_eq!(
+            *attempts.0.lock().expect("attempt count lock"),
+            0,
+            "a pre-claim abort never claims an attempt"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a pre-claim abort never reaches the provider"
+        );
+        assert!(
+            usage.0.lock().expect("usage capture lock").is_empty(),
+            "a never-claimed use records no usage fact"
+        );
     }
 
     #[tokio::test]
@@ -1481,5 +2024,329 @@ mod dispatch_tests {
         assert_eq!(facts[0].input_tokens, None);
         assert_eq!(facts[0].cached_input_tokens, None);
         assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn abort_that_lands_during_the_claim_records_the_unknown_fact() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let abort = DispatchAbort::default();
+        let attempts = AbortingAttempts(abort.clone());
+        let authorized = authorized();
+        let ticket = authorized.ticket;
+
+        let outcome = dispatch_authorized(
+            authorized,
+            prompt("hello").await,
+            &mut DiscardSink,
+            Some(&abort),
+            &consent,
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("an abort is a domain outcome");
+
+        assert_eq!(outcome, InferenceDispatchOutcome::Aborted);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the stop wins before the provider future is ever polled"
+        );
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(
+            facts.len(),
+            1,
+            "the claim that raced the stop still records its accounting"
+        );
+        assert_eq!(facts[0].ticket, ticket);
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn abort_accounting_failure_is_a_technical_error_not_a_clean_abort() {
+        let consent = FixedConsent(Some(record(1)));
+        let transport = DroppingTransport::default();
+        let abort = DispatchAbort::default();
+        let started = std::sync::Arc::clone(&transport.started);
+        let dropped = std::sync::Arc::clone(&transport.dropped);
+        let mut sink = DiscardSink;
+
+        let mut dispatch = Box::pin(dispatch_authorized(
+            authorized(),
+            prompt("hello").await,
+            &mut sink,
+            Some(&abort),
+            &consent,
+            &StartedAttempts,
+            &FailingUsage,
+            &transport,
+        ));
+        let mut started_wait = Box::pin(started.notified());
+        tokio::select! {
+            () = &mut started_wait => {}
+            outcome = &mut dispatch => {
+                panic!("the dispatch must wait for the abort, got {outcome:?}");
+            }
+        }
+        abort.abort();
+        let result = dispatch.await;
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::StorageUnavailable { .. })
+            ),
+            "a claimed abort whose accounting cannot be written must not answer a clean Aborted"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the abort still dropped the in-flight provider future"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_output_text() {
+        let ticket = InferenceTicketId(RawId::new());
+        let arrival = InferenceResultArrival {
+            ticket,
+            output_text: String::from("harbor-sunset-output-probe"),
+            usage: UsageFact {
+                ticket,
+                provider: String::from("acme"),
+                model: String::from("dialogue-1"),
+                input_tokens: None,
+                cached_input_tokens: None,
+                output_tokens: None,
+                source: UsageSource::Unknown,
+            },
+        };
+        let rendered = format!("{arrival:?}");
+        assert!(!rendered.contains("harbor-sunset-output-probe"));
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::{
+        Admission, InferenceTechnicalError, NotSentReason, PreparedAdmission,
+        TaskAgentAttemptPremise, prepare_dialogue_admission, prepare_learning_admission,
+        prepare_task_agent_admission,
+    };
+    use ene_credential::{
+        CredentialRef, CredentialRefRepository, CredentialTechnicalError, MemoryCredentialStore,
+    };
+    use ene_permission::{
+        CapabilityKind, ConsentRecord, ConsentRepository, ConsentRevision, PermissionTechnicalError,
+    };
+    use ene_primitive::{RawId, RevisionInner};
+
+    fn record_for(capability: CapabilityKind) -> ConsentRecord {
+        ConsentRecord {
+            capability,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("acme"),
+            model: String::from("shared-1"),
+            credential_id: String::from("acme:main"),
+        }
+    }
+
+    struct FixedConsent(Option<ConsentRecord>);
+
+    impl ConsentRepository for FixedConsent {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_current(
+            &self,
+            capability: CapabilityKind,
+        ) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+            Ok(self
+                .0
+                .clone()
+                .filter(|consent| consent.capability == capability))
+        }
+    }
+
+    struct FixedRefs(Vec<CredentialRef>);
+
+    impl CredentialRefRepository for FixedRefs {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn provisioned() -> (MemoryCredentialStore, CredentialRef) {
+        let store = MemoryCredentialStore::new();
+        let credential = CredentialRef::new("acme", "main").expect("valid test fixture");
+        store.insert(credential.clone(), "sk-test-only");
+        (store, credential)
+    }
+
+    #[tokio::test]
+    async fn learning_admission_resolves_the_learning_assignment() {
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Learning)));
+        let refs = FixedRefs(vec![credential]);
+        let prepared =
+            prepare_learning_admission(&consent, &refs, &credential_store, Vec::new()).await;
+        let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
+            panic!("a complete setup must prepare a learning admission");
+        };
+        let mut tracker = ene_permission::EvaluationTracker::new();
+        let Admission::Admitted(authorized) = request.authorize(&mut tracker) else {
+            panic!("the learning candidate is inside the closed world");
+        };
+        assert!(authorized.consent_premise().0 == "consent-1");
+    }
+
+    #[tokio::test]
+    async fn dialogue_consent_does_not_prepare_a_learning_admission() {
+        // Same provider, model, credential, and bearer: only the capability
+        // differs, and capability-scoped consent must not be borrowed.
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
+        let refs = FixedRefs(vec![credential]);
+        let prepared =
+            prepare_learning_admission(&consent, &refs, &credential_store, Vec::new()).await;
+        assert_eq!(
+            prepared,
+            Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
+            "a dialogue assignment never authorizes learning formation"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_agent_admission_inherits_the_dialogue_consent() {
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
+        let refs = FixedRefs(vec![credential]);
+        let premise = TaskAgentAttemptPremise {
+            delegation: RawId::new(),
+            task: RawId::new(),
+            task_revision: RevisionInner::from_u64(1),
+            data_use: vec![RawId::new()],
+        };
+        let prepared =
+            prepare_task_agent_admission(&consent, &refs, &credential_store, premise.clone()).await;
+        let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
+            panic!("a complete setup must prepare a task agent admission");
+        };
+        let mut tracker = ene_permission::EvaluationTracker::new();
+        let Admission::Admitted(authorized) = request.authorize(&mut tracker) else {
+            panic!("the task agent candidate is inside the closed world");
+        };
+        assert_eq!(authorized.task_agent.as_ref(), Some(&premise));
+        assert_eq!(authorized.consent_premise().0, "consent-1");
+    }
+
+    #[tokio::test]
+    async fn task_agent_admission_declines_without_the_dialogue_consent() {
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Learning)));
+        let refs = FixedRefs(vec![credential]);
+        let premise = TaskAgentAttemptPremise {
+            delegation: RawId::new(),
+            task: RawId::new(),
+            task_revision: RevisionInner::from_u64(1),
+            data_use: vec![RawId::new()],
+        };
+        let prepared =
+            prepare_task_agent_admission(&consent, &refs, &credential_store, premise).await;
+        assert_eq!(
+            prepared,
+            Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
+            "task agent admission inherits only the dialogue capability consent"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialogue_admission_still_resolves_its_own_consumer() {
+        let (credential_store, credential) = provisioned();
+        let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
+        let refs = FixedRefs(vec![credential]);
+        let prepared =
+            prepare_dialogue_admission(&consent, &refs, &credential_store, Vec::new()).await;
+        let PreparedAdmission::Ready(request) = prepared.expect("preparation answers") else {
+            panic!("a complete setup must prepare a dialogue admission");
+        };
+        let mut tracker = ene_permission::EvaluationTracker::new();
+        let Admission::Admitted(authorized) = request.authorize(&mut tracker) else {
+            panic!("the dialogue candidate is inside the closed world");
+        };
+        assert!(authorized.consent_premise().0 == "consent-1");
+    }
+
+    #[tokio::test]
+    async fn learning_admission_declines_without_setup() {
+        let (credential_store, _) = provisioned();
+        let refs = FixedRefs(Vec::new());
+        let prepared =
+            prepare_learning_admission(&FixedConsent(None), &refs, &credential_store, Vec::new())
+                .await;
+        assert_eq!(
+            prepared,
+            Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
+            "no stored consent declines without a tracker decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn learning_admission_declines_when_the_bearer_is_absent() {
+        let credential_store = MemoryCredentialStore::new();
+        let credential = CredentialRef::new("acme", "main").expect("valid test fixture");
+        let refs = FixedRefs(vec![credential]);
+        let prepared = prepare_learning_admission(
+            &FixedConsent(Some(record_for(CapabilityKind::Learning))),
+            &refs,
+            &credential_store,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            prepared,
+            Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete)),
+            "a registered ref without a bearer is incomplete setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn learning_preparation_never_returns_inference_errors_as_outcomes() {
+        // A store failure is `Err`, never a fabricated decline; both consumers
+        // share the rule.
+        let (credential_store, credential) = provisioned();
+        let refs = FixedRefs(vec![credential]);
+        let failing = FailingConsent;
+        let result =
+            prepare_learning_admission(&failing, &refs, &credential_store, Vec::new()).await;
+        assert!(matches!(
+            result,
+            Err(InferenceTechnicalError::StorageUnavailable { .. })
+        ));
+    }
+
+    struct FailingConsent;
+
+    impl ConsentRepository for FailingConsent {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_current(
+            &self,
+            _capability: CapabilityKind,
+        ) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+            Err(PermissionTechnicalError::StorageUnavailable {
+                reason: String::from("consent store down"),
+            })
+        }
     }
 }

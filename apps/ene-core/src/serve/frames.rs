@@ -81,8 +81,7 @@ pub(crate) fn outgoing_fact(
     live: &LiveInput,
     payload: WirePayload,
 ) -> WireFrame {
-    let mut envelope = outgoing_envelope(frame, live, &payload, None);
-    envelope.correlation.reply_to = None;
+    let envelope = outgoing_envelope(frame, live, &payload, None);
     WireFrame { envelope, payload }
 }
 

@@ -43,17 +43,18 @@
 //!
 //! Request/response correlation: every send matches the answer by transport
 //! pairing (`reply_to` against our message ID). A single read per request is
-//! wrong because the Host pipelines unsolicited facts ahead of answers
-//! (capability appends the current presence fact right after the negotiated
-//! terms), so `request` loops: an incoming frame whose `reply_to` matches is
-//! the answer and returns without further I/O; presence facts are absorbed
-//! into the [`session::SessionState`] and reading continues; any other
-//! non-fact frame is pushed to the deferred queue (cap
+//! wrong because the Host pipelines unsolicited facts ahead of answers (the
+//! accepted-connection answer appends the current presence fact, then any
+//! absence backlog), so `request` loops: an incoming frame whose `reply_to`
+//! matches is the answer and returns without further I/O; presence facts are
+//! absorbed into the [`session::SessionState`] and reading continues; any
+//! other non-fact frame is pushed to the deferred queue (cap
 //! [`session::DEFERRED_CAP`], oldest-drop), which only buffers
 //! auto-presented summaries for [`session::SessionState::take_undelivered`],
-//! and reading continues — mismatches are never returned as answers and
-//! never silently dropped. [`session::decide_frame`] is the pure per-frame
-//! step of that loop; the deferred queue holds the rest.
+//! and reading continues — mismatches are never returned as answers, and
+//! auto-presented summaries are never silently dropped from the deferred
+//! queue. [`session::decide_frame`] is the pure per-frame step of that loop;
+//! the deferred queue holds the rest.
 //!
 //! A pairing first answers
 //! [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation)

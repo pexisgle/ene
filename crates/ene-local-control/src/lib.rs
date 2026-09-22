@@ -44,12 +44,39 @@ pub struct PendingDeletionPreview {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeletionOutcome {
-    Started { operation: String, sweep: u64 },
-    AlreadyCoveredBy { operation: String, sweep: u64 },
-    HeldByOperation { operation: String, sweep: u64 },
+    Started {
+        operation: String,
+        sweep: u64,
+    },
+    AlreadyCoveredBy {
+        operation: String,
+        sweep: u64,
+    },
+    HeldByOperation {
+        operation: String,
+        sweep: u64,
+    },
     NeedsClarification,
     Missing,
-    Resumed { operation: String, sweep: u64 },
+    Resumed {
+        operation: String,
+        sweep: u64,
+    },
+    /// The named sweep is no longer current; a resume cannot apply.
+    StaleSweep {
+        operation: String,
+        sweep: u64,
+    },
+    /// The operation already finished; nothing was resumed.
+    Completed {
+        operation: String,
+        sweep: u64,
+    },
+    /// The operation is sealing its final boundary; a resume cannot apply.
+    Finalizing {
+        operation: String,
+        sweep: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -76,10 +76,22 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(WireFrame, usize), CodecError> {
     }
     let frame = rmp_serde::from_slice(&bytes[LEN_PREFIX_LEN..need]).map_err(|error| {
         CodecError::DecodeFailed {
-            reason: std::format!("{error}"),
+            reason: decode_reason(&error),
         }
     })?;
     Ok((frame, need))
+}
+
+/// Structural decode text without any frame-derived value. `Syntax` embeds the
+/// unexpected value (serde's `invalid_type`/`unknown variant` text), which a
+/// corrupt or cross-version body could have stuffed with conversation content.
+fn decode_reason(error: &rmp_serde::decode::Error) -> String {
+    match error {
+        rmp_serde::decode::Error::Syntax(_) => {
+            String::from("frame body does not match the expected structure")
+        }
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]

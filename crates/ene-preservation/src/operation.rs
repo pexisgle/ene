@@ -307,7 +307,6 @@ pub enum DeletionLifecycleOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentErasureCondition {
     pub condition: ErasureConditionRef,
-    pub scope: DeletionOperationId,
     pub opened_at: WallClockWithTz,
 }
 

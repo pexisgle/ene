@@ -466,15 +466,13 @@ fn regular_file(path: &str) -> Result<(), PathProblem> {
     }
 }
 
-/// Slot of a pose hint inside the fixed pose order.
+/// Slot of a pose hint inside [`POSE_ORDER`], which is the single source of
+/// the slot order.
 fn pose_index(pose: PoseHint) -> usize {
-    match pose {
-        PoseHint::Idle => 0,
-        PoseHint::Listening => 1,
-        PoseHint::Speaking => 2,
-        PoseHint::Working => 3,
-        PoseHint::Attention => 4,
-    }
+    POSE_ORDER
+        .iter()
+        .position(|candidate| *candidate == pose)
+        .unwrap_or(0)
 }
 
 struct Staging {

@@ -216,12 +216,19 @@ pub async fn submit_and_collect(
         Duration::from_secs(15),
     )
     .await?;
-    let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) = send
-    else {
-        return Err(DesktopError::Protocol(format!(
-            "intake was not accepted: {}",
-            send.message_type()
-        )));
+    let round = match send {
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) => {
+            round
+        }
+        WirePayload::RoundIntakeOutcome(refusal) => {
+            return Err(DesktopError::Unavailable(describe_intake_refusal(&refusal)));
+        }
+        other => {
+            return Err(DesktopError::Protocol(format!(
+                "expected RoundIntakeOutcome, got {}",
+                other.message_type()
+            )));
+        }
     };
     let mut reply = String::new();
     let mut stream_id = None;
@@ -258,6 +265,36 @@ pub async fn submit_and_collect(
     })
 }
 
+/// Maps an intake refusal to the Owner-facing reason. The wire type defines
+/// these as distinct domain outcomes, so a hold, a stale round, and a
+/// revalidation demand must not read as one another.
+fn describe_intake_refusal(outcome: &RoundIntakeOutcomeWire) -> String {
+    match outcome {
+        RoundIntakeOutcomeWire::StaleRound {
+            current_round,
+            current_generation,
+        } => match current_round {
+            Some(round) => format!(
+                "stale round; current round is {} at generation {current_generation}",
+                round.0
+            ),
+            None => format!("stale round; no round is open (generation {current_generation})"),
+        },
+        RoundIntakeOutcomeWire::HeldForTransition => {
+            String::from("held for a presence transition; retry after the transition settles")
+        }
+        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => {
+            format!("needs revalidation: {}", reason.0)
+        }
+        // The accepted variant is handled before this helper is reached.
+        RoundIntakeOutcomeWire::AcceptedForRound { .. } => String::from("intake was not accepted"),
+    }
+}
+
+/// Presentation ACK for one collected chat turn. Call only from the path
+/// that actually presented that receipt. Mere receive is not
+/// [`PresentationStatus::Presented`]. `send_text` ACKs
+/// PresentationStatus::Presented only after the timeline shows the turn.
 pub async fn confirm_chat_presentation(
     client: &mut Client,
     turn: &ChatTurn,
@@ -291,9 +328,17 @@ pub async fn fetch_history(
     });
     match request_with_timeout(client, payload, Duration::from_secs(15)).await? {
         WirePayload::HistoryResponse(HistoryResponse::Items(items)) => Ok(items),
-        WirePayload::HistoryResponse(_) => Err(DesktopError::Protocol(String::from(
-            "history was unavailable",
-        ))),
+        WirePayload::HistoryResponse(HistoryResponse::Unavailable) => Err(
+            DesktopError::Unavailable(String::from("the timeline could not be read; retry later")),
+        ),
+        WirePayload::HistoryResponse(HistoryResponse::StaleCompanion) => {
+            Err(DesktopError::Unavailable(String::from(
+                "the companion projection is stale; re-read presence and retry",
+            )))
+        }
+        WirePayload::HistoryResponse(HistoryResponse::InvalidRequest) => Err(
+            DesktopError::Protocol(String::from("history request is unusable")),
+        ),
         other => Err(DesktopError::Protocol(format!(
             "expected HistoryResponse, got {}",
             other.message_type()

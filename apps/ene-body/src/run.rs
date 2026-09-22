@@ -25,15 +25,11 @@ pub enum IpcEndpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions {
     pub try_gpu: bool,
-    pub try_native_overlay: bool,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
-        Self {
-            try_gpu: true,
-            try_native_overlay: true,
-        }
+        Self { try_gpu: true }
     }
 }
 
@@ -163,11 +159,7 @@ where
     W: AsyncWrite + Unpin + Send,
 {
     let writer = Mutex::new(writer);
-    let mut overlay = if options.try_native_overlay {
-        Overlay::open(options.try_gpu)
-    } else {
-        Overlay::unavailable("native overlay disabled by test options")
-    };
+    let mut overlay = Overlay::open(options.try_gpu);
     let mut vrm = VrmSession::new();
 
     send(
@@ -175,8 +167,6 @@ where
         &BodyToParent::Ready(ReadyInfo {
             overlay: overlay.kind(),
             gpu: overlay.gpu_status(),
-            expressions: vrm.expressions(),
-            spring_bone: vrm.spring_bone(),
         }),
     )
     .await?;
@@ -197,7 +187,6 @@ where
     let mut runtime_tick = tokio::time::interval(std::time::Duration::from_nanos(16_666_667));
     runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut render_paused_until = None;
-    let mut seq: u64 = 0;
 
     loop {
         tokio::select! {
@@ -227,7 +216,6 @@ where
                 }
             }
             _ = health.tick() => {
-                seq = seq.saturating_add(1);
                 while let Some(fact) = overlay.take_local_ui() {
                     if matches!(fact, LocalUiFact::Hide) {
                         // The gesture hides the overlay locally on every
@@ -250,13 +238,6 @@ where
                 send(
                     &writer,
                     &BodyToParent::HealthTick(crate::ipc::HealthTick {
-                        seq,
-                        visible: overlay.visible(),
-                        pose: vrm.pose(),
-                        gpu_ok: overlay.gpu_status() == crate::ipc::GpuInitStatus::Ok,
-                        overlay: overlay.kind(),
-                        expressions: vrm.expressions(),
-                        spring_bone: vrm.spring_bone(),
                         motion: vrm.motion(),
                     }),
                 )
@@ -425,4 +406,38 @@ fn peer_gone(error: &std::io::Error) -> bool {
         error.kind(),
         ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IpcEndpoint, parse_endpoint};
+
+    #[test]
+    fn default_endpoint_is_stdio() {
+        let endpoint = parse_endpoint(["ene-body"]).expect("parse");
+        assert_eq!(endpoint, IpcEndpoint::Stdio);
+    }
+
+    #[test]
+    fn stdio_flag_is_accepted() {
+        let endpoint = parse_endpoint(["ene-body", "--ipc-stdio"]).expect("parse");
+        assert_eq!(endpoint, IpcEndpoint::Stdio);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_stdio_fds_are_rejected() {
+        let err = parse_endpoint(["ene-body", "--ipc-fd", "1"]).expect_err("fd 1");
+        let text = err.to_string();
+        assert!(text.contains("ipc-fd"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn combined_endpoints_are_rejected() {
+        let err = parse_endpoint(["ene-body", "--ipc-stdio", "--ipc-unix", "/tmp/x"])
+            .expect_err("combined");
+        let text = err.to_string();
+        assert!(text.contains("only one"), "{text}");
+    }
 }

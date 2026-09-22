@@ -307,6 +307,18 @@ pub fn consent_mark(capability: CapabilityKind, rev: Option<u64>) -> String {
     }
 }
 
+/// Renders the mark of the stored consent row for `capability`, the "no
+/// current consent" and current-revision cases through one grammar.
+#[must_use]
+pub fn consent_current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> String {
+    consent_mark(capability, current.map(|record| record.rev.as_u64()))
+}
+
+/// Renders the combined management view mark for both capabilities:
+/// `consent-dialogue-...;consent-learning-...`.
+///
+/// The mark stays opaque to the Client; clients echo it and the Host parses
+/// the segment for the capability the intent names.
 #[must_use]
 pub fn consent_view_mark(dialogue_rev: Option<u64>, learning_rev: Option<u64>) -> String {
     format!(
@@ -355,7 +367,7 @@ impl EvaluationTracker {
         }
     }
 
-    pub fn mint(&mut self, candidate: &InferenceUseCandidate) -> PermissionEvaluationId {
+    pub(crate) fn mint(&mut self, candidate: &InferenceUseCandidate) -> PermissionEvaluationId {
         let id = PermissionEvaluationId(RawId::new());
         self.issued.insert(id.0, candidate.fingerprint());
         id

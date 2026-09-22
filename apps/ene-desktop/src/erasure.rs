@@ -34,7 +34,8 @@ pub(crate) fn apply_demand(
             } => {
                 copies.composer.wipe();
                 copies.search_draft.clear();
-                if input_draft_gone(copies.composer, copies.search_draft) {
+                copies.deletion.wipe_exact_text();
+                if input_draft_gone(copies) {
                     wiped.push(ClientTempClass::InputDraft);
                 } else {
                     unverified.push(ClientTempClass::InputDraft);
@@ -46,7 +47,7 @@ pub(crate) fn apply_demand(
                 copies.timeline.clear();
                 copies.history.clear();
                 copies.memory.wipe();
-                copies.tasks.wipe_owned_copies();
+                copies.tasks.reset_connection_state();
                 copies.usage.wipe_body();
                 copies.deletion.wipe_exact_text();
                 *copies.chat_receipt = None;
@@ -70,11 +71,12 @@ pub(crate) fn apply_demand(
     }
 }
 
-fn input_draft_gone(composer: &Composer, search_draft: &str) -> bool {
-    composer.draft().is_empty()
-        && !composer.composing()
-        && composer.undo_len() == 0
-        && search_draft.is_empty()
+fn input_draft_gone(copies: &GuiOwned<'_>) -> bool {
+    copies.composer.draft().is_empty()
+        && !copies.composer.composing()
+        && copies.composer.undo_len() == 0
+        && copies.search_draft.is_empty()
+        && copies.deletion.exact_text_cleared()
 }
 
 fn presentation_gone(copies: &GuiOwned<'_>) -> bool {

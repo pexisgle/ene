@@ -65,7 +65,7 @@ impl Command {
 
     fn measured_operation(&self) -> Option<&'static str> {
         match self {
-            Self::CancelTask(_) => Some("cancel_task"),
+            Self::CancelTask(_) => Some(ene_desktop::measure::CANCEL_TASK_OPERATION),
             _ => None,
         }
     }
@@ -892,7 +892,10 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::RequestDeletion(text) => {
             d.set_deletion_exact_text(text);
             let result = d.request_deletion().await?;
-            d.refresh_deletion_requests().await?;
+            // The destructive submission already returned an Ok domain
+            // outcome; a failed follow-up read must not mask it as a failure
+            // the Owner would retry.
+            let _result = d.refresh_deletion_requests().await;
             Some(result)
         }
         Command::BeginDeletion(key) => {
@@ -967,6 +970,19 @@ fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> Str
         FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
             ..
         })) => local(ja, "再開しました。", "Resumed."),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::StaleSweep {
+            ..
+        })) => local(
+            ja,
+            "状態が進んだため再開できません。",
+            "The state moved on; the resume did not apply.",
+        ),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Completed {
+            ..
+        })) => local(ja, "すでに完了しています。", "Already completed."),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Finalizing {
+            ..
+        })) => local(ja, "完了処理中です。", "Finalization is in progress."),
         FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Missing)) => {
             local(ja, "対象が見つかりません。", "The target was not found.")
         }

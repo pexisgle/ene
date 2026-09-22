@@ -326,12 +326,14 @@ impl DesktopRuntime {
             observed_unix_ns,
             feedback: feedback.clone(),
         };
-        let Ok(encoded) = serde_json::to_vec(&line) else {
+        let Ok(mut encoded) = serde_json::to_vec(&line) else {
             return;
         };
-        if file.write_all(&encoded).is_ok() {
-            let _result = file.write_all(b"\n");
-        }
+        // One write: the measurement reader captures its offset from the file
+        // length, so a separate newline write leaves a torn line it cannot
+        // decode.
+        encoded.push(b'\n');
+        let _result = file.write_all(&encoded);
     }
 
     pub fn kill_body(&mut self) {
@@ -1019,7 +1021,9 @@ impl DesktopRuntime {
                 .as_mut()
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             let outcome = self.tasks.cancel_displayed(client, &mark).await?;
-            self.tasks.refresh_list(client).await?;
+            // The cancel already reached the Host; a failed follow-up list
+            // must not report the accepted cancel as a failure.
+            let _result = self.tasks.refresh_list(client).await;
             Ok(outcome)
         };
         self.flush_pending_erasure().await;

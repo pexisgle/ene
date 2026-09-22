@@ -19,6 +19,7 @@ use crate::codec::{
     credential_unavailable, decode_device_record, decode_pending_credential,
     decode_pending_pairing, encode_id, insert_decided_row_tx, lock_shared, select_intent_row_tx,
 };
+use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
@@ -162,9 +163,8 @@ pub(crate) fn sweep_registered_secret(
     // fallback mirror `erasure::redact_exact`: a single `replace` can re-form
     // the bearer across the marker (or reproduce a bearer that is a substring
     // of it), and removal strictly shortens the value so it reaches a clean
-    // fixpoint. The final probe makes any residual match a technical error
-    // that rolls the enclosing transaction back instead of advancing the
-    // revision on an unprovable sweep.
+    // fixpoint. Every matched row is modified, so `changed == 0` proves no
+    // row matches; no separate residual probe can find one.
     for (table, column) in SWEEP_TARGETS {
         let replace = format!(
             "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
@@ -189,21 +189,6 @@ pub(crate) fn sweep_registered_secret(
             if changed == 0 {
                 break;
             }
-        }
-        let residual: i64 = tx
-            .query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM {table} \
-                     WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0)"
-                ),
-                params![bearer],
-                |row| row.get(0),
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        if residual != 0 {
-            return Err(credential_unavailable(
-                "credential sweep left the bearer in stored content",
-            ));
         }
     }
     for (memory, companion) in &affected {
@@ -617,8 +602,12 @@ impl CredentialIntentRepository for Store {
     }
 }
 
-const ERASURE_BATCH_ROWS: i64 = 500;
-
+/// Deletes usable refs whose derived identity, provider, or label carries the
+/// target. Deleting the ref is the local erasure: the derived
+/// `provider:label` identity can never be redacted without breaking the ref
+/// grammar, and the pair must not stay usable under a textless identity. The
+/// protected bearer value is not touched here (K-C); the pair simply stops
+/// being resolvable, and the set revision advances below.
 const SQL_ERASE_CREDENTIAL_REF: &str = "DELETE FROM credential_ref
      WHERE id IN (
          SELECT id FROM credential_ref
@@ -660,10 +649,6 @@ const SQL_COUNT_CREDENTIAL_METADATA_TARGET: &str = "SELECT
    + (SELECT COUNT(*) FROM pairing_pending
       WHERE instr(pending_id, ?1) > 0 OR instr(descriptor, ?1) > 0
          OR instr(origin_connection, ?1) > 0)";
-
-fn erasure_count(value: i64) -> Result<u64, CredentialTechnicalError> {
-    u64::try_from(value).map_err(|_| credential_unavailable("count out of range"))
-}
 
 impl CredentialErasureRepository for Store {
     fn erase_target_text(
@@ -721,11 +706,9 @@ impl CredentialErasureRepository for Store {
                         |row| row.get(0),
                     )
                     .map_err(|error| credential_unavailable(error.to_string()))?;
-                let erased = erasure_count(
-                    i64::try_from(refs + pendings + devices + pairing)
-                        .map_err(|_| credential_unavailable("count out of range"))?,
-                )?;
-                let remainder = erasure_count(remainder)?;
+                let erased = erasure_count(refs + pendings + devices + pairing)
+                    .map_err(credential_unavailable)?;
+                let remainder = erasure_count(remainder).map_err(credential_unavailable)?;
                 tx.commit()
                     .map_err(|error| credential_unavailable(error.to_string()))?;
                 Ok(CredentialErasureOutcome::Applied { erased, remainder })

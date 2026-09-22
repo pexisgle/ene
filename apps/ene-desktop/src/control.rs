@@ -76,6 +76,12 @@ impl RequesterClient {
         match self.request(&ToHost::PendingDeletions).await? {
             FromHost::PendingDeletions { requests } => Ok(requests),
             FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
+            FromHost::BackpressureHold => Err(DesktopError::Unavailable(String::from(
+                "the Host request queue is saturated; retry once it drains",
+            ))),
+            FromHost::Unavailable => Err(DesktopError::Unavailable(String::from(
+                "the Host could not answer; retry later",
+            ))),
             other => Err(DesktopError::Control(format!(
                 "expected pending deletions, got {other:?}"
             ))),
@@ -86,6 +92,12 @@ impl RequesterClient {
         match self.request(message).await? {
             FromHost::RequestAccepted { request_id } => Ok(request_id),
             FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
+            FromHost::BackpressureHold => Err(DesktopError::Unavailable(String::from(
+                "the Host request queue is saturated; retry once it drains",
+            ))),
+            FromHost::Unavailable => Err(DesktopError::Unavailable(String::from(
+                "the Host could not answer; retry later",
+            ))),
             other => Err(DesktopError::Control(format!(
                 "the request was not accepted: {other:?}"
             ))),

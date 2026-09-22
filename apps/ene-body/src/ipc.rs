@@ -135,11 +135,14 @@ pub struct MotionSetInfo {
 }
 
 impl MotionSetInfo {
-    #[must_use]
-    pub fn clip_for(&self, pose: PoseHint) -> Option<&PoseClip> {
-        self.clips.iter().find(|clip| clip.pose == pose)
-    }
-
+    /// Structural checks that run before any clip file is opened, so a
+    /// malformed set cannot partially replace playback state.
+    ///
+    /// # Errors
+    ///
+    /// [`MotionFailReason::EmptySet`], [`MotionFailReason::TooManyClips`],
+    /// [`MotionFailReason::DuplicatePose`], [`MotionFailReason::EmptyPath`],
+    /// or [`MotionFailReason::PathTooLong`].
     pub fn validate(&self) -> Result<(), MotionFailInfo> {
         if self.clips.is_empty() {
             return Err(MotionFailInfo::new(
@@ -668,23 +671,6 @@ mod tests {
             long_path.validate().expect_err("long path").reason,
             MotionFailReason::PathTooLong
         );
-    }
-
-    #[test]
-    fn motion_set_lookup_is_pose_scoped() {
-        let set = MotionSetInfo {
-            clips: vec![PoseClip {
-                pose: PoseHint::Attention,
-                path: String::from("/tmp/VRMA_03.vrma"),
-            }],
-        };
-        set.validate().expect("valid set");
-        assert_eq!(
-            set.clip_for(PoseHint::Attention)
-                .map(|clip| clip.path.as_str()),
-            Some("/tmp/VRMA_03.vrma")
-        );
-        assert!(set.clip_for(PoseHint::Idle).is_none());
     }
 
     #[test]

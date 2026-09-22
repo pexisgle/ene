@@ -24,18 +24,12 @@ impl ParticipantOwnerRef {
     #[must_use]
     pub fn storage_name(self) -> String {
         match self {
-            Self::Companion => String::from("companion"),
-            Self::Learning => String::from("learning"),
-            Self::Task => String::from("task"),
-            Self::Action => String::from("action"),
-            Self::Inference => String::from("inference"),
-            Self::Permission => String::from("permission"),
-            Self::Credential => String::from("credential"),
-            Self::Presence => String::from("presence"),
-            Self::HostTransient => String::from("host_transient"),
-            Self::ClientIncarnation(instance) => {
-                format!("client_incarnation:{}", instance.as_uuid().as_hyphenated())
-            }
+            Self::ClientIncarnation(instance) => format!(
+                "{}:{}",
+                self.class_name(),
+                instance.as_uuid().as_hyphenated()
+            ),
+            _ => self.class_name().to_owned(),
         }
     }
 
@@ -155,21 +149,6 @@ impl ParticipantProgress {
     #[must_use]
     pub const fn is_verified(self) -> bool {
         matches!(self, Self::Verified { .. })
-    }
-
-    /// Storage state token, independent of the sweep and the hold class; the
-    /// hold class rides [`ParticipantHoldClass::as_str`] separately. Unknown
-    /// stored or incoming tokens are outside the set and fail closed at their
-    /// parse boundary, never defaulted.
-    #[must_use]
-    pub const fn state_name(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running { .. } => "running",
-            Self::LocalComplete { .. } => "local_complete",
-            Self::Verified { .. } => "verified",
-            Self::Held { .. } => "held",
-        }
     }
 
     /// Rebuilds one progress row from its storage state token, sweep, and hold

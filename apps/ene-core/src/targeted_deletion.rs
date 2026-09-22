@@ -1,8 +1,10 @@
 //! Host-composition Targeted Deletion participant registry and fan-out.
 //!
 //! `ene-preservation` owns the participant vocabulary; each semantic owner
-//! implements [`ErasureParticipant`] in its own crate, and this module is the
-//! only place that knows the concrete implementations (lifecycle §9). The
+//! implements [`ErasureParticipant`] in its own crate, and the Host
+//! composition (`serve.rs`) constructs each concrete implementation and
+//! registers it here (lifecycle §9); this module holds only
+//! `Arc<dyn ErasureParticipant>`. The
 //! fan-out reads the durable operation and participant snapshot, issues one
 //! bounded demand at a time, and records each returned fact through the
 //! canonical store — it never invents a second participant registry and never
@@ -2122,7 +2124,6 @@ mod tests {
             .unwrap()
             .expect("the completion audit is durable");
         assert_eq!(audit.sweep_count, 1);
-        assert_eq!(audit.verified_count(), 2);
         let participants = reopened
             .store
             .deletion_participants(current.operation, None, 100)
@@ -2686,7 +2687,6 @@ mod tests {
             .unwrap()
             .expect("completion writes the durable audit");
         assert_eq!(audit.sweep_count, 1);
-        assert_eq!(audit.verified_count(), required.len() as u64);
         assert_eq!(
             audit.erased_count, 1,
             "the collected History row is counted"
@@ -4010,7 +4010,6 @@ mod tests {
             .unwrap()
             .expect("completion writes one audit");
         assert_eq!(audit.sweep_count, 1);
-        assert_eq!(audit.verified_count(), 2);
         // A later tick over the completed operation demands nothing and can
         // never reopen it.
         let idle = handle.run_targeted_deletion_tick().await.unwrap();

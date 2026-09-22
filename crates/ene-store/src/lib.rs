@@ -59,10 +59,19 @@ pub enum StoreError {
     SchemaFailed(String),
 }
 
+/// A panic inside the blocking task is the task's own panic: resume it rather
+/// than reporting it as a store failure. A cancelled blocking task (one that
+/// never started) is resumed as a cancellation, never reported as a store
+/// failure.
 async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     match tokio::task::spawn_blocking(work).await {
         Ok(value) => value,
-        Err(join) => std::panic::resume_unwind(join.into_panic()),
+        Err(join) => {
+            if join.is_panic() {
+                std::panic::resume_unwind(join.into_panic());
+            }
+            std::panic::resume_unwind(Box::new("store blocking task was cancelled"));
+        }
     }
 }
 

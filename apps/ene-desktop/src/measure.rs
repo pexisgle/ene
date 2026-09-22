@@ -12,6 +12,12 @@ const FPS_MINIMUM: f64 = 30.0;
 const INTAKE_LIMIT_SECS: f64 = 1.0;
 const IDLE_GATE_SECS: f64 = 300.0;
 
+/// The measured GUI operation whose intake and paint the campaign gate
+/// requires. Shared with the producer so a renamed label cannot silently turn
+/// every campaign Incomplete.
+pub const CANCEL_TASK_OPERATION: &str = "cancel_task";
+
+/// Role of a process included in the idle campaign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessRole {
@@ -170,10 +176,17 @@ impl PresentationRecord {
     }
 
     fn passes(&self) -> bool {
+        self.rejection().is_none()
+    }
+
+    /// The first presentation rejection, so the operator failure line names the
+    /// real cause instead of printing numbers that all look passing. `None`
+    /// when the presented events are accepted.
+    fn rejection(&self) -> Option<&'static str> {
+        let mut ids = std::collections::BTreeSet::new();
         let mut presented = 0_u64;
         let mut discarded = 0_u64;
         let mut missing = 0_u64;
-        let mut ids = std::collections::BTreeSet::new();
         let mut last_timestamp = None;
         let mut timing_domain = None;
         for event in &self.events {
@@ -183,7 +196,7 @@ impl PresentationRecord {
                 | PresentationEvent::Missing { correlation_id, .. } => *correlation_id,
             };
             if !ids.insert(id) {
-                return false;
+                return Some("presentation correlation ids are not unique");
             }
             match event {
                 PresentationEvent::Presented {
@@ -192,13 +205,17 @@ impl PresentationRecord {
                     output,
                     ..
                 } => {
-                    if output.is_empty()
-                        || last_timestamp.is_some_and(|last| *timestamp_ns <= last)
-                        || timing_domain
-                            .as_ref()
-                            .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
+                    if output.is_empty() {
+                        return Some("presented output is empty");
+                    }
+                    if last_timestamp.is_some_and(|last| *timestamp_ns <= last) {
+                        return Some("presented timestamps are not strictly increasing");
+                    }
+                    if timing_domain
+                        .as_ref()
+                        .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
                     {
-                        return false;
+                        return Some("presented timing domain changed");
                     }
                     last_timestamp = Some(*timestamp_ns);
                     timing_domain = Some((*clock_id, output.as_str()));
@@ -208,47 +225,18 @@ impl PresentationRecord {
                 PresentationEvent::Missing { .. } => missing = missing.saturating_add(1),
             }
         }
+        if !self.wall_secs.is_finite() || self.wall_secs <= 0.0 {
+            return Some("presentation window is not positive");
+        }
         let calculated_fps = presented as f64 / self.wall_secs;
-        self.wall_secs.is_finite()
-            && self.wall_secs > 0.0
-            && presented == self.presented
-            && discarded == self.discarded
-            && missing == self.missing
-            && (calculated_fps - self.actual_fps).abs() < f64::EPSILON
-            && discarded == 0
-            && missing == 0
-            && calculated_fps >= FPS_MINIMUM
-    }
-
-    /// The first presentation rejection [`Self::passes`] would apply, so the
-    /// operator failure line names the real cause instead of printing numbers
-    /// that all look passing. `None` when the presented events are accepted.
-    fn rejection_reason(&self) -> Option<&'static str> {
-        let mut last_timestamp = None;
-        let mut timing_domain = None;
-        for event in &self.events {
-            if let PresentationEvent::Presented {
-                timestamp_ns,
-                clock_id,
-                output,
-                ..
-            } = event
-            {
-                if output.is_empty() {
-                    return Some("presented output is empty");
-                }
-                if last_timestamp.is_some_and(|last| *timestamp_ns <= last) {
-                    return Some("presented timestamps are not strictly increasing");
-                }
-                if timing_domain
-                    .as_ref()
-                    .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
-                {
-                    return Some("presented timing domain changed");
-                }
-                last_timestamp = Some(*timestamp_ns);
-                timing_domain = Some((*clock_id, output.as_str()));
-            }
+        if presented == 0 || calculated_fps < FPS_MINIMUM {
+            return Some("presented FPS is below the minimum");
+        }
+        if discarded != 0 {
+            return Some("frames were discarded");
+        }
+        if missing != 0 {
+            return Some("frames are missing");
         }
         None
     }
@@ -745,7 +733,7 @@ impl MeasurementRecord {
             }
             if !fps.passes() {
                 let reason = fps
-                    .rejection_reason()
+                    .rejection()
                     .map_or(String::new(), |reason| format!(": {reason}"));
                 self.failures.push(format!(
                     "presented FPS {:.3}, discarded {}, missing {}{reason}",
@@ -775,7 +763,7 @@ impl MeasurementRecord {
         } else if !self
             .interactions
             .iter()
-            .any(|sample| sample.operation == "cancel_task")
+            .any(|sample| sample.operation == CANCEL_TASK_OPERATION)
         {
             self.failures
                 .push(String::from("cancel_task intake/paint is unmeasured"));

@@ -13,10 +13,3 @@ pub enum BodyError {
     #[error("runtime: {0}")]
     Runtime(String),
 }
-
-impl BodyError {
-    #[must_use]
-    pub fn exit_code(&self) -> u8 {
-        1
-    }
-}

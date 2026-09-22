@@ -609,6 +609,16 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
     })
 }
 
+/// Prints the same bounded deletion status page the wire view renders: the
+/// surface mark, then one line per operation, then the next cursor while a
+/// later page exists. No target body, search material, or credential appears
+/// here.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
+/// cannot be opened, and [`CoreError::Deletion`] for a malformed cursor, a
+/// `--limit` outside `1..=50`, or an unreadable surface.
 fn run_deletion_status(data_dir: &Path, cursor: Option<&str>, limit: u32) -> Result<(), CoreError> {
     use std::io::Write as _;
 

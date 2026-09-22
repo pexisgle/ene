@@ -316,16 +316,19 @@ pub fn render_task_list(page: &TaskListPage) -> String {
     lines.join("\n")
 }
 
-/// Headline (`<task> rev <n> <progress> purpose <purpose>`) plus one `kind id`
-/// line per detail row, plus the `next:` continuation while rows remain. Bodies
-/// page through `source`.
+/// Headline (`<task> rev <n> <progress> purpose <purpose> purpose-source
+/// <ref>`) plus one `kind id [source <ref>]` line per detail row and the
+/// `next:` continuation while rows remain; the refs page the bodies.
 pub fn render_report_page(page: &TaskReportPage) -> String {
     let mut lines = vec![format!(
-        "{} rev {} {} purpose {}",
-        page.task.0, page.revision, page.progress, page.purpose
+        "{} rev {} {} purpose {} purpose-source {}",
+        page.task.0, page.revision, page.progress, page.purpose, page.purpose_source.0
     )];
     for row in &page.rows {
-        lines.push(format!("{} {}", row.kind, row.id));
+        match &row.source {
+            Some(source) => lines.push(format!("{} {} source {}", row.kind, row.id, source.0)),
+            None => lines.push(format!("{} {}", row.kind, row.id)),
+        }
     }
     if let Some(cursor) = &page.next_cursor {
         lines.push(format!("next: {}", cursor.0));
@@ -504,7 +507,7 @@ pub fn usage_cap_mark_for<'a>(
         .find(|cap| {
             cap.scope == scope && cap.provider.as_deref() == provider && cap.window == window
         })
-        .map(|cap| cap.mark.as_str())
+        .map(|cap| cap.mark.0.as_str())
 }
 
 /// Renders one bounded usage page: one line per row, one line per cap slot,
@@ -570,12 +573,12 @@ pub fn render_usage_page(response: &UsageSummaryResponse) -> String {
                 match &cap.stored {
                     None => lines.push(format!(
                         "cap {} {} {} no-cap",
-                        cap.mark, scope, cap.window
+                        cap.mark.0, scope, cap.window
                     )),
                     Some(stored) => match &stored.consumption {
                         UsageCapConsumptionView::Indeterminate => lines.push(format!(
                             "cap {} {} {} limit={} indeterminate",
-                            cap.mark,
+                            cap.mark.0,
                             scope,
                             cap.window,
                             render_money(&stored.limit)
@@ -589,7 +592,7 @@ pub fn render_usage_page(response: &UsageSummaryResponse) -> String {
                             held,
                         } => lines.push(format!(
                             "cap {} {} {} limit={} consumed={} reserved={} reported={} unknown={} remaining={} held={}",
-                            cap.mark,
+                            cap.mark.0,
                             scope,
                             cap.window,
                             render_money(&stored.limit),
@@ -1542,7 +1545,7 @@ mod tests {
             next_cursor: Some(UsageCursorWire(String::from("cursor-2"))),
             caps: vec![
                 UsageCapView {
-                    mark: String::from("usage-cap-system-daily_utc-rev-0"),
+                    mark: ViewMarkWire(String::from("usage-cap-system-daily_utc-rev-0")),
                     scope: String::from("system"),
                     provider: None,
                     window: String::from("daily_utc"),
@@ -1577,7 +1580,7 @@ mod tests {
                     }),
                 },
                 UsageCapView {
-                    mark: String::from("usage-cap-provider-openai-daily_utc-none"),
+                    mark: ViewMarkWire(String::from("usage-cap-provider-openai-daily_utc-none")),
                     scope: String::from("provider"),
                     provider: Some(String::from("openai")),
                     window: String::from("daily_utc"),

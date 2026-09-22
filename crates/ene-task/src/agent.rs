@@ -185,6 +185,75 @@ pub enum TaskAgentTurnOutcome {
     Aborted,
 }
 
+/// Orchestrates one Task Agent inference turn.
+///
+/// The work owner assembles the logical input and maps the port result; the
+/// port's implementation owns the attempt claim and re-checks the delegation
+/// and task premise inside that claim, which is the actual currentness
+/// guarantee. The precheck here (delegation and held revision) is
+/// informational, so a competing steering winner between the precheck and
+/// the claim is still reported as stale by the port.
+///
+/// The logical input is a fixed response-format preamble, the relied
+/// revision's adopted-purpose text, the adopted-instruction bodies in
+/// `TaskRecord.context` order, the every-turn past-executed facts block, and
+/// the execution-local Action exchanges the caller replays (each request
+/// followed by its observation, oldest first).
+/// The newest exchanges are kept within the port's
+/// [`input_budget`](TaskAgentInference::input_budget): whole oldest exchanges
+/// are dropped (with a fixed omission note) when the transcript would
+/// outgrow the port, and an exchange that cannot fit even alone is left in
+/// place so the port refuses the over-limit input instead of the model
+/// answering from a silently shortened observation. The never-omitted
+/// logical input head — the response-format preamble, the relied purpose,
+/// every adopted instruction body, and the past-executed facts block — is
+/// reserved up front; when that head alone reaches the port budget no
+/// transcript trimming could help, so the turn fails as
+/// [`TaskAgentTurnError::InputUnavailable`]. The whole string is
+/// scrubbed exactly once and only the scrubber's output crosses the port. Instruction bodies stay canonical in History or in the first-party
+/// activity record: the
+/// [`TaskInstructionSource`] port reads each adopted entry's origin, the
+/// kind/source/role/companion correspondence is verified before the body is
+/// used, and an absent source ends the turn as
+/// [`TaskAgentTurnOutcome::InstructionSourceMissing`] without fabricating,
+/// skipping, or rewriting anything. The exchange transcript is execution-local
+/// evidence from the Action owner and is never persisted or treated as a
+/// canonical source; it is reproduced for the provider only through this
+/// turn.
+///
+/// The logical input's canonical source correlation (`data_use`) is the
+/// purpose entry's `origin.source` followed by every adopted instruction's
+/// `origin.source`, then every past-executed fact's source, and finally the
+/// durable occurrence identity of every kept Action exchange observation, in
+/// the same order, duplicates retained. The Action exchange transcript is
+/// execution-local, so the observation occurrence identity — minted and made
+/// durable at observation time — is what carries its provenance; the exchange
+/// request text itself adds no entry. It travels to
+/// the claim, which compares it against the canonical current
+/// erasure-condition store in the same transaction as the task premise; a
+/// covered source yields [`TaskAgentTurnOutcome::NotSent`] with
+/// [`TaskAgentNotSent::DataUseHeld`] and no provider I/O. A scrub failure,
+/// a source read failure, and a correspondence mismatch all fail closed as
+/// [`TaskAgentTurnError::InputUnavailable`] with nothing sent.
+///
+/// The History reads and the scrub happen outside any transaction or lock
+/// the claim uses: the claim alone is the linearization point.
+///
+/// Outcome mapping: `Produced` carries the output and consent flag without
+/// adopting either, `NotSent` reasons pass through unchanged, and the port's
+/// `Aborted` passes through unchanged (the port completed any claimed
+/// attempt's usage accounting before answering it). A
+/// `StaleTaskPremise` refusal is re-read against durable state and mapped to
+/// [`TaskAgentTurnOutcome::MissingDelegation`],
+/// [`TaskAgentTurnOutcome::MissingTask`],
+/// [`TaskAgentTurnOutcome::TaskTerminal`] (progress terminal),
+/// [`TaskAgentTurnOutcome::ExecutionSealed`] (the delegation already has its
+/// final result), or [`TaskAgentTurnOutcome::StaleTaskRevision`]. The precheck
+/// terminal refusal and the claim's terminal/seal refusal both come from
+/// durable comparisons, and neither sends a provider byte. Repository
+/// technical errors map to [`TaskAgentTurnError::StorageUnavailable`] and port
+/// technical errors to [`TaskAgentTurnError::InferenceUnavailable`]; domain
+/// outcomes are never folded into either.
 pub async fn orchestrate_task_agent_turn(
     repository: &impl TaskRepository,
     instructions: &impl TaskInstructionSource,

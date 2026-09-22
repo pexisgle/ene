@@ -365,17 +365,19 @@ impl HostHandle {
                 .await,
             )];
         };
-        self.trusted_task_premises.set_workspace(folder);
-        vec![outcome_frame(
-            frame,
-            live,
-            intent,
-            self.record_decided(
+        // Durable before visible: a held or conflicted record must not leave
+        // the workspace premise set, because the Task proposal consumes it as
+        // the applied authorization while the Client is told nothing applied.
+        let outcome = self
+            .record_decided(
                 Self::intent_fingerprint(intent, Self::INTENT_KIND_SELECT_WORKSPACE),
                 IntentOutcome::AppliedAsOneTime,
             )
-            .await,
-        )]
+            .await;
+        if matches!(&outcome, ManagementOutcome::AppliedAsOneTime) {
+            self.trusted_task_premises.set_workspace(folder);
+        }
+        vec![outcome_frame(frame, live, intent, outcome)]
     }
 
     async fn register_credential(

@@ -67,6 +67,14 @@ impl PreparedCredentialSnapshot {
     }
 }
 
+/// Version-aware backend for the publication protocol.
+///
+/// The product OS store exposes these operations as inherent methods, and the
+/// host-side `CredStore` adapts them to this trait; only
+/// [`MemoryVersionedStore`] implements it directly, for tests and local
+/// development. A backend that cannot hold versions (the environment store)
+/// deliberately does not: the Host then reports that registration is
+/// unavailable instead of writing a value nothing can activate.
 pub trait VersionedCredentialStore: Send + Sync {
     fn put_version(
         &self,
@@ -99,50 +107,12 @@ pub trait VersionedCredentialStore: Send + Sync {
     ) -> Result<(), CredentialTechnicalError>;
 }
 
-impl VersionedCredentialStore for crate::OsCredentialStore {
-    fn put_version(
-        &self,
-        cred: &CredentialRef,
-        version: u64,
-        secret: &str,
-    ) -> Result<(), CredentialTechnicalError> {
-        crate::OsCredentialStore::put_version(self, cred, version, secret)
-    }
-
-    fn with_version<R>(
-        &self,
-        cred: &CredentialRef,
-        version: u64,
-        f: impl FnOnce(&str) -> R,
-    ) -> Result<R, CredentialTechnicalError> {
-        crate::OsCredentialStore::with_version(self, cred, version, f)
-    }
-
-    fn prepare_snapshot(
-        &self,
-        cred: &CredentialRef,
-        version: u64,
-    ) -> Result<PreparedCredentialSnapshot, CredentialTechnicalError> {
-        crate::OsCredentialStore::prepare_snapshot(self, cred, version)
-    }
-
-    fn activate(&self, snapshot: PreparedCredentialSnapshot) {
-        crate::OsCredentialStore::activate(self, snapshot);
-    }
-
-    fn deactivate(&self, cred: &CredentialRef) {
-        crate::OsCredentialStore::deactivate(self, cred);
-    }
-
-    fn delete_version(
-        &self,
-        cred: &CredentialRef,
-        version: u64,
-    ) -> Result<(), CredentialTechnicalError> {
-        crate::OsCredentialStore::delete_version(self, cred, version)
-    }
-}
-
+/// Versioned in-memory backend for tests and local development.
+///
+/// It exists so the publication protocol can be exercised end to end without
+/// an OS store. It is never a product source of truth: the Host wires the OS
+/// backend for the product path and reports registration as unavailable when
+/// no version-capable backend is configured.
 pub struct MemoryVersionedStore {
     versions: Mutex<HashMap<(CredentialRef, u64), SecretValue>>,
     active: Mutex<HashMap<CredentialRef, (u64, SecretValue)>>,

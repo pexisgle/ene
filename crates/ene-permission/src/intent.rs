@@ -1,8 +1,8 @@
 use crate::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
     IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
-    IntentResolution, PermissionTechnicalError, ShortcutIntentOutcome, consent_mark,
-    parse_consent_mark,
+    IntentResolution, PermissionTechnicalError, ShortcutIntentOutcome, consent_current_mark,
+    consent_mark, parse_consent_mark,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub async fn assign_consent(
                     intents,
                     intent.fingerprint,
                     IntentOutcome::StaleBaseView {
-                        current: current_mark(intent.capability, current.as_ref()),
+                        current: consent_current_mark(intent.capability, current.as_ref()),
                     },
                 )
                 .await;
@@ -87,7 +87,7 @@ pub async fn assign_consent(
             intents,
             intent.fingerprint,
             IntentOutcome::StaleBaseView {
-                current: current_mark(intent.capability, current.as_ref()),
+                current: consent_current_mark(intent.capability, current.as_ref()),
             },
         )
         .await;
@@ -152,16 +152,12 @@ pub async fn assign_consent(
         }
         IntentResolution::Decided(ConsentCommitOutcome::StaleCurrent { current }) => {
             Ok(IntentResolution::Decided(IntentOutcome::StaleBaseView {
-                current: current_mark(intent.capability, current.as_ref()),
+                current: consent_current_mark(intent.capability, current.as_ref()),
             }))
         }
         IntentResolution::Replay(stored) => Ok(IntentResolution::Replay(stored)),
         IntentResolution::Conflict(stored) => Ok(IntentResolution::Conflict(stored)),
     }
-}
-
-fn current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> String {
-    consent_mark(capability, current.map(|record| record.rev.as_u64()))
 }
 
 async fn record_decided(

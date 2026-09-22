@@ -727,6 +727,12 @@ where
         let transport = Arc::clone(&self.transport);
         tasks.spawn(async move {
             drop(handle.run_task_agent(transport.as_ref(), delegation).await);
+            // A runner that refused before taking its reservation (a
+            // transient delegation load failure or a missing delegation) must
+            // not leave the launch token pinning the Task as running; a
+            // consumed reservation is already absent, so the release is a
+            // no-op there.
+            handle.task_executions.release(delegation);
         });
         Ok(())
     }

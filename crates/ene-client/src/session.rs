@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use ene_api::v1::deletion::{ClientTempClass, DeletionDemand};
 use ene_api::v1::handshake::{AuthResult, PairingProvisionSecret};
 use ene_api::v1::payload::{BodyStateHint, WirePayload};
-use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
+use ene_api::v1::presence::PresenceAttributionWire;
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
 use ene_plugin_ipc::WireFrame;
@@ -36,13 +36,14 @@ pub const PENDING_ERASURE_CAP: usize = 32;
 /// buffers auto-presented summaries drained by [`Self::take_undelivered`];
 /// answers are correlated on the read path, never recovered from here.
 ///
-/// `Eq` is deliberately absent: [`WireFrame`] is `PartialEq`-only, and
-/// whole-session equality beyond tests is meaningless; callers compare
-/// dimensions.
-#[derive(Clone, PartialEq, Default)]
+/// `PartialEq` and `Eq` are deliberately absent: [`WireFrame`] is
+/// `PartialEq`-only, and whole-session equality beyond tests is meaningless;
+/// callers compare dimensions.
+#[derive(Default)]
 pub struct SessionState {
     generation: Option<u64>,
-    presence: Option<PresenceStateWire>,
+    /// Companion projection to echo on submits and history requests so the
+    /// Host resolves them through its mapping.
     companion: Option<String>,
     pairing_secret: Option<PairingProvisionSecret>,
     deferred: VecDeque<WireFrame>,
@@ -58,7 +59,6 @@ impl core::fmt::Debug for SessionState {
         formatter
             .debug_struct("SessionState")
             .field("generation", &self.generation)
-            .field("presence", &self.presence)
             .field("companion", &self.companion)
             .field(
                 "pairing_secret",
@@ -76,11 +76,6 @@ impl SessionState {
         self.generation
     }
 
-    #[must_use]
-    pub fn presence_state(&self) -> Option<PresenceStateWire> {
-        self.presence
-    }
-
     pub fn pairing_secret(&self) -> Option<&str> {
         self.pairing_secret
             .as_ref()
@@ -93,7 +88,6 @@ impl SessionState {
 
     pub fn observe_presence(&mut self, fact: &PresenceAttributionWire) {
         self.generation = Some(fact.generation);
-        self.presence = Some(fact.state);
         self.companion = Some(fact.companion.0.clone());
     }
 
