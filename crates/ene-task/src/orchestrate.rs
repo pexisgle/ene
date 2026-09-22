@@ -218,6 +218,23 @@ fn map_commit_outcome(outcome: TaskCommitOutcome) -> TaskProposalOutcome {
     }
 }
 
+/// Orchestrates one delegation creation against the repository (H-A / AU3).
+///
+/// The precheck loads the durable current state: an absent Task returns
+/// [`DelegationOutcome::MissingTask`], a terminal Task returns
+/// [`DelegationOutcome::TaskTerminal`] (terminal is never folded into a stale
+/// answer, even when the revision also differs), and only then does a current
+/// revision different from `command.task` return
+/// [`DelegationOutcome::StaleTaskRevision`]; none of these paths mints
+/// identities or writes anything. On a match the orchestration
+/// mints the delegation and agent identities, builds the premise, and calls
+/// [`TaskRepository::create_delegation`]. The precheck is not the
+/// concurrency guarantee: `create_delegation` compares the revision again
+/// inside its atomic commit, so a competing winner between the precheck and
+/// the commit still yields [`DelegationOutcome::StaleTaskRevision`].
+///
+/// The repository outcome is passed through unchanged, and repository
+/// technical errors stay `Err`; domain outcomes are never folded into them.
 pub async fn orchestrate_delegation(
     repository: &impl TaskRepository,
     command: CreateDelegationCommand,
@@ -227,15 +244,15 @@ pub async fn orchestrate_delegation(
             task: command.task.task,
         });
     };
-    if record.task.reference != command.task {
-        return Ok(DelegationOutcome::StaleTaskRevision {
-            current: record.task.reference,
-        });
-    }
     if record.task.progress.is_terminal() {
         return Ok(DelegationOutcome::TaskTerminal {
             task: command.task.task,
             progress: record.task.progress,
+        });
+    }
+    if record.task.reference != command.task {
+        return Ok(DelegationOutcome::StaleTaskRevision {
+            current: record.task.reference,
         });
     }
     repository

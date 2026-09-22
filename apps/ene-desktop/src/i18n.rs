@@ -1,3 +1,8 @@
+//! Japanese / English locale and deny-reason text.
+//!
+//! Switching locale rewrites labels only. Conversation bodies, history, and
+//! Host domain state are not rewritten.
+
 use ene_api::v1::management::ManagementOutcome;
 use ene_local_control::{ControlOutcome, FromConfirmation};
 
@@ -23,60 +28,6 @@ impl Locale {
         } else {
             Self::Ja
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Label {
-    Chat,
-    Memory,
-    WizardLanguage,
-    WizardBundledEne,
-    WizardCloudCost,
-    WizardCredential,
-    WizardAssignment,
-    Connecting,
-    Connected,
-    Disconnected,
-}
-
-#[must_use]
-pub fn label(locale: Locale, key: Label) -> &'static str {
-    match (locale, key) {
-        (Locale::Ja, Label::Chat) => "会話",
-        (Locale::En, Label::Chat) => "Chat",
-        (Locale::Ja, Label::Memory) => "記憶",
-        (Locale::En, Label::Memory) => "Memory",
-        (Locale::Ja, Label::WizardLanguage) => "UI言語を選んでください",
-        (Locale::En, Label::WizardLanguage) => "Choose a UI language",
-        (Locale::Ja, Label::WizardBundledEne) => {
-            "同梱キャラクターは公式の ene です。編集基盤は使いません。"
-        }
-        (Locale::En, Label::WizardBundledEne) => {
-            "The bundled character is official ene. This is not a character editor."
-        }
-        (Locale::Ja, Label::WizardCloudCost) => {
-            "会話はクラウドへ送られ、トークン課金が発生します。キー登録だけでは送信しません。"
-        }
-        (Locale::En, Label::WizardCloudCost) => {
-            "Chat is sent to the cloud and incurs token cost. Registering a key does not send."
-        }
-        (Locale::Ja, Label::WizardCredential) => {
-            "OpenAI API キーを登録します（この欄は会話ではありません）"
-        }
-        (Locale::En, Label::WizardCredential) => {
-            "Register an OpenAI API key (this field is not chat)"
-        }
-        (Locale::Ja, Label::WizardAssignment) => "使用モデルを割り当てるとセットアップが完了します",
-        (Locale::En, Label::WizardAssignment) => {
-            "Assign a model to finish setup. This is the consent step."
-        }
-        (Locale::Ja, Label::Connecting) => "接続中",
-        (Locale::En, Label::Connecting) => "Connecting",
-        (Locale::Ja, Label::Connected) => "接続済み",
-        (Locale::En, Label::Connected) => "Connected",
-        (Locale::Ja, Label::Disconnected) => "未接続",
-        (Locale::En, Label::Disconnected) => "Disconnected",
     }
 }
 
@@ -165,5 +116,54 @@ pub fn control_deny(locale: Locale, from: &FromConfirmation) -> String {
         }
         (Locale::Ja, _) => String::from("制御の応答を処理できません。"),
         (Locale::En, _) => String::from("The control channel answered unexpectedly."),
+    }
+}
+
+/// Renders the requester-listener hold. The Host refused admission because
+/// its pending queue is saturated; nothing was accepted. The Owner retries by
+/// an explicit action, so no path may resend the held request on its own.
+#[must_use]
+pub fn backpressure_hold(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Ja => "混雑のため保留中です。しばらくしてから再試行してください。",
+        Locale::En => "Held due to load; retry shortly.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Locale, backpressure_hold, control_deny};
+    use ene_local_control::{ControlOutcome, FromConfirmation};
+
+    #[test]
+    fn credential_refused_is_not_an_unexpected_control_answer() {
+        let refused = FromConfirmation::Outcome(ControlOutcome::CredentialRefused {
+            provider: String::from("openai"),
+            label: String::from("main"),
+        });
+        let ja = control_deny(Locale::Ja, &refused);
+        let en = control_deny(Locale::En, &refused);
+        assert!(!ja.contains("処理できません"));
+        assert!(!en.contains("unexpected"));
+        assert!(ja.contains("保護ストア") || ja.contains("拒否"));
+    }
+
+    #[test]
+    fn a_requester_hold_has_its_own_notice_in_both_locales() {
+        let ja = backpressure_hold(Locale::Ja);
+        let en = backpressure_hold(Locale::En);
+        assert!(ja.contains("保留"));
+        assert_eq!(en, "Held due to load; retry shortly.");
+        // The hold is not the generic unexpected-answer fallback.
+        assert!(!ja.contains("処理できません"));
+        assert!(!en.contains("unexpected"));
+    }
+
+    #[test]
+    fn locale_tags_round_trip() {
+        assert_eq!(Locale::parse("en").as_tag(), "en");
+        assert_eq!(Locale::parse("ja").as_tag(), "ja");
+        assert_eq!(Locale::parse("EN-US").as_tag(), "en");
+        assert_eq!(Locale::parse("fr").as_tag(), "ja");
     }
 }

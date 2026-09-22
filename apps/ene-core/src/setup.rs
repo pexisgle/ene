@@ -778,6 +778,11 @@ impl HostHandle {
         }
     }
 
+    /// An empty section list selects every known section (`provider`,
+    /// `model`, `consent`, `credential`, `learning`, `memory`); otherwise only requested
+    /// known sections render and unknown names are skipped. `memory_after`
+    /// continues the current-memory list; `memory_revisions_of` (with
+    /// `memory_revisions_after`) renders one Memory's revision page instead.
     pub(crate) async fn answer_view(
         &self,
         frame: &WireFrame,

@@ -162,6 +162,8 @@ pub struct AttemptCommitPremise {
 pub enum ActionStartOutcome {
     Started,
     StalePremise,
+    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); nothing was written and
+    /// no external effect may happen.
     TaskTerminal,
     ExecutionSealed,
     /// A canonical current erasure condition covers the resolved target

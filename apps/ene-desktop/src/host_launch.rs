@@ -20,6 +20,13 @@ pub enum LaunchError {
     Spawn(String),
 }
 
+/// True when the Client listener already answers.
+///
+/// On Unix a stale socket that refuses a connect is not serving. The Windows
+/// arm probes with `std::fs::metadata`, which opens the pipe; only a
+/// successful open counts as serving, so a busy pipe instance can still read
+/// as not serving. That is a wasted `ene-core serve` (it loses the Host lock
+/// and exits), never a wrong "not serving" for a live Host.
 #[must_use]
 pub fn host_is_serving(data_dir: &Path) -> bool {
     #[cfg(unix)]

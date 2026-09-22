@@ -14,9 +14,10 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, RoundWireId};
+use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{PresentationStatus, RoundIntakeOutcomeWire};
 use ene_api::v1::undelivered::{
-    ResumeTaskOutcomeWire, TaskListPage, UndeliveredAckOutcome, UndeliveredResponse,
+    ListTasks, ResumeTaskOutcomeWire, TaskListPage, UndeliveredAckOutcome, UndeliveredResponse,
     UndeliveredSummary,
 };
 use ene_core::conn;
@@ -98,15 +99,15 @@ impl GateTransport {
 }
 
 impl ProviderTransport for GateTransport {
-    #[expect(clippy::unwrap_used, reason = "test fixture helper")]
-    fn complete(
-        &self,
+    fn complete_streaming<'a>(
+        &'a self,
         req: ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
     ) -> Pin<
         Box<
             dyn Future<Output = Result<ProviderResponse, ene_inference::InferenceTechnicalError>>
                 + Send
-                + '_,
+                + 'a,
         >,
     > {
         Box::pin(async move {
@@ -139,7 +140,15 @@ impl ProviderTransport for GateTransport {
                     )),
                 );
             }
-            Ok(ProviderResponse { text, usage: None })
+            let response = ProviderResponse { text, usage: None };
+            match sink.push_delta(&response.text).await {
+                ene_inference::DeltaFlow::Continue => Ok(response),
+                ene_inference::DeltaFlow::Abort(reason) => {
+                    Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    })
+                }
+            }
         })
     }
 }
@@ -503,6 +512,22 @@ async fn fetch_summary(client: &mut Client, what: &str) -> Result<UndeliveredSum
     Ok(summary)
 }
 
+/// One domain frame on a superseded connection answers typed
+/// `StaleConnection` while the socket stays open (IPC §11.3, S5-03/04).
+async fn expect_stale_connection(client: &mut Client, payload: WirePayload, what: &str) {
+    let answer = ask(client, payload, what)
+        .await
+        .expect("a superseded connection still answers");
+    let WirePayload::Reject(reject) = answer else {
+        panic!("{what} on a superseded connection must reject, got {answer:?}");
+    };
+    assert_eq!(
+        reject.kind,
+        RejectKind::StaleConnection,
+        "{what} must name the stale connection"
+    );
+}
+
 async fn ack_summary(
     client: &mut Client,
     summary: &UndeliveredSummary,
@@ -602,6 +627,95 @@ async fn start_restarted_host(
     (observer, server)
 }
 
+/// A persisted Present state from before process loss. Graceful teardown
+/// deliberately records disconnect first; after quiescence this fixture
+/// restores only the presence rows and log boundary that a crash would leave.
+struct PresenceCrashState {
+    companion: String,
+    state: String,
+    active_client: Option<String>,
+    generation: i64,
+    last_client: Option<String>,
+    recovery_destination: Option<String>,
+    last_transition: i64,
+}
+
+impl PresenceCrashState {
+    fn capture(dir: &std::path::Path) -> Self {
+        let db = rusqlite::Connection::open(dir.join("app.db")).unwrap();
+        let snapshot = db
+            .query_row(
+                "SELECT p.companion_id, p.state, p.active_client, p.generation,
+                    h.last_client, h.recovery_destination,
+                    (SELECT COALESCE(MAX(transition_seq), 0) FROM presence_transition_log
+                     WHERE companion_id = p.companion_id)
+             FROM presence_attribution p JOIN relocation_hint h USING (companion_id)",
+                (),
+                |row| {
+                    Ok(Self {
+                        companion: row.get(0)?,
+                        state: row.get(1)?,
+                        active_client: row.get(2)?,
+                        generation: row.get(3)?,
+                        last_client: row.get(4)?,
+                        recovery_destination: row.get(5)?,
+                        last_transition: row.get(6)?,
+                    })
+                },
+            )
+            .expect("present crash fixture must have attribution and relocation hint");
+        assert_eq!(snapshot.state, "present");
+        snapshot
+    }
+
+    fn restore_after_quiescence(self, dir: &std::path::Path) {
+        let mut db = rusqlite::Connection::open(dir.join("app.db")).unwrap();
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            tx.execute(
+                "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3
+             WHERE companion_id = ?4",
+                rusqlite::params![
+                    self.state,
+                    self.active_client,
+                    self.generation,
+                    self.companion
+                ],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.execute(
+                "UPDATE relocation_hint SET last_client = ?1, recovery_destination = ?2
+             WHERE companion_id = ?3",
+                rusqlite::params![self.last_client, self.recovery_destination, self.companion],
+            )
+            .unwrap(),
+            1
+        );
+        tx.execute(
+            "DELETE FROM presence_transition_log WHERE companion_id = ?1 AND transition_seq > ?2",
+            rusqlite::params![self.companion, self.last_transition],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+}
+
+async fn restart_host_from_presence_crash(
+    dir: &std::path::Path,
+    server: ServingTask,
+    transport: Arc<GateTransport>,
+) -> (Weak<HostHandle>, ServingTask) {
+    let crash = PresenceCrashState::capture(dir);
+    server.shutdown_and_join().await;
+    crash.restore_after_quiescence(dir);
+    start_restarted_host(dir, transport).await
+}
+
+/// Observation poll for the server-side disconnect fallback (not an
+/// ordering device; the fallback is async after a socket close).
 async fn wait_presence(dir: &std::path::Path, wanted: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -768,6 +882,183 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
     server.abort();
 }
 
+/// S5-03: same device, C1 present, C2 authenticates, only C2 closes. C1
+/// stays superseded (its old connection never revives), and with no current
+/// the Host falls back so a fresh connection serves again. The lingering
+/// superseded socket is covered at serve level
+/// (`current_close_falls_back_even_with_a_lingering_superseded_socket`).
+#[tokio::test]
+async fn s5_03_second_connection_close_keeps_superseded_and_falls_back() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(GateTransport::new(
+        vec![
+            String::from("one"),
+            String::from("two"),
+            String::from("three"),
+        ],
+        &[],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
+    let (round1, stream1, _) = send_round(&mut c1, "hello")
+        .await
+        .expect("first round must complete");
+    confirm_round(&mut c1, &round1, stream1).await;
+    // C2 on the same device authenticates and takes over currentness.
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("c2 must authenticate");
+    let (round2, stream2, chat) = send_round(&mut c2, "hello again")
+        .await
+        .expect("c2 round must complete");
+    assert_eq!(chat, "two");
+    confirm_round(&mut c2, &round2, stream2).await;
+
+    // C1 is superseded: domain input and management views reject as the old
+    // connection while the socket stays open (each ask answers).
+    let companion = c1.companion_ref();
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            None,
+            false,
+            String::from("replay"),
+            String::from("en"),
+        )),
+        "superseded input",
+    )
+    .await;
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::ManagementViewRequest(cmds::setup_view_request()),
+        "superseded view",
+    )
+    .await;
+
+    // Closing only C2 never revives the old connection, and the fallback
+    // lets a fresh connection serve again.
+    drop(c2);
+    let companion = c1.companion_ref();
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            None,
+            false,
+            String::from("replay after close"),
+            String::from("en"),
+        )),
+        "old close never revives",
+    )
+    .await;
+    let mut c3 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("fresh connect must serve after fallback");
+    let (_round3, stream3, chat3) = send_round(&mut c3, "hello third")
+        .await
+        .expect("post-fallback round must complete");
+    assert_eq!(chat3, "three");
+    confirm_round(&mut c3, &_round3, stream3).await;
+    server.abort();
+}
+
+/// S5-04: after C2's auth supersedes C1, everything C1's old connection
+/// replays (domain input here; capability/proof replays are serve-level)
+/// rejects as stale with zero side effects: no current steal, no Task, no
+/// presence revival. The replacement also inherits neither C1's
+/// connection-scoped task refs nor C1's open round: an Existing premise
+/// naming the old round answers `StaleRound` (the first-party selection
+/// binding is pinned by the deterministic Host-level replacement tests).
+#[tokio::test]
+async fn s5_04_superseded_replays_rejected_without_side_effects() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(GateTransport::new(
+        vec![String::from("one"), String::from("two")],
+        &[],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
+    let (round1, stream1, _) = send_round(&mut c1, "hello")
+        .await
+        .expect("c1 round must complete");
+    confirm_round(&mut c1, &round1, stream1).await;
+
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("c2 must authenticate");
+    let companion = c1.companion_ref();
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            None,
+            false,
+            String::from("replay after supersede"),
+            String::from("en"),
+        )),
+        "superseded domain input",
+    )
+    .await;
+    // The socket stayed open: a second replay rejects the same way.
+    let companion = c1.companion_ref();
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::HistoryRequest(cmds::history_request(&companion, 1)),
+        "superseded history read",
+    )
+    .await;
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::ListTasks(ListTasks {
+            cursor: None,
+            limit: None,
+        }),
+        "superseded task list",
+    )
+    .await;
+
+    // C2 does not inherit C1's open round: an Existing premise naming it
+    // answers `StaleRound` instead of joining.
+    let companion = c2.companion_ref();
+    let stale_round = ask(
+        &mut c2,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            Some(round1.clone()),
+            false,
+            String::from("join c1 round"),
+            String::from("en"),
+        )),
+        "old round join",
+    )
+    .await
+    .expect("the old-round submit must answer typed");
+    assert!(
+        matches!(
+            stale_round,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound { .. })
+        ),
+        "C2 must not inherit C1's open round, got {stale_round:?}"
+    );
+
+    // Current is untouched: C2 still rounds, Auto mints its own round, and
+    // the replays created no Task.
+    let (round2, stream2, chat) = send_round(&mut c2, "still current")
+        .await
+        .expect("c2 must stay current");
+    assert_eq!(chat, "two");
+    assert_ne!(round2, round1, "the replacement mints its own round");
+    confirm_round(&mut c2, &round2, stream2).await;
+    let page = list_tasks(&mut c2).await.expect("list must read");
+    assert!(page.tasks.is_empty(), "replays must create nothing");
+    server.abort();
+}
+
+/// S5-05: the old close never clears the new current, in both orders: (A)
+/// the old close completes before the new auth, (B) the new auth installs
+/// first and the old close races in after. The same-admission comparison is
+/// serve-level; these are the two orders' end states over real sockets.
 #[tokio::test]
 async fn s5_05_old_close_never_clears_new_current_both_orders() {
     let temp_a = tempfile::TempDir::new().unwrap();
@@ -824,7 +1115,39 @@ async fn s5_05_old_close_never_clears_new_current_both_orders() {
     server_b.abort();
 }
 
-#[expect(clippy::expect_used, reason = "test fixture helper")]
+fn workspace_binary(name: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let debug = exe.parent()?.parent()?;
+    let candidate = debug.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Runs one real `ene-ctl` child process (a fresh boot incarnation) and
+/// returns `(exit code, stdout, stderr)`.
+async fn run_cli(
+    binary: &std::path::Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> Option<(i32, String, String)> {
+    let mut command = tokio::process::Command::new(binary);
+    command.args(args);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let child = command.spawn().ok()?;
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    Some((
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
 fn only_task_uuid(dir: &std::path::Path) -> String {
     task_uuids(dir)
         .into_iter()
@@ -845,6 +1168,87 @@ fn task_uuids(dir: &std::path::Path) -> Vec<String> {
         .expect("task ids must decode")
 }
 
+/// S5-06: a same-process reconnect keeps the incarnation with a new
+/// connection, while a client-process restart boots a new incarnation; the
+/// last install wins and the older one goes stale. Counter-file races and
+/// write-failure behavior are incarnation-unit level; same-descriptor
+/// pairing distinctness is serve-level (#1389).
+#[tokio::test]
+async fn s5_06_reconnect_keeps_incarnation_restart_advances_it() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(GateTransport::new(
+        vec![
+            String::from("one"),
+            String::from("two"),
+            String::from("three"),
+        ],
+        &[],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
+    let (round1, stream1, _) = send_round(&mut c1, "hello")
+        .await
+        .expect("first round must complete");
+    confirm_round(&mut c1, &round1, stream1).await;
+
+    // Same-process reconnect: the cached incarnation is reused and the new
+    // connection serves.
+    drop(c1);
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("same-process reconnect must succeed");
+    let (round2, stream2, chat) = send_round(&mut c2, "hello again")
+        .await
+        .expect("reconnected round must complete");
+    assert_eq!(chat, "two");
+    confirm_round(&mut c2, &round2, stream2).await;
+
+    // Client-process restart as a REAL new process: the child boots its own
+    // incarnation and its auth installs last, winning currentness; the older
+    // install goes stale. The child shares the data directory, so device and
+    // rows are identical — only the boot is new, which is exactly S5-06's
+    // second half.
+    let ctl = workspace_binary("ene-ctl").expect("ene-ctl binary must be built");
+    let config_path = dir.join("ene.json");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{{\"language\": \"en\", \"data_dir\": \"{}\"}}",
+            dir.to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        ),
+    )
+    .expect("config file must be writable");
+    let config = config_path.to_string_lossy().into_owned();
+    let status = run_cli(&ctl, &["--config", &config, "status"], &[]).await;
+    assert!(
+        matches!(status, Some((0, _, _))),
+        "restarted client must authenticate, got {status:?}"
+    );
+    // The child's install won: the older in-process install is superseded.
+    // A fresh in-process round still serves afterwards (last install keeps
+    // deciding currentness per connection).
+    let companion = c2.companion_ref();
+    expect_stale_connection(
+        &mut c2,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            None,
+            false,
+            String::from("old install"),
+            String::from("en"),
+        )),
+        "superseded install",
+    )
+    .await;
+    server.abort();
+}
+
+/// S5-07: after a normal disconnect and reconnect, nothing old replays: the
+/// pre-restart round id is stale, the old connection's receipt never
+/// migrates, management stays readable, and only a fresh summon starts a
+/// new round. Auth alone restores nothing (the fresh submit summons).
 #[tokio::test]
 async fn s5_07_stale_round_input_and_ack_never_replay() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -909,6 +1313,147 @@ async fn s5_07_stale_round_input_and_ack_never_replay() {
     server.abort();
 }
 
+/// S5-08: a result shown but ACKed by nobody (client crash, then host
+/// crash) keeps its Unknown rows for re-presentation under a new receipt;
+/// the ACK loss may duplicate the display but never re-executes the work
+/// (sends static, one delegation, file intact).
+#[tokio::test]
+async fn s5_08_pre_ack_crash_represents_without_rerunning() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    let transport = Arc::new(GateTransport::new(
+        vec![
+            task_reply(
+                serde_json::json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
+            ),
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
+            ),
+            String::from(r#"{"final":"created report.md from input.txt"}"#),
+            String::from("Anything new?"),
+            String::from("Still there?"),
+        ],
+        &[],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
+    select_workspace(&mut c1, workspace.path())
+        .await
+        .expect("workspace must select");
+    let (round1, stream1, _) = send_round(&mut c1, "please read input.txt and write report.md")
+        .await
+        .expect("propose round must complete");
+    confirm_round(&mut c1, &round1, stream1).await;
+    let page = wait_task_progress(&mut c1, "completed", 1)
+        .await
+        .expect("task must complete");
+    assert_eq!(page.tasks[0].revision, 1);
+    assert_eq!(
+        transport.sends(),
+        4,
+        "one dialogue turn plus three agent turns"
+    );
+    let shown = fetch_summary(&mut c1, "fetch")
+        .await
+        .expect("fetch must answer");
+    assert!(!shown.items.is_empty(), "the completion must show");
+
+    // Client crash before the ACK: the reconnect summon re-presents the
+    // same rows under a new receipt, and ACKing it presents them.
+    drop(c1);
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("reconnect must succeed");
+    let (_round2, stream2, chat) = send_round(&mut c2, "anything new?")
+        .await
+        .expect("summon round must complete");
+    assert_eq!(chat, "Anything new?");
+    confirm_round(&mut c2, &_round2, stream2).await;
+    let pushed = take_summaries(&mut c2);
+    assert!(
+        pushed.iter().any(|summary| !summary.items.is_empty()),
+        "the crash must re-present under a new receipt"
+    );
+    let pushed_summary = pushed
+        .iter()
+        .find(|candidate| !candidate.items.is_empty())
+        .expect("a pushed batch must carry rows");
+    // The summon published the fact ahead of the push, so this session
+    // already echoes the fresh generation: the first ACK presents the
+    // re-presented rows with no probe round.
+    let acked = ack_summary(&mut c2, pushed_summary)
+        .await
+        .expect("re-presented ACK must answer");
+    assert!(
+        matches!(acked, UndeliveredAckOutcome::Presented { .. }),
+        "re-presented rows must present, got {acked:?}"
+    );
+    let drained = fetch_summary(&mut c2, "post-ack fetch")
+        .await
+        .expect("post-ack fetch must answer");
+    assert!(drained.items.is_empty(), "acked rows must drain");
+    assert_eq!(transport.sends(), 5, "re-presentation sends nothing");
+    assert_eq!(table_count(&dir, "delegation"), 1, "no second execution");
+
+    // Host crash before the next ACK: new rows (an unconfirmed round reply)
+    // re-present under a new receipt after the restart, with zero rerun.
+    let (_round3, _stream3, chat3) = send_round(&mut c2, "still there?")
+        .await
+        .expect("pre-crash round must complete");
+    assert_eq!(chat3, "Still there?");
+    let pre_crash = fetch_summary(&mut c2, "pre-crash fetch")
+        .await
+        .expect("pre-crash fetch must answer");
+    assert!(!pre_crash.items.is_empty());
+    drop(c2);
+    let fresh = Arc::new(GateTransport::new(vec![String::from("Back again.")], &[]));
+    let (_handle2, server2) = restart_host(&dir, server, Arc::clone(&fresh)).await;
+    let mut c3 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("post-crash reconnect must succeed");
+    let (_round4, stream4, back) = send_round(&mut c3, "back again?")
+        .await
+        .expect("recovery summon must complete");
+    assert_eq!(back, "Back again.");
+    confirm_round(&mut c3, &_round4, stream4).await;
+    let pushed = take_summaries(&mut c3);
+    assert!(
+        pushed.iter().any(|summary| !summary.items.is_empty()),
+        "host-crash rows must re-present under a new receipt"
+    );
+    let pushed_summary = pushed
+        .iter()
+        .find(|candidate| !candidate.items.is_empty())
+        .expect("a pushed batch must carry rows");
+    // Same leg after a Host restart: the recovery summon published the new
+    // generation ahead of the push, so the first ACK presents with no probe.
+    let acked = ack_summary(&mut c3, pushed_summary)
+        .await
+        .expect("post-crash ACK must answer");
+    assert!(
+        matches!(acked, UndeliveredAckOutcome::Presented { .. }),
+        "post-crash rows must present, got {acked:?}"
+    );
+    let page = list_tasks(&mut c3).await.expect("list must read");
+    assert_eq!(page.tasks.len(), 1);
+    assert_eq!(page.tasks[0].progress, "completed");
+    assert_eq!(transport.sends(), 6, "the old execution never re-ran");
+    assert_eq!(fresh.sends(), 1, "only the recovery summon sent");
+    assert_eq!(table_count(&dir, "delegation"), 1, "still one execution");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("report.md")).unwrap(),
+        "# Report\nnotes",
+        "the file survives both crashes"
+    );
+    server2.abort();
+}
+
+/// S5-09: while the progress receipt is on display, the completion commits;
+/// ACKing the progress receipt presents only its batch, the completion
+/// stays unpresented for the next display, and duplicate, forged-round, and
+/// foreign-connection ACKs never corrupt either state.
 #[tokio::test]
 async fn s5_09_progress_ack_never_presents_later_completion() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1048,6 +1593,531 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
     server.abort();
 }
 
+/// S5-13: every restart-reachable presence state over the real transport.
+/// Present restores only for the re-authenticated original client (through
+/// RecoveryWait); NoActive never auto-moves (same generation); a re-crash
+/// mid-recovery leaves exactly one row; and Stop stays out of wire reach
+/// (deferred scope clarifies). InTransition is a live-handshake window that
+/// cannot freeze across a restart from the wire; the startup table pins it
+/// at store level
+/// (`startup_normalization_never_moves_in_transition_to_its_candidate_or_last_client`).
+#[tokio::test]
+async fn s5_13_presence_states_across_restart() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let transport = Arc::new(GateTransport::new(
+        vec![
+            String::from("one"),
+            String::from("two"),
+            String::from("three"),
+            String::from("four"),
+        ],
+        &[],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
+    let (round1, stream1, _) = send_round(&mut c1, "hello")
+        .await
+        .expect("first round must complete");
+    confirm_round(&mut c1, &round1, stream1).await;
+    let (state, generation) = presence_row(&dir);
+    assert_eq!(state, "present", "first round summons presence");
+
+    // Preserve the crash's durable Present input explicitly, after joining
+    // graceful disconnect cleanup; no predecessor can write into recovery.
+    let (_handle, server) =
+        restart_host_from_presence_crash(&dir, server, Arc::clone(&transport)).await;
+    let (state, recovery_generation) = presence_row(&dir);
+    assert_eq!(state, "recovery_wait", "present must wait recovery");
+    assert!(
+        recovery_generation > generation,
+        "recovery moves to a new generation"
+    );
+    drop(c1);
+
+    // ...and only the original client's re-auth restores it.
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("original client must re-authenticate");
+    let (_round2, stream2, chat) = send_round(&mut c2, "back")
+        .await
+        .expect("recovery round must complete");
+    assert_eq!(chat, "two");
+    confirm_round(&mut c2, &_round2, stream2).await;
+    let (state, _) = presence_row(&dir);
+    assert_eq!(state, "present", "the original client restores presence");
+
+    // A re-crash mid-recovery neither duplicates nor resolves the wait.
+    let (_handle, server) =
+        restart_host_from_presence_crash(&dir, server, Arc::clone(&transport)).await;
+    assert_eq!(presence_row(&dir).0, "recovery_wait");
+    drop(c2);
+    let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport)).await;
+    let (state, _) = presence_row(&dir);
+    assert_eq!(state, "recovery_wait", "re-crash keeps waiting");
+    assert_eq!(
+        table_count(&dir, "presence_attribution"),
+        1,
+        "recovery never duplicates"
+    );
+    let mut c3 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("original client must re-authenticate again");
+    let (_round3, stream3, chat3) = send_round(&mut c3, "back again")
+        .await
+        .expect("second recovery round must complete");
+    assert_eq!(chat3, "three");
+    confirm_round(&mut c3, &_round3, stream3).await;
+    drop(c3);
+
+    // NoActive never auto-moves across a restart: same state, next
+    // generation (PR §6.4 advances every running row); a fresh summon then
+    // serves.
+    wait_presence(&dir, "no_active").await;
+    let (state, idle_generation) = presence_row(&dir);
+    assert_eq!(state, "no_active");
+    let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport)).await;
+    let (state, after_generation) = presence_row(&dir);
+    assert_eq!(state, "no_active", "no-active never auto-moves");
+    assert_eq!(
+        after_generation,
+        idle_generation + 1,
+        "no-active advances one generation without moving"
+    );
+    let mut c4 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("fresh connect must succeed");
+    let (_round4, stream4, chat4) = send_round(&mut c4, "fresh")
+        .await
+        .expect("post-restart summon must complete");
+    assert_eq!(chat4, "four");
+    confirm_round(&mut c4, &_round4, stream4).await;
+
+    // Stop is out of wire reach this milestone: the deferred scope answers
+    // clarify instead of stopping anything.
+    let mark = view_mark(&mut c4).await.expect("view must read");
+    let stop = ask(
+        &mut c4,
+        WirePayload::ManagementIntent(ManagementIntent {
+            intent_id: CommandWireId(uuid::Uuid::new_v4()),
+            kind: ManagementIntentKind::StopCompanion,
+            target: ManagementTargetWire(String::from("companion:test")),
+            base_view: BaseViewMark(mark),
+            rationale: IntentRationaleWire {
+                origin: RationaleOrigin::ManagementSurface,
+                quote: None,
+            },
+            confirmed: false,
+        }),
+        "stop",
+    )
+    .await
+    .expect("stop must answer");
+    assert!(
+        matches!(
+            stop,
+            WirePayload::ManagementOutcome(ManagementOutcome::NeedsClarification)
+        ),
+        "stop stays deferred over the wire, got {stop:?}"
+    );
+    let (state, _) = presence_row(&dir);
+    assert_eq!(state, "present", "the refused stop changes nothing");
+    server.abort();
+}
+
+/// S5-15: an executed-but-unsealed delegation survives a restart with its
+/// lifecycle intact, and no old delegation ever launches: zero provider
+/// calls and zero external effects after the restart. (A bare Started task
+/// and an attempt-0 delegation cannot arise through the live socket path —
+/// proposing without a workspace clarifies without committing, and the
+/// owner claims the attempt before the first gateable provider call — so
+/// those input shapes stay covered at owner level by the seed-based resume
+/// tests with the never-running launcher; the socket E2E pins the
+/// no-relaunch observables on the richest wire-reachable shape.)
+#[tokio::test]
+async fn s5_15_restart_launches_nothing_and_shows_lifecycle() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    // Calls: 1 propose, 2 read, 3 create, 4 final (held: executed but
+    // unsealed — attempts claimed, effects settled, no result).
+    let transport = Arc::new(GateTransport::new(
+        vec![
+            task_reply(
+                serde_json::json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
+            ),
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
+            ),
+            String::from(r#"{"final":"created report.md from input.txt"}"#),
+        ],
+        &[4],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
+    select_workspace(&mut c1, workspace.path())
+        .await
+        .expect("workspace must select");
+    let (_round, stream, _) = send_round(&mut c1, "please read input.txt and write report.md")
+        .await
+        .expect("propose round must complete");
+    confirm_round(&mut c1, &_round, stream).await;
+    transport.wait_sends(4).await;
+    let attempts_before = table_count(&dir, "inference_attempt");
+    let actions_before = table_count(&dir, "action_attempt");
+    assert!(attempts_before >= 2, "the delegation must have executed");
+    assert_eq!(table_count(&dir, "delegation"), 1);
+    assert!(workspace.path().join("report.md").exists());
+    let files_before: Vec<String> = std::fs::read_dir(workspace.path())
+        .unwrap()
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    drop(c1);
+
+    // Restart with a fresh, silent transport: nothing old may launch.
+    transport.fail(4);
+    let silent = Arc::new(GateTransport::new(Vec::new(), &[]));
+    let (_handle, server) = restart_host(&dir, server, Arc::clone(&silent)).await;
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("reconnect must succeed");
+
+    // The saved lifecycle and progress display...
+    let page = list_tasks(&mut c2).await.expect("list must read");
+    assert_eq!(page.tasks.len(), 1);
+    assert_eq!(page.tasks[0].progress, "in_progress");
+    assert_eq!(page.tasks[0].revision, 1);
+    assert!(
+        !page.tasks[0].running,
+        "restart holds no launch reservation"
+    );
+    let report = ask(
+        &mut c2,
+        WirePayload::GetTaskReport(cmds::task_report_request(&page.tasks[0].task.0, None, None)),
+        "report",
+    )
+    .await
+    .expect("report must answer");
+    assert!(
+        matches!(
+            report,
+            WirePayload::TaskReportResponse(ene_api::v1::undelivered::TaskReportResponse::Page(_))
+        ),
+        "the lifecycle must report, got {report:?}"
+    );
+    // ...and nothing launched: zero AI calls, zero new delegations,
+    // attempts, actions, or files.
+    assert_eq!(silent.sends(), 0, "no old delegation relaunches");
+    assert_eq!(table_count(&dir, "delegation"), 1, "no new delegation");
+    assert_eq!(
+        table_count(&dir, "inference_attempt"),
+        attempts_before,
+        "no new attempt"
+    );
+    assert_eq!(
+        table_count(&dir, "action_attempt"),
+        actions_before,
+        "no new action"
+    );
+    let mut files_after: Vec<String> = std::fs::read_dir(workspace.path())
+        .unwrap()
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    files_after.sort();
+    let mut files_before = files_before;
+    files_before.sort();
+    assert_eq!(
+        files_after, files_before,
+        "no external effect after restart"
+    );
+    server.abort();
+}
+
+/// S5-16: an interrupted Task resumes explicitly — same Task, r+1, exactly
+/// one new delegation and one new agent identity — through the management
+/// path and through the conversation path. Purpose identity, prior
+/// instructions, and the Workspace association survive; old results stay
+/// with the old delegation; later turns still see the executed facts and
+/// never replay old operations. Ends with S5-21: resuming a Completed task
+/// is refused as terminal.
+#[tokio::test]
+async fn s5_16_explicit_resume_mints_r_plus_1_once_per_path() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    // T_a calls: 1 propose-A, 2 read-A, 3 create-A (held: A is interrupted
+    // mid-execution by the crash below).
+    let transport_a = Arc::new(GateTransport::new(
+        vec![
+            task_reply(
+                serde_json::json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
+            ),
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+        ],
+        &[3],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport_a)).await;
+    select_workspace(&mut c1, workspace.path())
+        .await
+        .expect("workspace must select");
+    let (round_a, stream_a, _) = send_round(&mut c1, "please read input.txt and write report.md")
+        .await
+        .expect("propose-A must complete");
+    confirm_round(&mut c1, &round_a, stream_a).await;
+    transport_a.wait_sends(3).await;
+    drop(c1);
+
+    // End the old provider wait without a result, then restart: the new
+    // execution must not auto-send (S5-18 adjacency), and the interrupted
+    // r1 must list with no reservation held.
+    // T_b calls: 1 create-A2, 2 final-A2, 3 propose-B, 4 read-B,
+    // 5 create-B (held: B is interrupted by the second crash).
+    let transport_b = Arc::new(GateTransport::new(
+        vec![
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
+            ),
+            String::from(r#"{"final":"created report.md from input.txt"}"#),
+            task_reply(
+                serde_json::json!({"kind": "propose_task", "purpose": "write second.md from input.txt"}),
+            ),
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+        ],
+        &[5],
+    ));
+    transport_a.fail(3);
+    let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_b)).await;
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("reconnect must succeed");
+    let page = list_tasks(&mut c2).await.expect("list must read");
+    assert_eq!(page.tasks.len(), 1);
+    assert_eq!(page.tasks[0].progress, "in_progress");
+    assert_eq!(page.tasks[0].revision, 1);
+    assert!(
+        !page.tasks[0].running,
+        "the interrupted task holds no reservation"
+    );
+    let purpose_a = page.tasks[0].purpose.clone();
+    assert_eq!(transport_b.sends(), 0, "no auto-resend after restart");
+    let report = ask(
+        &mut c2,
+        WirePayload::GetTaskReport(cmds::task_report_request(&page.tasks[0].task.0, None, None)),
+        "report-A",
+    )
+    .await
+    .expect("report must answer");
+    assert!(
+        matches!(
+            report,
+            WirePayload::TaskReportResponse(ene_api::v1::undelivered::TaskReportResponse::Page(_))
+        ),
+        "interrupted progress must report, got {report:?}"
+    );
+
+    // Explicit resume through the management path: same Task, r+1.
+    let task_uuid: uuid::Uuid = only_task_uuid(&dir).parse().expect("task id parses");
+    let mark = view_mark(&mut c2).await.expect("view must read");
+    let resumed = ask(
+        &mut c2,
+        WirePayload::ManagementIntent(ManagementIntent {
+            intent_id: CommandWireId(uuid::Uuid::new_v4()),
+            kind: ManagementIntentKind::ResumeTask,
+            target: ene_api::v1::management::task_target(task_uuid),
+            base_view: BaseViewMark(mark),
+            rationale: IntentRationaleWire {
+                origin: RationaleOrigin::ManagementSurface,
+                quote: Some(String::from("finish the remaining report work")),
+            },
+            confirmed: false,
+        }),
+        "resume-A",
+    )
+    .await
+    .expect("resume must answer");
+    assert!(
+        matches!(
+            resumed,
+            WirePayload::ManagementOutcome(ManagementOutcome::AppliedAsOneTime)
+        ),
+        "management resume must apply, got {resumed:?}"
+    );
+    let page = wait_task_progress(&mut c2, "completed", 1)
+        .await
+        .expect("resumed task must complete");
+    assert_eq!(page.tasks[0].revision, 2, "resume mints r+1");
+    let (identity, revision) = page.tasks[0]
+        .purpose
+        .rsplit_once(':')
+        .expect("purpose carries its identity");
+    let (identity_a, _) = purpose_a
+        .rsplit_once(':')
+        .expect("purpose carries its identity");
+    assert_eq!(identity, identity_a, "purpose identity survives");
+    assert_eq!(
+        revision, "1",
+        "the resume carries the purpose without re-adopting it"
+    );
+    assert_eq!(page.tasks[0].revision, 2, "the Task itself is at r2");
+    assert_eq!(transport_b.sends(), 2, "exactly one new execution ran");
+    assert_eq!(
+        table_count(&dir, "delegation"),
+        2,
+        "exactly one new delegation"
+    );
+    assert_eq!(
+        table_count(&dir, "action_attempt"),
+        2,
+        "read-A once plus create-A2 once: no replay"
+    );
+    let inputs = transport_b.input_texts().join("\n");
+    assert!(
+        inputs.contains("input.txt"),
+        "later turns still see executed facts"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("report.md")).unwrap(),
+        "# Report\nnotes"
+    );
+
+    // S5-21 adjacency: resuming the now-Completed task is terminal-refused
+    // over the dedicated wire, with no new delegation.
+    let resume_a = WirePayload::ResumeTask(cmds::resume_task_request(
+        &page.tasks[0].task.0,
+        2,
+        &page.tasks[0].purpose,
+        String::from("once more"),
+    ));
+    let refused = ask(&mut c2, resume_a, "resume-completed")
+        .await
+        .expect("must answer");
+    assert!(
+        matches!(
+            refused,
+            WirePayload::ResumeTaskOutcome(ResumeTaskOutcomeWire::TaskTerminal { .. })
+        ),
+        "terminal tasks refuse resume, got {refused:?}"
+    );
+    assert_eq!(
+        table_count(&dir, "delegation"),
+        2,
+        "refusal commits nothing"
+    );
+
+    // Interrupt task B the same way for the conversation path. New tasks
+    // need a fresh Owner workspace selection after a restart (the
+    // selection premise is per-handle; resumed delegations reuse their
+    // stored association, as task A just proved).
+    select_workspace(&mut c2, workspace.path())
+        .await
+        .expect("workspace must re-select");
+    let (_round_b, stream_b, _) = send_round(&mut c2, "please write second.md from input.txt")
+        .await
+        .expect("propose-B must complete");
+    confirm_round(&mut c2, &_round_b, stream_b).await;
+    transport_b.wait_sends(5).await;
+    drop(c2);
+
+    // T_c calls: 1 resume directive (dialogue), 2 create-B2, 3 final-B2.
+    let transport_c = Arc::new(GateTransport::new(
+        vec![
+            task_reply(serde_json::json!({"kind": "resume"})),
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"second.md\",\"content\":\"# Second\\nnotes\"}",
+            ),
+            String::from(r#"{"final":"created second.md from input.txt"}"#),
+        ],
+        &[],
+    ));
+    transport_b.fail(5);
+    let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_c)).await;
+    let mut c3 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("second reconnect must succeed");
+    // The reconnect reset the conversation's in-memory task selection, so
+    // select B explicitly before resuming it through the conversation.
+    let uuid_b = task_uuids(&dir).into_iter().nth(1).expect("B must exist");
+    let page = list_tasks(&mut c3).await.expect("list must read");
+    let wire_b = page
+        .tasks
+        .iter()
+        .find(|item| item.purpose.starts_with(uuid_b.as_str()))
+        .expect("B must list")
+        .task
+        .0
+        .clone();
+    let selected = ask(
+        &mut c3,
+        WirePayload::SelectTask(cmds::select_task_request(&wire_b)),
+        "select-B",
+    )
+    .await
+    .expect("select must answer");
+    assert!(
+        matches!(
+            selected,
+            WirePayload::SelectTaskResponse(
+                ene_api::v1::undelivered::SelectTaskResponse::Selected(_)
+            )
+        ),
+        "B must select, got {selected:?}"
+    );
+    // Explicit resume through the conversation path: the directive never
+    // surfaces, and the same Task moves to r+1 exactly once.
+    let (_round_r, stream_r, reply) = send_round(&mut c3, "please resume the report work")
+        .await
+        .expect("resume round must complete");
+    assert!(
+        !reply.contains("[task-control]"),
+        "the directive never surfaces: {reply}"
+    );
+    confirm_round(&mut c3, &_round_r, stream_r).await;
+    transport_c.wait_sends(3).await;
+    assert_eq!(transport_c.sends(), 3, "directive plus one new execution");
+    assert_eq!(
+        table_count(&dir, "delegation"),
+        4,
+        "one delegation per resume"
+    );
+    let page = wait_task_progress(&mut c3, "completed", 2)
+        .await
+        .expect("both tasks must complete");
+    let task_b = page
+        .tasks
+        .iter()
+        .find(|item| item.purpose.starts_with(uuid_b.as_str()))
+        .expect("B must list");
+    assert_eq!(task_b.progress, "completed");
+    assert_eq!(task_b.revision, 2, "conversation resume mints r+1");
+    assert_eq!(
+        table_count(&dir, "action_attempt"),
+        4,
+        "no operation ever replayed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("second.md")).unwrap(),
+        "# Second\nnotes"
+    );
+    server.abort();
+}
+
+/// S5-17 (ordered gates; the true race is unit-level in
+/// `concurrent_resume_commands_commit_at_most_once`): of two resumes at the
+/// same revision exactly one commits r+1 and launches once; the loser is
+/// stale, cancel stays effective on the new revision, and terminal refuses.
+/// S5-18: the same-epoch retry replays the first outcome without a second
+/// launch; after a crash the old command never auto-resends (stale epoch),
+/// and a fresh command on the committed-away revision is stale while the
+/// new revision waits unexecuted.
 #[tokio::test]
 async fn s5_17_18_resume_gates_and_retry_idempotency() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1123,7 +2193,9 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     assert_eq!(transport_b.sends(), 1, "only the winner launches once");
     assert_eq!(table_count(&dir, "delegation"), 2, "one new delegation");
 
-    let replay = c2.retry(&prep1).await.expect("retry must answer");
+    // The same-epoch re-execution replays the first outcome with no second
+    // launch, because the retained command identity travels unchanged.
+    let replay = c2.execute(&prep1).await.expect("replay must answer");
     assert_eq!(replay, out1, "retries replay instead of recommitting");
     assert_eq!(transport_b.sends(), 1, "retry launches nothing");
     assert_eq!(table_count(&dir, "delegation"), 2, "retry commits nothing");
@@ -1135,7 +2207,7 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     let mut c3 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
         .expect("second reconnect must succeed");
-    let stale_epoch = c3.retry(&prep1).await.expect("old retry must answer");
+    let stale_epoch = c3.execute(&prep1).await.expect("old replay must answer");
     assert!(
         matches!(
             stale_epoch,
@@ -1454,6 +2526,208 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
     server.abort();
 }
 
+/// S5-20: a sealed-and-adopted completion survives a restart unchanged, and
+/// startup re-evaluates only the existing sealed results with zero provider
+/// or Action reruns. (The still-Withheld branch — Unknown effects outstanding
+/// across a restart — reconciles at store level; the socket E2E pins the
+/// Completed stability plus the zero-rerun observables on the live path.)
+#[tokio::test]
+async fn s5_20_completed_result_survives_restart_without_rerun() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    let transport = Arc::new(GateTransport::new(
+        vec![
+            task_reply(
+                serde_json::json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
+            ),
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
+            ),
+            String::from(r#"{"final":"created report.md from input.txt"}"#),
+        ],
+        &[],
+    ));
+    let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
+    select_workspace(&mut c1, workspace.path())
+        .await
+        .expect("workspace must select");
+    let (round_a, stream_a, _) = send_round(&mut c1, "please read input.txt and write report.md")
+        .await
+        .expect("propose must complete");
+    confirm_round(&mut c1, &round_a, stream_a).await;
+    let page = wait_task_progress(&mut c1, "completed", 1)
+        .await
+        .expect("task must complete");
+    assert_eq!(page.tasks[0].revision, 1);
+    assert_eq!(transport.sends(), 4);
+    let results_before = task_results(&dir);
+    assert_eq!(results_before.len(), 1);
+    assert_eq!(results_before[0].3, Some(1), "the result is adopted");
+    let attempts_before = table_count(&dir, "inference_attempt");
+    let actions_before = table_count(&dir, "action_attempt");
+    let content_before = std::fs::read_to_string(workspace.path().join("report.md")).unwrap();
+    drop(c1);
+
+    // Restart with a fresh, silent transport: startup may re-evaluate the
+    // sealed result, but must rerun nothing.
+    let silent = Arc::new(GateTransport::new(Vec::new(), &[]));
+    let (_handle, server) = restart_host(&dir, server, Arc::clone(&silent)).await;
+    let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("reconnect must succeed");
+    let page = list_tasks(&mut c2).await.expect("list must read");
+    assert_eq!(page.tasks.len(), 1);
+    assert_eq!(page.tasks[0].progress, "completed");
+    assert_eq!(page.tasks[0].revision, 1);
+    let report = ask(
+        &mut c2,
+        WirePayload::GetTaskReport(cmds::task_report_request(&page.tasks[0].task.0, None, None)),
+        "report",
+    )
+    .await
+    .expect("report must answer");
+    assert!(
+        matches!(
+            report,
+            WirePayload::TaskReportResponse(ene_api::v1::undelivered::TaskReportResponse::Page(_))
+        ),
+        "the completed lifecycle must report, got {report:?}"
+    );
+    assert_eq!(silent.sends(), 0, "no provider rerun");
+    assert_eq!(task_results(&dir), results_before, "no re-adoption");
+    assert_eq!(
+        table_count(&dir, "inference_attempt"),
+        attempts_before,
+        "no new attempt"
+    );
+    assert_eq!(
+        table_count(&dir, "action_attempt"),
+        actions_before,
+        "no new action"
+    );
+    assert_eq!(table_count(&dir, "delegation"), 1, "no new delegation");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("report.md")).unwrap(),
+        content_before,
+        "no file rewrite"
+    );
+    server.abort();
+}
+
+/// S5-23: two Hosts on one data directory — exactly one performs startup
+/// mutation and serves; the loser re-initializes nothing, reads tasks back
+/// without starting them, and never serves. Afterwards the loser cleanly
+/// takes over once the winner is gone (stale-socket handoff, no split
+/// brain). In-process the OS lock never excludes (POSIX locks are
+/// per-process), so the serving refusal lands at the singleton socket bind,
+/// exactly where a second in-process serve must fail; cross-process lock
+/// exclusion is unit-level (`second_acquisition_of_the_same_directory...`,
+/// `second_serve_startup_is_refused_before_startup_mutation`).
+#[tokio::test]
+async fn s5_23_second_host_serves_nothing_and_mutates_nothing() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
+    // T_a calls: 1 propose, 2 read, 3 create, 4 final (held while B loses),
+    // 5 chat after the handoff.
+    let transport_a = Arc::new(GateTransport::new(
+        vec![
+            task_reply(
+                serde_json::json!({"kind": "propose_task", "purpose": "read input.txt and write report.md"}),
+            ),
+            String::from(r#"{"tool":"read","path":"input.txt"}"#),
+            String::from(
+                "{\"tool\":\"create\",\"path\":\"report.md\",\"content\":\"# Report\\nnotes\"}",
+            ),
+            String::from(r#"{"final":"created report.md from input.txt"}"#),
+            String::from("Served by B."),
+        ],
+        &[4],
+    ));
+    let (_handle_a, server_a, mut c1) =
+        serve_and_setup(dir.clone(), Arc::clone(&transport_a)).await;
+    select_workspace(&mut c1, workspace.path())
+        .await
+        .expect("workspace must select");
+    let (round_a, stream_a, _) = send_round(&mut c1, "please read input.txt and write report.md")
+        .await
+        .expect("propose must complete");
+    confirm_round(&mut c1, &round_a, stream_a).await;
+    transport_a.wait_sends(4).await;
+    let presence_before = presence_row(&dir);
+
+    // The loser opens (a plain state open mutates nothing) but its serve is
+    // refused at the singleton bind while the winner listens.
+    let loser = open_host(&dir).await;
+    let transport_b = Arc::new(GateTransport::new(Vec::new(), &[]));
+    let refused = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::spawn(conn::run(
+            dir.clone(),
+            Arc::clone(&loser),
+            Arc::clone(&transport_b),
+        )),
+    )
+    .await
+    .expect("the singleton bind must refuse fast");
+    let refused = refused.expect("the bind task must report");
+    assert!(
+        matches!(refused, Err(CoreError::Bind(_))),
+        "the second serve must bind-refuse, got {refused:?}"
+    );
+    // The loser re-initialized nothing and started nothing: presence,
+    // tasks, and delegations read back unchanged, and the winner serves on.
+    assert_eq!(
+        presence_row(&dir),
+        presence_before,
+        "the loser must not re-initialize presence"
+    );
+    let page = list_tasks(&mut c1).await.expect("list must read");
+    assert_eq!(page.tasks.len(), 1);
+    assert_eq!(page.tasks[0].progress, "in_progress");
+    assert_eq!(table_count(&dir, "delegation"), 1, "no duplicate launch");
+    assert_eq!(transport_b.sends(), 0, "the loser runs nothing");
+    transport_a.unblock(4);
+    let page = wait_task_progress(&mut c1, "completed", 1)
+        .await
+        .expect("winner task must complete");
+    assert_eq!(page.tasks[0].revision, 1);
+    drop(c1);
+    server_a.shutdown_and_join().await;
+
+    // Handoff: with the winner gone, the same loser binds the stale socket
+    // and serves — one server, never two.
+    let server_b = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&loser),
+        Arc::clone(&transport_a),
+    ));
+    assert!(
+        wait_for_listener(&dir).await,
+        "the handoff must rebind the socket"
+    );
+    let mut cb = Client::connect(&dir, DESCRIPTOR, "test")
+        .await
+        .expect("post-handoff connect must succeed");
+    let (_round_b, stream_b, chat) = send_round(&mut cb, "who serves?")
+        .await
+        .expect("post-handoff round must complete");
+    assert_eq!(chat, "Served by B.");
+    confirm_round(&mut cb, &_round_b, stream_b).await;
+    let page = list_tasks(&mut cb).await.expect("list must read");
+    assert_eq!(page.tasks.len(), 1);
+    assert_eq!(page.tasks[0].progress, "completed", "tasks read back");
+    assert_eq!(transport_a.sends(), 5, "only the handoff turn sent");
+    server_b.abort();
+}
+
+/// S5 subscription over the real socket: after the attach-time backlog is
+/// drained, a new deliverable fact produced by the Task runner is pushed to
+/// the idle Client without it sending another request.
 #[tokio::test]
 async fn s5_subscription_pushes_a_new_arrival_without_a_request() {
     let temp = tempfile::TempDir::new().unwrap();

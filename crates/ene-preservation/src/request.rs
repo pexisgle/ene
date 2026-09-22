@@ -109,13 +109,15 @@ impl OwnerConfirmationFact {
     pub fn request(self) -> DeletionRequestId {
         self.request
     }
-
-    #[must_use]
-    pub fn confirmed_at(self) -> WallClockWithTz {
-        self.confirmed_at
-    }
 }
 
+/// Advisory staging input.
+///
+/// The mechanical target comes from the Host's parse of the wire grammar. The
+/// request identity is minted by the store; source correlations are
+/// Host-derived, never Client-supplied (lifecycle §4). A `semantic_hints` entry
+/// is usable only for the staging duplicate-scope decision, and the staged
+/// request journal re-derives the mechanical target and keeps no hints.
 #[derive(Debug, Clone)]
 pub struct StageTargetedDeletionRequestCommand {
     target: TargetedDeletionTarget,

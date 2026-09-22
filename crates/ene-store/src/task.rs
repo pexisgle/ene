@@ -762,6 +762,20 @@ fn create_delegation_sync(
     let Some(current) = current else {
         return Ok(DelegationOutcome::MissingTask { task: task.task });
     };
+    // Terminal progress refuses the whole creation: no delegation row and no
+    // revision advance. The task revision and progress are read in the same
+    // snapshot as the compare below. The terminal check precedes the revision
+    // compare so a terminal Task at a moved revision answers `TaskTerminal`,
+    // never `StaleTaskRevision`: terminal has its own outcome and is never
+    // folded into `Stale*` (the steering and agent admissions order it the
+    // same way).
+    let current_progress = decode_progress(current.progress.as_deref())?;
+    if current_progress.is_terminal() {
+        return Ok(DelegationOutcome::TaskTerminal {
+            task: task.task,
+            progress: current_progress,
+        });
+    }
     let current_revision = decode_revision(current.revision)?;
     if current_revision != task.revision {
         return Ok(DelegationOutcome::StaleTaskRevision {
@@ -771,13 +785,10 @@ fn create_delegation_sync(
             },
         });
     }
-    let current_progress = decode_progress(current.progress.as_deref())?;
-    if current_progress.is_terminal() {
-        return Ok(DelegationOutcome::TaskTerminal {
-            task: task.task,
-            progress: current_progress,
-        });
-    }
+    // Fail-closed D1/D2 check: the delegation relies on this revision's
+    // snapshot, and the delegator copied below must be the assignee that
+    // snapshot records. A missing snapshot or a disagreement is an
+    // inconsistent unit; no correspondence is synthesized from either side.
     let snapshot: RawTaskRevision = tx
         .query_row(
             SQL_SELECT_TASK_REVISION,

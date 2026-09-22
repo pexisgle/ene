@@ -86,7 +86,6 @@ export component Field inherits Rectangle {
     in property <bool> password: false;
     in property <bool> enabled: true;
     in-out property <string> value;
-    callback edited(string);
     min-height: 72px;
     vertical-stretch: 0;
     forward-focus: editor;
@@ -100,7 +99,6 @@ export component Field inherits Rectangle {
             font-size: Theme.body-size;
             input-type: root.password ? InputType.password : InputType.text;
             placeholder-text: root.hint;
-            edited(t) => { root.edited(t); }
         }
     }
 }

@@ -15,13 +15,16 @@ use ene_api::v1::round::PresentationStatus;
 use ene_companion::{CompanionRepository as _, UNDELIVERED_PAGE_MAX, UndeliveredRepository as _};
 use ene_core::conn;
 use ene_core::host_control;
-use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::MemoryVersionedStore;
+use ene_core::serve::{CoreError, HostHandle};
 use ene_desktop::body_supervise::BodySupervisor;
 use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
+
+mod common;
+
+use common::{drive_gui_until, open_host, pair_and_seat, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-e-secret-5519";
@@ -101,58 +104,6 @@ impl ServingTask {
     }
 }
 
-#[expect(clippy::panic, reason = "test fixture helper")]
-async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    match HostHandle::open_with_cred_store(
-        dir,
-        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
-    )
-    .await
-    {
-        Ok(handle) => {
-            handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
-            Arc::new(handle)
-        }
-        Err(error) => panic!("host must open: {error}"),
-    }
-}
-
-async fn wait_for_control(dir: &Path) -> bool {
-    for _ in 0..200 {
-        #[cfg(unix)]
-        if tokio::net::UnixStream::connect(host_control::control_socket_path(dir))
-            .await
-            .is_ok()
-        {
-            return true;
-        }
-        #[cfg(windows)]
-        if host_control::ControlClient::connect(dir).await.is_ok() {
-            tokio::task::yield_now().await;
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
-async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
-    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
-    desktop
-        .attach_confirmation(channel)
-        .expect("the private channel is the seat");
-    desktop
-        .connect_or_begin_pairing()
-        .await
-        .expect("pairing must challenge");
-    match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
-        other => panic!("expected DeviceApproved, got {other:?}"),
-    }
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn pair_and_setup(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     pair_and_seat(desktop, handle).await;
     desktop.set_secret(String::from(SECRET));
@@ -190,46 +141,6 @@ async fn unpresented_count(handle: &HostHandle) -> usize {
         .expect("unpresented page")
         .entries
         .len()
-}
-
-async fn drive_gui_until(desktop: &mut DesktopRuntime, handle: &HostHandle, needle: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
-    loop {
-        match desktop.refresh_deletion().await {
-            Ok(()) | Err(_) => {}
-        }
-        if desktop.snapshot().deletion_body.contains(needle) {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "GUI deletion body never contained {needle}: {}",
-            desktop.snapshot().deletion_body
-        );
-        handle.wake_deletion_driver_for_tests();
-        let mut drive = std::pin::pin!(handle.run_targeted_deletion_tick());
-        loop {
-            tokio::select! {
-                driven = &mut drive => {
-                    match driven {
-                        Ok(_) | Err(_) => {}
-                    }
-                    break;
-                }
-                () = tokio::time::sleep(Duration::from_millis(5)) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    match desktop.refresh_deletion().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    if desktop.snapshot().deletion_body.contains(needle) {
-                        return;
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn snapshot_has_target(desktop: &DesktopRuntime) -> bool {

@@ -142,6 +142,9 @@ impl HostHandle {
                 )];
             }
         };
+        // The rows are bounded by the walk's effective window (a declared past
+        // `to`, or the bounds frozen in the cursor); the cap section is the
+        // live state at `now`, reported through `evaluated_at`.
         let caps = match self
             .store
             .load_usage_cap_status(UsageCapStatusQuery {

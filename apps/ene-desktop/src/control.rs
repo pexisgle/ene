@@ -12,6 +12,12 @@ use crate::ui::DesktopError;
 
 const CONFIRMATION_WAIT: Duration = Duration::from_secs(30);
 
+/// Bound on challenges retained for a later Owner gesture. Concurrent
+/// requester traffic can mint challenges faster than the Owner answers them;
+/// the oldest deferred challenge is dropped first so retention stays bounded.
+const DEFERRED_LIMIT: usize = 8;
+
+/// One challenge waiting for the Owner's direct gesture.
 #[derive(Debug, Clone)]
 pub struct PendingChallenge {
     pub session_id: Uuid,
@@ -20,13 +26,7 @@ pub struct PendingChallenge {
     nonce: String,
 }
 
-impl PendingChallenge {
-    #[must_use]
-    pub fn display_target(&self) -> &str {
-        &self.target
-    }
-}
-
+/// Requester-side client for the serving Host's local listener.
 #[derive(Debug, Clone)]
 pub struct RequesterClient {
     data_dir: PathBuf,
@@ -224,6 +224,9 @@ impl ConfirmationClient {
                     nonce,
                     ..
                 } => {
+                    if self.deferred.len() >= DEFERRED_LIMIT {
+                        self.deferred.pop_front();
+                    }
                     self.deferred.push_back(PendingChallenge {
                         session_id,
                         op,
@@ -267,7 +270,7 @@ impl ConfirmationClient {
 
     pub async fn complete_credential(
         &mut self,
-        secret: String,
+        mut secret: zeroize::Zeroizing<String>,
     ) -> Result<FromConfirmation, DesktopError> {
         let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
@@ -291,7 +294,7 @@ impl ConfirmationClient {
             nonce: challenge.nonce.clone(),
             provider,
             label,
-            secret: ene_local_control::RedactedSecret::new(secret),
+            secret: ene_local_control::RedactedSecret::new(core::mem::take(&mut *secret)),
         })?;
         match self.await_outcome().await? {
             FromConfirmation::Outcome(ene_local_control::ControlOutcome::CredentialStaged {

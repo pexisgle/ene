@@ -291,6 +291,15 @@ async fn serve_and_setup(
     (handle, server, client)
 }
 
+/// One conversation round over the pipe: submit, require acceptance, drain the
+/// stream to completion, and return the round wire id, stream id, and reply
+/// text.
+///
+/// A mid-stream presence fact should not normally appear: the Client absorbs a
+/// `PresenceAttribution` push while its request is in flight, before the
+/// correlated answer. `Client::next_frame` can still hand one back, so this
+/// drain defensively steps over it. Any other unexpected payload fails the
+/// round.
 async fn send_round(
     client: &mut Client,
     text: &str,

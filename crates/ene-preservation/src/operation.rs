@@ -68,6 +68,34 @@ impl DeletionPurpose {
     }
 }
 
+/// Sealed, request-bound evidence. No Deserialize, raw-ID constructor, or
+/// public fields: Client/LLM output cannot manufacture final confirmation.
+/// The only production mint site is
+/// [`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command),
+/// which requires the store-read staged request *and* its durable Host-local
+/// confirmation fact.
+///
+/// ```compile_fail
+/// use ene_preservation::TrustedOwnerConfirmationRef;
+/// let confirmation = TrustedOwnerConfirmationRef {};
+/// ```
+///
+/// ```compile_fail
+/// use ene_preservation::{DeletionPurpose, StartTargetedDeletionCommand, TargetedDeletionTarget,
+///     MechanicalDeletionTarget, DeletionSearchMaterial};
+/// let forged = StartTargetedDeletionCommand::confirmed(
+///     ene_primitive::RawId::new(),
+///     TargetedDeletionTarget {
+///         mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+///             String::from("target"),
+///         )),
+///         semantic_hints: Vec::new(),
+///     },
+///     DeletionPurpose::Privacy,
+///     ene_primitive::WallClockWithTz::now(),
+///     Vec::new(),
+/// );
+/// ```
 #[derive(Debug, Clone)]
 pub struct TrustedOwnerConfirmationRef {
     request: RawId,

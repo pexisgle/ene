@@ -38,9 +38,11 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
     };
     desktop.try_spawn_body(&exe);
     desktop.tick();
-    if desktop.snapshot().body_status != "Spawned" {
-        return;
-    }
+    let status = desktop.snapshot().body_status;
+    assert_eq!(
+        status, "Spawned",
+        "the Body child must stay up for the motion projection, got {status}"
+    );
     let mut motion_ready = false;
     for _ in 0..200 {
         desktop.tick();

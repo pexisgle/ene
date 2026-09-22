@@ -7,7 +7,6 @@ use ene_api::v1::management::{
     credential_target,
 };
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::presence::PresenceStateWire;
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
     StreamWireId, TextLangWire,
@@ -19,7 +18,7 @@ use ene_api::v1::round::{
 use ene_client::error::ClientError;
 use ene_client::{Client, ConnectProgress, DEFAULT_COMPANION_REF, PendingPairingClient};
 
-use crate::ui::DesktopError;
+use crate::ui::{DesktopError, request_with_timeout};
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
@@ -187,7 +186,7 @@ pub fn confirmed_true_intent(mark: &str) -> WirePayload {
 }
 
 pub async fn fetch_setup_view(client: &mut Client) -> Result<ManagementView, DesktopError> {
-    match ask(client, setup_view_request()).await? {
+    match request_with_timeout(client, setup_view_request(), Duration::from_secs(15)).await? {
         WirePayload::ManagementView(view) => Ok(view),
         other => Err(DesktopError::Protocol(format!(
             "expected ManagementView, got {}",
@@ -202,7 +201,7 @@ pub async fn submit_and_collect(
     lang: &str,
 ) -> Result<ChatTurn, DesktopError> {
     let companion = client.companion_ref();
-    let send = ask(
+    let send = request_with_timeout(
         client,
         WirePayload::SubmitTextInput(SubmitTextInput {
             companion: CompanionWireRef(companion),
@@ -214,6 +213,7 @@ pub async fn submit_and_collect(
                 lang: TextLangWire(lang.to_string()),
             },
         }),
+        Duration::from_secs(15),
     )
     .await?;
     let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) = send
@@ -283,7 +283,7 @@ pub async fn fetch_history(
         limit,
         round: None,
     });
-    match ask(client, payload).await? {
+    match request_with_timeout(client, payload, Duration::from_secs(15)).await? {
         WirePayload::HistoryResponse(HistoryResponse::Items(items)) => Ok(items),
         WirePayload::HistoryResponse(_) => Err(DesktopError::Protocol(String::from(
             "history was unavailable",
@@ -293,23 +293,6 @@ pub async fn fetch_history(
             other.message_type()
         ))),
     }
-}
-
-pub fn presence_label(state: PresenceStateWire) -> &'static str {
-    match state {
-        PresenceStateWire::Present => "present",
-        PresenceStateWire::NoActive => "no-active",
-        PresenceStateWire::InTransition => "in-transition",
-        PresenceStateWire::Stopped => "stopped",
-        PresenceStateWire::RecoveryWait => "recovery-wait",
-    }
-}
-
-async fn ask(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(Duration::from_secs(15), client.request(payload))
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)
 }
 
 async fn ask_stream(client: &mut Client) -> Result<WirePayload, DesktopError> {

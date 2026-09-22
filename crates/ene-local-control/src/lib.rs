@@ -118,6 +118,11 @@ pub enum FromHost {
         requests: Vec<PendingDeletionPreview>,
     },
     DeniedByBoundary,
+    /// The requester queue is saturated; the request was not admitted. A hold,
+    /// not a technical failure and not a boundary refusal: the same request may
+    /// be retried once the queue drains.
+    BackpressureHold,
+    /// The Host cannot answer technically. Never a domain outcome.
     Unavailable,
 }
 

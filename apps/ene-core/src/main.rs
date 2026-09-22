@@ -367,7 +367,8 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
 /// # Errors
 ///
 /// [`CoreError::HostUnavailable`] when no Host is serving,
-/// [`CoreError::Deletion`] when the requester inlet is unreachable,
+/// [`CoreError::Control`] when the requester inlet is unreachable,
+/// [`CoreError::Store`] when the single-writer lock cannot be inspected,
 /// [`CoreError::Approve`] when the settled outcome cannot be shown, and
 /// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
@@ -445,15 +446,17 @@ fn show_requester_state(
         .map_err(|error| CoreError::Approve(format!("the outcome could not be shown: {error}")))
 }
 
-/// Unknown pairs fail with the pending set so the Owner can retry exactly.
-///
-/// The pair is named only; the raw value is entered on the Owner's
-/// confirmation surface and never on this command line. No serving Host means
-/// refusal, never an offline store open (`host_control::request_credential_put`).
+/// The pair is named, never the value: the Owner's confirmation surface opens
+/// the intake, and an unknown or refused pair is reported from the settled
+/// `RequesterOutcome`. The raw value is entered on that surface and never on
+/// this command line. No serving Host means refusal, never an offline store
+/// open (`host_control::request_credential_put`).
 ///
 /// # Errors
 ///
-/// [`CoreError::Deletion`] when the requester inlet is unreachable,
+/// [`CoreError::HostUnavailable`] when no Host is serving,
+/// [`CoreError::Control`] when the requester inlet is unreachable,
+/// [`CoreError::Store`] when the single-writer lock cannot be inspected,
 /// [`CoreError::Approve`] when the settled outcome cannot be shown, and
 /// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
@@ -473,6 +476,19 @@ fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Resul
     })
 }
 
+/// Prints the Targeted Deletion requests awaiting the Owner's confirmation,
+/// one `<request-id> <purpose> <exact-text>` line each.
+///
+/// This is the Host-local trusted preview (IPC §18.1): the exact target text is
+/// shown here, on the Owner's own console, and nowhere else. The request
+/// identity is Host-minted and never travels the wire, so no Client can name —
+/// let alone confirm — one.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
+/// cannot be opened, and [`CoreError::Deletion`] for a malformed `--after`
+/// identity or a `--limit` outside `1..=100`.
 fn run_pending_deletions(
     data_dir: &Path,
     after: Option<&str>,
@@ -512,6 +528,30 @@ fn run_pending_deletions(
     })
 }
 
+/// Records one Owner confirmation and starts the canonical Targeted Deletion
+/// operation (IPC §18.1) through the serving Host's Host-local first-party
+/// control inlet, then prints the operation identity the status view reports.
+///
+/// The confirmation must run in the serving process. The required
+/// participant snapshot includes every Client incarnation with durable
+/// body-delivery evidence, and only the serving process can reach those
+/// incarnations through its live connection table (lifecycle §8.1); an
+/// offline state open could name them but could never complete their local
+/// erasure, so this command never admits from an offline handle. It dials
+/// [`ene_core::host_control`] and reports the serving Host's typed outcome;
+/// when no Host is serving it fails with recovery guidance instead of
+/// confirming.
+///
+/// An unknown request id fails with the pending id set (never their target
+/// text, which stays on the `pending-deletions` preview).
+///
+/// # Errors
+///
+/// Returns [`CoreError::Control`] when the serving Host is not reachable on
+/// the control inlet or the confirmation is refused (no surface, declined,
+/// still awaiting) or malformed, [`CoreError::Deletion`] for an unknown or
+/// inadmissible request, and [`CoreError::Store`] when the pending-id
+/// fallback cannot be read.
 fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
 

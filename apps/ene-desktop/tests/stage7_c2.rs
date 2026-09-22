@@ -1,3 +1,18 @@
+//! Stage 7 C2: Task / Workspace management GUI against a real Host.
+//!
+//! Provider is fake and barrier-gated. The Slint window is not displayed; the
+//! same [`DesktopRuntime`] the window projects is driven here. Tasks are
+//! created only through companion `[task-control]` delegation, never a
+//! GUI-only factory.
+//!
+//! Covers acceptance §4's GUI path and the GUI subset of §5: Unknown vs
+//! interrupted vs Failed vs Cancelled vs Completed; cancel admission vs
+//! stop-complete; resume bound to the displayed revision/purpose; GUI close /
+//! reconnect; presentation ACK only after the panel copies a receipt.
+//! Conversation ACK is issued by the `send_text` presentation path via
+//! [`ene_desktop::session::confirm_chat_presentation`] after the collected
+//! turn is placed in the timeline.
+
 #![cfg(any(unix, windows))]
 
 use std::collections::{BTreeSet, VecDeque};
@@ -12,12 +27,14 @@ use std::time::Duration;
 use ene_api::v1::management::ManagementOutcome;
 use ene_api::v1::undelivered::{ResumeTaskOutcomeWire, UndeliveredAckOutcome};
 use ene_core::conn;
-use ene_core::host_control;
-use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::MemoryVersionedStore;
+use ene_core::serve::{CoreError, HostHandle};
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{ControlOutcome, FromConfirmation};
+
+mod common;
+
+use common::{open_host, pair_and_seat, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-c2-secret-4408";
@@ -153,58 +170,6 @@ impl ServingTask {
     }
 }
 
-#[expect(clippy::panic, reason = "test fixture helper")]
-async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    match HostHandle::open_with_cred_store(
-        dir,
-        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
-    )
-    .await
-    {
-        Ok(handle) => {
-            handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
-            Arc::new(handle)
-        }
-        Err(error) => panic!("host must open: {error}"),
-    }
-}
-
-async fn wait_for_control(dir: &Path) -> bool {
-    for _ in 0..200 {
-        #[cfg(unix)]
-        if tokio::net::UnixStream::connect(host_control::control_socket_path(dir))
-            .await
-            .is_ok()
-        {
-            return true;
-        }
-        #[cfg(windows)]
-        if host_control::ControlClient::connect(dir).await.is_ok() {
-            tokio::task::yield_now().await;
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
-async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
-    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
-    desktop
-        .attach_confirmation(channel)
-        .expect("the private channel is the seat");
-    desktop
-        .connect_or_begin_pairing()
-        .await
-        .expect("pairing must challenge");
-    match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
-        other => panic!("expected DeviceApproved, got {other:?}"),
-    }
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn complete_setup(desktop: &mut DesktopRuntime) {
     desktop.set_secret(String::from(SECRET));
     desktop
@@ -543,18 +508,16 @@ async fn gui_close_reconnect_and_ack_only_after_present() {
             .ack_presented_tasks()
             .await
             .expect("ACK after present");
-        assert!(
-            matches!(
-                acked,
-                UndeliveredAckOutcome::Presented { .. }
-                    | UndeliveredAckOutcome::AlreadyPresented
-                    | UndeliveredAckOutcome::KeptUnknown
-            ),
-            "ACK after present is a domain outcome, got {acked:?}"
-        );
+        let expected = match &acked {
+            UndeliveredAckOutcome::Presented { presented } => {
+                format!("ack presented {presented}")
+            }
+            UndeliveredAckOutcome::AlreadyPresented => String::from("ack already-presented"),
+            other => panic!("unexpected ACK outcome: {other:?}"),
+        };
         assert!(!desktop.has_presented_task_receipt());
         assert!(
-            desktop.snapshot().task_detail.contains("ack "),
+            desktop.snapshot().task_detail.contains(&expected),
             "{}",
             desktop.snapshot().task_detail
         );

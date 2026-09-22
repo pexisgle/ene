@@ -165,18 +165,8 @@ impl Surfaces {
             return false;
         };
         let busy = lane != 0 && self.mailbox.pending[lane].load(Ordering::SeqCst) > 0;
-        if busy {
-            return false;
-        }
-        if !self.mailbox.push(command, lane) {
-            management.set_notice(
-                local(
-                    management.get_japanese(),
-                    "操作が混み合っています。少し待ってください。",
-                    "Too many pending actions. Please wait.",
-                )
-                .into(),
-            );
+        if busy || !self.mailbox.push(command, lane) {
+            backpressure_notice(&management);
             return false;
         }
         match lane {
@@ -210,8 +200,23 @@ impl Surfaces {
                 m.set_page(6);
             }
         }
-        self.mailbox.push(Command::Dismiss, 0);
+        if !self.mailbox.push(Command::Dismiss, 0)
+            && let Some(m) = self.management.upgrade()
+        {
+            backpressure_notice(&m);
+        }
     }
+}
+
+fn backpressure_notice(management: &ManagementWindow) {
+    management.set_notice(
+        local(
+            management.get_japanese(),
+            "操作が混み合っています。少し待ってください。",
+            "Too many pending actions. Please wait.",
+        )
+        .into(),
+    );
 }
 
 pub fn run() -> Result<(), DesktopError> {
@@ -657,8 +662,8 @@ fn bind(s: &Surfaces, c: &ChatWindow, m: &ManagementWindow) {
         move || {
             if let Some(m) = s.management.upgrade()
                 && m.get_can_confirm()
+                && s.submit(Command::Confirm(m.get_confirmation_key().to_string()), 3)
             {
-                s.submit(Command::Confirm(m.get_confirmation_key().to_string()), 3);
                 m.set_can_confirm(false);
             }
         }
@@ -925,8 +930,9 @@ fn local<'a>(ja: bool, japanese: &'a str, english: &'a str) -> &'a str {
 }
 fn outcome_notice(ja: bool, outcome: &ManagementOutcome) -> String {
     match outcome {
-        ManagementOutcome::AppliedAsOneTime | ManagementOutcome::StoredAsRuleView { .. } => {
-            local(ja, "反映しました。", "Applied.")
+        ManagementOutcome::AppliedAsOneTime => local(ja, "反映しました。", "Applied."),
+        ManagementOutcome::StoredAsRuleView { .. } => {
+            local(ja, "規則として保存しました。", "Stored as a rule.")
         }
         ManagementOutcome::NeedsClarification => local(
             ja,
@@ -981,6 +987,15 @@ fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> Str
             "削除対象の確認が必要です。",
             "The deletion target needs clarification.",
         ),
+        FromConfirmation::Outcome(ControlOutcome::Rejected { .. })
+        | FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })
+        | FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted { .. })
+        | FromConfirmation::Outcome(ControlOutcome::DeviceUnknown { .. })
+        | FromConfirmation::DeniedByBoundary
+        | FromConfirmation::Unavailable => {
+            let locale = if ja { Locale::Ja } else { Locale::En };
+            return ene_desktop::i18n::control_deny(locale, result);
+        }
         _ => local(
             ja,
             "完了を確認できません。現在の状態を確認してください。",

@@ -521,18 +521,19 @@ impl HostHandle {
     ) -> Option<UndeliveredResponse> {
         let companion = match companion {
             Some(wire) => match self.resolve_companion(&wire.0).await {
-                Err(_) => return Some(UndeliveredResponse::Summary(self.empty_shell())),
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
                 Ok(None) => return Some(UndeliveredResponse::UnknownCompanion),
                 Ok(Some(companion)) => companion,
             },
             None => match self.store.ensure_running_companion().await {
-                Err(_) => return Some(UndeliveredResponse::Summary(self.empty_shell())),
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
                 Ok(companion) => companion,
             },
         };
         let attribution = match self.store.load_attribution(companion.as_raw()).await {
             Ok(Some(attribution)) => attribution,
-            _ => return Some(UndeliveredResponse::NoCurrentPresence),
+            Ok(None) => return Some(UndeliveredResponse::NoCurrentPresence),
+            Err(_) => return Some(UndeliveredResponse::Unavailable),
         };
         let Some(device_wire) = live.paired_device.clone() else {
             return Some(UndeliveredResponse::NoCurrentPresence);
@@ -723,7 +724,12 @@ impl HostHandle {
                 _ => return Some(UndeliveredResponse::StaleBaseView { current: None }),
             }
         } else {
-            let bound = self.store.undelivered_pass_bound().await.unwrap_or(0);
+            // A newer connection supersedes a live receipt from a dead one:
+            // old rows stay Unknown and re-present under the new receipt.
+            let bound = match self.store.undelivered_pass_bound().await {
+                Ok(bound) => bound,
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
+            };
             let planned = self.with_presentation_state(live, |state| {
                 let ckey = companion.as_raw().as_uuid().as_hyphenated().to_string();
                 if let Some(receipt) = state.receipts.get(&ckey).cloned()
@@ -805,11 +811,7 @@ impl HostHandle {
                 .await
             {
                 Ok(page) => page,
-                Err(_) => {
-                    return Some(UndeliveredResponse::Summary(
-                        self.empty_attributed(attribution),
-                    ));
-                }
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
             };
             let entries: Vec<UndeliveredRef> = if pending_only {
                 page.entries
@@ -1280,22 +1282,7 @@ impl HostHandle {
         }
     }
 
-    fn empty_shell(&self) -> UndeliveredSummary {
-        // A receipt-less shell has nothing to ACK, so its round is never
-        // resolved back: mint an opaque wire without registering a
-        // process-lifetime `rounds` mapping.
-        let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
-        UndeliveredSummary {
-            receipt: PresentationReceiptWireRef(String::new()),
-            round: round_wire,
-            presence_generation: 0,
-            items: Vec::new(),
-            reports: Vec::new(),
-            has_more: false,
-            next_cursor: None,
-        }
-    }
-
+    /// Dispatch entry: one receipt ACK, answering its typed outcome.
     pub(crate) async fn ack_undelivered(
         &self,
         frame: &WireFrame,
@@ -1389,6 +1376,7 @@ impl HostHandle {
                         let mut presented = 0_u32;
                         let mut held = 0_u32;
                         let mut not_written = 0_u32;
+                        let mut unavailable = false;
                         for id in &receipt.selected {
                             match store.compare_and_mark_reported_sync(
                                 *id,
@@ -1407,10 +1395,15 @@ impl HostHandle {
                                 // A stale/gone row or a rolled-back compare
                                 // wrote nothing and stays re-presentable:
                                 // never count it as already presented.
-                                Ok(_) | Err(_) => not_written += 1,
+                                Ok(_) => not_written += 1,
+                                // A store failure is not a domain answer: the
+                                // ACK cannot claim any status was written.
+                                Err(_) => unavailable = true,
                             }
                         }
-                        if held > 0 && presented == 0 {
+                        if unavailable {
+                            UndeliveredAckOutcome::Unavailable
+                        } else if held > 0 && presented == 0 {
                             UndeliveredAckOutcome::HeldForErasure
                         } else if presented > 0 {
                             UndeliveredAckOutcome::Presented { presented }
@@ -1426,18 +1419,25 @@ impl HostHandle {
                     }
                     PresentationStatus::Failed => {
                         let mut count = 0_u32;
+                        let mut unavailable = false;
                         for id in &receipt.selected {
-                            if let Ok(ene_companion::ReportStatusTransition::FailedToPending) =
-                                store.compare_and_mark_reported_sync(
-                                    *id,
-                                    ReportStatus::PresentationUnknown,
-                                    mark,
-                                )
-                            {
-                                count += 1;
+                            match store.compare_and_mark_reported_sync(
+                                *id,
+                                ReportStatus::PresentationUnknown,
+                                mark,
+                            ) {
+                                Ok(ene_companion::ReportStatusTransition::FailedToPending) => {
+                                    count += 1;
+                                }
+                                Ok(_) => {}
+                                Err(_) => unavailable = true,
                             }
                         }
-                        UndeliveredAckOutcome::ReturnedToPending { count }
+                        if unavailable {
+                            UndeliveredAckOutcome::Unavailable
+                        } else {
+                            UndeliveredAckOutcome::ReturnedToPending { count }
+                        }
                     }
                     PresentationStatus::Unknown => UndeliveredAckOutcome::KeptUnknown,
                 }

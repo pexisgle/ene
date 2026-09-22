@@ -348,6 +348,8 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
             .await,
         );
     }
+    // One reported settlement (actual cost 100: 100 input at 1 micro),
+    // one unknown settlement (keeps its 201 upper bound), one still reserved.
     assert_eq!(
         store
             .record_usage(reported_fact(claims[0], 100, 0, 0))

@@ -393,6 +393,10 @@ fn assemble_logical_input(
     input
 }
 
+/// The never-omitted head of the logical input: the protocol preamble,
+/// the relied purpose, every resolved instruction body, and the
+/// past-executed facts block. When this alone reaches the port budget, no
+/// transcript trimming could produce a fitting input.
 fn fixed_input_len(
     purpose: &str,
     instructions: &[String],
@@ -411,6 +415,16 @@ fn fixed_input_len(
             .sum::<usize>()
 }
 
+/// Fits the execution-local transcript into the port's input budget.
+///
+/// Exchanges are kept newest-first (the model most needs what just happened)
+/// and whole oldest exchanges are dropped; dropping them loses no canonical
+/// source because the transcript is execution-local, and the assembled input
+/// carries [`OMISSION_NOTE`] so the omission is visible to the model. When the
+/// newest exchange alone cannot fit, the transcript is left unchanged and the
+/// port refuses the over-limit input: the model must never answer from a
+/// silently shortened observation. The omitted note's length is reserved up
+/// front, so adding it cannot push the input back over the budget.
 fn fit_exchanges<'a>(
     purpose: &str,
     instructions: &[String],

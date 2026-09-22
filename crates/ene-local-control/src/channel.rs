@@ -72,7 +72,7 @@ where
 
 #[cfg(unix)]
 mod platform {
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
     use std::os::unix::net::UnixStream;
 
     use crate::{FromConfirmation, ToConfirmation};
@@ -136,12 +136,28 @@ mod platform {
             Ok((Self { stream: gui }, HostChannel { stream: host }))
         }
 
+        /// Adopts the channel the Host passed as this process's stdin.
+        ///
+        /// The descriptor is re-armed close-on-exec, so no descendant this
+        /// process execs can inherit the confirmation endpoint; the channel
+        /// is never re-handed to Body, tools, or plugins.
+        ///
+        /// # Errors
+        ///
+        /// Returns the OS failure when stdin cannot be taken or its
+        /// close-on-exec flag cannot be set.
         pub fn adopt_stdio() -> std::io::Result<Self> {
             // SAFETY: fd 0 is this process's stdin, which the Host set to the
             // child end of the pair before exec. Taking ownership here keeps a
-            // single owner and never re-hands the channel to Body, tools, or
-            // plugins.
+            // single owner.
             let fd = unsafe { OwnedFd::from_raw_fd(0) };
+            // The Host's dup2 during spawn cleared FD_CLOEXEC; re-arm it so no
+            // exec'd descendant inherits the confirmation endpoint.
+            // SAFETY: `fd` is a valid open descriptor and `fcntl` with F_SETFD
+            // does not transfer ownership.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(Self {
                 stream: UnixStream::from(fd),
             })
@@ -162,7 +178,9 @@ mod platform {
     use std::fs::File;
     use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
 
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
     use windows_sys::Win32::System::Pipes::CreatePipe;
 
     use crate::{FromConfirmation, ToConfirmation};
@@ -270,11 +288,35 @@ mod platform {
             ))
         }
 
+        /// Adopts the channel the Host passed as this process's stdio.
+        ///
+        /// The standard handles' inherit bit is cleared after the private
+        /// duplicates are taken, so no descendant this process spawns can
+        /// carry the confirmation endpoint; the channel is never re-handed to
+        /// Body, tools, or plugins.
+        ///
+        /// # Errors
+        ///
+        /// Returns the OS failure when the standard handles are unusable or
+        /// their inherit flag cannot be cleared.
         pub fn adopt_stdio() -> std::io::Result<Self> {
-            use std::os::windows::io::AsHandle as _;
+            use std::os::windows::io::{AsHandle as _, AsRawHandle as _};
 
             let from_host = std::io::stdin().as_handle().try_clone_to_owned()?;
             let to_host = std::io::stdout().as_handle().try_clone_to_owned()?;
+            // `try_clone_to_owned` duplicates without inheritance, but the
+            // original std handles stay inheritable. Clear the bit so no
+            // descendant that inherits stdio can carry the endpoint onward.
+            for handle in [
+                std::io::stdin().as_raw_handle(),
+                std::io::stdout().as_raw_handle(),
+            ] {
+                // SAFETY: `handle` is a live process standard handle; the call
+                // only clears the inherit flag and does not take ownership.
+                if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             Ok(Self {
                 from_host: File::from(from_host),
                 to_host: File::from(to_host),

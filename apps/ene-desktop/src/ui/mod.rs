@@ -154,7 +154,6 @@ pub struct GuiSnapshot {
     pub deny_reason: String,
     pub tasks: Vec<String>,
     pub task_detail: String,
-    pub about_slint: bool,
     pub body_status: String,
     pub ui_ticks: u64,
     pub setup_ready: bool,
@@ -192,6 +191,11 @@ pub enum DesktopError {
     DeniedByBoundary,
     #[error("{0}")]
     Protocol(String),
+    /// The Host could not answer technically; the request changed nothing and
+    /// is retryable. Distinct from [`DesktopError::Protocol`], which reports a
+    /// peer that violated the shape of the exchange.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error(transparent)]
     Client(#[from] ClientError),
 }

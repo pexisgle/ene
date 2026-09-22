@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 38;
+pub(crate) const CURRENT_VERSION: i64 = 38;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (

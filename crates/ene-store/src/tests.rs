@@ -109,10 +109,7 @@ async fn open_memory() -> Option<Store> {
 
 async fn running_companion(store: &Store) -> Option<(CompanionId, PresenceGeneration)> {
     let ensured = store.ensure_running_companion().await;
-    assert!(ensured.is_ok(), "ensure must succeed");
-    let Ok(companion) = ensured else {
-        return None;
-    };
+    let companion = ensured.expect("ensure_running_companion must succeed");
     let loaded = store.load_attribution(companion.as_raw()).await;
     assert!(loaded.is_ok(), "attribution load must succeed");
     let Ok(Some(attribution)) = loaded else {
@@ -717,11 +714,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         .await;
     let (retry_outcome, retry_registered) = retry.unwrap();
     let HistoryAppendOutcome::AlreadyCommittedAs { message, round } = retry_outcome else {
-        assert!(
-            format!("{retry_outcome:?}").is_empty(),
-            "retry must replay the original accept, got {retry_outcome:?}"
-        );
-        return;
+        panic!("retry must replay the original accept, got {retry_outcome:?}");
     };
     assert_eq!(
         message, first_id,

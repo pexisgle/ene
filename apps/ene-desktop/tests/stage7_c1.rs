@@ -16,14 +16,16 @@ use ene_api::v1::management::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId};
 use ene_core::conn;
-use ene_core::host_control;
-use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::MemoryVersionedStore;
-use ene_desktop::i18n::{self, Label, Locale};
+use ene_core::serve::{CoreError, HostHandle};
+use ene_desktop::i18n::Locale;
 use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{ControlOutcome, FromConfirmation};
+
+mod common;
+
+use common::{open_host, pair_and_seat, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-c1-secret-7719";
@@ -186,58 +188,6 @@ impl ServingTask {
     }
 }
 
-#[expect(clippy::panic, reason = "test fixture helper")]
-async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    match HostHandle::open_with_cred_store(
-        dir,
-        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
-    )
-    .await
-    {
-        Ok(handle) => {
-            handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
-            Arc::new(handle)
-        }
-        Err(error) => panic!("host must open: {error}"),
-    }
-}
-
-async fn wait_for_control(dir: &Path) -> bool {
-    for _ in 0..200 {
-        #[cfg(unix)]
-        if tokio::net::UnixStream::connect(host_control::control_socket_path(dir))
-            .await
-            .is_ok()
-        {
-            return true;
-        }
-        #[cfg(windows)]
-        if host_control::ControlClient::connect(dir).await.is_ok() {
-            tokio::task::yield_now().await;
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
-async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
-    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
-    desktop
-        .attach_confirmation(channel)
-        .expect("the private channel is the seat");
-    desktop
-        .connect_or_begin_pairing()
-        .await
-        .expect("pairing must challenge");
-    match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
-        other => panic!("expected DeviceApproved, got {other:?}"),
-    }
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn complete_setup(desktop: &mut DesktopRuntime) {
     desktop.set_secret(String::from(SECRET));
     desktop
@@ -672,9 +622,10 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
             .any(|row| row.content.contains("coffee")),
         "JA/EN must not rewrite memory content"
     );
-    assert_ne!(
-        i18n::label(Locale::Ja, Label::Memory),
-        i18n::label(Locale::En, Label::Memory)
+    assert_eq!(
+        desktop.surface_snapshot().memories[0].title,
+        "Memory",
+        "the projected Memory title must follow the locale"
     );
 
     server.shutdown_and_join().await;

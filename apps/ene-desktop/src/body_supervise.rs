@@ -23,7 +23,6 @@ pub struct BodySupervisor {
     stdin: Option<ChildStdin>,
     reader: Option<JoinHandle<()>>,
     events: Option<Receiver<BodyToParent>>,
-    exe: Option<PathBuf>,
     local_ui: VecDeque<LocalUiFact>,
     presentations: VecDeque<PresentationFeedback>,
     native_ready: bool,
@@ -72,7 +71,6 @@ impl BodySupervisor {
 
     pub fn spawn_if_present(&mut self, exe: &Path) -> BodyStatus {
         if !exe.is_file() {
-            self.exe = Some(exe.to_path_buf());
             return BodyStatus::Absent;
         }
         self.shutdown();
@@ -109,9 +107,14 @@ impl BodySupervisor {
                                                 Ok(len) => {
                                                     buf.drain(..len);
                                                 }
-                                                Err(_) => {
-                                                    buf.drain(..4);
-                                                }
+                                                // The length prefix itself is
+                                                // unreadable or oversize: no
+                                                // valid boundary exists, so
+                                                // dropping only 4 bytes would
+                                                // reread body bytes as the next
+                                                // length and desynchronize the
+                                                // stream. Abort the reader.
+                                                Err(_) => return,
                                             },
                                         }
                                     }
@@ -125,7 +128,6 @@ impl BodySupervisor {
                 self.stdin = stdin;
                 self.reader = reader;
                 self.events = Some(rx);
-                self.exe = Some(exe.to_path_buf());
                 self.local_ui.clear();
                 self.presentations.clear();
                 self.native_ready = false;

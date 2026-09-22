@@ -177,7 +177,6 @@ impl DesktopRuntime {
             tasks: self.tasks.list_lines(),
             task_detail: self.tasks.detail_text(),
             deny_reason: self.deny_reason.clone(),
-            about_slint: true,
             body_status: format!("{:?}", self.body_status),
             ui_ticks: self.ui_ticks,
             setup_ready: self.facts.setup_ready() && self.setup_completed,

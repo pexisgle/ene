@@ -80,6 +80,26 @@ pub trait TaskRepository: Send + Sync {
         premise: TaskFailurePremise,
     ) -> Result<TaskFailureOutcome, TaskTechnicalError>;
 
+    /// Creates one delegation correspondence for a Task revision (AU3).
+    ///
+    /// [`orchestrate_delegation`](crate::orchestrate_delegation) mints the
+    /// delegation and agent identities and passes them in the premise; the
+    /// repository never re-allocates them. Inside the atomic compare the
+    /// current Task row is read at exactly `premise.task.revision`, and the
+    /// assignee copied into the delegation is that row's assignee, checked
+    /// against the same revision's `task_revision` snapshot (a missing or
+    /// disagreeing snapshot is a technical error, never a composed value). The
+    /// same atomic snapshot reads the current progress: a missing Task returns
+    /// [`DelegationOutcome::MissingTask`], terminal progress (`Completed`,
+    /// `Failed`, or `Cancelled`) returns [`DelegationOutcome::TaskTerminal`],
+    /// and a revision mismatch on a non-terminal Task returns
+    /// [`DelegationOutcome::StaleTaskRevision`], all `Ok`-side domain outcomes
+    /// with zero writes. Terminal is decided before the revision compare, so it
+    /// is never folded into a stale answer.
+    ///
+    /// Creation never advances the Task revision and imposes no single
+    /// delegation constraint: multiple delegations of the same Task revision
+    /// are valid, and each is a new identity.
     async fn create_delegation(
         &self,
         premise: DelegationCreationPremise,

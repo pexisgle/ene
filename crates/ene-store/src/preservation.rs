@@ -665,9 +665,7 @@ fn decode_operation(
     let purpose = decode_purpose(&raw.3)?;
     let hold = match raw.5.as_deref() {
         None => None,
-        Some("unavailable") => Some(DeletionHoldReason::Unavailable),
-        Some("generation_exhausted") => Some(DeletionHoldReason::GenerationExhausted),
-        _ => return Err(corrupt()),
+        Some(name) => Some(DeletionHoldReason::from_name(name).ok_or_else(corrupt)?),
     };
     Ok(DeletionOperationRecord {
         current: decode_ref(&raw.0, raw.1)?,
@@ -3157,11 +3155,10 @@ impl PreservationRepository for Store {
                 "completed" => return Ok(DeletionFinalizationOutcome::CompletedAlready),
                 "finalizing" => return Ok(DeletionFinalizationOutcome::Finalizing),
                 "held" => {
-                    let reason = match hold.as_deref() {
-                        Some("unavailable") => DeletionHoldReason::Unavailable,
-                        Some("generation_exhausted") => DeletionHoldReason::GenerationExhausted,
-                        _ => return Err(corrupt()),
-                    };
+                    let reason = hold
+                        .as_deref()
+                        .and_then(DeletionHoldReason::from_name)
+                        .ok_or_else(corrupt)?;
                     return Ok(DeletionFinalizationOutcome::Held(reason));
                 }
                 "active" => {}
