@@ -19,9 +19,9 @@ PR Group K の同じ owner に次を追加する。具体的な Rust 型名は�
 |---|---|---|
 | 有効 credential 参照 | credential identity、active version、有効性、既存 set revision | OS item の参照だけ。秘密値・値の hash は保存しない |
 | 更新操作 | mutation ID、操作種別、credential identity、expected revision、旧/候補 version、phase、確認対象との対応、確定済み操作 outcome | 要求の fingerprint に秘密本文・その digest を入れない |
-| 後処理対象 | 不採用または退役した version、cleanup 状態 | 他の active version を消す汎用パスを受け取らない |
+| 後処理対象 | 不採用または退役した version、cleanup 状態。退役 version は一件ずつ durable に記録し、後続の更新が pending を上書きしない | 他の active version を消す汎用パスを受け取らない |
 
-phase は `Prepared`（候補 write の前）、`Staged`（OS 保存と照合済み）、`Activated`（有効参照と revision を commit 済み）、`CleanupPending`、`Completed`、`Abandoned` を区別する。有効化・失効の確定済み outcome と確定 revision は phase と独立に保持し、後処理や後続の更新で上書きしない。未採用 candidate の cleanup を終えても有効化成功にはならない。失効は候補 version なしで有効参照を無効化する。技術的失敗・OS write の成否不明も確定済み操作 outcome と分け、成功や「未実行」に丸めない。
+phase は `Prepared`（候補 write の前）、`Staged`（OS 保存と照合済み）、`Activated`（有効参照と revision を commit 済み）、`CleanupPending`（この操作が退役させた version の消去が未確認）、`Completed`（この操作が退役させた version がすべて消去済み）、`Abandoned` を区別する。有効化・失効の確定済み outcome と確定 revision は phase と独立に保持し、後処理や後続の更新で上書きしない。未採用 candidate の cleanup を終えても有効化成功にはならない。失効は候補 version なしで有効参照を無効化する。技術的失敗・OS write の成否不明も確定済み操作 outcome と分け、成功や「未実行」に丸めない。
 
 ## 3. 登録・更新の順序
 
@@ -30,7 +30,7 @@ phase は `Prepared`（候補 write の前）、`Staged`（OS 保存と照合済
 3. candidate と現行の登録値から次の immutable snapshot を準備する。秘密の読込・snapshot 準備に失敗したら切り替えない。candidate の保持・取消・期限切れは当該操作の責任であり、通常の Targeted Deletion に破棄を委ねない。
 4. control admission → credential owner の公開 write guard → 既存 master 上の transaction の順で取得し、session の live 性・対象・expected revision・操作 phase を再照合する。受理した確認の消費、approval sweep、active version 参照、credential-set revision、`Activated` と非秘密 outcome を一緒に commit する。競合に負けた候補は `Stale`、確認の失効は再確認待ちであり、新しい前提へ自動で付け替えない。commit の失敗では有効値を変更しない。
 5. 同じ guard を保持したまま、準備済み snapshot を commit 済み revision として公開する。この区間に OS I/O や新規 allocation を入れない。公開に失敗した Host は credential 利用を unavailable にして recovery を要求し、旧 snapshot を新 revision のものとして使い続けない。成功応答はこの公開後である。
-6. 不採用 candidate と退役 version は後処理対象にする。有効参照、実行中の lease、遅延結果の秘密除去が必要な間は削除しない。cleanup の失敗は有効化の成否と区別して表示し、登録処理を再実行する理由にしない。
+6. 不採用 candidate と退役 version は後処理対象にする。退役 version は active 参照の移動と同じ transaction で一件ずつ durable に記録し、後続の更新は先行する pending を上書きしない。cleanup は bounded な pass で行い、OS item の削除を確認した transaction で記録を消して当該操作を `Completed` にする。crash や削除失敗では記録を pending のまま残して再試行し、消去未確認の version を消去済みとして報告しない。有効参照、実行中の lease、遅延結果の秘密除去が必要な間は削除しない。cleanup の失敗は有効化の成否と区別して表示し、登録処理を再実行する理由にしない。
 
 OS item の version 作成、active pointer の更新、旧 version の破棄を一つの原子的 rename と説明してはならない。各中間状態は復旧可能な記録に対応させる。read-only の設定閲覧はこの後処理を行わない。
 
@@ -57,7 +57,7 @@ claim の既存 attempt 記録には利用 version の非秘密参照を対応�
 | `Staged`、有効化 commit 前 | 旧 active version を維持する。session は Host restart で失効するため、新しい本人確認なしに candidate を有効化しない |
 | commit 後、snapshot 公開または応答前 | 現行 active version から startup snapshot を再構築する。同じ mutation ID の照会は独立に保存した commit 済み outcome を返し、後続更新済みでも過去の操作を再適用しない。同じ mutation による revision 前進を重ねない |
 | active item の欠落・読込拒否・store locked | 対象の認証利用と、全登録値の除去を証明できない scrub を unavailable にする。旧 key、env、別 provider へ fallback しない |
-| 退役 item の削除失敗 | `CleanupPending` のままにする。現行 active version を削除したり、有効化を巻き戻したりしない |
+| 退役 item の削除失敗 | 記録を pending のままにし、次の bounded pass で再試行する。現行 active version を削除したり、有効化を巻き戻したりしない |
 
 serving 起動は HostLock 下で未完了操作と active version を照合し、読み出した値による既存 startup sweep と revision 更新を済ませてから snapshot を公開する。この startup 検証による revision 更新は、過去 mutation の再適用とは別である。OS ストアが外部変更されていても旧 revision の値としては公開しない。自動で provider を呼び出さない。通常の open / read-only query は照合結果と非秘密 phase を読むだけで、startup repair・sweep・cleanup を開始しない。
 

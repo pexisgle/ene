@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-pub(crate) const CURRENT_VERSION: i64 = 39;
+pub(crate) const CURRENT_VERSION: i64 = 40;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -76,9 +76,26 @@ CREATE TABLE credential_active (
 provider TEXT NOT NULL,
 label TEXT NOT NULL,
 active_version INTEGER NULL,
-cleanup_version INTEGER NULL,
 PRIMARY KEY (provider, label)
 );
+-- Retired credential versions whose OS item removal is not yet confirmed.
+-- One row per retired version, written in the same transaction that moves the
+-- active pointer (activation/rotation) or clears it (revocation), so a later
+-- update can never overwrite a pending retirement: the set accumulates and a
+-- bounded cleanup pass drains it. The row is the durable `pending` cleanup
+-- state; it is deleted only in the transaction that records the confirmed
+-- removal and completes the retiring mutation, so a crash between the OS
+-- erase and the state write leaves the row and the erase is re-attempted
+-- (idempotently). Non-secret references only: the OS item holds the value.
+CREATE TABLE credential_retired (
+provider TEXT NOT NULL,
+label TEXT NOT NULL,
+version INTEGER NOT NULL,
+mutation_id TEXT NOT NULL,
+retired_at TEXT NOT NULL,
+PRIMARY KEY (provider, label, version)
+);
+CREATE INDEX idx_credential_retired_mutation ON credential_retired (mutation_id);
 CREATE TABLE delegation (
 delegation_id TEXT PRIMARY KEY,
 task_id TEXT NOT NULL,
@@ -675,7 +692,7 @@ mod tests {
             7
         );
         for version in [
-            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
+            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
         ] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());

@@ -68,7 +68,8 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 /// data directory and the exclusive `host.lock` come first, then the store
 /// open (which runs migrations), then the explicit startup mutations (the
 /// presence normalization, the unapproved-pairing cleanup, the credential
-/// publication reconciliation, the credential sweep, sealed-result
+/// publication reconciliation, the credential sweep, the bounded
+/// retired-credential cleanup, sealed-result
 /// reconciliation, orphaned usage-reservation reconciliation, and Targeted
 /// Deletion recovery), and only then the
 /// listener. A second Host in the same directory is refused before any of

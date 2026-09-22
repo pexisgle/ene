@@ -1,13 +1,14 @@
 use super::frames::{
-    invalid_phase_reject, outgoing_frame, outgoing_frame_pre_auth, stale_reject, unpaired_close,
+    incompatible_protocol, invalid_phase_reject, outgoing_frame, outgoing_frame_pre_auth,
+    stale_reject, unpaired_close,
 };
 use super::{HostHandle, LiveInput, device_client};
 use crate::conn::{ChallengeOutcome, ConnectionPhase, InstallOutcome, NonceAdmission};
 use crate::pairing_delivery::PendingResend;
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::{
-    AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, DisconnectNotice,
-    NegotiatedConnection, PairingRequest, PairingResult,
+    AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, NegotiatedConnection,
+    PairingRequest, PairingResult,
 };
 use ene_api::v1::payload::WirePayload;
 use ene_companion::CompanionRepository;
@@ -98,16 +99,13 @@ impl HostHandle {
     /// [`InvalidHandshakePhase`](ene_api::v1::reject::RejectKind::InvalidHandshakePhase)
     /// and changes neither.
     ///
-    /// When no advertised version shares the v1 major, the reply is a single
-    /// terminal [`DisconnectNotice`]. The design requires the typed
-    /// `IncompatibleProtocol { host_max, client_max, hint }` here
-    /// (host-client-ipc.md §7.2 and V-11); `ene-api` only has
-    /// `RejectKind::IncompatibleProtocol` with a free-form detail and no such
-    /// payload, so this is a known deviation to be closed by an API/design
-    /// change, not a deliberate contract.
-    /// Capability frames never attach presence: attach happens only on the
-    /// submit path, so a negotiating-but-never-submitting peer leaves
-    /// attribution untouched.
+    /// When no advertised version shares the v1 major, the reply is the typed
+    /// terminal
+    /// [`IncompatibleProtocol`](ene_api::v1::reject::IncompatibleProtocol)
+    /// naming both sides' maxima and the upgrade hint (IPC §7.2, V-11); the
+    /// connection closes after it. Capability frames never attach presence:
+    /// attach happens only on the submit path, so a negotiating-but-never-
+    /// submitting peer leaves attribution untouched.
     pub(super) async fn advertise(
         &self,
         frame: &WireFrame,
@@ -119,14 +117,16 @@ impl HostHandle {
             .iter()
             .any(|candidate| candidate.shares_major_with(&ProtocolVersion::V1));
         if !negotiable {
-            let notice = DisconnectNotice {
-                reason: String::from("incompatible protocol major"),
-            };
-            return vec![outgoing_frame_pre_auth(
-                frame,
-                live,
-                WirePayload::DisconnectNotice(notice),
-            )];
+            // The rejection names the Client's highest advertised version; an
+            // empty advertisement leaves only the frame's own envelope version
+            // as its claim, and either way no advertised major is shared.
+            let client_max = advertise
+                .supported_protocol
+                .iter()
+                .copied()
+                .max_by_key(|version| (version.major, version.minor))
+                .unwrap_or(frame.envelope.protocol);
+            return vec![incompatible_protocol(frame, live, client_max)];
         }
         let claimed = frame
             .envelope

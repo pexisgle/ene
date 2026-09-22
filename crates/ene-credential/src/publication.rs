@@ -44,8 +44,13 @@ impl MutationKind {
 pub enum MutationPhase {
     Prepared,
     Staged,
+    /// The active reference, the revision, and this phase committed together,
+    /// and the mutation retired no version that still needs removal.
     Activated,
+    /// The reference and revision committed, but at least one version this
+    /// mutation retired is not yet removed from the OS store.
     CleanupPending,
+    /// The mutation finished and every version it retired is gone.
     Completed,
     Abandoned,
 }
@@ -118,14 +123,32 @@ pub struct CredentialMutation {
     pub decided_revision: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ActiveVersion {
-    pub active: Option<SecretVersionId>,
-    pub cleanup: Option<SecretVersionId>,
+/// One retired version whose OS item removal is not yet confirmed.
+///
+/// The durable record is a set, not a single slot: every activation/rotation
+/// or revocation enqueues the version it replaced in the same transaction
+/// that moved the reference, and a later update never overwrites an earlier
+/// pending retirement. The cleanup pass drains the set in bounded batches,
+/// oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredCredentialVersion {
+    pub provider: String,
+    pub label: String,
+    /// The retired version whose OS item still needs removal.
+    pub version: SecretVersionId,
+    /// The mutation that retired the version. Its phase reaches `Completed`
+    /// only after this row's removal is recorded.
+    pub mutation_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivationOutcome {
+    /// Committed: the active reference, the revision, and the phase moved
+    /// together, and `retired` is the version this commit retired and
+    /// enqueued for cleanup (or `None` when nothing was active). The caller
+    /// may remove the item immediately, but the durable retired row is the
+    /// record a later pass retries; a failed immediate removal never changes
+    /// this outcome.
     Activated {
         revision: u64,
         retired: Option<SecretVersionId>,
@@ -194,15 +217,37 @@ pub trait CredentialPublicationRepository: Send + Sync {
         mutation_id: &str,
     ) -> Result<Option<CredentialMutation>, CredentialTechnicalError>;
 
+    /// Reads the active version of one credential, if any.
+    ///
+    /// The retired set is read separately: a credential can have no active
+    /// version and still have retired versions whose items await removal.
     async fn active_credential_version(
         &self,
         provider: &str,
         label: &str,
-    ) -> Result<ActiveVersion, CredentialTechnicalError>;
+    ) -> Result<Option<SecretVersionId>, CredentialTechnicalError>;
 
-    /// Marks a retired version's item as removed and completes the mutation
-    /// that retired it. The value is already inactive; this only records that
-    /// the cleanup finished.
+    /// Lists up to `limit` retired versions whose OS items are not yet
+    /// removed, oldest first.
+    ///
+    /// This is the read side of the bounded cleanup pass: each returned row
+    /// names the credential, the version, and the mutation whose phase stays
+    /// `CleanupPending` until the removal is recorded. A row is never returned
+    /// as swept; only [`Self::mark_credential_cleaned`] removes it.
+    async fn pending_credential_retirements(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<RetiredCredentialVersion>, CredentialTechnicalError>;
+
+    /// Records that a retired version's OS item was removed, and completes the
+    /// mutation that retired it once no version it retired remains pending.
+    ///
+    /// Call only after the item's removal is confirmed: the durable row is the
+    /// retry record, so a failed or unconfirmed removal must leave it in place
+    /// (the phase stays `CleanupPending`). The call is idempotent — a version
+    /// already recorded as removed is not an error and is never counted as a
+    /// new removal — and it never completes a mutation while another version
+    /// it retired is still pending.
     async fn mark_credential_cleaned(
         &self,
         mutation_id: &str,

@@ -64,9 +64,12 @@
 //! authentication succeeds. A denied pairing exits 2 with the Host reason.
 //! A stored device the Host no longer knows is refused at capability
 //! time: the Host answers a `DisconnectNotice` instead of the negotiated
-//! terms, surfaced as an unexpected-frame `ServerRejected`. Only a device
-//! that resolves but cannot prove its secret fails later at authentication
-//! with `AuthResult::Rejected`.
+//! terms, surfaced as an unexpected-frame `ServerRejected`. A peer with no
+//! protocol major in common gets the typed terminal
+//! [`IncompatibleProtocol`](ene_api::v1::reject::IncompatibleProtocol) naming
+//! both maxima and the upgrade hint, also surfaced as `ServerRejected` (no
+//! retry can intersect majors). Only a device that resolves but cannot prove
+//! its secret fails later at authentication with `AuthResult::Rejected`.
 //!
 //! Framing goes through `ene-plugin-ipc` only ([`ene_plugin_ipc::encode_frame`]/[`ene_plugin_ipc::decode_frame`]); this module
 //! owns the socket read/write loops. [`ene_plugin_ipc::CodecError`]

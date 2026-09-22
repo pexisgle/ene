@@ -12,7 +12,7 @@ use super::management::{
     ManagementIntent, ManagementOutcome, ManagementView, ManagementViewRequest,
 };
 use super::presence::PresenceAttributionWire;
-use super::reject::RejectNotice;
+use super::reject::{IncompatibleProtocol, RejectNotice};
 use super::round::{
     ConfirmPresentationWire, HistoryRequest, HistoryResponse, RoundIntakeOutcomeWire,
     SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
@@ -41,6 +41,7 @@ pub enum WirePayload {
     CapabilityAdvertise(CapabilityAdvertise),
     NegotiatedConnection(NegotiatedConnection),
     DisconnectNotice(DisconnectNotice),
+    IncompatibleProtocol(IncompatibleProtocol),
     SubmitTextInput(SubmitTextInput),
     RoundIntakeOutcome(RoundIntakeOutcomeWire),
     TextStreamOpen(TextStreamOpen),
@@ -92,6 +93,7 @@ impl WirePayload {
             Self::CapabilityAdvertise(_) => "CapabilityAdvertise",
             Self::NegotiatedConnection(_) => "NegotiatedConnection",
             Self::DisconnectNotice(_) => "DisconnectNotice",
+            Self::IncompatibleProtocol(_) => "IncompatibleProtocol",
             Self::SubmitTextInput(_) => "SubmitTextInput",
             Self::RoundIntakeOutcome(_) => "RoundIntakeOutcome",
             Self::TextStreamOpen(_) => "TextStreamOpen",

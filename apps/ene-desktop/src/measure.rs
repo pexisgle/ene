@@ -182,10 +182,13 @@ impl PresentationRecord {
     /// The first presentation rejection, so the operator failure line names the
     /// real cause instead of printing numbers that all look passing. `None`
     /// when the presented events are accepted.
+    ///
+    /// A discarded frame is not its own rejection: it is absent from
+    /// `presented`, so it already lowers the FPS checked below. Only a
+    /// missing frame is a rejection independent of the presented count.
     fn rejection(&self) -> Option<&'static str> {
         let mut ids = std::collections::BTreeSet::new();
         let mut presented = 0_u64;
-        let mut discarded = 0_u64;
         let mut missing = 0_u64;
         let mut last_timestamp = None;
         let mut timing_domain = None;
@@ -221,7 +224,7 @@ impl PresentationRecord {
                     timing_domain = Some((*clock_id, output.as_str()));
                     presented = presented.saturating_add(1);
                 }
-                PresentationEvent::Discarded { .. } => discarded = discarded.saturating_add(1),
+                PresentationEvent::Discarded { .. } => {}
                 PresentationEvent::Missing { .. } => missing = missing.saturating_add(1),
             }
         }
@@ -231,9 +234,6 @@ impl PresentationRecord {
         let calculated_fps = presented as f64 / self.wall_secs;
         if presented == 0 || calculated_fps < FPS_MINIMUM {
             return Some("presented FPS is below the minimum");
-        }
-        if discarded != 0 {
-            return Some("frames were discarded");
         }
         if missing != 0 {
             return Some("frames are missing");
@@ -736,8 +736,8 @@ impl MeasurementRecord {
                     .rejection()
                     .map_or(String::new(), |reason| format!(": {reason}"));
                 self.failures.push(format!(
-                    "presented FPS {:.3}, discarded {}, missing {}{reason}",
-                    fps.actual_fps, fps.discarded, fps.missing
+                    "presented FPS {:.3}, missing {}{reason}",
+                    fps.actual_fps, fps.missing
                 ));
             }
         } else {
@@ -1214,6 +1214,18 @@ mod os {
 mod tests {
     use super::*;
 
+    /// Presented events at 30 FPS over the 10 s fixture window.
+    fn presented_events(count: u64) -> Vec<PresentationEvent> {
+        (0..count)
+            .map(|id| PresentationEvent::Presented {
+                correlation_id: id,
+                timestamp_ns: id * 33_000_000,
+                clock_id: 1,
+                output: String::from("fixture-output"),
+            })
+            .collect()
+    }
+
     fn passing_record() -> MeasurementRecord {
         let process = |role, pid| ProcessRecord {
             role,
@@ -1225,14 +1237,7 @@ mod tests {
             rss_mean_bytes: 1024,
             rss_peak_bytes: 2048,
         };
-        let events = (0..300)
-            .map(|id| PresentationEvent::Presented {
-                correlation_id: id,
-                timestamp_ns: id * 33_000_000,
-                clock_id: 1,
-                output: String::from("fixture-output"),
-            })
-            .collect();
+        let events = presented_events(300);
         MeasurementRecord {
             exact_sha: String::from("0123456789abcdef0123456789abcdef01234567"),
             build_profile: String::from("release"),
@@ -1303,6 +1308,44 @@ mod tests {
         assert!(!record.claims_pass());
         record.evaluate();
         assert!(record.claims_pass(), "{:?}", record.failures);
+    }
+
+    #[test]
+    fn discarded_frames_do_not_fail_a_passing_presented_fps() {
+        let mut record = passing_record();
+        let source = record.fps.as_ref().expect("fps").source.clone();
+        let mut events = presented_events(300);
+        events.push(PresentationEvent::Discarded {
+            correlation_id: 300,
+        });
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        assert!(record.claims_pass(), "{:?}", record.failures);
+    }
+
+    #[test]
+    fn missing_frames_still_fail_a_passing_presented_fps() {
+        let mut record = passing_record();
+        let source = record.fps.as_ref().expect("fps").source.clone();
+        let mut events = presented_events(300);
+        events.push(PresentationEvent::Missing {
+            correlation_id: 300,
+            reason: String::from("feedback never resolved"),
+        });
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        assert_eq!(record.verdict.label(), "Fail");
+        assert!(
+            record
+                .failures
+                .iter()
+                .any(|failure| failure.starts_with("presented FPS 30.000")
+                    && failure.ends_with("frames are missing")),
+            "{:?}",
+            record.failures
+        );
     }
 
     #[test]
@@ -1462,11 +1505,11 @@ mod tests {
         assert_eq!(fps.presented, 20);
         assert_eq!(fps.discarded, 40);
         assert_eq!(fps.actual_fps, 20.0);
-        assert!(!fps.passes());
+        assert_eq!(fps.rejection(), Some("presented FPS is below the minimum"));
     }
 
     #[test]
-    fn any_discarded_feedback_prevents_pass_even_above_thirty_fps() {
+    fn discarded_feedback_does_not_reject_a_passing_presented_fps() {
         let mut events = (0..31)
             .map(|id| PresentationEvent::Presented {
                 correlation_id: id,
@@ -1486,8 +1529,9 @@ mod tests {
             events,
         )
         .expect("fps");
+        assert_eq!(fps.discarded, 1);
         assert!(fps.actual_fps >= 30.0);
-        assert!(!fps.passes());
+        assert!(fps.passes());
     }
 
     #[test]

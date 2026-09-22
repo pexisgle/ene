@@ -38,8 +38,9 @@ pub use pairing::{
     pairing_proof_hex, verify_pairing_proof,
 };
 pub use publication::{
-    ActivationOutcome, ActiveVersion, CredentialMutation, CredentialPublicationRepository,
-    MutationKind, MutationOutcome, MutationPhase, SecretVersionId, UncommittedMutationOutcome,
+    ActivationOutcome, CredentialMutation, CredentialPublicationRepository, MutationKind,
+    MutationOutcome, MutationPhase, RetiredCredentialVersion, SecretVersionId,
+    UncommittedMutationOutcome,
 };
 pub use registration::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,

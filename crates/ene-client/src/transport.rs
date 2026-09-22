@@ -9,6 +9,8 @@ use ene_api::v1::payload::WirePayload;
 #[cfg(any(unix, windows))]
 use ene_api::v1::refs::WireMessageId;
 #[cfg(any(unix, windows))]
+use ene_api::v1::reject::IncompatibleProtocol;
+#[cfg(any(unix, windows))]
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 
 #[cfg(any(unix, windows))]
@@ -184,6 +186,9 @@ impl Client {
                             "pairing denied: {reason}; start a fresh pairing request"
                         )))
                     }
+                    WirePayload::IncompatibleProtocol(notice) => {
+                        Err(incompatible_protocol_error(&notice))
+                    }
                     unexpected => Err(ClientError::ServerRejected(format!(
                         "unexpected {} during pairing; expected PairingResult",
                         unexpected.message_type()
@@ -218,6 +223,9 @@ impl Client {
                         negotiated.version.major, negotiated.version.minor
                     )));
                 }
+            }
+            WirePayload::IncompatibleProtocol(notice) => {
+                return Err(incompatible_protocol_error(&notice));
             }
             unexpected => {
                 return Err(ClientError::ServerRejected(format!(
@@ -526,6 +534,26 @@ async fn read_frame(
     decode_frame(&bytes)
         .map(|(frame, _consumed)| frame)
         .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))
+}
+
+/// Terminal connect refusal: no common protocol major (IPC §7.2, V-11). Names
+/// both sides' maxima and the Host's upgrade hint so the operator can move the
+/// older side; operational text only, never a secret or body copy. Retrying
+/// the same build cannot intersect majors, so it is [`ServerRejected`], not a
+/// retryable [`ServerOutcome`].
+///
+/// [`ServerRejected`]: ClientError::ServerRejected
+/// [`ServerOutcome`]: ClientError::ServerOutcome
+#[cfg(any(unix, windows))]
+pub(crate) fn incompatible_protocol_error(notice: &IncompatibleProtocol) -> ClientError {
+    ClientError::ServerRejected(format!(
+        "incompatible protocol: host max {}.{}, client max {}.{}; {}",
+        notice.host_max.major,
+        notice.host_max.minor,
+        notice.client_max.major,
+        notice.client_max.minor,
+        notice.hint
+    ))
 }
 
 #[cfg(any(unix, windows))]

@@ -230,7 +230,7 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 
 - idle CPU: セットアップ後・推論なし 5 分。Host + desktop + Body を全て計上。
 - resident: 同じ区間の合計 ≤ 2 GiB。Body を除外しない。
-- avatar: 実表示済みの content update と時刻から平均 ≥ 30 FPS を確認する。Wayland presented / discarded、Windows display timing を使い、redraw / frame callback / Present 呼出し回数は代用しない。欠測・計測不能は合格にしない。
+- avatar: 実表示済みの content update と時刻から平均 ≥ 30 FPS を確認する（discarded は presented に数えず presented FPS を下げるが、それ自体は棄却条件にしない）。Wayland presented / discarded、Windows display timing を使い、redraw / frame callback / Present 呼出し回数は代用しない。欠測・計測不能は合格にしない。
 - 操作受付: 入力から 1 秒以内に受付表示。Body frame を待たない。
 
 通常 avatar 表示中の idle を基準にし、非表示・renderer 停止時は補助測定として分けます。
@@ -247,4 +247,28 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 
 報告は実施当時の記録として保持し、現在の残件一覧に流用しません。証拠の入口は [Linux 初期検証](../reports/stage-7-linux-2026-09-19.md)、[D/F 実装報告](../reports/stage-7-df-implementation-2026-09-21.md)、[Windows D/F acceptance](../reports/stage-7-windows-df-acceptance-2026-09-22.md)、[KDE Wayland probe](../reports/stage-7-kde-wayland-probe-2026-09-22.md) です。後日の Issue 完了コメントも確認し、古い「未実施」記述だけを理由に closed Issue を再び残件に戻しません。
 
-transport・アセット・実装が変わった場合は、過去の証拠の適用範囲と再検証項目を #1706 で確かめます。未マージ PR の検証は `main` の実績に含めず、統合 tip の全 gate が揃ってから `PROGRESS.md` を更新します。
+### A1 trust boundary の実装状況（2026-09-20）
+
+`ene-local-control` は要求専用 listener（`ToHost` / `FromHost`: 要求と非秘密の request state。challenge・秘密・completion の frame 型を持たない）と、Host が起動した GUI にだけ渡す専用確認 channel（`ToConfirmation` / `FromConfirmation`）に分離した。seat は Host の spawn から発行し、空席の先着では取得できない。`ene-core approve-*` は requester であり、pairing secret も credential 生値もその stdout / outcome には出ない。offline mutation fallback は削除した。
+
+#### A1c: credential publication（実装済み）
+
+`SecretVersionId` は値から導出しない採番であり、OS item は installation namespace と version ごとに作る。`credential_mutation` は attempt を write-once で記録し、`credential_active` は active version を持ち、退役 version は `credential_retired` に一件ずつ durable に保持する（どちらも非秘密）。`activate_credential` は一つの transaction で、候補と置換対象の sweep、usable ref、active version、退役 version の記録、credential-set revision、`Activated` とその outcome を一緒に commit する。前提 revision が動いていれば候補は adopt せず sweep し、`Stale` を durable に残すので retry は保存済みの決定を返す。退役 version の cleanup は bounded な pass（起動時と成功した公開の後）で行い、OS item の削除を確認した transaction で記録を消して当該 mutation を `Completed` にする。
+
+実 OS store adapter は `keyring` 経由で version item を作り、素の `put` を拒否する（owner の publish→activate だけが値を usable にする）。起動時は登録済み credential の active version を durable 記録から読み、item が読めることを確認してから adapter を向ける: 読めない active version は unactive のままにする。未完了 mutation（`Prepared` / `Staged`）は再実行も activate もしない。
+
+Windows Credential Manager での probe は成功（version 作成・読み戻し・上書き拒否・activate・削除）。Linux Secret Service は adapter を実装済みだが、この環境に service が無いため probe は 未実施であり、合格とは書かない。
+
+#### D/F 実装状況（2026-09-21）
+
+`ene-body` は `vrm-runtime` 0.1 の strict VRM 1.0 load、humanoid / expression / LookAt / SpringBone、約30 Hzの Body-local update、wgpu real surface と unlit fallback を実装した。生成 fixture は全 pose と renderer frame data を自動検証し、任意 asset 用の `ene-body-asset-probe` も追加した。これは公式 `ene` の acceptance ではない。
+
+KDE Wayland は `zwlr_layer_shell_v1` + input region + frame callback pacing + `wp_presentation.feedback`、Windows は layered/DWM popup + non-rectangular `WM_NCHITTEST` を実装した。headless fallback は `OverlayUnavailable` で明示し、production success には数えない。Linux build/test と Windows cross-check は通したが、このセッションに実 compositor / Windows desktop が無いため実表示 probe は未実施である。
+
+`ene-measure` は全 PID CPU/RSS、busy-wait、Wayland submitted/presented/discarded/missing、PresentMon CSV、cancel input→Host outcome→Slint `AfterRendering`、外部 compositor click-through evidence を同じ JSON/human reportへ集約する。Pass は再計算 APIだけが生成し、欠測・未解決 feedback・相関不能は Pass にならない。数値 gate 自体は実 desktop で未測定である。
+
+#### 未実施のまま残るもの
+
+- KDE Wayland と Windows 11 上の実 overlay / transparency / click-through / drag / resize / HiDPI / hide-restore probe。
+- VRM 1.0 サンプル `assets/seed-san.vrm`（Seed-san。公式 `ene` ではない）を同梱済み。公式同梱 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）は未解決。
+- Windows 11 実機 acceptance、Linux Secret Service、IME、および Performance Gate（idle CPU / resident / 実表示 FPS / 1 秒受付）。

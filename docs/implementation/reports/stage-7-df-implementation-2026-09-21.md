@@ -57,7 +57,7 @@ ene-measure \
   --output-json /path/result.json --output-report /path/result.txt
 ```
 
-WindowsではWayland引数の代わりに`--presentmon-exe PresentMon.exe --presentmon-csv TRACE --swap-chain ID`を使う。既に外部capture済みなら`--presentmon-exe`だけを省く。CSV/JSONを読み込んでも集計値は再計算する。debug binary、300秒未満、40桁SHAでない記録、環境JSONの欠測、Body PID不一致、discarded/missing、時刻/output相関不能はPassにならない。
+WindowsではWayland引数の代わりに`--presentmon-exe PresentMon.exe --presentmon-csv TRACE --swap-chain ID`を使う。既に外部capture済みなら`--presentmon-exe`だけを省く。CSV/JSONを読み込んでも集計値は再計算する。debug binary、300秒未満、40桁SHAでない記録、環境JSONの欠測、Body PID不一致、missing、時刻/output相関不能はPassにならない。discardedはpresentedに数えないためpresented FPSを下げるが、それ自体は棄却条件にしない。
 
 環境JSONは次の全fieldを持つ。値は実機から採取し、空文字にしない。
 
