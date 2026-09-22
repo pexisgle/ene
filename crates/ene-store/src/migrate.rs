@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-pub(crate) const CURRENT_VERSION: i64 = 38;
+pub(crate) const CURRENT_VERSION: i64 = 39;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -606,6 +606,20 @@ CREATE TABLE deletion_reconciliation (
  complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
  PRIMARY KEY (operation_id, sweep, identity_table)
 );
+-- Fair scheduling position of each bounded walk over the unfinished deletion
+-- operations (lifecycle §14). One row per walk owner; `after_id` is the last
+-- operation id the previous pass examined, so a pass starts after it instead
+-- of at the smallest id and the tail of a set larger than one pass bound is
+-- reached on later passes (the walk wraps to the head at the end). The row is
+-- a scheduling position only: it is never phase, participant, verification,
+-- condition, or completion truth, and a stale position changes nothing
+-- because each visit re-derives those from `deletion_operation` /
+-- `deletion_participant` / `erasure_condition`. The row holds an identity
+-- only: no target body, matcher material, or count.
+CREATE TABLE deletion_walk_cursor (
+ walk TEXT PRIMARY KEY CHECK (walk IN ('fan_out', 'retryable_hold')),
+ after_id TEXT NOT NULL
+);
 -- A reconciliation page associates already-claimed uses whose Task context
 -- origin names one of the page's covered identities; this index drives that
 -- probe from the (bounded) page instead of scanning every context entry.
@@ -661,7 +675,7 @@ mod tests {
             7
         );
         for version in [
-            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,
+            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
         ] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());

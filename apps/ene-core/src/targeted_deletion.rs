@@ -21,6 +21,14 @@
 //! backed-off retry of a retryable hold), and a first-party confirmation kicks
 //! a bounded drive immediately after admission. None of them decides
 //! completion: only the sealed store boundary does.
+//!
+//! Each bounded walk keeps a durable keyset cursor in the canonical store and
+//! starts its page after the last operation the previous pass examined,
+//! wrapping to the beginning at the end of the unfinished set. The cursor is
+//! a scheduling position only: with more unfinished operations than one pass
+//! bound, later passes reach the tail instead of re-reading the head forever,
+//! and every completion premise is still re-derived from durable operation
+//! and participant state on each visit.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,11 +36,11 @@ use std::sync::Arc;
 use ene_preservation::{
     DELETION_RECONCILIATION_PAGE_SIZE, DeletionFinalizationOutcome, DeletionLifecycleChange,
     DeletionLifecycleOutcome, DeletionMaterialOutcome, DeletionOperationId,
-    DeletionOperationMaterial, DeletionOperationPhase, DeletionOperationRef,
-    DeletionReconciliationOutcome, DemandLocalErasureCommand, ErasureParticipant,
-    ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantCompletionStatus,
-    ParticipantDemandOutcome, ParticipantErasureScope, ParticipantHoldClass, ParticipantOwnerRef,
-    PreservationRepository as _,
+    DeletionOperationMaterial, DeletionOperationPhase, DeletionOperationRecord,
+    DeletionOperationRef, DeletionReconciliationOutcome, DeletionWalk, DemandLocalErasureCommand,
+    ErasureParticipant, ParticipantCompletionFact, ParticipantCompletionOutcome,
+    ParticipantCompletionStatus, ParticipantDemandOutcome, ParticipantErasureScope,
+    ParticipantHoldClass, ParticipantOwnerRef, PreservationRepository as _,
 };
 use ene_primitive::WallClockWithTz;
 use ene_store::Store;
@@ -147,6 +155,19 @@ impl ErasureParticipantRegistry {
     }
 }
 
+/// Bounded parameters for one fan-out pass.
+///
+/// A pass never runs unbounded participant work: each unfinished participant
+/// receives at most [`Self::demands_per_participant`] bounded demands, and at
+/// most [`Self::operation_limit`] unfinished operations are examined. A
+/// participant still reporting more work is left unfinished for the next pass.
+///
+/// The examined window starts after the fan-out walk's durable cursor and
+/// advances past the last operation the pass examined, so an unfinished set
+/// larger than one pass is rotated instead of truncated: the operations past
+/// the window are reached by later passes when the walk wraps. The cursor is
+/// scheduling state only; it never substitutes for the durable phase,
+/// participant, and completion premises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetedDeletionPass {
     pub operation_limit: u32,
@@ -254,6 +275,117 @@ fn command_scope(
     }
 }
 
+/// A durable keyset rotation over the unfinished-operation set.
+///
+/// The stored position only chooses where a bounded pass starts reading; it is
+/// never completion, verification, or hold truth, and every visit re-derives
+/// the operation phase, hold, sweep, and participant status from the canonical
+/// rows. The walk advances to the last operation a pass examined, so a restart
+/// resumes after it instead of stampeding the head, and it wraps to the
+/// beginning when a page reaches the end of the unfinished set (a short page,
+/// or an empty page at a non-start position), so the tail is reached within
+/// one lap even while the head stays unfinished.
+struct UnfinishedWalk {
+    walk: DeletionWalk,
+    /// The position the next page starts after, in memory.
+    after: Option<DeletionOperationId>,
+    /// The position last durably written (or read at open). A pass persists
+    /// its position only when it moved, so an idle pass performs no durable
+    /// mutation.
+    persisted: Option<DeletionOperationId>,
+}
+
+impl UnfinishedWalk {
+    async fn open(store: &Store, walk: DeletionWalk) -> Result<Self, CoreError> {
+        let after = store
+            .deletion_walk_cursor(walk)
+            .await
+            .map_err(deletion_error)?;
+        Ok(Self {
+            walk,
+            after,
+            persisted: after,
+        })
+    }
+
+    /// Reads the next bounded page after the current position. An empty page
+    /// at a non-start position is the end of the unfinished set: the walk
+    /// wraps and returns the page from the beginning in the same pass, so an
+    /// emptied tail does not cost a whole idle pass.
+    async fn page(
+        &mut self,
+        store: &Store,
+        limit: u32,
+    ) -> Result<Vec<DeletionOperationRecord>, CoreError> {
+        let page = store
+            .unfinished_deletions(self.after, limit)
+            .await
+            .map_err(deletion_error)?;
+        if !page.is_empty() || self.after.is_none() {
+            return Ok(page);
+        }
+        self.after = None;
+        store
+            .unfinished_deletions(None, limit)
+            .await
+            .map_err(deletion_error)
+    }
+
+    /// Moves the in-memory position past one examined operation.
+    fn examined(&mut self, operation: DeletionOperationId) {
+        self.after = Some(operation);
+    }
+
+    /// Persists the position after a pass. `end` means the pass reached the
+    /// end of the unfinished set (a short page), which wraps the next pass to
+    /// the head.
+    ///
+    /// A crash between the last examined operation and this write repeats that
+    /// page on the next pass (idempotent work, never a skip); a pass that
+    /// fails before this call writes nothing.
+    async fn advance(&mut self, store: &Store, end: bool) -> Result<(), CoreError> {
+        if end {
+            self.after = None;
+        }
+        if self.after == self.persisted {
+            return Ok(());
+        }
+        store
+            .set_deletion_walk_cursor(self.walk, self.after)
+            .await
+            .map_err(deletion_error)?;
+        self.persisted = self.after;
+        Ok(())
+    }
+}
+
+/// Drives one bounded fan-out pass over the durable unfinished operations.
+///
+/// `Active` operations are driven through their required participants and then
+/// through the sealed completion boundary once the durable aggregate says
+/// every participant verified. A `Held` operation waits for an explicit resume
+/// decision. A `Finalizing` operation is resumed directly at the completion
+/// boundary: the durable marker means local erasure and current-sweep
+/// verification are complete and only the material wipe / audit / condition
+/// closure commit is owed (§12/§14). Participants already `Verified` for the
+/// current sweep are never demanded again, so a fan-out that crashed after a
+/// participant's semantic effect continues with only the unfinished
+/// participants (§14). No caller boolean exists anywhere on this path: the
+/// completion premise is re-derived by the store inside its own write
+/// transaction.
+///
+/// The pass reads one bounded window of unfinished operations after the
+/// fan-out walk's durable cursor and advances the cursor past the operations
+/// it examined (wrapping at the end of the set). The cursor bounds where a
+/// pass looks, never what it believes: an unfinished operation on a later page
+/// is deferred to the next pass instead of being permanently starved by a
+/// stuck head page.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for an invalid pass parameter or when the
+/// canonical store refuses (including torn participant state, which fails
+/// closed instead of reading as an incomplete set).
 pub async fn drive_targeted_deletion(
     store: &Store,
     registry: &ErasureParticipantRegistry,
@@ -268,20 +400,19 @@ pub async fn drive_targeted_deletion(
         host.publish_owed_arrivals().await;
     }
     let mut outcome = TargetedDeletionPassOutcome::default();
-    let mut after = None;
+    let mut walk = UnfinishedWalk::open(store, DeletionWalk::FanOut).await?;
+    let mut reached_end = false;
     while (outcome.operations as usize) < pass.operation_limit as usize {
         let remaining = pass.operation_limit - outcome.operations;
         let limit = remaining.min(100);
-        let page = store
-            .unfinished_deletions(after, limit)
-            .await
-            .map_err(deletion_error)?;
+        let page = walk.page(store, limit).await?;
         if page.is_empty() {
+            reached_end = true;
             break;
         }
         let page_len = page.len();
         for record in page {
-            after = Some(record.current.operation);
+            walk.examined(record.current.operation);
             outcome.operations += 1;
             match record.phase {
                 DeletionOperationPhase::Active => {
@@ -304,9 +435,11 @@ pub async fn drive_targeted_deletion(
             }
         }
         if page_len < limit as usize {
+            reached_end = true;
             break;
         }
     }
+    walk.advance(store, reached_end).await?;
     Ok(outcome)
 }
 
@@ -570,12 +703,25 @@ pub(crate) async fn recover_targeted_deletions(
     drive_targeted_deletion_until_settled(store, registry, pass, pass_budget).await
 }
 
+/// Resumes the retryable holds inside one bounded operation page.
+///
+/// Only `Held(Unavailable)` is a resume candidate. `GenerationExhausted`
+/// cannot be resumed by construction, every other phase is not a hold, and
+/// the canonical store re-checks all of that inside its own write
+/// transaction; this read only decides which candidates to offer.
+///
+/// The page is the next window of the retryable-hold walk (the same durable
+/// rotation as the fan-out pass), so a hold page blocked by earlier
+/// non-retryable holds or other unfinished operations is still reached on a
+/// later call instead of being starved. The walk position is scheduling state
+/// only: every offered resume re-derives its premise in the store's write
+/// transaction.
 async fn resume_retryable_holds(store: &Store, limit: u32) -> Result<(), CoreError> {
-    let page = store
-        .unfinished_deletions(None, limit)
-        .await
-        .map_err(deletion_error)?;
+    let mut walk = UnfinishedWalk::open(store, DeletionWalk::RetryableHold).await?;
+    let page = walk.page(store, limit).await?;
+    let page_len = page.len();
     for record in page {
+        walk.examined(record.current.operation);
         if is_retryable_hold(record.phase, record.hold) {
             // The store re-checks the phase, sweep, and hold class inside its
             // write transaction; a refusal (another writer moved the
@@ -587,6 +733,7 @@ async fn resume_retryable_holds(store: &Store, limit: u32) -> Result<(), CoreErr
                 .map_err(deletion_error)?;
         }
     }
+    walk.advance(store, page_len < limit as usize).await?;
     Ok(())
 }
 
@@ -641,6 +788,28 @@ impl HeldRetrySchedule {
     }
 }
 
+/// One bounded serving tick: at most one backed-off resume per retryable hold
+/// plus exactly one fan-out pass.
+///
+/// Holds are read from the durable phase; the schedule bounds how often a hold
+/// is retried, and a resume is offered only to `Held(Unavailable)` operations.
+/// `GenerationExhausted` is never retried (fail closed). The pass itself is
+/// [`drive_targeted_deletion`], so a tick can never run unbounded participant
+/// work and can never complete an operation without the sealed store
+/// boundary re-deriving every premise.
+///
+/// The hold page is the next window of the retryable-hold walk, so a tick
+/// examines a bounded page while successive ticks rotate through a hold set
+/// larger than one page instead of re-reading the head. Because the in-memory
+/// schedule only sees the window read by its tick, its backoff bounds
+/// consecutive attempts within a lap; a hold is still offered at most one
+/// resume per lap while the set exceeds one page, and the schedule is pacing
+/// only, never authority.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for an invalid pass and when the canonical
+/// store refuses.
 pub(crate) async fn tick_targeted_deletion(
     store: &Store,
     registry: &ErasureParticipantRegistry,
@@ -653,10 +822,9 @@ pub(crate) async fn tick_targeted_deletion(
         )));
     }
     let tick = schedule.next_tick();
-    let page = store
-        .unfinished_deletions(None, pass.operation_limit)
-        .await
-        .map_err(deletion_error)?;
+    let mut walk = UnfinishedWalk::open(store, DeletionWalk::RetryableHold).await?;
+    let page = walk.page(store, pass.operation_limit).await?;
+    let page_len = page.len();
     let retryable: HashSet<DeletionOperationId> = page
         .iter()
         .filter(|record| is_retryable_hold(record.phase, record.hold))
@@ -664,6 +832,7 @@ pub(crate) async fn tick_targeted_deletion(
         .collect();
     schedule.retain_only(&retryable);
     for record in &page {
+        walk.examined(record.current.operation);
         if !retryable.contains(&record.current.operation)
             || !schedule.eligible(record.current.operation, tick)
         {
@@ -684,6 +853,8 @@ pub(crate) async fn tick_targeted_deletion(
             | DeletionLifecycleOutcome::Finalizing => {}
         }
     }
+    walk.advance(store, page_len < pass.operation_limit as usize)
+        .await?;
     drive_targeted_deletion(store, registry, pass).await
 }
 
@@ -4017,6 +4188,353 @@ mod tests {
         assert_eq!(
             operation_record(&handle, current.operation).await.phase,
             DeletionOperationPhase::Completed
+        );
+    }
+
+    /// F-3 regression: an unfinished set larger than `operation_limit` is
+    /// rotated across passes instead of truncated to the first page. The
+    /// rotation is scheduling only: every operation stays unfinished on its
+    /// own durable evidence.
+    #[tokio::test]
+    async fn a_pass_rotates_through_more_unfinished_operations_than_the_limit() {
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-rotation").await else {
+            panic!("the host must open");
+        };
+        // Distinct owners per operation so "visited" is observable per
+        // identity instead of being conflated in one shared participant.
+        handle.reset_deletion_participants_for_tests();
+        let mut participants = Vec::new();
+        for (index, owner) in [
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+            ParticipantOwnerRef::Task,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let participant = Arc::new(TestParticipant::new(
+                owner,
+                ParticipantCompletionStatus::MoreWork,
+            ));
+            handle
+                .register_deletion_participant(participant.clone())
+                .unwrap();
+            admit(&handle, &format!("rotation-target-{index}"), vec![owner]).await;
+            participants.push(participant);
+        }
+        let visited = |participants: &[Arc<TestParticipant>]| {
+            participants
+                .iter()
+                .filter(|participant| participant.calls() > 0)
+                .count()
+        };
+        let pass = TargetedDeletionPass::new(2, 1);
+        let first = handle.drive_targeted_deletion(pass).await.unwrap();
+        assert_eq!(first.operations, 2, "one pass stays inside its bound");
+        assert_eq!(
+            visited(&participants),
+            2,
+            "the first pass examines only the head page"
+        );
+        let second = handle.drive_targeted_deletion(pass).await.unwrap();
+        assert_eq!(
+            visited(&participants),
+            3,
+            "the next pass starts after the cursor and reaches the tail operation"
+        );
+        assert_eq!(second.operations, 1, "the rotated pass examines the tail");
+        assert_eq!(
+            handle
+                .store
+                .unfinished_deletions(None, 100)
+                .await
+                .unwrap()
+                .len(),
+            3,
+            "rotation alone completes no operation"
+        );
+    }
+
+    /// F-3 regression: an operation admitted while the walk is mid-lap is still
+    /// collected. The id it lands on relative to the cursor is not known (ids
+    /// are not admission-ordered), so the rotation must reach it from either
+    /// side of the cursor within a bounded number of laps.
+    #[tokio::test]
+    async fn an_operation_admitted_mid_lap_is_collected_by_the_wrap() {
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-mid-lap").await else {
+            panic!("the host must open");
+        };
+        handle.reset_deletion_participants_for_tests();
+        for (index, owner) in [
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let participant = Arc::new(TestParticipant::new(
+                owner,
+                ParticipantCompletionStatus::MoreWork,
+            ));
+            handle.register_deletion_participant(participant).unwrap();
+            admit(&handle, &format!("mid-lap-{index}"), vec![owner]).await;
+        }
+        let pass = TargetedDeletionPass::new(1, 1);
+        handle.drive_targeted_deletion(pass).await.unwrap();
+        // The arrival is admitted while the walk sits between finished and
+        // unfinished ids.
+        let late_owner = ParticipantOwnerRef::Task;
+        let late = Arc::new(TestParticipant::new(
+            late_owner,
+            ParticipantCompletionStatus::MoreWork,
+        ));
+        handle.register_deletion_participant(late.clone()).unwrap();
+        admit(&handle, "mid-lap-late", vec![late_owner]).await;
+        for _ in 0..4 {
+            handle.drive_targeted_deletion(pass).await.unwrap();
+            if late.calls() > 0 {
+                break;
+            }
+        }
+        assert!(
+            late.calls() > 0,
+            "the mid-lap arrival is reached by the rotated walk"
+        );
+    }
+
+    /// F-3 regression: a completed head operation leaves the unfinished set
+    /// without stopping the walk at the operations after it.
+    #[tokio::test]
+    async fn a_completed_operation_does_not_stop_the_walk_at_the_later_operations() {
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-completed-head").await else {
+            panic!("the host must open");
+        };
+        handle.reset_deletion_participants_for_tests();
+        let mut registered = Vec::new();
+        for (index, owner) in [
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+            ParticipantOwnerRef::Task,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let participant = Arc::new(TestParticipant::new(
+                owner,
+                ParticipantCompletionStatus::MoreWork,
+            ));
+            handle
+                .register_deletion_participant(participant.clone())
+                .unwrap();
+            let current = admit(&handle, &format!("completed-head-{index}"), vec![owner]).await;
+            registered.push((current.operation, participant));
+        }
+        // The head is derived from the durable order, not from admission
+        // order: operation ids are not admission-ordered, and only the head
+        // verifies.
+        let order = handle.store.unfinished_deletions(None, 100).await.unwrap();
+        assert_eq!(order.len(), 3);
+        let head = order[0].current.operation;
+        registered
+            .iter()
+            .find(|(operation, _)| *operation == head)
+            .expect("the head operation is one of the admitted ones")
+            .1
+            .set_status(ParticipantCompletionStatus::Verified);
+
+        let pass = TargetedDeletionPass::new(1, 1);
+        let first = handle.drive_targeted_deletion(pass).await.unwrap();
+        assert_eq!(first.finalized, 1, "the verified head operation completes");
+        assert_eq!(
+            operation_record(&handle, head).await.phase,
+            DeletionOperationPhase::Completed
+        );
+        // The completed operation left the unfinished set and the cursor moved
+        // past it; the following passes must still reach the two operations
+        // after it instead of stopping at the vanished head.
+        handle.drive_targeted_deletion(pass).await.unwrap();
+        handle.drive_targeted_deletion(pass).await.unwrap();
+        for (operation, participant) in &registered {
+            if *operation == head {
+                continue;
+            }
+            assert!(
+                participant.calls() > 0,
+                "the operation after the completed head must be demanded"
+            );
+            assert_ne!(
+                operation_record(&handle, *operation).await.phase,
+                DeletionOperationPhase::Completed,
+                "an unfinished operation is not completed by a walk position"
+            );
+        }
+        assert_eq!(
+            handle
+                .store
+                .unfinished_deletions(None, 100)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// F-3 regression: the walk cursor is a scheduling position and never
+    /// completion truth. A pass that starts past a completion-ready operation
+    /// neither completes it unseen nor invents completion for the operation it
+    /// did examine; when the rotation reaches it, the same durable premise
+    /// completes it.
+    #[tokio::test]
+    async fn the_walk_cursor_is_a_position_and_never_completion_truth() {
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-cursor-truth").await else {
+            panic!("the host must open");
+        };
+        handle.reset_deletion_participants_for_tests();
+        let mut registered = Vec::new();
+        for (index, owner) in [
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+            ParticipantOwnerRef::Task,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let participant = Arc::new(TestParticipant::new(
+                owner,
+                ParticipantCompletionStatus::MoreWork,
+            ));
+            handle
+                .register_deletion_participant(participant.clone())
+                .unwrap();
+            let current = admit(&handle, &format!("cursor-truth-{index}"), vec![owner]).await;
+            registered.push((current, participant));
+        }
+        let order = handle.store.unfinished_deletions(None, 100).await.unwrap();
+        assert_eq!(order.len(), 3);
+        let head = registered
+            .iter()
+            .find(|(current, _)| current.operation == order[0].current.operation)
+            .expect("the head is one of the admitted operations")
+            .0;
+        let head_participant = Arc::clone(
+            &registered
+                .iter()
+                .find(|(current, _)| current.operation == head.operation)
+                .expect("the head is one of the admitted operations")
+                .1,
+        );
+        // Durable verification of the head is the only completion premise.
+        mark_all_participants_verified(&handle, head).await;
+        // The cursor starts after the head, so the pass cannot see it yet.
+        handle
+            .store
+            .set_deletion_walk_cursor(DeletionWalk::FanOut, Some(order[1].current.operation))
+            .await
+            .unwrap();
+        let pass = TargetedDeletionPass::new(1, 1);
+        let first = handle.drive_targeted_deletion(pass).await.unwrap();
+        assert_eq!(first.operations, 1);
+        assert_eq!(
+            first.finalized, 0,
+            "a position never completes an operation this pass did not settle"
+        );
+        assert_eq!(
+            operation_record(&handle, head.operation).await.phase,
+            DeletionOperationPhase::Active,
+            "the skipped completion-ready operation stays unfinished"
+        );
+        assert_eq!(
+            head_participant.calls(),
+            0,
+            "the skipped operation's participant was not demanded"
+        );
+        // The rotation wraps to it and completes it from the durable premise.
+        let mut completed = false;
+        for _ in 0..4 {
+            handle.drive_targeted_deletion(pass).await.unwrap();
+            if operation_record(&handle, head.operation).await.phase
+                == DeletionOperationPhase::Completed
+            {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "the rotation must reach and complete the delayed head"
+        );
+        assert!(
+            handle
+                .store
+                .deletion_completion_audit(head.operation)
+                .await
+                .unwrap()
+                .is_some(),
+            "the delayed completion re-derives and commits the audit"
+        );
+    }
+
+    /// F-3 regression: the retryable-hold scan rotates too, so holds past the
+    /// first page are offered a resume instead of being starved by the head.
+    #[tokio::test]
+    async fn the_retryable_hold_scan_rotates_through_more_holds_than_the_limit() {
+        let Some((handle, _dir)) = memory_handle("targeted-deletion-hold-rotation").await else {
+            panic!("the host must open");
+        };
+        handle.reset_deletion_participants_for_tests();
+        let mut participants = Vec::new();
+        for (index, owner) in [
+            ParticipantOwnerRef::Companion,
+            ParticipantOwnerRef::Learning,
+            ParticipantOwnerRef::Task,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let participant = Arc::new(TestParticipant::new(
+                owner,
+                ParticipantCompletionStatus::Held(ParticipantHoldClass::Unavailable),
+            ));
+            handle
+                .register_deletion_participant(participant.clone())
+                .unwrap();
+            admit(&handle, &format!("hold-rotation-{index}"), vec![owner]).await;
+            participants.push(participant);
+        }
+        let held = handle
+            .drive_targeted_deletion(TargetedDeletionPass::new(3, 1))
+            .await
+            .unwrap();
+        assert_eq!(held.held, 3, "all three operations hold after the drive");
+        assert!(
+            participants
+                .iter()
+                .all(|participant| participant.calls() == 1)
+        );
+
+        let registry = crate::lock_unpoison(&handle.targeted_deletion).clone();
+        let mut schedule = HeldRetrySchedule::new();
+        let pass = TargetedDeletionPass::new(2, 1);
+        for _ in 0..3 {
+            tick_targeted_deletion(&handle.store, &registry, pass, &mut schedule)
+                .await
+                .unwrap();
+        }
+        assert!(
+            participants
+                .iter()
+                .all(|participant| participant.calls() >= 2),
+            "every hold must be resumed and re-driven by the rotating scan"
+        );
+        assert_eq!(
+            handle
+                .store
+                .unfinished_deletions(None, 100)
+                .await
+                .unwrap()
+                .len(),
+            3,
+            "a resumed hold stays unfinished until its participant verifies"
         );
     }
 

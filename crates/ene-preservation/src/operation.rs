@@ -278,6 +278,37 @@ pub struct DeletionOperationRecord {
     pub hold: Option<DeletionHoldReason>,
 }
 
+/// One bounded walk over the unfinished deletion operations that keeps a
+/// durable scheduling cursor.
+///
+/// A cursor is a position in the keyset of unfinished operations, never
+/// completion, verification, or hold truth: every walk re-derives the phase,
+/// hold, and participant status of each operation it visits from the
+/// canonical rows, and a cursor naming a completed or vanished operation is
+/// only the start position of the next page. The walks are separate because
+/// each makes an independent decision over the same unfinished set: the
+/// fan-out drives operations, the hold scan decides which holds to offer a
+/// resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionWalk {
+    /// The Host fan-out pass over unfinished operations.
+    FanOut,
+    /// The retryable-hold resume scan (`Held(Unavailable)`).
+    RetryableHold,
+}
+
+impl DeletionWalk {
+    /// Storage token of the closed walk set. An unknown stored token is torn
+    /// state, never a defaulted walk.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FanOut => "fan_out",
+            Self::RetryableHold => "retryable_hold",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartTargetedDeletionOutcome {
     Started(DeletionOperationRef),
@@ -345,6 +376,33 @@ pub trait PreservationRepository: Send + Sync {
     ) -> impl std::future::Future<
         Output = Result<Vec<DeletionOperationRecord>, PreservationTechnicalError>,
     > + Send;
+    /// The durable scheduling position of one unfinished-operation walk, or
+    /// `None` when the next page starts at the beginning.
+    ///
+    /// The position is a rotation cursor, never completion truth: it is the
+    /// operation id a previous bounded pass examined last, and no operation
+    /// state is ever derived from it. A missing row is a fresh walk at the
+    /// beginning, not an empty unfinished set.
+    fn deletion_walk_cursor(
+        &self,
+        walk: DeletionWalk,
+    ) -> impl std::future::Future<
+        Output = Result<Option<DeletionOperationId>, PreservationTechnicalError>,
+    > + Send;
+    /// Persists the scheduling position of one walk after a bounded pass
+    /// examined operations up to `after`; `None` restarts the next pass at the
+    /// beginning.
+    ///
+    /// This writes only the cursor: it never changes an operation phase,
+    /// participant state, condition, or completion premise, and it is safe to
+    /// call with a stale position (the next pass re-derives everything it
+    /// visits).
+    fn set_deletion_walk_cursor(
+        &self,
+        walk: DeletionWalk,
+        after: Option<DeletionOperationId>,
+    ) -> impl std::future::Future<Output = Result<(), PreservationTechnicalError>> + Send;
+    /// Same canonical current set used by AU14 and Task resume. No sentinel.
     fn current_erasure_conditions(
         &self,
         after: Option<DeletionOperationId>,

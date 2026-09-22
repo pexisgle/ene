@@ -2714,6 +2714,69 @@ impl PreservationRepository for Store {
         .await
     }
 
+    async fn deletion_walk_cursor(
+        &self,
+        walk: DeletionWalk,
+    ) -> Result<Option<DeletionOperationId>, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_deletion_blocking(self, move || {
+            let guard = lock_shared(&conn);
+            let after: Option<String> = guard
+                .query_row(
+                    "SELECT after_id FROM deletion_walk_cursor WHERE walk=?1",
+                    [walk.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            match after {
+                None => Ok(None),
+                Some(text) => Ok(Some(DeletionOperationId::from_raw(
+                    decode_id(&text).map_err(|_| corrupt())?,
+                ))),
+            }
+        })
+        .await
+    }
+
+    async fn set_deletion_walk_cursor(
+        &self,
+        walk: DeletionWalk,
+        after: Option<DeletionOperationId>,
+    ) -> Result<(), PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_deletion_blocking(self, move || {
+            let mut guard = lock_shared(&conn);
+            // The cursor is not completion state: it shares the single-writer
+            // boundary so concurrent drivers cannot interleave a torn position,
+            // and it never joins the operation/participant rows in a check.
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            match after {
+                // A wrapped walk keeps no row: absence means "start at the
+                // head", exactly like a fresh walk.
+                None => {
+                    tx.execute(
+                        "DELETE FROM deletion_walk_cursor WHERE walk=?1",
+                        [walk.as_str()],
+                    )
+                    .map_err(storage)?;
+                }
+                Some(operation) => {
+                    tx.execute(
+                        "INSERT INTO deletion_walk_cursor (walk,after_id) VALUES (?1,?2)
+                         ON CONFLICT(walk) DO UPDATE SET after_id=excluded.after_id",
+                        params![walk.as_str(), encode_id(operation.as_raw())],
+                    )
+                    .map_err(storage)?;
+                }
+            }
+            tx.commit().map_err(storage)
+        })
+        .await
+    }
+
     async fn current_erasure_conditions(
         &self,
         after: Option<DeletionOperationId>,
