@@ -16,6 +16,7 @@ Stage 0〜6 の機能を、初回セットアップから日常の会話・管�
 
 - 初回セットアップ、同梱キャラクター `ene`、一対一のテキスト会話、日本語/英語の切り替え。
 - Memory と由来・変更履歴、Task と進捗・結果・明示的な再開、usage / cost / cap、Targeted Deletion と復旧操作の text-first 管理画面。
+- 通常 Host–Client 接続の WSS 統一（A2）。ローカルの GUI / CLI を対象にし、remote Client の製品提供は Stage 14 に残す。
 - VRM 1.0 の透明 desktop avatar、移動・resize・一時非表示、待機/応答中の表情・仕草、描画故障から独立したテキスト操作。
 - acceptance の全 Milestone 1 scenario と性能基準。対象は Windows 11 x86-64 と NixOS 26.11 x86-64 / KDE Wayland、日本語と英語。
 
@@ -93,7 +94,7 @@ NixOS 26.11 は Support Matrix の Linux 対象だが、この時点では正式
 
 | Slice | 範囲 | gate |
 |---|---|---|
-| A1a | `ene-ctl` から `ene-client` を抽出。GUI から使う非同期接続・correlation・device identity・erasure adapter | 実 socket / named pipe の既存 Client 回帰、connection replacement、slow consumer、待機中の deletion demand。event loop を塞がず bounded queue / cancellation を持つ |
+| A1a | `ene-ctl` から `ene-client` を抽出。GUI から使う非同期接続・correlation・device identity・erasure adapter | A1a 完了時点では実 socket / named pipe で Client 回帰を確認。connection replacement、slow consumer、待機中の deletion demand、event loop を塞がない bounded queue / cancellation は A2 の実 WSS でも再検証する |
 | A1b | 要求専用 listener、公式 GUI spawn / 限定継承、seat と session、`approve-*` の requester 化 | 空席 / 占有中とも一般 requester は承認不能。CLI と GUI は同時利用可能。GUI 不在時の起動、起動不能の明示 outcome、切断 / restart / stale / 二重完了を検証 |
 | A1c | OS-store port、candidate / version / mutation 記録、approval sweep と revision の commit、snapshot / lease の公開、startup / cleanup | Credential publication 第6節の全 race / crash / no-secret gate。OS write の成否不明を自動再実行せず、read-only は repair しない |
 
@@ -110,6 +111,20 @@ A1b / A1c は A1a 後、共通 session / mutation outcome の最小 interface �
 - credential の有効化・失効と旧世代の scrub / claim / 遅延結果、OS put / DB commit / snapshot 公開 / 応答の各 crash point を検証する。詳細な期待結果は Credential publication に従う。
 
 A1 の完了は Host / transport / publication 基盤の成立であり、実 GUI の直接確認と初回セットアップの合格は B で記録する。
+
+### A2: 通常 Client 通信の WSS 統一（未実装）
+
+通常 Client channel の設計を先に確定し、実装は後続の作業とします。正本は [IPC 第7・9・10・22・23・25節](../../design/concrete/host-client-ipc.md)、[Crate / Module 分解](../../design/concrete/crate-module-decomposition.md)、[Persistence / Recovery Group K](../../design/concrete/persistence-recovery.md) です。既存 A1 の統合や旧 transport の検証成功は、A2 の完了を意味しません。
+
+- DTO と純粋な MessagePack codec を `ene-api` へ集約し、通常通信の `ene-plugin-ipc` 依存と独自の長さプレフィックスを外す。Host と `ene-client` の入出力を WSS へ置換し、GUI / CLI を同じ変更で切り替える。旧 transport の並行サポート、平文 WS、互換 fallback、新規 transport crate は作らない。
+- Host 証明書・鍵の保護、単一 Host lock、ローカル runtime 情報の安全な公開と読取、TLS 検証、トークンによる受付を接続する。`SameMachine` の検証結果を現在の connection に束縛し、既存の端末認証・currentness・presence commit に渡す。
+- bounded I/O、認証前の制限、Origin 拒否、Ping / Pong / Close を共通化する。Host-local control と投影 IPC は既存の経路を維持する。remote listener の製品公開・接続設定 UI・実 remote pairing は Stage 14 に残す。
+
+**gate**:
+
+- Windows / Linux の実 WSS で [IPC V-15 / V-16](../../design/concrete/host-client-ipc.md#v-15-wss-の接続準備host-検証ローカル受付) のローカル項目と、[acceptance S5-01〜24](../../requirements/acceptance.md) の既存 Host integration / OS 別 Client E2E 対象を通す。偽 Host、pin・トークン・起動世代不一致、別 OS ユーザー、Origin、過大・分割電文、認証前無応答、二重 Host、runtime 残存・ポート再利用を含める。remote の種別判定は境界テストで拒否条件を固定し、Stage 14 の実接続検証とは区別する。
+- GUI の初回 setup・再接続・削除参加と CLI 接続を確認する。connection replacement、遅延 ACK、slow consumer、Host-only Task 継続、作用の無断再実行ゼロを維持し、A1b / A1c の確認・秘密保護 gate と Body の投影 IPC 回帰を通す。
+- TLS 追加後の起動時間・CPU・常駐メモリ・応答性を計測し、§7 と first-party-desktop 第8節の性能基準で F を再検証する。新しい性能閾値は作らない。実装時には repository の fmt / lint / test / build / docs gate を通す。
 
 ### B: 初回セットアップからテキスト会話までの縦断 GUI
 
@@ -180,6 +195,8 @@ Overlay / VRM / measurement probe → D renderer ───→ D integration → 
 
 A1a は GUI / overlay probe を待たない。A1b は child provenance、A1c は credential publication の gate を満たす。B は A1 全体と GUI / 秘密入力 / 実 OS-store probe の後。D の単体 renderer は独立に進められるが、GUI fallback の完了 gate は B への統合後である。Linux 検証は F で実施し、NixOS 26.11 公式 desktop を待たない。
 
+A2 は既存の A1 / B 接続経路と本設計更新を前提に進めます。上図の初期実装順を遡って書き換えず、A2 → E の WSS 回帰 → F の性能・実機再検証を追加します。D の renderer 作業とは並列化できますが、A2 完了前の transport / 性能結果だけで Stage 7 を close しません。
+
 C1 / C2 / C3 は異なる owner と画面に分け、共通 Client boundary・DTO・schema が確定した範囲だけ並列化します。
 
 ## 6. acceptance と証拠の対応
@@ -191,10 +208,10 @@ C1 / C2 / C3 は異なる owner と画面に分け、共通 Client boundary・DT
 | §3.1–§3.10: Memory | C1 | 会話由来の形成・訂正・状況変化・想起・統合・通常忘却と、scope / importance / 根拠 / revision の GUI 確認 |
 | §3.11–§3.12: Targeted Deletion | C3 / E | GUI での要求・control 確認・状態/復旧、GUI 一時コピーの消去 |
 | §4: Workspace Task | C2 | GUI からの会話→委任→並行会話/追加指示/cancel→結果 |
-| §5: S5-01〜S5-24 | A1 / C2 / E | 既存の全 Host / transport 回帰に加え、GUI close / reconnect / presentation ACK / manual resume を実経路で確認 |
+| §5: S5-01〜S5-24 | A1 / A2 / C2 / E | 既存の全 Host 回帰と両 OS の実 WSS で、GUI close / reconnect / presentation ACK / manual resume を確認 |
 | §6: 障害とデータ保護 | B / C2 / C3 / D / E | 認証失敗、provider 不通、renderer/Agent crash、cancel、保存中終了。無断再実行ゼロ |
 | §7.1–§7.2: 費用と機密 | C3 / E | token と費用内訳の表示、Unknown の区別、登録秘密の非露出 |
-| Performance Gates | A0 / D / F | 両 OS の全 process 計測、実描画 FPS と操作受付反映。分母は first-party-desktop 第8節 |
+| Performance Gates | A0 / A2 / D / F | WSS 統一後に両 OS の全 process 計測、実描画 FPS と操作受付反映を確認。分母は first-party-desktop 第8節 |
 
 protocol / currentness / failure は、実 Host・store・Client transport と barrier 制御した fake provider で自動化します。headless CI の成功は実 GPU / compositor / IME / desktop 性能の合格と別です。
 

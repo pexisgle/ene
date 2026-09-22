@@ -6,6 +6,7 @@
 
 - **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A1 と B/C/E は統合済み、D/F の実 desktop acceptance に blocker が残る**
   - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
+  - 通常 Host–Client 通信の WSS 統一は設計更新済み・実装未着手。[Stage 7 A2](stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装) で置換と再検証を行う。既存の OS ローカル接続の実装・検証を WSS 対応済みとは扱わない。
   - Linux 検証は Cloud Agent 上の Ubuntu 24.04 X11 で実施済み（[報告](reports/stage-7-linux-2026-09-19.md)）。NixOS 26.11 を待たない。Stage 7 は完了しない。
   - D/F production candidate（KDE layer-shell / Windows DWM、wgpu surface、`vrm-runtime` 0.1、presentation/CPU/RSS/operation measurement）は実装済み（[実装報告](reports/stage-7-df-implementation-2026-09-21.md)）。Windows 11 D/F runtime / platform acceptanceは完了（[Windows D/F acceptance報告](reports/stage-7-windows-df-acceptance-2026-09-22.md)）。
   - KDE Wayland 実環境の技術成立 probe（layer-shell 表示、click-through、wp_presentation evidence、hide/restore/resize、入れ子 KWin scale=2、IME）、Linux Secret Service 実機 probe、Linux Performance Gate（release 5 分、全 PID、presented FPS、cancel 1 秒、click-through）を実施し、Pass と未実施を分離して記録した（[KDE Wayland probe 報告](reports/stage-7-kde-wayland-probe-2026-09-22.md)）。probe で見つけた実装欠陥 6 件（presentation output、clean exit segfault、input region、hide/restore、clippy gate、FPS 窓境界）は修正済みで、land を [#1677](https://github.com/pexisgle/ene/issues/1677) で追跡する。

@@ -43,12 +43,12 @@ flowchart TB
   cu[ene Computer Use]
 
   owner -->|"ジェスチャ。別 process の完了ではない"| desktop
-  desktop -->|"Client channel ene-api"| host
+  desktop -->|"Client channel WSS / ene-api"| host
   desktop -->|"bound completion / secret intake"| host
   host -->|"spawn + inherited private channel / session"| desktop
   cu -.->|"denylist: confirm / secret / OS prompt を狙えない"| desktop
   desktop -->|"projection IPC no secrets / no domain"| body
-  ctl -->|"Client channel only"| host
+  ctl -->|"Client channel WSS only"| host
 ```
 
 - **Host (`apps/ene-core`)** は GUI / wgpu を持たない。Client 切断後も Task を続ける。要求専用 control listener を持ち、公式 GUI の起動・専用 channel・生存記録から `FirstPartyControlSeat` を発行する。`ConfirmationSession` の唯一の minter / binder である。Body process の有無は知らない。
@@ -137,8 +137,8 @@ body → desktop:
 
 要件「信頼境界」の本人による直接確認を、[Runtime Topology の信頼前提](../architecture/runtime-topology.md#第一者確認面の信頼前提)の下で満たす。確認面の由来、確認対象の freshness、ユーザーの直接操作は別の条件であり、すべて必要である。
 
-- **Client channel**（既存の unix socket / named pipe、`ene-api`）: pairing、session、chat、filtered management、Task、erasure。`ManagementIntent` は候補であり、`confirmed=true` は `DeniedByBoundary`。通常の GUI Client 経路も最終確認にはならない。
-- **Host-local control**（`ene-local-control`）: **要求専用 listener** と **非公開の確認 channel** に分ける。前者は公開 local endpoint の request / 非秘密 outcome、後者は Host が起動した GUI への challenge、秘密 intake、session completion を扱う。二つの役割は別の frame enum と dispatch にし、requester に確認 frame を decode・転送させない。どちらも remote WebSocket や `ene-api` に載せない。
+- **Client channel**（同一 PC も WSS＋MessagePack、`ene-api`）: pairing、session、chat、filtered management、Task、erasure。接続先の発見、Host の TLS 検証、ローカル受付、`SameMachine` の判定は [IPC 第10節](host-client-ipc.md#10-transport) に従う。`ene-client` が接続情報を読み取り、GUI と CLI は同じ接続経路を使う。`ManagementIntent` は候補であり、`confirmed=true` は `DeniedByBoundary`。ローカルトークンを持つことも最終確認にはならない。
+- **Host-local control**（`ene-local-control`）: **要求専用 listener** と **非公開の確認 channel** に分ける。前者は公開 local endpoint の request / 非秘密 outcome、後者は Host が起動した GUI への challenge、秘密 intake、session completion を扱う。二つの役割は別の frame enum と dispatch にし、requester に確認 frame を decode・転送させない。どちらも同一 PC を含め通常 Client の WSS や `ene-api` に載せない。第4節の投影 IPC も専用経路を維持する。
 
 要求専用 listener は Linux の保護された runtime directory + peer UID、Windows の logon SID DACL + peer token / `PIPE_REJECT_REMOTE_CLIENTS` で同じ local user に限定する。ただし local transport の適格性を確認権限にしない。複数 requester は利用できるが、listener から seat を取得する操作は提供しない。
 
@@ -271,7 +271,7 @@ C1 は通常のテキスト入力ではない。timeline / 検索 / 永続 undo 
 | `apps/ene-ctl` | CLI Client。Client channel のみ | 既存。control は話さない |
 | `apps/ene-desktop` | 製品 GUI と first-party 確認面 | A1（接続）/ B（画面） |
 | `apps/ene-body` | VRM overlay | D。compile 隔離のため別 package |
-| `crates/ene-client` | Host Client IPC（handshake, correlation, device identity, erasure participant） | A1 で `ene-ctl` から抽出。GUI は `ene-ctl` に依存しない |
+| `crates/ene-client` | Host Client WSS 接続（接続先の発見・TLS、handshake、correlation、device identity、erasure participant） | A1 で `ene-ctl` から抽出。WSS 統一は [Stage 7 A2](../../implementation/stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装) で行う。GUI は `ene-ctl` に依存しない |
 | `crates/ene-local-control` | 要求専用 DTO と専用確認 DTO を分ける。`ene-api` に載せず、秘密フィールドは redacted | A1 と同時の最小 crate |
 
 作らない: `ene-stage`, `ene-stage-ui`, `ene-vrm`, `ene-tray-linux`。トレイは Milestone 1 に無い。`ene-character` / `ene-plugin-host` も GUI のために先行 scaffold しない。同梱 `ene` の VRM は install asset とし、Host が W-7 descriptor を出し、GUI が Body へパス/バイトだけ渡す。
