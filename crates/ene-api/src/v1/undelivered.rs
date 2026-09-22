@@ -1,20 +1,28 @@
 use serde::{Deserialize, Serialize};
 
-use super::refs::{CompanionWireRef, RoundWireId};
+use super::refs::{CompanionWireRef, RoundWireId, string_wire_ref};
 use super::round::PresentationStatus;
 
-macro_rules! string_wire_ref {
-    ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        pub struct $name(pub String);
-    };
-}
-
-string_wire_ref!(PresentationReceiptWireRef);
-string_wire_ref!(UndeliveredWireRef);
-string_wire_ref!(TaskWireRef);
-string_wire_ref!(ReportSourceWireRef);
-string_wire_ref!(PageCursorWire);
+string_wire_ref!(
+    PresentationReceiptWireRef,
+    "Opaque presentation receipt, Host-issued per Companion presentation. Echo only; one live receipt per Companion."
+);
+string_wire_ref!(
+    UndeliveredWireRef,
+    "Opaque undelivered-item reference, Host-issued per connection query. Echo only."
+);
+string_wire_ref!(
+    TaskWireRef,
+    "Opaque Task reference, Host-issued per connection query. Echo only; never a TaskId."
+);
+string_wire_ref!(
+    ReportSourceWireRef,
+    "Opaque report-source reference, Host-issued per connection query. Echo only."
+);
+string_wire_ref!(
+    PageCursorWire,
+    "Opaque page cursor, Host-issued and bound to its query and Task. Echo only; reuse across queries answers StaleBaseView."
+);
 
 pub const DEFAULT_PAGE_LIMIT: u32 = 50;
 pub const MAX_PAGE_LIMIT: u32 = 50;
@@ -135,7 +143,11 @@ pub struct TaskListPage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskListResponse {
     Page(TaskListPage),
-    StaleBaseView { current: Option<PageCursorWire> },
+    StaleBaseView {
+        current: Option<PageCursorWire>,
+    },
+    /// The store could not answer; nothing was read.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -170,7 +182,11 @@ pub struct TaskReportPage {
 pub enum TaskReportResponse {
     Page(TaskReportPage),
     UnknownRef,
-    StaleBaseView { current: Option<PageCursorWire> },
+    StaleBaseView {
+        current: Option<PageCursorWire>,
+    },
+    /// The store could not answer; nothing was read.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -225,6 +241,8 @@ pub struct TaskSelected {
 pub enum SelectTaskResponse {
     Selected(TaskSelected),
     UnknownRef,
+    /// The store could not answer; nothing was changed.
+    Unavailable,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

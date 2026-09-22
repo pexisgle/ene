@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::command::CommandReplayRejectWire;
 use super::deletion::{
     DeletionDemand, DeletionStatusRequest, DeletionStatusResponse, LocalErasureResult,
 };
@@ -74,6 +75,7 @@ pub enum WirePayload {
     UsageSummaryRequest(UsageSummaryRequest),
     UsageSummaryResponse(UsageSummaryResponse),
     BodyStateHint(BodyStateHint),
+    CommandReplayReject(CommandReplayRejectWire),
     Reject(RejectNotice),
 }
 
@@ -124,6 +126,7 @@ impl WirePayload {
             Self::UsageSummaryRequest(_) => "UsageSummaryRequest",
             Self::UsageSummaryResponse(_) => "UsageSummaryResponse",
             Self::BodyStateHint(_) => "BodyStateHint",
+            Self::CommandReplayReject(_) => "CommandReplayReject",
             Self::Reject(_) => "Reject",
         }
     }

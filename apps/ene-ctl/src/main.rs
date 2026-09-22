@@ -897,6 +897,9 @@ async fn request_task_list(
                 "stale task-list cursor; re-query from the head",
             )))
         }
+        WirePayload::TaskListResponse(TaskListResponse::Unavailable) => Err(
+            CliError::ServerOutcome(String::from("task list is unavailable; retry later")),
+        ),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while listing tasks; expected TaskListResponse",
             unexpected.message_type()
@@ -933,6 +936,9 @@ async fn request_task_report(
             TaskReportResponse::UnknownRef | TaskReportResponse::StaleBaseView { .. } => Err(
                 CliError::ServerOutcome(String::from("task report moved underneath the request")),
             ),
+            TaskReportResponse::Unavailable => Err(CliError::ServerOutcome(String::from(
+                "task report is unavailable; retry later",
+            ))),
         },
         cmds::ReportAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
     }
@@ -981,6 +987,9 @@ async fn request_select_task(
         WirePayload::SelectTaskResponse(SelectTaskResponse::Selected(selected)) => Ok(selected),
         WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef) => Err(
             CliError::ServerOutcome(String::from("unknown task reference; re-list and retry")),
+        ),
+        WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable) => Err(
+            CliError::ServerOutcome(String::from("task selection is unavailable; retry later")),
         ),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while selecting a task; expected SelectTaskResponse",

@@ -1,9 +1,66 @@
+//! One-to-one text round trip: intake, reply, stream, ack, timeline.
+//!
+//! `HostHandle::submit_text` mediates one accepted input: durable idempotent
+//! replay, presence attach, presentation intake, then the companion-owned
+//! turn (`ene_companion::dialogue`), whose inference boundary
+//! (`ene_inference::InferenceExecutor`) owns admission, the attempt claim,
+//! the provider call, adoption, and usage accounting. The Host maps the
+//! resulting domain outcome to frames and records the open round between the
+//! owner append and dispatch. A companion reply carrying a
+//! `[task-control]` directive is interpreted by the companion and executed
+//! through `HostTaskControl` against the existing Task
+//! owner boundaries before the reply is stored; the stored reply is the
+//! owner-derived text, never the directive. `HostHandle::confirm_presentation`
+//! applies presentation observations, and `HostHandle::answer_history`
+//! restores the filtered timeline.
+//!
+//! `Stage 2` wire reason vocabulary for
+//! [`NeedsRevalidation`](ene_api::v1::round::RoundIntakeOutcomeWire::NeedsRevalidation)
+//! outcomes: `"missing-generation-view"`, `"unknown-companion"`,
+//! `"stopped-companion"` (all straight from
+//! [`ene_presentation::RevalidationReason`]), plus `"setup-incomplete"` and
+//! `"consent-stale"` for the admission gates and `"not-in-allowlist"` as a
+//! defensive closed-world denial. `"unknown-reason"` is defensive only:
+//! [`ene_presentation::check_intake`] never emits its source variant.
+//!
+//! Infallible-frame mapping used here (no `Result`: [`HostHandle::handle_frame`]
+//! answers every frame):
+//!
+//! - Store failures before acceptance become
+//!   [`HeldForTransition`](ene_api::v1::round::RoundIntakeOutcomeWire::HeldForTransition):
+//!   no work started, so a later retry is safe.
+//! - A reused command key with a different [`RequestFingerprint`] becomes the
+//!   typed
+//!   [`CommandReplayReject`](ene_api::v1::payload::WirePayload::CommandReplayReject)
+//!   (`CommandIdConflict`), judged by the companion's fingerprint comparison
+//!   shared with the store's in-transaction pre-check: declined without side
+//!   effects, never an intake outcome, never a retry signal.
+//! - A stale or held owner append becomes the matching outcome frame. Its
+//!   projection entry stays mapped but unpublished: no open-round record was
+//!   made and no ack carried it, so later intakes surface the round as stale
+//!   rather than rebinding anything onto it.
+//! - An admission decline becomes `NeedsRevalidation` with the setup/consent
+//!   reason above: the Client recovers by running the setup flow, then retries
+//!   with a fresh local id.
+//! - Any failure after acceptance (inference not sent, transport error, reply
+//!   append lost) becomes the accept ack plus a stream closed as
+//!   [`Interrupted`](ene_api::v1::round::StreamClose::Interrupted). Usage
+//!   accounting follows certainty, never adoption (owned by
+//!   `ene-inference`): never-sent calls record no fact, uncertain attempts
+//!   record [`Unknown`](ene_inference::UsageSource::Unknown) counts, and
+//!   reported counts are kept even when the reply cannot be adopted. A
+//!   usage-record failure after a durable reply keeps the `Completed` close:
+//!   the reply happened, and the usage gap is the documented `Stage 2`
+//!   follow-up (retry queue), not a reason to misreport the stream.
+//! - Presentation observations and unresolvable confirmation rounds produce no
+//!   reply: confirmation is an observation, never a report of completion.
+
+use ene_api::v1::command::CommandReplayRejectWire;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
 use ene_api::v1::refs::{ConnectionWireId, RevalidationReasonWire};
-use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
-    ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryResponse,
+    ConfirmPresentationWire, HISTORY_LIMIT_MAX, HistoryItem, HistoryRequest, HistoryResponse,
     HistoryRole as HistoryRoleWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
     SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
@@ -41,7 +98,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
     CredStore, FrameSink, HostHandle, LiveInput, attribution_to_wire, device_client, emit_end,
-    outgoing_fact, outgoing_frame, reject_frame, stale_reject, unpaired_close,
+    outgoing_fact, outgoing_frame, stale_reject, unpaired_close,
 };
 
 fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<CommandId> {
@@ -157,10 +214,15 @@ fn revalidate_frame(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFr
     )
 }
 
-fn command_conflict_detail(command: &CommandId) -> String {
-    format!(
-        "command {} reused with a different request",
-        command.0.as_uuid().as_hyphenated()
+/// Builds the typed command-id-conflict reject for `command`: the reused id
+/// travels structured, never inside an untyped detail string (IPC §24).
+fn command_conflict_frame(frame: &WireFrame, live: &LiveInput, command: &CommandId) -> WireFrame {
+    outgoing_frame(
+        frame,
+        live,
+        WirePayload::CommandReplayReject(CommandReplayRejectWire::CommandIdConflict {
+            command_id: CommandWireId(command.0.as_uuid()),
+        }),
     )
 }
 
@@ -256,6 +318,56 @@ impl HostHandle {
         }
     }
 
+    /// Mediates one [`SubmitTextInput`] frame into the companion turn.
+    ///
+    /// Order: companion mapping, mandatory command key, durable idempotent
+    /// replay, presence attach, presentation intake, dialogue prompt
+    /// assembly, then the companion-owned turn
+    /// (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
+    /// inference boundary. The assembled prompt's canonical read-set rides
+    /// the admission as the attempt's `data_use`, so the claim gate and the
+    /// deletion admission see the exact provenance the provider input was
+    /// built from. Admission precedes the append so a declined input leaves
+    /// neither history rows nor transient round claims behind; the round
+    /// projection is minted atomically with its map entry (one domain round,
+    /// one wire), and a racy duplicate that lands on
+    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
+    /// accept without re-running inference. The canonical round premise comes
+    /// from the input `round`, a populated envelope `round_view` must agree
+    /// with it, and a force-new request carries no premise at all — a
+    /// contradictory frame answers stale with current values instead of
+    /// adopting either side; a present-but-unresolvable round is stale, never
+    /// rebound.
+    ///
+    /// Presence attach runs when the loaded attribution is `NoActive` or
+    /// `RecoveryWait`, and only on the envelope's observed generation
+    /// premise: a missing `presence_generation_view` revalidates, a view
+    /// that does not equal the current generation answers stale with the
+    /// current values, and only then does the compare-and-commit run.
+    ///
+    /// A committed attach publishes the resulting attribution fact to this
+    /// connection (IPC §12.2): the fact is unsolicited — it names no
+    /// `reply_to`, so a Client awaiting this submit's answer absorbs it
+    /// instead of mistaking it for one — and it precedes the
+    /// auto-presented absence summary as well as this submit's own accept,
+    /// open, and stream frames. The order is load-bearing: the summary's
+    /// receipt carries the fresh generation and the Client's first ACK for
+    /// it echoes the generation it observed, so a summary delivered ahead
+    /// of its fact could only be answered `StalePresentation`.
+    ///
+    /// Idempotency is durable over the envelope `command_id`, looked up
+    /// through [`lookup_command`](HistoryRepository::lookup_command) and
+    /// judged by the same [`RequestFingerprint`] the store compares
+    /// in-transaction (role, body, language, sender incarnation, and the
+    /// canonical round intent — never the Host-decided round or its
+    /// projection): an exact retry replays the stored accept ack verbatim
+    /// without re-appending or re-streaming anything, including after a
+    /// restart, while a different request answers a typed wire rejection
+    /// (`CommandIdConflict`), never an intake outcome. Provider deltas may
+    /// be presented before durable reply adoption while the presentation
+    /// premise remains current. Durable completion/replay is reported only
+    /// after the final reply append succeeds. Stream outcome replay is
+    /// explicitly out of scope: only the accept ack replays.
     pub(crate) async fn submit_text(
         &self,
         frame: &WireFrame,
@@ -351,15 +463,7 @@ impl HostHandle {
                 return;
             }
             ReplayClassification::Conflict => {
-                return emit_end(
-                    sink,
-                    reject_frame(
-                        frame,
-                        live,
-                        RejectKind::ConflictingCommand,
-                        command_conflict_detail(&command),
-                    ),
-                );
+                return emit_end(sink, command_conflict_frame(frame, live, &command));
             }
             ReplayClassification::Held => {
                 return emit_end(sink, held_frame(frame, live));
@@ -709,15 +813,9 @@ impl HostHandle {
             DialogueBegin::StaleCredentialSet => {
                 emit_end(sink, held_frame(frame, live));
             }
-            DialogueBegin::Conflict => emit_end(
-                sink,
-                reject_frame(
-                    frame,
-                    live,
-                    RejectKind::ConflictingCommand,
-                    command_conflict_detail(&command),
-                ),
-            ),
+            DialogueBegin::Conflict => {
+                emit_end(sink, command_conflict_frame(frame, live, &command));
+            }
             DialogueBegin::Held => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldForErasure => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldByLifecycle(_) => {
@@ -813,6 +911,14 @@ impl HostHandle {
     }
 
     async fn read_history(&self, request: &HistoryRequest) -> HistoryResponse {
+        // An over-limit read is refused before any store work: the bound
+        // rides the storage query, never a full scan truncated afterward.
+        if request.limit > HISTORY_LIMIT_MAX {
+            return HistoryResponse::InvalidRequest;
+        }
+        // The same companion mapping as submits: an unknown ref means the
+        // Client's projection rotated, and it recovers by re-reading
+        // presence, never by treating the timeline as empty.
         let companion = match self.resolve_companion(&request.companion.0).await {
             Err(_) => return HistoryResponse::Unavailable,
             Ok(None) => return HistoryResponse::StaleCompanion,

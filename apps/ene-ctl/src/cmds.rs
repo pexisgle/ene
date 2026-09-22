@@ -788,6 +788,9 @@ pub fn describe_report(response: &TaskReportResponse) -> ReportAction {
         TaskReportResponse::StaleBaseView { .. } => ReportAction::Retryable {
             message: String::from("stale cursor; re-query from the head"),
         },
+        TaskReportResponse::Unavailable => ReportAction::Retryable {
+            message: String::from("host unavailable; retry later"),
+        },
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -219,11 +219,19 @@ impl TaskPanel {
             }),
         )
         .await?;
-        let WirePayload::TaskListResponse(TaskListResponse::Page(page)) = answer else {
-            return Err(DesktopError::Protocol(format!(
-                "list tasks answered {}",
-                answer.message_type()
-            )));
+        let page = match answer {
+            WirePayload::TaskListResponse(TaskListResponse::Page(page)) => page,
+            WirePayload::TaskListResponse(TaskListResponse::Unavailable) => {
+                return Err(DesktopError::Protocol(String::from(
+                    "task list is unavailable; retry later",
+                )));
+            }
+            other => {
+                return Err(DesktopError::Protocol(format!(
+                    "list tasks answered {}",
+                    other.message_type()
+                )));
+            }
         };
         self.items = page.tasks;
         if let Some(shown) = &self.displayed {
@@ -269,6 +277,11 @@ impl TaskPanel {
             WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef) => {
                 return Err(DesktopError::Protocol(String::from(
                     "task ref is unknown on this connection",
+                )));
+            }
+            WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable) => {
+                return Err(DesktopError::Protocol(String::from(
+                    "task selection is unavailable; retry later",
                 )));
             }
             other => {
@@ -502,6 +515,11 @@ impl TaskPanel {
             WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView { .. }) => {
                 return Err(DesktopError::Protocol(String::from(
                     "task report cursor is stale",
+                )));
+            }
+            WirePayload::TaskReportResponse(TaskReportResponse::Unavailable) => {
+                return Err(DesktopError::Protocol(String::from(
+                    "task report is unavailable; retry later",
                 )));
             }
             other => {

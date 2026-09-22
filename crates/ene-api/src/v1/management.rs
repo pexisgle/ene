@@ -157,6 +157,9 @@ pub fn parse_consent_target(
     ))
 }
 
+/// Management intent kinds (IPC §18.2). The kind name never decides the
+/// trust class: the Host classifies by operation, target, and impact, and
+/// each owner alone may accept its kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManagementIntentKind {
     StopCompanion,

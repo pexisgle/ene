@@ -28,11 +28,6 @@ impl PairingProvisionSecret {
     pub fn expose_secret(&self) -> &str {
         &self.0
     }
-
-    #[must_use]
-    pub fn into_inner(mut self) -> String {
-        core::mem::take(&mut self.0)
-    }
 }
 
 impl core::fmt::Debug for PairingProvisionSecret {

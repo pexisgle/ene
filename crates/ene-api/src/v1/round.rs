@@ -151,6 +151,10 @@ impl core::fmt::Debug for HistoryItem {
     }
 }
 
+/// Largest accepted [`HistoryRequest::limit`]. The bound rides the storage
+/// query; an out-of-range limit is an unusable request, never a full scan.
+pub const HISTORY_LIMIT_MAX: u64 = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryRequest {
     pub companion: CompanionWireRef,

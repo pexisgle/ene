@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use ene_api::v1::command::CommandReplayRejectWire;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{CompanionWireRef, ConnectionWireId, RoundWireId};
 use ene_api::v1::reject::RejectKind;
@@ -1394,11 +1395,18 @@ impl HostHandle {
                 }
             }
         };
-        let headlines: Vec<TaskHeadline> = self
-            .store
-            .list_tasks_after(after, limit)
-            .await
-            .unwrap_or_default();
+        let headlines: Vec<TaskHeadline> = match self.store.list_tasks_after(after, limit).await {
+            Ok(headlines) => headlines,
+            Err(_) => {
+                return vec![outgoing_frame(
+                    frame,
+                    live,
+                    WirePayload::TaskListResponse(TaskListResponse::Unavailable),
+                )];
+            }
+        };
+        // Test-only race gate: pause after the durable read and before the
+        // guarded mint.
         #[cfg(test)]
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
@@ -1513,9 +1521,7 @@ impl HostHandle {
                 return vec![outgoing_frame(
                     frame,
                     live,
-                    WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView {
-                        current: None,
-                    }),
+                    WirePayload::TaskReportResponse(TaskReportResponse::Unavailable),
                 )];
             }
         };
@@ -1529,9 +1535,7 @@ impl HostHandle {
                 return vec![outgoing_frame(
                     frame,
                     live,
-                    WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView {
-                        current: None,
-                    }),
+                    WirePayload::TaskReportResponse(TaskReportResponse::Unavailable),
                 )];
             }
         };
@@ -1723,11 +1727,18 @@ impl HostHandle {
         };
         let record = match self.store.load_task(task).await {
             Ok(Some(record)) => record,
-            _ => {
+            Ok(None) => {
                 return vec![outgoing_frame(
                     frame,
                     live,
                     WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef),
+                )];
+            }
+            Err(_) => {
+                return vec![outgoing_frame(
+                    frame,
+                    live,
+                    WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
                 )];
             }
         };
@@ -1737,7 +1748,7 @@ impl HostHandle {
                 return vec![outgoing_frame(
                     frame,
                     live,
-                    WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef),
+                    WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
                 )];
             }
         };
@@ -1765,12 +1776,20 @@ impl HostHandle {
                 "task selection on a superseded connection",
             )];
         }
-        let details = record.task.adopted_result.is_some()
-            || self
-                .store
-                .list_task_report_rows_after(task, None, 1)
-                .await
-                .is_ok_and(|rows| !rows.is_empty());
+        let details = if record.task.adopted_result.is_some() {
+            true
+        } else {
+            match self.store.list_task_report_rows_after(task, None, 1).await {
+                Ok(rows) => !rows.is_empty(),
+                Err(_) => {
+                    return vec![outgoing_frame(
+                        frame,
+                        live,
+                        WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
+                    )];
+                }
+            }
+        };
         vec![outgoing_frame(
             frame,
             live,
@@ -1804,11 +1823,12 @@ impl HostHandle {
                 live,
                 WirePayload::ResumeTaskOutcome(outcome),
             )],
-            ResumeApply::Conflict => vec![reject_frame(
+            ResumeApply::Conflict => vec![outgoing_frame(
                 frame,
                 live,
-                RejectKind::ConflictingCommand,
-                String::from("command id reused with different content"),
+                WirePayload::CommandReplayReject(CommandReplayRejectWire::CommandIdConflict {
+                    command_id,
+                }),
             )],
         }
     }

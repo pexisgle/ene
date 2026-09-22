@@ -9,11 +9,13 @@ macro_rules! uuid_wire_id {
 }
 
 macro_rules! string_wire_ref {
-    ($name:ident) => {
+    ($name:ident, $($doc:literal),+ $(,)?) => {
+        $(#[doc = $doc])+
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub struct $name(pub String);
     };
 }
+pub(crate) use string_wire_ref;
 
 uuid_wire_id!(WireMessageId);
 uuid_wire_id!(RequestWireId);
