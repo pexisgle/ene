@@ -476,7 +476,6 @@ pub fn usage_request(args: &UsageArgs) -> UsageSummaryRequest {
 pub fn usage_cap_intent(
     intent_id: CommandWireId,
     base: &str,
-    scope: &str,
     provider: Option<&str>,
     window: &str,
     currency: &str,
@@ -485,7 +484,7 @@ pub fn usage_cap_intent(
     ManagementIntent {
         intent_id,
         kind: ManagementIntentKind::ManageRuleConsentCap,
-        target: usage_cap_target(scope, provider, window, currency, limit_micros),
+        target: usage_cap_target(provider, window, currency, limit_micros),
         base_view: BaseViewMark(base.to_string()),
         rationale: IntentRationaleWire {
             origin: RationaleOrigin::ManagementSurface,
@@ -1620,7 +1619,6 @@ mod tests {
         let intent = usage_cap_intent(
             CommandWireId(uuid::Uuid::nil()),
             "usage-cap-system-daily_utc-none",
-            "system",
             None,
             "daily_utc",
             "USD",
@@ -1637,7 +1635,6 @@ mod tests {
         let provider = usage_cap_intent(
             CommandWireId(uuid::Uuid::nil()),
             "usage-cap-provider-openai-monthly_utc-rev-2",
-            "provider",
             Some("openai"),
             "monthly_utc",
             "USD",

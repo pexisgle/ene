@@ -19,12 +19,6 @@ impl CredentialStore for ServingCredentials {
     fn contains(&self, cred: &CredentialRef) -> bool {
         self.0.cred_store.contains(cred)
     }
-
-    fn put(&self, _cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
-        Err(CredentialTechnicalError::StorageUnavailable {
-            reason: String::from("transport credentials are read-only; use Host publication"),
-        })
-    }
 }
 
 #[cfg(unix)]
@@ -94,4 +88,45 @@ pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
         OpenAiResponsesTransport::new(base_url, ServingCredentials(Arc::clone(&handle)))
             .map_err(|error| CoreError::Inference(error.to_string()))?;
     crate::conn::run(data_dir.to_path_buf(), handle, Arc::new(transport)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serve::CredStore;
+    use ene_credential::{MemoryVersionedStore, VersionedCredentialStore};
+
+    #[tokio::test]
+    async fn transport_reads_host_publications_and_rotations() {
+        let dir = tempfile::tempdir().expect("data directory");
+        let host = Arc::new(
+            HostHandle::open_with_cred_store(
+                dir.path(),
+                CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+            )
+            .await
+            .expect("Host"),
+        );
+        let transport_store = ServingCredentials(Arc::clone(&host));
+        let cred = CredentialRef::new("openai", "main").expect("reference");
+        assert!(!transport_store.contains(&cred));
+        let CredStore::MemoryVersioned(store) = &host.cred_store else {
+            panic!("versioned store");
+        };
+        for (version, secret) in [(1, "first-test-value"), (2, "rotated-test-value")] {
+            store
+                .put_version(&cred, version, secret)
+                .expect("candidate");
+            store.activate(store.prepare_snapshot(&cred, version).expect("snapshot"));
+            assert!(transport_store.contains(&cred));
+            assert!(
+                transport_store
+                    .with_bearer(&cred, |value| value == secret)
+                    .expect("borrow")
+            );
+        }
+        store.deactivate(&cred);
+        assert!(!transport_store.contains(&cred));
+        assert!(transport_store.with_bearer(&cred, |_| ()).is_err());
+    }
 }

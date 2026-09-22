@@ -776,7 +776,6 @@ async fn run_usage_cap(
     let intent = cmds::usage_cap_intent(
         CommandWireId(uuid::Uuid::new_v4()),
         base,
-        scope,
         provider,
         window,
         currency,

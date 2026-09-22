@@ -83,11 +83,17 @@ pub trait DevicePairingRepository: Send + Sync {
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError>;
 }
 
-#[must_use]
-pub fn pairing_proof_hex(secret: &str, nonce: &str) -> String {
-    encode_hex_lower(&compute_pairing_mac(secret, nonce))
-}
-
+/// Verifies a pairing ownership proof against the secret and nonce.
+///
+/// Hex-decodes `proof` (malformed input yields `false`) and compares the
+/// bytes against the recomputed MAC in constant time via `subtle`, so no
+/// early exit leaks how much of the proof matched. Minting stays the Client's
+/// contract — it holds the pairing secret and deliberately does not depend on
+/// this crate — while the Host only verifies. The secret is never logged or
+/// rendered in `Debug`, initial provisioning uses the authentication-only
+/// frame, and the nonce is single-use by caller contract: the Host mints a
+/// fresh nonce per challenge and rejects reuse, so a captured proof cannot be
+/// replayed.
 #[must_use]
 pub fn verify_pairing_proof(secret: &str, nonce: &str, proof: &str) -> bool {
     let Some(decoded) = decode_hex_lower(proof) else {

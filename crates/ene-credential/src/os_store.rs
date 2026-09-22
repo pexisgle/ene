@@ -1,6 +1,6 @@
 use crate::CredentialTechnicalError;
 use crate::registry::CredentialRef;
-use crate::secret::{CredentialStore, PreparedCredentialSnapshot, SecretValue};
+use crate::secret::{ActiveVersions, CredentialStore, PreparedCredentialSnapshot, SecretValue};
 
 /// Prefix of the installation namespace for the OS protected store.
 ///
@@ -20,19 +20,19 @@ pub fn service_name(namespace: &str, cred: &CredentialRef, version: u64) -> Stri
 
 pub struct OsCredentialStore {
     namespace: String,
-    active: std::sync::Mutex<std::collections::HashMap<CredentialRef, (u64, SecretValue)>>,
+    /// Immutable value snapshot published for each ref, shared with the
+    /// in-memory versioned store: the credential owner replaces an entry only
+    /// after the activation transaction commits, and routine use never
+    /// re-reads a mutable external OS item as the same revision.
+    active: ActiveVersions,
 }
 
 impl core::fmt::Debug for OsCredentialStore {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let active = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         formatter
             .debug_struct("OsCredentialStore")
             .field("namespace", &self.namespace)
-            .field("active", &active.keys().collect::<Vec<_>>())
+            .field("active", &self.active.keys())
             .finish()
     }
 }
@@ -42,7 +42,7 @@ impl OsCredentialStore {
     pub fn new(namespace: impl Into<String>) -> Self {
         Self {
             namespace: namespace.into(),
-            active: std::sync::Mutex::new(std::collections::HashMap::new()),
+            active: ActiveVersions::new(),
         }
     }
 
@@ -53,8 +53,11 @@ impl OsCredentialStore {
         secret: &str,
     ) -> Result<(), CredentialTechnicalError> {
         let entry = self.entry(cred, version)?;
-        match entry.get_password() {
-            Ok(_) => {
+        match entry.get_password().map(SecretValue::new) {
+            Ok(existing) => {
+                // The probe copy is dropped zeroized: a discarded `String`
+                // would leave the previous bearer on the heap unzeroized.
+                drop(existing);
                 return Err(CredentialTechnicalError::StorageUnavailable {
                     reason: format!("{}: version {version} is already published", cred.id()),
                 });
@@ -78,7 +81,7 @@ impl OsCredentialStore {
         cred: &CredentialRef,
         version: u64,
     ) -> Result<PreparedCredentialSnapshot, CredentialTechnicalError> {
-        let snapshot = self.with_version(cred, version, |bearer| bearer.as_bytes().to_vec())?;
+        let snapshot = self.with_version(cred, version, str::to_owned)?;
         Ok(PreparedCredentialSnapshot::new(
             cred.clone(),
             version,
@@ -87,24 +90,11 @@ impl OsCredentialStore {
     }
 
     pub fn activate(&self, snapshot: PreparedCredentialSnapshot) {
-        let PreparedCredentialSnapshot {
-            credential,
-            version,
-            secret,
-        } = snapshot;
-        let mut active = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        active.insert(credential, (version, secret));
+        self.active.publish(snapshot);
     }
 
     pub fn deactivate(&self, cred: &CredentialRef) {
-        let mut active = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        active.remove(cred);
+        self.active.deactivate(cred);
     }
 
     pub fn delete_version(
@@ -121,6 +111,13 @@ impl OsCredentialStore {
         }
     }
 
+    /// Reads one version's value into the request-builder closure.
+    ///
+    /// # Errors
+    ///
+    /// [`CredentialTechnicalError::StorageUnavailable`] when the version is
+    /// not published or the OS store refuses the read. The error never carries
+    /// the value.
     pub fn with_version<R>(
         &self,
         cred: &CredentialRef,
@@ -134,13 +131,8 @@ impl OsCredentialStore {
                 .map_err(|error| CredentialTechnicalError::StorageUnavailable {
                     reason: format!("{}: {}", cred.id(), error),
                 })?;
-        let secret = SecretValue::new(value.into_bytes());
-        let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
-            return Err(CredentialTechnicalError::StorageUnavailable {
-                reason: format!("{}: the stored value is not valid UTF-8", cred.id()),
-            });
-        };
-        Ok(f(bearer))
+        let secret = SecretValue::new(value);
+        Ok(f(secret.as_str()))
     }
 
     fn entry(
@@ -164,37 +156,11 @@ impl CredentialStore for OsCredentialStore {
         cred: &CredentialRef,
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError> {
-        let active = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some((_, secret)) = active.get(cred) else {
-            return Err(CredentialTechnicalError::StorageUnavailable {
-                reason: format!("{}: no published version is active", cred.id()),
-            });
-        };
-        let bearer = core::str::from_utf8(secret.bytes()).map_err(|_| {
-            CredentialTechnicalError::StorageUnavailable {
-                reason: format!("{}: the active value is not valid UTF-8", cred.id()),
-            }
-        })?;
-        Ok(f(bearer))
+        self.active.with_bearer(cred, f)
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {
-        self.active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(cred)
-    }
-
-    fn put(&self, cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
-        Err(CredentialTechnicalError::StorageUnavailable {
-            reason: format!(
-                "{}: the OS store publishes versions through the credential owner, not a bare put",
-                cred.id()
-            ),
-        })
+        self.active.contains(cred)
     }
 }
 
@@ -219,23 +185,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_bare_put_is_refused_without_touching_the_store() {
-        use super::OsCredentialStore;
-        use crate::secret::CredentialStore as _;
-
-        let store = OsCredentialStore::new("ene-test-never-written");
-        let cred = CredentialRef::new("openai", "main").expect("valid ref");
-        let refused = store.put(&cred, "sk-never-stored");
-        assert!(refused.is_err(), "a bare put must fail closed");
-        assert!(!store.contains(&cred), "nothing may be published by a put");
-        let rendered = format!("{refused:?}");
-        assert!(
-            !rendered.contains("sk-never-stored"),
-            "the refusal must not echo the value: {rendered}"
-        );
-    }
-
+    /// Reading without an active version is unavailable, never a guess at
+    /// "the newest item".
     #[test]
     fn a_read_without_an_active_version_is_unavailable() {
         use super::OsCredentialStore;

@@ -86,9 +86,7 @@ impl core::fmt::Debug for DeletionTargetRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletionStatusRequest {
-    #[serde(default)]
     pub cursor: Option<DeletionStatusCursorWire>,
-    #[serde(default)]
     pub limit: Option<u32>,
 }
 

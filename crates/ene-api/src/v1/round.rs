@@ -160,7 +160,10 @@ pub struct HistoryRequest {
     pub companion: CompanionWireRef,
     pub since: Option<String>,
     pub limit: u64,
-    #[serde(default)]
+    /// Restrict to one Host-issued round projection, or [`None`] for the
+    /// whole companion timeline. The projection travels opaquely: the Host
+    /// resolves it against stored history, so a round stays addressable
+    /// across restarts even though the transient wire map is gone.
     pub round: Option<RoundWireId>,
 }
 

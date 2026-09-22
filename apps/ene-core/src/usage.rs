@@ -219,6 +219,16 @@ impl HostHandle {
         )]
     }
 
+    /// Maps one `ManageRuleConsentCap` intent whose target carries the shared
+    /// `cap:` grammar onto the permission-owned command (`usage-cost-cap`
+    /// §13/§17).
+    ///
+    /// Currentness is re-checked here, not trusted from the Client: the
+    /// `base_view` mark names exactly `(scope, window)` at one revision (or
+    /// the none state), and the command serializes the compare with the send
+    /// admission. A face-stale mark, an unknown window/currency, or an
+    /// unrepresentable limit clarifies with zero writes; a store failure
+    /// holds (nothing decided, a retry is safe).
     pub(crate) async fn set_usage_cap_intent(
         &self,
         frame: &WireFrame,
@@ -239,10 +249,9 @@ impl HostHandle {
         let Some(target) = parse_usage_cap_target(&intent.target) else {
             return vec![self.cap_clarify(frame, intent, live).await];
         };
-        let scope = match (target.scope.as_str(), target.provider) {
-            ("system", None) => UsageCapScope::System,
-            ("provider", Some(provider)) => UsageCapScope::Provider(provider),
-            _ => return vec![self.cap_clarify(frame, intent, live).await],
+        let scope = match target.provider {
+            None => UsageCapScope::System,
+            Some(provider) => UsageCapScope::Provider(provider),
         };
         let Some(window) = UsageCapWindow::from_name(&target.window) else {
             return vec![self.cap_clarify(frame, intent, live).await];

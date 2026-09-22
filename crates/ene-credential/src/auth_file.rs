@@ -55,6 +55,10 @@ use crate::secret::SecretValue;
 /// error: opening succeeds empty and the file is created lazily on the first
 /// save. A malformed file is always an error, never a silent default.
 ///
+/// [`Clone`] names the same protected file that
+/// [`FileDeviceAuthStore::open`] already validated; cloning never re-opens,
+/// re-reads, or re-checks the file.
+///
 /// Atomicity story: every mutation rewrites the whole file by staging the
 /// new bytes to a temp file in the same directory (created `0600` on Unix,
 /// flushed with `sync_all`) and renaming it over the target. The rename is
@@ -79,16 +83,9 @@ use crate::secret::SecretValue;
 /// nothing until fresh pairing mints new material. The mutation sidecar
 /// `device-auth.json.lock` carries no secret material; backups may ignore it
 /// and restore must not replace it.
+#[derive(Clone)]
 pub struct FileDeviceAuthStore {
     path: PathBuf,
-}
-
-impl Clone for FileDeviceAuthStore {
-    fn clone(&self) -> Self {
-        Self {
-            path: self.path.clone(),
-        }
-    }
 }
 
 impl core::fmt::Debug for FileDeviceAuthStore {
@@ -217,7 +214,11 @@ impl FileDeviceAuthStore {
                 reason: format!("device-auth entry for {key} holds malformed secret material"),
             });
         };
-        Ok(Some(SecretValue::new(bytes)))
+        let text =
+            String::from_utf8(bytes).map_err(|_| CredentialTechnicalError::StorageUnavailable {
+                reason: format!("device-auth entry for {key} holds malformed secret material"),
+            })?;
+        Ok(Some(SecretValue::new(text)))
     }
 
     /// Reports whether a persisted secret exists for `device` without
@@ -234,19 +235,18 @@ impl FileDeviceAuthStore {
     /// reported as absent.
     pub fn has_secret(&self, device: &DeviceId) -> Result<bool, CredentialTechnicalError> {
         let entries = self.read_entries()?;
-        Ok(entries
-            .get(&device_key(device))
-            .is_some_and(|entry| decode_hex_lower(&entry.secret_hex).is_some()))
+        Ok(entries.contains_key(&device_key(device)))
     }
 
     /// Verifies one pairing ownership proof against the persisted secret.
     ///
-    /// The secret bytes never leave this crate: they are borrowed into the
+    /// The secret never leaves this crate: it is borrowed into the
     /// constant-time comparison inside [`verify_pairing_proof`] and zeroized
     /// on drop with the `SecretValue`. An unknown device yields `Ok(false)`;
-    /// a stored secret that is not valid UTF-8 (never minted by the approve
-    /// path, which stores UUID text) likewise yields `Ok(false)`. Both are
-    /// fail-closed without distinguishing the reason to the caller.
+    /// stored material that is not valid UTF-8 (never minted by the approve
+    /// path, which stores UUID text) is malformed and yields
+    /// [`CredentialTechnicalError::StorageUnavailable`], never a silent proof
+    /// failure.
     ///
     /// # Errors
     ///
@@ -261,10 +261,7 @@ impl FileDeviceAuthStore {
         let Some(secret) = self.load_secret(device)? else {
             return Ok(false);
         };
-        let Ok(text) = core::str::from_utf8(secret.bytes()) else {
-            return Ok(false);
-        };
-        Ok(verify_pairing_proof(text, nonce, proof_hex))
+        Ok(verify_pairing_proof(secret.as_str(), nonce, proof_hex))
     }
 
     pub fn erase_target_text(&self, target: &str) -> Result<u64, CredentialTechnicalError> {
