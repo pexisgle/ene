@@ -30,10 +30,11 @@ pub const PENDING_ERASURE_CAP: usize = 32;
 /// logged; the custom [`core::fmt::Debug`] below renders it as `[redacted]`
 /// so a debug dump cannot leak key material.
 ///
-/// The deferred queue holds whole [`WireFrame`]s (payload plus envelope, so
-/// the `reply_to` link survives for later correlation), never facts (absorbed
-/// on arrival); it is session-lifetime only, never persisted, and capped at
-/// [`DEFERRED_CAP`] with oldest-drop.
+/// The deferred queue holds whole [`WireFrame`]s (payload plus envelope),
+/// never facts (absorbed on arrival); it is session-lifetime only, never
+/// persisted, and capped at [`DEFERRED_CAP`] with oldest-drop. It only
+/// buffers auto-presented summaries drained by [`Self::take_undelivered`];
+/// answers are correlated on the read path, never recovered from here.
 ///
 /// `Eq` is deliberately absent: [`WireFrame`] is `PartialEq`-only, and
 /// whole-session equality beyond tests is meaningless; callers compare
@@ -145,11 +146,9 @@ impl SessionState {
         self.pending_erasure.pop_front()
     }
 
-    pub fn take_deferred_reply(&mut self, own: WireMessageId) -> Option<WirePayload> {
-        let position = find_deferred_reply(&self.deferred, own)?;
-        self.deferred.remove(position).map(|frame| frame.payload)
-    }
-
+    /// Drains deferred auto-presented summaries (unsolicited facts the Host
+    /// pushed without `reply_to`). The caller paints them and ACKs each
+    /// receipt it fully painted; unpainted ones stay Unknown Host-side.
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         let mut summaries = Vec::new();
         let mut rest = VecDeque::with_capacity(self.deferred.len());
@@ -197,12 +196,11 @@ pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDe
     }
 }
 
-fn find_deferred_reply(deferred: &VecDeque<WireFrame>, own: WireMessageId) -> Option<usize> {
-    deferred
-        .iter()
-        .position(|frame| frame.envelope.correlation.reply_to == Some(own))
-}
-
+/// [`AuthResult::Rejected`] maps to [`AuthDecision::Guidance`] (exit code 2:
+/// re-provision a fresh secret and retry) while an unexpected payload kind
+/// maps to [`AuthDecision::Unexpected`] (a wire-shape violation, exit code 1).
+/// The Host's rejection reason is operational by DTO contract (never a secret
+/// or body copy), so carrying it into the guidance is safe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthDecision {
     Accepted { connection_id: ConnectionWireId },

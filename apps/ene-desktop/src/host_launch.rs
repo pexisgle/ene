@@ -6,12 +6,6 @@ pub struct DetachedHost {
     pub pid: u32,
 }
 
-impl Drop for DetachedHost {
-    fn drop(&mut self) {
-        // Host outlives the GUI. Do not send a signal here.
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
     #[error("ene-core binary was not found")]
@@ -141,7 +135,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         assert_eq!(detached.pid, pid);
-        drop(detached);
+        // Dropping the handle must not signal the child. `DetachedHost` holds
+        // only a pid and no `Drop` impl; the move into `_` drops it here.
+        let _ = detached;
         std::thread::sleep(Duration::from_millis(100));
         let still = std::path::Path::new("/proc").join(pid.to_string()).exists();
         match std::process::Command::new("kill")

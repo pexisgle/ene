@@ -28,7 +28,8 @@ use crate::codec::{
     decode_id, decode_lifecycle, decode_role, decode_u64, encode_id, encode_u64, lock_shared,
 };
 use crate::companion::{
-    SQL_SELECT_ACTIVITY_PREMISE, SQL_SELECT_COMPANION_LIFECYCLE, SQL_SELECT_HISTORY_PREMISE,
+    ACTIVITY_KIND_RESUME_INSTRUCTION, SQL_SELECT_ACTIVITY_PREMISE, SQL_SELECT_COMPANION_LIFECYCLE,
+    SQL_SELECT_HISTORY_PREMISE,
 };
 use crate::run_blocking;
 
@@ -113,7 +114,11 @@ const ORIGIN_KIND_OWNER_CONVERSATION: &str = "owner_conversation";
 const ORIGIN_KIND_SPONTANEOUS: &str = "spontaneous";
 const ORIGIN_KIND_SCHEDULE_OCCURRENCE: &str = "schedule_occurrence";
 
-pub(crate) const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
+/// The stored `item_kind` discriminators. The kind decides which payload is
+/// required: an adopted purpose carries the adopted revision, an adopted
+/// instruction carries no payload because the entry identity is the adoption
+/// identity.
+const ITEM_KIND_ADOPTED_PURPOSE: &str = "adopted_purpose";
 const ITEM_KIND_ADOPTED_INSTRUCTION: &str = "adopted_instruction";
 
 const ORIGIN_KIND_OWNER_MANAGEMENT: &str = "owner_management";
@@ -422,6 +427,11 @@ fn validated_adopted_purpose_entry(
     Ok(entry)
 }
 
+/// Decodes the provenance identity of one validated adopted-purpose entry with
+/// the same checks the Task read applies to every context row: an unknown
+/// origin kind, an undecodable source, or a malformed acquisition time is an
+/// unreadable row. The steering carry-forward and the resume carry-forward
+/// share this, so neither re-stamps provenance the Task reads would reject.
 fn validate_adopted_purpose_provenance(
     entry: &RawAdoptedPurpose,
 ) -> Result<(), TaskTechnicalError> {
@@ -1737,7 +1747,14 @@ fn observation_correlation(
         ));
     }
     let body_observed = premise.observed.is_some();
-    if body_observed && !matches!(operation.as_str(), "read" | "list") {
+    let operation = ene_action::OperationKind::from_name(&operation)
+        .ok_or_else(|| task_unavailable("unknown action operation in observation attempt"))?;
+    if body_observed
+        && !matches!(
+            operation,
+            ene_action::OperationKind::Read | ene_action::OperationKind::List
+        )
+    {
         return Err(task_unavailable(
             "observed body names a non-body action operation",
         ));
@@ -2350,11 +2367,6 @@ fn adopt_result_sync(
                 "adopted task result does not match the completed current task",
             ));
         }
-        if relied_purpose != current_purpose {
-            return Err(task_unavailable(
-                "task revision purpose does not match the current purpose",
-            ));
-        }
         if load_adopted_result(&tx, &raw.task, current_revision, current_progress)?
             != Some(claim.result)
         {
@@ -2515,7 +2527,7 @@ fn validate_resume_source(
                 premise_row.task_revision,
                 premise_row.purpose_revision,
             );
-            if kind_text != "resume_instruction" {
+            if kind_text != ACTIVITY_KIND_RESUME_INSTRUCTION {
                 return Err(task_unavailable("unknown activity record kind"));
             }
             if decode_id(&companion_text).map_err(task_unavailable)? != assignee.companion {

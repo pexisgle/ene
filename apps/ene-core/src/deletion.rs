@@ -109,7 +109,12 @@ fn status_view(
 impl HostHandle {
     const INTENT_KIND_DELETION: &str = "deletion-targeted";
 
-    const DELETION_JOURNAL_FAMILY: &str = "deletion-family";
+    /// Body-free journal target for an inadmissible deletion inlet target.
+    ///
+    /// It names the inlet family only: even a target the grammar refuses may
+    /// carry the Owner's text (an unknown purpose token, an over-long body),
+    /// and the journal must never keep it.
+    pub(crate) const DELETION_JOURNAL_FAMILY: &str = "deletion-family";
 
     pub(crate) fn deletion_intent_fingerprint(
         intent: &ManagementIntent,

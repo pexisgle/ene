@@ -2,6 +2,11 @@ use crate::CredentialTechnicalError;
 use crate::registry::CredentialRef;
 use crate::secret::{CredentialStore, PreparedCredentialSnapshot, SecretValue};
 
+/// Prefix of the installation namespace for the OS protected store.
+///
+/// The composition root appends a per-data-directory identity to this prefix,
+/// so two data directories never share an OS item even under one OS user whose
+/// OS keyring is shared, and an unrelated application's item is never read.
 pub const DEFAULT_NAMESPACE: &str = "ene";
 
 #[must_use]

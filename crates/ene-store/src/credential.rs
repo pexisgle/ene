@@ -22,7 +22,7 @@ use crate::codec::{
 use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
-const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
+pub(crate) const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
 
 pub(crate) const SQL_SELECT_SET_REV: &str = "SELECT rev FROM credential_set WHERE id = 1";
 
@@ -108,6 +108,11 @@ impl Store {
     }
 }
 
+/// Marker-language passes bounded before the fallback removal. A replacement
+/// can re-form the bearer across the marker, and a bearer that is a substring
+/// of the marker keeps re-matching, so the sweep repeats and then removes.
+const SWEEP_PASS_BOUND: usize = 8;
+
 /// Table and column pairs holding quarantined plaintext content.
 ///
 /// The derived recall token index is deliberately absent: a registered value
@@ -121,11 +126,6 @@ impl Store {
 /// was still ordinary text must be redacted by the same boundary, or the
 /// report/presentation would keep reading the raw value out of the owner row
 /// after the value became a registered credential.
-/// Marker-language passes bounded before the fallback removal. A replacement
-/// can re-form the bearer across the marker, and a bearer that is a substring
-/// of the marker keeps re-matching, so the sweep repeats and then removes.
-const SWEEP_PASS_BOUND: usize = 8;
-
 const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("activity_record", "body"),
     ("history_message", "body"),

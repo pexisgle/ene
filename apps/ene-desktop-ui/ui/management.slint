@@ -1,6 +1,6 @@
 import { ScrollView, AboutSlint } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Action, NavItem, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, Item } from "components.slint";
+import { Action, NavItem, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, StaticRowCard, Item } from "components.slint";
 
 component SetupPane inherits Rectangle {
     in property <bool> japanese;
@@ -39,16 +39,15 @@ component SetupPane inherits Rectangle {
             Action { text: "日本語"; selected: root.japanese; clicked => { root.language(true); } }
             Action { text: "English"; selected: !root.japanese; clicked => { root.language(false); } }
         }
-        key-field := Field {
-            visible: root.step == 3;
-            height: root.step == 3 ? 76px : 0px;
+        if root.step == 3: key-field := Field {
+            height: 76px;
             value <=> root.secret-draft;
             label: "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
         }
         if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-5.6-luna"; value <=> root.model; enabled: !root.busy; }
         HorizontalLayout {
             spacing: 12px;
-            Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { key-field.value = ""; root.back(); } }
+            Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { root.secret-draft = ""; root.back(); } }
             Rectangle { horizontal-stretch: 1; }
             Action {
                 text: root.busy ? (root.japanese ? "処理中…" : "Working…") :
@@ -58,9 +57,9 @@ component SetupPane inherits Rectangle {
                 // Credential presence in the setup view describes the assigned
                 // route. Before the first assignment it is false even after
                 // registration; the Host validates the selected credential.
-                enabled: !root.busy && (root.step != 3 || key-field.value != "") && (root.step != 4 || root.model != "");
+                enabled: !root.busy && (root.step != 3 || root.secret-draft != "") && (root.step != 4 || root.model != "");
                 clicked => {
-                    if root.step == 3 { root.credential(key-field.value); key-field.value = ""; }
+                    if root.step == 3 { root.credential(root.secret-draft); root.secret-draft = ""; }
                     else if root.step == 4 { root.assign(root.model); }
                     else { root.next(); }
                 }
@@ -218,9 +217,9 @@ export component ManagementWindow inherits Window {
                             if root.page == 1: VerticalLayout {
                                 spacing: 16px;
                                 Caption { text: root.japanese ? "接続と登録の状態" : "Connection and registration"; }
-                                RowCard { item: { title: "OpenAI", body: root.japanese ? "会話に使う AI プロバイダー" : "AI provider for conversation", state: root.connected ? (root.japanese ? "接続済み" : "Connected") : (root.japanese ? "未接続" : "Disconnected") }; }
-                                RowCard { item: { title: root.japanese ? "API キー" : "API key", body: root.japanese ? "キーの値はここには表示されません。" : "Your key is never displayed here.", state: root.credential-present ? (root.japanese ? "登録済み" : "Registered") : (root.japanese ? "未登録" : "Not registered") }; }
-                                RowCard { item: { title: root.japanese ? "モデルの割り当て" : "Model assignment", body: root.model, state: root.consent-assigned ? (root.japanese ? "同意済み" : "Authorized") : (root.japanese ? "未設定" : "Not configured") }; }
+                                StaticRowCard { item: { title: "OpenAI", body: root.japanese ? "会話に使う AI プロバイダー" : "AI provider for conversation", state: root.connected ? (root.japanese ? "接続済み" : "Connected") : (root.japanese ? "未接続" : "Disconnected") }; }
+                                StaticRowCard { item: { title: root.japanese ? "API キー" : "API key", body: root.japanese ? "キーの値はここには表示されません。" : "Your key is never displayed here.", state: root.credential-present ? (root.japanese ? "登録済み" : "Registered") : (root.japanese ? "未登録" : "Not registered") }; }
+                                StaticRowCard { item: { title: root.japanese ? "モデルの割り当て" : "Model assignment", body: root.model, state: root.consent-assigned ? (root.japanese ? "同意済み" : "Authorized") : (root.japanese ? "未設定" : "Not configured") }; }
                                 Action { text: root.japanese ? "セットアップを開く" : "Open setup"; primary: true; clicked => { root.navigate(6); } }
                             }
                             if root.page == 2: VerticalLayout {
@@ -230,7 +229,7 @@ export component ManagementWindow inherits Window {
                                 for memory in root.memories: RowCard { item: memory; selected: memory.key == root.selected-memory; clicked(key) => { if !root.busy { root.select-memory(key); } } }
                                 if root.memory-more: Action { text: root.japanese ? "さらに読み込む" : "Load more"; enabled: !root.busy; clicked => { root.next-memory(); } }
                                 if root.selected-memory != "": Heading { text: root.japanese ? "根拠と変更履歴" : "Sources & revisions"; font-size: 18px; }
-                                for revision in root.revisions: RowCard { item: revision; }
+                                for revision in root.revisions: StaticRowCard { item: revision; }
                                 if root.revisions-more: Action { text: root.japanese ? "履歴をさらに読む" : "More revisions"; enabled: !root.busy; clicked => { root.next-revisions(); } }
                             }
                             if root.page == 3: VerticalLayout {
@@ -254,7 +253,7 @@ export component ManagementWindow inherits Window {
                                 }
                                 if root.usage-more: Action { text: root.japanese ? "次のページ" : "Next page"; enabled: !root.busy; clicked => { root.next-usage(); } }
                                 Heading { text: root.japanese ? "利用上限" : "Spending limits"; font-size: 18px; }
-                                for cap in root.caps: RowCard { item: cap; }
+                                for cap in root.caps: StaticRowCard { item: cap; }
                                 Field { label: root.japanese ? "全体の日次上限 · USD / UTC 日" : "System daily limit · USD / UTC day"; hint: "1.00"; value <=> root.cap-amount; enabled: !root.busy; }
                                 Action { text: root.japanese ? "日次上限を更新" : "Update daily limit"; enabled: !root.busy && root.connected; clicked => { root.apply-cap(root.cap-amount); } }
                             }

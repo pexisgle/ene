@@ -520,7 +520,7 @@ fn erase_path(text: &str, target: &str) -> Result<Option<(String, u64)>, Erasure
     let Some((redacted, removed)) = erase_exact(text, target) else {
         return Ok(None);
     };
-    if redacted.is_empty() || !std::path::Path::new(&redacted).is_absolute() {
+    if !std::path::Path::new(&redacted).is_absolute() {
         if ERASED_LOCATOR.contains(target) {
             return Err(ErasurePageError::Unrepresentable);
         }

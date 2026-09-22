@@ -26,15 +26,12 @@ use std::time::Duration;
 
 use ene_api::v1::management::ManagementOutcome;
 use ene_api::v1::undelivered::{ResumeTaskOutcomeWire, UndeliveredAckOutcome};
-use ene_core::conn;
-use ene_core::serve::{CoreError, HostHandle};
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
-use ene_local_control::{ControlOutcome, FromConfirmation};
 
 mod common;
 
-use common::{open_host, pair_and_seat, wait_for_control};
+use common::{ServingTask, open_host, pair_and_seat, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-c2-secret-4408";
@@ -142,54 +139,8 @@ impl ProviderTransport for GateTransport {
     }
 }
 
-struct ServingTask {
-    shutdown: tokio::sync::watch::Sender<bool>,
-    task: tokio::task::JoinHandle<Result<(), CoreError>>,
-}
-
-impl ServingTask {
-    fn start(dir: &Path, handle: Arc<HostHandle>, transport: Arc<GateTransport>) -> Self {
-        let (shutdown, rx) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(conn::run_until_shutdown(
-            dir.to_path_buf(),
-            handle,
-            transport,
-            rx,
-        ));
-        Self { shutdown, task }
-    }
-
-    #[expect(clippy::expect_used, reason = "test fixture helper")]
-    async fn shutdown_and_join(self) {
-        self.shutdown.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(30), self.task)
-            .await
-            .expect("serving shutdown must drain; release provider gates before restart")
-            .expect("serving task must join")
-            .expect("serving shutdown must succeed");
-    }
-}
-
 async fn complete_setup(desktop: &mut DesktopRuntime) {
-    desktop.set_secret(String::from(SECRET));
-    desktop
-        .begin_credential_put()
-        .await
-        .expect("credential put must challenge");
-    match desktop
-        .confirm_owner()
-        .await
-        .expect("owner confirm stores the key")
-    {
-        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
-        other => panic!("expected CredentialStored, got {other:?}"),
-    }
-    desktop.set_model(String::from(MODEL));
-    let assigned = desktop.assign_model().await.expect("dialogue assign");
-    assert!(
-        matches!(assigned, ManagementOutcome::StoredAsRuleView { .. }),
-        "dialogue assignment must store, got {assigned:?}"
-    );
+    common::complete_setup(desktop, SECRET, MODEL).await;
 }
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
@@ -264,7 +215,7 @@ async fn acceptance_4_workspace_task_gui_path() {
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
-    desktop.try_spawn_body(&desktop.bundled_sample_asset());
+    desktop.try_spawn_body(&dir.path().join("ene-body-absent"));
     assert_eq!(desktop.snapshot().body_status, "Absent");
 
     desktop.open_tasks().await.expect("empty tasks page");
@@ -502,31 +453,28 @@ async fn gui_close_reconnect_and_ack_only_after_present() {
         .await
         .expect("copy the receipt into the panel");
     let detail = desktop.snapshot().task_detail;
-    if desktop.has_presented_task_receipt() {
-        assert!(detail.contains("presentation ready-to-ack"), "{detail}");
-        let acked = desktop
-            .ack_presented_tasks()
-            .await
-            .expect("ACK after present");
-        let expected = match &acked {
-            UndeliveredAckOutcome::Presented { presented } => {
-                format!("ack presented {presented}")
-            }
-            UndeliveredAckOutcome::AlreadyPresented => String::from("ack already-presented"),
-            other => panic!("unexpected ACK outcome: {other:?}"),
-        };
-        assert!(!desktop.has_presented_task_receipt());
-        assert!(
-            desktop.snapshot().task_detail.contains(&expected),
-            "{}",
-            desktop.snapshot().task_detail
-        );
-    } else {
-        assert!(
-            detail.contains("presentation not-presented") || detail.contains("undelivered none"),
-            "empty backlog still is not an ACK: {detail}"
-        );
-    }
+    assert!(
+        desktop.has_presented_task_receipt(),
+        "present_undelivered must copy a receipt: {detail}"
+    );
+    assert!(detail.contains("presentation ready-to-ack"), "{detail}");
+    let acked = desktop
+        .ack_presented_tasks()
+        .await
+        .expect("ACK after present");
+    let expected = match &acked {
+        UndeliveredAckOutcome::Presented { presented } => {
+            format!("ack presented {presented}")
+        }
+        UndeliveredAckOutcome::AlreadyPresented => String::from("ack already-presented"),
+        other => panic!("unexpected ACK outcome: {other:?}"),
+    };
+    assert!(!desktop.has_presented_task_receipt());
+    assert!(
+        desktop.snapshot().task_detail.contains(&expected),
+        "{}",
+        desktop.snapshot().task_detail
+    );
     let debug = format!("{:?}", desktop.snapshot());
     assert!(!debug.contains(SECRET), "Debug of snapshot must not leak");
     server.shutdown_and_join().await;

@@ -7,8 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::error::BodyError;
 use crate::ipc::{
-    AssetRef, BodyToParent, HEALTH_INTERVAL, MotionSetInfo, ParentToBody, ReadyInfo, decode_parent,
-    encode_body,
+    AssetRef, BodyToParent, HEALTH_INTERVAL, LocalUiFact, MotionSetInfo, ParentToBody, ReadyInfo,
+    decode_parent, encode_body,
 };
 use crate::vrm::VrmSession;
 use crate::window::Overlay;
@@ -181,6 +181,7 @@ where
     )
     .await?;
     let mut reported_gpu_failure = overlay.gpu_failure();
+    let mut reported_asset_failure: Option<crate::ipc::AssetFailInfo> = None;
     if let Some(info) = reported_gpu_failure {
         send(&writer, &BodyToParent::GpuFail(info)).await?;
     }
@@ -228,6 +229,12 @@ where
             _ = health.tick() => {
                 seq = seq.saturating_add(1);
                 while let Some(fact) = overlay.take_local_ui() {
+                    if matches!(fact, LocalUiFact::Hide) {
+                        // The gesture hides the overlay locally on every
+                        // backend; Windows already hid its HWND in WM_CLOSE,
+                        // so this is idempotent.
+                        overlay.set_visible(false);
+                    }
                     send(&writer, &BodyToParent::LocalUi(fact)).await?;
                 }
                 while let Some(feedback) = overlay.take_presentation() {
@@ -262,8 +269,20 @@ where
                 if overlay.ready_to_render() && !high_load_paused {
                     let started = std::time::Instant::now();
                     match vrm.update(1.0 / RUNTIME_HZ) {
-                        Ok(meshes) => overlay.render(&meshes),
-                        Err(info) => send(&writer, &BodyToParent::AssetFail(info)).await?,
+                        Ok(meshes) => {
+                            reported_asset_failure = None;
+                            overlay.render(&meshes);
+                        }
+                        Err(info) => {
+                            if reported_asset_failure.as_ref() != Some(&info) {
+                                send(
+                                    &writer,
+                                    &BodyToParent::AssetFail(info.clone()),
+                                )
+                                .await?;
+                                reported_asset_failure = Some(info);
+                            }
+                        }
                     }
                     if started.elapsed() >= std::time::Duration::from_millis(100) {
                         render_paused_until = Some(now + std::time::Duration::from_secs(1));

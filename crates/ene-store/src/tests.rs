@@ -1,37 +1,46 @@
 use crate::Store;
 mod publication;
 use ene_companion::{
-    AppendHistoryCommand, CompanionId, CompanionLifecycle, CompanionRepository,
-    HistoryAppendOutcome, HistoryRepository, HistoryRole, UndeliveredRepository,
+    ActivityId, ActivityRepository as _, AppendHistoryCommand, CommandId, CompanionId,
+    CompanionLifecycle, CompanionRepository, CompanionTechnicalError, HistoryAppendOutcome,
+    HistoryRepository, HistoryRole, PresentationMark, RecordResumeActivityCommand, ReportStatus,
+    ReportStatusTransition, ResumeActivityOutcome, RoundIntentMark, UndeliveredRepository,
 };
 use ene_credential::{
-    CredentialIntentRepository as _, CredentialRef, CredentialRefRepository,
-    CredentialSetRepository, CredentialSetRevision, CredentialTechnicalError,
-    MemoryCredentialStore, RegistrationApply, RegistrationFingerprint, RegistrationState,
+    CredentialApprovalRepository, CredentialIntentRepository as _, CredentialRef,
+    CredentialRefRepository, CredentialScrubber, CredentialSetRepository, CredentialSetRevision,
+    CredentialTechnicalError, DevicePairingRepository, MemoryCredentialStore, RegistrationApply,
+    RegistrationFingerprint, RegistrationState,
 };
 use ene_inference::{
-    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
-    TaskAgentAttemptPremise, UsageFact, UsageRepository, UsageSource,
+    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _,
+    InferenceTechnicalError, InferenceTicketId, TaskAgentAttemptPremise, UsageFact,
+    UsageRepository, UsageSource,
 };
 use ene_learning::{
-    ChangeKind, ExperienceSourceKind, Importance, LearningRepository, LearningScope, MemoryChange,
-    MemoryChangeCommit, MemoryChangeOutcome, MemoryId, MemoryRevision, MemoryTarget,
-    SourceRangeRef, SummaryId, SummaryRecord, TemporalMeaning,
+    ChangeKind, ExperienceSourceKind, Importance, LearningRepository, LearningScope,
+    LearningTechnicalError, MemoryChange, MemoryChangeCommit, MemoryChangeOutcome, MemoryId,
+    MemoryRevision, MemoryTarget, SourceRangeRef, SummaryId, SummaryRecord, TemporalMeaning,
 };
 use ene_permission::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
     ConsumerKind, IntentFingerprint, IntentOutcomeRepository, IntentResolution, PurposeKind,
 };
-use ene_presence::{PresenceGeneration, PresenceRepository, PresenceState};
+use ene_presence::{
+    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
+    PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
+};
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
     DelegationScope, TaskAgentEphemeralId, TaskCommitOutcome, TaskCommitPremise,
-    TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskId,
-    TaskPurpose, TaskRef, TaskRepository, TaskResultArrivalOutcome, TaskResultRecord,
-    TaskResultScrubPremise, TaskRevision, TaskTechnicalError, WorkspaceAssocId,
+    TaskContextEntryId, TaskContextItem, TaskContextOrigin, TaskContextOriginKind,
+    TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise, TaskPurpose,
+    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRef, TaskRepository, TaskResultArrivalOutcome,
+    TaskResultRecord, TaskResultScrubPremise, TaskRevision, TaskTechnicalError, WorkspaceAssocId,
     WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
 };
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 
 fn fixture_clock() -> WallClockWithTz {
@@ -101,6 +110,70 @@ fn history_command(
     }
 }
 
+/// A keyed command always names its canonical round intent, so its replay
+/// stays decidable from durable state.
+fn history_command_with_ids(
+    companion: CompanionId,
+    generation: PresenceGeneration,
+    text: &str,
+    command_id: Option<CommandId>,
+    local_id: Option<&str>,
+) -> AppendHistoryCommand {
+    AppendHistoryCommand {
+        companion,
+        round: RawId::new(),
+        role: HistoryRole::Owner,
+        text: text.to_owned(),
+        lang: String::from("en"),
+        at: fixture_clock(),
+        expected_generation: generation,
+        expected_consent: None,
+        expected_credential_set: None,
+        expected_owner_message: None,
+        command_id,
+        round_wire: Some(RawId::new().as_uuid().to_string()),
+        round_intent: command_id.map(|_| RoundIntentMark::Auto),
+        incarnation: Some((1, 2)),
+        local_id: local_id.map(String::from),
+    }
+}
+
+/// Records one resume-instruction activity and returns its identity.
+///
+/// The A4 held path (`HeldForErasure`) is exercised by its own boundary
+/// tests; this helper is the committed path the existing AU17 coverage
+/// expects, and reports a held outcome as an unavailability so those legacy
+/// assertions keep their `Result` shape without conflating the outcome in
+/// production code.
+async fn record_activity_id(
+    store: &Store,
+    cmd: RecordResumeActivityCommand,
+) -> Result<ActivityId, CompanionTechnicalError> {
+    match store.record_resume_activity(cmd).await {
+        Ok(ResumeActivityOutcome::Recorded(activity)) => Ok(activity),
+        Ok(ResumeActivityOutcome::HeldForErasure) => {
+            Err(CompanionTechnicalError::StorageUnavailable {
+                reason: String::from("activity held for erasure"),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn history_row_count(store: &Store, companion: CompanionId) -> Option<i64> {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let counted: Result<i64, _> = guard.query_row(
+        "SELECT COUNT(*) FROM history_message WHERE companion_id = ?1",
+        params![crate::codec::encode_id(companion.as_raw())],
+        |row| row.get(0),
+    );
+    assert!(counted.is_ok(), "row count must succeed");
+    counted.ok()
+}
+
 async fn open_memory() -> Option<Store> {
     let opened = Store::open_in_memory().await;
     assert!(opened.is_ok(), "in-memory open must succeed");
@@ -119,6 +192,327 @@ async fn running_companion(store: &Store) -> Option<(CompanionId, PresenceGenera
     Some((companion, attribution.generation))
 }
 
+fn lock_for_test(store: &Store) -> rusqlite::Result<i64> {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.query_row("SELECT 1", (), |row| row.get(0))
+}
+
+#[tokio::test]
+async fn reopen_is_idempotent_and_seeds_running_companion() {
+    let dir = tempfile::tempdir();
+    let dir = dir.unwrap();
+    let path = dir.path().join("store.db");
+    let opened = Store::open(&path).await;
+    let first = opened.unwrap();
+    let ensured = first.ensure_running_companion().await;
+    let companion = ensured.unwrap();
+    let lifecycle = first.load_lifecycle(companion).await;
+    assert!(
+        matches!(lifecycle, Ok(Some(CompanionLifecycle::Running))),
+        "seeded companion must run"
+    );
+    drop(first);
+    let reopened = Store::open(&path).await;
+    let second = reopened.unwrap();
+    let ensured_again = second.ensure_running_companion().await;
+    let same = ensured_again.unwrap();
+    assert_eq!(same, companion, "seed must be idempotent");
+    let ping = lock_for_test(&second);
+    assert!(ping.is_ok(), "reopened handle must serve queries");
+}
+
+#[tokio::test]
+async fn append_message_commits_and_timeline_reads_back() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let appended = store
+        .append_message(history_command(companion, generation, "hello history"))
+        .await;
+    let outcome = appended.unwrap();
+    assert!(
+        matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
+        "happy path must commit"
+    );
+    let loaded = store.load_timeline(companion, None, None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 1, "one item must read back");
+    assert_eq!(timeline[0].text, "hello history");
+    assert_eq!(timeline[0].lang, "en");
+    assert_eq!(timeline[0].presence_generation, generation);
+    let bounded = store
+        .load_timeline(companion, Some(fixture_clock()), None, 10)
+        .await;
+    let kept = bounded.unwrap();
+    assert_eq!(kept.len(), 1, "item at the bound must be kept");
+    let capped = store.load_timeline(companion, None, None, 0).await;
+    let none = capped.unwrap();
+    assert!(none.is_empty(), "zero limit must return nothing");
+}
+
+/// One raw batch insert bypasses the per-append transaction so a large
+/// fixture stays fast. Rows carry the same canonical `at_utc` the production
+/// append writes. `start_date` is a `YYYY-MM-DD` prefix; each row is one
+/// second later starting at midnight (counts stay within one day). Returns
+/// `(message, round, round_wire)` per row.
+fn insert_history_batch(
+    store: &Store,
+    companion: CompanionId,
+    count: usize,
+    start_date: &str,
+    round: Option<RawId>,
+) -> Vec<(RawId, RawId, String)> {
+    assert!(count < 86_400, "the fixture stays within one day");
+    let companion_text = crate::codec::encode_id(companion.as_raw());
+    let mut guard = store.conn.lock().expect("store lock");
+    let tx = guard
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .expect("batch transaction must open");
+    let mut inserted = Vec::with_capacity(count);
+    // Every row of one round carries that round's single stored projection,
+    // exactly like the production append path.
+    let round_wire = RawId::new().as_uuid().to_string();
+    for index in 0..count {
+        let second = index as u32;
+        let at = WallClockWithTz::parse_rfc3339(&format!(
+            "{start_date}T{:02}:{:02}:{:02}Z",
+            second / 3600,
+            (second / 60) % 60,
+            second % 60
+        ))
+        .expect("fixture timestamp must parse");
+        let message = RawId::new();
+        let round = round.unwrap_or_default();
+        tx.execute(
+            "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, NULL, ?9, NULL, NULL, NULL, NULL)",
+            params![
+                crate::codec::encode_id(message),
+                companion_text,
+                crate::codec::encode_id(round),
+                "owner",
+                format!("row {index}"),
+                "en",
+                at.to_rfc3339(),
+                at.to_rfc3339_utc(),
+                round_wire,
+            ],
+        )
+        .expect("batch row must insert");
+        inserted.push((message, round, round_wire.clone()));
+    }
+    tx.commit().expect("batch must commit");
+    inserted
+}
+
+/// `at_utc` keeps query comparison exact across offsets; the display `at`
+/// keeps its creation offset.
+#[tokio::test]
+async fn history_since_compares_instants_across_offsets() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    // Inserted first but earlier in time: a lexical comparison of the raw
+    // offset renderings would order these two the other way around.
+    let mut early = history_command(companion, generation, "early");
+    early.at = WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00+09:00")
+        .expect("fixture timestamp must parse");
+    let mut late = history_command(companion, generation, "late");
+    late.at = WallClockWithTz::parse_rfc3339("2026-09-12T00:30:00-05:00")
+        .expect("fixture timestamp must parse");
+    assert!(store.append_message(early).await.is_ok());
+    assert!(store.append_message(late).await.is_ok());
+
+    let bound = WallClockWithTz::parse_rfc3339("2026-09-12T02:00:00Z")
+        .expect("fixture timestamp must parse");
+    let loaded = store.load_timeline(companion, Some(bound), None, 10).await;
+    let timeline = loaded.unwrap();
+    assert_eq!(
+        timeline.len(),
+        1,
+        "the offset comparison must select the later instant only"
+    );
+    assert_eq!(timeline[0].text, "late");
+    assert_eq!(
+        timeline[0].at.to_rfc3339(),
+        "2026-09-12T00:30:00-05:00",
+        "the display rendering keeps the creation offset"
+    );
+}
+
+/// The limit bounds SQLite's scan and the Rust decode, not only the returned
+/// vector: a malformed row beyond the limit never reaches the decoder.
+#[tokio::test]
+async fn history_limit_bounds_decoding_not_only_the_returned_vector() {
+    let store = open_memory().await.unwrap();
+    let (companion, _generation) = running_companion(&store).await.unwrap();
+    insert_history_batch(&store, companion, 20_000, "2026-01-01", None);
+    // A poisoned row after every well-formed one: any implementation that
+    // decodes the whole table before truncating fails here.
+    {
+        let guard = store.conn.lock().expect("store lock");
+        guard
+            .execute(
+                "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation) VALUES (?1, ?2, ?3, 'owner', 'poison', 'en', 'not-a-timestamp', '2027-01-01T00:00:00.000000000Z', 0)",
+                params![
+                    RawId::new().as_uuid().hyphenated().to_string(),
+                    crate::codec::encode_id(companion.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                ],
+            )
+            .expect("poison row must insert");
+    }
+    let loaded = store.load_timeline(companion, None, None, 1).await;
+    let timeline = loaded.expect("limit 1 must not decode the whole table");
+    assert_eq!(timeline.len(), 1);
+    assert_eq!(timeline[0].text, "row 0");
+}
+
+/// Round scope comes from the stored projection: an old round is addressable
+/// even though the caller's default window would never contain it.
+#[tokio::test]
+async fn history_round_scope_is_independent_of_the_recent_window() {
+    let store = open_memory().await.unwrap();
+    let (companion, _generation) = running_companion(&store).await.unwrap();
+    let old_round = RawId::new();
+    let old_rows = insert_history_batch(&store, companion, 120, "2026-01-01", Some(old_round));
+    insert_history_batch(&store, companion, 120, "2026-02-01", None);
+
+    let wire = &old_rows[0].2;
+    let resolved = store.round_for_stored_wire(companion, wire).await;
+    assert_eq!(
+        resolved,
+        Ok(Some(old_round)),
+        "the stored projection resolves to its domain round"
+    );
+    assert_eq!(
+        store.round_for_stored_wire(companion, "no-such-wire").await,
+        Ok(None)
+    );
+    let loaded = store
+        .load_timeline(companion, None, Some(old_round), 500)
+        .await;
+    let timeline = loaded.unwrap();
+    assert_eq!(timeline.len(), 120, "the whole old round comes back");
+    assert!(timeline.iter().all(|item| item.text.starts_with("row ")));
+    assert_eq!(
+        timeline[0].round_wire.as_deref(),
+        Some(wire.as_str()),
+        "items stay oldest-first and carry the stored projection"
+    );
+
+    let wide = store.load_timeline(companion, None, None, 500).await;
+    let all = wide.unwrap();
+    assert_eq!(all.len(), 240, "the unfiltered window still sees both");
+}
+
+#[tokio::test]
+async fn history_limit_zero_is_empty_and_huge_limits_saturate() {
+    let store = open_memory().await.unwrap();
+    let (companion, _generation) = running_companion(&store).await.unwrap();
+    insert_history_batch(&store, companion, 3, "2026-01-01", None);
+    let zero = store.load_timeline(companion, None, None, 0).await;
+    assert_eq!(zero, Ok(Vec::new()), "zero means no items, not an error");
+    let huge = store.load_timeline(companion, None, None, u64::MAX).await;
+    assert_eq!(
+        huge.map(|items| items.len()),
+        Ok(3),
+        "a limit beyond i64 saturates instead of failing"
+    );
+}
+
+#[tokio::test]
+async fn append_with_stale_generation_is_rejected() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let stale_number = generation.as_u64() + 1;
+    let appended = store
+        .append_message(history_command(
+            companion,
+            PresenceGeneration::from_u64(stale_number),
+            "stale body",
+        ))
+        .await;
+    let outcome = appended.unwrap();
+    assert_eq!(
+        outcome,
+        HistoryAppendOutcome::StaleExpected {
+            current: generation
+        },
+        "stale expectation must carry the current generation"
+    );
+    let loaded = store.load_timeline(companion, None, None, 10).await;
+    let timeline = loaded.unwrap();
+    assert!(timeline.is_empty(), "stale append must store nothing");
+}
+
+/// A reply naming a superseded Owner message is refused inside the same
+/// transaction that would insert it: the newer accepted Owner input wins
+/// by commit order, even inside one round, and the refused reply registers
+/// nothing.
+#[tokio::test]
+async fn reply_after_newer_owner_input_is_stale() {
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
+    let HistoryAppendOutcome::CommittedAs { message: owner1 } = store
+        .append_message(history_command(companion, generation, "first"))
+        .await
+        .unwrap()
+    else {
+        panic!("the first owner input must commit");
+    };
+    let HistoryAppendOutcome::CommittedAs { message: owner2 } = store
+        .append_message(history_command(companion, generation, "second"))
+        .await
+        .unwrap()
+    else {
+        panic!("the second owner input must commit");
+    };
+    let mut stale_reply = history_command(companion, generation, "stale reply");
+    stale_reply.role = HistoryRole::Companion;
+    stale_reply.expected_owner_message = Some(owner1);
+    let (outcome, registered) = store
+        .append_reply_with_undelivered(stale_reply, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        HistoryAppendOutcome::StaleOwnerInput,
+        "a reply to a superseded owner must not adopt"
+    );
+    assert!(
+        registered.is_none(),
+        "a refused reply registers no undelivered entry"
+    );
+    let mut current_reply = history_command(companion, generation, "current reply");
+    current_reply.role = HistoryRole::Companion;
+    current_reply.expected_owner_message = Some(owner2);
+    let (outcome, _) = store
+        .append_reply_with_undelivered(current_reply, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
+        "a reply to the latest owner still commits, got {outcome:?}"
+    );
+    let loaded = store
+        .load_timeline(companion, None, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded.len(),
+        3,
+        "two owners plus the current reply, never the stale one"
+    );
+    assert!(
+        loaded.iter().all(|item| item.text != "stale reply"),
+        "the refused reply leaves no row"
+    );
+}
+
+/// The supersession probe is an index seek, not a History scan: it stops
+/// at the first newer Owner row, so proving recency costs one index step
+/// in the common current case no matter how long the timeline grows.
 #[tokio::test]
 async fn supersession_probe_is_index_backed_not_a_scan() {
     let store = open_memory().await.unwrap();
@@ -213,11 +607,7 @@ async fn undelivered_register_mark_and_stale_mark() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
     let appended = store
-        .append_reply_with_undelivered(
-            history_command(companion, generation, "reply body"),
-            true,
-            None,
-        )
+        .append_reply_with_undelivered(history_command(companion, generation, "reply body"), None)
         .await;
     let (outcome, registered) = appended.unwrap();
     assert!(
@@ -375,7 +765,7 @@ async fn presence_begin_mismatch_is_rejected_as_stale() {
         .compare_and_begin_transition(
             raw,
             check,
-            Some(ClientId::generate()),
+            Some(ClientId::from_raw(RawId::new())),
             ThinMoveReason::InitialAttach,
         )
         .await;
@@ -385,7 +775,7 @@ async fn presence_begin_mismatch_is_rejected_as_stale() {
     };
     assert_eq!(current.generation, generation);
     assert_eq!(current.state, PresenceState::NoActive);
-    let client = ClientId::generate();
+    let client = ClientId::from_raw(RawId::new());
     let begin = store
         .compare_and_begin_transition(
             raw,
@@ -424,8 +814,8 @@ async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
     let raw = companion.as_raw();
-    let pinned = ClientId::generate();
-    let intruder = ClientId::generate();
+    let pinned = ClientId::from_raw(RawId::new());
+    let intruder = ClientId::from_raw(RawId::new());
     let begin = store
         .compare_and_begin_transition(
             raw,
@@ -699,7 +1089,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         Some("send-1"),
     );
     let first = store
-        .append_reply_with_undelivered(base.clone(), true, None)
+        .append_reply_with_undelivered(base.clone(), None)
         .await;
     let (first_outcome, first_registered) = first.unwrap();
     let HistoryAppendOutcome::CommittedAs { message: first_id } = first_outcome else {
@@ -710,7 +1100,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         "first commit registers undelivered"
     );
     let retry = store
-        .append_reply_with_undelivered(base.clone(), true, None)
+        .append_reply_with_undelivered(base.clone(), None)
         .await;
     let (retry_outcome, retry_registered) = retry.unwrap();
     let HistoryAppendOutcome::AlreadyCommittedAs { message, round } = retry_outcome else {
@@ -1951,11 +2341,7 @@ async fn restart_keeps_timeline_intact() {
         "first append must commit"
     );
     let second_append = first
-        .append_reply_with_undelivered(
-            history_command(companion, current.generation, "second"),
-            false,
-            None,
-        )
+        .append_message(history_command(companion, current.generation, "second"))
         .await;
     assert!(second_append.is_ok(), "second append must succeed");
     drop(first);
@@ -2064,6 +2450,69 @@ fn commit(summary: Option<SummaryRecord>, change: MemoryChange) -> MemoryChangeC
     }
 }
 
+#[tokio::test]
+async fn learning_new_memory_keeps_summary_grounds_and_current_row() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "owner likes jasmine tea");
+    let outcome = store
+        .commit_memory_change(commit(
+            Some(evidence.clone()),
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner likes jasmine tea",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(MemoryChangeOutcome::Committed {
+            memory,
+            revision: MemoryRevision::initial(),
+        })
+    );
+
+    let memories = store
+        .list_current_memories(companion, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "the committed memory must be current");
+    let current = &memories[0];
+    assert_eq!(current.content, "owner likes jasmine tea");
+    assert_eq!(current.scope, LearningScope::companion(companion));
+    assert_eq!(current.importance, Importance::clamped(4));
+    assert_eq!(current.temporal, TemporalMeaning::Enduring);
+
+    let revisions = store
+        .list_memory_revisions(memory, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0].change, ChangeKind::Initial);
+    assert_eq!(revisions[0].summary, Some(evidence.id));
+    assert_eq!(revisions[0].content, "owner likes jasmine tea");
+
+    let stored_evidence = store
+        .load_summaries(&[evidence.id])
+        .await
+        .unwrap()
+        .into_iter()
+        .next();
+    let Some(stored_evidence) = stored_evidence else {
+        panic!("the evidence summary must be stored");
+    };
+    assert_eq!(stored_evidence.content, "owner likes jasmine tea");
+    assert_eq!(stored_evidence.source.kind, ExperienceSourceKind::Dialogue);
+    assert_eq!(stored_evidence.scope, LearningScope::companion(companion));
+}
+
+/// Revision pages bound the rows read and still cover every revision exactly
+/// once; a shared Summary is one row in the batch read, and a missing id
+/// stays absent instead of being fabricated.
 #[tokio::test]
 async fn memory_revision_pages_and_summary_batches_are_bounded() {
     let store = open_memory().await.unwrap();
@@ -3334,6 +3783,161 @@ async fn approval_sweep_redacts_history_and_learning_content() {
 /// recorded final result, and the first-party resume instruction, or those
 /// readers would keep serving the raw value out of the owner row.
 #[tokio::test]
+async fn approval_sweep_redacts_task_and_activity_bodies() {
+    use ene_companion::{
+        ActivityRepository as _, RecordResumeActivityCommand, TaskFact, UndeliveredSource,
+    };
+    use ene_task::TaskReportSourceRef;
+
+    let secret = "sk-sweep-task-body";
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let created = store
+        .create_task(TaskCreationPremise {
+            task: TaskId::generate(),
+            purpose: TaskPurpose {
+                text: format!("the old key is {secret}"),
+            },
+            entry: TaskContextEntryId::generate(),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: fixture_clock(),
+            assignee: AssigneeRef { companion },
+            workspace: None,
+        })
+        .await
+        .expect("the task must commit");
+    let advanced = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(ene_task::TaskPurposeAdoptionPremise {
+                purpose: TaskPurpose {
+                    text: format!("now the key is {secret}"),
+                },
+                origin: TaskContextOrigin {
+                    kind: TaskContextOriginKind::OwnerConversation,
+                    source: RawId::new(),
+                },
+                acquired_at: fixture_clock(),
+            }),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .expect("the steering must answer");
+    let TaskCommitOutcome::CommittedAs(current) = advanced else {
+        panic!("the purpose update must commit, got {advanced:?}");
+    };
+    let delegation = DelegationId::generate();
+    assert!(matches!(
+        store
+            .create_delegation(DelegationCreationPremise {
+                delegation,
+                task: current,
+                agent: TaskAgentEphemeralId::generate(),
+                scope_copy: DelegationScope { workspace: None },
+            })
+            .await
+            .expect("the delegation must commit"),
+        DelegationOutcome::Delegated(_)
+    ));
+    let arrival = record_result(
+        &store,
+        delegation,
+        &format!("final report mentions {secret}"),
+    )
+    .await;
+    let activity = record_activity_id(
+        &store,
+        RecordResumeActivityCommand {
+            companion: CompanionId::from_raw(companion),
+            task: current,
+            purpose: TaskPurposeRef {
+                task: current.task,
+                adopted_revision: TaskRevision::initial(),
+            },
+            body: format!("continue from the key {secret}"),
+            command: RawId::new(),
+        },
+    )
+    .await
+    .expect("the activity must record");
+
+    approve_pair(&store, "openai", "main", secret, "reg-sweep-task-body").await;
+
+    let record = store
+        .load_task(current.task)
+        .await
+        .expect("the task must load")
+        .expect("the task still exists");
+    assert!(
+        !record.revision.purpose_text.text.contains(secret),
+        "the current revision purpose is swept: {}",
+        record.revision.purpose_text.text
+    );
+    assert!(
+        record.revision.purpose_text.text.contains("[credential]"),
+        "the swept position stays visible: {}",
+        record.revision.purpose_text.text
+    );
+    let original = store
+        .load_report_source_bounded(
+            TaskReportSourceRef::RevisionPurpose {
+                task: current.task,
+                revision: TaskRevision::initial(),
+            },
+            0,
+            4096,
+        )
+        .await
+        .expect("the revision history must read")
+        .expect("the original revision is retained");
+    assert!(
+        !original.text.contains(secret),
+        "the previous revision purpose is swept: {}",
+        original.text
+    );
+    let result = store
+        .load_report_source_bounded(TaskReportSourceRef::ResultBody(arrival.result), 0, 4096)
+        .await
+        .expect("the result body must read")
+        .expect("the result row exists");
+    assert!(
+        !result.text.contains(secret),
+        "the recorded result body is swept: {}",
+        result.text
+    );
+    let stored_activity = store
+        .load_activity(activity)
+        .await
+        .expect("the activity must load")
+        .expect("the activity still exists");
+    assert!(
+        !stored_activity.body.contains(secret),
+        "the resume instruction body is swept: {}",
+        stored_activity.body
+    );
+    let excerpt = store
+        .load_undelivered_excerpt(
+            UndeliveredSource::TaskRecord {
+                task: current.task.as_raw(),
+                fact: TaskFact::ResultRecorded(arrival.result.as_raw()),
+            },
+            4096,
+        )
+        .await
+        .expect("the excerpt must read")
+        .expect("the result source carries a bounded body");
+    assert!(
+        !excerpt.text.contains(secret),
+        "the presentation-facing excerpt reads the swept row: {}",
+        excerpt.text
+    );
+}
+
+#[tokio::test]
 async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
     let store = open_memory().await.unwrap();
     let Some((companion, generation)) = running_companion(&store).await else {
@@ -3397,6 +4001,140 @@ async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
     assert_eq!(timeline[0].text, "the old key is [credential]");
 }
 
+#[tokio::test]
+async fn stale_credential_set_refuses_history_append_after_approval() {
+    // Two connections model two Host processes sharing one SQLite file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("race.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let Some((companion, generation)) = running_companion(&writer).await else {
+        panic!("the running companion must resolve");
+    };
+    // The writer scrubs its row under the current set premise.
+    let premise = writer.current_set_revision().await.unwrap();
+    // The approver concurrently sweeps + registers + bumps in one commit.
+    approve_pair(&approver, "acme", "main", "sk-new", "reg-race-history").await;
+    // The writer's prepared row carries a value that just became registered;
+    // the stale premise refuses it.
+    let mut cmd = history_command(companion, generation, "the key is sk-new");
+    cmd.expected_credential_set = Some(premise);
+    let appended = writer.append_message(cmd).await;
+    assert_eq!(
+        appended,
+        Ok(HistoryAppendOutcome::StaleCredentialSet),
+        "a stale credential-set premise must refuse the raw append"
+    );
+    let timeline = writer
+        .load_timeline(companion, None, None, 10)
+        .await
+        .unwrap();
+    assert!(
+        timeline.iter().all(|item| !item.text.contains("sk-new")),
+        "no raw bearer may land in History: {timeline:?}"
+    );
+}
+
+#[tokio::test]
+async fn stale_credential_set_refuses_memory_commit_after_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("race-learning.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let companion = RawId::new();
+    let premise = writer.current_set_revision().await.unwrap();
+    approve_pair(&approver, "acme", "main", "sk-new", "reg-race-learning").await;
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "evidence says sk-new");
+    let outcome = writer
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(evidence.clone()),
+            secret_premise: Some(premise),
+            claim: None,
+            change: learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner key sk-new",
+                ChangeKind::Initial,
+                false,
+            ),
+        })
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(MemoryChangeOutcome::StaleCredentialSet),
+        "a stale credential-set premise must refuse the Learning commit"
+    );
+    assert!(
+        writer
+            .list_current_memories(companion, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(writer.load_summaries(&[evidence.id]).await, Ok(Vec::new()));
+    assert!(
+        writer
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn stale_credential_set_refuses_attempt_claim_after_approval() {
+    use ene_inference::{
+        AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("race-send.db");
+    let sender = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let seeded = save_consent(
+        &sender,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(matches!(seeded, ConsentCommitOutcome::Committed { .. }));
+    let premise = sender.current_set_revision().await.unwrap();
+    approve_pair(&approver, "openai", "main", "sk-new", "reg-race-send").await;
+    let claim = sender
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: premise,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            data_use: Vec::new(),
+            task_agent: None,
+            pricing: None,
+            usage_estimate: None,
+        })
+        .await;
+    assert_eq!(
+        claim,
+        Ok(AttemptBeginOutcome::Stale),
+        "a stale credential-set premise must refuse the send claim"
+    );
+}
+
+/// The provider claim is the send boundary of the credential premise: a proof
+/// produced by the real scrub boundary before a rotation must be refused with
+/// zero provider bytes, and only a re-scrub under the new revision may claim.
+/// The refusal itself carries no secret material.
 #[tokio::test]
 async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims() {
     use ene_credential::{CredentialScrubber, SecretScrubber as _};
@@ -3510,6 +4248,215 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
     );
 }
 
+#[tokio::test]
+async fn reapproval_with_a_new_value_refuses_a_stale_history_premise() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reapprove-history.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let Some((companion, generation)) = running_companion(&writer).await else {
+        panic!("the running companion must resolve");
+    };
+    // The value A is usable; the in-flight premise names that generation.
+    approve_pair(&approver, "acme", "main", "sk-a", "reg-reapprove-history").await;
+    let premise = writer.current_set_revision().await.unwrap();
+    // The Owner updates the value to B through a re-approval.
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-b"),
+        Ok(true)
+    ));
+    let updated = writer.current_set_revision().await.unwrap();
+    assert!(
+        updated > premise,
+        "a successful re-approval must advance the credential-set revision"
+    );
+
+    // The in-flight write prepared under A may carry B raw and is refused.
+    let mut stale = history_command(companion, generation, "the new key is sk-b");
+    stale.expected_credential_set = Some(premise);
+    assert_eq!(
+        writer.append_message(stale).await,
+        Ok(HistoryAppendOutcome::StaleCredentialSet)
+    );
+    let timeline = writer
+        .load_timeline(companion, None, None, 10)
+        .await
+        .unwrap();
+    assert!(
+        timeline.iter().all(|item| !item.text.contains("sk-b")),
+        "a stale premise must not re-save the updated value: {timeline:?}"
+    );
+
+    // Content prepared under the new revision commits normally.
+    let mut fresh = history_command(companion, generation, "the new key is [credential]");
+    fresh.expected_credential_set = Some(updated);
+    assert!(matches!(
+        writer.append_message(fresh).await,
+        Ok(HistoryAppendOutcome::CommittedAs { .. })
+    ));
+}
+
+#[tokio::test]
+async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reapprove-learning.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let companion = RawId::new();
+    approve_pair(&approver, "acme", "main", "sk-a", "reg-reapprove-learning").await;
+    let premise = writer.current_set_revision().await.unwrap();
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-b"),
+        Ok(true)
+    ));
+    let updated = writer.current_set_revision().await.unwrap();
+
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "evidence says sk-b");
+    let stale = writer
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(evidence.clone()),
+            secret_premise: Some(premise),
+            claim: None,
+            change: learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner key sk-b",
+                ChangeKind::Initial,
+                false,
+            ),
+        })
+        .await;
+    assert_eq!(stale, Ok(MemoryChangeOutcome::StaleCredentialSet));
+    assert!(
+        writer
+            .list_current_memories(companion, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(writer.load_summaries(&[evidence.id]).await, Ok(Vec::new()));
+    assert!(
+        writer
+            .list_memory_revisions(memory, None, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let fresh_memory = MemoryId::generate();
+    let fresh = writer
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(learning_summary(companion, "fresh evidence")),
+            secret_premise: Some(updated),
+            claim: None,
+            change: learning_change(
+                companion,
+                MemoryTarget::New { id: fresh_memory },
+                "owner key [credential]",
+                ChangeKind::Initial,
+                false,
+            ),
+        })
+        .await;
+    assert!(matches!(fresh, Ok(MemoryChangeOutcome::Committed { .. })));
+}
+
+#[tokio::test]
+async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
+    use ene_inference::{
+        AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reapprove-send.db");
+    let sender = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let seeded = save_consent(
+        &sender,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(matches!(seeded, ConsentCommitOutcome::Committed { .. }));
+    approve_pair(&approver, "openai", "main", "sk-a", "reg-reapprove-send").await;
+    let premise = sender.current_set_revision().await.unwrap();
+    assert!(matches!(
+        approver.approve_credential_with_sweep("openai", "main", "sk-b"),
+        Ok(true)
+    ));
+    let updated = sender.current_set_revision().await.unwrap();
+    assert!(updated > premise);
+
+    let stale = sender
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: premise,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            data_use: Vec::new(),
+            task_agent: None,
+            pricing: None,
+            usage_estimate: None,
+        })
+        .await;
+    assert_eq!(stale, Ok(AttemptBeginOutcome::Stale));
+
+    let fresh = sender
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            consumer: ConsumerKind::CompanionDialogue,
+            capability: CapabilityKind::Dialogue,
+            purpose: PurposeKind::DialogueResponse,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: updated,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            data_use: Vec::new(),
+            task_agent: None,
+            pricing: None,
+            usage_estimate: None,
+        })
+        .await;
+    assert_eq!(fresh, Ok(AttemptBeginOutcome::Started));
+}
+
+#[tokio::test]
+async fn recent_timeline_keeps_the_newest_window_in_order() {
+    let store = open_memory().await.unwrap();
+    let Some((companion, generation)) = running_companion(&store).await else {
+        panic!("the running companion must resolve");
+    };
+    for text in ["one", "two", "three"] {
+        let appended = store
+            .append_message(history_command(companion, generation, text))
+            .await;
+        assert!(matches!(
+            appended,
+            Ok(HistoryAppendOutcome::CommittedAs { .. })
+        ));
+    }
+    let recent = store.load_recent_timeline(companion, 2).await.unwrap();
+    assert_eq!(recent.len(), 2, "the window is capped");
+    assert_eq!(recent[0].text, "two", "oldest first within the window");
+    assert_eq!(recent[1].text, "three");
+}
+
+// --- Task: AU2 creation / reload ---
+
+/// Counts rows of one test-probed table. The table name is a literal from
+/// this test module, never caller input.
 fn task_table_count(store: &Store, table: &str) -> i64 {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
@@ -3555,6 +4502,1911 @@ fn task_premise(workspace: Option<WorkspaceAssociationPremise>) -> TaskCreationP
     }
 }
 
+#[tokio::test]
+async fn task_creation_commits_the_au2_unit_and_loads() {
+    let store = open_memory().await.unwrap();
+    let workspace = task_workspace("/srv/workspace/ene", Some("/srv/workspace/ene/out"));
+    let premise = task_premise(Some(workspace.clone()));
+    let created = store
+        .create_task(premise.clone())
+        .await
+        .expect("creation must commit");
+    assert_eq!(created.task, premise.task);
+    assert_eq!(created.revision, TaskRevision::initial());
+
+    let record = store
+        .load_task(created.task)
+        .await
+        .unwrap()
+        .expect("the created task must load");
+    assert_eq!(record.task.reference, created);
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: premise.task,
+            adopted_revision: TaskRevision::initial(),
+        }
+    );
+    assert_eq!(record.task.assignee, premise.assignee);
+    assert_eq!(record.revision.reference, created);
+    assert_eq!(record.revision.purpose, record.task.purpose);
+    assert_eq!(record.revision.purpose_text, premise.purpose);
+    assert_eq!(record.revision.assignee, premise.assignee);
+    assert_eq!(
+        record.context.len(),
+        1,
+        "AU2 records exactly the adopted purpose entry"
+    );
+    let entry = &record.context[0];
+    assert_eq!(entry.entry, premise.entry);
+    assert_eq!(entry.reference, created);
+    assert_eq!(
+        entry.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(entry.origin, premise.origin);
+    assert_eq!(
+        entry.acquired_at.to_rfc3339(),
+        premise.acquired_at.to_rfc3339(),
+        "the stored acquisition time keeps its creation rendering"
+    );
+    let association = record
+        .workspace
+        .expect("the confirmed association must load");
+    assert_eq!(association.assoc, workspace.assoc);
+    assert_eq!(association.task, premise.task);
+    assert_eq!(association.folder, workspace.need.folder);
+    assert_eq!(association.save_target, workspace.need.save_target);
+
+    assert_eq!(
+        store.load_task(TaskId::generate()).await,
+        Ok(None),
+        "a missing task is never fabricated"
+    );
+}
+
+#[tokio::test]
+async fn task_creation_without_workspace_omits_the_association() {
+    let store = open_memory().await.unwrap();
+    let premise = task_premise(None);
+    let created = store.create_task(premise).await.unwrap();
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.workspace, None);
+    assert_eq!(
+        task_table_count(&store, "workspace_assoc"),
+        0,
+        "no confirmed association writes no row"
+    );
+}
+
+#[tokio::test]
+async fn task_au2_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let workspace = task_workspace("/srv/workspace/ene", None);
+    let premise = task_premise(Some(workspace.clone()));
+    let before = {
+        let store = Store::open(&path).await.unwrap();
+        let created = store.create_task(premise.clone()).await.unwrap();
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        drop(store);
+        record
+    };
+
+    let reopened = Store::open(&path).await.unwrap();
+    let after = reopened
+        .load_task(premise.task)
+        .await
+        .unwrap()
+        .expect("the task must survive reopen");
+    assert_eq!(after, before, "the committed AU2 unit survives reopen");
+    assert_eq!(
+        after.task.reference,
+        TaskRef {
+            task: premise.task,
+            revision: TaskRevision::initial(),
+        },
+        "the created revision survives reopen"
+    );
+    assert_eq!(after.revision.purpose_text, premise.purpose);
+    assert_eq!(
+        after.context.len(),
+        1,
+        "the adopted purpose entry must survive reopen"
+    );
+    assert_eq!(after.context[0].origin, premise.origin);
+    let association = after
+        .workspace
+        .expect("the association must survive reopen");
+    assert_eq!(association.folder, workspace.need.folder);
+    assert_eq!(reopened.load_task(TaskId::generate()).await, Ok(None));
+}
+
+#[tokio::test]
+async fn task_creation_is_atomic_across_every_au2_insert() {
+    let store = open_memory().await.unwrap();
+    for table in [
+        "task",
+        "task_revision",
+        "task_context_entry",
+        "workspace_assoc",
+    ] {
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch(&format!(
+                    "CREATE TRIGGER au2_abort BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'injected fault'); END;"
+                ))
+                .expect("the fault trigger must install");
+        }
+        let premise = task_premise(Some(task_workspace("/srv/workspace/ene", None)));
+        let failed = store.create_task(premise.clone()).await;
+        assert!(
+            matches!(failed, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a fault on {table} must surface a storage failure, got {failed:?}"
+        );
+        assert_eq!(
+            store.load_task(premise.task).await,
+            Ok(None),
+            "a failed creation is not visible as a Task"
+        );
+        for probe in [
+            "task",
+            "task_revision",
+            "task_context_entry",
+            "workspace_assoc",
+        ] {
+            assert_eq!(
+                task_table_count(&store, probe),
+                0,
+                "a fault on {table} must leave no {probe} row"
+            );
+        }
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch("DROP TRIGGER au2_abort;")
+                .expect("the fault trigger must drop");
+        }
+    }
+
+    let premise = task_premise(Some(task_workspace("/srv/workspace/ene", None)));
+    let created = store
+        .create_task(premise.clone())
+        .await
+        .expect("creation succeeds after the faults clear");
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.context.len(), 1);
+    assert_eq!(record.task.purpose.task, premise.task);
+}
+
+#[tokio::test]
+async fn task_load_rejects_a_partial_au2_unit() {
+    let store = open_memory().await.unwrap();
+
+    // A current row without its revision snapshot is corruption, not an empty Task.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_revision WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the snapshot probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current row without its revision snapshot is a technical error"
+    );
+
+    // A current revision without its adopted context entry is corruption too.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the context probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current revision without its context entry is a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_an_inconsistent_au2_unit() {
+    let store = open_memory().await.unwrap();
+    let mismatch = i64::try_from(TaskRevision::initial().as_u64() + 1)
+        .expect("the probe revision fits an integer");
+
+    // D1 current purpose and the D2 snapshot adopted revision must agree.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_revision SET purpose_adopted_revision = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw()), mismatch],
+            )
+            .expect("the purpose probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current/snapshot purpose mismatch is a technical error"
+    );
+
+    // The adopted-purpose entry must record the current purpose.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw()), mismatch],
+            )
+            .expect("the context probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an adopted-purpose/current purpose mismatch is a technical error"
+    );
+
+    // D1 current assignee and the D2 snapshot assignee must agree.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_revision SET assignee = ?2 WHERE task_id = ?1",
+                params![
+                    crate::codec::encode_id(premise.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                ],
+            )
+            .expect("the assignee probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "a current/snapshot assignee mismatch is a technical error"
+    );
+
+    // An unknown stored origin kind is an unreadable row.
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET origin_kind = 'unknown' WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the origin probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an unknown stored origin kind is a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_origin_kinds_round_trip() {
+    let store = open_memory().await.unwrap();
+    for kind in [
+        TaskContextOriginKind::OwnerConversation,
+        TaskContextOriginKind::Spontaneous,
+        TaskContextOriginKind::ScheduleOccurrence,
+    ] {
+        let mut premise = task_premise(None);
+        premise.origin.kind = kind;
+        let created = store.create_task(premise).await.unwrap();
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        assert_eq!(
+            record.context[0].origin.kind, kind,
+            "the stored origin kind round-trips"
+        );
+    }
+}
+
+// --- Task: AU4 steering / CAS forward ---
+
+fn task_purpose_adoption(text: &str) -> TaskPurposeAdoptionPremise {
+    TaskPurposeAdoptionPremise {
+        purpose: TaskPurpose {
+            text: text.to_owned(),
+        },
+        origin: TaskContextOrigin {
+            kind: TaskContextOriginKind::OwnerConversation,
+            source: RawId::new(),
+        },
+        acquired_at: fixture_clock(),
+    }
+}
+
+/// One adopted-instruction premise sourced from the given utterance record.
+fn task_instruction_adoption(source: RawId) -> TaskInstructionAdoptionPremise {
+    TaskInstructionAdoptionPremise {
+        entry: TaskContextEntryId::generate(),
+        origin: TaskContextOrigin {
+            kind: TaskContextOriginKind::OwnerConversation,
+            source,
+        },
+        acquired_at: fixture_clock(),
+    }
+}
+
+/// The D1 current row as stored: `(revision, adopted, text, assignee)`.
+fn task_current_row(store: &Store, task: TaskId) -> (i64, i64, String, String) {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .query_row(
+            "SELECT revision, purpose_adopted_revision, purpose_text, assignee FROM task WHERE task_id = ?1",
+            params![crate::codec::encode_id(task.as_raw())],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("the current row must read")
+}
+
+/// The stored D2 assignee per revision, by revision.
+fn task_revision_assignees(store: &Store, task: TaskId) -> Vec<String> {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut statement = guard
+        .prepare("SELECT assignee FROM task_revision WHERE task_id = ?1 ORDER BY revision")
+        .expect("the assignee probe must prepare");
+    statement
+        .query_map(params![crate::codec::encode_id(task.as_raw())], |row| {
+            row.get(0)
+        })
+        .expect("the assignee probe must query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("the assignee probe must read")
+}
+
+/// Every stored revision snapshot: `(revision, adopted, text)` by revision.
+fn task_revision_rows(store: &Store, task: TaskId) -> Vec<(i64, i64, String)> {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut statement = guard
+        .prepare(
+            "SELECT revision, purpose_adopted_revision, purpose_text FROM task_revision WHERE task_id = ?1 ORDER BY revision",
+        )
+        .expect("the revision probe must prepare");
+    statement
+        .query_map(params![crate::codec::encode_id(task.as_raw())], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("the revision probe must query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("the revision probe must read")
+}
+
+/// One stored context entry:
+/// `(revision, adopted, entry, kind, origin, source, at)`. The adopted
+/// revision is `None` for entries whose kind carries no purpose payload.
+type ContextRow = (i64, Option<i64>, String, String, String, String, String);
+
+/// Every stored context entry by row order.
+fn task_context_rows(store: &Store, task: TaskId) -> Vec<ContextRow> {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut statement = guard
+        .prepare(
+            "SELECT revision, purpose_adopted_revision, entry_id, item_kind, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 ORDER BY rowid",
+        )
+        .expect("the context probe must prepare");
+    statement
+        .query_map(params![crate::codec::encode_id(task.as_raw())], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .expect("the context probe must query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("the context probe must read")
+}
+
+#[tokio::test]
+async fn task_steering_with_a_new_purpose_adopts_it_at_the_new_revision() {
+    let store = open_memory().await.unwrap();
+    let workspace = task_workspace("/srv/workspace/au4", Some("/srv/workspace/au4/out"));
+    let creation = task_premise(Some(workspace.clone()));
+    let created = store.create_task(creation.clone()).await.unwrap();
+    let adoption = task_purpose_adoption("revised AU4 purpose");
+    let adopted_entry = TaskContextEntryId::generate();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: adopted_entry,
+            adopted_instruction: None,
+        })
+        .await
+        .expect("the steering commit must run");
+    let TaskCommitOutcome::CommittedAs(committed) = outcome else {
+        panic!("expected CommittedAs, got {outcome:?}");
+    };
+    assert_eq!(committed.task, created.task);
+    assert_eq!(committed.revision, TaskRevision::from_u64(2));
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.task.reference, committed, "D1 advanced by one");
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: created.task,
+            adopted_revision: committed.revision,
+        },
+        "a purpose change adopts at the new revision"
+    );
+    assert_eq!(record.revision.reference, committed);
+    assert_eq!(record.revision.purpose, record.task.purpose);
+    assert_eq!(record.revision.purpose_text, adoption.purpose);
+    assert_eq!(
+        record.revision.assignee, creation.assignee,
+        "steering carries the assignee unchanged"
+    );
+    assert_eq!(
+        record.context.len(),
+        1,
+        "the new revision records exactly its adopted purpose entry"
+    );
+    let entry = &record.context[0];
+    assert_eq!(
+        entry.entry, adopted_entry,
+        "the repository persists the caller-minted entry identity"
+    );
+    assert_eq!(entry.reference, committed);
+    assert_eq!(
+        entry.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(entry.origin, adoption.origin);
+    assert_eq!(
+        entry.acquired_at.to_rfc3339(),
+        adoption.acquired_at.to_rfc3339()
+    );
+    let association = record
+        .workspace
+        .as_ref()
+        .expect("steering must keep the confirmed workspace association");
+    assert_eq!(association.assoc, workspace.assoc);
+    assert_eq!(association.task, created.task);
+    assert_eq!(association.folder, workspace.need.folder);
+    assert_eq!(association.save_target, workspace.need.save_target);
+
+    let current = task_current_row(&store, created.task);
+    assert_eq!(current.0, 2);
+    assert_eq!(current.1, 2);
+    assert_eq!(current.2, adoption.purpose.text);
+    assert_eq!(
+        current.3,
+        crate::codec::encode_id(creation.assignee.companion),
+        "the D1 assignee projection is untouched"
+    );
+    assert_eq!(
+        task_revision_rows(&store, created.task),
+        vec![
+            (1, 1, creation.purpose.text.clone()),
+            (2, 2, adoption.purpose.text.clone()),
+        ],
+        "the old snapshot is retained and the new one adopts the new purpose"
+    );
+    let contexts = task_context_rows(&store, created.task);
+    assert_eq!(contexts.len(), 2, "both revisions keep their context entry");
+    assert_eq!(contexts[0].0, 1);
+    assert_eq!(
+        contexts[0].2,
+        crate::codec::encode_id(creation.entry.as_raw()),
+        "the old entry keeps its row identity"
+    );
+    assert_eq!(contexts[1].0, 2);
+    assert_eq!(
+        contexts[1].2,
+        crate::codec::encode_id(adopted_entry.as_raw())
+    );
+}
+
+#[tokio::test]
+async fn task_purpose_preserving_forward_carries_the_adopted_purpose_entry() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    let carried_entry = TaskContextEntryId::generate();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: None,
+            adopted_purpose_entry: carried_entry,
+            adopted_instruction: None,
+        })
+        .await
+        .expect("the steering commit must run");
+    let TaskCommitOutcome::CommittedAs(committed) = outcome else {
+        panic!("expected CommittedAs, got {outcome:?}");
+    };
+    assert_eq!(committed.revision, TaskRevision::from_u64(2));
+
+    // The load invariant is the contract here: a carried purpose entry whose
+    // adopted revision predates the entry's revision must stay valid.
+    let record = store
+        .load_task(created.task)
+        .await
+        .unwrap()
+        .expect("the carried-forward revision must load");
+    assert_eq!(record.task.reference, committed);
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: created.task,
+            adopted_revision: TaskRevision::initial(),
+        },
+        "the adopted identity does not move on a purpose-preserving forward"
+    );
+    assert_eq!(record.revision.reference, committed);
+    assert_eq!(record.revision.purpose, record.task.purpose);
+    assert_eq!(
+        record.revision.purpose_text, creation.purpose,
+        "the in-force text is carried, not re-adopted"
+    );
+    assert_eq!(record.revision.assignee, creation.assignee);
+    assert_eq!(record.context.len(), 1);
+    let entry = &record.context[0];
+    assert_eq!(
+        entry.entry, carried_entry,
+        "the repository persists the caller-minted carried entry identity"
+    );
+    assert_eq!(
+        entry.reference, committed,
+        "the entry belongs to revision 2"
+    );
+    assert_eq!(
+        entry.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(
+        entry.origin, creation.origin,
+        "provenance is carried, not re-derived"
+    );
+    assert_eq!(
+        entry.acquired_at.to_rfc3339(),
+        creation.acquired_at.to_rfc3339()
+    );
+
+    let current = task_current_row(&store, created.task);
+    assert_eq!(current.0, 2);
+    assert_eq!(current.1, 1, "the D1 adopted revision stays at 1");
+    assert_eq!(current.2, creation.purpose.text);
+    assert_eq!(
+        task_revision_rows(&store, created.task),
+        vec![
+            (1, 1, creation.purpose.text.clone()),
+            (2, 1, creation.purpose.text.clone()),
+        ],
+        "the new snapshot keeps the old adopted revision"
+    );
+    let contexts = task_context_rows(&store, created.task);
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(contexts[0].1, Some(1));
+    assert_eq!(
+        contexts[0].2,
+        crate::codec::encode_id(creation.entry.as_raw()),
+        "the old entry keeps its row identity"
+    );
+    assert_eq!(contexts[1].0, 2);
+    assert_eq!(
+        contexts[1].1,
+        Some(1),
+        "the carried entry keeps the old adopted identity"
+    );
+    assert_eq!(
+        contexts[1].2,
+        crate::codec::encode_id(carried_entry.as_raw())
+    );
+    assert_eq!(contexts[1].4, contexts[0].4, "the origin kind is carried");
+    assert_eq!(contexts[1].5, contexts[0].5, "the origin source is carried");
+    assert_eq!(
+        contexts[1].6, contexts[0].6,
+        "the acquisition time is carried verbatim"
+    );
+}
+
+#[tokio::test]
+async fn task_steering_stale_expected_changes_nothing() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let winner = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("winner")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(winner, TaskCommitOutcome::CommittedAs(_)));
+
+    let before_current = task_current_row(&store, created.task);
+    let before_revisions = task_revision_rows(&store, created.task);
+    let before_contexts = task_context_rows(&store, created.task);
+    // The stale loser carries an adopted instruction: a rejected forward must
+    // not leave that entry behind either.
+    let stale = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("loser")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        stale,
+        TaskCommitOutcome::StaleExpected {
+            current: TaskRef {
+                task: created.task,
+                revision: TaskRevision::from_u64(2),
+            },
+        },
+        "a stale expected revision reports the winner's revision"
+    );
+    assert_eq!(task_current_row(&store, created.task), before_current);
+    assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+    assert_eq!(task_context_rows(&store, created.task), before_contexts);
+    assert_eq!(
+        task_revision_rows(&store, created.task).len(),
+        2,
+        "no third revision is created"
+    );
+    assert!(
+        !task_context_rows(&store, created.task)
+            .iter()
+            .any(|row| row.3 == "adopted_instruction"),
+        "the stale loser must not leave an adopted-instruction row"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_task_steering_commits_exactly_one_revision() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let left_instruction = task_instruction_adoption(RawId::new());
+    let right_instruction = task_instruction_adoption(RawId::new());
+    let left = TaskCommitPremise {
+        expected: created,
+        new_purpose: Some(task_purpose_adoption("concurrent left")),
+        adopted_purpose_entry: TaskContextEntryId::generate(),
+        adopted_instruction: Some(left_instruction.clone()),
+    };
+    let right = TaskCommitPremise {
+        expected: created,
+        new_purpose: Some(task_purpose_adoption("concurrent right")),
+        adopted_purpose_entry: TaskContextEntryId::generate(),
+        adopted_instruction: Some(right_instruction.clone()),
+    };
+    let (left, right) = tokio::join!(store.forward_steering(left), store.forward_steering(right));
+    let left = left.unwrap();
+    let right = right.unwrap();
+    let winners = [&left, &right]
+        .into_iter()
+        .filter(|outcome| matches!(outcome, TaskCommitOutcome::CommittedAs(_)))
+        .count();
+    let losers = [&left, &right]
+        .into_iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                TaskCommitOutcome::StaleExpected { current }
+                    if current.revision == TaskRevision::from_u64(2)
+            )
+        })
+        .count();
+    assert_eq!(
+        (winners, losers),
+        (1, 1),
+        "exactly one winner and one stale loser: {left:?} / {right:?}"
+    );
+    assert_eq!(
+        task_current_row(&store, created.task).0,
+        2,
+        "the revision advances exactly once"
+    );
+    assert_eq!(
+        task_revision_rows(&store, created.task).len(),
+        2,
+        "no duplicate revision row exists"
+    );
+    // Exactly the winner's instruction lands; the stale loser's entry id is
+    // nowhere in the durable context.
+    let (winner_instruction, loser_instruction) = match (&left, &right) {
+        (TaskCommitOutcome::CommittedAs(_), TaskCommitOutcome::StaleExpected { .. }) => {
+            (&left_instruction, &right_instruction)
+        }
+        (TaskCommitOutcome::StaleExpected { .. }, TaskCommitOutcome::CommittedAs(_)) => {
+            (&right_instruction, &left_instruction)
+        }
+        _ => panic!("exactly one winner expected: {left:?} / {right:?}"),
+    };
+    let contexts = task_context_rows(&store, created.task);
+    assert_eq!(
+        contexts.len(),
+        3,
+        "one purpose entry plus exactly one instruction entry"
+    );
+    assert_eq!(
+        contexts[2].3, "adopted_instruction",
+        "the winner's instruction is the third row"
+    );
+    assert_eq!(
+        contexts[2].2,
+        crate::codec::encode_id(winner_instruction.entry.as_raw()),
+        "the winner's caller-minted instruction entry is the one recorded"
+    );
+    assert!(
+        contexts
+            .iter()
+            .all(|row| row.2 != crate::codec::encode_id(loser_instruction.entry.as_raw())),
+        "the stale loser's instruction entry must not exist"
+    );
+    assert_eq!(
+        contexts[2].6,
+        winner_instruction.acquired_at.to_rfc3339(),
+        "the winner's acquisition time is stored"
+    );
+    let record = store
+        .load_task(created.task)
+        .await
+        .unwrap()
+        .expect("the winning revision loads");
+    assert_eq!(record.context.len(), 2);
+    assert_eq!(
+        record.context[1].item,
+        TaskContextItem::AdoptedInstruction,
+        "the loaded context carries the winner's instruction"
+    );
+    assert_eq!(record.context[1].entry, winner_instruction.entry);
+    assert_eq!(record.context[1].origin, winner_instruction.origin);
+}
+
+#[tokio::test]
+async fn task_steering_faults_roll_back_every_write() {
+    let store = open_memory().await.unwrap();
+    for (trigger, statement) in [
+        (
+            "au4_abort_revision",
+            "CREATE TRIGGER au4_abort_revision BEFORE INSERT ON task_revision BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+        ),
+        (
+            "au4_abort_purpose_entry",
+            "CREATE TRIGGER au4_abort_purpose_entry BEFORE INSERT ON task_context_entry WHEN NEW.item_kind = 'adopted_purpose' BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+        ),
+        (
+            "au4_abort_instruction_entry",
+            "CREATE TRIGGER au4_abort_instruction_entry BEFORE INSERT ON task_context_entry WHEN NEW.item_kind = 'adopted_instruction' BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+        ),
+        (
+            "au4_abort_current",
+            "CREATE TRIGGER au4_abort_current BEFORE UPDATE ON task BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+        ),
+    ] {
+        let creation = task_premise(None);
+        let created = store.create_task(creation.clone()).await.unwrap();
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch(statement)
+                .expect("the fault trigger must install");
+        }
+        // The forward adopts both a new purpose and an instruction, so each
+        // insert position is exercised by its own trigger case. The premise
+        // is retried unchanged after the fault clears: the failed forward
+        // wrote nothing, so the CAS premise is still current.
+        let premise = TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("faulted")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        };
+        let failed = store.forward_steering(premise.clone()).await;
+        assert!(
+            matches!(failed, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a fault on {trigger} must surface a storage failure, got {failed:?}"
+        );
+        let current = task_current_row(&store, created.task);
+        assert_eq!(current.0, 1, "D1 stays at the expected revision");
+        assert_eq!(current.1, 1);
+        assert_eq!(current.2, creation.purpose.text);
+        assert_eq!(
+            current.3,
+            crate::codec::encode_id(creation.assignee.companion)
+        );
+        assert_eq!(task_revision_rows(&store, created.task).len(), 1);
+        let after_fault = task_context_rows(&store, created.task);
+        assert_eq!(after_fault.len(), 1, "only the AU2 purpose entry remains");
+        assert!(
+            !after_fault.iter().any(|row| row.3 == "adopted_instruction"),
+            "a fault on {trigger} must leave no instruction row"
+        );
+        let record = store
+            .load_task(created.task)
+            .await
+            .unwrap()
+            .expect("the pre-steering state stays loadable");
+        assert_eq!(record.task.reference.revision, TaskRevision::initial());
+        assert_eq!(record.revision.purpose_text, creation.purpose);
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute_batch(&format!("DROP TRIGGER {trigger};"))
+                .expect("the fault trigger must drop");
+        }
+        let committed = store
+            .forward_steering(premise)
+            .await
+            .expect("the same premise succeeds after the fault clears");
+        let TaskCommitOutcome::CommittedAs(committed) = committed else {
+            panic!("expected CommittedAs, got {committed:?}");
+        };
+        assert_eq!(committed.revision, TaskRevision::from_u64(2));
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        assert_eq!(
+            record.context.len(),
+            2,
+            "the retried premise records the purpose and instruction entries"
+        );
+        assert_eq!(record.context[1].item, TaskContextItem::AdoptedInstruction);
+    }
+}
+
+#[tokio::test]
+async fn task_steering_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let (task, before) = {
+        let store = Store::open(&path).await.unwrap();
+        let created = store.create_task(task_premise(None)).await.unwrap();
+        let outcome = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose: Some(task_purpose_adoption("persisted steering")),
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, TaskCommitOutcome::CommittedAs(_)));
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        (created.task, record)
+    };
+
+    let reopened = Store::open(&path).await.unwrap();
+    let after = reopened
+        .load_task(task)
+        .await
+        .unwrap()
+        .expect("the steered revision survives reopen");
+    assert_eq!(after, before, "the steered state survives reopen");
+    assert_eq!(after.task.reference.revision, TaskRevision::from_u64(2));
+    assert_eq!(
+        after.revision.purpose.adopted_revision,
+        TaskRevision::from_u64(2)
+    );
+    assert_eq!(
+        task_revision_rows(&reopened, task).len(),
+        2,
+        "old revision history survives reopen"
+    );
+    assert_eq!(task_context_rows(&reopened, task).len(), 2);
+}
+
+#[tokio::test]
+async fn task_steering_reports_revision_exhaustion_without_writing() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    let exhausted = i64::MAX;
+    let exhausted_entry = TaskContextEntryId::generate();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Move the current unit to the last representable revision as a
+        // consistent unit, so the test isolates the durable bound.
+        guard
+            .execute(
+                "UPDATE task SET revision = ?2 WHERE task_id = ?1",
+                params![crate::codec::encode_id(created.task.as_raw()), exhausted],
+            )
+            .expect("the exhaustion probe must update");
+        guard
+            .execute(
+                "INSERT INTO task_revision (task_id, revision, purpose_adopted_revision, purpose_text, assignee) SELECT task_id, ?2, purpose_adopted_revision, purpose_text, assignee FROM task_revision WHERE task_id = ?1 AND revision = 1",
+                params![crate::codec::encode_id(created.task.as_raw()), exhausted],
+            )
+            .expect("the exhaustion snapshot must insert");
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) SELECT ?3, task_id, ?2, purpose_adopted_revision, 'adopted_purpose', origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?1 AND revision = 1",
+                params![
+                    crate::codec::encode_id(created.task.as_raw()),
+                    exhausted,
+                    crate::codec::encode_id(exhausted_entry.as_raw()),
+                ],
+            )
+            .expect("the exhaustion context must insert");
+    }
+    let before_current = task_current_row(&store, created.task);
+    let before_revisions = task_revision_rows(&store, created.task);
+    let before_contexts = task_context_rows(&store, created.task);
+    assert_eq!(before_revisions.len(), 2);
+    assert_eq!(before_contexts.len(), 2);
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: TaskRef {
+                task: created.task,
+                revision: TaskRevision::from_u64(u64::try_from(exhausted).unwrap()),
+            },
+            new_purpose: Some(task_purpose_adoption("exhausted")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        TaskCommitOutcome::RevisionExhausted { task: created.task },
+        "the first unrepresentable successor is reported, not saturated"
+    );
+    assert_eq!(task_current_row(&store, created.task), before_current);
+    assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+    assert_eq!(task_context_rows(&store, created.task), before_contexts);
+}
+
+#[tokio::test]
+async fn task_steering_reports_a_missing_task_as_a_domain_outcome() {
+    let store = open_memory().await.unwrap();
+    let missing = TaskId::generate();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: TaskRef {
+                task: missing,
+                revision: TaskRevision::initial(),
+            },
+            new_purpose: None,
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(TaskCommitOutcome::MissingTask { task: missing }),
+        "a missing Task is a domain outcome, not a storage failure"
+    );
+}
+
+#[tokio::test]
+async fn task_steering_refuses_an_inconsistent_current_unit() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_revision SET assignee = ?2 WHERE task_id = ?1",
+                params![
+                    crate::codec::encode_id(created.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                ],
+            )
+            .expect("the inconsistency probe must update");
+    }
+    let before_current = task_current_row(&store, created.task);
+    let before_revisions = task_revision_rows(&store, created.task);
+    let before_assignees = task_revision_assignees(&store, created.task);
+    let before_contexts = task_context_rows(&store, created.task);
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("must not normalize")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await;
+    assert!(
+        matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a forward must not normalize a unit the reads reject, got {outcome:?}"
+    );
+    assert_eq!(task_current_row(&store, created.task), before_current);
+    assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+    assert_eq!(
+        task_revision_assignees(&store, created.task),
+        before_assignees
+    );
+    assert_eq!(task_context_rows(&store, created.task), before_contexts);
+}
+
+#[tokio::test]
+async fn task_purpose_preserving_forward_fails_closed_on_an_unreadable_predecessor() {
+    for probe in [
+        "DELETE FROM task_context_entry WHERE task_id = ?1",
+        "UPDATE task_context_entry SET origin_kind = 'unknown' WHERE task_id = ?1",
+        "UPDATE task_context_entry SET acquired_at = 'not-a-time' WHERE task_id = ?1",
+    ] {
+        let store = open_memory().await.unwrap();
+        let creation = task_premise(None);
+        let created = store.create_task(creation.clone()).await.unwrap();
+        {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    probe,
+                    params![crate::codec::encode_id(created.task.as_raw())],
+                )
+                .expect("the predecessor probe must apply");
+        }
+        let before_current = task_current_row(&store, created.task);
+        let before_revisions = task_revision_rows(&store, created.task);
+        let before_contexts = task_context_rows(&store, created.task);
+        let outcome = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose: None,
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a carry-forward must fail closed on {probe}, got {outcome:?}"
+        );
+        assert_eq!(task_current_row(&store, created.task), before_current);
+        assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+        assert_eq!(task_context_rows(&store, created.task), before_contexts);
+    }
+}
+
+/// Runs one fail-closed probe in both forward branches: seed a revision-1
+/// unit, apply `corrupt` to its creation purpose entry, and require the
+/// forward to reject the unit without writing anything.
+async fn assert_forward_rejects_corrupted_purpose(label: &str, corrupt: impl Fn(&Store, TaskId)) {
+    for adopt in [false, true] {
+        let store = open_memory().await.unwrap();
+        let created = store.create_task(task_premise(None)).await.unwrap();
+        corrupt(&store, created.task);
+        let before_current = task_current_row(&store, created.task);
+        let before_revisions = task_revision_rows(&store, created.task);
+        let before_contexts = task_context_rows(&store, created.task);
+        let new_purpose = if adopt {
+            Some(task_purpose_adoption("probe purpose"))
+        } else {
+            None
+        };
+        let outcome = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose,
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a forward must fail closed on {label} with new_purpose={adopt}, got {outcome:?}"
+        );
+        assert_eq!(task_current_row(&store, created.task), before_current);
+        assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+        assert_eq!(task_context_rows(&store, created.task), before_contexts);
+    }
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_duplicate_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a duplicate current purpose entry", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) SELECT ?1, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at FROM task_context_entry WHERE task_id = ?2 AND item_kind = 'adopted_purpose'",
+                params![
+                    crate::codec::encode_id(TaskContextEntryId::generate().as_raw()),
+                    crate::codec::encode_id(task.as_raw()),
+                ],
+            )
+            .expect("the duplicate-purpose probe must insert");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_missing_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a missing current purpose entry", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(task.as_raw())],
+            )
+            .expect("the missing-purpose probe must delete");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_mismatched_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose(
+        "a current purpose entry that disagrees with the pointer",
+        |store, task| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    "UPDATE task_context_entry SET purpose_adopted_revision = 99 WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                    params![crate::codec::encode_id(task.as_raw())],
+                )
+                .expect("the mismatched-purpose probe must update");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn task_forward_rejects_a_payload_free_current_purpose_entry() {
+    assert_forward_rejects_corrupted_purpose("a current purpose entry without its payload", |store, task| {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = NULL WHERE task_id = ?1 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(task.as_raw())],
+            )
+            .expect("the payload-free-purpose probe must update");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn task_purpose_preserving_forward_after_a_change_carries_the_in_force_entry() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let adoption = task_purpose_adoption("adopted at revision 2");
+    let adopted_entry = TaskContextEntryId::generate();
+    let changed = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: adopted_entry,
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = changed else {
+        panic!("expected CommittedAs, got {changed:?}");
+    };
+    let carried_entry = TaskContextEntryId::generate();
+    let carried = store
+        .forward_steering(TaskCommitPremise {
+            expected: second,
+            new_purpose: None,
+            adopted_purpose_entry: carried_entry,
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(third) = carried else {
+        panic!("expected CommittedAs, got {carried:?}");
+    };
+    assert_eq!(third.revision, TaskRevision::from_u64(3));
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: created.task,
+            adopted_revision: second.revision,
+        },
+        "the in-force adoption is the revision-2 purpose, not the initial one"
+    );
+    assert_eq!(record.revision.purpose, record.task.purpose);
+    assert_eq!(record.revision.purpose_text, adoption.purpose);
+    let entry = &record.context[0];
+    assert_eq!(
+        entry.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(
+        entry.origin, adoption.origin,
+        "provenance is carried from the in-force adoption entry"
+    );
+    assert_eq!(
+        entry.acquired_at.to_rfc3339(),
+        adoption.acquired_at.to_rfc3339()
+    );
+    assert_eq!(
+        entry.entry, carried_entry,
+        "the repository persists the caller-minted carried identity"
+    );
+
+    let revisions = task_revision_rows(&store, created.task);
+    assert_eq!(revisions.len(), 3);
+    assert_eq!(revisions[2], (3, 2, adoption.purpose.text));
+    let contexts = task_context_rows(&store, created.task);
+    assert_eq!(contexts.len(), 3);
+    assert_eq!(contexts[2].0, 3);
+    assert_eq!(contexts[2].1, Some(2));
+    assert_eq!(
+        contexts[2].2,
+        crate::codec::encode_id(carried_entry.as_raw())
+    );
+    assert_eq!(
+        contexts[2].5,
+        crate::codec::encode_id(adoption.origin.source),
+        "the revision-2 adoption source is carried, not revision 1's"
+    );
+}
+
+// --- Task: AU4 adopted instructions ---
+
+#[tokio::test]
+async fn task_instruction_adoption_round_trips_at_one_revision() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    let adoption = task_purpose_adoption("purpose with instruction");
+    let purpose_entry = TaskContextEntryId::generate();
+    let instruction = task_instruction_adoption(RawId::new());
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: purpose_entry,
+            adopted_instruction: Some(instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(committed) = outcome else {
+        panic!("expected CommittedAs, got {outcome:?}");
+    };
+    assert_eq!(committed.revision, TaskRevision::from_u64(2));
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.task.reference, committed);
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: created.task,
+            adopted_revision: committed.revision,
+        }
+    );
+    assert_eq!(
+        record.context.len(),
+        2,
+        "the purpose entry comes first, then the instruction entry"
+    );
+    let purpose = &record.context[0];
+    assert_eq!(purpose.entry, purpose_entry);
+    assert_eq!(purpose.reference, committed);
+    assert_eq!(
+        purpose.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(purpose.origin, adoption.origin);
+    let adopted = &record.context[1];
+    assert_eq!(
+        adopted.entry, instruction.entry,
+        "the repository persists the caller-minted instruction identity"
+    );
+    assert_eq!(
+        adopted.reference, committed,
+        "the instruction belongs to the forward's revision"
+    );
+    assert_eq!(adopted.item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(adopted.origin, instruction.origin);
+    assert_eq!(
+        adopted.acquired_at.to_rfc3339(),
+        instruction.acquired_at.to_rfc3339()
+    );
+
+    let rows = task_context_rows(&store, created.task);
+    assert_eq!(
+        rows.len(),
+        3,
+        "the AU2 purpose entry plus the forward's purpose and instruction entries"
+    );
+    assert_eq!(rows[1].0, 2);
+    assert_eq!(rows[1].1, Some(2));
+    assert_eq!(rows[1].2, crate::codec::encode_id(purpose_entry.as_raw()));
+    assert_eq!(rows[1].3, "adopted_purpose");
+    assert_eq!(rows[2].0, 2);
+    assert_eq!(
+        rows[2].1, None,
+        "an instruction entry carries no purpose payload"
+    );
+    assert_eq!(
+        rows[2].2,
+        crate::codec::encode_id(instruction.entry.as_raw())
+    );
+    assert_eq!(rows[2].3, "adopted_instruction");
+    assert_eq!(rows[2].4, "owner_conversation");
+    assert_eq!(
+        rows[2].5,
+        crate::codec::encode_id(instruction.origin.source)
+    );
+    assert_eq!(rows[2].6, instruction.acquired_at.to_rfc3339());
+    assert_eq!(
+        task_revision_rows(&store, created.task).len(),
+        2,
+        "the old revision snapshot is retained"
+    );
+}
+
+#[tokio::test]
+async fn task_instruction_only_forward_carries_the_purpose_entry_and_keeps_prior_instructions() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+
+    // Revision 2 adopts a new purpose and an instruction.
+    let adoption = task_purpose_adoption("in force at revision 2");
+    let purpose_entry = TaskContextEntryId::generate();
+    let first_instruction = task_instruction_adoption(RawId::new());
+    let second = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(adoption.clone()),
+            adopted_purpose_entry: purpose_entry,
+            adopted_instruction: Some(first_instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = second else {
+        panic!("expected CommittedAs, got {second:?}");
+    };
+
+    // Revision 3 adopts a second instruction only, sourced from the same
+    // utterance record as the first. The purpose entry is carried from the
+    // in-force revision-2 purpose entry, not re-adopted, and the store must
+    // return both instruction entries rather than deduplicating by
+    // provenance.
+    let carried_entry = TaskContextEntryId::generate();
+    let second_instruction = task_instruction_adoption(first_instruction.origin.source);
+    let third = store
+        .forward_steering(TaskCommitPremise {
+            expected: second,
+            new_purpose: None,
+            adopted_purpose_entry: carried_entry,
+            adopted_instruction: Some(second_instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(third) = third else {
+        panic!("expected CommittedAs, got {third:?}");
+    };
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.task.reference, third);
+    assert_eq!(
+        record.task.purpose,
+        TaskPurposeRef {
+            task: created.task,
+            adopted_revision: second.revision,
+        },
+        "the carried purpose keeps its revision-2 adoption identity"
+    );
+    assert_eq!(record.revision.purpose_text, adoption.purpose);
+    assert_eq!(
+        record.context.len(),
+        3,
+        "the current purpose entry plus both instruction entries"
+    );
+    assert_eq!(record.context[0].entry, carried_entry);
+    assert_eq!(record.context[0].reference, third);
+    assert_eq!(
+        record.context[0].item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(record.context[0].origin, adoption.origin);
+    assert_eq!(record.context[1].entry, first_instruction.entry);
+    assert_eq!(record.context[1].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(
+        record.context[1].reference, second,
+        "the earlier instruction keeps its own adoption reference"
+    );
+    assert_eq!(record.context[2].entry, second_instruction.entry);
+    assert_eq!(record.context[2].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(record.context[2].reference, third);
+    assert_eq!(record.context[2].origin, second_instruction.origin);
+    assert_eq!(
+        record.context[1].origin.source, record.context[2].origin.source,
+        "a shared source must not collapse the two instruction entries"
+    );
+
+    let rows = task_context_rows(&store, created.task);
+    assert_eq!(
+        rows.len(),
+        5,
+        "every revision and adopted entry is retained"
+    );
+    assert_eq!(rows[4].0, 3);
+    assert_eq!(rows[4].1, None);
+    assert_eq!(
+        rows[4].2,
+        crate::codec::encode_id(second_instruction.entry.as_raw())
+    );
+    assert_eq!(rows[4].3, "adopted_instruction");
+}
+
+#[tokio::test]
+async fn task_instruction_context_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let (task, before) = {
+        let store = Store::open(&path).await.unwrap();
+        let created = store.create_task(task_premise(None)).await.unwrap();
+        let adoption = task_purpose_adoption("reopened purpose");
+        let first_instruction = task_instruction_adoption(RawId::new());
+        let second = store
+            .forward_steering(TaskCommitPremise {
+                expected: created,
+                new_purpose: Some(adoption),
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: Some(first_instruction),
+            })
+            .await
+            .unwrap();
+        let TaskCommitOutcome::CommittedAs(second) = second else {
+            panic!("expected CommittedAs, got {second:?}");
+        };
+        let second_instruction = task_instruction_adoption(RawId::new());
+        let third = store
+            .forward_steering(TaskCommitPremise {
+                expected: second,
+                new_purpose: None,
+                adopted_purpose_entry: TaskContextEntryId::generate(),
+                adopted_instruction: Some(second_instruction),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(third, TaskCommitOutcome::CommittedAs(_)),
+            "the second instruction must commit, got {third:?}"
+        );
+        let record = store.load_task(created.task).await.unwrap().unwrap();
+        (created.task, record)
+    };
+
+    let reopened = Store::open(&path).await.unwrap();
+    let after = reopened
+        .load_task(task)
+        .await
+        .unwrap()
+        .expect("the instruction context survives reopen");
+    assert_eq!(after, before, "every loaded field survives reopen");
+    assert_eq!(after.task.reference.revision, TaskRevision::from_u64(3));
+    assert_eq!(after.context.len(), 3);
+    assert_eq!(
+        after.context[0].item,
+        TaskContextItem::AdoptedPurpose(after.task.purpose)
+    );
+    assert_eq!(after.context[1].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(after.context[2].item, TaskContextItem::AdoptedInstruction);
+    assert_eq!(
+        task_revision_rows(&reopened, task).len(),
+        3,
+        "older revision snapshots survive reopen"
+    );
+    assert_eq!(
+        task_context_rows(&reopened, task).len(),
+        5,
+        "old purpose and instruction rows stay on disk"
+    );
+}
+
+#[tokio::test]
+async fn task_purpose_carry_ignores_instruction_entries() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+
+    // Revision 2 carries the purpose and adopts an instruction whose
+    // provenance differs from the purpose's.
+    let carried_in_force = TaskContextEntryId::generate();
+    let instruction = task_instruction_adoption(RawId::new());
+    assert_ne!(
+        instruction.origin.source, creation.origin.source,
+        "the probe needs distinct provenance"
+    );
+    let second = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: None,
+            adopted_purpose_entry: carried_in_force,
+            adopted_instruction: Some(instruction.clone()),
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = second else {
+        panic!("expected CommittedAs, got {second:?}");
+    };
+
+    // Physically move the revision-2 purpose row behind the instruction row,
+    // so a carry-forward that forgets the kind discriminator cannot pass by
+    // rowid luck.
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE entry_id = ?1",
+                params![crate::codec::encode_id(carried_in_force.as_raw())],
+            )
+            .expect("the purpose row must delete");
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, 2, 1, 'adopted_purpose', 'owner_conversation', ?3, ?4)",
+                params![
+                    crate::codec::encode_id(carried_in_force.as_raw()),
+                    crate::codec::encode_id(created.task.as_raw()),
+                    crate::codec::encode_id(creation.origin.source),
+                    creation.acquired_at.to_rfc3339(),
+                ],
+            )
+            .expect("the purpose row must reinsert");
+    }
+
+    let carried = TaskContextEntryId::generate();
+    let third = store
+        .forward_steering(TaskCommitPremise {
+            expected: second,
+            new_purpose: None,
+            adopted_purpose_entry: carried,
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(third) = third else {
+        panic!("expected CommittedAs, got {third:?}");
+    };
+    assert_eq!(third.revision, TaskRevision::from_u64(3));
+
+    let record = store.load_task(created.task).await.unwrap().unwrap();
+    assert_eq!(record.context.len(), 2);
+    let purpose = &record.context[0];
+    assert_eq!(purpose.entry, carried);
+    assert_eq!(
+        purpose.item,
+        TaskContextItem::AdoptedPurpose(record.task.purpose)
+    );
+    assert_eq!(
+        purpose.origin, creation.origin,
+        "the carry copies the purpose row's provenance, not the instruction's"
+    );
+    assert_eq!(
+        purpose.acquired_at.to_rfc3339(),
+        creation.acquired_at.to_rfc3339(),
+        "the carry copies the purpose row's acquisition time"
+    );
+    assert_eq!(
+        record.context[1].item,
+        TaskContextItem::AdoptedInstruction,
+        "the instruction row is still part of the current context"
+    );
+    assert_eq!(record.context[1].entry, instruction.entry);
+    assert_eq!(record.context[1].origin, instruction.origin);
+
+    let rows = task_context_rows(&store, created.task);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        rows[1].3, "adopted_instruction",
+        "the physically first revision-2 row is the instruction"
+    );
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[2].3, "adopted_purpose");
+    assert_eq!(rows[2].1, Some(1));
+    assert_eq!(rows[3].0, 3);
+    assert_eq!(rows[3].3, "adopted_purpose");
+    assert_eq!(
+        rows[3].5,
+        crate::codec::encode_id(creation.origin.source),
+        "the revision-3 purpose row carries revision 1's source"
+    );
+}
+
+// --- Task: context item-kind read rules ---
+
+#[tokio::test]
+async fn task_load_rejects_an_unknown_context_item_kind() {
+    let store = open_memory().await.unwrap();
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET item_kind = 'unknown' WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the kind probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an unknown stored item kind is a technical error, never skipped"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_context_kind_payload_mismatches() {
+    // A purpose entry without its purpose identity payload.
+    let store = open_memory().await.unwrap();
+    let premise = task_premise(None);
+    let _ = store.create_task(premise.clone()).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = NULL WHERE task_id = ?1",
+                params![crate::codec::encode_id(premise.task.as_raw())],
+            )
+            .expect("the payload probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(premise.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an adopted-purpose entry without a payload is a technical error"
+    );
+
+    // An instruction entry that carries a purpose payload.
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("with instruction")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, TaskCommitOutcome::CommittedAs(_)),
+        "the probe forward must commit, got {outcome:?}"
+    );
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE task_context_entry SET purpose_adopted_revision = 2 WHERE item_kind = 'adopted_instruction' AND task_id = ?1",
+                params![crate::codec::encode_id(created.task.as_raw())],
+            )
+            .expect("the payload probe must update");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an adopted-instruction entry with a purpose payload is a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_missing_or_duplicate_current_purpose_entries() {
+    // The current revision's purpose entry is missing.
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("missing probe")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, TaskCommitOutcome::CommittedAs(_)));
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "DELETE FROM task_context_entry WHERE task_id = ?1 AND revision = 2 AND item_kind = 'adopted_purpose'",
+                params![crate::codec::encode_id(created.task.as_raw())],
+            )
+            .expect("the missing-purpose probe must delete");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an instruction row must not stand in for the missing purpose entry"
+    );
+
+    // The current revision carries two purpose entries.
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("duplicate probe")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, TaskCommitOutcome::CommittedAs(_)));
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, 2, 2, 'adopted_purpose', 'owner_conversation', ?3, ?4)",
+                params![
+                    crate::codec::encode_id(TaskContextEntryId::generate().as_raw()),
+                    crate::codec::encode_id(created.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                    fixture_clock().to_rfc3339(),
+                ],
+            )
+            .expect("the duplicate-purpose probe must insert");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "two current purpose entries are a technical error"
+    );
+}
+
+#[tokio::test]
+async fn task_load_rejects_instruction_entries_beyond_the_current_revision() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let outcome = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("current probe")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: Some(task_instruction_adoption(RawId::new())),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, TaskCommitOutcome::CommittedAs(_)));
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "INSERT INTO task_context_entry (entry_id, task_id, revision, purpose_adopted_revision, item_kind, origin_kind, origin_source, acquired_at) VALUES (?1, ?2, 3, NULL, 'adopted_instruction', 'owner_conversation', ?3, ?4)",
+                params![
+                    crate::codec::encode_id(TaskContextEntryId::generate().as_raw()),
+                    crate::codec::encode_id(created.task.as_raw()),
+                    crate::codec::encode_id(RawId::new()),
+                    fixture_clock().to_rfc3339(),
+                ],
+            )
+            .expect("the future-instruction probe must insert");
+    }
+    assert!(
+        matches!(
+            store.load_task(created.task).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "an instruction entry beyond the current revision is a technical error"
+    );
+}
+
+// --- Delegation: AU3 creation / reload ---
+
 fn delegation_scope(workspace: Option<DelegatedWorkspace>) -> DelegationScope {
     DelegationScope { workspace }
 }
@@ -3589,6 +6441,723 @@ fn delegation_premise(
     }
 }
 
+/// One stored `delegation` row in column order:
+/// `(delegation_id, task_id, task_revision, delegator, agent, scope_assoc,
+/// scope_folder, scope_save_target)`.
+type DelegationRow = (
+    String,
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn delegation_row(store: &Store, delegation: DelegationId) -> Option<DelegationRow> {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .query_row(
+            "SELECT delegation_id, task_id, task_revision, delegator, agent, scope_assoc, scope_folder, scope_save_target FROM delegation WHERE delegation_id = ?1",
+            params![crate::codec::encode_id(delegation.as_raw())],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .expect("the delegation probe must read")
+}
+
+#[tokio::test]
+async fn delegation_creation_commits_with_and_without_a_workspace_scope() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+
+    // A delegation that uses no workspace freezes an empty scope: all three
+    // scope columns stay NULL.
+    let bare = DelegationId::generate();
+    let bare_agent = TaskAgentEphemeralId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            bare,
+            created,
+            bare_agent,
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(reference.delegation, bare);
+    assert_eq!(
+        reference.task, created,
+        "the relied-on revision travels in the reference"
+    );
+    assert_eq!(
+        reference.delegator, creation.assignee,
+        "the delegator is copied from the current Task row"
+    );
+    assert_eq!(reference.agent, bare_agent);
+    assert_eq!(reference.scope, delegation_scope(None));
+    assert_eq!(
+        delegation_row(&store, bare),
+        Some((
+            crate::codec::encode_id(bare.as_raw()),
+            crate::codec::encode_id(created.task.as_raw()),
+            1,
+            crate::codec::encode_id(creation.assignee.companion),
+            crate::codec::encode_id(bare_agent.as_raw()),
+            None,
+            None,
+            None,
+        )),
+        "a bare scope persists as three NULL columns"
+    );
+    assert_eq!(store.load_delegation(bare).await.unwrap(), Some(reference));
+
+    // A delegation that relied on a confirmed association freezes the
+    // association's projection into the scope columns.
+    let assoc = WorkspaceAssocId::generate();
+    let scope = delegation_scope(Some(delegated_workspace(
+        assoc,
+        "/srv/workspace/au3",
+        Some("/srv/workspace/au3/out"),
+    )));
+    let scoped = DelegationId::generate();
+    let scoped_agent = TaskAgentEphemeralId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            scoped,
+            created,
+            scoped_agent,
+            scope.clone(),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(reference.delegation, scoped);
+    assert_eq!(reference.task, created);
+    assert_eq!(reference.delegator, creation.assignee);
+    assert_eq!(reference.agent, scoped_agent);
+    assert_eq!(reference.scope, scope);
+    assert_eq!(
+        delegation_row(&store, scoped),
+        Some((
+            crate::codec::encode_id(scoped.as_raw()),
+            crate::codec::encode_id(created.task.as_raw()),
+            1,
+            crate::codec::encode_id(creation.assignee.companion),
+            crate::codec::encode_id(scoped_agent.as_raw()),
+            Some(crate::codec::encode_id(assoc.as_raw())),
+            Some(String::from("/srv/workspace/au3")),
+            Some(String::from("/srv/workspace/au3/out")),
+        )),
+        "the frozen boundary persists its association, folder, and save target"
+    );
+    assert_eq!(
+        store.load_delegation(scoped).await.unwrap(),
+        Some(reference)
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        2,
+        "each delegation keeps its own row"
+    );
+}
+
+#[tokio::test]
+async fn delegation_correspondence_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let (created, expected, before, scope) = {
+        let store = Store::open(&path).await.unwrap();
+        let creation = task_premise(Some(task_workspace(
+            "/srv/workspace/au3",
+            Some("/srv/workspace/au3/out"),
+        )));
+        let created = store.create_task(creation).await.unwrap();
+        let delegation = DelegationId::generate();
+        let scope = delegation_scope(Some(delegated_workspace(
+            WorkspaceAssocId::generate(),
+            "/srv/workspace/au3",
+            Some("/srv/workspace/au3/out"),
+        )));
+        let outcome = store
+            .create_delegation(delegation_premise(
+                delegation,
+                created,
+                TaskAgentEphemeralId::generate(),
+                scope.clone(),
+            ))
+            .await
+            .unwrap();
+        let DelegationOutcome::Delegated(expected) = outcome else {
+            panic!("expected Delegated, got {outcome:?}");
+        };
+        assert_eq!(
+            store.load_delegation(delegation).await.unwrap(),
+            Some(expected.clone())
+        );
+        let before = store.load_task(created.task).await.unwrap().unwrap();
+        (created, expected, before, scope)
+    };
+
+    let reopened = Store::open(&path).await.unwrap();
+    let after = reopened
+        .load_delegation(expected.delegation)
+        .await
+        .unwrap()
+        .expect("the delegation correspondence must survive reopen");
+    assert_eq!(
+        after, expected,
+        "the correlation survives reopen verbatim; it proves no liveness"
+    );
+    assert_eq!(after.scope, scope, "the frozen scope survives reopen");
+    assert_eq!(
+        reopened.load_task(created.task).await.unwrap(),
+        Some(before),
+        "reopen restores the task unit unchanged"
+    );
+    assert_eq!(
+        task_table_count(&reopened, "delegation"),
+        1,
+        "reopen fabricates no extra delegation"
+    );
+    assert_eq!(
+        task_table_count(&reopened, "task"),
+        1,
+        "reopen fabricates no extra task"
+    );
+    assert_eq!(
+        task_table_count(&reopened, "task_revision"),
+        1,
+        "reopen fabricates no extra revision"
+    );
+    assert_eq!(
+        reopened.load_delegation(DelegationId::generate()).await,
+        Ok(None),
+        "an absent correspondence is None, never fabricated"
+    );
+}
+
+#[tokio::test]
+async fn delegation_creation_is_stale_after_a_steering_forward() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation).await.unwrap();
+    let second = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("moved before the delegation")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = second else {
+        panic!("expected CommittedAs, got {second:?}");
+    };
+    assert_eq!(second.revision, TaskRevision::from_u64(2));
+
+    let before_current = task_current_row(&store, created.task);
+    let before_revisions = task_revision_rows(&store, created.task);
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(DelegationOutcome::StaleTaskRevision { current: second }),
+        "a moved revision is reported with the current one"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a stale delegation writes zero rows"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+    assert_eq!(
+        task_current_row(&store, created.task),
+        before_current,
+        "the failed delegation attempt never advances the task"
+    );
+    assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+}
+
+#[tokio::test]
+async fn delegation_creation_races_a_steering_forward_without_torn_state() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation).await.unwrap();
+    let delegation = DelegationId::generate();
+    let premise = delegation_premise(
+        delegation,
+        created,
+        TaskAgentEphemeralId::generate(),
+        delegation_scope(None),
+    );
+    let steering = TaskCommitPremise {
+        expected: created,
+        new_purpose: Some(task_purpose_adoption("racing steering")),
+        adopted_purpose_entry: TaskContextEntryId::generate(),
+        adopted_instruction: None,
+    };
+    let (steering, outcome) = tokio::join!(
+        store.forward_steering(steering),
+        store.create_delegation(premise)
+    );
+
+    // Delegation creation never advances the task revision, so the steering
+    // CAS always commits: the only interleavings are delegation-then-steering
+    // (the delegation stays bound to revision 1) and steering-then-delegation
+    // (the delegation answers stale for revision 2).
+    let steering = steering.unwrap();
+    let TaskCommitOutcome::CommittedAs(advanced) = steering else {
+        panic!("steering must commit at revision 2, got {steering:?}");
+    };
+    assert_eq!(advanced.revision, TaskRevision::from_u64(2));
+    match outcome {
+        Ok(DelegationOutcome::Delegated(reference)) => {
+            assert_eq!(
+                reference.task, created,
+                "the committed delegation froze the revision it compared"
+            );
+            assert_eq!(
+                delegation_row(&store, reference.delegation).map(|row| row.2),
+                Some(1),
+                "the durable row keeps the compared revision"
+            );
+            assert_eq!(
+                task_table_count(&store, "delegation"),
+                1,
+                "exactly the winner's row is durable"
+            );
+        }
+        Ok(DelegationOutcome::StaleTaskRevision { current }) => {
+            assert_eq!(
+                current, advanced,
+                "the stale loser reports the advanced revision"
+            );
+            assert_eq!(
+                task_table_count(&store, "delegation"),
+                0,
+                "the stale path leaves no partial delegation row"
+            );
+            assert_eq!(store.load_delegation(delegation).await, Ok(None));
+        }
+        other => panic!("unexpected delegation outcome: {other:?}"),
+    }
+    assert_eq!(
+        task_current_row(&store, created.task).0,
+        2,
+        "the steering forward advanced exactly once"
+    );
+    assert_eq!(
+        task_revision_rows(&store, created.task).len(),
+        2,
+        "no duplicate revision row exists"
+    );
+}
+
+#[tokio::test]
+async fn delegation_creation_reports_a_missing_task_as_a_domain_outcome() {
+    let store = open_memory().await.unwrap();
+    let missing = TaskId::generate();
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            TaskRef {
+                task: missing,
+                revision: TaskRevision::initial(),
+            },
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(DelegationOutcome::MissingTask { task: missing }),
+        "a missing Task is a domain outcome, not a storage failure"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a missing task writes zero delegation rows"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+}
+
+#[tokio::test]
+async fn delegation_multiple_rows_are_allowed_at_one_revision() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation.clone()).await.unwrap();
+    let first = DelegationId::generate();
+    let second = DelegationId::generate();
+    assert_ne!(first, second, "re-delegation mints a new identity");
+    let first_agent = TaskAgentEphemeralId::generate();
+    let second_agent = TaskAgentEphemeralId::generate();
+    let first_outcome = store
+        .create_delegation(delegation_premise(
+            first,
+            created,
+            first_agent,
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let second_outcome = store
+        .create_delegation(delegation_premise(
+            second,
+            created,
+            second_agent,
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(first_ref) = first_outcome else {
+        panic!("expected Delegated, got {first_outcome:?}");
+    };
+    let DelegationOutcome::Delegated(second_ref) = second_outcome else {
+        panic!("expected Delegated, got {second_outcome:?}");
+    };
+    assert_eq!(first_ref.delegation, first);
+    assert_eq!(second_ref.delegation, second);
+    assert_eq!(first_ref.task, created);
+    assert_eq!(second_ref.task, created);
+    assert_eq!(first_ref.agent, first_agent);
+    assert_eq!(second_ref.agent, second_agent);
+    assert_eq!(
+        first_ref.delegator, creation.assignee,
+        "each row copies the Task row's assignee"
+    );
+    assert_eq!(second_ref.delegator, creation.assignee);
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        2,
+        "parallel delegations of one revision are not collapsed"
+    );
+    assert_eq!(
+        delegation_row(&store, first).map(|row| row.0),
+        Some(crate::codec::encode_id(first.as_raw()))
+    );
+    assert_eq!(
+        delegation_row(&store, second).map(|row| row.0),
+        Some(crate::codec::encode_id(second.as_raw()))
+    );
+    assert_eq!(
+        task_current_row(&store, created.task).0,
+        1,
+        "creating delegations never advances the task revision"
+    );
+}
+
+/// Seeds one Task, applies `corrupt`, and requires `create_delegation` to fail
+/// closed without writing a delegation row.
+async fn assert_create_delegation_rejects(label: &str, corrupt: impl Fn(&Store, TaskId)) {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    corrupt(&store, created.task);
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "create_delegation must reject {label}, got {outcome:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a rejected {label} writes zero delegation rows"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+}
+
+#[tokio::test]
+async fn delegation_creation_fails_closed_on_an_incoherent_task_unit() {
+    for (label, statement) in [
+        (
+            "a missing revision snapshot",
+            "DELETE FROM task_revision WHERE task_id = ?1",
+        ),
+        (
+            "a disagreeing revision assignee",
+            "UPDATE task_revision SET assignee = '11111111-1111-1111-1111-111111111111' WHERE task_id = ?1",
+        ),
+        (
+            "a malformed revision assignee",
+            "UPDATE task_revision SET assignee = 'not-an-id' WHERE task_id = ?1",
+        ),
+    ] {
+        assert_create_delegation_rejects(label, |store, task| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(statement, params![crate::codec::encode_id(task.as_raw())])
+                .expect("the incoherent-unit probe must run");
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn delegation_creation_at_a_later_revision_binds_that_revision() {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let moved = store
+        .forward_steering(TaskCommitPremise {
+            expected: created,
+            new_purpose: Some(task_purpose_adoption("delegated after the move")),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(moved) = moved else {
+        panic!("expected CommittedAs, got {moved:?}");
+    };
+    assert_eq!(moved.revision, TaskRevision::from_u64(2));
+
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            moved,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(Some(delegated_workspace(
+                WorkspaceAssocId::generate(),
+                "/srv/workspace/moved",
+                None,
+            ))),
+        ))
+        .await
+        .unwrap();
+    let DelegationOutcome::Delegated(reference) = outcome else {
+        panic!("expected Delegated, got {outcome:?}");
+    };
+    assert_eq!(
+        reference.task, moved,
+        "the delegation binds the relied-on revision, not the initial one"
+    );
+    assert_eq!(
+        delegation_row(&store, delegation).map(|row| row.2),
+        Some(2),
+        "the durable row stores the relied-on revision"
+    );
+    assert_eq!(
+        store.load_delegation(delegation).await,
+        Ok(Some(reference)),
+        "the correspondence round-trips at a later revision, folder-only scope included"
+    );
+}
+
+/// Seeds one Task and one scoped delegation, applies `corrupt`, and requires
+/// `load_delegation` to fail closed without deleting or rewriting the row.
+async fn assert_load_delegation_rejects(label: &str, corrupt: impl Fn(&Store, DelegationId)) {
+    let store = open_memory().await.unwrap();
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(Some(delegated_workspace(
+                WorkspaceAssocId::generate(),
+                "/srv/workspace/corrupt",
+                Some("/srv/workspace/corrupt/out"),
+            ))),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, DelegationOutcome::Delegated(_)),
+        "the corruption probe needs a committed row, got {outcome:?}"
+    );
+    corrupt(&store, delegation);
+    let loaded = store.load_delegation(delegation).await;
+    assert!(
+        matches!(loaded, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "load_delegation must reject {label}, got {loaded:?}"
+    );
+    assert!(
+        delegation_row(&store, delegation).is_some(),
+        "a rejected read must not delete the {label} row"
+    );
+}
+
+#[tokio::test]
+async fn load_delegation_rejects_malformed_stored_values() {
+    for (label, statement) in [
+        (
+            "a malformed task id",
+            "UPDATE delegation SET task_id = 'not-an-id' WHERE delegation_id = ?1",
+        ),
+        (
+            "a negative task revision",
+            "UPDATE delegation SET task_revision = -1 WHERE delegation_id = ?1",
+        ),
+        (
+            "a malformed delegator",
+            "UPDATE delegation SET delegator = 'not-an-id' WHERE delegation_id = ?1",
+        ),
+        (
+            "a malformed agent",
+            "UPDATE delegation SET agent = 'not-an-id' WHERE delegation_id = ?1",
+        ),
+    ] {
+        assert_load_delegation_rejects(label, |store, delegation| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    statement,
+                    params![crate::codec::encode_id(delegation.as_raw())],
+                )
+                .expect("the malformed-identity probe must update");
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn load_delegation_rejects_inconsistent_scope_columns() {
+    for (label, statement) in [
+        (
+            "assoc NULL with a folder",
+            "UPDATE delegation SET scope_assoc = NULL, scope_folder = '/srv/orphan' WHERE delegation_id = ?1",
+        ),
+        (
+            "assoc NULL with a save target",
+            "UPDATE delegation SET scope_assoc = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
+        ),
+        (
+            "assoc NULL with a save target but no folder",
+            "UPDATE delegation SET scope_assoc = NULL, scope_folder = NULL, scope_save_target = '/srv/orphan/out' WHERE delegation_id = ?1",
+        ),
+        (
+            "assoc without a folder",
+            "UPDATE delegation SET scope_folder = NULL WHERE delegation_id = ?1",
+        ),
+    ] {
+        assert_load_delegation_rejects(label, |store, delegation| {
+            let guard = match store.conn.lock() {
+                Ok(locked) => locked,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .execute(
+                    statement,
+                    params![crate::codec::encode_id(delegation.as_raw())],
+                )
+                .expect("the scope probe must update");
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn delegation_creation_faults_roll_back_every_write() {
+    let store = open_memory().await.unwrap();
+    let creation = task_premise(None);
+    let created = store.create_task(creation).await.unwrap();
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute_batch(
+                "CREATE TRIGGER au3_abort BEFORE INSERT ON delegation BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+            )
+            .expect("the fault trigger must install");
+    }
+    let before_current = task_current_row(&store, created.task);
+    let before_revisions = task_revision_rows(&store, created.task);
+    let before_contexts = task_context_rows(&store, created.task);
+    let delegation = DelegationId::generate();
+    let premise = delegation_premise(
+        delegation,
+        created,
+        TaskAgentEphemeralId::generate(),
+        delegation_scope(Some(delegated_workspace(
+            WorkspaceAssocId::generate(),
+            "/srv/workspace/faulted",
+            None,
+        ))),
+    );
+    let failed = store.create_delegation(premise.clone()).await;
+    assert!(
+        matches!(failed, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a fault on the delegation insert must surface a storage failure, got {failed:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "delegation"),
+        0,
+        "a failed delegation leaves no row"
+    );
+    assert_eq!(store.load_delegation(delegation).await, Ok(None));
+    assert_eq!(
+        task_current_row(&store, created.task),
+        before_current,
+        "the task rows are untouched by the fault"
+    );
+    assert_eq!(task_revision_rows(&store, created.task), before_revisions);
+    assert_eq!(task_context_rows(&store, created.task), before_contexts);
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute_batch("DROP TRIGGER au3_abort;")
+            .expect("the fault trigger must drop");
+    }
+    let committed = store
+        .create_delegation(premise)
+        .await
+        .expect("the same premise succeeds after the fault clears");
+    assert!(
+        matches!(committed, DelegationOutcome::Delegated(_)),
+        "the retried premise commits, got {committed:?}"
+    );
+    assert_eq!(task_table_count(&store, "delegation"), 1);
+}
+
+/// A readable credential registry with no refs, pinned at one revision.
 struct EmptyRevisionRegistry(CredentialSetRevision);
 
 impl CredentialRefRepository for EmptyRevisionRegistry {
@@ -3643,6 +7212,26 @@ async fn record_result(store: &Store, delegation: DelegationId, text: &str) -> T
     }
 }
 
+mod action;
+mod agent;
+mod cancel;
+mod client_delivery;
+mod completion;
+mod delayed_arrival;
+mod deletion_request;
+mod erasure;
+mod erasure_owners;
+mod participant_erasure;
+mod presence;
+mod preservation;
 mod report_reads;
+mod result_reevaluation;
+mod resume;
+mod source_reconciliation;
+mod targeted_deletion;
+mod task_failure;
 mod task_result;
+mod undelivered;
+mod usage;
+mod usage_cap;
 mod usage_query;

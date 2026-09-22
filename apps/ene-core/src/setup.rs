@@ -484,13 +484,25 @@ impl HostHandle {
     }
 
     pub(crate) fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {
+        // The target grammar, never the declared kind, decides whether the
+        // intent may carry the Owner's deletion body; a body-carrying target
+        // is journaled body-free even under a mismatched kind.
+        let body_carrying = intent.target_carries_owner_body();
         IntentFingerprint {
             intent_id: intent.intent_id.0.as_hyphenated().to_string(),
             kind: kind.to_string(),
-            target: intent.target.0.clone(),
+            target: if body_carrying {
+                String::from(Self::DELETION_JOURNAL_FAMILY)
+            } else {
+                intent.target.0.clone()
+            },
             base: intent.base_view.0.clone(),
             rationale_origin: Self::rationale_origin_name(intent.rationale.origin).to_string(),
-            rationale_quote: intent.rationale.quote.clone(),
+            rationale_quote: if body_carrying {
+                None
+            } else {
+                intent.rationale.quote.clone()
+            },
         }
     }
 

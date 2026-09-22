@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,17 +14,14 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId};
-use ene_core::conn;
-use ene_core::serve::{CoreError, HostHandle};
 use ene_desktop::i18n::Locale;
 use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
-use ene_local_control::{ControlOutcome, FromConfirmation};
 
 mod common;
 
-use common::{open_host, pair_and_seat, wait_for_control};
+use common::{ServingTask, open_host, pair_and_seat, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-c1-secret-7719";
@@ -160,54 +156,8 @@ impl ProviderTransport for LearningTransport {
     }
 }
 
-struct ServingTask {
-    shutdown: tokio::sync::watch::Sender<bool>,
-    task: tokio::task::JoinHandle<Result<(), CoreError>>,
-}
-
-impl ServingTask {
-    fn start(dir: &Path, handle: Arc<HostHandle>, transport: Arc<LearningTransport>) -> Self {
-        let (shutdown, rx) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(conn::run_until_shutdown(
-            dir.to_path_buf(),
-            handle,
-            transport,
-            rx,
-        ));
-        Self { shutdown, task }
-    }
-
-    #[expect(clippy::expect_used, reason = "test fixture helper")]
-    async fn shutdown_and_join(self) {
-        self.shutdown.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(30), self.task)
-            .await
-            .expect("serving shutdown must drain")
-            .expect("serving task must join")
-            .expect("serving shutdown must succeed");
-    }
-}
-
 async fn complete_setup(desktop: &mut DesktopRuntime) {
-    desktop.set_secret(String::from(SECRET));
-    desktop
-        .begin_credential_put()
-        .await
-        .expect("credential put must challenge");
-    match desktop
-        .confirm_owner()
-        .await
-        .expect("owner confirm stores the key")
-    {
-        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
-        other => panic!("expected CredentialStored, got {other:?}"),
-    }
-    desktop.set_model(String::from(MODEL));
-    let assigned = desktop.assign_model().await.expect("dialogue assign");
-    assert!(
-        matches!(assigned, ManagementOutcome::StoredAsRuleView { .. }),
-        "dialogue assignment must store, got {assigned:?}"
-    );
+    common::complete_setup(desktop, SECRET, MODEL).await;
     assign_learning(desktop).await;
 }
 
@@ -334,7 +284,7 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
-    desktop.try_spawn_body(&desktop.bundled_sample_asset());
+    desktop.try_spawn_body(&dir.path().join("ene-body-absent"));
     assert_eq!(desktop.snapshot().body_status, "Absent");
 
     desktop.open_page(Page::Memory);

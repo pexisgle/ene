@@ -273,6 +273,19 @@ pub(crate) fn consumption_breakdown(
     }))
 }
 
+/// The overflow-safe micro-currency total of one window, or `None` when the
+/// three buckets cannot be represented; both the admission compare and the
+/// displayed status must agree on that question.
+fn total_micros(breakdown: &WindowConsumption) -> Option<u64> {
+    u64::try_from(
+        u128::from(breakdown.reserved)
+            + u128::from(breakdown.committed_reported)
+            + u128::from(breakdown.committed_unknown),
+    )
+    .ok()
+}
+
+/// Sums one scope's consumption over the UTC period containing `at`.
 pub(crate) fn consumed_in_window(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,
@@ -283,10 +296,7 @@ pub(crate) fn consumed_in_window(
     let Some(breakdown) = consumption_breakdown(conn, scope, window, currency, at)? else {
         return Ok(CapWindowConsumption::Indeterminate);
     };
-    let total = u128::from(breakdown.reserved)
-        + u128::from(breakdown.committed_reported)
-        + u128::from(breakdown.committed_unknown);
-    let Ok(micros) = u64::try_from(total) else {
+    let Some(micros) = total_micros(&breakdown) else {
         return Ok(CapWindowConsumption::Indeterminate);
     };
     Ok(CapWindowConsumption::Known(Money::from_micros(
@@ -570,10 +580,7 @@ fn cap_consumption(
     else {
         return Ok(UsageCapConsumption::Indeterminate);
     };
-    let total = u128::from(breakdown.reserved)
-        + u128::from(breakdown.committed_reported)
-        + u128::from(breakdown.committed_unknown);
-    let Some(total) = u64::try_from(total).ok() else {
+    let Some(total) = total_micros(&breakdown) else {
         return Ok(UsageCapConsumption::Indeterminate);
     };
     let consumed = Money::from_micros(currency, total);

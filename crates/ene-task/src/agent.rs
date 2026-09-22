@@ -307,12 +307,19 @@ pub async fn orchestrate_task_agent_turn(
         kept_exchanges,
         omitted,
     );
+    // The never-omitted logical input head (preamble, purpose, instructions,
+    // adopted facts) that alone outgrows the port budget is never silently
+    // shortened and never sent: no transcript trimming could help, so the turn
+    // refuses before scrubbing or reaching the port. A transcript overflow
+    // around a fitting head keeps its existing port-refusal behavior: the port
+    // refuses the over-limit input as `OverLimit` instead of the model
+    // answering from a silently shortened transcript.
     if raw_input.chars().count() > inference.input_budget()
         && fixed_input_len(purpose_text, &instruction_texts, &past.facts)
             >= inference.input_budget()
     {
         return Err(TaskAgentTurnError::InputUnavailable {
-            reason: String::from("past executed facts exceed the input budget"),
+            reason: String::from("never-omitted logical input exceeds the input budget"),
         });
     }
     let Ok(prompt) = scrubber.scrub(&raw_input).await else {

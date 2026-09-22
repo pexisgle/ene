@@ -587,6 +587,9 @@ mod imp {
     impl State {
         fn missing_all(&mut self, reason: &str) {
             for correlation_id in std::mem::take(&mut self.pending_feedback) {
+                // A compositor terminal for an already-synthesized commit must
+                // be dropped, exactly as the Skipped/Err paths arrange.
+                self.ignored_feedback.insert(correlation_id);
                 self.events
                     .push_back(Event::Presentation(PresentationFeedback {
                         surface_id: self.surface_id.clone(),

@@ -1,3 +1,31 @@
+//! `ene-ctl` CLI client entrypoint.
+//!
+//! The client holds no canonical state and establishes no local authority of
+//! its own; round identity stays Host-issued, and every acceptance or outcome
+//! is Host-reported.
+//!
+//! Presentation output avoids the `print!` family (workspace-denied): all
+//! output goes through `writeln!`/`write!` on locked stdio handles with
+//! explicit flushes, so each write site states its destination and its
+//! failure becomes a [`CliError::Transport`].
+//!
+//! Stdout contract: view and history commands print their rendered lines (or
+//! nothing when empty). `send` prints `AcceptedForRound <round>`, then the
+//! stream deltas concatenated as they arrive (flushed per frame), then a
+//! trailing newline on [`TextStreamClose`](ene_api::v1::round::TextStreamClose),
+//! and finally sends one presentation observation for the round whose status
+//! is `Presented` only when text was shown or the stream completed and
+//! `Unknown` otherwise (no reply is expected; nothing is sent when stdio
+//! failed mid-stream). Host auto-presented backlog summaries are painted to
+//! stdout before and among the deltas and ACKed as receipts after the stream
+//! observation. Deltas on stdout are the user's own conversation text by
+//! design; error paths (stderr, exit codes) never carry bodies or secrets.
+//!
+//! Exit codes: `0` on success; `1` for usage and technical failures
+//! (transport, codec, terminal server refusals); `2` for retryable
+//! server-side domain outcomes (stale rounds, held transitions, stale base
+//! views, pending confirmations, and similar Ok-side declines).
+
 use ene_ctl::errors::CliError;
 use ene_ctl::{client, cmds};
 
@@ -70,8 +98,7 @@ fn ene_ctl_command() -> clap::Command {
                     Arg::new("limit")
                         .long("limit")
                         .value_name("N")
-                        .value_parser(clap::value_parser!(u64))
-                        .default_value("50"),
+                        .value_parser(clap::value_parser!(u64)),
                 ),
         )
         .subcommand(
@@ -205,7 +232,7 @@ fn ene_ctl_command() -> clap::Command {
                     Arg::new("purpose")
                         .long("purpose")
                         .value_name("privacy|security")
-                        .default_value("privacy"),
+                        .default_value(DEFAULT_DELETION_PURPOSE),
                 ),
         )
         .subcommand(
@@ -248,20 +275,20 @@ fn ene_ctl_command() -> clap::Command {
                     Arg::new("scope")
                         .long("scope")
                         .value_name("system|provider")
-                        .default_value("system"),
+                        .default_value(DEFAULT_USAGE_CAP_SCOPE),
                 )
                 .arg(Arg::new("provider").long("provider").value_name("NAME"))
                 .arg(
                     Arg::new("window")
                         .long("window")
                         .value_name("daily_utc|monthly_utc")
-                        .default_value("daily_utc"),
+                        .default_value(DEFAULT_USAGE_CAP_WINDOW),
                 )
                 .arg(
                     Arg::new("currency")
                         .long("currency")
                         .value_name("CODE")
-                        .default_value("USD"),
+                        .default_value(DEFAULT_USAGE_CAP_CURRENCY),
                 )
                 .arg(
                     Arg::new("limit-micros")
@@ -286,6 +313,13 @@ run `ene-ctl --help`",
     ))
 }
 
+/// Defaults shared by the clap surface and the parser fallbacks so the two
+/// cannot drift apart.
+const DEFAULT_DELETION_PURPOSE: &str = "privacy";
+const DEFAULT_USAGE_CAP_SCOPE: &str = "system";
+const DEFAULT_USAGE_CAP_WINDOW: &str = "daily_utc";
+const DEFAULT_USAGE_CAP_CURRENCY: &str = "USD";
+
 fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
     let config = matches.get_one::<PathBuf>("config").cloned();
     let Some((name, sub)) = matches.subcommand() else {
@@ -305,9 +339,10 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
                 .ok_or_else(|| usage_error("watch requires --round ROUND"))?,
         },
         "history" => cmds::Command::History {
-            limit: *sub
+            limit: sub
                 .get_one::<u64>("limit")
-                .ok_or_else(|| usage_error("history limit has no default"))?,
+                .copied()
+                .unwrap_or(cmds::DEFAULT_HISTORY_LIMIT),
         },
         "memory" => {
             let after = sub.get_one::<String>("after").cloned();
@@ -379,7 +414,7 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             let purpose = sub
                 .get_one::<String>("purpose")
                 .cloned()
-                .unwrap_or_else(|| String::from("privacy"));
+                .unwrap_or_else(|| String::from(DEFAULT_DELETION_PURPOSE));
             let Some(purpose) = cmds::deletion_purpose(&purpose) else {
                 return Err(usage_error("--purpose must be privacy or security"));
             };
@@ -410,7 +445,7 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             let scope = sub
                 .get_one::<String>("scope")
                 .cloned()
-                .unwrap_or_else(|| String::from("system"));
+                .unwrap_or_else(|| String::from(DEFAULT_USAGE_CAP_SCOPE));
             let provider = sub.get_one::<String>("provider").cloned();
             match (scope.as_str(), provider.as_deref()) {
                 ("system", None) => {}
@@ -431,11 +466,11 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
                 window: sub
                     .get_one::<String>("window")
                     .cloned()
-                    .unwrap_or_else(|| String::from("daily_utc")),
+                    .unwrap_or_else(|| String::from(DEFAULT_USAGE_CAP_WINDOW)),
                 currency: sub
                     .get_one::<String>("currency")
                     .cloned()
-                    .unwrap_or_else(|| String::from("USD")),
+                    .unwrap_or_else(|| String::from(DEFAULT_USAGE_CAP_CURRENCY)),
                 limit_micros: *sub
                     .get_one::<u64>("limit-micros")
                     .ok_or_else(|| usage_error("usage-cap requires --limit-micros N"))?,

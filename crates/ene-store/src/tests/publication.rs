@@ -1,6 +1,6 @@
 use ene_credential::{
-    ActivationOutcome, CredentialPublicationRepository as _, MutationKind, MutationOutcome,
-    MutationPhase, SecretVersionId, UncommittedMutationOutcome,
+    ActivationOutcome, CredentialPublicationRepository as _, CredentialRefRepository as _,
+    MutationKind, MutationOutcome, MutationPhase, SecretVersionId, UncommittedMutationOutcome,
 };
 
 use crate::Store;
@@ -339,6 +339,12 @@ async fn a_revocation_invalidates_the_reference_and_retires_the_version() {
         "revocation clears the active reference"
     );
     assert_eq!(active.cleanup, Some(first));
+    // Revocation deletes the usable ref, so a later re-registration must be
+    // approved again instead of being answered as already applied.
+    assert!(
+        store.list_refs().await.unwrap().is_empty(),
+        "the revoked pair must no longer be a usable credential ref"
+    );
     let stored = store
         .credential_mutation("m-revoke")
         .await

@@ -60,6 +60,16 @@ pub(crate) const SQL_SELECT_HISTORY_BY_MESSAGE: &str = "SELECT message_id, round
 pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
     "SELECT rowid FROM history_message WHERE message_id = ?1";
 
+/// Durable identity of an Owner-message premise, scoped to the companion:
+/// the expected row must be this companion's Owner row, not merely a
+/// resolvable message id.
+const SQL_SELECT_OWNER_ROWID_SCOPED: &str =
+    "SELECT rowid FROM history_message WHERE message_id = ?1 AND companion_id = ?2 AND role = ?3";
+
+/// Supersession probe for one reply premise: any accepted Owner row for
+/// this companion past the expected rowid, newest or otherwise. Served by
+/// the companion-plus-role covering index and stopping at the first hit,
+/// so the common current case is one index step, never a History scan.
 pub(crate) const SQL_EXISTS_NEWER_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM history_message WHERE companion_id = ?1 AND role = ?2 AND rowid > ?3 LIMIT 1)";
 
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (companion_id, source_kind, source_id, source_phase) DO NOTHING";
@@ -209,8 +219,12 @@ fn append_history(
     if let Some(expected) = cmd.expected_owner_message {
         let expected_rowid: Option<i64> = tx
             .query_row(
-                SQL_SELECT_OWNER_ROWID,
-                params![encode_id(expected)],
+                SQL_SELECT_OWNER_ROWID_SCOPED,
+                params![
+                    encode_id(expected),
+                    companion_text,
+                    encode_role(HistoryRole::Owner)
+                ],
                 |row| row.get(0),
             )
             .optional()
@@ -506,15 +520,11 @@ impl HistoryRepository for Store {
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
-        register_unpresented: bool,
         inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         self.hint_after_commit(
-            run_blocking(move || {
-                append_history(&conn, &cmd, register_unpresented, inference_claim)
-            })
-            .await,
+            run_blocking(move || append_history(&conn, &cmd, true, inference_claim)).await,
         )
     }
 
@@ -975,7 +985,9 @@ impl Store {
     }
 }
 
-const ACTIVITY_KIND_RESUME_INSTRUCTION: &str = "resume_instruction";
+/// The stored activity kind this slice records; an unknown stored value is
+/// an unreadable row and is rejected on read.
+pub(crate) const ACTIVITY_KIND_RESUME_INSTRUCTION: &str = "resume_instruction";
 
 const SQL_INSERT_ACTIVITY: &str = "INSERT INTO activity_record (activity_id, companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at, command_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (command_id) DO NOTHING";
 

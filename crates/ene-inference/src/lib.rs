@@ -9,6 +9,7 @@ use std::pin::Pin;
 use cost::UsageEstimate;
 use ene_credential::{
     CredentialRef, CredentialRefRepository, CredentialSetRevision, CredentialStore, ScrubbedText,
+    available_credential,
 };
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRepository, ConsentRevision,
@@ -207,6 +208,11 @@ pub trait UsageRepository: Send + Sync {
         ticket: InferenceTicketId,
     ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError>;
 
+    /// Loads the ticket's usage reservation, if the admission created one.
+    ///
+    /// `Ok(None)` means no reservation exists: no cap applied to the route, so
+    /// there is no reserved amount. A malformed or internally inconsistent row
+    /// is a technical error. This read settles nothing.
     async fn load_usage_reservation(
         &self,
         ticket: InferenceTicketId,
@@ -435,21 +441,19 @@ async fn prepare_admission(
     let Some(record) = record else {
         return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
     };
-    let known_refs = credential_refs.list_refs().await.map_err(|_| {
-        InferenceTechnicalError::StorageUnavailable {
-            reason: String::from("list credential refs"),
-        }
+    let credential = available_credential(
+        &record.provider,
+        &record.credential_id,
+        credential_refs,
+        credential_store,
+    )
+    .await
+    .map_err(|_| InferenceTechnicalError::StorageUnavailable {
+        reason: String::from("resolve credential"),
     })?;
-    let Some(credential) = known_refs
-        .iter()
-        .find(|known| known.provider() == record.provider && known.id() == record.credential_id)
-        .cloned()
-    else {
+    let Some(credential) = credential else {
         return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
     };
-    if !credential_store.contains(&credential) {
-        return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
-    }
     let candidate = InferenceUseCandidate {
         consumer,
         capability,
@@ -694,15 +698,7 @@ pub async fn dispatch_authorized(
             output_tokens: Some(raw.output_tokens),
             source: UsageSource::Reported,
         },
-        None => UsageFact {
-            ticket,
-            provider,
-            model,
-            input_tokens: None,
-            cached_input_tokens: None,
-            output_tokens: None,
-            source: UsageSource::Unknown,
-        },
+        None => unknown_usage(ticket, &provider, &model),
     };
     let arrival = InferenceResultArrival {
         ticket,

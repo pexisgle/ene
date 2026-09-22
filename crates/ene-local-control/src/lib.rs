@@ -27,12 +27,6 @@ impl RedactedSecret {
     pub fn expose(&self) -> &str {
         &self.0
     }
-
-    #[must_use]
-    pub fn into_inner(self) -> String {
-        let mut owned = self;
-        core::mem::take(&mut owned.0)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

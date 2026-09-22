@@ -85,6 +85,29 @@ impl HostHandle {
         }
     }
 
+    /// Handles one [`CapabilityAdvertise`]: bind, negotiate, then challenge.
+    ///
+    /// On a connection that never paired, the frame's `sender.device_id` must
+    /// resolve to an existing device in the device store; that resolution,
+    /// the device bind, the terms, and the challenge are one phase operation
+    /// (`Accepted → Challenged`), so a reconnect never needs a redundant
+    /// pairing round trip and an unresolved claim cannot bind anything. On a
+    /// freshly paired connection the record's device is already bound
+    /// (`Paired → Challenged`). The table writes the terms and the nonce
+    /// exactly once: a repeat capability frame answers
+    /// [`InvalidHandshakePhase`](ene_api::v1::reject::RejectKind::InvalidHandshakePhase)
+    /// and changes neither.
+    ///
+    /// When no advertised version shares the v1 major, the reply is a single
+    /// terminal [`DisconnectNotice`]. The design requires the typed
+    /// `IncompatibleProtocol { host_max, client_max, hint }` here
+    /// (host-client-ipc.md §7.2 and V-11); `ene-api` only has
+    /// `RejectKind::IncompatibleProtocol` with a free-form detail and no such
+    /// payload, so this is a known deviation to be closed by an API/design
+    /// change, not a deliberate contract.
+    /// Capability frames never attach presence: attach happens only on the
+    /// submit path, so a negotiating-but-never-submitting peer leaves
+    /// attribution untouched.
     pub(super) async fn advertise(
         &self,
         frame: &WireFrame,

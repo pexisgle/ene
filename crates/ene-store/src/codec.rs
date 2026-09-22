@@ -359,6 +359,16 @@ pub(crate) fn encode_usage_source(source: UsageSource) -> &'static str {
     }
 }
 
+pub(crate) fn decode_usage_source(text: &str) -> Result<UsageSource, String> {
+    match text {
+        "reported" => Ok(UsageSource::Reported),
+        "unknown" => Ok(UsageSource::Unknown),
+        _ => Err(String::from("unknown usage source")),
+    }
+}
+
+/// Consumer/purpose storage vocabulary is owned by `ene-permission`; unknown
+/// stored names are unreadable rows and fail closed on decode.
 pub(crate) fn encode_consumer(consumer: ConsumerKind) -> &'static str {
     consumer.as_str()
 }
@@ -486,6 +496,8 @@ pub(crate) fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFi
         && stored.rationale_quote == incoming.rationale_quote
 }
 
+/// Shared by every write-once claim check: an existing row decides, and exact
+/// content replays while anything else clarifies.
 pub(crate) fn replay_or_conflict<T>(
     stored: IntentOutcomeRecord,
     fingerprint: &IntentFingerprint,

@@ -113,7 +113,7 @@ impl WorkspaceRoot {
                         }
                     }
                 }
-                Ok(canonical_target(canonical))
+                Ok(canonical_target(canonical)?)
             }
             OperationKind::Create => {
                 let Some((file_name, parent_names)) = names.split_last() else {
@@ -148,7 +148,7 @@ impl WorkspaceRoot {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(map_io_error(&error)),
                 }
-                Ok(canonical_target(destination))
+                Ok(canonical_target(destination)?)
             }
         }
     }
@@ -180,9 +180,17 @@ impl WorkspaceRoot {
                 }
             }
             OperationKind::Create => {
-                self.write_atomically(target, content.unwrap_or_default(), false)
+                let Some(bytes) = content else {
+                    return refused();
+                };
+                self.write_atomically(target, bytes, false)
             }
-            OperationKind::Edit => self.write_atomically(target, content.unwrap_or_default(), true),
+            OperationKind::Edit => {
+                let Some(bytes) = content else {
+                    return refused();
+                };
+                self.write_atomically(target, bytes, true)
+            }
         }
     }
 
@@ -496,8 +504,13 @@ fn refused() -> ObservedEffect {
     }
 }
 
-fn canonical_target(path: PathBuf) -> RealTargetRef {
-    RealTargetRef::from_canonical_path(path.to_string_lossy().into_owned())
+fn canonical_target(path: PathBuf) -> Result<RealTargetRef, TargetRejection> {
+    match path.to_str() {
+        Some(text) => Ok(RealTargetRef::from_canonical_path(text.to_owned())),
+        // A non-UTF-8 resolved component cannot be represented as the
+        // persisted target text; refusing is safer than a lossy identity.
+        None => Err(TargetRejection::TargetUnavailable),
+    }
 }
 
 fn map_io_error(error: &std::io::Error) -> TargetRejection {

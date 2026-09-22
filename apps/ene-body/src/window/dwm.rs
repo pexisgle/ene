@@ -437,10 +437,12 @@ mod imp {
                     unsafe {
                         (*state).placement.x = rect.left;
                         (*state).placement.y = rect.top;
-                        (*state).events.push_back(LocalUiFact::Drag {
-                            x: rect.left,
-                            y: rect.top,
-                        });
+                        if !(*state).dpi_resize_in_progress {
+                            (*state).events.push_back(LocalUiFact::Drag {
+                                x: rect.left,
+                                y: rect.top,
+                            });
+                        }
                     }
                 }
                 return 0;

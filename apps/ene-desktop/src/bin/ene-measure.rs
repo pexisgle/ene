@@ -54,6 +54,12 @@ enum CliError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to reap PresentMon {path}: {source}")]
+    PresentMonWait {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("PresentMon exited unsuccessfully: {0}")]
     PresentMonExit(std::process::ExitStatus),
 }
@@ -102,7 +108,7 @@ fn run() -> Result<bool, CliError> {
     }
     let mut record = sampled?;
     if let Some(child) = &mut presentmon {
-        let status = child.wait().map_err(|source| CliError::PresentMonStart {
+        let status = child.wait().map_err(|source| CliError::PresentMonWait {
             path: args
                 .presentmon_exe
                 .clone()
@@ -153,12 +159,20 @@ fn run() -> Result<bool, CliError> {
             args.fps_wall_secs,
         )?;
         if !feedback.is_empty() {
-            record.fps = Some(wayland_presentation_record(
+            // Uncorrelatable runtime evidence is 測定不能 (unmeasured), not a
+            // discarded campaign: keep the completed CPU/RSS/interaction
+            // record and let `evaluate` mark FPS incomplete.
+            match wayland_presentation_record(
                 body_pid,
                 args.fps_warmup_secs,
                 args.fps_wall_secs,
                 feedback,
-            )?);
+            ) {
+                Ok(fps) => record.fps = Some(fps),
+                Err(MeasurementError::PresentationTrace(_))
+                | Err(MeasurementError::DuplicatePresentation(_)) => {}
+                Err(other) => return Err(other.into()),
+            }
         }
     }
     if let Some(path) = args.interactions {

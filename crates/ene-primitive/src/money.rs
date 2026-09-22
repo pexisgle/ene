@@ -49,19 +49,13 @@ impl Money {
     }
 
     #[must_use]
-    pub const fn checked_add(self, other: Self) -> Option<Self> {
-        if !matches!(
-            (self.currency, other.currency),
-            (CurrencyCode::Usd, CurrencyCode::Usd)
-        ) {
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        if self.currency != other.currency {
             return None;
         }
-        match self.micros.checked_add(other.micros) {
-            Some(micros) => Some(Self {
-                currency: self.currency,
-                micros,
-            }),
-            None => None,
-        }
+        self.micros.checked_add(other.micros).map(|micros| Self {
+            currency: self.currency,
+            micros,
+        })
     }
 }

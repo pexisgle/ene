@@ -126,6 +126,29 @@ export component EmptyState inherits Rectangle {
         Caption { text: root.description; }
     }
 }
+component RowCardBody inherits VerticalLayout {
+    in property <Item> item;
+    padding: 12px; spacing: 6px;
+    HorizontalLayout {
+        Text { text: root.item.title; color: Theme.text; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+        Text { text: root.item.state; color: Theme.accent; font-size: 12px; horizontal-stretch: 0; wrap: word-wrap; }
+    }
+    if item.body != "": BodyText { text: root.item.body; }
+    if item.meta != "": Caption { text: root.item.meta; }
+}
+/// Informational card: no button role, pointer target, or focus, so it offers
+/// no affordance an operator could activate.
+export component StaticRowCard inherits Rectangle {
+    in property <Item> item;
+    in property <bool> selected: false;
+    min-height: content.min-height;
+    vertical-stretch: 0;
+    border-radius: Theme.radius;
+    background: selected ? Theme.raised : Theme.surface;
+    border-width: 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    content := RowCardBody { item: root.item; }
+}
 export component RowCard inherits Rectangle {
     in property <Item> item;
     in property <bool> selected: false;
@@ -140,15 +163,7 @@ export component RowCard inherits Rectangle {
     accessible-role: button;
     accessible-label: item.title;
     accessible-action-default => { root.clicked(root.item.key); }
-    content := VerticalLayout {
-        padding: 12px; spacing: 6px;
-        HorizontalLayout {
-            Text { text: root.item.title; color: Theme.text; font-size: 14px; font-weight: 600; wrap: word-wrap; }
-            Text { text: root.item.state; color: Theme.accent; font-size: 12px; horizontal-stretch: 0; wrap: word-wrap; }
-        }
-        if item.body != "": BodyText { text: root.item.body; }
-        if item.meta != "": Caption { text: root.item.meta; }
-    }
+    content := RowCardBody { item: root.item; }
     TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(root.item.key); } }
     focus := FocusScope { width: 0px; key-pressed(event) => { if event.text == Key.Return || event.text == Key.Space { root.clicked(root.item.key); return accept; } return reject; } }
 }

@@ -74,6 +74,18 @@ struct Subscription {
     resume: Option<(UndeliveredCursor, bool, u32, String)>,
 }
 
+/// Records a drained scan floor: advance the floor to `upper`, mark the
+/// subscription drained, and clear any pending continuation. No-op when the
+/// subscription is bound to a different companion.
+fn drain_sub(sub: &mut Subscription, companion: RawId, upper: u64) {
+    if sub.companion == companion {
+        sub.scan_floor = sub.scan_floor.max(upper);
+        sub.drained_once = true;
+        sub.resume = None;
+    }
+}
+
+/// One live presentation receipt (at most one per Companion).
 #[derive(Debug, Clone)]
 struct Receipt {
     id: String,
@@ -510,6 +522,10 @@ impl HostHandle {
         }
     }
 
+    /// Presents one page: presence-checked, receipt-backed, frame-capped.
+    /// Store failures answer `Unavailable`; no row, cursor, or receipt moves,
+    /// and the next request retries the same pass rather than receiving a
+    /// lying page.
     async fn present_page(
         &self,
         frame: &WireFrame,
@@ -639,19 +655,28 @@ impl HostHandle {
         Self::sweep_carried(&mut crate::lock_unpoison(&self.presentations), conn);
         let items = self.carry_items(live, conn, &carried).await?;
         let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
-        let pruned = self
-            .with_presentation_state(live, |state| {
-                if !satisfied.is_empty()
-                    && let Some(live_receipt) = state.receipts.get_mut(&companion_key)
-                    && live_receipt.id == receipt.id
-                {
-                    live_receipt.selected.retain(|id| !satisfied.contains(id));
-                }
-            })
-            .is_some();
-        if !pruned {
-            self.forget_carried(conn, &items).await;
-            return None;
+        let receipt_live = self.with_presentation_state(live, |state| {
+            if !satisfied.is_empty()
+                && let Some(live_receipt) = state.receipts.get_mut(&companion_key)
+                && live_receipt.id == receipt.id
+            {
+                live_receipt.selected.retain(|id| !satisfied.contains(id));
+            }
+            state
+                .receipts
+                .get(&companion_key)
+                .is_some_and(|live| live.id == receipt.id)
+        });
+        match receipt_live {
+            Some(true) => {}
+            Some(false) => {
+                self.forget_carried(conn, &items).await;
+                return Some(UndeliveredResponse::StaleBaseView { current: None });
+            }
+            None => {
+                self.forget_carried(conn, &items).await;
+                return None;
+            }
         }
         if estimate_summary_bytes(&items) > self.frame_budget() {
             return Some(UndeliveredResponse::FrameTooLarge);
@@ -704,6 +729,10 @@ impl HostHandle {
         // consumed (see `take_cursor`) so a cursor-less advance replaces the
         // predecessor wire instead of leaking it.
         let mut from_cursor = cursor.map(|cursor| cursor.0.clone());
+        // A cursor supplied by this request is a continuation, not an explicit
+        // head pass: only the stored cursor-less catch-up may fall through to a
+        // head re-display when it drains.
+        let from_request_cursor = cursor.is_some();
         // Resolve the fetch window: continue a stored pass, catch up on new
         // arrivals, or rewind to the head for an explicit pass. The plan
         // installs this connection's subscription, so it runs under the
@@ -834,7 +863,15 @@ impl HostHandle {
         };
         let (entries, items, fetched_next, upper, pending_only) = fitted;
         if entries.is_empty() {
-            if matches!(start, PlanStart::Continued { .. }) && trigger != PassTrigger::Push {
+            // A drained continued pass falls through to an explicit head
+            // re-display in the same response instead of stranding failed
+            // rows behind an empty arrival check. A push never does: it
+            // must not re-display Unknown rows without an explicit request
+            // or a new presence.
+            if matches!(start, PlanStart::Continued { .. })
+                && !from_request_cursor
+                && trigger != PassTrigger::Push
+            {
                 // The continued cursor is consumed by this drained pass: the
                 // recurrence below is an explicit head re-display under
                 // `None`, so without this the stored cursor would survive
@@ -1048,12 +1085,8 @@ impl HostHandle {
                         (Some(wire), false)
                     }
                     None => {
-                        if let Some(sub) = state.subs.get_mut(conn)
-                            && sub.companion == companion.as_raw()
-                        {
-                            sub.scan_floor = sub.scan_floor.max(upper);
-                            sub.drained_once = true;
-                            sub.resume = None;
+                        if let Some(sub) = state.subs.get_mut(conn) {
+                            drain_sub(sub, companion.as_raw(), upper);
                         }
                         (None, true)
                     }
@@ -1228,12 +1261,8 @@ impl HostHandle {
         upper: u64,
     ) -> bool {
         self.with_presentation_state(live, |state| {
-            if let Some(sub) = state.subs.get_mut(conn)
-                && sub.companion == companion.as_raw()
-            {
-                sub.scan_floor = sub.scan_floor.max(upper);
-                sub.drained_once = true;
-                sub.resume = None;
+            if let Some(sub) = state.subs.get_mut(conn) {
+                drain_sub(sub, companion.as_raw(), upper);
             }
         })
         .is_some()

@@ -54,6 +54,32 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Runs the `Stage 2` Host.
+///
+/// The inference transport is credential-agnostic: every provider request
+/// carries the credential the admission resolved for that use, so a consent
+/// reassignment bills the new credential on the next request without any
+/// transport rebinding. The environment bearer store serves the `openai`
+/// provider until real OS stores arrive. Socket-path assembly stays inside
+/// [`crate::conn`]: this entry point passes
+/// the data directory, never the socket path.
+///
+/// Startup is ordered around the single-writer lock (PR §6.4): the `0700`
+/// data directory and the exclusive `host.lock` come first, then the store
+/// open (which runs migrations), then the explicit startup mutations (the
+/// presence normalization, the unapproved-pairing cleanup, the credential
+/// publication reconciliation, the credential sweep, sealed-result
+/// reconciliation, orphaned usage-reservation reconciliation, and Targeted
+/// Deletion recovery), and only then the
+/// listener. A second Host in the same directory is refused before any of
+/// that runs.
+///
+/// # Errors
+///
+/// Returns [`CoreError::AlreadyRunning`] when another Host holds the data
+/// directory, [`CoreError::Store`] when the state cannot be opened, and
+/// [`CoreError::Bind`] (or [`CoreError::UnsupportedPlatform`]) when the
+/// listener cannot run.
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let _lock = crate::host_lock::HostLock::acquire(data_dir)?;
     let handle = HostHandle::open(data_dir).await?;

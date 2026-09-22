@@ -1,0 +1,589 @@
+//! H-A command-level steering mapping checks (IB §4 / §13.2).
+//!
+//! `propose_steering_current` and `propose_task_current` are the companion-side
+//! entry points the conversation path uses: they map the Owner's command onto
+//! the Task-side value premise, carry the relied Owner input currentness, and
+//! delegate to the Task orchestration. The faked repository pins what crossed
+//! the boundary — the boundary token, the proposed purpose text, and the
+//! instruction source — and that no caller-minted context-entry identity or
+//! future revision can appear in the command type.
+
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "integration-test fixtures and helpers live outside #[test] functions, where clippy.toml's test allowances do not apply"
+)]
+
+use std::sync::Mutex;
+
+use ene_companion::dialogue::{
+    ProposeSteeringCommand, ProposeTaskCommand, propose_steering_current, propose_task_current,
+};
+use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{
+    AssigneeRef, ConversationTaskRepository, DelegationCreationPremise, DelegationId,
+    DelegationOutcome, DelegationRef, OwnerMessageCurrentness, SteeringPremiseRef, Task,
+    TaskAgentResultArrival, TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise,
+    TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskId, TaskProgress, TaskProposalOutcome,
+    TaskPurpose, TaskPurposeRef, TaskRecord, TaskRef, TaskRepository, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, TaskResumeCommitPremise,
+    TaskResumeOutcome, TaskRevision, TaskRevisionRecord, TaskTechnicalError,
+};
+
+/// Scripted `TaskRepository`: one load fixture, one forward result, and a
+/// capture of every `TaskCommitPremise` handed to `forward_steering`.
+struct FakeTaskRepository {
+    load: Mutex<Result<Option<TaskRecord>, TaskTechnicalError>>,
+    forward: Mutex<Result<TaskCommitOutcome, TaskTechnicalError>>,
+    forwarded: Mutex<Vec<TaskCommitPremise>>,
+    created: Mutex<Vec<TaskCreationPremise>>,
+}
+
+impl FakeTaskRepository {
+    fn new(
+        load: Result<Option<TaskRecord>, TaskTechnicalError>,
+        forward: Result<TaskCommitOutcome, TaskTechnicalError>,
+    ) -> Self {
+        Self {
+            load: Mutex::new(load),
+            forward: Mutex::new(forward),
+            forwarded: Mutex::new(Vec::new()),
+            created: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn forwarded(&self) -> Vec<TaskCommitPremise> {
+        self.forwarded
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .clone()
+    }
+
+    fn created(&self) -> Vec<TaskCreationPremise> {
+        self.created
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .clone()
+    }
+}
+
+impl TaskRepository for FakeTaskRepository {
+    async fn record_task_agent_observation(
+        &self,
+        _premise: ene_task::TaskAgentObservationPremise,
+    ) -> Result<ene_task::TaskAgentObservationId, ene_task::TaskTechnicalError> {
+        Err(ene_task::TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_agent_observation is outside this fixture's scope"),
+        })
+    }
+    async fn create_task(
+        &self,
+        premise: TaskCreationPremise,
+    ) -> Result<TaskRef, TaskTechnicalError> {
+        let reference = TaskRef {
+            task: premise.task,
+            revision: TaskRevision::initial(),
+        };
+        self.created
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .push(premise);
+        Ok(reference)
+    }
+
+    async fn forward_steering(
+        &self,
+        premise: TaskCommitPremise,
+    ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
+        self.forwarded
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .push(premise);
+        self.forward
+            .lock()
+            .expect("fixture script is never poisoned")
+            .clone()
+    }
+
+    async fn load_task(&self, _task: TaskId) -> Result<Option<TaskRecord>, TaskTechnicalError> {
+        self.load
+            .lock()
+            .expect("fixture script is never poisoned")
+            .clone()
+    }
+
+    async fn cancel_task(&self, _task: TaskId) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("cancel_task is outside this fixture's scope"),
+        })
+    }
+
+    async fn create_delegation(
+        &self,
+        _premise: DelegationCreationPremise,
+    ) -> Result<DelegationOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("create_delegation is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_delegation(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<Option<DelegationRef>, TaskTechnicalError> {
+        Ok(None)
+    }
+
+    async fn record_task_result_arrival(
+        &self,
+        _arrival: TaskAgentResultArrival,
+    ) -> Result<ene_task::TaskResultArrivalOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("record_task_result_arrival is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_task_result(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_task_result is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_delegation_result(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+        Ok(None)
+    }
+
+    async fn delegation_has_started_work(
+        &self,
+        _delegation: DelegationId,
+    ) -> Result<bool, TaskTechnicalError> {
+        Ok(false)
+    }
+
+    async fn adopt_result(
+        &self,
+        _claim: TaskResultAdoptionClaim,
+    ) -> Result<TaskResultAcceptance, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("adopt_result is outside this fixture's scope"),
+        })
+    }
+
+    async fn fail_task(
+        &self,
+        _premise: ene_task::TaskFailurePremise,
+    ) -> Result<ene_task::TaskFailureOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("fail_task is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_result_adoption_claim(
+        &self,
+        _result: TaskResultId,
+    ) -> Result<Option<TaskResultAdoptionClaim>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_result_adoption_claim is outside this fixture's scope"),
+        })
+    }
+
+    async fn list_unadopted_results_after(
+        &self,
+        _after: Option<ene_task::UnadoptedResultCursor>,
+        _limit: u64,
+    ) -> Result<Vec<ene_task::UnadoptedResultCursor>, TaskTechnicalError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_task_action_attempts(
+        &self,
+        _task: TaskId,
+    ) -> Result<Vec<ene_primitive::RawId>, TaskTechnicalError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_tasks_after(
+        &self,
+        _after: Option<TaskId>,
+        _limit: u32,
+    ) -> Result<Vec<ene_task::TaskHeadline>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("list_tasks_after is outside this fixture's scope"),
+        })
+    }
+
+    async fn list_task_report_rows_after(
+        &self,
+        _task: TaskId,
+        _after: Option<ene_task::TaskReportRowCursor>,
+        _limit: u32,
+    ) -> Result<Vec<ene_task::TaskReportRow>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("list_task_report_rows_after is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_report_source_bounded(
+        &self,
+        _source: ene_task::TaskReportSourceRef,
+        _cursor_bytes: u64,
+        _limit_bytes: u32,
+    ) -> Result<Option<ene_task::TaskReportSourcePage>, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("load_report_source_bounded is outside this fixture's scope"),
+        })
+    }
+
+    async fn commit_task_resume(
+        &self,
+        _premise: ene_task::TaskResumeCommitPremise,
+    ) -> Result<ene_task::TaskResumeOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("commit_task_resume is outside this fixture's scope"),
+        })
+    }
+
+    async fn load_past_executed_facts(
+        &self,
+        _task: TaskId,
+    ) -> Result<ene_task::PastExecutedFactsPage, TaskTechnicalError> {
+        Ok(ene_task::PastExecutedFactsPage {
+            facts: Vec::new(),
+            has_more: false,
+        })
+    }
+}
+
+/// The conversation-sourced half of the same fixture: it replays the scripted
+/// outcome and ignores the currentness premise, which the real store compares
+/// inside its transaction. Extending it keeps the tested mapping on the exact
+/// trait the conversation path calls.
+impl ConversationTaskRepository for FakeTaskRepository {
+    async fn create_task_from_conversation(
+        &self,
+        premise: TaskCreationPremise,
+        _currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskProposalOutcome, TaskTechnicalError> {
+        let reference = TaskRef {
+            task: premise.task,
+            revision: TaskRevision::initial(),
+        };
+        self.created
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .push(premise);
+        Ok(TaskProposalOutcome::AcceptedAsTask(reference))
+    }
+
+    async fn forward_steering_from_conversation(
+        &self,
+        premise: TaskCommitPremise,
+        _currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCommitOutcome, TaskTechnicalError> {
+        self.forwarded
+            .lock()
+            .expect("fixture capture is never poisoned")
+            .push(premise);
+        self.forward
+            .lock()
+            .expect("fixture script is never poisoned")
+            .clone()
+    }
+
+    async fn cancel_task_from_conversation(
+        &self,
+        _task: TaskId,
+        _currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskCancelOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("cancel_task_from_conversation is outside this fixture's scope"),
+        })
+    }
+
+    async fn commit_task_resume_from_conversation(
+        &self,
+        _premise: TaskResumeCommitPremise,
+        _currentness: OwnerMessageCurrentness,
+    ) -> Result<TaskResumeOutcome, TaskTechnicalError> {
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from(
+                "commit_task_resume_from_conversation is outside this fixture's scope",
+            ),
+        })
+    }
+}
+
+fn clock() -> WallClockWithTz {
+    WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00").expect("fixture timestamp parses")
+}
+
+/// Stand-in for the relied Owner input premise the real store compares; the
+/// fixture accepts whatever it is given.
+fn currentness() -> OwnerMessageCurrentness {
+    OwnerMessageCurrentness {
+        companion: RawId::new(),
+        message: RawId::new(),
+    }
+}
+
+fn revision(value: u64) -> TaskRevision {
+    TaskRevision::from_u64(value)
+}
+
+fn record(
+    task: TaskId,
+    current_revision: TaskRevision,
+    purpose: TaskPurposeRef,
+    purpose_entry: TaskContextEntryId,
+) -> TaskRecord {
+    let reference = TaskRef {
+        task,
+        revision: current_revision,
+    };
+    let assignee = AssigneeRef {
+        companion: RawId::new(),
+    };
+    TaskRecord {
+        task: Task {
+            reference,
+            purpose,
+            assignee,
+            progress: TaskProgress::InProgress,
+            adopted_result: None,
+        },
+        revision: TaskRevisionRecord {
+            reference,
+            purpose,
+            purpose_text: TaskPurpose {
+                text: String::from("loaded purpose body"),
+            },
+            assignee,
+        },
+        context: vec![TaskContextEntry {
+            entry: purpose_entry,
+            reference,
+            item: TaskContextItem::AdoptedPurpose(purpose),
+            origin: TaskContextOrigin {
+                kind: TaskContextOriginKind::OwnerConversation,
+                source: RawId::new(),
+            },
+            acquired_at: clock(),
+        }],
+        workspace: None,
+    }
+}
+
+fn steer_command(
+    expected: TaskRef,
+    purpose: TaskPurposeRef,
+    new_purpose: Option<TaskPurpose>,
+    instruction_source: RawId,
+) -> ProposeSteeringCommand {
+    ProposeSteeringCommand {
+        premise: SteeringPremiseRef { expected, purpose },
+        new_purpose,
+        instruction_source,
+    }
+}
+
+#[tokio::test]
+async fn propose_steering_current_maps_the_command_onto_the_task_premise() {
+    let task = TaskId::generate();
+    let expected = TaskRef {
+        task,
+        revision: revision(2),
+    };
+    let purpose = TaskPurposeRef {
+        task,
+        adopted_revision: revision(2),
+    };
+    let existing_purpose_entry = TaskContextEntryId::generate();
+    let instruction_source = RawId::new();
+    let new_purpose = TaskPurpose {
+        text: String::from("also cover the review findings"),
+    };
+    let accepted = TaskRef {
+        task,
+        revision: revision(3),
+    };
+
+    // Compile-level shape check: exhaustively destructuring the command proves
+    // it carries exactly the boundary token, the proposed purpose text, and
+    // the instruction source. A caller-minted entry identity or a future
+    // revision would not compile here.
+    let probe = steer_command(
+        expected,
+        purpose,
+        Some(new_purpose.clone()),
+        instruction_source,
+    );
+    let ProposeSteeringCommand {
+        premise,
+        new_purpose: probed_purpose,
+        instruction_source: probed_source,
+    } = probe;
+    assert_eq!(premise, SteeringPremiseRef { expected, purpose });
+    assert_eq!(probed_purpose, Some(new_purpose.clone()));
+    assert_eq!(probed_source, instruction_source);
+
+    let repository = FakeTaskRepository::new(
+        Ok(Some(record(
+            task,
+            revision(2),
+            purpose,
+            existing_purpose_entry,
+        ))),
+        Ok(TaskCommitOutcome::CommittedAs(accepted)),
+    );
+
+    let outcome = propose_steering_current(
+        steer_command(
+            expected,
+            purpose,
+            Some(new_purpose.clone()),
+            instruction_source,
+        ),
+        &repository,
+        currentness(),
+    )
+    .await
+    .expect("a steering decision is a domain outcome, not a technical error");
+
+    match outcome {
+        TaskProposalOutcome::AcceptedAsSteering(found) => assert_eq!(found, accepted),
+        other => panic!("expected AcceptedAsSteering, got {other:?}"),
+    }
+
+    let forwarded = repository.forwarded();
+    assert_eq!(
+        forwarded.len(),
+        1,
+        "one command commits at most one forward"
+    );
+    let premise = forwarded.first().expect("the forward premise was captured");
+    assert_eq!(
+        premise.expected, expected,
+        "the command's boundary token crosses unchanged"
+    );
+    assert_eq!(
+        premise
+            .new_purpose
+            .as_ref()
+            .map(|adoption| &adoption.purpose),
+        Some(&new_purpose),
+        "the command's purpose text is what the Task owner adopts"
+    );
+    let instruction = premise
+        .adopted_instruction
+        .as_ref()
+        .expect("the instruction is adopted");
+    assert_eq!(
+        instruction.origin,
+        TaskContextOrigin {
+            kind: TaskContextOriginKind::OwnerConversation,
+            source: instruction_source,
+        },
+        "instruction_source crosses as the origin record, not as the adoption identity"
+    );
+    assert_ne!(
+        premise.adopted_purpose_entry, existing_purpose_entry,
+        "the Task owner mints a fresh purpose entry"
+    );
+    assert_ne!(
+        instruction.entry, existing_purpose_entry,
+        "the Task owner mints a fresh instruction entry"
+    );
+    assert_ne!(
+        premise.adopted_purpose_entry, instruction.entry,
+        "purpose and instruction entries are distinct identities"
+    );
+}
+
+#[tokio::test]
+async fn propose_task_current_maps_the_requester_and_delegates_the_creation() {
+    let repository = FakeTaskRepository::new(
+        Ok(None),
+        Err(TaskTechnicalError::StorageUnavailable {
+            reason: String::from("steering is outside this test"),
+        }),
+    );
+    let companion = ene_companion::CompanionId::from_raw(RawId::new());
+    let purpose = TaskPurpose {
+        text: String::from("read the notes and write the report"),
+    };
+    let origin = TaskContextOrigin {
+        kind: TaskContextOriginKind::OwnerConversation,
+        source: RawId::new(),
+    };
+    let workspace_need = ene_task::WorkspaceNeedRef {
+        folder: ene_task::WorkspaceFolderRef {
+            path: String::from("/srv/workspace/ene"),
+        },
+        save_target: None,
+    };
+
+    // Compile-level shape check: the command carries the requester, the
+    // proposed purpose and origin, and the workspace need — no caller-minted
+    // Task, entry, or association identity.
+    let ProposeTaskCommand {
+        requester,
+        purpose: proposed_purpose,
+        origin: proposed_origin,
+        workspace_need: proposed_workspace,
+    } = ProposeTaskCommand {
+        requester: companion,
+        purpose: purpose.clone(),
+        origin,
+        workspace_need: Some(workspace_need.clone()),
+    };
+    assert_eq!(requester, companion);
+    assert_eq!(proposed_purpose, purpose);
+    assert_eq!(proposed_origin, origin);
+    assert_eq!(proposed_workspace, Some(workspace_need.clone()));
+
+    let outcome = propose_task_current(
+        ProposeTaskCommand {
+            requester: companion,
+            purpose: purpose.clone(),
+            origin,
+            workspace_need: Some(workspace_need.clone()),
+        },
+        &repository,
+        currentness(),
+    )
+    .await
+    .expect("a task decision is a domain outcome, not a technical error");
+    let TaskProposalOutcome::AcceptedAsTask(created) = outcome else {
+        panic!("expected AcceptedAsTask, got {outcome:?}");
+    };
+    assert_eq!(created.revision, TaskRevision::initial());
+
+    let captured = repository.created();
+    assert_eq!(captured.len(), 1);
+    let premise = &captured[0];
+    assert_eq!(
+        premise.assignee,
+        AssigneeRef {
+            companion: companion.as_raw()
+        },
+        "the requester is adopted as the Task assignee"
+    );
+    assert_eq!(premise.purpose, purpose);
+    assert_eq!(premise.origin, origin);
+    assert_eq!(
+        premise
+            .workspace
+            .as_ref()
+            .map(|association| &association.need),
+        Some(&workspace_need),
+        "the workspace conditions cross as a need, not as a confirmed association"
+    );
+}

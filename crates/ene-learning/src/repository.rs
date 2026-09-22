@@ -14,7 +14,17 @@ pub enum LearningTechnicalError {
     #[error("summary identity conflicts with the stored evidence")]
     SummaryIdentityConflict { summary: SummaryId },
     #[error("learning inference unavailable: {reason}")]
-    InferenceUnavailable { reason: String },
+    InferenceUnavailable {
+        /// Provider-class cause. Never prompt or output text.
+        reason: String,
+    },
+    /// The secret boundary could not prove registered values absent, or the
+    /// credential set moved past the scrub premise.
+    ///
+    /// The unproven text was neither sent nor stored. The stale-credential-set
+    /// refusal can follow changes of the same pass that already committed, so
+    /// the caller must not retry the same content: it may carry the newly
+    /// registered value and needs a fresh scrub and currentness premise.
     #[error("secret boundary unavailable: {reason}")]
     SecretBoundaryUnavailable { reason: String },
 }

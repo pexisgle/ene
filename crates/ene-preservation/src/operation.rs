@@ -199,6 +199,32 @@ pub enum DeletionOperationPhase {
     Completed,
 }
 
+impl DeletionOperationPhase {
+    /// Storage and display token of the closed phase set. Unknown stored or
+    /// incoming tokens are outside the set and fail closed at their parse
+    /// boundary, never defaulted.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Held => "held",
+            Self::Finalizing => "finalizing",
+            Self::Completed => "completed",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "active" => Self::Active,
+            "held" => Self::Held,
+            "finalizing" => Self::Finalizing,
+            "completed" => Self::Completed,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeletionHoldReason {
     Unavailable,

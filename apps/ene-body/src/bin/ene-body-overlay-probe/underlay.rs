@@ -51,6 +51,8 @@ enum UnderlayError {
     Wayland(String),
     #[error("shm: {0}")]
     Shm(String),
+    #[error("evidence: {0}")]
+    Evidence(String),
 }
 
 fn run(path: PathBuf) -> Result<(), UnderlayError> {
@@ -90,6 +92,11 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
     layer.set_size(width, height);
     layer.set_margin(0, 0, 0, 0);
     layer.commit();
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| UnderlayError::Evidence(format!("{}: {error}", path.display())))?;
     let mut state = State {
         registry_state,
         output_state,
@@ -99,8 +106,7 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
         pool,
         buffer: None,
         surface_size: (width, height),
-        log: Mutex::new(()),
-        log_path: path,
+        log: Mutex::new(log),
     };
     queue
         .roundtrip(&mut state)
@@ -126,7 +132,7 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
         "underlay: {}x{} top layer ready (evidence {})",
         state.surface_size.0,
         state.surface_size.1,
-        state.log_path.display()
+        path.display()
     );
     loop {
         queue
@@ -158,13 +164,12 @@ struct State {
     pool: SlotPool,
     buffer: Option<smithay_client_toolkit::shm::slot::Buffer>,
     surface_size: (u32, u32),
-    log: Mutex<()>,
-    log_path: PathBuf,
+    log: Mutex<std::fs::File>,
 }
 
 impl State {
     fn record(&self, kind: &str, detail: serde_json::Value) {
-        let Ok(_guard) = self.log.lock() else {
+        let Ok(mut file) = self.log.lock() else {
             return;
         };
         let observed = std::time::SystemTime::now()
@@ -176,14 +181,7 @@ impl State {
             "kind": kind,
             "detail": detail,
         });
-        let opened = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path);
-        let Ok(mut file) = opened else {
-            return;
-        };
-        if serde_json::to_writer(&mut file, &line).is_ok() {
+        if serde_json::to_writer(&mut *file, &line).is_ok() {
             // Best effort: a lost newline is not a probe failure.
             drop(file.write_all(b"\n"));
         }

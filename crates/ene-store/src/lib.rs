@@ -410,12 +410,8 @@ impl Store {
         self.test_parks.learning_formation.pause_if_armed().await;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_device_auth_file_if_armed_for_tests(&self) {
-        self.test_parks.device_auth_file.pause_if_armed().await;
-    }
-
+    /// Arms the first-waiter park after HostTransient has minted a Verified
+    /// fact and before that fact is recorded durably.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn arm_host_transient_verified_record_park_for_tests(&self) {
@@ -524,14 +520,8 @@ impl Store {
             .await;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn fail_next_host_transient_arrival_for_tests(&self) {
-        self.test_parks
-            .fail_host_transient_arrival
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
+    /// Forces every `note_host_transient_learning_arrival` to fail until
+    /// [`Self::allow_host_transient_arrival_for_tests`].
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn fail_host_transient_arrivals_until_allow_for_tests(&self) {
@@ -545,9 +535,6 @@ impl Store {
     pub fn allow_host_transient_arrival_for_tests(&self) {
         self.test_parks
             .fail_host_transient_arrival_sticky
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.test_parks
-            .fail_host_transient_arrival
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 

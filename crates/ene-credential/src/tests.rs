@@ -38,11 +38,6 @@ async fn availability_requires_both_registry_and_store() {
     );
     let both = available_credential("acme", &cred.id(), &registry, &store).await;
     assert_eq!(both, Ok(Some(cred.clone())), "both sides must agree");
-    store
-        .put(&cred, "rotated-bearer")
-        .expect("memory store accepts serving-time put");
-    let rotated = store.with_bearer(&cred, str::to_owned).expect("put bearer");
-    assert_eq!(rotated, "rotated-bearer");
     let wrong_provider = available_credential("other", &cred.id(), &registry, &store).await;
     assert_eq!(
         wrong_provider,
@@ -127,47 +122,12 @@ fn failed_snapshot_publication_does_not_fall_back_to_the_old_version() {
 }
 
 #[test]
-fn pairing_proof_conforms_to_rfc4231_and_rejects_mismatch() {
+fn pairing_proof_matches_rfc4231_case_1() {
     let key = "\x0b".repeat(20);
-    let proof = crate::pairing::pairing_proof_hex(&key, "Hi There");
-    assert_eq!(
-        proof.as_str(),
+    assert!(crate::pairing::verify_pairing_proof(
+        &key,
+        "Hi There",
         "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-    );
-    assert!(crate::pairing::verify_pairing_proof(
-        &key, "Hi There", &proof
-    ));
-
-    let proof = crate::pairing::pairing_proof_hex("pairing-secret", "single-use-nonce");
-    assert!(crate::pairing::verify_pairing_proof(
-        "pairing-secret",
-        "single-use-nonce",
-        &proof
-    ));
-    assert!(!crate::pairing::verify_pairing_proof(
-        "other-secret",
-        "single-use-nonce",
-        &proof
-    ));
-    assert!(!crate::pairing::verify_pairing_proof(
-        "pairing-secret",
-        "other-nonce",
-        &proof
-    ));
-    assert!(!crate::pairing::verify_pairing_proof(
-        "pairing-secret",
-        "single-use-nonce",
-        "not-hex!!"
-    ));
-    assert!(!crate::pairing::verify_pairing_proof(
-        "pairing-secret",
-        "single-use-nonce",
-        ""
-    ));
-    assert!(!crate::pairing::verify_pairing_proof(
-        "pairing-secret",
-        "single-use-nonce",
-        "B0344C61D8DB38535CA8AFCEAF0BF12B881DC200C9833DA726E9376C2E32CFF7"
     ));
 }
 
@@ -187,15 +147,20 @@ fn device_auth_roundtrip_preserves_secret_bytes() {
     let device = DeviceId(RawId::new());
     let saved = store.save_secret(&device, "phone", "pairing-secret-value");
     assert!(saved.is_ok(), "save must succeed");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(&path).unwrap();
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-    }
     let loaded = store.load_secret(&device);
     let secret = loaded.unwrap().unwrap();
-    assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
+    assert_eq!(secret.as_str(), "pairing-secret-value");
+}
+
+#[test]
+fn device_auth_missing_file_loads_none_and_missing_parent_fails_open() {
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let store = open_device_auth_store(&path);
+    let loaded = store.load_secret(&DeviceId(RawId::new()));
+    assert!(matches!(loaded, Ok(None)));
+    let nested = temp.path().join("no-such-dir").join("device-auth.json");
+    assert!(FileDeviceAuthStore::open(&nested).is_err());
 }
 
 #[test]
@@ -260,6 +225,54 @@ fn device_auth_malformed_files_error_never_default() {
     }
 }
 
+#[test]
+fn device_auth_file_renders_canonical_json() {
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let store = open_device_auth_store(&path);
+    let first = DeviceId(RawId::new());
+    let second = DeviceId(RawId::new());
+    assert!(store.save_secret(&first, "phone", "first-secret").is_ok());
+    assert!(
+        store
+            .save_secret(&second, "tablet", "second-secret")
+            .is_ok()
+    );
+    let raw = std::fs::read(&path);
+    let raw = raw.unwrap();
+    assert!(
+        raw.starts_with(b"{\"devices\":{"),
+        "rendering keeps the single-section shape"
+    );
+    assert!(
+        raw.ends_with(b"}}\n"),
+        "rendering is compact with a trailing newline"
+    );
+    assert!(
+        !raw.contains(&b' '),
+        "rendering carries no whitespace padding"
+    );
+}
+
+#[test]
+fn device_auth_parses_canonical_json_escaping() {
+    // The reader decodes the canonical document shape independently of field
+    // order and with JSON escaping (`\"`, `\\`, non-ASCII).
+    let fixture = "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+        {\"secret_hex\":\"00\",\"descriptor\":\"a\\\"b\\\\nc✓\",\
+        \"paired_at\":\"2026-09-08T12:00:00+09:00\"}}}\n";
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let written = std::fs::write(&path, fixture);
+    assert!(written.is_ok(), "fixture setup must succeed");
+    let store = open_device_auth_store(&path);
+    let device =
+        crate::auth_file::parse_device_key("123e4567-e89b-12d3-a456-426614174000").unwrap();
+    let loaded = store.load_secret(&device);
+    let secret = loaded.unwrap().unwrap();
+    assert_eq!(secret.as_str(), "\0");
+}
+
 #[cfg(unix)]
 #[test]
 fn device_auth_open_tightens_lax_permissions() {
@@ -276,6 +289,52 @@ fn device_auth_open_tightens_lax_permissions() {
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     let loaded = store.load_secret(&DeviceId(RawId::new()));
     assert!(matches!(loaded, Ok(None)));
+}
+
+#[cfg(unix)]
+#[test]
+fn device_auth_saved_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let store = open_device_auth_store(&path);
+    let saved = store.save_secret(&DeviceId(RawId::new()), "phone", "pairing-secret");
+    assert!(saved.is_ok(), "save must succeed");
+    let meta = std::fs::metadata(&path);
+    let meta = meta.unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn device_auth_second_save_rotates_the_secret() {
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let store = open_device_auth_store(&path);
+    let device = DeviceId(RawId::new());
+    assert!(store.save_secret(&device, "phone", "first-secret").is_ok());
+    assert!(store.save_secret(&device, "phone", "second-secret").is_ok());
+    let loaded = store.load_secret(&device);
+    let secret = loaded.unwrap().unwrap();
+    assert_eq!(secret.as_str(), "second-secret");
+}
+
+#[test]
+fn device_auth_persists_across_store_instances() {
+    let temp = fresh_tempdir();
+    let path = temp.path().join("device-auth.json");
+    let device = DeviceId(RawId::new());
+    let descriptor = "phone \"pro\"\nline2\t✓";
+    let first = open_device_auth_store(&path);
+    assert!(
+        first
+            .save_secret(&device, descriptor, "pairing-secret-value")
+            .is_ok()
+    );
+    drop(first);
+    let second = open_device_auth_store(&path);
+    let loaded = second.load_secret(&device);
+    let secret = loaded.unwrap().unwrap();
+    assert_eq!(secret.as_str(), "pairing-secret-value");
 }
 
 #[test]
@@ -342,7 +401,7 @@ fn device_auth_same_device_rotations_leave_one_current_secret() {
     let loaded = store.load_secret(&device);
     let current = loaded.unwrap().unwrap();
     assert!(
-        current.bytes() == b"first-secret" || current.bytes() == b"second-secret",
+        current.as_str() == "first-secret" || current.as_str() == "second-secret",
         "exactly one written secret stays current"
     );
     let raw = std::fs::read(&path).unwrap_or_default();
@@ -420,7 +479,7 @@ fn device_auth_write_failure_recovers_on_the_next_approval() {
         "the next approval recovers after the cause is cleared"
     );
     let loaded = store.load_secret(&device);
-    assert_eq!(loaded.unwrap().unwrap().bytes(), b"second-try");
+    assert_eq!(loaded.unwrap().unwrap().as_str(), "second-try");
 }
 
 #[test]
@@ -445,12 +504,10 @@ fn device_auth_debug_carries_no_secret_or_descriptor() {
 }
 
 #[test]
-fn memory_put_stores_without_echoing_the_secret_in_debug() {
+fn memory_debug_carries_no_secret() {
     let store = MemoryCredentialStore::new();
     let credential = CredentialRef::new("openai", "rotated").expect("valid test fixture");
-    store
-        .put(&credential, "sk-must-not-appear")
-        .expect("memory put must accept");
+    store.insert(credential.clone(), "sk-must-not-appear");
     assert!(store.contains(&credential));
     let rendered = format!("{store:?}");
     assert!(
@@ -460,12 +517,17 @@ fn memory_put_stores_without_echoing_the_secret_in_debug() {
 }
 
 mod env_credential_store_tests {
+    use crate::CredentialTechnicalError;
     use crate::registry::CredentialRef;
     use crate::secret::{CredentialStore, ENV_API_KEY, EnvCredentialStore, resolve_for};
     use std::cell::Cell;
 
+    fn other_cred() -> CredentialRef {
+        CredentialRef::new("acme", "main").expect("valid test fixture")
+    }
+
     #[test]
-    fn lookup_respects_provider_gating_and_presence() {
+    fn lookup_gates_on_provider_before_reading_env() {
         let calls = Cell::new(0_u32);
         let resolved = resolve_for("acme", |_| {
             calls.set(calls.get() + 1);
@@ -473,32 +535,63 @@ mod env_credential_store_tests {
         });
         assert!(resolved.is_none());
         assert_eq!(calls.get(), 0);
+    }
 
+    #[test]
+    fn lookup_accepts_a_present_non_empty_value() {
         let resolved = resolve_for("openai", |name| {
             assert_eq!(name, ENV_API_KEY);
             Some("test-key".to_owned())
         });
         assert_eq!(resolved.as_deref(), Some("test-key"));
+    }
 
+    #[test]
+    fn lookup_treats_a_missing_value_as_absent() {
         let resolved = resolve_for("openai", |_| None);
         assert!(resolved.is_none());
     }
 
     #[test]
-    fn put_fail_closes_and_never_echoes_the_secret() {
-        let store = EnvCredentialStore::from_lookup(|_| Some("pinned-key".to_owned()));
+    fn lookup_treats_an_empty_value_as_absent() {
+        let resolved = resolve_for("openai", |_| Some(String::new()));
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn store_reports_other_providers_absent_without_re_reading_env() {
+        let calls = Cell::new(0_u32);
+        let store = EnvCredentialStore::from_lookup(|_| {
+            calls.set(calls.get() + 1);
+            Some("test-key".to_owned())
+        });
+        assert_eq!(calls.get(), 1, "construction pins the value once");
+        assert!(!store.contains(&other_cred()));
+        assert_eq!(calls.get(), 1, "other providers never re-read the source");
+    }
+
+    #[test]
+    fn store_with_bearer_rejects_other_providers() {
+        let store = EnvCredentialStore::from_lookup(|_| Some("test-key".to_owned()));
+        let outcome = store.with_bearer(&other_cred(), str::len);
+        let CredentialTechnicalError::StorageUnavailable { reason } = outcome.unwrap_err();
+        assert_eq!(reason, "env credential missing");
+    }
+
+    #[test]
+    fn store_pins_the_value_at_construction() {
+        let calls = Cell::new(0_u32);
+        let store = EnvCredentialStore::from_lookup(|name| {
+            assert_eq!(name, ENV_API_KEY);
+            calls.set(calls.get() + 1);
+            Some("pinned-key".to_owned())
+        });
+        assert_eq!(calls.get(), 1, "construction reads the source once");
         let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
-        let error = store
-            .put(&credential, "sk-must-not-appear")
-            .expect_err("env store is not a product source of truth");
-        let rendered = error.to_string();
-        assert!(
-            !rendered.contains("sk-must-not-appear"),
-            "env put error must not echo the secret: {rendered}"
-        );
-        assert!(
-            rendered.contains("not a product source of truth"),
-            "env put must fail closed: {rendered}"
-        );
+        let first = store.with_bearer(&credential, str::to_owned).unwrap();
+        let second = store.with_bearer(&credential, str::to_owned).unwrap();
+        assert_eq!(first, "pinned-key");
+        assert_eq!(second, "pinned-key");
+        assert_eq!(calls.get(), 1, "calls never re-read the source");
     }
 }

@@ -323,6 +323,29 @@ impl Client {
         PreparedRequest::new(payload)
     }
 
+    /// Sends one prepared request and returns the answer correlated by
+    /// `reply_to`, absorbing pipelined presence facts and deferring other
+    /// out-of-order frames on the way. The deferred queue only buffers
+    /// auto-presented summaries drained by
+    /// [`super::session::SessionState::take_undelivered`]; the answer itself
+    /// is read from the socket, so this loops until the correlated answer
+    /// arrives (the streaming form of
+    /// [`super::session::decide_frame`]). A
+    /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
+    /// answer refreshes the session generation; mismatches are never returned
+    /// as answers and never silently dropped.
+    ///
+    /// Message and request ids go fresh per attempt while the prepared command
+    /// identity travels unchanged, so calling this again through
+    /// [`Client::retry`] replays one logical command rather than minting a
+    /// second one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
+    /// exchange cannot be moved or framed. Payload semantics are the caller's
+    /// job: this helper never interprets the answer beyond the generation
+    /// bookkeeping.
     pub async fn execute(
         &mut self,
         prepared: &PreparedRequest,
@@ -366,12 +389,6 @@ impl Client {
         own_message_id: WireMessageId,
     ) -> Result<WirePayload, ClientError> {
         write_frame(&mut self.stream, &frame).await?;
-        if let Some(queued) = self.state.take_deferred_reply(own_message_id) {
-            if let Some(current) = stale_generation_of(&queued) {
-                self.state.note_stale_generation(current);
-            }
-            return Ok(queued);
-        }
         loop {
             let incoming = read_frame(&mut self.stream).await?;
             if self
@@ -394,6 +411,15 @@ impl Client {
         }
     }
 
+    /// Answers one unsolicited Host local-erasure demand inline, returning
+    /// whether the frame was handled: `true` means either an answer was
+    /// written or, in the deferred (GUI participant) mode, the demand was
+    /// stashed for later local wiping — never that a reply reached the Host.
+    ///
+    /// The demand is a control fact, never the reply this session is waiting
+    /// for: it is handled and the read continues. The reply carries only class
+    /// names and correlation — never a target body — and claims nothing beyond
+    /// this process's own local wiping (IPC §17, lifecycle §10).
     async fn answer_deletion_demand_if_any(
         &mut self,
         payload: &WirePayload,

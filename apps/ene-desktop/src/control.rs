@@ -12,6 +12,9 @@ use crate::ui::DesktopError;
 
 const CONFIRMATION_WAIT: Duration = Duration::from_secs(30);
 
+/// How long one requester-listener request round trip may take.
+const REQUESTER_WAIT: Duration = Duration::from_secs(30);
+
 /// Bound on challenges retained for a later Owner gesture. Concurrent
 /// requester traffic can mint challenges faster than the Owner answers them;
 /// the oldest deferred challenge is dropped first so retention stays bounded.
@@ -40,8 +43,15 @@ impl RequesterClient {
         }
     }
 
+    /// Sends one request and reads its answer.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Transport`] when the requester listener is unreachable
+    /// or does not answer within [`REQUESTER_WAIT`], [`DesktopError::Protocol`]
+    /// when the answer cannot be decoded.
     pub async fn request(&self, message: &ToHost) -> Result<FromHost, DesktopError> {
-        tokio::time::timeout(CONFIRMATION_WAIT, async {
+        tokio::time::timeout(REQUESTER_WAIT, async {
             let mut stream = connect_requester(&self.data_dir).await?;
             write_requester_frame(&mut stream, message).await?;
             read_requester_frame(&mut stream).await
@@ -205,6 +215,7 @@ impl ConfirmationClient {
                     nonce,
                     ..
                 } if op == expected => {
+                    self.retain_presented();
                     self.challenge = Some(PendingChallenge {
                         session_id,
                         op,
@@ -247,6 +258,19 @@ impl ConfirmationClient {
     /// the most recently awaited one or an earlier deferred one.
     fn take_challenge(&mut self) -> Option<PendingChallenge> {
         self.challenge.take().or_else(|| self.deferred.pop_front())
+    }
+
+    /// Retains an already-held challenge for its own gesture before a newly
+    /// arriving one takes the single presented slot. Without this the previous
+    /// session is overwritten and can never be answered on the one-shot
+    /// private channel.
+    fn retain_presented(&mut self) {
+        if let Some(previous) = self.challenge.take() {
+            if self.deferred.len() >= DEFERRED_LIMIT {
+                self.deferred.pop_front();
+            }
+            self.deferred.push_back(previous);
+        }
     }
 
     /// The Owner's direct confirmation on a non-secret challenge surface.
@@ -355,6 +379,9 @@ impl ConfirmationClient {
                     nonce,
                     ..
                 } => {
+                    // A second request's challenge may arrive while the first
+                    // is settling; keep it for its own Owner gesture.
+                    self.retain_presented();
                     self.challenge = Some(PendingChallenge {
                         session_id,
                         op,

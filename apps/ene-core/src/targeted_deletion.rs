@@ -182,6 +182,14 @@ pub struct TargetedDeletionPassOutcome {
 }
 
 impl TargetedDeletionPassOutcome {
+    /// Whether one pass advanced durable work: it demanded a participant,
+    /// verified one, moved an operation into `Finalizing`, committed a
+    /// completion, opened a remainder sweep, or published a covered-source
+    /// reconciliation page.
+    ///
+    /// Counters only, and deliberately never a completion decision. A recorded
+    /// hold is not progress: the operation waits for a resume and the same
+    /// bounded driver must not keep hammering it (lifecycle §5.1).
     #[must_use]
     pub(crate) fn progressed(self) -> bool {
         self.demands > 0
@@ -216,6 +224,17 @@ const RECONCILIATION_PAGES_PER_PASS: u32 = 8;
 
 fn valid_pass(pass: TargetedDeletionPass) -> bool {
     (1..=100).contains(&pass.operation_limit) && pass.demands_per_participant > 0
+}
+
+/// Whether one durable unfinished record is a hold this Host may retry.
+/// Only `Held(Unavailable)` is retryable: `GenerationExhausted` cannot resume
+/// by construction and every non-hold phase is not a hold.
+fn is_retryable_hold(
+    phase: DeletionOperationPhase,
+    hold: Option<ene_preservation::DeletionHoldReason>,
+) -> bool {
+    phase == DeletionOperationPhase::Held
+        && hold == Some(ene_preservation::DeletionHoldReason::Unavailable)
 }
 
 fn deletion_error(error: ene_preservation::PreservationTechnicalError) -> CoreError {
@@ -496,6 +515,21 @@ async fn drive_operation(
     Ok(true)
 }
 
+/// Drives bounded passes until a pass advances no durable work or the budget
+/// is exhausted.
+///
+/// This is the continuation driver behind startup recovery and the post-
+/// confirmation kick: each iteration is one [`drive_targeted_deletion`] pass
+/// with its own bounded operation/demand limits, and the loop stops as soon as
+/// a pass reports no demand, verification, finalizing step, completion,
+/// remainder sweep, or published reconciliation page. It never decides
+/// completion itself — the sealed store
+/// boundary re-derives every premise on each pass.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for an invalid pass or budget and when the
+/// canonical store refuses.
 pub(crate) async fn drive_targeted_deletion_until_settled(
     store: &Store,
     registry: &ErasureParticipantRegistry,
@@ -540,9 +574,11 @@ async fn resume_retryable_holds(store: &Store, limit: u32) -> Result<(), CoreErr
         .await
         .map_err(deletion_error)?;
     for record in page {
-        if record.phase == DeletionOperationPhase::Held
-            && record.hold == Some(ene_preservation::DeletionHoldReason::Unavailable)
-        {
+        if is_retryable_hold(record.phase, record.hold) {
+            // The store re-checks the phase, sweep, and hold class inside its
+            // write transaction; a refusal (another writer moved the
+            // operation, or the durable state cannot resume) leaves it for the
+            // bounded drive below without inventing an outcome here.
             store
                 .change_deletion_lifecycle(record.current, DeletionLifecycleChange::Resume)
                 .await
@@ -621,10 +657,7 @@ pub(crate) async fn tick_targeted_deletion(
         .map_err(deletion_error)?;
     let retryable: HashSet<DeletionOperationId> = page
         .iter()
-        .filter(|record| {
-            record.phase == DeletionOperationPhase::Held
-                && record.hold == Some(ene_preservation::DeletionHoldReason::Unavailable)
-        })
+        .filter(|record| is_retryable_hold(record.phase, record.hold))
         .map(|record| record.current.operation)
         .collect();
     schedule.retain_only(&retryable);
@@ -1015,21 +1048,12 @@ mod tests {
                 .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
                 .await
                 .expect("the fan-out must not fail");
-            total.operations += outcome.operations;
-            total.demands += outcome.demands;
-            total.verified += outcome.verified;
-            total.unfinished += outcome.unfinished;
-            total.held += outcome.held;
-            total.stale_reports += outcome.stale_reports;
-            total.finalizing += outcome.finalizing;
-            total.finalized += outcome.finalized;
-            total.remainder_sweeps += outcome.remainder_sweeps;
-            total.reconciliation_pages += outcome.reconciliation_pages;
-            if outcome.held == 0
+            let settled = outcome.held == 0
                 && outcome.unfinished == 0
                 && outcome.demands == 0
-                && outcome.reconciliation_pages == 0
-            {
+                && outcome.reconciliation_pages == 0;
+            total.accumulate(outcome);
+            if settled {
                 return total;
             }
         }
@@ -2764,34 +2788,7 @@ mod tests {
         // Establish the durable all-verified premise through the canonical
         // participant API, then enter Finalizing: this is the durable shape a
         // crashed pass leaves behind.
-        let mut after = None;
-        loop {
-            let page = handle
-                .store
-                .deletion_participants(current.operation, after, 100)
-                .await
-                .unwrap();
-            if page.is_empty() {
-                break;
-            }
-            let page_len = page.len();
-            for record in page {
-                after = Some(record.participant.owner);
-                handle
-                    .store
-                    .record_participant_completion(ParticipantCompletionFact::verified(
-                        current.condition(),
-                        record.participant.owner,
-                        0,
-                        WallClockWithTz::now(),
-                    ))
-                    .await
-                    .unwrap();
-            }
-            if page_len < 100 {
-                break;
-            }
-        }
+        mark_all_participants_verified(&handle, current).await;
         assert_eq!(
             handle
                 .store
@@ -3451,7 +3448,7 @@ mod tests {
             "positive control: the assembled prompt carries the Task-owned purpose"
         );
 
-        let current = admit(
+        let _ = admit(
             &handle,
             target,
             vec![ParticipantOwnerRef::Task, ParticipantOwnerRef::Action],
@@ -3459,7 +3456,6 @@ mod tests {
         .await;
         let outcome = drive_until_local_owners_verify(&handle, 2).await;
         assert_eq!(outcome.verified, 2);
-        let _ = current;
 
         let after = orchestrate_task_agent_turn(
             &handle.store,

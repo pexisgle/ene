@@ -38,6 +38,8 @@ enum ProbeError {
     Body(#[from] ene_body::BodyError),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("body did not exit within 5s")]
+    Timeout,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -130,18 +132,39 @@ async fn run() -> Result<(), ProbeError> {
         eprintln!("probe: shutdown send failed: {error}");
     }
     drop(to_body);
-    // The runtime future ends only after it has written `CleanExit`; drain the
-    // event stream until EOF so that final event is printed too.
+    // The runtime future ends only after it has written `CleanExit`; drive it
+    // while draining so the body processes `Shutdown` and its final event is
+    // printed too.
     let drain = async {
         loop {
-            let read = from_body.read(&mut chunk).await?;
-            if read == 0 {
-                break;
-            }
-            frame.extend_from_slice(&chunk[..read]);
-            while let Ok((event, used)) = decode_body(&frame) {
-                frame.drain(..used);
-                emit(&event)?;
+            tokio::select! {
+                read = from_body.read(&mut chunk) => {
+                    let read = read?;
+                    if read == 0 {
+                        break;
+                    }
+                    frame.extend_from_slice(&chunk[..read]);
+                    while let Ok((event, used)) = decode_body(&frame) {
+                        frame.drain(..used);
+                        emit(&event)?;
+                    }
+                }
+                result = &mut body_future => {
+                    // Drain the events the runtime wrote before it dropped its
+                    // writer (including CleanExit), then propagate its result.
+                    loop {
+                        let read = from_body.read(&mut chunk).await?;
+                        if read == 0 {
+                            break;
+                        }
+                        frame.extend_from_slice(&chunk[..read]);
+                        while let Ok((event, used)) = decode_body(&frame) {
+                            frame.drain(..used);
+                            emit(&event)?;
+                        }
+                    }
+                    return result.map_err(ProbeError::Body);
+                }
             }
         }
         (&mut body_future).await.map_err(ProbeError::Body)
@@ -149,7 +172,7 @@ async fn run() -> Result<(), ProbeError> {
     match tokio::time::timeout(std::time::Duration::from_secs(5), drain).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => return Err(error),
-        Err(_) => eprintln!("probe: body did not exit within 5s"),
+        Err(_) => return Err(ProbeError::Timeout),
     }
     Ok(())
 }

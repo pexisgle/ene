@@ -91,15 +91,7 @@ impl Composer {
         }
     }
 
-    pub fn undo(&mut self) {
-        if self.composing {
-            return;
-        }
-        if let Some(previous) = self.undo.pop() {
-            self.draft = previous;
-        }
-    }
-
+    /// Returns the committed draft when IME is not composing.
     pub fn take_sendable(&mut self) -> Option<String> {
         if self.composing {
             return None;

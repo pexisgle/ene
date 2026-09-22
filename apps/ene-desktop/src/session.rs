@@ -237,6 +237,12 @@ pub async fn submit_and_collect(
                 }
                 break;
             }
+            // Protocol-defined interleavings the Client must absorb: a
+            // state-only presence fact (`Client::next_frame` already observed
+            // it) and an auto-presented backlog summary the explicit
+            // UndeliveredRequest path re-presents. A stream turn must not fail
+            // on either.
+            WirePayload::PresenceAttribution(_) | WirePayload::UndeliveredResponse(_) => {}
             other => {
                 return Err(DesktopError::Protocol(format!(
                     "unexpected stream {}",

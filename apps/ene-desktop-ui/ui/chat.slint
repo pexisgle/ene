@@ -1,6 +1,6 @@
 import { ScrollView, LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Action, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, Item, Message } from "components.slint";
+import { Action, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, StaticRowCard, Item, Message } from "components.slint";
 
 export component ChatWindow inherits Window {
     title: "ene";
@@ -152,7 +152,7 @@ export component ChatWindow inherits Window {
                                 description: root.japanese ? "会話で依頼した作業の進捗や結果を、ここで確認できます。" : "Tasks delegated in conversation will appear here.";
                             }
                             for task in root.tasks: RowCard { item: task; selected: root.selected-task == task.key; clicked(key) => { if !root.task-busy { root.select-task(key); } } }
-                            for detail in root.details: RowCard { item: detail; }
+                            for detail in root.details: StaticRowCard { item: detail; }
                             Field { label: root.japanese ? "作業フォルダ" : "Workspace folder"; hint: root.japanese ? "フォルダのパス" : "Folder path"; value <=> root.workspace-draft; }
                             Action { text: root.japanese ? "フォルダを選択" : "Use folder"; enabled: !root.task-busy && root.connected && root.workspace-draft != ""; clicked => { root.workspace(root.workspace-draft); } }
                             Field { label: root.japanese ? "再開時の指示" : "Instructions for resuming"; hint: root.japanese ? "続きをどう進めるか" : "How should the task continue?"; value <=> root.instruction-draft; }

@@ -158,15 +158,16 @@ impl VrmSession {
         let mut loaded = Vec::with_capacity(set.clips.len());
         for clip in &set.clips {
             let path = clip.path.as_str();
-            let meta = std::fs::metadata(path).map_err(|_| {
-                MotionFailInfo::new(MotionFailReason::Missing, "motion clip file is unavailable")
-            })?;
-            if !meta.is_file() {
-                return Err(MotionFailInfo::new(
+            regular_file(path).map_err(|problem| match problem {
+                PathProblem::Missing => MotionFailInfo::new(
+                    MotionFailReason::Missing,
+                    "motion clip file is unavailable",
+                ),
+                PathProblem::NotAFile => MotionFailInfo::new(
                     MotionFailReason::NotAFile,
                     "motion clip path is not a regular file",
-                ));
-            }
+                ),
+            })?;
             let animation = VrmAnimation::load(path).map_err(|error| {
                 MotionFailInfo::new(
                     MotionFailReason::InvalidVrma,
@@ -192,14 +193,13 @@ impl VrmSession {
         if path.is_empty() {
             return Err(fail(AssetFailReason::EmptyPath, "asset path is empty"));
         }
-        let meta = std::fs::metadata(path)
-            .map_err(|_| fail(AssetFailReason::Missing, "asset file is unavailable"))?;
-        if !meta.is_file() {
-            return Err(fail(
+        regular_file(path).map_err(|problem| match problem {
+            PathProblem::Missing => fail(AssetFailReason::Missing, "asset file is unavailable"),
+            PathProblem::NotAFile => fail(
                 AssetFailReason::NotAFile,
                 "asset path is not a regular file",
-            ));
-        }
+            ),
+        })?;
         let avatar = vrm_runtime::AvatarAsset::load(path).map_err(|error| {
             fail(
                 AssetFailReason::InvalidVrm,
@@ -426,21 +426,21 @@ fn decode_material_textures(
         .collect()
 }
 
-fn transformed_uv(uv: [f32; 2], transform: vrm_runtime::TextureTransform) -> [f32; 2] {
-    let scaled = [uv[0] * transform.scale[0], uv[1] * transform.scale[1]];
-    let (sin, cos) = transform.rotation.sin_cos();
+fn affine_uv(uv: [f32; 2], offset: [f32; 2], scale: [f32; 2], rotation: f32) -> [f32; 2] {
+    let scaled = [uv[0] * scale[0], uv[1] * scale[1]];
+    let (sin, cos) = rotation.sin_cos();
     [
-        transform.offset[0] + cos * scaled[0] - sin * scaled[1],
-        transform.offset[1] + sin * scaled[0] + cos * scaled[1],
+        offset[0] + cos * scaled[0] - sin * scaled[1],
+        offset[1] + sin * scaled[0] + cos * scaled[1],
     ]
 }
 
+fn transformed_uv(uv: [f32; 2], transform: vrm_runtime::TextureTransform) -> [f32; 2] {
+    affine_uv(uv, transform.offset, transform.scale, transform.rotation)
+}
+
 fn animated_uv(uv: [f32; 2], animation: vrm_runtime::UvAnimationState) -> [f32; 2] {
-    let (sin, cos) = animation.rotation.sin_cos();
-    [
-        animation.scroll[0] + cos * uv[0] - sin * uv[1],
-        animation.scroll[1] + sin * uv[0] + cos * uv[1],
-    ]
+    affine_uv(uv, animation.scroll, [1.0, 1.0], animation.rotation)
 }
 
 fn fail(reason: AssetFailReason, detail: impl Into<String>) -> AssetFailInfo {
@@ -450,6 +450,23 @@ fn fail(reason: AssetFailReason, detail: impl Into<String>) -> AssetFailInfo {
     }
 }
 
+/// Filesystem problem shared by the asset and motion-clip preconditions. The
+/// two callers map it onto their own failure reason type.
+enum PathProblem {
+    Missing,
+    NotAFile,
+}
+
+fn regular_file(path: &str) -> Result<(), PathProblem> {
+    let meta = std::fs::metadata(path).map_err(|_| PathProblem::Missing)?;
+    if meta.is_file() {
+        Ok(())
+    } else {
+        Err(PathProblem::NotAFile)
+    }
+}
+
+/// Slot of a pose hint inside the fixed pose order.
 fn pose_index(pose: PoseHint) -> usize {
     match pose {
         PoseHint::Idle => 0,

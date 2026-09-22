@@ -93,16 +93,17 @@ impl TargetedDeletionRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OwnerConfirmationFact {
     request: DeletionRequestId,
-    confirmed_at: WallClockWithTz,
 }
 
 impl OwnerConfirmationFact {
+    /// Store-read construction for one durable confirmation row.
+    ///
+    /// Callers must have read and validated this exact row from the
+    /// confirmation journal; the admission transaction re-reads and re-checks
+    /// it before any operation row is committed.
     #[must_use]
-    pub fn from_durable(request: DeletionRequestId, confirmed_at: WallClockWithTz) -> Self {
-        Self {
-            request,
-            confirmed_at,
-        }
+    pub fn from_durable(request: DeletionRequestId) -> Self {
+        Self { request }
     }
 
     #[must_use]
@@ -237,7 +238,7 @@ mod tests {
     fn confirmation_binds_to_its_own_request_identity() {
         let request = staged();
         let identity = request.request();
-        let fact = OwnerConfirmationFact::from_durable(identity, WallClockWithTz::now());
+        let fact = OwnerConfirmationFact::from_durable(identity);
         assert_eq!(fact.request(), identity);
         let command = request
             .clone()
@@ -256,10 +257,8 @@ mod tests {
         );
         assert_eq!(command.purpose(), DeletionPurpose::Privacy);
 
-        let foreign = OwnerConfirmationFact::from_durable(
-            DeletionRequestId::from_raw(RawId::new()),
-            WallClockWithTz::now(),
-        );
+        let foreign =
+            OwnerConfirmationFact::from_durable(DeletionRequestId::from_raw(RawId::new()));
         assert!(
             request
                 .into_command(foreign, WallClockWithTz::now(), Vec::new())

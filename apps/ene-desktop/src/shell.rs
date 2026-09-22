@@ -919,7 +919,9 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         }
         Command::Dismiss => {
             d.reject_pending_challenge().await;
-            d.cancel_secret();
+            // The reject above owns the live challenge; a locally deferred one
+            // must stay reachable instead of being silently discarded.
+            d.cancel_secret_keep_pending();
             None
         }
     };
@@ -929,33 +931,8 @@ fn local<'a>(ja: bool, japanese: &'a str, english: &'a str) -> &'a str {
     if ja { japanese } else { english }
 }
 fn outcome_notice(ja: bool, outcome: &ManagementOutcome) -> String {
-    match outcome {
-        ManagementOutcome::AppliedAsOneTime => local(ja, "反映しました。", "Applied."),
-        ManagementOutcome::StoredAsRuleView { .. } => {
-            local(ja, "規則として保存しました。", "Stored as a rule.")
-        }
-        ManagementOutcome::NeedsClarification => local(
-            ja,
-            "対象や内容を具体的にしてください。",
-            "Clarify the target or requested change.",
-        ),
-        ManagementOutcome::DeniedByBoundary => local(
-            ja,
-            "この操作は許可されませんでした。",
-            "This action was denied.",
-        ),
-        ManagementOutcome::StaleBaseView { .. } => local(
-            ja,
-            "表示後に状態が変わりました。更新して確認してください。",
-            "The state changed. Refresh and review before acting.",
-        ),
-        ManagementOutcome::HeldByOperation => local(
-            ja,
-            "要求を保留しています。状態を確認してください。",
-            "The request is on hold. Review its status.",
-        ),
-    }
-    .into()
+    let locale = if ja { Locale::Ja } else { Locale::En };
+    ene_desktop::i18n::management_deny(locale, outcome)
 }
 fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> String {
     use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
@@ -987,6 +964,12 @@ fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> Str
             "削除対象の確認が必要です。",
             "The deletion target needs clarification.",
         ),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
+            ..
+        })) => local(ja, "再開しました。", "Resumed."),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Missing)) => {
+            local(ja, "対象が見つかりません。", "The target was not found.")
+        }
         FromConfirmation::Outcome(ControlOutcome::Rejected { .. })
         | FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })
         | FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted { .. })

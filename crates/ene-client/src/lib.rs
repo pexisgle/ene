@@ -45,14 +45,15 @@
 //! pairing (`reply_to` against our message ID). A single read per request is
 //! wrong because the Host pipelines unsolicited facts ahead of answers
 //! (capability appends the current presence fact right after the negotiated
-//! terms), so `request` consults the deferred queue first and then loops: a
-//! queued or incoming frame whose `reply_to` matches is the answer and
-//! returns without further I/O; presence facts are absorbed into the
-//! [`session::SessionState`] and reading continues; any other non-fact frame
-//! is pushed to the deferred queue (cap [`session::DEFERRED_CAP`],
-//! oldest-drop) and reading continues — mismatches are never returned as
-//! answers and never silently dropped. [`session::decide_frame`] is the pure
-//! per-frame step of that loop; the deferred queue holds the rest.
+//! terms), so `request` loops: an incoming frame whose `reply_to` matches is
+//! the answer and returns without further I/O; presence facts are absorbed
+//! into the [`session::SessionState`] and reading continues; any other
+//! non-fact frame is pushed to the deferred queue (cap
+//! [`session::DEFERRED_CAP`], oldest-drop), which only buffers
+//! auto-presented summaries for [`session::SessionState::take_undelivered`],
+//! and reading continues — mismatches are never returned as answers and
+//! never silently dropped. [`session::decide_frame`] is the pure per-frame
+//! step of that loop; the deferred queue holds the rest.
 //!
 //! A pairing first answers
 //! [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation)
@@ -60,9 +61,11 @@
 //! Host-local trusted surface while the Client retains the connection. The
 //! Host then provisions that connection and the Client persists only after
 //! authentication succeeds. A denied pairing exits 2 with the Host reason.
-//! A stored device the Host no longer
-//! knows fails later at the domain gate (unknown sender: close plus
-//! `DisconnectNotice`), never with a dedicated capability-time outcome.
+//! A stored device the Host no longer knows is refused at capability
+//! time: the Host answers a `DisconnectNotice` instead of the negotiated
+//! terms, surfaced as an unexpected-frame `ServerRejected`. Only a device
+//! that resolves but cannot prove its secret fails later at authentication
+//! with `AuthResult::Rejected`.
 //!
 //! Framing goes through `ene-plugin-ipc` only ([`ene_plugin_ipc::encode_frame`]/[`ene_plugin_ipc::decode_frame`]); this module
 //! owns the socket read/write loops. [`ene_plugin_ipc::CodecError`]

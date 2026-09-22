@@ -221,13 +221,19 @@ impl DesktopRuntime {
         self.secret.set(value);
     }
 
-    pub fn cancel_secret(&mut self) {
+    /// Clears temporary secret/confirmation UI state without consuming a
+    /// challenge retained for a later Owner gesture.
+    pub fn cancel_secret_keep_pending(&mut self) {
         self.secret.cancel();
-        if let Some(seat) = &mut self.control {
-            seat.discard_pending();
-        }
         if matches!(self.page, Page::Confirm) {
             self.page = Page::Wizard;
+        }
+    }
+
+    pub fn cancel_secret(&mut self) {
+        self.cancel_secret_keep_pending();
+        if let Some(seat) = &mut self.control {
+            seat.discard_pending();
         }
     }
 
@@ -797,15 +803,15 @@ impl DesktopRuntime {
         let Some(text) = self.composer.take_sendable() else {
             return Ok(());
         };
-        self.ensure_client()?;
         self.project_body_pose(PoseHint::Listening);
         let lang = self.locale.as_tag().to_string();
-        let collected = {
-            let client = self
-                .client
-                .as_mut()
-                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
-            session::submit_and_collect(client, &text, &lang).await
+        // A disconnected send takes the same failure path as a transport
+        // failure, so the typed text stays in the Owner-visible timeline.
+        let collected = match self.client.as_mut() {
+            Some(client) => session::submit_and_collect(client, &text, &lang).await,
+            None => Err(DesktopError::Transport(String::from(
+                "client is not connected",
+            ))),
         };
         match collected {
             Ok(turn) => {
@@ -1543,5 +1549,29 @@ impl DesktopRuntime {
             return Err(DesktopError::Protocol(String::from("stale confirmation")));
         }
         self.confirm_owner().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DesktopRuntime;
+
+    #[tokio::test]
+    async fn disconnected_send_keeps_the_typed_text_in_the_timeline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut runtime = DesktopRuntime::new(dir.path().to_path_buf());
+        runtime.composer_mut().set_draft(String::from("keep me"));
+        let result = runtime.send_text().await;
+        assert!(result.is_err(), "a disconnected send must not fake success");
+        let snapshot = runtime.snapshot();
+        assert!(
+            snapshot
+                .timeline
+                .iter()
+                .any(|line| line == "[owner] keep me"),
+            "the Owner's text must stay in the timeline: {:?}",
+            snapshot.timeline
+        );
+        assert!(!snapshot.deny_reason.is_empty());
     }
 }

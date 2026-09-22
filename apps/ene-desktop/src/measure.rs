@@ -219,6 +219,39 @@ impl PresentationRecord {
             && missing == 0
             && calculated_fps >= FPS_MINIMUM
     }
+
+    /// The first presentation rejection [`Self::passes`] would apply, so the
+    /// operator failure line names the real cause instead of printing numbers
+    /// that all look passing. `None` when the presented events are accepted.
+    fn rejection_reason(&self) -> Option<&'static str> {
+        let mut last_timestamp = None;
+        let mut timing_domain = None;
+        for event in &self.events {
+            if let PresentationEvent::Presented {
+                timestamp_ns,
+                clock_id,
+                output,
+                ..
+            } = event
+            {
+                if output.is_empty() {
+                    return Some("presented output is empty");
+                }
+                if last_timestamp.is_some_and(|last| *timestamp_ns <= last) {
+                    return Some("presented timestamps are not strictly increasing");
+                }
+                if timing_domain
+                    .as_ref()
+                    .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
+                {
+                    return Some("presented timing domain changed");
+                }
+                last_timestamp = Some(*timestamp_ns);
+                timing_domain = Some((*clock_id, output.as_str()));
+            }
+        }
+        None
+    }
 }
 
 pub fn wayland_presentation_record(
@@ -711,8 +744,11 @@ impl MeasurementRecord {
                 ));
             }
             if !fps.passes() {
+                let reason = fps
+                    .rejection_reason()
+                    .map_or(String::new(), |reason| format!(": {reason}"));
                 self.failures.push(format!(
-                    "presented FPS {:.3}, discarded {}, missing {}",
+                    "presented FPS {:.3}, discarded {}, missing {}{reason}",
                     fps.actual_fps, fps.discarded, fps.missing
                 ));
             }
@@ -1318,6 +1354,34 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| failure.starts_with("presented FPS 29.000"))
+        );
+    }
+
+    #[test]
+    fn rejected_presentation_names_the_reason_on_the_failure_line() {
+        let mut record = passing_record();
+        let source = record.fps.as_ref().expect("fps").source.clone();
+        // Every presented timestamp is valid and no frame is discarded or
+        // missing, so the empty output is the only rejection.
+        let events = (0..300)
+            .map(|id| PresentationEvent::Presented {
+                correlation_id: id,
+                timestamp_ns: id * 33_000_000,
+                clock_id: 1,
+                output: String::new(),
+            })
+            .collect();
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        let failure = record
+            .failures
+            .iter()
+            .find(|failure| failure.starts_with("presented FPS"))
+            .expect("the rejected presentation is reported");
+        assert!(
+            failure.contains("presented output is empty"),
+            "the operator line must name the rejection reason: {failure}"
         );
     }
 

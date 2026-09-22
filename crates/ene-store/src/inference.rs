@@ -15,8 +15,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::Store;
 use crate::codec::{
     decode_consumer, decode_currency, decode_id, decode_pricing_reference, decode_purpose,
-    decode_u64, decode_wall_clock, encode_consumer, encode_currency, encode_id,
-    encode_optional_count, encode_pricing_reference, encode_purpose, encode_u64,
+    decode_u64, decode_usage_source, decode_wall_clock, encode_consumer, encode_currency,
+    encode_id, encode_optional_count, encode_pricing_reference, encode_purpose, encode_u64,
     encode_usage_source, encode_wall_clock, inference_unavailable, lock_shared, select_consent,
 };
 use crate::credential::SQL_SELECT_SET_REV;
@@ -520,15 +520,7 @@ fn decode_usage_fact(
         .map(decode_u64)
         .transpose()
         .map_err(inference_unavailable)?;
-    let source = match raw.source.as_str() {
-        "reported" => UsageSource::Reported,
-        "unknown" => UsageSource::Unknown,
-        _ => {
-            return Err(inference_unavailable(String::from(
-                "unknown usage source in usage fact",
-            )));
-        }
-    };
+    let source = decode_usage_source(&raw.source).map_err(inference_unavailable)?;
     let fact = UsageFact {
         ticket,
         provider: raw.provider.clone(),
@@ -791,7 +783,13 @@ impl UsageRepository for Store {
         run_blocking(move || {
             let ticket_text = encode_id(fact.ticket.0);
             let reported = fact.source == UsageSource::Reported;
-            if reported != (fact.input_tokens.is_some() && fact.output_tokens.is_some()) {
+            let all_present = fact.input_tokens.is_some()
+                && fact.cached_input_tokens.is_some()
+                && fact.output_tokens.is_some();
+            let any_present = fact.input_tokens.is_some()
+                || fact.cached_input_tokens.is_some()
+                || fact.output_tokens.is_some();
+            if reported != all_present || (!reported && any_present) {
                 return Err(inference_unavailable(String::from(
                     "usage source and counts disagree",
                 )));
@@ -1103,13 +1101,7 @@ fn decode_usage_summary(
     };
     let source = match raw.usage_source.as_deref() {
         None => None,
-        Some("reported") => Some(UsageSource::Reported),
-        Some("unknown") => Some(UsageSource::Unknown),
-        Some(_) => {
-            return Err(inference_unavailable(String::from(
-                "unknown usage source in usage summary",
-            )));
-        }
+        Some(text) => Some(decode_usage_source(text).map_err(inference_unavailable)?),
     };
     let upper_bound = match (raw.reserved_currency.as_deref(), raw.reserved_upper_bound) {
         (None, None) => None,
@@ -1271,9 +1263,15 @@ fn decode_usage_summary(
                             "usage fact references a missing pricing snapshot",
                         ))
                     })?;
-                    if decode_pricing(stored)?.reference() != reference {
+                    let snapshot = decode_pricing(stored)?;
+                    if snapshot.reference() != reference {
                         return Err(inference_unavailable(String::from(
                             "stored pricing snapshot does not match its reference",
+                        )));
+                    }
+                    if snapshot.provider != raw.provider || snapshot.model != raw.model {
+                        return Err(inference_unavailable(String::from(
+                            "pricing snapshot route disagrees with the usage attribution",
                         )));
                     }
                     Some(reference)

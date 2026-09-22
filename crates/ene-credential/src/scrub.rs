@@ -127,21 +127,32 @@ where
             };
             scrubbed = next;
         }
-        // The redaction marker is excluded from the absence proof: a
-        // registered value that is a substring of the marker (for example
-        // "cred") appears inside every marker, so testing the whole scrubbed
-        // text would falsely report a surviving occurrence. Every raw
-        // occurrence was replaced above, so a value seen in a non-marker
-        // segment is a genuine residual; a match wholly inside the marker is
-        // the public marker's own text. Any surviving occurrence means the
-        // scrubber cannot claim removal.
+        // The absence proof is containment-aware: a registered value that is a
+        // substring of the marker (for example "cred") appears inside every
+        // marker, so a naive whole-text `contains` would falsely fail closed on
+        // the public marker's own text. A genuine residual is any occurrence
+        // not wholly contained in one marker — including one that a
+        // replacement creates across a marker boundary, which a per-segment
+        // split cannot see. Any surviving occurrence means the scrubber cannot
+        // claim removal.
+        let marker_len = REDACTED_CREDENTIAL.len();
+        let marker_starts: Vec<usize> = scrubbed
+            .match_indices(REDACTED_CREDENTIAL)
+            .map(|(start, _)| start)
+            .collect();
         for (_, credential) in &known {
             let still_present = self
                 .store
                 .with_bearer(credential, |bearer| {
-                    scrubbed
-                        .split(REDACTED_CREDENTIAL)
-                        .any(|segment| segment.contains(bearer))
+                    scrubbed.char_indices().any(|(start, _)| {
+                        if !scrubbed[start..].starts_with(bearer) {
+                            return false;
+                        }
+                        let end = start + bearer.len();
+                        !marker_starts
+                            .iter()
+                            .any(|&marker| start >= marker && end <= marker + marker_len)
+                    })
                 })
                 .map_err(|_| SecretScrubError::SecretUnavailable)?;
             if still_present {
@@ -269,6 +280,16 @@ mod scrub_tests {
         .await
         .expect("a marker-substring value must not defeat the absence proof");
         assert_eq!(proof.text(), "token [credential] tail");
+    }
+
+    #[tokio::test]
+    async fn a_value_reconstructed_at_a_marker_boundary_fails_closed() {
+        // "]x" is absent from "cx", but replacing the shorter registered "c"
+        // with the marker creates it at the marker's trailing "]".
+        assert_eq!(
+            error_of(&["c", "]x"], "cx").await,
+            SecretScrubError::SecretUnavailable
+        );
     }
 
     #[tokio::test]

@@ -75,6 +75,8 @@ impl SweepCursor {
     fn fact(&self, owner: ParticipantOwnerRef, at: WallClockWithTz) -> ParticipantCompletionFact {
         if self.verified {
             ParticipantCompletionFact::verified(self.condition, owner, self.erased, at)
+        } else if self.phase == SweepPhase::Verify {
+            ParticipantCompletionFact::local_complete(self.condition, owner, self.erased, 0, at)
         } else {
             ParticipantCompletionFact::more_work(
                 self.condition,
@@ -105,6 +107,68 @@ struct PageRequest<'a> {
 
 type LocalStep =
     fn(tx: &Transaction<'_>, cursor: &mut SweepCursor, target: &str) -> Result<(), rusqlite::Error>;
+
+/// Runs one bounded budget of scanned rows over an owner's table order: the
+/// shared erase→verify walk both local owners drive. The per-owner dispatch
+/// decides what one page of a table means; the budget, transition, and
+/// continuation update stay identical so the two sweeps cannot drift.
+fn bounded_step(
+    tx: &Transaction<'_>,
+    cursor: &mut SweepCursor,
+    target: &str,
+    table_count: usize,
+    mut page: impl FnMut(
+        &Transaction<'_>,
+        usize,
+        &PageRequest<'_>,
+    ) -> Result<PageOutcome, rusqlite::Error>,
+) -> Result<(), rusqlite::Error> {
+    let mut budget = ERASURE_SCAN_ROWS;
+    while budget > 0 {
+        if cursor.verified {
+            break;
+        }
+        if cursor.table >= table_count {
+            if cursor.phase == SweepPhase::Erase {
+                cursor.begin_verify();
+                continue;
+            }
+            cursor.verified = true;
+            break;
+        }
+        let limit = i64::from(budget);
+        let after = cursor.after.clone().unwrap_or_default();
+        let erasing = cursor.phase == SweepPhase::Erase;
+        let request = PageRequest {
+            target,
+            after: &after,
+            after_ordinal: cursor.after_ordinal,
+            limit,
+            delete: erasing,
+        };
+        let outcome = page(tx, cursor.table, &request)?;
+        budget = budget.saturating_sub(outcome.scanned);
+        if outcome.matched > 0 && !erasing {
+            // Verification found rows the erase walk must remove: re-walk
+            // from the head of the table that still holds them.
+            cursor.remainder = outcome.matched;
+            cursor.phase = SweepPhase::Erase;
+            cursor.reset_position();
+            continue;
+        }
+        if erasing {
+            cursor.erased += outcome.deleted;
+        }
+        if outcome.scanned < u32::try_from(limit).unwrap_or(u32::MAX) {
+            cursor.table += 1;
+            cursor.reset_position();
+        } else if let Some((last, ordinal)) = outcome.last {
+            cursor.after = Some(last);
+            cursor.after_ordinal = ordinal;
+        }
+    }
+    Ok(())
+}
 
 fn lock_cursors(
     cursors: &Mutex<HashMap<ErasureConditionRef, SweepCursor>>,
@@ -317,65 +381,29 @@ fn companion_step(
     cursor: &mut SweepCursor,
     target: &str,
 ) -> Result<(), rusqlite::Error> {
-    let mut budget = ERASURE_SCAN_ROWS;
-    while budget > 0 {
-        if cursor.verified {
-            break;
-        }
-        if cursor.table >= COMPANION_TABLES {
-            if cursor.phase == SweepPhase::Erase {
-                cursor.begin_verify();
-                continue;
-            }
-            cursor.verified = true;
-            break;
-        }
-        let limit = i64::from(budget);
-        let after = cursor.after.clone().unwrap_or_default();
-        let erasing = cursor.phase == SweepPhase::Erase;
-        let request = PageRequest {
-            target,
-            after: &after,
-            after_ordinal: 0,
-            limit,
-            delete: erasing,
-        };
-        let outcome = match cursor.table {
+    bounded_step(
+        tx,
+        cursor,
+        target,
+        COMPANION_TABLES,
+        |tx, table, request| match table {
             0 => exact_page(
                 tx,
                 COMPANION_CONTENT[0].0,
                 HISTORY_MESSAGE_KEY,
                 COMPANION_CONTENT[0].1,
-                &request,
-            )?,
+                request,
+            ),
             1 => exact_page(
                 tx,
                 COMPANION_CONTENT[1].0,
                 ACTIVITY_RECORD_KEY,
                 COMPANION_CONTENT[1].1,
-                &request,
-            )?,
-            _ => undelivered_page(tx, &request)?,
-        };
-        budget = budget.saturating_sub(outcome.scanned);
-        if outcome.matched > 0 && !erasing {
-            cursor.remainder = outcome.matched;
-            cursor.phase = SweepPhase::Erase;
-            cursor.reset_position();
-            continue;
-        }
-        if erasing {
-            cursor.erased += outcome.deleted;
-        }
-        if outcome.scanned < u32::try_from(limit).unwrap_or(u32::MAX) {
-            cursor.table += 1;
-            cursor.reset_position();
-        } else if let Some((last, ordinal)) = outcome.last {
-            cursor.after = Some(last);
-            cursor.after_ordinal = ordinal;
-        }
-    }
-    Ok(())
+                request,
+            ),
+            _ => undelivered_page(tx, request),
+        },
+    )
 }
 
 pub struct CompanionErasureParticipant {
@@ -704,56 +732,10 @@ fn learning_step(
 ) -> Result<(), rusqlite::Error> {
     let mut covered_memo: HashMap<String, bool> = HashMap::new();
     let mut memo: HashMap<String, bool> = HashMap::new();
-    let mut budget = ERASURE_SCAN_ROWS;
-    while budget > 0 {
-        if cursor.verified {
-            break;
-        }
-        if cursor.table >= LEARNING_TABLES {
-            if cursor.phase == SweepPhase::Erase {
-                cursor.begin_verify();
-                continue;
-            }
-            cursor.verified = true;
-            break;
-        }
-        let limit = i64::from(budget);
-        let after = cursor.after.clone().unwrap_or_default();
-        let erasing = cursor.phase == SweepPhase::Erase;
-        let request = PageRequest {
-            target,
-            after: &after,
-            after_ordinal: cursor.after_ordinal,
-            limit,
-            delete: erasing,
-        };
-        let outcome = learning_page(
-            tx,
-            cursor.table,
-            cursor.condition,
-            &request,
-            &mut covered_memo,
-            &mut memo,
-        )?;
-        budget = budget.saturating_sub(outcome.scanned);
-        if outcome.matched > 0 && !erasing {
-            cursor.remainder = outcome.matched;
-            cursor.phase = SweepPhase::Erase;
-            cursor.reset_position();
-            continue;
-        }
-        if erasing {
-            cursor.erased += outcome.deleted;
-        }
-        if outcome.scanned < u32::try_from(limit).unwrap_or(u32::MAX) {
-            cursor.table += 1;
-            cursor.reset_position();
-        } else if let Some((last, ordinal)) = outcome.last {
-            cursor.after = Some(last);
-            cursor.after_ordinal = ordinal;
-        }
-    }
-    Ok(())
+    let condition = cursor.condition;
+    bounded_step(tx, cursor, target, LEARNING_TABLES, |tx, table, request| {
+        learning_page(tx, table, condition, request, &mut covered_memo, &mut memo)
+    })
 }
 
 pub struct LearningErasureParticipant {

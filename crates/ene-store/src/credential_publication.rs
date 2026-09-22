@@ -8,7 +8,9 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{credential_unavailable, lock_shared};
-use crate::credential::{SQL_SELECT_SET_REV, advance_credential_set, sweep_registered_secret};
+use crate::credential::{
+    SQL_SELECT_SET_REV, SQL_UPSERT_CREDENTIAL, advance_credential_set, sweep_registered_secret,
+};
 use crate::run_blocking;
 
 const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)";
@@ -29,8 +31,8 @@ const SQL_CLEAR_CLEANUP: &str = "UPDATE credential_active SET cleanup_version = 
 /// never decided (for example an abandoned candidate) keeps its phase.
 const SQL_COMPLETE_MUTATION: &str = "UPDATE credential_mutation SET phase = ?2 WHERE mutation_id = ?1 AND decided_outcome IS NOT NULL";
 
-const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
-
+/// A stored outcome is written as its own durable text, so a later phase move
+/// never rewrites what the Owner decided.
 fn outcome_text(outcome: &MutationOutcome) -> String {
     match outcome {
         MutationOutcome::Activated { revision } => format!("activated:{revision}"),
@@ -434,6 +436,11 @@ impl CredentialPublicationRepository for Store {
                     Option::<i64>::None,
                     retired,
                 ],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.execute(
+                "DELETE FROM credential_ref WHERE provider = ?1 AND label = ?2",
+                params![mutation.provider, mutation.label],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
             let next = advance_credential_set(&tx)?;

@@ -296,6 +296,8 @@ pub fn render_summary(summary: &UndeliveredSummary) -> String {
     lines.join("\n")
 }
 
+/// One `task rev progress [running] purpose <purpose>` line per entry, plus the
+/// `next:` continuation while a page remains.
 pub fn render_task_list(page: &TaskListPage) -> String {
     let mut lines: Vec<String> = page
         .tasks
@@ -314,6 +316,9 @@ pub fn render_task_list(page: &TaskListPage) -> String {
     lines.join("\n")
 }
 
+/// Headline (`<task> rev <n> <progress> purpose <purpose>`) plus one `kind id`
+/// line per detail row, plus the `next:` continuation while rows remain. Bodies
+/// page through `source`.
 pub fn render_report_page(page: &TaskReportPage) -> String {
     let mut lines = vec![format!(
         "{} rev {} {} purpose {}",
@@ -415,6 +420,9 @@ pub fn deletion_purpose(token: &str) -> Option<DeletionPurposeWire> {
     DeletionPurposeWire::from_name(token)
 }
 
+/// Renders the bounded deletion status page: the surface mark an intent builds
+/// on, one line per operation, and the `next ` cursor while a later page
+/// exists. No target body, search material, or credential is in this page.
 #[must_use]
 pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
     let DeletionStatusResponse::Page(page) = response else {
@@ -499,6 +507,9 @@ pub fn usage_cap_mark_for<'a>(
         .map(|cap| cap.mark.as_str())
 }
 
+/// Renders one bounded usage page: one line per row, one line per cap slot,
+/// and the `next ` cursor while a later page exists. Unavailable and stale
+/// answers keep their distinct meaning instead of an empty page.
 #[must_use]
 pub fn render_usage_page(response: &UsageSummaryResponse) -> String {
     match response {

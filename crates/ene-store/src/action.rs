@@ -346,22 +346,10 @@ fn raw_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAttempt> {
 }
 
 fn grounds_match(certainty: ActionCertainty, grounds: Option<EffectGrounds>) -> bool {
-    matches!(
-        (certainty, grounds),
-        (ActionCertainty::Unknown, None)
-            | (
-                ActionCertainty::Unknown,
-                Some(EffectGrounds::OutcomeUnverified)
-            )
-            | (
-                ActionCertainty::ConfirmedSuccess,
-                Some(EffectGrounds::ObservedAtTarget)
-            )
-            | (
-                ActionCertainty::ConfirmedFailure,
-                Some(EffectGrounds::RefusedBeforeEffect)
-            )
-    )
+    match grounds {
+        None => certainty == ActionCertainty::Unknown,
+        Some(grounds) => ene_action::certainty_grounds_pair_is_valid(certainty, grounds),
+    }
 }
 
 fn decode_attempt_record(

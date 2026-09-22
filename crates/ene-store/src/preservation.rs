@@ -655,13 +655,7 @@ fn raw_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawOperation> {
 fn decode_operation(
     raw: RawOperation,
 ) -> Result<DeletionOperationRecord, PreservationTechnicalError> {
-    let phase = match raw.2.as_str() {
-        "active" => DeletionOperationPhase::Active,
-        "held" => DeletionOperationPhase::Held,
-        "finalizing" => DeletionOperationPhase::Finalizing,
-        "completed" => DeletionOperationPhase::Completed,
-        _ => return Err(corrupt()),
-    };
+    let phase = DeletionOperationPhase::from_name(raw.2.as_str()).ok_or_else(corrupt)?;
     let purpose = decode_purpose(&raw.3)?;
     let hold = match raw.5.as_deref() {
         None => None,
@@ -711,14 +705,8 @@ fn decode_participant(
         None => None,
         Some(name) => Some(ParticipantHoldClass::from_name(name).ok_or_else(corrupt)?),
     };
-    let progress = match (raw.1.as_str(), hold) {
-        ("pending", None) => ParticipantProgress::Pending,
-        ("running", None) => ParticipantProgress::Running { sweep },
-        ("local_complete", None) => ParticipantProgress::LocalComplete { sweep },
-        ("verified", None) => ParticipantProgress::Verified { sweep },
-        ("held", Some(reason)) => ParticipantProgress::Held { sweep, reason },
-        _ => return Err(corrupt()),
-    };
+    let progress =
+        ParticipantProgress::from_state_name(raw.1.as_str(), sweep, hold).ok_or_else(corrupt)?;
     let erased_count = u64::try_from(raw.4).map_err(|_| corrupt())?;
     let remainder_count = u64::try_from(raw.5).map_err(|_| corrupt())?;
     let reported_at = raw.6.as_deref().map(parse_time).transpose()?;
@@ -1601,11 +1589,7 @@ impl Store {
                 .test_parks
                 .fail_host_transient_arrival_sticky
                 .load(std::sync::atomic::Ordering::SeqCst);
-            let once = self
-                .test_parks
-                .fail_host_transient_arrival
-                .swap(false, std::sync::atomic::Ordering::SeqCst);
-            if sticky || once {
+            if sticky {
                 return Err(PreservationTechnicalError::StorageUnavailable);
             }
         }
@@ -1664,9 +1648,6 @@ fn note_host_transient_learning_arrival_sync(
             continue;
         }
         if phase != "finalizing" && state.as_deref() != Some("verified") {
-            continue;
-        }
-        if phase != "active" && phase != "held" && phase != "finalizing" {
             continue;
         }
         match open_next_sweep(tx, &id, sweep)? {
@@ -1793,7 +1774,7 @@ pub(crate) const ASSOCIATE_INFLIGHT_BODY_OBSERVING_DELEGATIONS_SQL: &str =
 
 pub(crate) const HOLD_OBSERVING_DELEGATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
-     SELECT ?3, d.delegation_id, ?1, ?4
+     SELECT ?2, d.delegation_id, ?1, ?3
      FROM delegation d
      WHERE EXISTS
          (SELECT 1 FROM task_agent_observation o WHERE o.delegation_id = d.delegation_id)";
@@ -2113,7 +2094,7 @@ fn admit_deletion(
     if observation_overflow {
         tx.execute(
             HOLD_OBSERVING_DELEGATIONS_SQL,
-            params![id, 1, USE_KIND_TASK_DELEGATION, at],
+            params![id, USE_KIND_TASK_DELEGATION, at],
         )
         .map_err(storage)?;
     }
@@ -2449,8 +2430,10 @@ impl PreservationRepository for Store {
                 return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
             };
             let staged = decode_request(staged)?;
-            let fact =
-                OwnerConfirmationFact::from_durable(request, parse_time(&confirmed_at)?);
+            // The confirmation row's timestamp is validated even though the
+            // fact itself carries only the request identity.
+            parse_time(&confirmed_at)?;
+            let fact = OwnerConfirmationFact::from_durable(request);
             let Some(command) =
                 staged.into_command(fact, WallClockWithTz::now(), required_participants)
             else {
@@ -2633,6 +2616,17 @@ impl PreservationRepository for Store {
                     .map_err(storage)?;
                 }
                 DeletionLifecycleChange::NextSweep => {
+                    // A Held(Unavailable) operation keeps its current condition
+                    // active (§5.1) until an explicit Resume decides recovery:
+                    // advancing the generation underneath the hold would publish
+                    // a new current condition without a recovery decision and
+                    // silently flip the phase that A4/A5 participant sweep
+                    // tracking observes. Reject like the GenerationExhausted
+                    // hold below — no writes, no generation advance — so this
+                    // generic lifecycle call never moves a Held(Unavailable)
+                    // operation back to Active; only an explicit Resume, or the
+                    // §11 delayed-arrival sweep in
+                    // note_host_transient_learning_arrival_sync, may.
                     if record.phase == DeletionOperationPhase::Held
                         && record.hold == Some(DeletionHoldReason::Unavailable)
                     {

@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -13,9 +12,8 @@ use ene_api::v1::deletion::ClientTempClass;
 use ene_api::v1::management::ManagementOutcome;
 use ene_api::v1::round::PresentationStatus;
 use ene_companion::{CompanionRepository as _, UNDELIVERED_PAGE_MAX, UndeliveredRepository as _};
-use ene_core::conn;
 use ene_core::host_control;
-use ene_core::serve::{CoreError, HostHandle};
+use ene_core::serve::HostHandle;
 use ene_desktop::body_supervise::BodySupervisor;
 use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
@@ -24,7 +22,7 @@ use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
 
 mod common;
 
-use common::{drive_gui_until, open_host, pair_and_seat, wait_for_control};
+use common::{ServingTask, drive_gui_until, open_host, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-e-secret-5519";
@@ -76,55 +74,8 @@ impl ProviderTransport for GateTransport {
     }
 }
 
-struct ServingTask {
-    shutdown: tokio::sync::watch::Sender<bool>,
-    task: tokio::task::JoinHandle<Result<(), CoreError>>,
-}
-
-impl ServingTask {
-    fn start(dir: &Path, handle: Arc<HostHandle>, transport: Arc<GateTransport>) -> Self {
-        let (shutdown, rx) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(conn::run_until_shutdown(
-            dir.to_path_buf(),
-            handle,
-            transport,
-            rx,
-        ));
-        Self { shutdown, task }
-    }
-
-    #[expect(clippy::expect_used, reason = "test fixture helper")]
-    async fn shutdown_and_join(self) {
-        self.shutdown.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(30), self.task)
-            .await
-            .expect("serving shutdown must drain")
-            .expect("serving task must join")
-            .expect("serving shutdown must succeed");
-    }
-}
-
 async fn pair_and_setup(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
-    pair_and_seat(desktop, handle).await;
-    desktop.set_secret(String::from(SECRET));
-    desktop
-        .begin_credential_put()
-        .await
-        .expect("credential put must challenge");
-    match desktop
-        .confirm_owner()
-        .await
-        .expect("owner confirm stores the key")
-    {
-        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
-        other => panic!("expected CredentialStored, got {other:?}"),
-    }
-    desktop.set_model(String::from(MODEL));
-    let assigned = desktop.assign_model().await.expect("assign");
-    assert!(
-        matches!(assigned, ManagementOutcome::StoredAsRuleView { .. }),
-        "assignment must store, got {assigned:?}"
-    );
+    common::pair_and_setup(desktop, handle, SECRET, MODEL).await;
 }
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]

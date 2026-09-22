@@ -156,6 +156,40 @@ impl ParticipantProgress {
     pub const fn is_verified(self) -> bool {
         matches!(self, Self::Verified { .. })
     }
+
+    /// Storage state token, independent of the sweep and the hold class; the
+    /// hold class rides [`ParticipantHoldClass::as_str`] separately. Unknown
+    /// stored or incoming tokens are outside the set and fail closed at their
+    /// parse boundary, never defaulted.
+    #[must_use]
+    pub const fn state_name(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running { .. } => "running",
+            Self::LocalComplete { .. } => "local_complete",
+            Self::Verified { .. } => "verified",
+            Self::Held { .. } => "held",
+        }
+    }
+
+    /// Rebuilds one progress row from its storage state token, sweep, and hold
+    /// class. The hold class is present exactly for `held`; any other
+    /// combination is outside the closed vocabulary and answers [`None`].
+    #[must_use]
+    pub fn from_state_name(
+        state: &str,
+        sweep: DeletionSweepGeneration,
+        hold: Option<ParticipantHoldClass>,
+    ) -> Option<Self> {
+        Some(match (state, hold) {
+            ("pending", None) => Self::Pending,
+            ("running", None) => Self::Running { sweep },
+            ("local_complete", None) => Self::LocalComplete { sweep },
+            ("verified", None) => Self::Verified { sweep },
+            ("held", Some(reason)) => Self::Held { sweep, reason },
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

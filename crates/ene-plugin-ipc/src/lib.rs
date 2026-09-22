@@ -37,15 +37,14 @@ pub enum CodecError {
     Truncated { have: usize, need: usize },
     #[error("frame body failed to decode: {reason}")]
     DecodeFailed { reason: String },
+    /// The body could not be serialized as a [`WireFrame`].
+    #[error("frame body failed to encode: {reason}")]
+    EncodeFailed { reason: String },
 }
 
 pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
-    let body = rmp_serde::to_vec_named(frame).map_err(|error| CodecError::DecodeFailed {
-        // `rmp-serde` writing into a `Vec` cannot fail in practice; there is
-        // no encode-dedicated variant because the failure is uninhabited for
-        // these types, so the single codec error carries it with the stage
-        // named in the reason.
-        reason: std::format!("encode: {error}"),
+    let body = rmp_serde::to_vec_named(frame).map_err(|error| CodecError::EncodeFailed {
+        reason: std::format!("{error}"),
     })?;
     if body.len() > MAX_FRAME_BYTES {
         return Err(CodecError::FrameTooLarge { len: body.len() });

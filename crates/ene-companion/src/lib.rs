@@ -424,10 +424,25 @@ pub trait HistoryRepository {
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError>;
 
+    /// Appends one companion reply and registers an undelivered entry for it
+    /// in the same atomic section.
+    ///
+    /// Conversation-sourced undelivered registration shares the history
+    /// append atom (AU1a); Task- and Action-sourced registration shares the
+    /// parent fact's own commit instead (AU1b). The returned [`Option`]
+    /// carries the registered [`UndeliveredRef`] when registration happened.
+    ///
+    /// `inference_claim` is the durable provider claim this reply was
+    /// produced under, when the caller obtained one. The implementor compares
+    /// it inside the same transaction against the canonical deletion
+    /// correspondence: a claim a deletion admission already associated with
+    /// an interval is refused with [`HistoryAppendOutcome::HeldForErasure`]
+    /// even after the operation completed and no current condition is
+    /// readable (lifecycle §11 R2). [`None`] skips the check (non-provider
+    /// appends and direct test fixtures).
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
-        register_unpresented: bool,
         inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError>;
 

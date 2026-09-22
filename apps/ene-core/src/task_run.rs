@@ -588,9 +588,6 @@ fn not_started_observation(reason: &ActionNotStarted) -> String {
         ActionNotStarted::ContentNotAllowed => String::from("refused: content is not allowed"),
         ActionNotStarted::Denied(code) => format!("denied: {code:?}"),
         ActionNotStarted::NeedsRevalidation => String::from("refused: revalidation needed"),
-        ActionNotStarted::EvaluationConsumed => {
-            String::from("refused: the authorization evaluation was already used")
-        }
         ActionNotStarted::StalePremise => String::from("refused: the task premise moved"),
         ActionNotStarted::TaskTerminal => String::from("refused: the task is terminal"),
         ActionNotStarted::ExecutionSealed => String::from("refused: the execution is sealed"),

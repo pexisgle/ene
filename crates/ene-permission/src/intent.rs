@@ -73,10 +73,14 @@ pub async fn assign_consent(
         )
         .await;
     }
+    // The base premise is enforced before the shortcut: a stale base with a
+    // coincidentally equal route must answer stale, never silent success.
+    // `base_view_expectation` already fills the identity from `current`, so
+    // only the revision can differ here.
     let base_fresh = match (&expected, current.as_ref()) {
         (None, None) => true,
-        (Some((id, revision)), Some(record)) => record.id == *id && record.rev == *revision,
-        (None, Some(_)) | (Some(_), None) => false,
+        (Some((_, revision)), Some(record)) => record.rev == *revision,
+        _ => false,
     };
     if !base_fresh {
         return record_decided(

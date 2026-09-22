@@ -302,6 +302,9 @@ pub struct HealthTick {
     pub overlay: OverlayKind,
     pub expressions: FeatureSupport,
     pub spring_bone: FeatureSupport,
+    /// Whether at least one validated clip is loaded. Layout capability and
+    /// per-pose coverage are not claimed here; use `motion_poses` for which
+    /// hints have a clip.
     pub motion: FeatureSupport,
 }
 
