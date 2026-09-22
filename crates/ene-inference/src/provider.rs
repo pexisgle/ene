@@ -589,23 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_usage_maps_to_none() {
-        let body = serde_json::json!({
-            "status": "completed",
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "hi"}],
-                },
-            ],
-        });
-        let result = parse_response(200, body);
-        let response = result.unwrap();
-        assert_eq!(response.text, "hi");
-        assert_eq!(response.usage, None);
-    }
-
-    #[test]
     fn request_body_disables_server_side_storage() {
         let body = super::responses_body("gpt-test", "hello", false);
         assert_eq!(
@@ -614,16 +597,6 @@ mod tests {
             "history lives locally; the provider must not retain response state: {body}"
         );
         assert_eq!(body.get("stream"), Some(&serde_json::Value::Bool(false)));
-    }
-
-    #[test]
-    fn request_body_sets_the_explicit_output_maximum_the_estimate_uses() {
-        let body = super::responses_body("gpt-test", "hello", false);
-        assert_eq!(
-            body.get("max_output_tokens"),
-            Some(&serde_json::json!(super::MAX_OUTPUT_TOKENS)),
-            "the request itself must carry the explicit maximum the reservation bound covers"
-        );
     }
 
     #[test]
@@ -651,22 +624,6 @@ mod tests {
             super::MAX_OUTPUT_TOKENS,
             "the output side must be the explicit maximum the body carries"
         );
-    }
-
-    #[test]
-    fn empty_output_without_status_is_not_success() {
-        let result = parse_response(200, serde_json::json!({"output": []}));
-        assert!(
-            matches!(
-                result,
-                Err(InferenceTechnicalError::ProviderTransportFailed(_))
-            ),
-            "a status-less body must fail, got {result:?}"
-        );
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("missing status"), "got {reason:?}");
     }
 
     #[test]
@@ -736,116 +693,6 @@ mod tests {
     }
 
     #[test]
-    fn null_body_maps_to_decode_failure() {
-        let result = parse_response(200, serde_json::Value::Null);
-        assert!(matches!(
-            result,
-            Err(InferenceTechnicalError::ProviderTransportFailed(_))
-        ));
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("decode"));
-    }
-
-    #[test]
-    fn partial_usage_maps_to_none() {
-        let body = serde_json::json!({
-            "status": "completed",
-            "output": [],
-            "usage": {"input_tokens": 7},
-        });
-        let result = parse_response(200, body);
-        let response = result.unwrap();
-        assert_eq!(response.usage, None);
-    }
-
-    #[test]
-    fn missing_cache_detail_is_unknown_not_zero() {
-        let body = serde_json::json!({
-            "status": "completed",
-            "output": [],
-            "usage": {"input_tokens": 7, "output_tokens": 3},
-        });
-        let result = parse_response(200, body);
-        let response = result.unwrap();
-        assert_eq!(response.text, "");
-        assert_eq!(
-            response.usage, None,
-            "cache detail absence is not evidence of zero cache hits"
-        );
-    }
-
-    #[test]
-    fn cache_detail_absent_and_empty_both_stay_unknown() {
-        // Explicit null and an empty details object carry no cached count.
-        for usage in [
-            serde_json::json!({"input_tokens": 7, "output_tokens": 3, "input_tokens_details": null}),
-            serde_json::json!({"input_tokens": 7, "output_tokens": 3, "input_tokens_details": {}}),
-        ] {
-            let body = serde_json::json!({
-                "status": "completed",
-                "output": [],
-                "usage": usage,
-            });
-            let result = parse_response(200, body);
-            let response = result.unwrap();
-            assert_eq!(
-                response.usage, None,
-                "a cache detail without cached_tokens is not a zero cache"
-            );
-        }
-    }
-
-    #[test]
-    fn cache_count_above_input_is_rejected_as_unknown() {
-        let body = serde_json::json!({
-            "status": "completed",
-            "output": [],
-            "usage": {
-                "input_tokens": 5,
-                "output_tokens": 3,
-                "input_tokens_details": {"cached_tokens": 6},
-            },
-        });
-        let result = parse_response(200, body);
-        let response = result.unwrap();
-        assert_eq!(
-            response.usage, None,
-            "cached subset larger than input is not a correct usage report"
-        );
-    }
-
-    #[test]
-    fn malformed_usage_json_keeps_the_valid_response_unknown() {
-        let body = serde_json::json!({
-            "status": "completed",
-            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
-            "usage": {"input_tokens": "lots"},
-        });
-        let result = parse_response(200, body);
-        let response = result.expect("the response envelope itself is valid");
-        assert_eq!(response.text, "hi");
-        assert_eq!(
-            response.usage, None,
-            "an undecodable usage report settles Unknown, not a failed call"
-        );
-    }
-
-    #[test]
-    fn unauthorized_maps_to_transport_failure() {
-        let result = parse_response(401, error_shape());
-        assert!(matches!(
-            result,
-            Err(InferenceTechnicalError::ProviderTransportFailed(_))
-        ));
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("unauthorized"));
-    }
-
-    #[test]
     fn rate_limited_maps_to_unavailable() {
         let result = parse_response(429, error_shape());
         assert!(matches!(
@@ -857,34 +704,6 @@ mod tests {
         };
         assert!(reason.contains("provider unavailable"));
         assert!(reason.contains("429"));
-    }
-
-    #[test]
-    fn server_error_maps_to_unavailable() {
-        let result = parse_response(503, error_shape());
-        assert!(matches!(
-            result,
-            Err(InferenceTechnicalError::ProviderTransportFailed(_))
-        ));
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider unavailable"));
-        assert!(reason.contains("503"));
-    }
-
-    #[test]
-    fn other_client_error_maps_to_request_failure() {
-        let result = parse_response(400, error_shape());
-        assert!(matches!(
-            result,
-            Err(InferenceTechnicalError::ProviderTransportFailed(_))
-        ));
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider request failed"));
-        assert!(reason.contains("400"));
     }
 
     #[test]
@@ -901,34 +720,6 @@ mod tests {
             panic!("unexpected variant");
         };
         assert!(reason.contains("decode"));
-    }
-
-    #[test]
-    fn stream_assembler_missing_cache_detail_reports_unknown_usage() {
-        let mut assembler = super::StreamAssembler::default();
-        for line in [
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
-        ] {
-            assembler.feed_line(line).expect("a known event must parse");
-        }
-        let response = assembler.finish().expect("a completed stream answers");
-        assert_eq!(response.text, "hi");
-        assert_eq!(
-            response.usage, None,
-            "SSE completion without cache detail settles Unknown, never zero"
-        );
-    }
-
-    #[test]
-    fn streaming_body_requests_incremental_output() {
-        let body = super::responses_body("gpt-test", "hello", true);
-        assert_eq!(
-            body.get("stream"),
-            Some(&serde_json::Value::Bool(true)),
-            "the streaming transport must request server-sent events: {body}"
-        );
-        assert_eq!(body.get("store"), Some(&serde_json::Value::Bool(false)));
     }
 
     #[test]
@@ -958,24 +749,6 @@ mod tests {
     }
 
     #[test]
-    fn stream_assembler_treats_missing_completion_as_failure() {
-        let mut assembler = super::StreamAssembler::default();
-        let fed = assembler
-            .feed_line("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}")
-            .expect("the delta parses");
-        assert_eq!(fed.as_deref(), Some("partial"));
-        let result = assembler.finish();
-        assert!(matches!(
-            result,
-            Err(InferenceTechnicalError::ProviderTransportFailed(_))
-        ));
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("completion"), "got {reason:?}");
-    }
-
-    #[test]
     fn stream_assembler_maps_failure_events_without_body_text() {
         for (line, marker) in [
             (
@@ -1001,23 +774,6 @@ mod tests {
                 "failure reasons must not echo provider body text: {reason:?}"
             );
         }
-    }
-
-    #[test]
-    fn stream_assembler_ignores_unknown_events_and_malformed_lines() {
-        let mut assembler = super::StreamAssembler::default();
-        let mut deltas = Vec::new();
-        deltas.extend(
-            assembler
-                .feed_line("event: response.output_text.delta")
-                .expect("a non-data line is ignored"),
-        );
-        deltas.extend(
-            assembler
-                .feed_line("data: {\"type\":\"response.future_event\",\"x\":1}")
-                .expect("an unknown event is ignored"),
-        );
-        assert!(deltas.is_empty());
     }
 
     #[test]

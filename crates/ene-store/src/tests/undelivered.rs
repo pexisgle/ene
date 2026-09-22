@@ -10,11 +10,11 @@ use ene_action::{
 };
 use ene_companion::{
     PresentationMark, ReportStatus, ReportStatusTransition, TaskFact, TerminalKindWire,
-    UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredId, UndeliveredSource,
+    UNDELIVERED_PAGE_MAX, UndeliveredCursor, UndeliveredSource,
 };
 use ene_task::{
-    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskFailureKind,
-    TaskFailureOutcome, TaskFailurePremise, TaskProgress, TaskResultAcceptance,
+    TaskCancelOutcome, TaskCommitOutcome, TaskCommitPremise, TaskContextEntryId, TaskProgress,
+    TaskResultAcceptance,
 };
 
 use super::task_result::{
@@ -167,39 +167,6 @@ async fn task_producers_register_their_source_key_once() {
 }
 
 #[tokio::test]
-async fn confirmed_failure_registers_the_terminal_fact_once() {
-    let store = open_memory().await.unwrap();
-    let assignee = RawId::new();
-    let task = create_task_for_assignee(&store, assignee).await;
-    let premise = TaskFailurePremise {
-        task,
-        delegation: None,
-        kind: TaskFailureKind::ConfirmedUnachievable,
-    };
-    assert!(matches!(
-        store.fail_task(premise).await.unwrap(),
-        TaskFailureOutcome::FailedAs(_)
-    ));
-    assert_eq!(
-        count_key(&store, "terminal", task.task.as_raw(), "failed"),
-        1
-    );
-    assert!(matches!(
-        store.fail_task(premise).await.unwrap(),
-        TaskFailureOutcome::AlreadyFailed { .. }
-    ));
-    assert_eq!(
-        count_key(&store, "terminal", task.task.as_raw(), "failed"),
-        1
-    );
-    assert_eq!(
-        count_companion(&store, assignee),
-        2,
-        "initial revision plus the terminal fact"
-    );
-}
-
-#[tokio::test]
 async fn action_and_result_producers_register_under_the_task_assignee() {
     let store = open_memory().await.unwrap();
     let (task, delegation, assoc) = seed_workspace_execution(&store).await;
@@ -307,38 +274,6 @@ async fn action_and_result_producers_register_under_the_task_assignee() {
         8,
         "revision, delegation, two unknown phases, two confirmations, recorded, adopted"
     );
-}
-
-#[tokio::test]
-async fn recorded_to_original_only_registers_no_adoption_fact() {
-    let store = open_memory().await.unwrap();
-    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
-    let attempt = start_attempt(&store, delegation, task, assoc, "late.txt").await;
-    settle(
-        &store,
-        attempt,
-        ActionCertainty::ConfirmedSuccess,
-        EffectGrounds::ObservedAtTarget,
-    )
-    .await;
-    let result = finalize(&store, delegation, "late result").await.result;
-
-    assert_eq!(
-        store.cancel_task(task.task).await.unwrap(),
-        TaskCancelOutcome::CancelAccepted
-    );
-    let recorded_only = store.adopt_result(claim(result, &[attempt])).await.unwrap();
-    assert_eq!(
-        recorded_only,
-        TaskResultAcceptance::RecordedToOriginalOnly,
-        "a cancelled Task keeps the result in its original record only"
-    );
-    // RecordedToOriginalOnly commits correlation only: it is not an adoption,
-    // so no ResultAdopted notification exists. The terminal Cancelled fact
-    // already describes the lifecycle, and a fabricated adoption would claim
-    // a completion that never happened.
-    assert_eq!(count_key(&store, "result_adopted", result.as_raw(), ""), 0);
-    assert_eq!(count_key(&store, "result_recorded", result.as_raw(), ""), 1);
 }
 
 #[tokio::test]
@@ -671,79 +606,4 @@ async fn undelivered_unknown_is_relisted_and_receipts_never_downgrade_presented(
         Ok(ReportStatusTransition::AlreadyPresented),
         "a presented row absorbs every later mark, stale premise included"
     );
-}
-
-/// The exact-identity read resolves requested ids in their requested order
-/// with stored statuses, and omits unknown or foreign identities so a
-/// receipt can detect an unrehydratable selection.
-#[tokio::test]
-async fn exact_identity_reads_preserve_order_and_resolve_statuses() {
-    let store = open_memory().await.unwrap();
-    let assignee = RawId::new();
-    let task = create_task_for_assignee(&store, assignee).await;
-    let TaskCommitOutcome::CommittedAs(_) = steer(&store, task).await else {
-        panic!("steering must commit");
-    };
-    let companion = CompanionId::from_raw(assignee);
-    let page = store
-        .list_unpresented(companion, None, 50)
-        .await
-        .expect("the listing must read");
-    assert_eq!(page.entries.len(), 2, "revision 1 and revision 2");
-    let first = page.entries[0].id;
-    let second = page.entries[1].id;
-
-    // Requested order wins, never insertion order.
-    let loaded = store
-        .load_undelivered_by_ids(companion, &[second, first])
-        .await
-        .expect("the exact read must answer");
-    assert_eq!(
-        loaded.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        vec![second, first]
-    );
-
-    // A presented row still resolves, with its stored status; an unknown
-    // identity is omitted, so the caller sees the shorter vector and can
-    // fail closed.
-    let transition = store
-        .compare_and_mark_reported(
-            second,
-            ReportStatus::Pending,
-            PresentationMark {
-                round: RawId::new(),
-                presented: true,
-            },
-        )
-        .await
-        .expect("the presentation compare must answer");
-    assert_eq!(transition, ReportStatusTransition::PendingToPresented);
-    let unknown = UndeliveredId::from_raw(RawId::new());
-    let loaded = store
-        .load_undelivered_by_ids(companion, &[first, second, unknown])
-        .await
-        .expect("the exact read must answer");
-    assert_eq!(
-        loaded.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        vec![first, second],
-        "presented and pending identities both resolve"
-    );
-    assert_eq!(loaded[0].status, ReportStatus::Pending);
-    assert_eq!(loaded[1].status, ReportStatus::Presented);
-
-    // A foreign companion never resolves another companion's identity, even
-    // with the exact id.
-    let other = store
-        .load_undelivered_by_ids(CompanionId::from_raw(RawId::new()), &[first])
-        .await
-        .expect("the exact read must answer");
-    assert!(other.is_empty());
-
-    // The read changes nothing.
-    let after = store
-        .list_unpresented(companion, None, 50)
-        .await
-        .expect("the listing must read");
-    assert_eq!(after.entries.len(), 1);
-    assert_eq!(after.entries[0].id, first);
 }

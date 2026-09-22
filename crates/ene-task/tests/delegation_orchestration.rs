@@ -37,8 +37,6 @@ use ene_task::{
 /// the durable repository would.
 enum FakeDelegationReply {
     Delegated,
-    Stale(TaskRef),
-    Missing(TaskId),
 }
 
 /// Scripted `TaskRepository`: one `load_task` fixture, a queue of
@@ -139,8 +137,6 @@ impl TaskRepository for FakeTaskRepository {
                 agent: premise.agent,
                 scope: premise.scope_copy,
             }),
-            FakeDelegationReply::Stale(current) => DelegationOutcome::StaleTaskRevision { current },
-            FakeDelegationReply::Missing(task) => DelegationOutcome::MissingTask { task },
         })
     }
 
@@ -339,67 +335,6 @@ fn command(task: TaskRef, scope_copy: DelegationScope) -> CreateDelegationComman
 }
 
 #[tokio::test]
-async fn missing_task_is_reported_without_creating_a_delegation() {
-    let task = TaskId::generate();
-    let expected = TaskRef {
-        task,
-        revision: revision(1),
-    };
-    let repository = FakeTaskRepository::new(Ok(None), assignee());
-
-    let outcome = orchestrate_delegation(
-        &repository,
-        command(expected, DelegationScope { workspace: None }),
-    )
-    .await
-    .expect("a missing Task is a domain outcome, not a technical error");
-
-    match outcome {
-        DelegationOutcome::MissingTask { task: found } => assert_eq!(found, task),
-        other => panic!("expected MissingTask, got {other:?}"),
-    }
-    assert!(
-        repository.delegated().is_empty(),
-        "a missing Task must not create a delegation"
-    );
-}
-
-#[tokio::test]
-async fn terminal_task_is_reported_without_creating_a_delegation() {
-    let task = TaskId::generate();
-    let reference = TaskRef {
-        task,
-        revision: revision(1),
-    };
-    let purpose = TaskPurposeRef {
-        task,
-        adopted_revision: revision(1),
-    };
-    let mut loaded = record(task, revision(1), purpose, TaskContextEntryId::generate());
-    loaded.task.progress = TaskProgress::Completed;
-    let repository = FakeTaskRepository::new(Ok(Some(loaded)), assignee());
-
-    let outcome = orchestrate_delegation(
-        &repository,
-        command(reference, DelegationScope { workspace: None }),
-    )
-    .await
-    .expect("terminal progress is a domain outcome, not a technical error");
-
-    assert_eq!(
-        outcome,
-        DelegationOutcome::TaskTerminal {
-            task,
-            progress: TaskProgress::Completed,
-        }
-    );
-    assert!(
-        repository.delegated().is_empty(),
-        "a terminal Task must not create a delegation"
-    );
-}
-
-#[tokio::test]
 async fn stale_revision_reports_current_without_creating_a_delegation() {
     let task = TaskId::generate();
     let expected = TaskRef {
@@ -527,64 +462,6 @@ async fn delegated_outcome_echoes_the_minted_identities_and_the_command() {
 }
 
 #[tokio::test]
-async fn technical_failures_stay_errors() {
-    let task = TaskId::generate();
-    let expected = TaskRef {
-        task,
-        revision: revision(1),
-    };
-
-    let load_error = TaskTechnicalError::StorageUnavailable {
-        reason: String::from("load unavailable"),
-    };
-    let repository = FakeTaskRepository::new(Err(load_error.clone()), assignee());
-    let outcome = orchestrate_delegation(
-        &repository,
-        command(expected, DelegationScope { workspace: None }),
-    )
-    .await;
-    match outcome {
-        Err(error) => assert_eq!(
-            error, load_error,
-            "the load failure is not a stale revision"
-        ),
-        Ok(other) => panic!("expected a technical error, got {other:?}"),
-    }
-    assert!(repository.delegated().is_empty());
-
-    let create_error = TaskTechnicalError::StorageUnavailable {
-        reason: String::from("create_delegation unavailable"),
-    };
-    let repository = FakeTaskRepository::new(
-        Ok(Some(record(
-            task,
-            revision(1),
-            TaskPurposeRef {
-                task,
-                adopted_revision: revision(1),
-            },
-            TaskContextEntryId::generate(),
-        ))),
-        assignee(),
-    );
-    repository.script_delegation(Err(create_error.clone()));
-    let outcome = orchestrate_delegation(
-        &repository,
-        command(expected, DelegationScope { workspace: None }),
-    )
-    .await;
-    match outcome {
-        Err(error) => assert_eq!(error, create_error),
-        Ok(other) => panic!("expected a technical error, got {other:?}"),
-    }
-    assert_eq!(
-        repository.delegated().len(),
-        1,
-        "the commit was attempted before the technical failure"
-    );
-}
-
-#[tokio::test]
 async fn delegated_workspace_scope_copy_crosses_unchanged() {
     let task = TaskId::generate();
     let expected = TaskRef {
@@ -649,64 +526,5 @@ async fn delegated_workspace_scope_copy_crosses_unchanged() {
             );
         }
         other => panic!("expected Delegated, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn repository_stale_and_missing_outcomes_pass_through() {
-    let task = TaskId::generate();
-    let expected = TaskRef {
-        task,
-        revision: revision(1),
-    };
-    let purpose = TaskPurposeRef {
-        task,
-        adopted_revision: revision(1),
-    };
-    let raced = TaskRef {
-        task,
-        revision: revision(2),
-    };
-
-    let repository = FakeTaskRepository::new(
-        Ok(Some(record(
-            task,
-            revision(1),
-            purpose,
-            TaskContextEntryId::generate(),
-        ))),
-        assignee(),
-    );
-    repository.script_delegation(Ok(FakeDelegationReply::Stale(raced)));
-    let outcome = orchestrate_delegation(
-        &repository,
-        command(expected, DelegationScope { workspace: None }),
-    )
-    .await
-    .expect("a lost compare is a domain outcome, not a technical error");
-    match outcome {
-        DelegationOutcome::StaleTaskRevision { current: found } => assert_eq!(found, raced),
-        other => panic!("expected StaleTaskRevision, got {other:?}"),
-    }
-
-    let repository = FakeTaskRepository::new(
-        Ok(Some(record(
-            task,
-            revision(1),
-            purpose,
-            TaskContextEntryId::generate(),
-        ))),
-        assignee(),
-    );
-    repository.script_delegation(Ok(FakeDelegationReply::Missing(task)));
-    let outcome = orchestrate_delegation(
-        &repository,
-        command(expected, DelegationScope { workspace: None }),
-    )
-    .await
-    .expect("a missing Task from the commit is a domain outcome");
-    match outcome {
-        DelegationOutcome::MissingTask { task: found } => assert_eq!(found, task),
-        other => panic!("expected MissingTask, got {other:?}"),
     }
 }

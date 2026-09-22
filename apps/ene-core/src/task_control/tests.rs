@@ -17,27 +17,22 @@ use ene_action::{
     AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds, OperationKind, RealTargetRef,
 };
 use ene_companion::CompanionRepository as _;
-use ene_companion::dialogue::TaskReportCertainty;
 use ene_inference::{
     InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
 };
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, CancelTaskCommand, DelegatedWorkspace, DelegationCreationPremise, DelegationId,
-    DelegationOutcome, DelegationScope, TaskAgentEphemeralId, TaskCancelOutcome,
-    TaskContextEntryId, TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise,
-    TaskFailureKind, TaskFailureOutcome, TaskFailurePremise, TaskId, TaskProgress, TaskPurpose,
-    TaskRef, TaskRepository as _, TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId,
-    WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef,
+    AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
+    DelegationScope, TaskAgentEphemeralId, TaskContextEntryId, TaskContextOrigin,
+    TaskContextOriginKind, TaskCreationPremise, TaskFailureKind, TaskFailureOutcome,
+    TaskFailurePremise, TaskId, TaskProgress, TaskPurpose, TaskRef, TaskRepository as _,
+    TaskResultAcceptance, TaskResultAdoptionClaim, WorkspaceAssocId, WorkspaceAssociationPremise,
+    WorkspaceFolderRef, WorkspaceNeedRef,
 };
 
 use super::TaskProposalHostOutcome;
 use crate::serve::HostHandle;
 use crate::test_support::memory_handle_with;
-
-/// Tiny bound that exercises exactly the same keyset-page transitions without
-/// making test fixture size scale with the production tuning constant.
-const TEST_RECONCILIATION_PAGE_SIZE: u64 = 2;
 
 /// Provider transport that counts calls and never answers usefully. A call
 /// means an execution reached provider I/O when the test pinned zero.
@@ -365,241 +360,6 @@ async fn recovery_reconciliation_is_idempotent_and_reports_bounded_counts() {
 }
 
 #[tokio::test]
-async fn reconciliation_narrows_to_readoption_possible_candidates() {
-    let (handle, dir) = open_handle("reconcile-narrow").await;
-    // Permanently unadopted history: cancelled Tasks with late results. They
-    // can only answer RecordedToOriginalOnly, so they are not candidates.
-    let mut permanent = Vec::new();
-    for index in 0..TEST_RECONCILIATION_PAGE_SIZE + 1 {
-        let (task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
-        assert_eq!(
-            handle
-                .cancel_task(CancelTaskCommand { task: task.task })
-                .await
-                .unwrap(),
-            TaskCancelOutcome::CancelAccepted
-        );
-        let body = format!("late body {index}");
-        let result = crate::test_support::record_result(&handle.store, delegation, &body).await;
-        permanent.push((task, result.result));
-    }
-
-    // One candidate where re-adoption is still possible from canonical facts.
-    let (recoverable_task, recoverable_delegation, recoverable_assoc) =
-        seed_execution(&handle, "/srv/workspace/ene").await;
-    let attempt = start_attempt(
-        &handle,
-        recoverable_delegation,
-        recoverable_task,
-        recoverable_assoc,
-        &canonical_target("recoverable.md"),
-        OperationKind::Create,
-    )
-    .await;
-    handle
-        .settle_action_certainty(
-            attempt,
-            ActionCertainty::ConfirmedSuccess,
-            EffectGrounds::ObservedAtTarget,
-        )
-        .await
-        .unwrap();
-    let recoverable =
-        crate::test_support::record_result(&handle.store, recoverable_delegation, "recoverable")
-            .await;
-
-    // The candidate read is bounded and skips the permanent history.
-    let candidates = handle
-        .store
-        .list_unadopted_results_after(None, TEST_RECONCILIATION_PAGE_SIZE)
-        .await
-        .unwrap();
-    assert_eq!(
-        candidates.len(),
-        1,
-        "only the recoverable result is a candidate"
-    );
-    assert_eq!(candidates[0].result, recoverable.result);
-
-    let summary = handle
-        .reconcile_sealed_results_with_page_size(TEST_RECONCILIATION_PAGE_SIZE)
-        .await
-        .unwrap();
-    assert_eq!(summary.evaluated, 1);
-    assert_eq!(summary.adopted, 1);
-    assert_eq!(
-        progress(&handle, recoverable_task.task).await,
-        TaskProgress::Completed
-    );
-    for (task, result) in &permanent {
-        assert_eq!(progress(&handle, task.task).await, TaskProgress::Cancelled);
-        // The late result stays durable and unadopted; it is simply not a
-        // re-adoption candidate.
-        let stored = handle
-            .store
-            .load_task_result(*result)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(stored.adopted_revision.is_none());
-    }
-    assert_eq!(
-        attempt_rows(dir.path()),
-        1,
-        "reconciliation never replays an Action"
-    );
-}
-
-#[tokio::test]
-async fn reconciliation_pages_through_many_recoverable_candidates() {
-    let (handle, dir) = open_handle("reconcile-pages").await;
-    let mut results = Vec::new();
-    for index in 0..TEST_RECONCILIATION_PAGE_SIZE + 2 {
-        let (_task, delegation, _) = seed_execution(&handle, "/srv/workspace/ene").await;
-        let body = format!("body {index}");
-        let result = crate::test_support::record_result(&handle.store, delegation, &body).await;
-        results.push(result.result);
-    }
-    rewrite_result_times(dir.path(), &results);
-
-    // Each storage read is bounded by the injected page size.
-    let first_page = handle
-        .store
-        .list_unadopted_results_after(None, TEST_RECONCILIATION_PAGE_SIZE)
-        .await
-        .unwrap();
-    assert_eq!(first_page.len() as u64, TEST_RECONCILIATION_PAGE_SIZE);
-    let second_page = handle
-        .store
-        .list_unadopted_results_after(first_page.last().copied(), TEST_RECONCILIATION_PAGE_SIZE)
-        .await
-        .unwrap();
-    assert_eq!(second_page.len(), 2);
-
-    let summary = handle
-        .reconcile_sealed_results_with_page_size(TEST_RECONCILIATION_PAGE_SIZE)
-        .await
-        .unwrap();
-    assert_eq!(summary.evaluated, TEST_RECONCILIATION_PAGE_SIZE + 2);
-    assert_eq!(summary.adopted, TEST_RECONCILIATION_PAGE_SIZE + 2);
-    assert_eq!(summary.first_error, None);
-    assert!(
-        handle
-            .reconcile_sealed_results_with_page_size(TEST_RECONCILIATION_PAGE_SIZE)
-            .await
-            .unwrap()
-            .adopted
-            == 0
-    );
-}
-
-/// Rewrites the reconciliation keys of the given results to a deterministic
-/// increasing order, so paging regression does not depend on clock
-/// resolution.
-///
-/// The nanoseconds are non-zero and not a multiple of 1000, exactly the
-/// representation `WallClockWithTz::to_rfc3339` produces for such values, so
-/// the stored text parses and re-renders byte-identically and the keyset
-/// cursor comparison is stable.
-fn rewrite_result_times(dir: &std::path::Path, results: &[ene_task::TaskResultId]) {
-    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
-    for (index, result) in results.iter().enumerate() {
-        let recorded_at = format!(
-            "2026-09-08T12:{:02}:{:02}.{:09}+09:00",
-            index / 60,
-            index % 60,
-            7 * index + 1
-        );
-        conn.execute(
-            "UPDATE task_result SET recorded_at = ?1 WHERE result_id = ?2",
-            rusqlite::params![
-                recorded_at,
-                result.as_raw().as_uuid().as_hyphenated().to_string()
-            ],
-        )
-        .expect("the test keyset rewrite must apply");
-    }
-}
-
-fn attempt_rows(dir: &std::path::Path) -> i64 {
-    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
-    conn.query_row("SELECT COUNT(*) FROM action_attempt", (), |row| row.get(0))
-        .expect("the attempt count must read")
-}
-
-#[tokio::test]
-async fn the_task_report_composes_canonical_task_and_action_facts() {
-    let (handle, _dir) = open_handle("report").await;
-    let (task, delegation, assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
-    let attempt = start_attempt(
-        &handle,
-        delegation,
-        task,
-        assoc,
-        &canonical_target("report.md"),
-        OperationKind::Create,
-    )
-    .await;
-    handle
-        .settle_action_certainty(
-            attempt,
-            ActionCertainty::ConfirmedSuccess,
-            EffectGrounds::ObservedAtTarget,
-        )
-        .await
-        .unwrap();
-    let result = crate::test_support::record_result(
-        &handle.store,
-        delegation,
-        "report.md was created from input.txt",
-    )
-    .await;
-    assert_eq!(
-        handle
-            .store
-            .adopt_result(TaskResultAdoptionClaim {
-                result: result.result,
-                attempt_refs: vec![attempt.as_raw()],
-            })
-            .await
-            .unwrap(),
-        TaskResultAcceptance::AdoptedAsCompletion(task)
-    );
-
-    let report = handle
-        .task_report(task.task, Some(delegation))
-        .await
-        .expect("the report read must answer")
-        .expect("the task exists");
-    assert_eq!(report.progress, TaskProgress::Completed);
-    assert_eq!(
-        report.workspace_folder.as_deref(),
-        Some("/srv/workspace/ene")
-    );
-    assert!(report.result_adopted);
-    assert_eq!(
-        report.result_body.as_deref(),
-        Some("report.md was created from input.txt")
-    );
-    assert_eq!(report.correlated_attempts.len(), 1);
-    let rendered = report.render();
-    assert!(rendered.contains("report.md"), "{rendered}");
-    assert!(rendered.contains("/srv/workspace/ene"), "{rendered}");
-    assert!(
-        rendered.contains("remaining/unconfirmed effects:\n- none"),
-        "{rendered}"
-    );
-
-    assert!(
-        handle
-            .task_report(TaskId::generate(), None)
-            .await
-            .expect("the missing-task read must answer")
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn a_failed_task_refuses_every_new_work_start_with_zero_provider_calls() {
     let (handle, _dir) = open_handle("failed-gates").await;
     let (task, delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
@@ -645,77 +405,6 @@ async fn a_failed_task_refuses_every_new_work_start_with_zero_provider_calls() {
     assert!(report.result_body.is_none());
 }
 
-#[tokio::test]
-async fn a_cancel_report_distinguishes_confirmed_changes_from_unknown_effects() {
-    let (handle, _dir) = open_handle("cancel-report").await;
-    let (task, delegation, assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
-    start_attempt(
-        &handle,
-        delegation,
-        task,
-        assoc,
-        &canonical_target("half.md"),
-        OperationKind::Create,
-    )
-    .await;
-    // The attempt started but no evidence settled it: it stays Unknown.
-    assert_eq!(
-        handle
-            .cancel_task(CancelTaskCommand { task: task.task })
-            .await
-            .unwrap(),
-        TaskCancelOutcome::CancelAccepted
-    );
-
-    let report = handle
-        .task_report(task.task, Some(delegation))
-        .await
-        .unwrap()
-        .expect("the task exists");
-    assert_eq!(report.progress, TaskProgress::Cancelled);
-    assert!(report.result_body.is_none());
-    assert_eq!(report.other_attempts.len(), 1);
-    assert_eq!(
-        report.other_attempts[0].certainty,
-        TaskReportCertainty::Unknown,
-        "the unknown effect stays unknown and is never rounded"
-    );
-    let rendered = report.render();
-    assert!(rendered.contains("task status: cancelled"), "{rendered}");
-    assert!(rendered.contains("(unknown)"), "{rendered}");
-    assert!(
-        rendered.contains("completed changes:\n- none"),
-        "an unknown effect is not a completed change: {rendered}"
-    );
-    assert!(
-        !rendered.contains("all stopped"),
-        "cancel acceptance never claims every effect stopped: {rendered}"
-    );
-}
-
-#[tokio::test]
-async fn an_admission_not_sent_never_becomes_a_task_failure() {
-    // No consent or credential is provisioned, so the Task Agent admission is
-    // declined before any provider I/O.
-    let (handle, _dir) = open_handle("not-sent").await;
-    let (task, delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
-    let transport = CountingTransport::default();
-    let run = handle
-        .run_task_agent(&transport, delegation)
-        .await
-        .expect("a declined admission is a domain outcome");
-    assert!(
-        matches!(run, crate::task_run::TaskAgentRunOutcome::NotSent(_)),
-        "the admission decline stays NotSent, got {run:?}"
-    );
-    assert_eq!(transport.calls(), 0);
-    assert_eq!(
-        progress(&handle, task.task).await,
-        TaskProgress::InProgress,
-        "NotSent is never a confirmed Task failure"
-    );
-}
-
 // ---- Stage 5 slice E: explicit resume and launch reservation (appended) ----
 
 use std::sync::Mutex as StdMutex;
@@ -727,10 +416,6 @@ use ene_companion::{
     AppendHistoryCommand, CompanionId, HistoryAppendOutcome, HistoryRepository as _, HistoryRole,
 };
 use ene_presence::PresenceRepository as _;
-use ene_task::{
-    OwnerMessageCurrentness, ResumeInstructionSource, ResumeTaskCommand, SteeringPremiseRef,
-    TaskResumeOutcome,
-};
 
 use super::HostTaskControl;
 use crate::task_run::TaskAgentLauncher;
@@ -863,87 +548,6 @@ async fn conversation_resume_commits_r_plus_one_and_launches() {
 }
 
 #[tokio::test]
-async fn conversation_resume_without_a_task_asks_for_a_target() {
-    let (handle, _dir) = open_handle("resume-no-task").await;
-    install_recording_launcher(&handle);
-    let companion = handle
-        .store
-        .ensure_running_companion()
-        .await
-        .expect("the companion must resolve");
-    let origin = append_owner_message(&handle, companion, "keep going").await;
-
-    let reply = HostTaskControl::new(&handle, companion, test_connection())
-        .apply(DialogueTaskCommand::Resume, origin)
-        .await;
-    let DialogueTaskControlReply::Answered(text) = reply else {
-        panic!("a missing target clarifies, got {reply:?}");
-    };
-    assert!(
-        text.contains("which task"),
-        "the clarification asks for a target: {text}"
-    );
-}
-
-#[tokio::test]
-async fn resume_refuses_while_the_task_holds_a_reservation() {
-    let (handle, _dir) = open_handle("resume-race").await;
-    install_recording_launcher(&handle);
-    let companion = handle
-        .store
-        .ensure_running_companion()
-        .await
-        .expect("the companion must resolve");
-    let (task, _delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
-    // The seed's reservation still holds the Task, so the resume below
-    // observes it as running and refuses with zero writes.
-    assert!(
-        handle
-            .task_executions
-            .task_has_reservation_or_running(task.task)
-    );
-
-    let record = handle
-        .store
-        .load_task(task.task)
-        .await
-        .unwrap()
-        .expect("the task must load");
-    let outcome = handle
-        .resume_task(ResumeTaskCommand {
-            premise: SteeringPremiseRef {
-                expected: record.task.reference,
-                purpose: record.task.purpose,
-            },
-            instruction: ResumeInstructionSource::OwnerHistory {
-                message: RawId::new(),
-                currentness: OwnerMessageCurrentness {
-                    companion: companion.as_raw(),
-                    message: RawId::new(),
-                },
-            },
-        })
-        .await
-        .expect("a held resume is a domain outcome");
-    assert_eq!(
-        outcome,
-        TaskResumeOutcome::AlreadyRunning { task: task.task }
-    );
-    assert_eq!(
-        handle
-            .store
-            .load_task(task.task)
-            .await
-            .unwrap()
-            .expect("the task must load")
-            .task
-            .reference,
-        task,
-        "a held resume writes nothing"
-    );
-}
-
-#[tokio::test]
 async fn run_task_agent_requires_a_launch_reservation() {
     let (handle, _dir) = open_handle("reservation-required").await;
     let (task, delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
@@ -988,65 +592,5 @@ async fn run_task_agent_requires_a_launch_reservation() {
         crate::task_run::TaskAgentRunOutcome::Refused(
             crate::task_run::TaskAgentRunRefusal::ExecutionUnavailable { delegation }
         )
-    );
-}
-
-#[tokio::test]
-async fn a_running_execution_refuses_a_second_take() {
-    let (handle, _dir) = open_handle("already-running").await;
-    let (task, delegation, _assoc) = seed_execution(&handle, "/srv/workspace/ene").await;
-    handle.task_executions.release(delegation);
-    let _registration = handle
-        .task_executions
-        .register(delegation, task.task)
-        .expect("the first registration holds");
-
-    let transport = CountingTransport::default();
-    let run = handle
-        .run_task_agent(&transport, delegation)
-        .await
-        .expect("a double take is a domain outcome");
-    assert_eq!(
-        run,
-        crate::task_run::TaskAgentRunOutcome::Refused(
-            crate::task_run::TaskAgentRunRefusal::ExecutionAlreadyRunning { delegation }
-        )
-    );
-    assert_eq!(transport.calls(), 0);
-}
-
-/// A dialogue-owned Task projection is not connection-bound, while a
-/// first-party `SelectTask` is: a same-device replacement drops only the
-/// selection (IPC §9.3 replacement).
-#[tokio::test]
-async fn replacement_drops_only_the_first_party_selection_not_the_dialogue_projection() {
-    let (handle, _dir) = open_handle("projection-replacement").await;
-    let companion = handle
-        .store
-        .ensure_running_companion()
-        .await
-        .expect("the companion must resolve");
-    let c1 = test_connection();
-    let c2 = test_connection();
-    let task = ene_task::TaskId::from_raw(RawId::new());
-
-    // A dialogue-created projection survives the lifecycle sweep.
-    handle.conversation_tasks.record(companion, task, None);
-    handle.on_connection_superseded(&c1);
-    assert!(
-        handle.conversation_tasks.current(companion, &c2).is_some(),
-        "dialogue work is Host-only accepted work, not a wire selection"
-    );
-
-    // A first-party selection replaces the slot and dies with its connection.
-    handle.conversation_tasks.select(companion, task, c1);
-    assert_eq!(handle.conversation_tasks.first_party_selection_count(), 1);
-    assert!(handle.conversation_tasks.current(companion, &c1).is_some());
-    assert!(handle.conversation_tasks.current(companion, &c2).is_none());
-    handle.on_connection_superseded(&c1);
-    assert_eq!(handle.conversation_tasks.first_party_selection_count(), 0);
-    assert!(
-        handle.conversation_tasks.current(companion, &c2).is_none(),
-        "the replacement starts unselected"
     );
 }

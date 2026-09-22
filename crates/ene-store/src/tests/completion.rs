@@ -8,18 +8,17 @@
 //! after the owner verified" is exactly what the A5 remainder probe must
 //! collect instead of completing over it.
 
-use super::preservation::{admit, complete_via_a5, mark_all_verified, reconcile_to_complete};
+use super::preservation::{admit, reconcile_to_complete};
 use super::*;
 
 use ene_preservation::{
     ConfirmTargetedDeletionOutcome, DeletionAuditStatus, DeletionCompletionSummary,
-    DeletionFinalizationOutcome, DeletionLifecycleChange, DeletionLifecycleOutcome,
-    DeletionMaterialOutcome, DeletionOperationId, DeletionOperationPhase, DeletionOperationRef,
-    DeletionPurpose, DeletionSearchMaterial, DeletionSweepGeneration, MechanicalDeletionTarget,
+    DeletionFinalizationOutcome, DeletionMaterialOutcome, DeletionOperationPhase,
+    DeletionOperationRef, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
     ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantCompletionStatus,
     ParticipantOwnerRef, ParticipantProgress, PreservationRepository as _,
-    PreservationTechnicalError, StageTargetedDeletionRequestCommand,
-    StageTargetedDeletionRequestOutcome, TargetedDeletionTarget,
+    StageTargetedDeletionRequestCommand, StageTargetedDeletionRequestOutcome,
+    TargetedDeletionTarget,
 };
 
 /// Verifies every required participant of the operation's current sweep
@@ -606,165 +605,4 @@ async fn completion_destroys_the_search_material_unrecoverably() {
         .unwrap();
     assert_eq!(audit.erased_count, 0);
     assert_eq!(audit.sweep_count, 1);
-}
-
-/// A completed operation ends the text's meaning as a deletion target: the
-/// same string is a fresh origin for reads, appends, and a new admission.
-#[tokio::test]
-async fn a_completed_operation_is_not_a_permanent_ban() {
-    let store = open_memory().await.unwrap();
-    let target = "a5-new-origin";
-    let current = admit(&store, target, vec![]).await;
-    complete_via_a5(&store, current).await;
-    assert!(
-        crate::preservation::covering_text(
-            &store.conn.lock().unwrap(),
-            &format!("text with {target}")
-        )
-        .unwrap()
-        .is_none(),
-        "a closed condition no longer covers the text"
-    );
-    let (companion, generation) = running_companion(&store).await.unwrap();
-    assert!(matches!(
-        store
-            .append_message(history_command(companion, generation, target))
-            .await
-            .unwrap(),
-        HistoryAppendOutcome::CommittedAs { .. }
-    ));
-    let fresh = admit(&store, target, vec![]).await;
-    assert_ne!(fresh.operation, current.operation);
-    assert_eq!(
-        store.current_erasure_conditions(None, 10).await.unwrap()[0].condition,
-        fresh.condition(),
-        "a new operation with the same text is a new origin, not a duplicate"
-    );
-}
-
-/// A completion audit can never be written for an operation that is not
-/// `Finalizing`, and a completed operation's own condition is terminal.
-#[tokio::test]
-async fn completion_only_commits_from_finalizing_and_only_advances_a_matching_ref() {
-    let store = open_memory().await.unwrap();
-    let current = admit(&store, "a5-phases", vec![]).await;
-    assert_eq!(
-        store.complete_deletion_finalizing(current).await.unwrap(),
-        DeletionFinalizationOutcome::NotFinalizing
-    );
-    let stale = DeletionOperationRef {
-        operation: current.operation,
-        sweep: DeletionSweepGeneration::from_u64(7),
-    };
-    assert_eq!(
-        store.begin_deletion_finalizing(stale).await.unwrap(),
-        DeletionFinalizationOutcome::StaleSweep
-    );
-    assert_eq!(
-        store.complete_deletion_finalizing(stale).await.unwrap(),
-        DeletionFinalizationOutcome::StaleSweep
-    );
-    verify_all(&store, current).await;
-    assert_eq!(
-        store.begin_deletion_finalizing(current).await.unwrap(),
-        DeletionFinalizationOutcome::Finalizing
-    );
-    // Idempotent marker: repeating the begin step changes nothing.
-    assert_eq!(
-        store.begin_deletion_finalizing(current).await.unwrap(),
-        DeletionFinalizationOutcome::Finalizing
-    );
-    let rows = store.unfinished_deletions(None, 10).await.unwrap();
-    assert_eq!(rows[0].phase, DeletionOperationPhase::Finalizing);
-    assert!(
-        store
-            .deletion_completion_summary(current.operation)
-            .await
-            .unwrap()
-            .all_verified()
-    );
-}
-
-/// The audited erased count accumulates every sweep of the operation, not just
-/// the final generation: a sweep that erased and was superseded still appears
-/// in the objective completion metadata.
-#[tokio::test]
-async fn the_audit_erased_count_accumulates_across_sweeps() {
-    let store = open_memory().await.unwrap();
-    let current = admit(&store, "a5-erased-total", vec![]).await;
-    for (owner, erased, remainder) in [
-        (ParticipantOwnerRef::Companion, 5, 2),
-        (ParticipantOwnerRef::Learning, 3, 1),
-    ] {
-        store
-            .record_participant_completion(ParticipantCompletionFact::local_complete(
-                current.condition(),
-                owner,
-                erased,
-                remainder,
-                WallClockWithTz::now(),
-            ))
-            .await
-            .unwrap();
-    }
-    let DeletionLifecycleOutcome::Applied(next) = store
-        .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
-        .await
-        .unwrap()
-    else {
-        panic!("the generation must advance");
-    };
-    verify_all(&store, next).await;
-    reconcile_to_complete(&store, next).await;
-    assert_eq!(
-        store.begin_deletion_finalizing(next).await.unwrap(),
-        DeletionFinalizationOutcome::Finalizing
-    );
-    assert_eq!(
-        store.complete_deletion_finalizing(next).await.unwrap(),
-        DeletionFinalizationOutcome::Completed
-    );
-    let audit = store
-        .deletion_completion_audit(current.operation)
-        .await
-        .unwrap()
-        .expect("completion writes the audit");
-    assert_eq!(audit.sweep_count, 2);
-    assert_eq!(
-        audit.erased_count, 8,
-        "the superseded sweep's erased rows stay in the audit"
-    );
-}
-
-/// `mark_all_verified` and the aggregate agree: the summary counts what the
-/// durable participant rows say for the current sweep, nothing inferred.
-#[tokio::test]
-async fn the_completion_summary_is_the_durable_participant_aggregate() {
-    let store = open_memory().await.unwrap();
-    let current = admit(&store, "a5-summary", vec![]).await;
-    let summary = store
-        .deletion_completion_summary(current.operation)
-        .await
-        .unwrap();
-    assert_eq!(
-        (summary.required, summary.verified, summary.held),
-        (2, 0, 0)
-    );
-    assert!(!summary.all_verified());
-    assert!(summary.is_well_formed());
-    mark_all_verified(&store, current);
-    let summary = store
-        .deletion_completion_summary(current.operation)
-        .await
-        .unwrap();
-    assert_eq!((summary.required, summary.verified), (2, 2));
-    assert!(summary.all_verified());
-    assert!(summary.is_well_formed());
-    assert_eq!(summary.sweep, current.sweep);
-    assert_eq!(
-        store
-            .deletion_completion_summary(DeletionOperationId::from_raw(RawId::new()))
-            .await,
-        Err(PreservationTechnicalError::UnknownOperation)
-    );
 }

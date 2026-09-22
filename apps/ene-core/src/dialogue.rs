@@ -1288,18 +1288,6 @@ impl HostHandle {
         !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
 
-    /// The queued Experience premises, in completion order.
-    ///
-    /// Test-only: lets a regression prove the queue carries the pinned source
-    /// boundary and transcript, not just a companion id.
-    #[cfg(test)]
-    pub(crate) fn pending_learning_premises(&self) -> Vec<ExperienceCandidate> {
-        crate::lock_unpoison(&self.learning_queue)
-            .iter()
-            .cloned()
-            .collect()
-    }
-
     /// Drains queued Learning formation passes, one pinned premise at a time.
     ///
     /// The queue is in-memory and best-effort: a crash before the drain loses

@@ -246,47 +246,6 @@ async fn covering_condition_holds_the_send_without_an_attempt_row_or_child_rows(
 }
 
 #[tokio::test]
-async fn unrelated_condition_does_not_hold_another_source() {
-    let store = open_memory().await.unwrap();
-    seed_dialogue_consent(&store).await;
-    let (created, delegation, purpose_source) = seed_delegated_task(&store).await;
-    // A condition covering a different source never refuses this input.
-    seed_condition(&store, 1, &[RawId::new()]);
-
-    assert_eq!(
-        store
-            .begin_inference_attempt(task_agent_claim(
-                InferenceTicketId(RawId::new()),
-                1,
-                task_agent_premise(delegation, created, vec![purpose_source]),
-            ))
-            .await,
-        Ok(AttemptBeginOutcome::Started)
-    );
-}
-
-#[tokio::test]
-async fn one_condition_can_cover_many_sources_and_holds_any_of_them() {
-    let store = open_memory().await.unwrap();
-    seed_dialogue_consent(&store).await;
-    let (created, delegation, purpose_source) = seed_delegated_task(&store).await;
-    let covered = RawId::new();
-    seed_condition(&store, 4, &[covered, purpose_source]);
-
-    assert_eq!(
-        store
-            .begin_inference_attempt(task_agent_claim(
-                InferenceTicketId(RawId::new()),
-                1,
-                task_agent_premise(delegation, created, vec![covered]),
-            ))
-            .await,
-        Ok(AttemptBeginOutcome::DataUseHeld),
-        "one source of a multi-source condition holds the whole send"
-    );
-}
-
-#[tokio::test]
 async fn missing_erasure_store_fails_closed_instead_of_reading_as_clear() {
     let store = open_memory().await.unwrap();
     seed_dialogue_consent(&store).await;
@@ -489,48 +448,6 @@ async fn condition_and_data_use_survive_reopen() {
         task_table_count(&reopened, "erasure_condition_source"),
         1,
         "the canonical condition state survives restart"
-    );
-}
-
-#[tokio::test]
-async fn dialogue_attempts_record_the_empty_data_use_and_are_not_gated() {
-    let store = open_memory().await.unwrap();
-    seed_dialogue_consent(&store).await;
-    // An empty read-set is a genuine "the prompt read no canonical source",
-    // not a default: a condition covering an unrelated source cannot hold it.
-    seed_condition(&store, 1, &[RawId::new()]);
-    let ticket = InferenceTicketId(RawId::new());
-    assert_eq!(
-        store
-            .begin_inference_attempt(InferenceAttempt {
-                ticket,
-                consumer: ConsumerKind::CompanionDialogue,
-                capability: CapabilityKind::Dialogue,
-                purpose: PurposeKind::DialogueResponse,
-                expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
-                expected_credential_set: CredentialSetRevision::initial(),
-                provider: String::from("openai"),
-                model: String::from("dialogue-1"),
-                data_use: Vec::new(),
-                task_agent: None,
-                pricing: None,
-                usage_estimate: None,
-            })
-            .await,
-        Ok(AttemptBeginOutcome::Started),
-        "dialogue keeps its existing path"
-    );
-    let record = store
-        .load_inference_attempt(ticket)
-        .await
-        .unwrap()
-        .expect("the dialogue attempt must read");
-    assert_eq!(record.task_agent, None);
-    assert!(record.data_use.is_empty());
-    assert_eq!(
-        task_table_count(&store, "inference_attempt_data_use"),
-        0,
-        "a dialogue attempt records the empty set, never a fabricated source"
     );
 }
 

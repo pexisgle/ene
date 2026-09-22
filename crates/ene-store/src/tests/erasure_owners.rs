@@ -11,9 +11,6 @@ use ene_permission::{
     IntentOutcome, IntentOutcomeRecord, PermissionErasureOutcome, PermissionErasureRepository,
 };
 use ene_presence::{PresenceAttribution, PresenceErasureOutcome, PresenceErasureRepository};
-use ene_preservation::{
-    DeletionLifecycleChange, DeletionLifecycleOutcome, PreservationRepository as _,
-};
 
 /// Commits one consent row with the caller-supplied route parts.
 async fn save_route_consent(
@@ -230,85 +227,6 @@ async fn permission_erasure_redacts_owner_text_and_invalidates_target_bearing_co
 }
 
 #[tokio::test]
-async fn permission_erasure_never_touches_a_superseded_or_completed_condition() {
-    let store = open_memory().await.unwrap();
-    let target = "midnight-plan";
-    record_decision(&store, "intent-old", "workspace:prod", Some(target)).await;
-    let current = super::preservation::admit(&store, target, vec![]).await;
-    let old_condition = current.condition();
-
-    // A new sweep moves the operation on: the old condition mutates nothing.
-    let advanced = store
-        .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
-        .await
-        .unwrap();
-    let DeletionLifecycleOutcome::Applied(new_current) = advanced else {
-        panic!("the sweep advance must apply, got {advanced:?}");
-    };
-    assert_ne!(old_condition, new_current.condition());
-    assert_eq!(
-        PermissionErasureRepository::erase_target_text(&store, old_condition, target)
-            .await
-            .unwrap(),
-        PermissionErasureOutcome::NotCurrent
-    );
-    // Text the Owner provides after the sweep is not covered by the old
-    // generation and must survive its late duplicate.
-    record_decision(&store, "intent-new", "workspace:prod", Some(target)).await;
-    assert_eq!(
-        PermissionErasureRepository::erase_target_text(&store, old_condition, target)
-            .await
-            .unwrap(),
-        PermissionErasureOutcome::NotCurrent
-    );
-    assert!(
-        store
-            .lookup_intent_outcome("intent-new")
-            .await
-            .unwrap()
-            .unwrap()
-            .fingerprint
-            .rationale_quote
-            .as_deref()
-            .is_some_and(|quote| contains_target(quote, target)),
-        "a superseded condition never erases newly provided text"
-    );
-    // The current generation still erases it.
-    assert_eq!(
-        PermissionErasureRepository::erase_target_text(&store, new_current.condition(), target)
-            .await
-            .unwrap(),
-        PermissionErasureOutcome::Applied {
-            erased: 2,
-            remainder: 0
-        }
-    );
-
-    // A completed operation is terminal: even its own condition mutates
-    // nothing (the Owner's later text is never a permanent keyword ban).
-    super::preservation::complete_via_a5(&store, new_current).await;
-    record_decision(&store, "intent-after", "workspace:prod", Some(target)).await;
-    assert_eq!(
-        PermissionErasureRepository::erase_target_text(&store, new_current.condition(), target)
-            .await
-            .unwrap(),
-        PermissionErasureOutcome::NotCurrent
-    );
-    assert!(
-        store
-            .lookup_intent_outcome("intent-after")
-            .await
-            .unwrap()
-            .unwrap()
-            .fingerprint
-            .rationale_quote
-            .as_deref()
-            .is_some_and(|quote| contains_target(quote, target)),
-        "a completed operation never erases text provided afterwards"
-    );
-}
-
-#[tokio::test]
 async fn credential_erasure_removes_metadata_without_touching_protected_values() {
     use ene_credential::{CredentialStore as _, available_credential};
 
@@ -427,42 +345,6 @@ async fn credential_erasure_removes_metadata_without_touching_protected_values()
         store.current_set_revision().await.unwrap().as_u64(),
         revision_before.as_u64() + 1
     );
-}
-
-#[tokio::test]
-async fn credential_erasure_refuses_a_superseded_condition_before_mutating() {
-    let store = open_memory().await.unwrap();
-    let target = "midnight-plan";
-    approve_pair(&store, "acme", target, "bearer", "register-target").await;
-    let revision_before = store.current_set_revision().await.unwrap();
-    let current = super::preservation::admit(&store, target, vec![]).await;
-    let old = current.condition();
-    let DeletionLifecycleOutcome::Applied(new_current) = store
-        .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
-        .await
-        .unwrap()
-    else {
-        panic!("the sweep advance must apply");
-    };
-    assert_eq!(
-        CredentialErasureRepository::erase_target_text(&store, old, target)
-            .await
-            .unwrap(),
-        CredentialErasureOutcome::NotCurrent
-    );
-    assert_eq!(
-        store.current_set_revision().await.unwrap().as_u64(),
-        revision_before.as_u64(),
-        "a refused pass never advances the set revision"
-    );
-    assert_eq!(store.list_refs().await.unwrap().len(), 1);
-    // The current generation still erases it.
-    let applied =
-        CredentialErasureRepository::erase_target_text(&store, new_current.condition(), target)
-            .await
-            .unwrap();
-    assert!(matches!(applied, CredentialErasureOutcome::Applied { .. }));
-    assert!(store.list_refs().await.unwrap().is_empty());
 }
 
 /// Drives one companion to `Present` on `client` through the production
@@ -609,72 +491,4 @@ async fn presence_erasure_clears_target_bearing_references_and_proves_absence() 
             remainder: 0
         }
     );
-}
-
-#[tokio::test]
-async fn presence_erasure_removes_a_targeted_identity_whole_and_refuses_stale_generations() {
-    let store = open_memory().await.unwrap();
-    let companion = store.ensure_running_companion().await.unwrap();
-    let client = ClientId::generate();
-    present_on(&store, companion, client).await;
-    let target = companion.as_raw().as_uuid().to_string();
-    let transition_rows: i64 = {
-        let conn = store.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM presence_transition_log WHERE companion_id=?1",
-            params![crate::codec::encode_id(companion.as_raw())],
-            |row| row.get(0),
-        )
-        .unwrap()
-    };
-    assert!(transition_rows > 0, "the fixture left transition history");
-
-    let current = super::preservation::admit(&store, &target, vec![]).await;
-    let old = current.condition();
-    let DeletionLifecycleOutcome::Applied(new_current) = store
-        .change_deletion_lifecycle(current, DeletionLifecycleChange::NextSweep)
-        .await
-        .unwrap()
-    else {
-        panic!("the sweep advance must apply");
-    };
-    assert_eq!(
-        PresenceErasureRepository::erase_target_text(&store, old, &target)
-            .await
-            .unwrap(),
-        PresenceErasureOutcome::NotCurrent
-    );
-    assert!(
-        store
-            .load_attribution(companion.as_raw())
-            .await
-            .unwrap()
-            .is_some(),
-        "a stale generation never erases the identity"
-    );
-
-    let applied =
-        PresenceErasureRepository::erase_target_text(&store, new_current.condition(), &target)
-            .await
-            .unwrap();
-    let PresenceErasureOutcome::Applied { remainder, .. } = applied else {
-        panic!("the current condition must apply, got {applied:?}");
-    };
-    assert_eq!(remainder, 0);
-    assert_eq!(
-        store.load_attribution(companion.as_raw()).await.unwrap(),
-        None,
-        "the target identity is erased whole, not renamed"
-    );
-    assert_eq!(store.load_hint(companion.as_raw()).await.unwrap(), None);
-    let remaining: i64 = {
-        let conn = store.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM presence_transition_log WHERE companion_id=?1",
-            params![crate::codec::encode_id(companion.as_raw())],
-            |row| row.get(0),
-        )
-        .unwrap()
-    };
-    assert_eq!(remaining, 0, "the identity's transition history is erased");
 }

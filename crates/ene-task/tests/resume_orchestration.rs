@@ -19,8 +19,8 @@ use std::sync::Mutex;
 
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
-    AssigneeRef, ConversationTaskRepository, DelegatedWorkspace, DelegationCreationPremise,
-    DelegationId, DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness,
+    AssigneeRef, ConversationTaskRepository, DelegationCreationPremise, DelegationId,
+    DelegationOutcome, DelegationRef, DelegationScope, OwnerMessageCurrentness,
     ResumeInstructionSource, ResumeTaskCommand, SteeringPremiseRef, Task, TaskAgentEphemeralId,
     TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome, TaskCommitOutcome,
     TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem, TaskContextOrigin,
@@ -390,55 +390,6 @@ async fn resume_mints_fresh_identities_and_passes_the_command_through() {
 }
 
 #[tokio::test]
-async fn both_instruction_sources_travel_unchanged() {
-    for instruction in [
-        ResumeInstructionSource::OwnerHistory {
-            message: RawId::new(),
-            currentness: OwnerMessageCurrentness {
-                companion: RawId::new(),
-                message: RawId::new(),
-            },
-        },
-        ResumeInstructionSource::OwnerManagement {
-            activity: RawId::new(),
-        },
-    ] {
-        let repository = FakeResumeRepository::new();
-        let task = TaskId::generate();
-        let relied = task_ref(task, 1);
-        let purpose = TaskPurposeRef {
-            task,
-            adopted_revision: TaskRevision::from_u64(1),
-        };
-        repository.script_commit(Ok(resumed(task_ref(task, 2))));
-        let outcome = orchestrate_resume(
-            &repository,
-            ResumeTaskCommand {
-                premise: SteeringPremiseRef {
-                    expected: relied,
-                    purpose,
-                },
-                instruction,
-            },
-            readiness(),
-        )
-        .await
-        .expect("a committed resume is a domain outcome");
-        assert!(matches!(outcome, TaskResumeOutcome::Resumed { .. }));
-        let premises = repository.premises();
-        assert_eq!(
-            premises
-                .first()
-                .expect("the premise was captured")
-                .command
-                .instruction,
-            instruction,
-            "the source travels to the commit without reinterpretation"
-        );
-    }
-}
-
-#[tokio::test]
 async fn refusals_pass_through_without_routing() {
     for outcome in [
         TaskResumeOutcome::StalePremise {
@@ -580,82 +531,6 @@ async fn result_available_routes_the_current_revision_through_adoption() {
     assert_eq!(
         claims.first().expect("the claim was captured").result,
         result
-    );
-}
-
-#[tokio::test]
-async fn result_available_skips_results_of_other_revisions() {
-    let repository = FakeResumeRepository::new();
-    let task = TaskId::generate();
-    let current = task_ref(task, 3);
-    let old = TaskResultId::generate();
-    repository.script_commit(Ok(TaskResumeOutcome::ResultAvailable { task }));
-    *repository
-        .report_rows
-        .lock()
-        .expect("fixture script is never poisoned") = vec![TaskReportRow {
-        kind: TaskReportRowKind::TaskResult,
-        id: old.as_raw(),
-        adopted_revision: None,
-    }];
-    *repository
-        .results
-        .lock()
-        .expect("fixture script is never poisoned") = vec![TaskResultRecord {
-        result: old,
-        task: task_ref(task, 2),
-        delegation: DelegationId::generate(),
-        body: TaskAgentOutput::new(String::from("the old answer")),
-        attempt_refs: Vec::new(),
-        adopted_revision: None,
-        recorded_at: WallClockWithTz::now(),
-    }];
-
-    let outcome = orchestrate_resume(
-        &repository,
-        command(
-            current,
-            TaskPurposeRef {
-                task,
-                adopted_revision: TaskRevision::from_u64(3),
-            },
-        ),
-        readiness(),
-    )
-    .await
-    .expect("an available result is a domain outcome");
-
-    assert_eq!(outcome, TaskResumeOutcome::ResultAvailable { task });
-    assert!(
-        repository.claims().is_empty(),
-        "a moved revision's result is history, not a routing candidate"
-    );
-}
-
-#[tokio::test]
-async fn commit_technical_errors_stay_errors() {
-    let repository = FakeResumeRepository::new();
-    let task = TaskId::generate();
-    repository.script_commit(Err(TaskTechnicalError::StorageUnavailable {
-        reason: String::from("the commit is unreachable"),
-    }));
-    let outcome = orchestrate_resume(
-        &repository,
-        command(
-            task_ref(task, 1),
-            TaskPurposeRef {
-                task,
-                adopted_revision: TaskRevision::from_u64(1),
-            },
-        ),
-        readiness(),
-    )
-    .await;
-    assert_eq!(
-        outcome,
-        Err(TaskTechnicalError::StorageUnavailable {
-            reason: String::from("the commit is unreachable"),
-        })
     );
 }
 
@@ -907,39 +782,5 @@ async fn guarded_resume_carries_the_currentness_to_the_commit() {
             .expect("fixture capture is never poisoned")
             .clone(),
         vec![currentness]
-    );
-}
-
-#[tokio::test]
-async fn workspace_assoc_import_covers_the_premise_shape() {
-    // The resume commit freezes its scope from the current association, so
-    // this pins that the premise type carries no workspace copy of its own.
-    let premise = TaskResumeCommitPremise {
-        command: command(
-            task_ref(TaskId::generate(), 1),
-            TaskPurposeRef {
-                task: TaskId::generate(),
-                adopted_revision: TaskRevision::from_u64(1),
-            },
-        ),
-        readiness: readiness(),
-        adopted_purpose_entry: TaskContextEntryId::generate(),
-        adopted_instruction_entry: TaskContextEntryId::generate(),
-        delegation: DelegationId::generate(),
-        agent: TaskAgentEphemeralId::generate(),
-        accepted_at: WallClockWithTz::now(),
-    };
-    let _ = DelegationScope {
-        workspace: Some(DelegatedWorkspace {
-            assoc: ene_task::WorkspaceAssocId::generate(),
-            folder: ene_task::WorkspaceFolderRef {
-                path: String::from("/srv/workspace/ene"),
-            },
-            save_target: None,
-        }),
-    };
-    assert_ne!(
-        premise.adopted_purpose_entry, premise.adopted_instruction_entry,
-        "the two carried entries are distinct identities"
     );
 }

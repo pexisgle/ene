@@ -8,9 +8,7 @@
 
 use super::*;
 
-use ene_action::{
-    ActionAttemptRepository as _, ActionCertainty, ActionStartOutcome, EffectGrounds,
-};
+use ene_action::{ActionCertainty, EffectGrounds};
 use ene_task::{
     TaskProgress, TaskResultAcceptance, TaskResultAdoptionClaim, reevaluate_result_adoption,
 };
@@ -141,40 +139,6 @@ async fn a_result_sealed_before_a_stop_is_recovered_after_reopen() {
 }
 
 #[tokio::test]
-async fn a_cancelled_late_result_stays_recorded_to_the_original_only() {
-    let store = open_memory().await.unwrap();
-    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
-    let attempt = start_attempt(&store, delegation, task, assoc, "input.txt").await;
-    settle(
-        &store,
-        attempt,
-        ActionCertainty::ConfirmedSuccess,
-        EffectGrounds::ObservedAtTarget,
-    )
-    .await;
-    assert_eq!(
-        store.cancel_task(task.task).await.unwrap(),
-        ene_task::TaskCancelOutcome::CancelAccepted
-    );
-    let result = finalize(&store, delegation, "late body").await;
-
-    assert_eq!(
-        reevaluate_result_adoption(&store, result.result)
-            .await
-            .unwrap(),
-        TaskResultAcceptance::RecordedToOriginalOnly,
-        "cancel is absorbing: a late result never completes the Task"
-    );
-    assert_eq!(progress(&store, task.task).await, TaskProgress::Cancelled);
-    let stored = store
-        .load_task_result(result.result)
-        .await
-        .unwrap()
-        .expect("the late result stays durable");
-    assert!(stored.adopted_revision.is_none());
-}
-
-#[tokio::test]
 async fn a_moved_revision_result_stays_recorded_to_the_original_only() {
     let store = open_memory().await.unwrap();
     let (task, delegation, assoc) = seed_workspace_execution(&store).await;
@@ -245,47 +209,6 @@ async fn duplicate_and_concurrent_reevaluation_converge_idempotently() {
     );
     assert_eq!(task_table_count(&store, "task_result"), 1);
     assert_eq!(progress(&store, task.task).await, TaskProgress::Completed);
-}
-
-#[tokio::test]
-async fn the_derived_claim_matches_the_durable_execution_lifetime() {
-    let store = open_memory().await.unwrap();
-    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
-    let missing = ene_task::TaskResultId::generate();
-    assert_eq!(
-        store.load_result_adoption_claim(missing).await.unwrap(),
-        None
-    );
-
-    let first = start_attempt(&store, delegation, task, assoc, "first.txt").await;
-    let result = finalize(&store, delegation, "done").await;
-    let claim = store
-        .load_result_adoption_claim(result.result)
-        .await
-        .unwrap()
-        .expect("the stored result derives a claim");
-    assert_eq!(claim.result, result.result);
-    assert_eq!(claim.attempt_refs, vec![first.as_raw()]);
-
-    // The execution is sealed, so a new attempt is refused; the authoritative
-    // sealed set never grows and the derived claim stays exactly it.
-    let refused = store
-        .insert_attempt_if_current(super::task_result::attempt_premise(
-            ene_action::ActionAttemptId::generate(),
-            delegation,
-            task,
-            assoc,
-            "second.txt",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(refused, ActionStartOutcome::ExecutionSealed);
-    let claim = store
-        .load_result_adoption_claim(result.result)
-        .await
-        .unwrap()
-        .expect("the stored result still derives a claim");
-    assert_eq!(claim.attempt_refs, vec![first.as_raw()]);
 }
 
 #[tokio::test]

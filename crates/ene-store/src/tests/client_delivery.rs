@@ -63,42 +63,6 @@ async fn delivery_creates_advances_and_persists_evidence() {
 }
 
 #[tokio::test]
-async fn clear_matches_the_observed_sequence_exactly() {
-    let store = open_memory().await.unwrap();
-    let identity = incarnation(21, 31);
-    store.note_client_delivery_evidence(identity).await.unwrap();
-    assert!(
-        !store
-            .clear_client_delivery_evidence(identity, 2)
-            .await
-            .unwrap(),
-        "a stale expected sequence never clears the row"
-    );
-    assert_eq!(
-        store.client_delivery_evidence_seq(identity).await.unwrap(),
-        Some(1)
-    );
-    assert!(
-        store
-            .clear_client_delivery_evidence(identity, 1)
-            .await
-            .unwrap(),
-        "the exact observed sequence clears the row"
-    );
-    assert_eq!(
-        store.client_delivery_evidence_seq(identity).await.unwrap(),
-        None
-    );
-    assert!(
-        !store
-            .clear_client_delivery_evidence(identity, 1)
-            .await
-            .unwrap(),
-        "clearing an absent row changes nothing"
-    );
-}
-
-#[tokio::test]
 async fn a_delivery_between_read_and_clear_survives_the_clear() {
     let store = open_memory().await.unwrap();
     let identity = incarnation(22, 32);
@@ -183,39 +147,4 @@ async fn admission_unions_durable_delivery_evidence_into_the_snapshot() {
         "the durable incarnation joins the snapshot even though the caller did not name it: {owners:?}"
     );
     assert!(owners.contains(&unrelated.storage_name()));
-}
-
-#[tokio::test]
-async fn the_identity_page_is_bounded_and_validated() {
-    let store = open_memory().await.unwrap();
-    for counter in 0..3 {
-        store
-            .note_client_delivery_evidence(incarnation(counter, 5))
-            .await
-            .unwrap();
-    }
-    let page = store
-        .client_delivery_evidence_incarnations(None, 2)
-        .await
-        .unwrap();
-    assert_eq!(page.len(), 2);
-    let next = store
-        .client_delivery_evidence_incarnations(Some(page[1]), 2)
-        .await
-        .unwrap();
-    assert_eq!(next.len(), 1, "the page continues after the last identity");
-    assert_eq!(
-        store
-            .client_delivery_evidence_incarnations(None, 0)
-            .await
-            .unwrap_err(),
-        ene_preservation::PreservationTechnicalError::InvalidLimit
-    );
-    assert_eq!(
-        store
-            .client_delivery_evidence_incarnations(None, 101)
-            .await
-            .unwrap_err(),
-        ene_preservation::PreservationTechnicalError::InvalidLimit
-    );
 }

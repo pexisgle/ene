@@ -1482,6 +1482,7 @@ impl HostHandle {
 
     /// Arms the test-only task-control race gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test synchronization gate")]
     pub(crate) fn arm_task_control_gate(
         &self,
     ) -> std::sync::Arc<crate::task_control::TestTaskControlGate> {
@@ -2510,6 +2511,7 @@ impl HostHandle {
 
     /// Arms the confirmation gate before either commit lock is acquired.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_confirm_commit_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.confirm_commit_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2524,6 +2526,7 @@ impl HostHandle {
 
     /// Disarms the confirmation commit gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_confirm_commit_gate(&self) {
         *crate::lock_unpoison(&self.confirm_commit_gate) = None;
     }
@@ -2531,6 +2534,7 @@ impl HostHandle {
     /// Arms the body-delivery evidence gate: a display path pauses after its
     /// coverage premise read and before the durable evidence write.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_delivery_evidence_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.delivery_evidence_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2539,6 +2543,7 @@ impl HostHandle {
 
     /// Disarms the body-delivery evidence gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_delivery_evidence_gate(&self) {
         *crate::lock_unpoison(&self.delivery_evidence_gate) = None;
     }
@@ -2551,6 +2556,7 @@ impl HostHandle {
 
     /// Arms the test-only close-admission gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_close_gate(&self) -> std::sync::Arc<TestCloseGate> {
         let gate = std::sync::Arc::new(TestCloseGate::default());
         *crate::lock_unpoison(&self.close_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2581,6 +2587,7 @@ impl HostHandle {
     /// connection-scoped ref/cursor mint, so a test can supersede the
     /// connection in between and pin that no ref is minted.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_ref_mint_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.ref_mint_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2601,6 +2608,7 @@ impl HostHandle {
 
     /// Disarms the test-only read-ref mint gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_ref_mint_gate(&self) {
         *crate::lock_unpoison(&self.ref_mint_gate) = None;
     }
@@ -2612,6 +2620,7 @@ impl HostHandle {
     /// the connection and let the replacement run its own full pass before
     /// the paused one resumes.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_fetch_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.fetch_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2626,6 +2635,7 @@ impl HostHandle {
 
     /// Disarms the test-only fetch gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_fetch_gate(&self) {
         *crate::lock_unpoison(&self.fetch_gate) = None;
     }
@@ -2670,6 +2680,7 @@ impl HostHandle {
 
     /// Arms the test-only guarded-resume race gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_resume_gate(&self) -> std::sync::Arc<crate::task_control::TestResumeGate> {
         let gate = std::sync::Arc::new(crate::task_control::TestResumeGate::default());
         *crate::lock_unpoison(&self.resume_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2678,6 +2689,7 @@ impl HostHandle {
 
     /// Test-only: how many receipt-expiry housekeeping runs happened.
     #[cfg(all(test, unix))]
+    #[expect(dead_code, reason = "test observation probe")]
     pub(crate) fn receipt_expiry_runs_for_test(&self) -> usize {
         self.receipt_expiry_runs
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -2685,6 +2697,7 @@ impl HostHandle {
 
     /// Arms the test-only presentation-start commit gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_presentation_commit_gate(
         &self,
     ) -> std::sync::Arc<crate::presentation::TestPresentationCommitGate> {

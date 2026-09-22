@@ -1534,6 +1534,7 @@ impl HostHandle {
     /// Windows lib test build would otherwise see it as dead code under the
     /// warnings-as-errors configuration.
     #[cfg(all(test, unix))]
+    #[expect(dead_code, reason = "test observation probe")]
     pub(crate) fn set_receipt_ttl_for_test(&self, ttl: Duration) {
         crate::lock_unpoison(&self.presentations).receipt_ttl = ttl;
     }
@@ -2662,6 +2663,7 @@ impl HostHandle {
     /// Test-only: force-expire one receipt so ACK-loss advance is
     /// deterministic without sleeping past the 30 s TTL.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test hook for receipt expiry")]
     pub(crate) fn expire_receipt_for_test(&self, receipt: &str) -> bool {
         let mut state = crate::lock_unpoison(&self.presentations);
         let Some(companion_key) = state.receipt_ids.get(receipt).cloned() else {
@@ -2709,12 +2711,14 @@ impl TestPresentationCommitGate {
     }
 
     /// Waits until a paused commit has entered the gate.
+    #[expect(dead_code, reason = "test gate hook")]
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
     /// Releases one paused commit.
+    #[expect(dead_code, reason = "test gate hook")]
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }

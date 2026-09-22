@@ -35,10 +35,6 @@ impl FakeLearningRepository {
         self.memories.lock().expect("fake memory lock").clone()
     }
 
-    pub(crate) fn summaries(&self) -> Vec<SummaryRecord> {
-        self.summaries.lock().expect("fake summary lock").clone()
-    }
-
     /// Terms and limits observed by [`LearningRepository::recall_candidates`].
     pub(crate) fn recall_calls(&self) -> Vec<(Vec<String>, u64)> {
         self.recall_calls.lock().expect("fake recall lock").clone()

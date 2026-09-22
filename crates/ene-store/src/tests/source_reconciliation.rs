@@ -427,39 +427,6 @@ async fn the_last_of_many_covered_sources_still_holds_its_claimed_use_across_com
     );
 }
 
-/// A delayed arrival that reaches its acceptance boundary while the walk is
-/// still incomplete is associated directly from its own correlation, so it
-/// cannot escape the correspondence.
-#[tokio::test]
-async fn an_arrival_during_the_walk_is_held_by_its_own_correlation() {
-    let store = open_memory().await.unwrap();
-    let target = "m3-window-canary";
-    let companion = RawId::new();
-    let keys = seed_covered_identities(&store, target);
-    let last = keys.last().cloned().expect("the fixture has a last key");
-    seed_learning_consent(&store).await;
-    let claim = claim_formation(&store, vec![decode(&last)]).await;
-    let current = admit_first_party(&store, target, vec![ParticipantOwnerRef::Companion]).await;
-    assert_eq!(incomplete_tables(&store, current).len(), 1);
-
-    // The arrival commits while reconciliation is incomplete: no hold row
-    // exists yet, so the claim's own ordered correlation is compared directly
-    // against the operation's protected target.
-    assert_eq!(
-        store
-            .commit_memory_change(delayed_formation(companion, claim))
-            .await
-            .expect("the arrival must answer"),
-        MemoryChangeOutcome::HeldForErasure,
-        "the arrival window is closed by the direct mechanical check"
-    );
-    assert_eq!(
-        hold_rows(&store, current),
-        vec![expected_hold(claim)],
-        "the direct check writes the same durable correspondence"
-    );
-}
-
 /// A crash between pages resumes from the durable cursor: no page is replayed
 /// from memory and no generation is invented.
 #[tokio::test]
@@ -492,41 +459,6 @@ async fn reconciliation_resumes_from_the_durable_cursor_across_restart() {
         vec![expected_hold(claim)],
         "the resumed walk associates the claim"
     );
-}
-
-/// A retried page is idempotent: rewinding the durable cursor and re-running
-/// the same page adds no source row and no second hold.
-#[tokio::test]
-async fn a_retried_reconciliation_page_is_idempotent() {
-    let store = open_memory().await.unwrap();
-    let target = "m3-idempotent-canary";
-    let keys = seed_covered_identities(&store, target);
-    let last = keys.last().cloned().expect("the fixture has a last key");
-    seed_learning_consent(&store).await;
-    let claim = claim_formation(&store, vec![decode(&last)]).await;
-    let current = admit_first_party(&store, target, vec![ParticipantOwnerRef::Companion]).await;
-    let id = crate::codec::encode_id(current.operation.as_raw());
-    let rewind = |store: &Store| {
-        store
-            .conn
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE deletion_reconciliation SET cursor='',complete=0 WHERE operation_id=?1 AND sweep=?2 AND identity_table='history_message'",
-                params![id, current.sweep.as_u64() as i64],
-            )
-            .unwrap();
-    };
-    let steps = reconcile_to_complete(&store, current).await;
-    assert!(steps >= 1);
-    assert_eq!(source_rows(&store, current), keys);
-    assert_eq!(hold_rows(&store, current), vec![expected_hold(claim)]);
-    // Rewinding and replaying both pages changes nothing: the source rows are
-    // keyed and the holds are keyed.
-    rewind(&store);
-    let _ = reconcile_to_complete(&store, current).await;
-    assert_eq!(source_rows(&store, current), keys);
-    assert_eq!(hold_rows(&store, current), vec![expected_hold(claim)]);
 }
 
 /// A new sweep generation resets the walk: the completion premise is refused

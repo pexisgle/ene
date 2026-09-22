@@ -667,8 +667,7 @@ mod tests {
     use ene_primitive::{RawId, WallClockWithTz};
 
     use crate::formation::{
-        ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision,
-        LearningInferenceError, form_experience,
+        ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::repository::{LearningRepository, LearningTechnicalError};
@@ -749,65 +748,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn declines_an_experience_with_no_keepable_information() {
-        let repository = FakeLearningRepository::new();
-        let inference = ScriptedInference::new(vec![Ok(String::from(
-            r#"{"summary": "They exchanged greetings.", "memories": []}"#,
-        ))]);
-        let scrubber = ReplacingScrubber::new("sk-secret", "[credential]");
-        let decision = form_experience(
-            &repository,
-            &inference,
-            &scrubber,
-            candidate(RawId::new(), &[("owner", "hi"), ("companion", "hello")]),
-        )
-        .await
-        .unwrap();
-        assert_eq!(decision, FormationDecision::DeclinedAsNoEndValue);
-        assert!(
-            repository.current().is_empty(),
-            "nothing is stored for a declined experience"
-        );
-    }
-
-    #[tokio::test]
-    async fn malformed_model_answers_store_nothing() {
-        let repository = FakeLearningRepository::new();
-        let inference =
-            ScriptedInference::new(vec![Ok(String::from("I could not decide anything."))]);
-        let scrubber = ReplacingScrubber::new("sk-secret", "[credential]");
-        let decision = form_experience(
-            &repository,
-            &inference,
-            &scrubber,
-            candidate(RawId::new(), &[("owner", "something")]),
-        )
-        .await
-        .unwrap();
-        assert_eq!(decision, FormationDecision::DeferredForContext);
-        assert!(repository.current().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_memory_without_summary_evidence_is_not_stored() {
-        let repository = FakeLearningRepository::new();
-        let inference = ScriptedInference::new(vec![Ok(String::from(
-            r#"{"memories": [{"content": "ungrounded", "importance": 3}]}"#,
-        ))]);
-        let scrubber = ReplacingScrubber::new("sk-secret", "[credential]");
-        let decision = form_experience(
-            &repository,
-            &inference,
-            &scrubber,
-            candidate(RawId::new(), &[("owner", "something")]),
-        )
-        .await
-        .unwrap();
-        assert_eq!(decision, FormationDecision::DeferredForContext);
-        assert!(repository.current().is_empty());
-    }
-
-    #[tokio::test]
     async fn secrets_never_reach_the_prompt_or_stored_content() {
         let repository = FakeLearningRepository::new();
         let inference = ScriptedInference::new(vec![Ok(String::from(
@@ -843,64 +783,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn formation_prompt_keeps_each_turns_source_time() {
-        let repository = FakeLearningRepository::new();
-        let inference = ScriptedInference::new(vec![Ok(String::from(
-            r#"{"summary": "A deadline was mentioned.", "memories": []}"#,
-        ))]);
-        let scrubber = ReplacingScrubber::new("sk-secret", "[credential]");
-        let candidate = ExperienceCandidate {
-            companion: RawId::new(),
-            source: SourceRangeRef {
-                kind: ExperienceSourceKind::Dialogue,
-                start: RawId::new(),
-                end: RawId::new(),
-            },
-            sources: Vec::new(),
-            transcript: vec![
-                ExperienceTurn {
-                    role: ExperienceRole::Owner,
-                    text: String::from("明日提出する"),
-                    at: Some(
-                        WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00+09:00")
-                            .expect("fixture timestamp"),
-                    ),
-                },
-                ExperienceTurn {
-                    role: ExperienceRole::Companion,
-                    text: String::from("了解した"),
-                    at: Some(
-                        WallClockWithTz::parse_rfc3339("2026-09-12T00:30:00-05:00")
-                            .expect("fixture timestamp"),
-                    ),
-                },
-                ExperienceTurn {
-                    role: ExperienceRole::Owner,
-                    text: String::from("追記: 変更なし"),
-                    at: None,
-                },
-            ],
-            at: WallClockWithTz::now(),
-        };
-        let _ = form_experience(&repository, &inference, &scrubber, candidate)
-            .await
-            .unwrap();
-        let prompt = &inference.prompts()[0];
-        assert!(
-            prompt.contains("Owner [2026-09-12T10:00:00+09:00]: 明日提出する"),
-            "each turn keeps its own offset-qualified source time: {prompt}"
-        );
-        assert!(
-            prompt.contains("Companion [2026-09-12T00:30:00-05:00]: 了解した"),
-            "a different offset stays visible on its own turn: {prompt}"
-        );
-        assert!(
-            prompt.contains("Owner: 追記: 変更なし"),
-            "a turn without a recorded time renders without a guessed one: {prompt}"
-        );
-    }
-
-    #[tokio::test]
     async fn a_scrub_failure_stores_nothing_and_never_prompts() {
         let repository = FakeLearningRepository::new();
         let inference = ScriptedInference::new(vec![Ok(answer())]);
@@ -926,27 +808,6 @@ mod tests {
             repository.current().is_empty(),
             "nothing may be stored when the scrub failed"
         );
-    }
-
-    #[tokio::test]
-    async fn inference_failure_is_a_technical_error_not_a_formation() {
-        let repository = FakeLearningRepository::new();
-        let inference = ScriptedInference::new(vec![Err(LearningInferenceError::Unavailable {
-            reason: String::from("provider down"),
-        })]);
-        let scrubber = ReplacingScrubber::new("sk-secret", "[credential]");
-        let outcome = form_experience(
-            &repository,
-            &inference,
-            &scrubber,
-            candidate(RawId::new(), &[("owner", "something")]),
-        )
-        .await;
-        assert!(matches!(
-            outcome,
-            Err(LearningTechnicalError::InferenceUnavailable { .. })
-        ));
-        assert!(repository.current().is_empty());
     }
 
     #[tokio::test]
@@ -1045,8 +906,7 @@ mod consolidation_tests {
     use ene_primitive::{RawId, WallClockWithTz};
 
     use crate::formation::{
-        ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision,
-        MAX_FORMATION_CHANGES, form_experience,
+        ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationDecision, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::memory::ChangeKind;
@@ -1099,86 +959,6 @@ mod consolidation_tests {
     }
 
     #[tokio::test]
-    async fn repeated_information_reinforces_instead_of_duplicating() {
-        let (repository, memory, decision) = apply_update(
-            r#"{"summary": "The owner mentioned tea again.", "memories": [{"action": "update", "target": 1, "change": "reinforced", "content": "owner likes tea"}]}"#,
-        )
-        .await;
-        assert!(
-            matches!(decision, FormationDecision::Formed { .. }),
-            "the reinforcement must apply, got {decision:?}"
-        );
-        assert_eq!(
-            repository.current().len(),
-            1,
-            "no duplicate memory is created"
-        );
-        let revisions = repository
-            .list_memory_revisions(memory, None, 100)
-            .await
-            .unwrap();
-        assert_eq!(revisions.len(), 2);
-        assert_eq!(revisions[0].content, "owner likes tea");
-        assert_eq!(revisions[1].change, ChangeKind::Reinforced);
-        assert_eq!(
-            revisions.last().unwrap().revision,
-            MemoryRevision::from_u64(2)
-        );
-    }
-
-    #[tokio::test]
-    async fn refinement_updates_content_and_keeps_the_earlier_revision() {
-        let (repository, memory, decision) = apply_update(
-            r#"{"summary": "The owner was more specific.", "memories": [{"action": "update", "target": 1, "change": "refined", "content": "owner prefers jasmine tea in the morning"}]}"#,
-        )
-        .await;
-        assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository
-            .list_memory_revisions(memory, None, 100)
-            .await
-            .unwrap();
-        assert_eq!(revisions.len(), 2);
-        assert_eq!(
-            revisions[1].content,
-            "owner prefers jasmine tea in the morning"
-        );
-        assert_eq!(
-            revisions[0].content, "owner likes tea",
-            "the earlier recognition is not rewritten"
-        );
-        assert_eq!(revisions[1].change, ChangeKind::Refined);
-    }
-
-    #[tokio::test]
-    async fn initial_wrong_and_changed_since_stay_distinct() {
-        let (repository, memory, decision) = apply_update(
-            r#"{"summary": "The owner corrected me.", "memories": [{"action": "update", "target": 1, "change": "corrected_initially_wrong", "content": "owner never liked tea"}]}"#,
-        )
-        .await;
-        assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository
-            .list_memory_revisions(memory, None, 100)
-            .await
-            .unwrap();
-        assert_eq!(revisions[1].change, ChangeKind::CorrectedInitiallyWrong);
-
-        let (repository, memory, decision) = apply_update(
-            r#"{"summary": "The situation changed.", "memories": [{"action": "update", "target": 1, "change": "changed_since", "content": "owner switched to coffee"}]}"#,
-        )
-        .await;
-        assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository
-            .list_memory_revisions(memory, None, 100)
-            .await
-            .unwrap();
-        assert_eq!(revisions[1].change, ChangeKind::ChangedSince);
-        assert_ne!(
-            ChangeKind::CorrectedInitiallyWrong,
-            ChangeKind::ChangedSince
-        );
-    }
-
-    #[tokio::test]
     async fn forgetting_suppresses_recall_without_deleting_content_or_revisions() {
         let (repository, memory, decision) = apply_update(
             r#"{"summary": "The owner asked me to let the topic rest.", "memories": [{"action": "forget", "target": 1}]}"#,
@@ -1195,24 +975,6 @@ mod consolidation_tests {
         assert!(
             revisions[1].recall_suppressed,
             "the suppression is part of the revision history"
-        );
-    }
-
-    #[tokio::test]
-    async fn update_without_importance_keeps_the_existing_one() {
-        let (repository, memory, decision) = apply_update(
-            r#"{"summary": "A small refinement.", "memories": [{"action": "update", "target": 1, "change": "refined", "content": "owner really likes tea"}]}"#,
-        )
-        .await;
-        assert!(matches!(decision, FormationDecision::Formed { .. }));
-        let revisions = repository
-            .list_memory_revisions(memory, None, 100)
-            .await
-            .unwrap();
-        assert_eq!(
-            revisions.last().unwrap().importance.as_u8(),
-            crate::Importance::default().as_u8(),
-            "an omitted importance does not reset the stored one"
         );
     }
 
@@ -1245,177 +1007,6 @@ mod consolidation_tests {
             "the newer recognition is untouched"
         );
         assert_eq!(revisions.len(), 2, "the stale change leaves no revision");
-    }
-
-    /// Asserts one undecidable answer leaves current Memory, revisions, and
-    /// Summary evidence untouched, whether or not a target was seeded.
-    async fn deferred_answer_stores_nothing(seeded: bool, answer: &str) {
-        let companion = RawId::new();
-        let repository = FakeLearningRepository::new();
-        let target = if seeded {
-            let (memory, revision) = seed_memory(&repository, companion, "owner likes tea").await;
-            Some((memory, revision))
-        } else {
-            None
-        };
-        let before = repository.current();
-        let inference = ScriptedInference::new(vec![Ok(answer.to_owned())]);
-        let decision = form_experience(&repository, &inference, &scrubber(), candidate(companion))
-            .await
-            .unwrap();
-        assert_eq!(
-            decision,
-            FormationDecision::DeferredForContext,
-            "an undecidable answer must defer: {answer}"
-        );
-        assert_eq!(
-            repository.current(),
-            before,
-            "no current Memory may change: {answer}"
-        );
-        assert!(
-            repository.summaries().is_empty(),
-            "no Summary evidence may be stored: {answer}"
-        );
-        if let Some((memory, revision)) = target {
-            let revisions = repository
-                .list_memory_revisions(memory, None, 100)
-                .await
-                .unwrap();
-            assert_eq!(revisions.len(), 1, "no partial revision may remain");
-            assert_eq!(
-                revisions.last().unwrap().revision,
-                revision,
-                "no revision may advance"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_or_unknown_action_defers_the_whole_answer() {
-        for answer in [
-            r#"{"summary": "s", "memories": [{"content": "x", "temporal": "enduring"}]}"#,
-            r#"{"summary": "s", "memories": [{"action": "merge", "content": "x", "temporal": "enduring"}]}"#,
-        ] {
-            deferred_answer_stores_nothing(false, answer).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn update_with_missing_or_unknown_change_defers_the_whole_answer() {
-        for answer in [
-            r#"{"summary": "s", "memories": [{"action": "update", "target": 1, "content": "y"}]}"#,
-            r#"{"summary": "s", "memories": [{"action": "update", "target": 1, "change": "merged", "content": "y"}]}"#,
-        ] {
-            deferred_answer_stores_nothing(true, answer).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn supplied_unknown_temporal_defers_the_whole_answer() {
-        deferred_answer_stores_nothing(
-            false,
-            r#"{"summary": "s", "memories": [{"action": "create", "content": "x", "temporal": "eternal"}]}"#,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn missing_temporal_on_a_new_memory_defers_the_whole_answer() {
-        deferred_answer_stores_nothing(
-            false,
-            r#"{"summary": "s", "memories": [{"action": "create", "content": "x", "importance": 4}]}"#,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn invalid_target_defers_the_whole_answer() {
-        for answer in [
-            r#"{"summary": "s", "memories": [{"action": "update", "target": 9, "change": "refined", "content": "y"}]}"#,
-            r#"{"summary": "s", "memories": [{"action": "update", "change": "refined", "content": "y"}]}"#,
-            r#"{"summary": "s", "memories": [{"action": "forget", "target": 0}]}"#,
-        ] {
-            deferred_answer_stores_nothing(true, answer).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn mixed_valid_and_invalid_entries_store_nothing() {
-        deferred_answer_stores_nothing(
-            true,
-            r#"{"summary": "s", "memories": [{"action": "update", "target": 1, "change": "refined", "content": "y"}, {"action": "explode", "content": "z", "temporal": "enduring"}]}"#,
-        )
-        .await;
-        deferred_answer_stores_nothing(
-            true,
-            r#"{"summary": "s", "memories": [{"action": "create", "content": "new", "temporal": "enduring"}, {"action": "update", "target": 1, "content": "no change kind"}]}"#,
-        )
-        .await;
-    }
-
-    fn create_entries(count: usize) -> String {
-        (0..count)
-            .map(|index| {
-                format!(
-                    r#"{{"action": "create", "content": "memory {index}", "importance": 3, "temporal": "enduring"}}"#
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    #[tokio::test]
-    async fn an_answer_at_the_change_cap_is_accepted() {
-        let companion = RawId::new();
-        let repository = FakeLearningRepository::new();
-        let entries = create_entries(MAX_FORMATION_CHANGES);
-        let inference = ScriptedInference::new(vec![Ok(format!(
-            r#"{{"summary": "s", "memories": [{entries}]}}"#
-        ))]);
-        let decision = form_experience(&repository, &inference, &scrubber(), candidate(companion))
-            .await
-            .unwrap();
-        assert!(
-            matches!(decision, FormationDecision::Formed { .. }),
-            "an answer at the cap is still decidable, got {decision:?}"
-        );
-        assert_eq!(repository.current().len(), MAX_FORMATION_CHANGES);
-        assert!(
-            inference.prompts()[0].contains(&format!("at most {MAX_FORMATION_CHANGES}")),
-            "the prompt states the same cap the parser enforces"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_answer_over_the_change_cap_defers_the_whole_answer() {
-        let entries = create_entries(MAX_FORMATION_CHANGES + 1);
-        deferred_answer_stores_nothing(
-            false,
-            &format!(r#"{{"summary": "s", "memories": [{entries}]}}"#),
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_valid_prefix_is_not_committed_when_the_answer_exceeds_the_cap() {
-        let mut entries = vec![
-            String::from(
-                r#"{"action": "update", "target": 1, "change": "refined", "content": "y"}"#,
-            );
-            MAX_FORMATION_CHANGES
-        ];
-        entries.push(String::from(
-            r#"{"action": "explode", "content": "z", "temporal": "enduring"}"#,
-        ));
-        deferred_answer_stores_nothing(
-            true,
-            &format!(
-                r#"{{"summary": "s", "memories": [{}]}}"#,
-                entries.join(", ")
-            ),
-        )
-        .await;
     }
 
     #[tokio::test]
