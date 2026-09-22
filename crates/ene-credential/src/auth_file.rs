@@ -34,7 +34,7 @@ use crate::secret::SecretValue;
 ///
 /// Secret custody: generation stays with the caller (the pairing repository
 /// approve path mints the secret); this store only persists it, and the owned
-/// [`SecretValue`] never leaves this crate. Callers outside the crate verify a
+/// `SecretValue` never leaves this crate. Callers outside the crate verify a
 /// device with [`verify_device_proof`](FileDeviceAuthStore::verify_device_proof)
 /// and probe existence with [`has_secret`](FileDeviceAuthStore::has_secret);
 /// there is no public accessor that returns the value. Secrets and descriptors
@@ -192,7 +192,7 @@ impl FileDeviceAuthStore {
 
     /// Loads the persisted secret for `device`, if any.
     ///
-    /// Crate-private: the owned [`SecretValue`] must not cross the crate
+    /// Crate-private: the owned `SecretValue` must not cross the crate
     /// boundary, so external callers use [`Self::verify_device_proof`] or the
     /// non-secret [`Self::has_secret`] probe instead.
     ///
@@ -224,7 +224,7 @@ impl FileDeviceAuthStore {
     /// returning any of its material.
     ///
     /// This is the non-secret existence probe for callers outside the crate;
-    /// the value itself stays confined to [`load_secret`](Self::load_secret)
+    /// the value itself stays confined to `load_secret`
     /// and [`verify_device_proof`](Self::verify_device_proof).
     ///
     /// # Errors

@@ -48,7 +48,7 @@ impl RequesterClient {
     /// # Errors
     ///
     /// [`DesktopError::Transport`] when the requester listener is unreachable
-    /// or does not answer within [`REQUESTER_WAIT`], [`DesktopError::Protocol`]
+    /// or does not answer within `REQUESTER_WAIT`, [`DesktopError::Protocol`]
     /// when the answer cannot be decoded.
     pub async fn request(&self, message: &ToHost) -> Result<FromHost, DesktopError> {
         tokio::time::timeout(REQUESTER_WAIT, async {

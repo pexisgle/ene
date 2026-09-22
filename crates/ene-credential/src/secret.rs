@@ -1,3 +1,7 @@
+//! Bearer secret confinement: the zeroizing `SecretValue`, the
+//! [`CredentialStore`] request-builder boundary, and the in-memory and
+//! environment-backed store implementations.
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -21,6 +25,14 @@ impl SecretValue {
     }
 }
 
+/// Bearer store with a request-builder access pattern.
+///
+/// Implementations hold `SecretValue` internally and expose the bearer only
+/// as a `&str` borrowed into the caller's closure `f`. The caller must build
+/// an owned request (headers, body) inside the closure and perform I/O after
+/// it returns: the borrow cannot escape, so there is deliberately no getter
+/// returning an owned secret. Existence checks via [`CredentialStore::contains`]
+/// are non-secret and safe to branch on.
 pub trait CredentialStore: Send + Sync {
     fn with_bearer<R>(
         &self,
@@ -302,6 +314,14 @@ impl CredentialStore for MemoryVersionedStore {
     }
 }
 
+/// In-memory bearer store for tests and local development only.
+///
+/// Holds `SecretValue` entries keyed by `(provider, label)` behind a
+/// mutex. Not a production backend: contents live in process memory and
+/// vanish on restart.
+///
+/// [`core::fmt::Debug`] lists only the public refs and the entry count, never
+/// secret material.
 pub struct MemoryCredentialStore {
     entries: Mutex<HashMap<CredentialRef, SecretValue>>,
 }
@@ -391,7 +411,7 @@ const SUPPORTED_PROVIDER: &str = "openai";
 /// Environment-backed bearer store for the `OpenAI` provider.
 ///
 /// The bearer is read from [`ENV_API_KEY`] exactly once when the store is
-/// constructed (Host startup) and held as a zeroizing [`SecretValue`] for the
+/// constructed (Host startup) and held as a zeroizing `SecretValue` for the
 /// rest of the run. It is deliberately not re-read per call: a running Host
 /// must not silently adopt a different value than the one its current
 /// credential-set revision was swept and advanced for. Rotation therefore
