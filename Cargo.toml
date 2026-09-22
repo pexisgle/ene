@@ -73,3 +73,12 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# The avatar runtime performs CPU skinning and alpha-aware hit-test
+# rasterization every frame. Unoptimized code regularly crosses Body's 100 ms
+# overload threshold and makes development builds pause rendering for a second.
+[profile.dev.package.ene-body]
+opt-level = 2
+
+[profile.dev.package.vrm-runtime]
+opt-level = 2
