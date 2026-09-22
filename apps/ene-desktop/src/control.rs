@@ -45,19 +45,31 @@ impl RequesterClient {
 
     /// Sends one request and reads its answer.
     ///
+    /// The refusal answers every requester call shares are classified once
+    /// here: a hold is its own state, and a boundary refusal or an unavailable
+    /// Host is a domain answer, not a control-shape failure.
+    ///
     /// # Errors
     ///
     /// [`DesktopError::Transport`] when the requester listener is unreachable
     /// or does not answer within `REQUESTER_WAIT`, [`DesktopError::Protocol`]
     /// when the answer cannot be decoded.
     pub async fn request(&self, message: &ToHost) -> Result<FromHost, DesktopError> {
-        tokio::time::timeout(REQUESTER_WAIT, async {
+        let answer = tokio::time::timeout(REQUESTER_WAIT, async {
             let mut stream = connect_requester(&self.data_dir).await?;
             write_requester_frame(&mut stream, message).await?;
             read_requester_frame(&mut stream).await
         })
         .await
-        .map_err(|_| DesktopError::Transport(String::from("requester listener stayed silent")))?
+        .map_err(|_| DesktopError::Transport(String::from("requester listener stayed silent")))??;
+        match answer {
+            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
+            FromHost::BackpressureHold => Err(DesktopError::BackpressureHold),
+            FromHost::Unavailable => Err(DesktopError::Unavailable(String::from(
+                "the Host could not answer; retry later",
+            ))),
+            other => Ok(other),
+        }
     }
 
     pub async fn open_desktop(&self) -> Result<bool, DesktopError> {
@@ -75,13 +87,6 @@ impl RequesterClient {
     ) -> Result<Vec<PendingDeletionPreview>, DesktopError> {
         match self.request(&ToHost::PendingDeletions).await? {
             FromHost::PendingDeletions { requests } => Ok(requests),
-            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
-            FromHost::BackpressureHold => Err(DesktopError::Unavailable(String::from(
-                "the Host request queue is saturated; retry once it drains",
-            ))),
-            FromHost::Unavailable => Err(DesktopError::Unavailable(String::from(
-                "the Host could not answer; retry later",
-            ))),
             other => Err(DesktopError::Control(format!(
                 "expected pending deletions, got {other:?}"
             ))),
@@ -91,13 +96,6 @@ impl RequesterClient {
     async fn request_accepted(&self, message: &ToHost) -> Result<String, DesktopError> {
         match self.request(message).await? {
             FromHost::RequestAccepted { request_id } => Ok(request_id),
-            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
-            FromHost::BackpressureHold => Err(DesktopError::Unavailable(String::from(
-                "the Host request queue is saturated; retry once it drains",
-            ))),
-            FromHost::Unavailable => Err(DesktopError::Unavailable(String::from(
-                "the Host could not answer; retry later",
-            ))),
             other => Err(DesktopError::Control(format!(
                 "the request was not accepted: {other:?}"
             ))),
@@ -360,11 +358,11 @@ impl ConfirmationClient {
         self.await_outcome().await
     }
 
-    pub async fn send_confirmed_true(&mut self) -> Result<FromConfirmation, DesktopError> {
-        self.send(&ToConfirmation::ConfirmedTrue)?;
-        self.await_outcome().await
-    }
-
+    /// Sends one frame on the private channel.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Transport`] when the channel ended.
     fn send(&mut self, frame: &ToConfirmation) -> Result<(), DesktopError> {
         match self.channel.send(frame) {
             Ok(()) => Ok(()),
@@ -433,13 +431,13 @@ async fn connect_requester(data_dir: &Path) -> Result<tokio::net::UnixStream, De
 async fn connect_requester(
     data_dir: &Path,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, DesktopError> {
-    let pipe = format!("{}-control", crate::session::client_pipe_name(data_dir));
+    // Same derivation as the Host's requester listener: the device pipe name
+    // plus the control suffix, folded from the data directory.
+    let pipe = format!("{}-control", ene_plugin_ipc::pipe_name(data_dir));
     tokio::net::windows::named_pipe::ClientOptions::new()
         .open(&pipe)
         .map_err(|error| DesktopError::Transport(format!("requester listener: {}", error.kind())))
 }
-
-const MAX_REQUESTER_FRAME_BYTES: u32 = 16 * 1024;
 
 async fn write_requester_frame<W>(stream: &mut W, message: &ToHost) -> Result<(), DesktopError>
 where
@@ -447,13 +445,8 @@ where
 {
     use tokio::io::AsyncWriteExt as _;
 
-    let body = serde_json::to_vec(message)
+    let body = ene_local_control::channel::encode_body(message)
         .map_err(|error| DesktopError::Protocol(format!("requester encode: {error}")))?;
-    if body.len() > MAX_REQUESTER_FRAME_BYTES as usize {
-        return Err(DesktopError::Protocol(String::from(
-            "requester frame exceeds the bound",
-        )));
-    }
     stream
         .write_all(&(body.len() as u32).to_be_bytes())
         .await
@@ -480,7 +473,7 @@ where
         .await
         .map_err(|error| DesktopError::Transport(format!("requester read: {error}")))?;
     let length = u32::from_be_bytes(prefix);
-    if length == 0 || length > MAX_REQUESTER_FRAME_BYTES {
+    if length == 0 || length > ene_local_control::channel::MAX_CONTROL_FRAME_BYTES {
         return Err(DesktopError::Protocol(String::from(
             "requester frame length is out of bounds",
         )));
@@ -490,6 +483,103 @@ where
         .read_exact(&mut body)
         .await
         .map_err(|error| DesktopError::Transport(format!("requester read: {error}")))?;
-    serde_json::from_slice(&body)
+    ene_local_control::channel::decode_body(&body)
         .map_err(|error| DesktopError::Protocol(format!("requester decode: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use ene_local_control::{CONFIRMATION_MODE_ENV, CONFIRMATION_MODE_STDIO};
+
+    /// The launcher/GUI switch is an environment marker the Host sets, never a
+    /// command-line flag a user or a requester can aim.
+    #[test]
+    fn the_confirmation_mode_marker_is_the_hosts() {
+        assert_eq!(CONFIRMATION_MODE_ENV, "ENE_CONFIRMATION_CHANNEL");
+        assert_eq!(CONFIRMATION_MODE_STDIO, "stdio");
+    }
+
+    /// A saturated Host answers every requester call with
+    /// `FromHost::BackpressureHold`; the GUI must classify that as the hold,
+    /// never as a control-shape or technical failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_backpressure_hold_is_its_own_error_at_every_requester_call() {
+        use super::RequesterClient;
+        use crate::ui::DesktopError;
+        use ene_local_control::{FromHost, ToHost};
+        use tokio::io::AsyncWriteExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let listener = tokio::net::UnixListener::bind(dir.path().join("host-control.sock"))
+            .expect("bind requester listener");
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let body = serde_json::to_vec(&FromHost::BackpressureHold).expect("encode hold");
+                let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                frame.extend_from_slice(&body);
+                stream.write_all(&frame).await.expect("write hold");
+                stream.flush().await.expect("flush hold");
+            }
+        });
+        let requester = RequesterClient::new(dir.path());
+        assert!(matches!(
+            requester.open_desktop().await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        assert!(matches!(
+            requester.list_pending_deletions().await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        assert!(matches!(
+            requester
+                .request_accepted(&ToHost::RequestDeviceApprove {
+                    pending_id: String::from("pending-1"),
+                })
+                .await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        server.await.expect("hold server must finish");
+    }
+
+    /// A hold is an admission answer, not a transient transport failure: the
+    /// requester waits for the Owner to act again and never resends on its own.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_held_request_is_not_resent() {
+        use super::RequesterClient;
+        use crate::ui::DesktopError;
+        use ene_local_control::{FromHost, ToHost};
+        use std::time::Duration;
+        use tokio::io::AsyncWriteExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let listener = tokio::net::UnixListener::bind(dir.path().join("host-control.sock"))
+            .expect("bind requester listener");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let body = serde_json::to_vec(&FromHost::BackpressureHold).expect("encode hold");
+            let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&body);
+            stream.write_all(&frame).await.expect("write hold");
+            stream.flush().await.expect("flush hold");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err(),
+                "a held request must not be resent"
+            );
+        });
+        let requester = RequesterClient::new(dir.path());
+        assert!(matches!(
+            requester
+                .request_accepted(&ToHost::RequestDeviceApprove {
+                    pending_id: String::from("pending-1"),
+                })
+                .await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        server.await.expect("hold server must finish");
+    }
 }

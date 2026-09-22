@@ -188,6 +188,12 @@ pub enum DesktopError {
     /// peer that violated the shape of the exchange.
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// The Host refused admission because its requester queue is saturated
+    /// (`FromHost::BackpressureHold`). A hold, not a technical failure and not
+    /// a boundary refusal: nothing was accepted, the Owner's surface shows the
+    /// retry guidance, and no path resends the held request automatically.
+    #[error("the Host requester queue is saturated; retry shortly")]
+    BackpressureHold,
     #[error(transparent)]
     Client(#[from] ClientError),
 }
