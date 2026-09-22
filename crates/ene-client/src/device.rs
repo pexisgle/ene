@@ -135,6 +135,12 @@ pub(crate) fn atomic_replace(
                 options.mode(mode);
             }
         }
+        #[cfg(not(unix))]
+        {
+            // Unix permission bits do not apply to the staging temp here; the
+            // platform's default ACLs govern it.
+            let _ = mode;
+        }
         let mut file = options
             .open(&staged)
             .map_err(|error| store_error(context, &error))?;
