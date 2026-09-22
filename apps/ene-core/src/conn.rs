@@ -691,7 +691,7 @@ impl ConnectionTable {
     }
 
     /// Test-only negotiated-terms snapshot.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn negotiated_of(&self, id: &ConnectionWireId) -> Option<NegotiatedConnection> {
         crate::lock_unpoison(&self.inner)
             .records
