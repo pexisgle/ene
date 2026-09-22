@@ -30,7 +30,8 @@ mod imp {
     use crate::ipc::{
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
     };
-    use crate::render::{HitTestMask, RenderFailure, RenderOutcome, SurfaceRenderer};
+    use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
+    use crate::window::{gpu_info, physical};
 
     const CLASS_NAME: &[u16] = &[
         b'e' as u16,
@@ -515,10 +516,6 @@ mod imp {
         unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
     }
 
-    fn physical(logical: u32, scale: f32) -> u32 {
-        ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
-    }
-
     fn logical(physical: u32, scale: f32) -> u32 {
         ((physical as f64 / f64::from(scale.max(f32::EPSILON))).round() as u64)
             .clamp(1, u64::from(u32::MAX)) as u32
@@ -622,18 +619,6 @@ mod imp {
             Err(String::from("failed to create alpha-aware window region"))
         } else {
             Ok(region)
-        }
-    }
-
-    fn gpu_info(failure: RenderFailure) -> GpuFailInfo {
-        GpuFailInfo {
-            reason: match failure {
-                RenderFailure::Adapter => GpuFailReason::NoAdapter,
-                RenderFailure::Device => GpuFailReason::RequestDevice,
-                RenderFailure::Surface => GpuFailReason::Surface,
-                RenderFailure::DeviceLost => GpuFailReason::DeviceLost,
-                RenderFailure::OutOfMemory => GpuFailReason::OutOfMemory,
-            },
         }
     }
 

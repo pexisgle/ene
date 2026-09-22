@@ -940,6 +940,12 @@ impl UsageRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
+            // One bounded read of every reservation still `reserved` (the
+            // only stored non-terminal state); each one settles as
+            // CommittedUnknown in this transaction. The external consumption
+            // cannot be denied after a crash, so the reserved upper bound stays
+            // counted and the ticket records an unknown token usage fact:
+            // recovery never releases a slot and never estimates zero.
             let orphans: Vec<crate::usage_cap::ReservationRow> = {
                 let mut statement = tx
                     .prepare(crate::usage_cap::SQL_SELECT_ORPHANED_RESERVATIONS)
@@ -952,13 +958,13 @@ impl UsageRepository for Store {
             };
             let mut settled = 0_u64;
             for raw in orphans {
-                let state = ene_permission::UsageReservationState::from_name(&raw.state)
-                    .ok_or_else(|| {
-                        inference_unavailable(String::from("unknown usage reservation state"))
-                    })?;
-                if state.is_terminal() {
-                    continue;
-                }
+                // `SQL_SELECT_ORPHANED_RESERVATIONS` pins `state = 'reserved'`,
+                // the only stored non-terminal value, so every returned row is
+                // settled here; no second filter can diverge from the query.
+                // The attempt row and the reservation were written in one
+                // transaction, so a missing or disagreeing route correlation
+                // is corruption: fail closed instead of recording an
+                // unattributable usage fact.
                 let route: Option<(String, String, Option<String>)> = tx
                     .query_row(SQL_SELECT_ATTEMPT_ROUTE, params![raw.ticket], |row| {
                         Ok((row.get(0)?, row.get(1)?, row.get(2)?))

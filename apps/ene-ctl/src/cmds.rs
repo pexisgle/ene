@@ -28,6 +28,12 @@ pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
+/// The CLI's copy of the documented Host setup section set: `HostHandle::build_view`
+/// in `apps/ene-core/src/setup.rs` renders exactly these for a setup or status
+/// request. The in-file test below pins this literal and the setup request
+/// against this constant only; the Host side is exercised by the `ene-core`
+/// integration tests. An empty request is not the same set: the Host also
+/// selects the read-only `memory` section.
 pub const HOST_SETUP_SECTIONS: &[&str] =
     &["provider", "model", "consent", "credential", "learning"];
 
@@ -297,8 +303,8 @@ pub fn render_task_list(page: &TaskListPage) -> String {
         .map(|task| {
             let running = if task.running { " running" } else { "" };
             format!(
-                "{} rev {} {}{}",
-                task.task.0, task.revision, task.progress, running
+                "{} rev {} {}{} purpose {}",
+                task.task.0, task.revision, task.progress, running, task.purpose
             )
         })
         .collect();
@@ -310,8 +316,8 @@ pub fn render_task_list(page: &TaskListPage) -> String {
 
 pub fn render_report_page(page: &TaskReportPage) -> String {
     let mut lines = vec![format!(
-        "{} rev {} {}",
-        page.task.0, page.revision, page.progress
+        "{} rev {} {} purpose {}",
+        page.task.0, page.revision, page.progress, page.purpose
     )];
     for row in &page.rows {
         lines.push(format!("{} {}", row.kind, row.id));
@@ -680,6 +686,9 @@ pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> AckAction {
         UndeliveredAckOutcome::HeldForErasure => AckAction::Retryable {
             message: String::from("items are under deletion; re-query after it settles"),
         },
+        UndeliveredAckOutcome::Unavailable => AckAction::Retryable {
+            message: String::from("presentation confirmation is unavailable; retry later"),
+        },
     }
 }
 
@@ -761,6 +770,9 @@ pub fn describe_fetch(response: UndeliveredResponse) -> FetchAction {
         },
         UndeliveredResponse::StaleBaseView { .. } => FetchAction::Retryable {
             message: String::from("stale base view; re-query from the head"),
+        },
+        UndeliveredResponse::Unavailable => FetchAction::Retryable {
+            message: String::from("undelivered items are unavailable; retry later"),
         },
     }
 }
@@ -933,7 +945,7 @@ mod tests {
             current_generation: 9,
         });
         let IntakeAction::Declined { message } = stale else {
-            return;
+            panic!("stale must decline, got {stale:?}")
         };
         assert!(
             message.contains("round-4") && message.contains('9'),
@@ -956,7 +968,7 @@ mod tests {
             reason: RevalidationReasonWire(String::from("reason-1")),
         });
         let IntakeAction::Declined { message } = revalidation else {
-            return;
+            panic!("revalidation must decline, got {revalidation:?}")
         };
         assert!(
             message.contains("reason-1"),
@@ -977,7 +989,7 @@ mod tests {
             revision: ViewMarkWire(String::from("rev-2")),
         });
         let ManagementAction::Applied { detail } = stored else {
-            return;
+            panic!("stored rule must be applied, got {stored:?}")
         };
         assert!(
             detail.contains("rev-2"),
@@ -1307,8 +1319,10 @@ mod tests {
             next_cursor: Some(PageCursorWire(String::from("cursor-2"))),
         });
         assert!(
-            list.contains("rev 2 in_progress running") && list.contains("next: cursor-2"),
-            "task list renders entries plus continuation, got {list:?}"
+            list.contains("rev 2 in_progress running")
+                && list.contains("purpose task-7:2")
+                && list.contains("next: cursor-2"),
+            "task list renders entries plus purpose and continuation, got {list:?}"
         );
         let report = super::render_report_page(&TaskReportPage {
             task: TaskWireRef(String::from("task-7")),
@@ -1333,8 +1347,10 @@ mod tests {
             next_cursor: None,
         });
         assert!(
-            report.contains("action_attempt") && report.contains("task_result"),
-            "report renders both row kinds, got {report:?}"
+            report.contains("purpose task-7:2")
+                && report.contains("action_attempt")
+                && report.contains("task_result"),
+            "report renders purpose and both row kinds, got {report:?}"
         );
         let source = super::render_source_page(&ReportSourcePageView {
             text: String::from("body bytes"),

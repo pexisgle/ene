@@ -1,3 +1,22 @@
+//! Projection IPC owned by `ene-body`.
+//!
+//! This is **not** the Host↔Client protocol (`ene-api` / `ene-plugin-ipc`) and
+//! not plugin IPC. `ene-desktop` links this crate and uses these types and the
+//! codec directly; this module owns the byte layout. See
+//! `apps/ene-body/README.md` for the table of flags and the separation between
+//! automated checks and real probes.
+//!
+//! Frame:
+//!
+//! ```text
+//! u32 BE exclusive body length | MessagePack body (named structs, ≤ 64 KiB)
+//! ```
+//!
+//! Direction is implied by the writer: parent encodes [`ParentToBody`]; body
+//! encodes [`BodyToParent`]. Forbidden content (secrets, conversation text,
+//! pairing material, Task commands, Host PKs) has no variant and is rejected
+//! as an unknown payload, not interpreted.
+
 use serde::{Deserialize, Serialize};
 
 const LEN_PREFIX_LEN: usize = 4;
@@ -353,7 +372,9 @@ fn encode_named<T: Serialize>(message: &T) -> Result<Vec<u8>, IpcError> {
 ///
 /// # Errors
 ///
-/// Truncated input or an oversize claimed length.
+/// Truncated input. An oversize claimed length yields no boundary and must be
+/// treated as unrecoverable: the stream cannot be resynchronized from a length
+/// the cap rejects.
 pub fn frame_len(bytes: &[u8]) -> Result<usize, IpcError> {
     if bytes.len() < LEN_PREFIX_LEN {
         return Err(IpcError::Truncated {
@@ -379,10 +400,22 @@ fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize)
     let need = frame_len(bytes)?;
     let message = rmp_serde::from_slice(&bytes[LEN_PREFIX_LEN..need]).map_err(|error| {
         IpcError::DecodeFailed {
-            reason: std::format!("{error}"),
+            reason: decode_reason(&error),
         }
     })?;
     Ok((message, need))
+}
+
+/// Structural decode text without any frame-derived value. `Syntax` embeds the
+/// unexpected value (serde's `invalid_type`/`unknown variant` text), which a
+/// confused parent could have stuffed with conversation content.
+fn decode_reason(error: &rmp_serde::decode::Error) -> String {
+    match error {
+        rmp_serde::decode::Error::Syntax(_) => {
+            String::from("frame body does not match the expected structure")
+        }
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]

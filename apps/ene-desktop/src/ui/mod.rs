@@ -196,6 +196,19 @@ pub enum DesktopError {
     Client(#[from] ClientError),
 }
 
+/// Sends one Client request under a caller-chosen budget. The only shared
+/// difference between panels is the timeout, so it stays a parameter.
+pub(crate) async fn request_with_timeout(
+    client: &mut ene_client::Client,
+    payload: ene_api::v1::payload::WirePayload,
+    timeout: std::time::Duration,
+) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
+    tokio::time::timeout(timeout, client.request(payload))
+        .await
+        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
+        .map_err(DesktopError::Client)
+}
+
 pub(crate) fn history_lines(items: &[HistoryItem]) -> Vec<String> {
     items
         .iter()

@@ -456,9 +456,10 @@ fn page_sql(stage: &ErasureStage) -> String {
     )
 }
 
-/// Plans the redactions of one row. Nothing is written until the whole page
-/// has been read and planned, so an unrepresentable value fails the page
-/// closed instead of leaving it half-swept.
+/// Plans the redactions of one row. The whole page is applied inside the one
+/// surrounding `Immediate` transaction; an unrepresentable value returns
+/// before `tx.commit()`, so the page rolls back atomically rather than
+/// committing half-swept.
 ///
 /// `provenance_linked` is the observation-hold path for `task_result`: the
 /// whole body is replaced by the body-free marker because a paraphrase of a

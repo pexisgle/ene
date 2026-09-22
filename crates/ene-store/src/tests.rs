@@ -2835,6 +2835,83 @@ async fn learning_stale_change_leaves_no_orphan_summary() {
     );
 }
 
+/// The durable revision column is signed: a stored revision at the
+/// representable bound is exhausted for storage, so the update reports the
+/// documented domain outcome and writes no revision row.
+#[tokio::test]
+async fn learning_revision_at_the_signed_bound_is_exhausted_without_a_write() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let seeded = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner lives in Tokyo",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(seeded, Ok(MemoryChangeOutcome::Committed { .. })));
+    {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .execute(
+                "UPDATE learning_memory SET revision = ?1 WHERE memory_id = ?2",
+                rusqlite::params![i64::MAX, crate::codec::encode_id(memory.as_raw())],
+            )
+            .expect("the current row must move to the bound");
+        guard
+            .execute(
+                "UPDATE learning_memory_revision SET revision = ?1 WHERE memory_id = ?2",
+                rusqlite::params![i64::MAX, crate::codec::encode_id(memory.as_raw())],
+            )
+            .expect("the revision row must move to the bound");
+    }
+    let outcome = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::from_u64(i64::MAX as u64),
+                },
+                "owner lives in Osaka",
+                ChangeKind::ChangedSince,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(MemoryChangeOutcome::RevisionExhausted { memory })
+    );
+    let revisions: i64 = {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .query_row(
+                "SELECT COUNT(*) FROM learning_memory_revision WHERE memory_id = ?1",
+                rusqlite::params![crate::codec::encode_id(memory.as_raw())],
+                |row| row.get(0),
+            )
+            .expect("the revision count must read")
+    };
+    assert_eq!(
+        revisions, 1,
+        "the exhausted update must write no revision row"
+    );
+}
+
 #[tokio::test]
 async fn learning_update_appends_a_revision_and_keeps_the_previous_one() {
     let store = open_memory().await.unwrap();

@@ -66,7 +66,12 @@ struct Subscription {
     companion: RawId,
     scan_floor: u64,
     drained_once: bool,
-    resume: Option<(UndeliveredCursor, bool, u32)>,
+    /// Undrained pass continuation: cursor, filter, bound, and the wire of the
+    /// cursor minted for it. A cursor-less request continues it before looking
+    /// for arrivals, so an abandoned page never resends its head as "new"; the
+    /// stored wire is consumed on that advance so the connection's cursor map
+    /// stays at one entry (forward-only paging contract).
+    resume: Option<(UndeliveredCursor, bool, u32, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -693,7 +698,15 @@ impl HostHandle {
         limit: u32,
         trigger: PassTrigger,
     ) -> Option<UndeliveredResponse> {
-        let from_cursor = cursor.map(|cursor| cursor.0.as_str());
+        // The wire this pass continues from, if any: the request's own cursor
+        // wire, or the one a stored continuation was minted under. It is
+        // consumed (see `take_cursor`) so a cursor-less advance replaces the
+        // predecessor wire instead of leaking it.
+        let mut from_cursor = cursor.map(|cursor| cursor.0.clone());
+        // Resolve the fetch window: continue a stored pass, catch up on new
+        // arrivals, or rewind to the head for an explicit pass. The plan
+        // installs this connection's subscription, so it runs under the
+        // ownership section; a superseded connection plans nothing.
         let start: PlanStart = if let Some(cursor) = cursor {
             let state = crate::lock_unpoison(&self.presentations);
             match state.cursors.get(&(conn.to_string(), cursor.0.clone())) {
@@ -730,14 +743,18 @@ impl HostHandle {
                     sub.resume = None;
                 }
                 let continuation = (trigger != PassTrigger::Redisplay)
-                    .then_some(sub.resume)
+                    .then_some(sub.resume.as_ref())
                     .flatten()
-                    .filter(|_| sub.companion == companion.as_raw());
+                    .filter(|_| sub.companion == companion.as_raw())
+                    .map(|(cursor, pending_only, saved, wire)| {
+                        (*cursor, *pending_only, *saved, wire.clone())
+                    });
                 let arrivals = trigger != PassTrigger::Redisplay
                     && sub.drained_once
                     && sub.scan_floor < bound
                     && sub.companion == companion.as_raw();
-                let plan = if let Some((cursor, pending_only, saved)) = continuation {
+                let plan = if let Some((cursor, pending_only, saved, wire)) = continuation {
+                    from_cursor = Some(wire);
                     Some(PlanStart::Continued {
                         cursor,
                         pending_only,
@@ -822,7 +839,7 @@ impl HostHandle {
                 // every repeat request and the map would grow with the page
                 // count (take_cursor's contract).
                 self.with_presentation_state(live, |state| {
-                    Self::take_cursor(state, conn, from_cursor);
+                    Self::take_cursor(state, conn, from_cursor.as_deref());
                 })?;
                 return Box::pin(self.begin_pass(
                     live,
@@ -844,12 +861,9 @@ impl HostHandle {
             if let Some(next) = fetched_next {
                 let installed = self
                     .with_presentation_state(live, |state| {
-                        Self::take_cursor(state, conn, from_cursor);
+                        Self::take_cursor(state, conn, from_cursor.as_deref());
                         summary.has_more = true;
-                        if let Some(sub) = state.subs.get_mut(conn) {
-                            sub.resume = Some((next, pending_only, pass_limit));
-                        }
-                        summary.next_cursor = Some(Self::mint_cursor(
+                        let wire = Self::mint_cursor(
                             state,
                             conn,
                             StoredCursor::Undelivered {
@@ -858,7 +872,11 @@ impl HostHandle {
                                 pending_only,
                                 limit: pass_limit,
                             },
-                        ));
+                        );
+                        if let Some(sub) = state.subs.get_mut(conn) {
+                            sub.resume = Some((next, pending_only, pass_limit, wire.0.clone()));
+                        }
+                        summary.next_cursor = Some(wire);
                     })
                     .is_some();
                 if !installed {
@@ -880,7 +898,7 @@ impl HostHandle {
             upper,
             pending_only,
             pass_limit,
-            from_cursor,
+            from_cursor.as_deref(),
         )
         .await
     }
@@ -1010,25 +1028,22 @@ impl HostHandle {
                 state.receipt_ids.insert(receipt_id.clone(), companion_key);
                 let (next_cursor, drained) = match fetched_next {
                     Some(next) => {
-                        let resume = (next, pending_only, limit);
+                        let wire = Self::mint_cursor(
+                            state,
+                            conn,
+                            StoredCursor::Undelivered {
+                                companion: companion.as_raw(),
+                                cursor: next,
+                                pending_only,
+                                limit,
+                            },
+                        );
                         if let Some(sub) = state.subs.get_mut(conn)
                             && sub.companion == companion.as_raw()
                         {
-                            sub.resume = Some(resume);
+                            sub.resume = Some((next, pending_only, limit, wire.0.clone()));
                         }
-                        (
-                            Some(Self::mint_cursor(
-                                state,
-                                conn,
-                                StoredCursor::Undelivered {
-                                    companion: companion.as_raw(),
-                                    cursor: next,
-                                    pending_only,
-                                    limit,
-                                },
-                            )),
-                            false,
-                        )
+                        (Some(wire), false)
                     }
                     None => {
                         if let Some(sub) = state.subs.get_mut(conn)
@@ -1369,8 +1384,11 @@ impl HostHandle {
                 };
                 match ack.status {
                     PresentationStatus::Presented => {
+                        // Bounded to the carried ids; later arrivals are never
+                        // touched by this ACK.
                         let mut presented = 0_u32;
                         let mut held = 0_u32;
+                        let mut not_written = 0_u32;
                         for id in &receipt.selected {
                             match store.compare_and_mark_reported_sync(
                                 *id,
@@ -1383,15 +1401,27 @@ impl HostHandle {
                                 Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
                                     held += 1;
                                 }
-                                _ => {}
+                                // `AlreadyPresented` writes nothing but is a
+                                // true duplicate, so it is not "not written".
+                                Ok(ene_companion::ReportStatusTransition::AlreadyPresented) => {}
+                                // A stale/gone row or a rolled-back compare
+                                // wrote nothing and stays re-presentable:
+                                // never count it as already presented.
+                                Ok(_) | Err(_) => not_written += 1,
                             }
                         }
                         if held > 0 && presented == 0 {
                             UndeliveredAckOutcome::HeldForErasure
                         } else if presented > 0 {
                             UndeliveredAckOutcome::Presented { presented }
-                        } else {
+                        } else if not_written == 0 {
+                            // Every carried row was already presented (a parallel
+                            // round observation got there first): no write.
                             UndeliveredAckOutcome::AlreadyPresented
+                        } else {
+                            // Some rows were not written but stay
+                            // re-presentable: nothing durable changed.
+                            UndeliveredAckOutcome::KeptUnknown
                         }
                     }
                     PresentationStatus::Failed => {
@@ -1812,19 +1842,13 @@ impl HostHandle {
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
         }
-        let selected = self
-            .with_current_connection(live, || {
-                self.conversation_tasks
-                    .select(running, task, live.connection_id);
-            })
-            .is_some();
-        if !selected {
-            return vec![stale_operation(
-                frame,
-                live,
-                "task selection on a superseded connection",
-            )];
-        }
+        // The selection commit runs under the ownership section: a
+        // connection superseded while the Task was read selects nothing, and
+        // the new connection must select again (IPC §9.3 replacement).
+        // The report-row read is fallible, so it runs before the selection
+        // commit: a store failure answers `Unavailable` (documented as
+        // side-effect-free) while the projection is still untouched, never
+        // after the connection already selected the Task.
         let details = if record.task.adopted_result.is_some() {
             true
         } else {
@@ -1839,6 +1863,19 @@ impl HostHandle {
                 }
             }
         };
+        let selected = self
+            .with_current_connection(live, || {
+                self.conversation_tasks
+                    .select(running, task, live.connection_id);
+            })
+            .is_some();
+        if !selected {
+            return vec![stale_operation(
+                frame,
+                live,
+                "task selection on a superseded connection",
+            )];
+        }
         vec![outgoing_frame(
             frame,
             live,

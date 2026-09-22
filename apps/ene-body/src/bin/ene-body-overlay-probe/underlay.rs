@@ -2,9 +2,11 @@
 //!
 //! The Body overlay is an `Overlay` layer surface with an alpha-aware input
 //! region. This underlay is a `Top` layer surface (immediately below the
-//! `Overlay` layer) covering the whole output: a click that the overlay does
-//! not claim lands here and is written as raw evidence. It is not a product
-//! surface.
+//! `Overlay` layer) anchored top-left and sized to
+//! `ENE_PROBE_UNDERLAY_WIDTH` x `ENE_PROBE_UNDERLAY_HEIGHT` (default 700x900),
+//! so it only receives clicks that fall inside that region: a click the
+//! overlay does not claim there lands here and is written as raw evidence. It
+//! is not a product surface.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -181,8 +183,9 @@ impl State {
         let Ok(mut file) = opened else {
             return;
         };
-        if serde_json::to_writer(&mut file, &line).is_ok() && file.write_all(b"\n").is_err() {
+        if serde_json::to_writer(&mut file, &line).is_ok() {
             // Best effort: a lost newline is not a probe failure.
+            drop(file.write_all(b"\n"));
         }
     }
 }

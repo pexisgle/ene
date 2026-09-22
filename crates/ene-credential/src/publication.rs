@@ -87,6 +87,23 @@ pub enum MutationOutcome {
     Unknown,
 }
 
+/// Outcome of a mutation that committed nothing to the active reference or
+/// revision.
+///
+/// Kept narrower than [`MutationOutcome`] so a caller cannot record a commit
+/// (`Activated`/`Revoked`) through the non-committing journal path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UncommittedMutationOutcome {
+    /// Another writer won the same expected revision; nothing changed here.
+    Stale,
+    /// The Owner declined, or the session expired before completion.
+    Rejected,
+    /// The OS store refused the value. Nothing is active.
+    Refused,
+    /// The result could not be determined. Never success, never "not run".
+    Unknown,
+}
+
 /// Durable record of one credential mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialMutation {
@@ -148,10 +165,26 @@ pub trait CredentialPublicationRepository: Send + Sync {
         retired_bearer: Option<&str>,
     ) -> Result<ActivationOutcome, CredentialTechnicalError>;
 
+    /// Commits one revocation under a single transaction.
+    ///
+    /// The mutation must be an undecided [`MutationKind::Revoke`]. The sweep of
+    /// `retired_bearer`, the cleared active reference (with the retired version
+    /// recorded for cleanup), the credential-set revision, and the `Revoked`
+    /// outcome commit together, so a premise taken before the call is either
+    /// covered by the sweep or refused by the revision.
+    async fn revoke_credential(
+        &self,
+        mutation_id: &str,
+        retired_bearer: Option<&str>,
+    ) -> Result<ActivationOutcome, CredentialTechnicalError>;
+
+    /// Records a decided outcome that committed nothing to the active
+    /// reference or revision (stale, refused, rejected, unknown) and abandons
+    /// the candidate.
     async fn record_credential_mutation_outcome(
         &self,
         mutation_id: &str,
-        outcome: MutationOutcome,
+        outcome: UncommittedMutationOutcome,
     ) -> Result<(), CredentialTechnicalError>;
 
     async fn credential_mutation(
@@ -165,8 +198,12 @@ pub trait CredentialPublicationRepository: Send + Sync {
         label: &str,
     ) -> Result<ActiveVersion, CredentialTechnicalError>;
 
+    /// Marks a retired version's item as removed and completes the mutation
+    /// that retired it. The value is already inactive; this only records that
+    /// the cleanup finished.
     async fn mark_credential_cleaned(
         &self,
+        mutation_id: &str,
         provider: &str,
         label: &str,
         version: SecretVersionId,

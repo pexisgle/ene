@@ -616,8 +616,8 @@ async fn run_command(
         cmds::Command::SelectTask { task } => {
             let selected = request_select_task(&mut session, &task).await?;
             emit(&format!(
-                "selected {} rev {} {}",
-                selected.task.0, selected.revision, selected.progress
+                "selected {} rev {} {} purpose {}",
+                selected.task.0, selected.revision, selected.progress, selected.purpose
             ))
         }
         cmds::Command::ResumeTask {
@@ -672,19 +672,35 @@ async fn run_command(
     }
 }
 
+/// Fails a `Reject` frame before any helper matches on its expected payload, so
+/// a superseded authenticated connection surfaces the Host's operational reason
+/// (`RejectKind::StaleConnection`) rather than an "unexpected Reject" shape
+/// error. `Reject` is a defined answer, not a malformed payload; the exit class
+/// stays `ServerRejected`.
+fn answer(payload: WirePayload, operation: &str) -> Result<WirePayload, CliError> {
+    match payload {
+        WirePayload::Reject(notice) => Err(CliError::ServerRejected(format!(
+            "{operation} rejected: {}",
+            notice.detail
+        ))),
+        other => Ok(other),
+    }
+}
+
+/// One bounded usage summary read. `Reject` (a malformed filter the Host
+/// refuses) stays distinct from `Unavailable` (the read could not answer) and
+/// from a stale cursor.
 async fn request_usage(
     session: &mut client::Client,
     args: &cmds::UsageArgs,
 ) -> Result<ene_api::v1::usage::UsageSummaryResponse, CliError> {
-    match session
-        .request(WirePayload::UsageSummaryRequest(cmds::usage_request(args)))
-        .await?
-    {
+    match answer(
+        session
+            .request(WirePayload::UsageSummaryRequest(cmds::usage_request(args)))
+            .await?,
+        "usage request",
+    )? {
         WirePayload::UsageSummaryResponse(response) => Ok(response),
-        WirePayload::Reject(notice) => Err(CliError::ServerRejected(format!(
-            "usage request rejected: {}",
-            notice.detail
-        ))),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while reading usage; expected UsageSummaryResponse",
             unexpected.message_type()
@@ -776,18 +792,16 @@ async fn request_deletion_status(
     use ene_api::v1::deletion::DeletionStatusRequest;
     use ene_api::v1::refs::DeletionStatusCursorWire;
 
-    match session
-        .request(WirePayload::DeletionStatusRequest(DeletionStatusRequest {
-            cursor: cursor.map(|cursor| DeletionStatusCursorWire(cursor.to_string())),
-            limit,
-        }))
-        .await?
-    {
+    match answer(
+        session
+            .request(WirePayload::DeletionStatusRequest(DeletionStatusRequest {
+                cursor: cursor.map(|cursor| DeletionStatusCursorWire(cursor.to_string())),
+                limit,
+            }))
+            .await?,
+        "deletion status",
+    )? {
         WirePayload::DeletionStatusResponse(response) => Ok(response),
-        WirePayload::Reject(notice) => Err(CliError::ServerRejected(format!(
-            "deletion status rejected: {}",
-            notice.detail
-        ))),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while reading the deletion status; expected DeletionStatusResponse",
             unexpected.message_type()
@@ -811,12 +825,21 @@ fn emit(text: &str) -> Result<(), CliError> {
 /// A setup/status view always carries the five Host setup sections when the
 /// stores are readable; an empty section set is `unavailable_view()`, the only
 /// signal the view path has for an unreadable store (`ene-core` `setup.rs`).
-fn emit_setup_view(view: &ene_api::v1::management::ManagementView) -> Result<(), CliError> {
+/// Both the read-only display and the assign flow must refuse that view before
+/// reading its mark: `unavailable_view()` carries no usable mark, so an assign
+/// against it would commit mutating steps before the assignment is rejected as
+/// stale.
+fn require_setup_view(view: &ene_api::v1::management::ManagementView) -> Result<(), CliError> {
     if view.sections.is_empty() {
         return Err(CliError::ServerOutcome(String::from(
             "setup view is unavailable; retry later",
         )));
     }
+    Ok(())
+}
+
+fn emit_setup_view(view: &ene_api::v1::management::ManagementView) -> Result<(), CliError> {
+    require_setup_view(view)?;
     emit(&cmds::render_view(view))
 }
 
@@ -824,10 +847,12 @@ async fn request_view(
     session: &mut client::Client,
     request: ene_api::v1::management::ManagementViewRequest,
 ) -> Result<ene_api::v1::management::ManagementView, CliError> {
-    match session
-        .request(WirePayload::ManagementViewRequest(request))
-        .await?
-    {
+    match answer(
+        session
+            .request(WirePayload::ManagementViewRequest(request))
+            .await?,
+        "view request",
+    )? {
         WirePayload::ManagementView(view) => Ok(view),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while reading a view; expected ManagementView",
@@ -864,10 +889,12 @@ async fn request_history(
         Some(round) => cmds::round_history_request(&companion, round, limit),
         None => cmds::history_request(&companion, limit),
     };
-    match session
-        .request(WirePayload::HistoryRequest(request))
-        .await?
-    {
+    match answer(
+        session
+            .request(WirePayload::HistoryRequest(request))
+            .await?,
+        "history request",
+    )? {
         WirePayload::HistoryResponse(response) => history_items(response),
         unexpected => Err(CliError::ServerRejected(format!(
             "unexpected {} while reading history; expected HistoryResponse",
@@ -882,13 +909,15 @@ async fn request_task_list(
     limit: Option<u32>,
 ) -> Result<ene_api::v1::undelivered::TaskListPage, CliError> {
     use ene_api::v1::undelivered::TaskListResponse;
-    match session
-        .request(WirePayload::ListTasks(cmds::list_tasks_request(
-            cursor.map(str::to_owned),
-            limit,
-        )))
-        .await?
-    {
+    match answer(
+        session
+            .request(WirePayload::ListTasks(cmds::list_tasks_request(
+                cursor.map(str::to_owned),
+                limit,
+            )))
+            .await?,
+        "task list request",
+    )? {
         WirePayload::TaskListResponse(TaskListResponse::Page(page)) => Ok(page),
         WirePayload::TaskListResponse(TaskListResponse::StaleBaseView { .. }) => {
             Err(CliError::ServerOutcome(String::from(
@@ -911,14 +940,16 @@ async fn request_task_report(
     cursor: Option<&str>,
     limit: Option<u32>,
 ) -> Result<ene_api::v1::undelivered::TaskReportPage, CliError> {
-    let response = match session
-        .request(WirePayload::GetTaskReport(cmds::task_report_request(
-            task,
-            cursor.map(str::to_owned),
-            limit,
-        )))
-        .await?
-    {
+    let response = match answer(
+        session
+            .request(WirePayload::GetTaskReport(cmds::task_report_request(
+                task,
+                cursor.map(str::to_owned),
+                limit,
+            )))
+            .await?,
+        "task report request",
+    )? {
         WirePayload::TaskReportResponse(response) => response,
         unexpected => {
             return Err(CliError::ServerRejected(format!(
@@ -940,14 +971,16 @@ async fn request_report_source(
     limit_bytes: Option<u32>,
 ) -> Result<ene_api::v1::undelivered::ReportSourcePageView, CliError> {
     use ene_api::v1::undelivered::ReportSourceResponse;
-    match session
-        .request(WirePayload::GetReportSource(cmds::report_source_request(
-            source,
-            cursor,
-            limit_bytes,
-        )))
-        .await?
-    {
+    match answer(
+        session
+            .request(WirePayload::GetReportSource(cmds::report_source_request(
+                source,
+                cursor,
+                limit_bytes,
+            )))
+            .await?,
+        "report source request",
+    )? {
         WirePayload::ReportSourceResponse(ReportSourceResponse::Page(page)) => Ok(page),
         WirePayload::ReportSourceResponse(ReportSourceResponse::UnknownRef) => {
             Err(CliError::ServerOutcome(String::from(
@@ -969,10 +1002,12 @@ async fn request_select_task(
     task: &str,
 ) -> Result<ene_api::v1::undelivered::TaskSelected, CliError> {
     use ene_api::v1::undelivered::SelectTaskResponse;
-    match session
-        .request(WirePayload::SelectTask(cmds::select_task_request(task)))
-        .await?
-    {
+    match answer(
+        session
+            .request(WirePayload::SelectTask(cmds::select_task_request(task)))
+            .await?,
+        "task selection request",
+    )? {
         WirePayload::SelectTaskResponse(SelectTaskResponse::Selected(selected)) => Ok(selected),
         WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef) => Err(
             CliError::ServerOutcome(String::from("unknown task reference; re-list and retry")),
@@ -996,15 +1031,17 @@ async fn run_resume_task(
     purpose: &str,
     instruction: String,
 ) -> Result<(), CliError> {
-    let outcome = match session
-        .request(WirePayload::ResumeTask(cmds::resume_task_request(
-            task,
-            revision,
-            purpose,
-            instruction,
-        )))
-        .await?
-    {
+    let outcome = match answer(
+        session
+            .request(WirePayload::ResumeTask(cmds::resume_task_request(
+                task,
+                revision,
+                purpose,
+                instruction,
+            )))
+            .await?,
+        "task resume request",
+    )? {
         WirePayload::ResumeTaskOutcome(outcome) => outcome,
         unexpected => {
             return Err(CliError::ServerRejected(format!(
@@ -1026,14 +1063,16 @@ async fn run_undelivered(
     limit: Option<u32>,
     redisplay: bool,
 ) -> Result<(), CliError> {
-    let response = match session
-        .request(WirePayload::UndeliveredRequest(cmds::undelivered_request(
-            cursor.map(str::to_owned),
-            limit,
-            redisplay,
-        )))
-        .await?
-    {
+    let response = match answer(
+        session
+            .request(WirePayload::UndeliveredRequest(cmds::undelivered_request(
+                cursor.map(str::to_owned),
+                limit,
+                redisplay,
+            )))
+            .await?,
+        "undelivered request",
+    )? {
         WirePayload::UndeliveredResponse(response) => response,
         unexpected => {
             return Err(CliError::ServerRejected(format!(
@@ -1060,14 +1099,16 @@ async fn ack_summary(
         return Ok(());
     }
     let ack = cmds::undelivered_ack(&summary.receipt.0, PresentationStatus::Presented);
-    let outcome = match session
-        .request_observed(
-            WirePayload::UndeliveredAck(ack),
-            Some(summary.round.clone()),
-            Some(summary.presence_generation),
-        )
-        .await?
-    {
+    let outcome = match answer(
+        session
+            .request_observed(
+                WirePayload::UndeliveredAck(ack),
+                Some(summary.round.clone()),
+                Some(summary.presence_generation),
+            )
+            .await?,
+        "presentation confirmation",
+    )? {
         WirePayload::UndeliveredAckOutcome(outcome) => outcome,
         unexpected => {
             return Err(CliError::ServerRejected(format!(
@@ -1086,10 +1127,12 @@ async fn apply_intent(
     session: &mut client::Client,
     intent: ene_api::v1::management::ManagementIntent,
 ) -> Result<String, CliError> {
-    let outcome = match session
-        .request(WirePayload::ManagementIntent(intent))
-        .await?
-    {
+    let outcome = match answer(
+        session
+            .request(WirePayload::ManagementIntent(intent))
+            .await?,
+        "management intent",
+    )? {
         WirePayload::ManagementOutcome(outcome) => outcome,
         unexpected => {
             return Err(CliError::ServerRejected(format!(
@@ -1117,6 +1160,7 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
             learning,
         } => {
             let view = request_view(session, cmds::setup_view_request()).await?;
+            require_setup_view(&view)?;
             let base = BaseViewMark(view.mark.0.clone());
             let credential =
                 cmds::credential_intent(CommandWireId(uuid::Uuid::new_v4()), &base, &provider);
@@ -1147,6 +1191,31 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
     }
 }
 
+/// Paints one auto-presented backlog summary to `stdout` and remembers its
+/// receipt in `auto` for the post-close ACK. A stdio failure returns before
+/// any ACK, so the Host keeps the batch `Unknown`.
+fn paint_auto(
+    stdout: &mut std::io::Stdout,
+    summary: UndeliveredSummary,
+    auto: &mut Vec<UndeliveredSummary>,
+) -> Result<(), CliError> {
+    let text = cmds::render_summary(&summary);
+    if !text.is_empty() {
+        writeln!(stdout, "{text}").map_err(|error| {
+            CliError::Transport(format!("stdout write failed: {}", error.kind()))
+        })?;
+        stdout.flush().map_err(|error| {
+            CliError::Transport(format!("stdout flush failed: {}", error.kind()))
+        })?;
+    }
+    auto.push(summary);
+    Ok(())
+}
+
+/// Any stdio failure before the close frame and the buffered frames are
+/// flushed returns early and sends no presentation observation, so the Host
+/// keeps the stream `Pending`/`Unknown` instead of recording a presentation
+/// the operator never saw.
 async fn run_send(
     session: &mut client::Client,
     language: &str,
@@ -1159,7 +1228,10 @@ async fn run_send(
         send.text,
         String::from(language),
     );
-    let outcome = match session.request(WirePayload::SubmitTextInput(input)).await? {
+    let outcome = match answer(
+        session.request(WirePayload::SubmitTextInput(input)).await?,
+        "text submission",
+    )? {
         WirePayload::RoundIntakeOutcome(outcome) => outcome,
         unexpected => {
             return Err(CliError::ServerRejected(format!(
@@ -1182,22 +1254,13 @@ async fn run_send(
         if let WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) =
             frame.payload
         {
-            let text = cmds::render_summary(&summary);
-            if !text.is_empty() {
-                writeln!(stdout, "{text}").map_err(|error| {
-                    CliError::Transport(format!("stdout write failed: {}", error.kind()))
-                })?;
-                stdout.flush().map_err(|error| {
-                    CliError::Transport(format!("stdout flush failed: {}", error.kind()))
-                })?;
-            }
-            auto.push(summary);
+            paint_auto(&mut stdout, summary, &mut auto)?;
         }
     }
     let mut stream: Option<StreamWireId> = None;
     let mut shown = false;
     let close_status = loop {
-        match session.next_frame().await? {
+        match answer(session.next_frame().await?, "text stream")? {
             WirePayload::TextStreamOpen(open) => {
                 if stream.is_none() {
                     stream = Some(open.stream);
@@ -1226,16 +1289,9 @@ async fn run_send(
                 // generation in the frame loop; there is nothing to display.
             }
             WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) => {
-                let text = cmds::render_summary(&summary);
-                if !text.is_empty() {
-                    writeln!(stdout, "{text}").map_err(|error| {
-                        CliError::Transport(format!("stdout write failed: {}", error.kind()))
-                    })?;
-                    stdout.flush().map_err(|error| {
-                        CliError::Transport(format!("stdout flush failed: {}", error.kind()))
-                    })?;
-                }
-                auto.push(summary);
+                // Auto-presented backlog interleaved with the stream: paint
+                // inline and remember the receipt for the end-of-send ACK.
+                paint_auto(&mut stdout, summary, &mut auto)?;
             }
             WirePayload::UndeliveredResponse(_) | WirePayload::UndeliveredAckOutcome(_) => {
                 // Non-summary fetch answers and stray ACK outcomes never

@@ -16,6 +16,7 @@ use zeroize::Zeroize as _;
 
 use crate::control::ConfirmationClient;
 use crate::ui::DesktopError;
+use crate::ui::request_with_timeout;
 
 pub struct DeletionPanel {
     exact_text: String,
@@ -23,7 +24,6 @@ pub struct DeletionPanel {
     mark: String,
     page: Option<DeletionStatusPage>,
     notice: String,
-    pending_request_id: Option<String>,
     pending: Vec<ene_local_control::PendingDeletionPreview>,
     selected: String,
 }
@@ -37,7 +37,6 @@ impl core::fmt::Debug for DeletionPanel {
             .field("mark", &self.mark)
             .field("page", &self.page)
             .field("notice", &self.notice)
-            .field("pending_request_id", &self.pending_request_id)
             .finish()
     }
 }
@@ -50,11 +49,18 @@ impl Default for DeletionPanel {
             mark: String::new(),
             page: None,
             notice: String::new(),
-            pending_request_id: None,
             pending: Vec::new(),
             selected: String::new(),
         }
     }
+}
+
+fn request_key(id: &str) -> String {
+    format!("request:{id}")
+}
+
+fn operation_key(operation: &str, sweep: u64) -> String {
+    format!("operation:{operation}:{sweep}")
 }
 
 impl DeletionPanel {
@@ -65,7 +71,7 @@ impl DeletionPanel {
             .iter()
             .enumerate()
             .map(|(index, p)| Row {
-                key: format!("request:{}", p.request_id),
+                key: request_key(&p.request_id),
                 title: format!(
                     "{} {}",
                     tr(locale, "削除要求", "Deletion request"),
@@ -82,7 +88,7 @@ impl DeletionPanel {
             .collect();
         if let Some(page) = &self.page {
             rows.extend(page.operations.iter().map(|op| Row {
-                key: format!("operation:{}:{}", op.operation.0, op.sweep),
+                key: operation_key(&op.operation.0, op.sweep),
                 title: tr(locale, "データ削除", "Data deletion"),
                 state: state(locale, op.phase.as_str()),
                 body: match &op.participants {
@@ -104,11 +110,16 @@ impl DeletionPanel {
         self.selected.clone()
     }
     pub(crate) fn select_key(&mut self, key: &str) -> Result<(), DesktopError> {
-        if !self
-            .rows(crate::i18n::Locale::En)
+        let known = self
+            .pending
             .iter()
-            .any(|r| r.key == key)
-        {
+            .any(|p| request_key(&p.request_id) == key)
+            || self.page.as_ref().is_some_and(|page| {
+                page.operations
+                    .iter()
+                    .any(|op| operation_key(&op.operation.0, op.sweep) == key)
+            });
+        if !known {
             return Err(DesktopError::Protocol(String::from(
                 "stale deletion selection",
             )));
@@ -119,7 +130,7 @@ impl DeletionPanel {
     pub(crate) fn can_resume(&self) -> bool {
         self.page.as_ref().is_some_and(|p| {
             p.operations.iter().any(|op| {
-                self.selected == format!("operation:{}:{}", op.operation.0, op.sweep)
+                self.selected == operation_key(&op.operation.0, op.sweep)
                     && op.phase == DeletionPhaseWire::Held
             })
         })
@@ -160,9 +171,6 @@ impl DeletionPanel {
         lines.push(String::from(
             "targeted-deletion is distinct from conversational forget",
         ));
-        if let Some(pending) = &self.pending_request_id {
-            lines.push(format!("pending-request {pending}"));
-        }
         let Some(page) = &self.page else {
             if self.mark.is_empty() {
                 lines.push(String::from("deletion: (empty)"));
@@ -218,7 +226,13 @@ impl DeletionPanel {
             confirmed: false,
         };
         self.wipe_exact_text();
-        match ask(client, WirePayload::ManagementIntent(intent)).await? {
+        match request_with_timeout(
+            client,
+            WirePayload::ManagementIntent(intent),
+            Duration::from_secs(15),
+        )
+        .await?
+        {
             WirePayload::ManagementOutcome(outcome) => {
                 self.notice = format!("deletion-outcome={outcome:?}");
                 Ok(outcome)
@@ -246,7 +260,13 @@ impl DeletionPanel {
             },
             confirmed: true,
         };
-        match ask(client, WirePayload::ManagementIntent(intent)).await? {
+        match request_with_timeout(
+            client,
+            WirePayload::ManagementIntent(intent),
+            Duration::from_secs(15),
+        )
+        .await?
+        {
             WirePayload::ManagementOutcome(outcome) => Ok(outcome),
             other => Err(DesktopError::Protocol(format!(
                 "expected ManagementOutcome, got {}",
@@ -256,12 +276,13 @@ impl DeletionPanel {
     }
 
     pub async fn refresh(&mut self, client: &mut Client) -> Result<(), DesktopError> {
-        match ask(
+        match request_with_timeout(
             client,
             WirePayload::DeletionStatusRequest(DeletionStatusRequest {
                 cursor: None,
                 limit: None,
             }),
+            Duration::from_secs(15),
         )
         .await?
         {
@@ -273,7 +294,7 @@ impl DeletionPanel {
             WirePayload::DeletionStatusResponse(DeletionStatusResponse::Unavailable) => {
                 self.page = None;
                 self.notice = String::from("deletion status is unavailable; retry later");
-                Err(DesktopError::Protocol(String::from(
+                Err(DesktopError::Unavailable(String::from(
                     "deletion status unavailable",
                 )))
             }
@@ -291,20 +312,12 @@ impl DeletionPanel {
         let pending = seat.list_pending_deletions().await?;
         let preview = pending
             .iter()
-            .find(|p| self.selected == format!("request:{}", p.request_id))
-            .or_else(|| {
-                if self.selected.is_empty() && pending.len() == 1 {
-                    pending.first()
-                } else {
-                    None
-                }
-            });
+            .find(|p| self.selected == request_key(&p.request_id));
         let Some(preview) = preview else {
             return Err(DesktopError::Protocol(String::from(
                 "no staged deletion request",
             )));
         };
-        self.pending_request_id = Some(preview.request_id.clone());
         seat.request_deletion_confirm(&preview.request_id).await
     }
 
@@ -312,14 +325,7 @@ impl DeletionPanel {
         let operation = self.page.as_ref().and_then(|page| {
             page.operations
                 .iter()
-                .find(|op| self.selected == format!("operation:{}:{}", op.operation.0, op.sweep))
-                .or_else(|| {
-                    if self.selected.is_empty() && page.operations.len() == 1 {
-                        page.operations.first()
-                    } else {
-                        None
-                    }
-                })
+                .find(|op| self.selected == operation_key(&op.operation.0, op.sweep))
         });
         let Some(operation) = operation else {
             return Err(DesktopError::Protocol(String::from(
@@ -335,13 +341,29 @@ impl DeletionPanel {
     }
 
     pub(crate) fn note_resume(&mut self, reply: &FromConfirmation) {
-        self.notice = match reply {
-            FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
-                operation,
-                sweep,
-            })) => format!("resumed {operation} sweep {sweep}"),
-            other => format!("resume={other:?}"),
-        };
+        self.notice =
+            match reply {
+                FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
+                    operation,
+                    sweep,
+                })) => format!("resumed {operation} sweep {sweep}"),
+                FromConfirmation::Outcome(ControlOutcome::Deletion(
+                    DeletionOutcome::StaleSweep { operation, sweep },
+                )) => format!("stale-sweep {operation} sweep {sweep}"),
+                FromConfirmation::Outcome(ControlOutcome::Deletion(
+                    DeletionOutcome::Completed { operation, sweep },
+                )) => format!("completed {operation} sweep {sweep}"),
+                FromConfirmation::Outcome(ControlOutcome::Deletion(
+                    DeletionOutcome::Finalizing { operation, sweep },
+                )) => format!("finalizing {operation} sweep {sweep}"),
+                FromConfirmation::Outcome(ControlOutcome::Deletion(
+                    DeletionOutcome::HeldByOperation { operation, sweep },
+                )) => format!("held {operation} sweep {sweep}"),
+                FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Missing)) => {
+                    String::from("missing")
+                }
+                other => format!("resume={other:?}"),
+            };
     }
 }
 
@@ -373,9 +395,54 @@ fn render_operation(operation: &DeletionOperationStatusView) -> String {
     )
 }
 
-async fn ask(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(Duration::from_secs(15), client.request(payload))
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)
+#[cfg(test)]
+mod tests {
+    use super::{DeletionPanel, render_operation};
+    use ene_api::v1::deletion::{
+        DeletionOperationStatusView, DeletionParticipantReportWire, DeletionPhaseWire,
+        DeletionPurposeWire,
+    };
+    use ene_api::v1::refs::DeletionOperationWireRef;
+
+    #[test]
+    fn debug_redacts_exact_text() {
+        let mut panel = DeletionPanel::default();
+        panel.set_exact_text(String::from("raw-secret-keyword"));
+        let rendered = format!("{panel:?}");
+        assert!(
+            !rendered.contains("raw-secret-keyword"),
+            "exact text must not Debug: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"));
+        let body = panel.render();
+        assert!(
+            !body.contains("raw-secret-keyword"),
+            "projection must omit the body: {body}"
+        );
+    }
+
+    #[test]
+    fn phases_are_distinct_in_the_projection() {
+        for phase in [
+            DeletionPhaseWire::Held,
+            DeletionPhaseWire::Finalizing,
+            DeletionPhaseWire::Completed,
+        ] {
+            let line = render_operation(&DeletionOperationStatusView {
+                operation: DeletionOperationWireRef(String::from("op-1")),
+                phase,
+                purpose: DeletionPurposeWire::Privacy,
+                started_at: String::from("2026-09-19T00:00:00Z"),
+                sweep: 1,
+                hold: None,
+                participants: DeletionParticipantReportWire::NotReported,
+            });
+            assert!(
+                line.contains(phase.as_str()),
+                "phase token must appear: {line}"
+            );
+        }
+        assert_ne!(DeletionPhaseWire::Held, DeletionPhaseWire::Completed);
+        assert_ne!(DeletionPhaseWire::Finalizing, DeletionPhaseWire::Completed);
+    }
 }

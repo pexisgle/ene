@@ -384,6 +384,21 @@ impl CredentialStore for MemoryCredentialStore {
 
 pub const ENV_API_KEY: &str = "ENE_OPENAI_API_KEY";
 
+/// The single closed-world provider allow-list, consulted both when the bearer
+/// is pinned at construction and when it is served.
+const SUPPORTED_PROVIDER: &str = "openai";
+
+/// Environment-backed bearer store for the `OpenAI` provider.
+///
+/// The bearer is read from [`ENV_API_KEY`] exactly once when the store is
+/// constructed (Host startup) and held as a zeroizing [`SecretValue`] for the
+/// rest of the run. It is deliberately not re-read per call: a running Host
+/// must not silently adopt a different value than the one its current
+/// credential-set revision was swept and advanced for. Rotation therefore
+/// takes effect on the next Host start, where the startup sweep and revision
+/// advance complete before any use. Only the `"openai"` provider is served
+/// (closed world until real OS stores arrive); every other provider reports
+/// absent. The value is in memory only, so backup exclusion still holds.
 pub struct EnvCredentialStore {
     bearer: Option<SecretValue>,
 }
@@ -412,23 +427,28 @@ impl EnvCredentialStore {
     #[must_use]
     pub fn from_lookup(lookup: impl FnOnce(&str) -> Option<String>) -> Self {
         Self {
-            bearer: resolve_for("openai", lookup).map(|value| SecretValue::new(value.into_bytes())),
+            bearer: resolve_for(SUPPORTED_PROVIDER, lookup)
+                .map(|value| SecretValue::new(value.into_bytes())),
         }
     }
 
     fn pinned(&self, provider: &str) -> Option<&SecretValue> {
-        if provider != "openai" {
+        if provider != SUPPORTED_PROVIDER {
             return None;
         }
         self.bearer.as_ref()
     }
 }
 
+// `SUPPORTED_PROVIDER` is the single allow-list: the construction-time gate in
+// `resolve_for` and the serving-time gate in `pinned` both consult it, so the
+// two can never drift. An empty value counts as absent, matching an unset
+// variable; values arrive as `String`, so the bearer is already valid UTF-8.
 pub(crate) fn resolve_for(
     provider: &str,
     lookup: impl FnOnce(&str) -> Option<String>,
 ) -> Option<String> {
-    if provider != "openai" {
+    if provider != SUPPORTED_PROVIDER {
         return None;
     }
     let raw = lookup(ENV_API_KEY)?;

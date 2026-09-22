@@ -36,7 +36,8 @@ mod imp {
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
         PresentationOutcome,
     };
-    use crate::render::{HitTestMask, RenderFailure, RenderOutcome, SurfaceRenderer};
+    use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
+    use crate::window::{gpu_info, physical};
 
     const LEFT_BUTTON: u32 = 0x110;
     const RIGHT_BUTTON: u32 = 0x111;
@@ -80,6 +81,14 @@ mod imp {
             let compositor =
                 CompositorState::bind(&globals, &qh).map_err(|error| error.to_string())?;
             let layer_shell = LayerShell::bind(&globals, &qh).map_err(|error| error.to_string())?;
+            // Optional protocol: KWin, GNOME and wlroots compositors expose
+            // it. Drag and resize use its accelerated deltas (the cursor
+            // vector the user sees), with the unaccelerated delta only as a
+            // fallback when the compositor leaves the accelerated vector at
+            // zero, so the overlay never feeds its own surface movement back
+            // into the gesture (surface-local motion coordinates are relative
+            // to the moving surface, which made the overlay travel at half
+            // speed).
             let relative_pointer_state = RelativePointerState::bind(&globals, &qh);
             let presentation = globals
                 .bind(&qh, 1..=1, ())
@@ -120,9 +129,9 @@ mod imp {
                 configured: false,
                 frame_ready: true,
                 closed: false,
+                dead: false,
                 scale: 1,
                 size: (placement.width, placement.height),
-                pointer_position: (0.0, 0.0),
                 position: (placement.x, placement.y),
                 interaction: None,
                 events: VecDeque::new(),
@@ -220,6 +229,15 @@ mod imp {
             if !self.state.closed {
                 if self.renderer.is_some() {
                     self.render_frame(&[], true);
+                    // The transparent frame commits the previous visible
+                    // frame's mask; set_input_region is double-buffered, so
+                    // apply the empty region with a second state-only commit.
+                    let wanted_size = (
+                        physical(self.state.size.0, self.state.scale as f32),
+                        physical(self.state.size.1, self.state.scale as f32),
+                    );
+                    self.refresh_input_region(&[], wanted_size);
+                    self.state.layer.commit();
                 } else {
                     self.state.layer.wl_surface().attach(None, 0, 0);
                     self.state.layer.commit();
@@ -231,16 +249,22 @@ mod imp {
         }
 
         pub fn visible(&self) -> bool {
-            self.visible && !self.state.closed
+            self.visible && !self.state.closed && !self.state.dead
         }
 
         pub fn set_placement(&mut self, placement: PlacementBox) {
             self.placement = placement;
             self.state.size = (placement.width, placement.height);
             self.state.position = (placement.x, placement.y);
-            self.state.layer.set_margin(placement.y, 0, 0, placement.x);
-            self.state.layer.set_size(placement.width, placement.height);
+            // The alpha-aware region is recomputed from the next presented
+            // frame at the new size; until then the old region is not reused.
             self.state.region_dirty = true;
+            // A surface the compositor already closed must not be committed
+            // again (same invariant as set_visible).
+            if !self.state.closed {
+                self.state.layer.set_margin(placement.y, 0, 0, placement.x);
+                self.state.layer.set_size(placement.width, placement.height);
+            }
             if let Some(renderer) = &mut self.renderer {
                 let size = (
                     physical(placement.width, placement.scale),
@@ -249,7 +273,9 @@ mod imp {
                 renderer.resize(size.0, size.1);
                 self.renderer_size = size;
             }
-            self.state.layer.commit();
+            if !self.state.closed {
+                self.state.layer.commit();
+            }
         }
 
         pub fn placement(&self) -> PlacementBox {
@@ -284,6 +310,7 @@ mod imp {
 
         pub fn pump(&mut self) {
             if self.pump_events().is_err() {
+                self.state.dead = true;
                 self.renderer = None;
                 self.gpu_failure = Some(GpuFailInfo {
                     reason: GpuFailReason::DeviceLost,
@@ -467,10 +494,8 @@ mod imp {
         region.destroy();
     }
 
-    fn physical(logical: u32, scale: f32) -> u32 {
-        ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
-    }
-
+    /// Output name reported by the compositor, or the proxy identity when the
+    /// output was not announced with a name.
     fn output_name(output_state: &OutputState, output: &wl_output::WlOutput) -> String {
         output_state
             .info(output)
@@ -498,25 +523,20 @@ mod imp {
         entered.unwrap_or_default().to_string()
     }
 
-    fn gpu_info(failure: RenderFailure) -> GpuFailInfo {
-        GpuFailInfo {
-            reason: match failure {
-                RenderFailure::Adapter => GpuFailReason::NoAdapter,
-                RenderFailure::Device => GpuFailReason::RequestDevice,
-                RenderFailure::Surface => GpuFailReason::Surface,
-                RenderFailure::DeviceLost => GpuFailReason::DeviceLost,
-                RenderFailure::OutOfMemory => GpuFailReason::OutOfMemory,
-            },
-        }
-    }
-
     #[derive(Debug)]
     enum Interaction {
+        /// Dragging the whole overlay. `origin` is the surface position at
+        /// press; `accum` is the accelerated pointer displacement since
+        /// press. `start_local` is only the fallback anchor for compositors
+        /// without `zwp_relative_pointer_v1`.
         Drag {
             origin: (i32, i32),
             accum: (f64, f64),
             start_local: (f64, f64),
         },
+        /// Resizing from the bottom-band grip. `origin` is the surface size
+        /// at press; `accum` is the accelerated pointer displacement since
+        /// press. `start_local` is the fallback anchor.
         Resize {
             origin: (u32, u32),
             accum: (f64, f64),
@@ -539,15 +559,19 @@ mod imp {
         layer: LayerSurface,
         presentation: wp_presentation::WpPresentation,
         pointer: Option<wl_pointer::WlPointer>,
+        /// Optional relative-motion source for drag / resize; its accelerated
+        /// delta is preferred.
         relative_pointer: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
         configured: bool,
         frame_ready: bool,
         /// Set when the compositor sends `layer_surface.closed`; the surface
         /// must not be committed or presented again.
         closed: bool,
+        /// Set when the Wayland connection is unusable; the surface can no
+        /// longer be committed or presented.
+        dead: bool,
         scale: i32,
         size: (u32, u32),
-        pointer_position: (f64, f64),
         position: (i32, i32),
         interaction: Option<Interaction>,
         events: VecDeque<Event>,
@@ -789,7 +813,6 @@ mod imp {
                 if &event.surface != self.layer.wl_surface() {
                     continue;
                 }
-                self.pointer_position = event.position;
                 match event.kind {
                     PointerEventKind::Press {
                         button: LEFT_BUTTON,
@@ -825,6 +848,12 @@ mod imp {
                         self.events.push_back(Event::LocalUi(LocalUiFact::Hide));
                     }
                     PointerEventKind::Motion { .. } => {
+                        // Fallback for compositors without
+                        // `zwp_relative_pointer_v1`: surface-local motion is
+                        // relative to the moving surface, so this path can
+                        // under-travel during sustained drags. KWin, GNOME and
+                        // wlroots use the relative-motion path below instead
+                        // (accelerated delta preferred).
                         if self.relative_pointer.is_none() {
                             match self.interaction {
                                 Some(Interaction::Resize {

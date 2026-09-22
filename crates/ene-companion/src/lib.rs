@@ -134,31 +134,55 @@ impl core::fmt::Debug for AppendHistoryCommand {
     }
 }
 
+/// Builds the request semantics fingerprint shared by both constructors.
+///
+/// Returns [`None`] exactly when the request carries no replay key or no
+/// round intent: there is then nothing provable to compare. Keeping the
+/// construction in one place stops the store's in-transaction judge and the
+/// Host's early replay judge from drifting apart when a field is added.
+fn fingerprint_of(
+    command_id: Option<&CommandId>,
+    role: HistoryRole,
+    text: &str,
+    lang: &str,
+    incarnation: Option<(u64, u64)>,
+    round_intent: Option<&RoundIntentMark>,
+) -> Option<RequestFingerprint> {
+    command_id?;
+    Some(RequestFingerprint {
+        role,
+        text: text.to_owned(),
+        lang: lang.to_owned(),
+        incarnation,
+        round_intent: round_intent.cloned()?,
+    })
+}
+
 impl AppendHistoryCommand {
     #[must_use]
     pub fn request_fingerprint(&self) -> Option<RequestFingerprint> {
-        self.command_id.as_ref()?;
-        Some(RequestFingerprint {
-            role: self.role,
-            text: self.text.clone(),
-            lang: self.lang.clone(),
-            incarnation: self.incarnation,
-            round_intent: self.round_intent.clone()?,
-        })
+        fingerprint_of(
+            self.command_id.as_ref(),
+            self.role,
+            &self.text,
+            &self.lang,
+            self.incarnation,
+            self.round_intent.as_ref(),
+        )
     }
 }
 
 impl HistoryMessage {
     #[must_use]
     pub fn request_fingerprint(&self) -> Option<RequestFingerprint> {
-        self.command_id.as_ref()?;
-        Some(RequestFingerprint {
-            role: self.role,
-            text: self.text.clone(),
-            lang: self.lang.clone(),
-            incarnation: self.incarnation,
-            round_intent: self.round_intent.clone()?,
-        })
+        fingerprint_of(
+            self.command_id.as_ref(),
+            self.role,
+            &self.text,
+            &self.lang,
+            self.incarnation,
+            self.round_intent.as_ref(),
+        )
     }
 }
 

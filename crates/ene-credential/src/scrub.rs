@@ -127,15 +127,22 @@ where
             };
             scrubbed = next;
         }
-        // The redaction marker itself contains no bearer text, but a
-        // registered value that is a substring of the marker, or a value
-        // re-formed across a marker boundary, can survive the sequential
-        // replacement. Absence must be proven on the final text: any
-        // surviving occurrence means the scrubber cannot claim removal.
+        // The redaction marker is excluded from the absence proof: a
+        // registered value that is a substring of the marker (for example
+        // "cred") appears inside every marker, so testing the whole scrubbed
+        // text would falsely report a surviving occurrence. Every raw
+        // occurrence was replaced above, so a value seen in a non-marker
+        // segment is a genuine residual; a match wholly inside the marker is
+        // the public marker's own text. Any surviving occurrence means the
+        // scrubber cannot claim removal.
         for (_, credential) in &known {
             let still_present = self
                 .store
-                .with_bearer(credential, |bearer| scrubbed.contains(bearer))
+                .with_bearer(credential, |bearer| {
+                    scrubbed
+                        .split(REDACTED_CREDENTIAL)
+                        .any(|segment| segment.contains(bearer))
+                })
                 .map_err(|_| SecretScrubError::SecretUnavailable)?;
             if still_present {
                 return Err(SecretScrubError::SecretUnavailable);
@@ -246,6 +253,22 @@ mod scrub_tests {
         .await
         .expect("readable registry");
         assert_eq!(proof.text(), "[credential]");
+    }
+
+    #[tokio::test]
+    async fn a_value_inside_the_marker_is_still_proven_absent() {
+        // "cred" is a substring of the "[credential]" marker: a naive
+        // whole-text `contains` proof would always fail closed here even
+        // though the raw occurrence was replaced.
+        let (refs, store) = registry(&["cred"], CredentialSetRevision::from_u64(2));
+        let proof = CredentialScrubber {
+            refs: &refs,
+            store: &store,
+        }
+        .scrub("token cred tail")
+        .await
+        .expect("a marker-substring value must not defeat the absence proof");
+        assert_eq!(proof.text(), "token [credential] tail");
     }
 
     #[tokio::test]

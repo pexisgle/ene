@@ -103,6 +103,11 @@ use crate::serve::{
     outgoing_fact, outgoing_frame, stale_reject, unpaired_close,
 };
 
+/// An absent command id yields [`None`] (no replay key); the caller declines
+/// the submit with `missing-command-id`, because idempotency keys are
+/// mandatory. Transport retry reuses the same command ID with a fresh message
+/// ID within one sender incarnation; the store answers replays with the
+/// original acceptance instead of re-appending.
 fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<CommandId> {
     let CommandWireId(id) = envelope.correlation.command_id?;
     Some(CommandId(ene_primitive::RawId::from_uuid(id)))
@@ -250,16 +255,6 @@ pub(crate) enum AttachOutcome {
 }
 
 impl HostHandle {
-    pub(crate) fn open_wire_for(
-        &self,
-        connection: &ConnectionWireId,
-        companion_key: &str,
-    ) -> Option<RoundWireId> {
-        let open = self.open_round_for(connection, companion_key)?;
-        let wire = self.wire_for_round(&open.round)?;
-        Some(RoundWireId(wire))
-    }
-
     pub(crate) fn stale_frame(
         &self,
         frame: &WireFrame,
@@ -267,7 +262,10 @@ impl HostHandle {
         companion_key: &str,
         generation: u64,
     ) -> WireFrame {
-        let current_round = self.open_wire_for(&live.connection_id, companion_key);
+        let current_round = self
+            .open_round_for(&live.connection_id, companion_key)
+            .and_then(|open| self.wire_for_round(&open.round))
+            .map(RoundWireId);
         stale_frame_with(frame, live, current_round, generation)
     }
 
@@ -451,14 +449,10 @@ impl HostHandle {
         };
         match classify_replay(&self.store, companion, &command, incoming_fingerprint).await {
             ReplayClassification::Replay { round_wire, .. } => {
-                for response in
-                    self.replay_frames(frame, live, round_wire, attribution.generation.as_u64())
-                {
-                    if sink.emit(response).is_err() {
-                        break;
-                    }
-                }
-                return;
+                return emit_end(
+                    sink,
+                    self.replay_frame(frame, live, round_wire, attribution.generation.as_u64()),
+                );
             }
             ReplayClassification::Conflict => {
                 return emit_end(sink, command_conflict_frame(frame, live, &command));
@@ -469,7 +463,14 @@ impl HostHandle {
             ReplayClassification::None => {}
         }
         if !ene_companion::dialogue::dialogue_input_fits(&text) {
-            return emit_end(sink, revalidate_frame(frame, live, "input-over-limit"));
+            return emit_end(
+                sink,
+                revalidate_frame(
+                    frame,
+                    live,
+                    intake_reason(&RevalidationReason::InputOverLimit),
+                ),
+            );
         }
         let mut attached_generation: Option<PresenceGeneration> = None;
         if matches!(
@@ -479,7 +480,11 @@ impl HostHandle {
             let Some(viewed) = frame.envelope.observed.presence_generation_view else {
                 return emit_end(
                     sink,
-                    revalidate_frame(frame, live, "missing-generation-view"),
+                    revalidate_frame(
+                        frame,
+                        live,
+                        intake_reason(&RevalidationReason::MissingGenerationView),
+                    ),
                 );
             };
             if viewed != attribution.generation.as_u64() {
@@ -528,23 +533,29 @@ impl HostHandle {
                     else {
                         return emit_end(sink, held_frame(frame, live));
                     };
-                    if matches!(
-                        current.state,
-                        PresenceState::InTransition | PresenceState::RecoveryWait
-                    ) {
-                        return emit_end(sink, held_frame(frame, live));
-                    }
-                    {
-                        return emit_end(
-                            sink,
-                            self.stale_frame(
-                                frame,
-                                live,
-                                &companion_key,
-                                current.generation.as_u64(),
-                            ),
-                        );
+                    match current.state {
+                        PresenceState::InTransition | PresenceState::RecoveryWait => {
+                            return emit_end(sink, held_frame(frame, live));
+                        }
+                        // A companion stopped under this submit's feet is a
+                        // revalidation premise, not an expired round: the
+                        // Client recovers by re-running the setup flow.
+                        PresenceState::Stopped => {
+                            return emit_end(
+                                sink,
+                                revalidate_frame(
+                                    frame,
+                                    live,
+                                    intake_reason(&RevalidationReason::StoppedCompanion),
+                                ),
+                            );
+                        }
+                        _ => {}
                     };
+                    return emit_end(
+                        sink,
+                        self.stale_frame(frame, live, &companion_key, current.generation.as_u64()),
+                    );
                 }
                 AttachOutcome::Superseded => {
                     return emit_end(
@@ -595,7 +606,6 @@ impl HostHandle {
                     text: text.clone(),
                     lang: submit.body.lang.0.clone(),
                 },
-                local_id: submit.local_id.0.clone(),
             },
             attribution,
             companion: match lifecycle {
@@ -667,6 +677,22 @@ impl HostHandle {
             Err(_) => return emit_end(sink, held_frame(frame, live)),
         };
         let inference_claim = authorized.ticket().0;
+        // The consent premise the admission was granted under. The stream
+        // baseline must be this admitted premise, not a fresh read taken after
+        // the append: a consent move committing in that window would otherwise
+        // become the baseline, presenting post-move deltas as current while
+        // the reply append compares against the admitted premise and refuses.
+        let admitted_consent = {
+            let (id, rev) = authorized.consent_premise();
+            (id.to_owned(), rev)
+        };
+        // Test-only race gate: pause after admission and before the guarded
+        // acceptance section, so a test can supersede the connection in
+        // between and pin that nothing commits.
+        #[cfg(test)]
+        if let Some(gate) = self.submit_accept_gate() {
+            gate.pause().await;
+        }
         let store = self.store.clone();
         let commit_input = input.clone();
         let committed = self
@@ -691,6 +717,19 @@ impl HostHandle {
         };
         match begin {
             DialogueBegin::Ready(turn) => {
+                // The connection-bound open round is installed under the
+                // ownership section: a replacement that wins this section
+                // leaves the durable Owner row and the reply's durable
+                // adoption to continue (the reply registers as undelivered
+                // for the new connection), while this connection opens no
+                // round and its stream aborts before any further publication.
+                #[cfg(test)]
+                {
+                    let gate = crate::lock_unpoison(&self.submit_open_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
+                }
                 let installed = self.record_open_round(
                     live,
                     &companion_key,
@@ -701,6 +740,13 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
+                #[cfg(test)]
+                {
+                    let gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
+                }
                 let stream = StreamWireId(RawId::new().as_uuid());
                 let fence_epoch = self.transient_fence.epoch();
                 let opened = if installed {
@@ -721,8 +767,17 @@ impl HostHandle {
                 } else {
                     false
                 };
-                let Ok(Some(consent)) = self.store.load_current(CapabilityKind::Dialogue).await
-                else {
+                // Baselines the gate on the current record: the owner append
+                // committed under the admission consent, and any move or
+                // unreadable read since means the stream can no longer be
+                // proven to run under the admitted premise. Abort before
+                // baselining on the changed value.
+                let consent_current = match self.store.load_current(CapabilityKind::Dialogue).await
+                {
+                    Ok(Some(record)) => (record.id, record.rev.as_u64()) == admitted_consent,
+                    _ => false,
+                };
+                if !consent_current {
                     if opened {
                         self.with_current_connection(live, || {
                             emit_end(
@@ -732,8 +787,7 @@ impl HostHandle {
                         });
                     }
                     return;
-                };
-                let consent = (consent.id, consent.rev.as_u64());
+                }
                 let mut gate = StreamGate {
                     handle: self,
                     frame,
@@ -744,7 +798,7 @@ impl HostHandle {
                     stream,
                     round: accepted,
                     generation: attribution.generation,
-                    consent,
+                    consent: admitted_consent,
                     credential_set,
                     tx: stream_tx.clone(),
                     seq: 0,
@@ -779,7 +833,7 @@ impl HostHandle {
                 match outcome {
                     DialogueOutcome::Completed { input, .. } => {
                         {
-                            let _pin = self.acquire_learning_pin().await;
+                            let _pin = self.host_transient_arrival.acquire_pin().await;
                             if let Some(experience) = pin_experience(&input, &self.store).await {
                                 #[cfg(any(test, feature = "test-support"))]
                                 self.store
@@ -796,17 +850,19 @@ impl HostHandle {
                 }
             }
             DialogueBegin::Replayed { round_wire, .. } => {
-                for response in self.replay_frames(frame, live, round_wire, generation_number) {
-                    if sink.emit(response).is_err() {
-                        break;
-                    }
-                }
+                emit_end(
+                    sink,
+                    self.replay_frame(frame, live, round_wire, generation_number),
+                );
             }
             DialogueBegin::StaleExpected { current } => {
                 emit_end(sink, stale_frame_with(frame, live, None, current.as_u64()));
             }
             DialogueBegin::StaleConsent => {
-                emit_end(sink, revalidate_frame(frame, live, "consent-stale"));
+                emit_end(
+                    sink,
+                    revalidate_frame(frame, live, admission_reason(NotSentReason::ConsentStale)),
+                );
             }
             DialogueBegin::StaleCredentialSet => {
                 emit_end(sink, held_frame(frame, live));
@@ -817,12 +873,13 @@ impl HostHandle {
             DialogueBegin::Held => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldForErasure => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldByLifecycle(_) => {
-                emit_end(sink, revalidate_frame(frame, live, "stopped-companion"));
-            }
-            DialogueBegin::Declined(reason) => {
                 emit_end(
                     sink,
-                    revalidate_frame(frame, live, admission_reason(reason)),
+                    revalidate_frame(
+                        frame,
+                        live,
+                        intake_reason(&RevalidationReason::StoppedCompanion),
+                    ),
                 );
             }
         }
@@ -830,7 +887,6 @@ impl HostHandle {
 
     pub(crate) async fn confirm_presentation(
         &self,
-        _frame: &WireFrame,
         live: &LiveInput,
         confirm: &ConfirmPresentationWire,
     ) -> Vec<WireFrame> {
@@ -970,17 +1026,16 @@ impl HostHandle {
     /// The stored round wire travels verbatim, so a retry after a restart
     /// replays instead of going stale on the dropped transient map; a missing
     /// wire is stale, and the Client recovers missed items through history.
-    fn replay_frames(
+    fn replay_frame(
         &self,
         frame: &WireFrame,
         live: &LiveInput,
         stored_wire: Option<String>,
         generation: u64,
-    ) -> Vec<WireFrame> {
-        let wire = stored_wire;
-        match wire {
-            Some(wire) => vec![accept_frame(frame, live, &RoundWireId(wire))],
-            None => vec![stale_frame_with(frame, live, None, generation)],
+    ) -> WireFrame {
+        match stored_wire {
+            Some(wire) => accept_frame(frame, live, &RoundWireId(wire)),
+            None => stale_frame_with(frame, live, None, generation),
         }
     }
 
@@ -1000,14 +1055,44 @@ impl HostHandle {
         .await;
     }
 
-    async fn acquire_learning_pin(&self) -> crate::transient_erasure::LearningPinGuard {
-        self.host_transient_arrival.acquire_pin().await
-    }
-
+    /// Whether a queued formation pass is waiting.
     pub(crate) fn has_pending_learning(&self) -> bool {
         !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
 
+    /// The queued Experience premises, in completion order.
+    ///
+    /// Test-only: lets a regression prove the queue carries the pinned source
+    /// boundary and transcript, not just a companion id.
+    #[cfg(test)]
+    pub(crate) fn pending_learning_premises(&self) -> Vec<ExperienceCandidate> {
+        crate::lock_unpoison(&self.learning_queue)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Drains queued Learning formation passes, one pinned premise at a time.
+    ///
+    /// The queue is in-memory and best-effort: a crash before the drain loses
+    /// only the pending derived updates, exactly as a crash during the
+    /// previous synchronous pass did. No pass is durable, so a restart never
+    /// replays an old one and cannot duplicate a formation. The worker lock
+    /// serializes passes; the repository's compare-before-commit additionally
+    /// keeps a genuine overlap from overwriting newer recognition. Stopped
+    /// companions are skipped because stopping must not start new internal
+    /// activity. A pass failure drops its item, so there is no retry storm,
+    /// and a pass the erasure gate refused is reported as held, never as an
+    /// empty pass: its origin is old, so it is dropped rather than re-queued
+    /// while the durable association holds it until erasure clears.
+    ///
+    /// Taking a candidate off the pending queue parks it in the worker-owned
+    /// `taken` slot until a body-free formation identity is published. HostTransient
+    /// can no longer drop that transcript as a queue entry; it also cannot
+    /// report Verified while the slot still carries a covered body. After the
+    /// identity commits, deletion correspondence outlives the slot, so a
+    /// deletion that completes before the Learning claim still refuses the
+    /// stale origin at the provider gate.
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
         let _serialized = self.learning_worker.lock().await;
         loop {
@@ -1063,6 +1148,10 @@ impl HostHandle {
                 refs: &self.store,
                 store: &self.cred_store,
             };
+            // A HeldForErasure decision changes nothing here: the origin is
+            // settled below and never re-queued or re-claimed under a fresh
+            // identity, and the correspondence row keeps it held until erasure
+            // clears it.
             drop(
                 ene_companion::dialogue::propose_experience(
                     experience,
@@ -1202,10 +1291,14 @@ impl StreamGate<'_> {
             .is_current_authenticated(&self.live.connection_id)
     }
 
-    async fn current(&self) -> bool {
-        if !self.connection_current() {
-            return false;
-        }
+    /// Re-reads the durable presentation premises only: the round,
+    /// attribution, consent, lifecycle, credential set, erasure fence, and
+    /// inference claim. A replaced connection does not fail here, so a
+    /// refusal to publish on the wire stays distinct from a moved premise.
+    async fn durable_current(&self) -> bool {
+        // A Targeted Deletion invalidated Host transient payloads since this
+        // stream opened: the remaining deltas can no longer prove they are
+        // uncovered, so they fail closed instead of publishing.
         if self.handle.transient_fence_epoch() != self.fence_epoch {
             return false;
         }
@@ -1273,7 +1366,7 @@ impl StreamGate<'_> {
     }
 
     async fn finish(&mut self) {
-        if !self.connection_current() || !self.current().await {
+        if !self.connection_current() || !self.durable_current().await {
             self.interrupt().await;
             return;
         }
@@ -1337,7 +1430,17 @@ impl DeltaSink for StreamGate<'_> {
             // then deliberately held across the post-reserve re-checks
             // (dropped on any refusal) so the bounded channel paces the
             // provider while still refusing a stale delta.
-            if !self.opened || !self.current().await {
+            if !self.opened || !self.connection_current() {
+                // CCT §9.3: a refused install or a replacement before
+                // publication opens no wire stream and sends no close, but
+                // the accepted turn's dispatch/adoption contract still runs.
+                // Only a moved durable premise aborts.
+                if !self.durable_current().await {
+                    return DeltaFlow::Abort("the presentation premise went stale");
+                }
+                return DeltaFlow::Continue;
+            }
+            if !self.durable_current().await {
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
             let frame = self.delta_frame(delta, false);
@@ -1345,27 +1448,56 @@ impl DeltaSink for StreamGate<'_> {
                 Ok(permit) => permit,
                 Err(_) => return DeltaFlow::Abort("the client connection is gone"),
             };
-            if !self.current().await {
+            // Re-check after the capacity wait: the premise may have gone
+            // stale while parked, and a stale delta must never publish. A
+            // replacement during the wait only suppresses the wire copy.
+            if !self.durable_current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
+            if !self.connection_current() {
+                drop(permit);
+                return DeltaFlow::Continue;
+            }
+            // Write-ahead delivery evidence: the delta body may only leave the
+            // Host after this incarnation's durable evidence row is committed,
+            // so a crash between the send and the record cannot lose the copy
+            // (lifecycle §8.1). A failed commit aborts the provider read
+            // instead of creating an unaccountable copy; the turn is not
+            // adopted, so no partial copy is published.
             if !self.handle.note_client_body_delivery(self.live).await {
                 drop(permit);
                 return DeltaFlow::Abort("the delivery evidence could not be committed");
             }
-            if !self.current().await {
+            // Final premise check after the durable write: the write awaited,
+            // so a condition, fence, or connection that moved meanwhile must
+            // still stop this delta before it is published. The evidence row,
+            // when written, is conservative and re-derived by a later demand.
+            if !self.durable_current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
+            }
+            // Final connection currentness check, synchronous and after the
+            // last await: a same-device replacement during the premise reads
+            // must not let this stream publish one more delta (IPC §9.3).
+            // The accepted turn still completes and is adopted, so it is
+            // delivered through its presentation subscription instead.
+            if !self.connection_current() {
+                drop(permit);
+                return DeltaFlow::Continue;
             }
             if self
                 .handle
                 .with_current_connection(self.live, || permit.send(frame))
                 .is_none()
             {
-                return DeltaFlow::Abort("the connection was replaced");
+                return DeltaFlow::Continue;
             }
             self.seq += 1;
             DeltaFlow::Continue
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

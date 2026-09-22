@@ -382,6 +382,9 @@ fn texture_alpha(texture: Option<&RenderTexture>, uv: [f32; 2]) -> f32 {
         .map_or(0.0, |alpha| f32::from(*alpha) / 255.0)
 }
 
+/// Surface rendering failure. The renderer is dropped and the reason is
+/// reported to the parent as `GpuFail`; presentation stops while the body
+/// process stays alive, so a GPU failure never takes chat down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFailure {
     Surface,
@@ -445,7 +448,8 @@ impl SurfaceRenderer {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("ene-body surface"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: wgpu::Limits::downlevel_defaults()
+                    .using_resolution(adapter.limits()),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,

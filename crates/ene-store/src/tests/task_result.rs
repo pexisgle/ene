@@ -5,8 +5,8 @@ use ene_action::{
     AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds, OperationKind, RealTargetRef,
 };
 use ene_task::{
-    TaskAgentResultArrival, TaskProgress, TaskResultAcceptance, TaskResultAdoptionClaim,
-    TaskResultId, TaskResultRecord,
+    TaskAgentOutput, TaskAgentResultArrival, TaskProgress, TaskResultAcceptance,
+    TaskResultAdoptionClaim, TaskResultId, TaskResultRecord, orchestrate_result_arrival,
 };
 
 /// One Task Agent attempt premise for the sealed/terminal claim checks.
@@ -130,7 +130,7 @@ pub(super) async fn seed_workspace_execution(
         .create_task(task_premise(Some(workspace)))
         .await
         .expect("the AU2 task must commit");
-    let delegation = create_workspace_delegation(store, created, assoc).await;
+    let delegation = create_workspace_delegation(store, created, assoc, None).await;
     (created, delegation, assoc)
 }
 
@@ -138,6 +138,7 @@ pub(super) async fn create_workspace_delegation(
     store: &Store,
     task: TaskRef,
     assoc: WorkspaceAssocId,
+    save_target: Option<&str>,
 ) -> DelegationId {
     let delegation = DelegationId::generate();
     let outcome = store
@@ -145,7 +146,11 @@ pub(super) async fn create_workspace_delegation(
             delegation,
             task,
             TaskAgentEphemeralId::generate(),
-            delegation_scope(Some(delegated_workspace(assoc, "/srv/workspace/ene", None))),
+            delegation_scope(Some(delegated_workspace(
+                assoc,
+                "/srv/workspace/ene",
+                save_target,
+            ))),
         ))
         .await
         .expect("the AU3 delegation must answer");
@@ -218,6 +223,18 @@ pub(super) fn claim(result: TaskResultId, attempts: &[ActionAttemptId]) -> TaskR
         attempt_refs: attempts.iter().map(|attempt| attempt.as_raw()).collect(),
     }
 }
+
+pub(super) fn raw_exec(store: &Store, sql: &str) {
+    let guard = match store.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .execute_batch(sql)
+        .expect("the raw test statement applies");
+}
+
+// --- lifecycle ---
 
 #[tokio::test]
 async fn fresh_task_starts_started_and_delegation_advances_to_in_progress() {
@@ -338,6 +355,100 @@ async fn completed_task_refuses_delegation_and_steering_without_writes() {
         task
     );
 }
+
+#[tokio::test]
+async fn inference_claim_refuses_seal_and_terminal_before_any_attempt_row() {
+    let store = open_store().await;
+    seed_dialogue_consent(&store).await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let attempt = start_attempt(&store, delegation, task, assoc, "one.txt").await;
+    settle(
+        &store,
+        attempt,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    // The seal exists before adoption: a new claim under the sealed execution
+    // is refused even while the Task stays `InProgress`.
+    let result = finalize(&store, delegation, "final body").await;
+    let sealed_claim = store
+        .begin_inference_attempt(task_agent_claim_for(delegation, task))
+        .await
+        .unwrap();
+    assert_eq!(sealed_claim, AttemptBeginOutcome::TaskPremiseStale);
+    assert_eq!(task_table_count(&store, "inference_attempt"), 0);
+
+    // A second delegation is created while the Task is still non-terminal;
+    // after the completion CAS, its claim is refused by the terminal gate.
+    let late = create_workspace_delegation(&store, task, assoc, None).await;
+    let adopted = store
+        .adopt_result(claim(result.result, &[attempt]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    let terminal_claim = store
+        .begin_inference_attempt(task_agent_claim_for(late, task))
+        .await
+        .unwrap();
+    assert_eq!(terminal_claim, AttemptBeginOutcome::TaskPremiseStale);
+    assert_eq!(task_table_count(&store, "inference_attempt"), 0);
+}
+
+#[tokio::test]
+async fn action_start_refuses_seal_and_terminal_without_an_attempt() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let attempt = start_attempt(&store, delegation, task, assoc, "first.txt").await;
+    settle(
+        &store,
+        attempt,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let result = finalize(&store, delegation, "final body").await;
+    // Seal before adoption: the sealed execution admits no new start.
+    let sealed = store
+        .insert_attempt_if_current(attempt_premise(
+            ActionAttemptId::generate(),
+            delegation,
+            task,
+            assoc,
+            "sealed.txt",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sealed, ActionStartOutcome::ExecutionSealed);
+    assert_eq!(task_table_count(&store, "action_attempt"), 1);
+
+    let late = create_workspace_delegation(&store, task, assoc, None).await;
+    let adopted = store
+        .adopt_result(claim(result.result, &[attempt]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    let terminal = store
+        .insert_attempt_if_current(attempt_premise(
+            ActionAttemptId::generate(),
+            late,
+            task,
+            assoc,
+            "terminal.txt",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(terminal, ActionStartOutcome::TaskTerminal);
+    assert_eq!(task_table_count(&store, "action_attempt"), 1);
+}
+
+// --- AU15a arrival / seal ---
 
 #[tokio::test]
 async fn arrival_is_durable_before_adoption_and_reopen_preserves_the_body() {
@@ -565,4 +676,1755 @@ async fn unknown_and_failure_attempts_withhold_completion() {
             .attempt_refs;
         assert_eq!(stamped, vec![attempt.as_raw()]);
     }
+}
+
+#[tokio::test]
+async fn claim_must_match_the_authoritative_set_exactly() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let result = finalize(&store, delegation, "final body").await;
+
+    for (label, refs) in [
+        ("missing", Vec::new()),
+        ("extra", vec![a1.as_raw(), RawId::new()]),
+        ("duplicate", vec![a1.as_raw(), a1.as_raw()]),
+    ] {
+        let adoption = store
+            .adopt_result(TaskResultAdoptionClaim {
+                result: result.result,
+                attempt_refs: refs,
+            })
+            .await;
+        assert!(
+            matches!(adoption, Err(TaskTechnicalError::StorageUnavailable { .. })),
+            "a {label} claim is an inconsistent unit, got {adoption:?}"
+        );
+    }
+    // The failed claims wrote nothing.
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 0);
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress
+    );
+    // The exact claim still works.
+    let adopted = store
+        .adopt_result(claim(result.result, &[a1]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+}
+
+#[tokio::test]
+async fn omitting_an_unknown_attempt_is_a_technical_error_not_withheld() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    let result = finalize(&store, delegation, "final body").await;
+
+    let omission = store.adopt_result(claim(result.result, &[])).await;
+    assert!(
+        matches!(omission, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a claim that drops a durable Unknown is inconsistent, not withheld: {omission:?}"
+    );
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 0);
+
+    let honest = store
+        .adopt_result(claim(result.result, &[a1]))
+        .await
+        .unwrap();
+    assert_eq!(
+        honest,
+        TaskResultAcceptance::WithheldByEffectFacts {
+            attempts: vec![a1.as_raw()],
+        }
+    );
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress
+    );
+}
+
+#[tokio::test]
+async fn a_claim_cannot_borrow_another_delegations_attempt() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let other = create_workspace_delegation(&store, task, assoc, None).await;
+    let foreign = start_attempt(&store, other, task, assoc, "foreign.txt").await;
+    settle(
+        &store,
+        foreign,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let result = finalize(&store, delegation, "final body").await;
+    let adoption = store
+        .adopt_result(claim(result.result, &[a1, foreign]))
+        .await;
+    assert!(
+        matches!(adoption, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the claim is pinned to the sealed execution lifetime"
+    );
+    let adopted = store
+        .adopt_result(claim(result.result, &[a1]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_durable_no_action_execution_adopts_with_an_empty_claim() {
+    let store = open_store().await;
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DelegationOutcome::Delegated(_)));
+    let result = finalize(&store, delegation, "no action body").await;
+    let adopted = store.adopt_result(claim(result.result, &[])).await.unwrap();
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(created));
+    assert_eq!(
+        store
+            .load_task(created.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::Completed
+    );
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 0);
+}
+
+// --- stale and idempotency ---
+
+#[tokio::test]
+async fn a_result_after_steering_is_recorded_to_the_original_revision_only() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let attempt = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        attempt,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let advanced = store
+        .forward_steering(TaskCommitPremise {
+            expected: task,
+            new_purpose: None,
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = advanced else {
+        panic!("the steering must commit, got {advanced:?}");
+    };
+    let result = finalize(&store, delegation, "stale body").await;
+    let adoption = store
+        .adopt_result(claim(result.result, &[attempt]))
+        .await
+        .unwrap();
+    assert_eq!(adoption, TaskResultAcceptance::RecordedToOriginalOnly);
+    let loaded = store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(loaded.task.reference, second);
+    assert_eq!(loaded.task.progress, TaskProgress::InProgress);
+    assert_eq!(loaded.task.adopted_result, None);
+    assert_eq!(
+        store
+            .load_task_result(result.result)
+            .await
+            .unwrap()
+            .unwrap()
+            .adopted_revision,
+        None
+    );
+    assert_eq!(
+        store
+            .load_task_result(result.result)
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_refs,
+        vec![attempt.as_raw()],
+        "the result-local correlation is still recorded against the original revision"
+    );
+}
+
+/// The relied revision's purpose snapshot and the current Task's purpose
+/// identity are two halves of one D1/D2 unit. A same-revision disagreement on
+/// an unadopted result is durable corruption: the adoption fails closed and
+/// stamps nothing instead of being recorded as original-only.
+#[tokio::test]
+async fn unadopted_result_same_revision_purpose_corruption_fails_closed() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let attempt = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        attempt,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let result = finalize(&store, delegation, "x body").await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task SET purpose_adopted_revision = 2 WHERE task_id = '{}'",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    let adoption = store.adopt_result(claim(result.result, &[attempt])).await;
+    assert!(
+        matches!(adoption, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the same-revision purpose disagreement must fail closed, got {adoption:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "task_result_attempt"),
+        0,
+        "the failed adoption must stamp nothing"
+    );
+}
+
+#[tokio::test]
+async fn same_result_retry_after_completion_does_not_transition_twice() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let attempt = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        attempt,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let result = finalize(&store, delegation, "final body").await;
+    let first = store
+        .adopt_result(claim(result.result, &[attempt]))
+        .await
+        .unwrap();
+    assert_eq!(first, TaskResultAcceptance::AdoptedAsCompletion(task));
+    let completed_at = store
+        .load_task(task.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .task
+        .progress;
+
+    let retry = store
+        .adopt_result(claim(result.result, &[attempt]))
+        .await
+        .unwrap();
+    assert_eq!(retry, TaskResultAcceptance::AdoptedAsCompletion(task));
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 1);
+    assert_eq!(task_table_count(&store, "task_revision"), 1);
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        completed_at
+    );
+}
+
+#[tokio::test]
+async fn another_result_after_terminal_is_recorded_to_the_original_only() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let winner = finalize(&store, delegation, "winner body").await;
+    // The second execution is created before the completion CAS.
+    let late = create_workspace_delegation(&store, task, assoc, None).await;
+    let a2 = start_attempt(&store, late, task, assoc, "a2.txt").await;
+    settle(
+        &store,
+        a2,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let adopted = store
+        .adopt_result(claim(winner.result, &[a1]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+
+    let loser = finalize(&store, late, "loser body").await;
+    let recorded = store
+        .adopt_result(claim(loser.result, &[a2]))
+        .await
+        .unwrap();
+    assert_eq!(recorded, TaskResultAcceptance::RecordedToOriginalOnly);
+    let loaded = store.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(loaded.task.progress, TaskProgress::Completed);
+    assert_eq!(
+        loaded.task.adopted_result,
+        Some(winner.result),
+        "the first completion stays the adopted result"
+    );
+    assert_eq!(
+        store
+            .load_task_result(loser.result)
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_refs,
+        vec![a2.as_raw()],
+        "the losing result still records its own verified correlation"
+    );
+}
+
+// --- Task-wide completion barrier ---
+
+#[tokio::test]
+async fn task_wide_barrier_sees_another_delegations_unknown_and_clears_on_settlement() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    let x = finalize(&store, d1, "x body").await;
+    let withheld = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert_eq!(
+        withheld,
+        TaskResultAcceptance::WithheldByEffectFacts {
+            attempts: vec![a1.as_raw()],
+        }
+    );
+
+    let d2 = create_workspace_delegation(&store, task, assoc, None).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let withheld = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert_eq!(
+        withheld,
+        TaskResultAcceptance::WithheldByEffectFacts {
+            attempts: vec![a2.as_raw()],
+        },
+        "the other execution's unresolved Unknown blocks completion"
+    );
+    // Barrier attempts are never stamped as result-local dependencies.
+    assert_eq!(
+        store
+            .load_task_result(x.result)
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_refs,
+        vec![a1.as_raw()]
+    );
+
+    settle(
+        &store,
+        a2,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(task));
+}
+
+#[tokio::test]
+async fn cross_delegation_settled_facts_do_not_block_by_themselves() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let d2 = create_workspace_delegation(&store, task, assoc, None).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+    settle(
+        &store,
+        a2,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(
+        matches!(adopted, TaskResultAcceptance::AdoptedAsCompletion(_)),
+        "a settled cross-delegation success is not a blocker"
+    );
+
+    // A cross-delegation ConfirmedFailure is likewise not a blocker.
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let d2 = create_workspace_delegation(&store, task, assoc, None).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+    settle(
+        &store,
+        a2,
+        ActionCertainty::ConfirmedFailure,
+        EffectGrounds::RefusedBeforeEffect,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(
+        matches!(adopted, TaskResultAcceptance::AdoptedAsCompletion(_)),
+        "a cross-delegation ConfirmedFailure is not a blocker"
+    );
+
+    // A result-local ConfirmedFailure still blocks.
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let local = start_attempt(&store, delegation, task, assoc, "local.txt").await;
+    settle(
+        &store,
+        local,
+        ActionCertainty::ConfirmedFailure,
+        EffectGrounds::RefusedBeforeEffect,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let withheld = store.adopt_result(claim(x.result, &[local])).await.unwrap();
+    assert_eq!(
+        withheld,
+        TaskResultAcceptance::WithheldByEffectFacts {
+            attempts: vec![local.as_raw()],
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_unsealed_delegation_without_started_actions_is_not_a_barrier() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    // D2 has no final result and no started Action: neither is a barrier.
+    let _d2 = create_workspace_delegation(&store, task, assoc, None).await;
+    let x = finalize(&store, d1, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+}
+
+#[tokio::test]
+async fn old_revision_unknown_blocks_until_settled() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let old = start_attempt(&store, d1, task, assoc, "old.txt").await;
+    let advanced = store
+        .forward_steering(TaskCommitPremise {
+            expected: task,
+            new_purpose: Some(ene_task::TaskPurposeAdoptionPremise {
+                purpose: TaskPurpose {
+                    text: String::from("new direction"),
+                },
+                origin: TaskContextOrigin {
+                    kind: TaskContextOriginKind::OwnerConversation,
+                    source: RawId::new(),
+                },
+                acquired_at: fixture_clock(),
+            }),
+            adopted_purpose_entry: TaskContextEntryId::generate(),
+            adopted_instruction: None,
+        })
+        .await
+        .unwrap();
+    let TaskCommitOutcome::CommittedAs(second) = advanced else {
+        panic!("steering must commit, got {advanced:?}");
+    };
+    let d2 = create_workspace_delegation(&store, second, assoc, None).await;
+    let fresh = start_attempt(&store, d2, second, assoc, "fresh.txt").await;
+    settle(
+        &store,
+        fresh,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d2, "x body").await;
+    let withheld = store.adopt_result(claim(x.result, &[fresh])).await.unwrap();
+    assert_eq!(
+        withheld,
+        TaskResultAcceptance::WithheldByEffectFacts {
+            attempts: vec![old.as_raw()],
+        },
+        "a pre-steering Unknown still blocks the current revision's completion"
+    );
+    settle(
+        &store,
+        old,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let adopted = store.adopt_result(claim(x.result, &[fresh])).await.unwrap();
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(second));
+}
+
+#[tokio::test]
+async fn au5_and_adoption_serialize_into_exactly_two_orderings() {
+    for _ in 0..10 {
+        let store = open_store().await;
+        let (task, d1, assoc) = seed_workspace_execution(&store).await;
+        let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+        settle(
+            &store,
+            a1,
+            ActionCertainty::ConfirmedSuccess,
+            EffectGrounds::ObservedAtTarget,
+        )
+        .await;
+        let x = finalize(&store, d1, "x body").await;
+        let d2 = create_workspace_delegation(&store, task, assoc, None).await;
+        let a2 = ActionAttemptId::generate();
+        let premise = attempt_premise(a2, d2, task, assoc, "a2.txt");
+
+        let (adoption, start) = tokio::join!(
+            store.adopt_result(claim(x.result, &[a1])),
+            store.insert_attempt_if_current(premise),
+        );
+        let adoption = adoption.expect("adoption answers a domain outcome");
+        let start = start.expect("the start answers a domain outcome");
+        match (start, adoption) {
+            (
+                ActionStartOutcome::Started,
+                TaskResultAcceptance::WithheldByEffectFacts { attempts },
+            ) => assert_eq!(
+                attempts,
+                vec![a2.as_raw()],
+                "AU5 first: the barrier sees the new Unknown"
+            ),
+            (ActionStartOutcome::TaskTerminal, TaskResultAcceptance::AdoptedAsCompletion(_)) => {}
+            other => {
+                panic!("no third ordering may leave a start invisible to the barrier: {other:?}")
+            }
+        }
+        let started = matches!(start, ActionStartOutcome::Started);
+        assert_eq!(
+            task_table_count(&store, "action_attempt"),
+            if started { 2 } else { 1 },
+            "a terminal refusal writes no attempt row"
+        );
+        assert_eq!(
+            store
+                .load_task(task.task)
+                .await
+                .unwrap()
+                .unwrap()
+                .task
+                .progress
+                == TaskProgress::Completed,
+            !started
+        );
+    }
+}
+
+#[tokio::test]
+async fn certainty_settlement_before_or_after_adoption_both_reach_completion() {
+    // Settlement first: the barrier is already clear.
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let attempt = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        attempt,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store
+        .adopt_result(claim(x.result, &[attempt]))
+        .await
+        .unwrap();
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(task));
+
+    // Withheld first: the same result is re-evaluated after settlement.
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let attempt = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    let x = finalize(&store, delegation, "x body").await;
+    let withheld = store
+        .adopt_result(claim(x.result, &[attempt]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        withheld,
+        TaskResultAcceptance::WithheldByEffectFacts { .. }
+    ));
+    settle(
+        &store,
+        attempt,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let adopted = store
+        .adopt_result(claim(x.result, &[attempt]))
+        .await
+        .unwrap();
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(task));
+}
+
+// --- load / restart invariants ---
+
+#[tokio::test]
+async fn completed_task_reopens_with_its_adopted_result_and_no_unknown_attempts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("completed.db");
+    let (task, result) = {
+        let store = Store::open(&path).await.unwrap();
+        let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+        let attempt = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+        settle(
+            &store,
+            attempt,
+            ActionCertainty::ConfirmedSuccess,
+            EffectGrounds::ObservedAtTarget,
+        )
+        .await;
+        let result = finalize(&store, delegation, "final body").await;
+        let adopted = store
+            .adopt_result(claim(result.result, &[attempt]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            adopted,
+            TaskResultAcceptance::AdoptedAsCompletion(_)
+        ));
+        (task, result)
+    };
+    let reopened = Store::open(&path).await.unwrap();
+    let loaded = reopened.load_task(task.task).await.unwrap().unwrap();
+    assert_eq!(loaded.task.progress, TaskProgress::Completed);
+    assert_eq!(loaded.task.adopted_result, Some(result.result));
+    // The completion invariant is recoverable from durable facts alone.
+    let guard = match reopened.conn.lock() {
+        Ok(locked) => locked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let unknown: i64 = guard
+        .query_row(
+            "SELECT COUNT(*) FROM action_attempt WHERE task_id = ?1 AND certainty = 'unknown'",
+            params![crate::codec::encode_id(task.task.as_raw())],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unknown, 0);
+}
+
+#[tokio::test]
+async fn load_fails_closed_on_corrupt_progress_or_adoption_state() {
+    // An unknown stored progress name is unreadable.
+    let store = open_store().await;
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    raw_exec(&store, "UPDATE task SET progress = 'paused'");
+    let loaded = store.load_task(created.task).await;
+    assert!(matches!(
+        loaded,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+
+    // Completed without an adopted result contradicts the producer.
+    let store = open_store().await;
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    raw_exec(&store, "UPDATE task SET progress = 'completed'");
+    let loaded = store.load_task(created.task).await;
+    assert!(matches!(
+        loaded,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+// --- corruption fail-closed ---
+
+/// Healthy cross-delegation Unknown first withholds; after a corrupted
+/// `action_attempt.task_id` moves that row out of a naive
+/// `WHERE task_id = target` read, the correspondence join must still see it,
+/// fail closed, and never complete the Task.
+#[tokio::test]
+async fn barrier_fails_closed_on_swapped_action_task_id() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+
+    let d2 = create_workspace_delegation(&store, task, assoc, None).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+    assert_eq!(
+        store.adopt_result(claim(x.result, &[a1])).await.unwrap(),
+        TaskResultAcceptance::WithheldByEffectFacts {
+            attempts: vec![a2.as_raw()],
+        },
+        "a healthy cross-delegation Unknown withholds"
+    );
+
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET task_id = '{}' WHERE attempt_id = '{}'",
+            crate::codec::encode_id(RawId::new()),
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a swapped task_id must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress,
+        "the barrier corruption must not complete the Task"
+    );
+}
+
+#[tokio::test]
+async fn barrier_fails_closed_on_action_revision_mismatch() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+    let d2 = create_workspace_delegation(&store, task, assoc, None).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET task_revision = 999 WHERE attempt_id = '{}'",
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a copied revision disagreeing with the delegation must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress
+    );
+}
+
+#[tokio::test]
+async fn barrier_fails_closed_on_foreign_delegation() {
+    let store = open_store().await;
+    let (task, d1, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, d1, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, d1, "x body").await;
+    let d2 = create_workspace_delegation(&store, task, assoc, None).await;
+    let a2 = start_attempt(&store, d2, task, assoc, "a2.txt").await;
+
+    let (foreign_premise, foreign_assoc) = workspace_task_premise();
+    let foreign_task = store.create_task(foreign_premise).await.unwrap();
+    let foreign_delegation =
+        create_workspace_delegation(&store, foreign_task, foreign_assoc, None).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET delegation_id = '{}' WHERE attempt_id = '{}'",
+            crate::codec::encode_id(foreign_delegation.as_raw()),
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a copied task_id without its delegation must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        store
+            .load_task(task.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .task
+            .progress,
+        TaskProgress::InProgress
+    );
+}
+
+/// A `task_result` copied `task_id`/`task_revision` that disagrees with its
+/// sealed delegation is unreadable on every bounded result read and on
+/// adoption.
+#[tokio::test]
+async fn bounded_result_reads_fail_closed_on_result_correspondence_mismatch() {
+    // Copied task_id swapped.
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET task_id = '{}' WHERE result_id = '{}'",
+            crate::codec::encode_id(RawId::new()),
+            crate::codec::encode_id(x.result.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.load_delegation_result(delegation).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.adopt_result(claim(x.result, &[a1])).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+
+    // Copied task_revision swapped.
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET task_revision = 999 WHERE result_id = '{}'",
+            crate::codec::encode_id(x.result.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.load_delegation_result(delegation).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.adopt_result(claim(x.result, &[a1])).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+/// Once stamped, the result-local set is fixed: a deleted row is never
+/// silently recreated by a retry.
+#[tokio::test]
+async fn stamped_correlation_is_never_silently_refilled() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    let a2 = start_attempt(&store, delegation, task, assoc, "a2.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    settle(
+        &store,
+        a2,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store
+        .adopt_result(claim(x.result, &[a1, a2]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 2);
+
+    raw_exec(
+        &store,
+        &format!(
+            "DELETE FROM task_result_attempt WHERE result_id = '{}' AND attempt_id = '{}'",
+            crate::codec::encode_id(x.result.as_raw()),
+            crate::codec::encode_id(a2.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1, a2])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a missing stamped row must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "task_result_attempt"),
+        1,
+        "the missing row must not be silently refilled"
+    );
+}
+
+/// A stamped row that points at a foreign delegation is unreadable on the
+/// bounded reads and fails the retry's exact-match check.
+#[tokio::test]
+async fn stamped_foreign_attempt_fails_closed_on_reads_and_retry() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+
+    let (foreign_premise, foreign_assoc) = workspace_task_premise();
+    let foreign_task = store.create_task(foreign_premise).await.unwrap();
+    let foreign_delegation =
+        create_workspace_delegation(&store, foreign_task, foreign_assoc, None).await;
+    let foreign_attempt = start_attempt(
+        &store,
+        foreign_delegation,
+        foreign_task,
+        foreign_assoc,
+        "foreign.txt",
+    )
+    .await;
+    raw_exec(
+        &store,
+        &format!(
+            "INSERT INTO task_result_attempt (result_id, attempt_id) VALUES ('{}', '{}')",
+            crate::codec::encode_id(x.result.as_raw()),
+            crate::codec::encode_id(foreign_attempt.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a foreign stamped attempt must fail the retry, got {retry:?}"
+    );
+}
+
+/// A stamped attempt whose copied correlation is corrupted is unreadable on
+/// the bounded reads, on the arrival retry, and on the adoption retry.
+#[tokio::test]
+async fn stamped_attempt_correlation_corruption_fails_closed() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE action_attempt SET task_id = '{}' WHERE attempt_id = '{}'",
+            crate::codec::encode_id(RawId::new()),
+            crate::codec::encode_id(a1.as_raw()),
+        ),
+    );
+    assert!(matches!(
+        store.load_task_result(x.result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    let arrival =
+        orchestrate_result_arrival(&store, delegation, scrubbed_result(&store, "x body").await)
+            .await;
+    assert!(
+        matches!(arrival, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "an arrival retry must not return a corrupted record, got {arrival:?}"
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(matches!(
+        retry,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+/// Seeds one Task completed by adopting a result whose result-local set was
+/// stamped as exactly `{a1, a2}`, ready for full-wipe corruption probes.
+async fn seed_adopted_two_attempt_result(
+    store: &Store,
+) -> (
+    TaskRef,
+    DelegationId,
+    TaskResultId,
+    ActionAttemptId,
+    ActionAttemptId,
+) {
+    let (task, delegation, assoc) = seed_workspace_execution(store).await;
+    let a1 = start_attempt(store, delegation, task, assoc, "a1.txt").await;
+    let a2 = start_attempt(store, delegation, task, assoc, "a2.txt").await;
+    for attempt in [a1, a2] {
+        settle(
+            store,
+            attempt,
+            ActionCertainty::ConfirmedSuccess,
+            EffectGrounds::ObservedAtTarget,
+        )
+        .await;
+    }
+    let x = finalize(store, delegation, "x body").await;
+    let adopted = store
+        .adopt_result(claim(x.result, &[a1, a2]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    assert_eq!(task_table_count(store, "task_result_attempt"), 2);
+    (task, delegation, x.result, a1, a2)
+}
+
+/// Wipes every stamped result-local row of one result and asserts the wipe.
+fn wipe_result_attempts(store: &Store, result: TaskResultId) {
+    raw_exec(
+        store,
+        &format!(
+            "DELETE FROM task_result_attempt WHERE result_id = '{}'",
+            crate::codec::encode_id(result.as_raw()),
+        ),
+    );
+    assert_eq!(task_table_count(store, "task_result_attempt"), 0);
+}
+
+/// An adopted result whose stamped set is wiped whole is durable corruption:
+/// the same-result adoption retry fails closed and never refills the rows.
+#[tokio::test]
+async fn adopted_result_full_wipe_is_never_refilled() {
+    let store = open_store().await;
+    let (_task, _delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    wipe_result_attempts(&store, result);
+    let retry = store.adopt_result(claim(result, &[a1, a2])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a fully wiped adopted set must fail closed, got {retry:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "task_result_attempt"),
+        0,
+        "the wiped rows must not be silently refilled"
+    );
+}
+
+/// The bounded reads re-derive the adopted result's authoritative set and
+/// fail closed when the stamped set was wiped whole.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_adopted_result_full_wipe() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    wipe_result_attempts(&store, result);
+    assert!(matches!(
+        store.load_task_result(result).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+    assert!(matches!(
+        store.load_delegation_result(delegation).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+/// The AU15a same-result retry composes the bounded record and therefore also
+/// fails closed on a fully wiped adopted set instead of returning it.
+#[tokio::test]
+async fn arrival_retry_fails_closed_on_adopted_result_full_wipe() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    wipe_result_attempts(&store, result);
+    let retry = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation,
+            result,
+            body: scrubbed_result(&store, "x body").await,
+        })
+        .await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the arrival retry must not hide the wiped adopted set, got {retry:?}"
+    );
+    assert_eq!(
+        task_table_count(&store, "task_result_attempt"),
+        0,
+        "the arrival retry must not refill the wiped rows"
+    );
+}
+
+// --- adopted current-unit bounded-read corruption ---
+
+/// Asserts both bounded reads and the AU15a same-result retry, which share
+/// `compose_result`, fail closed for one corrupted adopted current unit.
+async fn assert_adopted_unit_corruption_fails_closed(
+    store: &Store,
+    delegation: DelegationId,
+    result: TaskResultId,
+) {
+    assert!(
+        matches!(
+            store.load_task_result(result).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "the bounded result read must fail closed"
+    );
+    assert!(
+        matches!(
+            store.load_delegation_result(delegation).await,
+            Err(TaskTechnicalError::StorageUnavailable { .. })
+        ),
+        "the bounded delegation read must fail closed"
+    );
+    let retry = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation,
+            result,
+            body: scrubbed_result(store, "x body").await,
+        })
+        .await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the arrival retry must fail closed, got {retry:?}"
+    );
+}
+
+/// A corrupted `task_result.adopted_revision` must equal the relied revision;
+/// disagreeing is durable corruption, never a readable adopted record.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_adopted_revision_corruption() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET adopted_revision = 2 WHERE result_id = '{}'",
+            crate::codec::encode_id(result.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// The adopted result's current Task must still be `Completed`: a demoted
+/// progress is an inconsistent unit on every shared read path.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_demoted_adopted_task() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(&store, "UPDATE task SET progress = 'in_progress'");
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// The current Task must still be at the relied revision: a moved revision
+/// cannot be composed into an adopted bounded record.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_moved_adopted_current_revision() {
+    let store = open_store().await;
+    let (_task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(&store, "UPDATE task SET revision = 2");
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// An adopted result without its current Task row is corruption, never a
+/// missing record.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_missing_adopted_current_task() {
+    let store = open_store().await;
+    let (task, delegation, result, _a1, _a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "DELETE FROM task WHERE task_id = '{}'",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, result).await;
+}
+
+/// Two adopted results for one Task violate the 0..1 invariant: the bounded
+/// reads resolve the unique adopted result through the existing fail-closed
+/// helper instead of returning one of them.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_duplicate_adopted_results() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let late = create_workspace_delegation(&store, task, assoc, None).await;
+    let y = finalize(&store, late, "y body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET adopted_revision = 1 WHERE result_id = '{}'",
+            crate::codec::encode_id(y.result.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed(&store, delegation, x.result).await;
+}
+
+// --- adopted current-unit snapshot / purpose identity corruption ---
+
+/// Asserts all four adopted-result paths — both bounded reads, the AU15a
+/// same-result retry, and the AU15b same-result adoption retry — fail closed
+/// for one corrupted adopted current unit.
+async fn assert_adopted_unit_corruption_fails_closed_everywhere(
+    store: &Store,
+    delegation: DelegationId,
+    result: TaskResultId,
+    attempts: &[ActionAttemptId],
+) {
+    assert_adopted_unit_corruption_fails_closed(store, delegation, result).await;
+    let retry = store.adopt_result(claim(result, attempts)).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "the adoption retry must fail closed, got {retry:?}"
+    );
+}
+
+/// Deleting the relied revision's `task_revision` snapshot after completion is
+/// durable corruption: no adopted path may answer from the stamp alone.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_deleted_relied_task_revision() {
+    let store = open_store().await;
+    let (task, delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "DELETE FROM task_revision WHERE task_id = '{}' AND revision = 1",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed_everywhere(&store, delegation, result, &[a1, a2])
+        .await;
+}
+
+/// The current Task's purpose identity must still equal the relied revision
+/// snapshot's; corrupting it is durable corruption on all adopted paths.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_current_purpose_identity_corruption() {
+    let store = open_store().await;
+    let (task, delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task SET purpose_adopted_revision = 2 WHERE task_id = '{}'",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed_everywhere(&store, delegation, result, &[a1, a2])
+        .await;
+}
+
+/// The relied snapshot's purpose identity must still equal the current Task's;
+/// corrupting it is durable corruption on all adopted paths.
+#[tokio::test]
+async fn bounded_reads_fail_closed_on_snapshot_purpose_identity_corruption() {
+    let store = open_store().await;
+    let (task, delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_revision SET purpose_adopted_revision = 2 \
+             WHERE task_id = '{}' AND revision = 1",
+            crate::codec::encode_id(task.task.as_raw()),
+        ),
+    );
+    assert_adopted_unit_corruption_fails_closed_everywhere(&store, delegation, result, &[a1, a2])
+        .await;
+}
+
+/// A true no-Action execution adopts with an empty authoritative set, and the
+/// adopted result stays healthy: `{} == {}` is valid on the bounded reads and
+/// on both idempotent retries.
+#[tokio::test]
+async fn true_no_action_adopted_result_stays_healthy() {
+    let store = open_store().await;
+    let created = store.create_task(task_premise(None)).await.unwrap();
+    let delegation = DelegationId::generate();
+    let outcome = store
+        .create_delegation(delegation_premise(
+            delegation,
+            created,
+            TaskAgentEphemeralId::generate(),
+            delegation_scope(None),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DelegationOutcome::Delegated(_)));
+    let result = finalize(&store, delegation, "no action body").await;
+    let adopted = store.adopt_result(claim(result.result, &[])).await.unwrap();
+    assert_eq!(adopted, TaskResultAcceptance::AdoptedAsCompletion(created));
+
+    let loaded = store
+        .load_task_result(result.result)
+        .await
+        .unwrap()
+        .expect("the adopted no-Action result reads");
+    assert_eq!(loaded.attempt_refs, Vec::new());
+    assert_eq!(loaded.adopted_revision, Some(created.revision));
+    assert_eq!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .expect("the adopted no-Action result reads by delegation"),
+        loaded
+    );
+
+    let retry = store.adopt_result(claim(result.result, &[])).await.unwrap();
+    assert_eq!(retry, TaskResultAcceptance::AdoptedAsCompletion(created));
+    let arrival = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation,
+            result: result.result,
+            body: scrubbed_result(&store, "no action body").await,
+        })
+        .await
+        .unwrap();
+    assert_eq!(arrival, TaskResultArrivalOutcome::Recorded(loaded));
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 0);
+}
+
+/// A healthy non-empty adopted result keeps its exact stamped set across the
+/// idempotent retries: completion is answered without a new row, a duplicate,
+/// or a second terminal transition.
+#[tokio::test]
+async fn healthy_non_empty_adopted_retry_is_idempotent() {
+    let store = open_store().await;
+    let (task, _delegation, result, a1, a2) = seed_adopted_two_attempt_result(&store).await;
+    let before = store.load_task(task.task).await.unwrap().unwrap();
+    let loaded = store.load_task_result(result).await.unwrap().unwrap();
+    let mut refs = loaded.attempt_refs.clone();
+    refs.sort_by_key(|attempt| attempt.as_uuid());
+    let mut expected = vec![a1.as_raw(), a2.as_raw()];
+    expected.sort_by_key(|attempt| attempt.as_uuid());
+    assert_eq!(refs, expected);
+
+    let retry = store.adopt_result(claim(result, &[a1, a2])).await.unwrap();
+    assert_eq!(retry, TaskResultAcceptance::AdoptedAsCompletion(task));
+    let arrival = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation: loaded.delegation,
+            result,
+            body: scrubbed_result(&store, "x body").await,
+        })
+        .await
+        .unwrap();
+    assert_eq!(arrival, TaskResultArrivalOutcome::Recorded(loaded));
+    assert_eq!(task_table_count(&store, "task_result_attempt"), 2);
+    assert_eq!(
+        store.load_task(task.task).await.unwrap().unwrap(),
+        before,
+        "the idempotent retries must not transition the Task again"
+    );
+}
+
+#[tokio::test]
+async fn adopted_retry_rejects_non_completed_current_task() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(&store, "UPDATE task SET progress = 'in_progress'");
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a demoted current progress must fail the retry, got {retry:?}"
+    );
+}
+
+#[tokio::test]
+async fn adopted_retry_rejects_moved_current_revision() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(&store, "UPDATE task SET revision = 2");
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "a moved current revision must fail the retry, got {retry:?}"
+    );
+}
+
+#[tokio::test]
+async fn adopted_retry_rejects_multiple_adopted_results() {
+    let store = open_store().await;
+    let (task, delegation, assoc) = seed_workspace_execution(&store).await;
+    let a1 = start_attempt(&store, delegation, task, assoc, "a1.txt").await;
+    settle(
+        &store,
+        a1,
+        ActionCertainty::ConfirmedSuccess,
+        EffectGrounds::ObservedAtTarget,
+    )
+    .await;
+    let x = finalize(&store, delegation, "x body").await;
+    // The second execution seals before the completion CAS; its result is
+    // never adopted by the producer, then corruption stamps it too.
+    let late = create_workspace_delegation(&store, task, assoc, None).await;
+    let y = finalize(&store, late, "y body").await;
+    let adopted = store.adopt_result(claim(x.result, &[a1])).await.unwrap();
+    assert!(matches!(
+        adopted,
+        TaskResultAcceptance::AdoptedAsCompletion(_)
+    ));
+    raw_exec(
+        &store,
+        &format!(
+            "UPDATE task_result SET adopted_revision = 1 WHERE result_id = '{}'",
+            crate::codec::encode_id(y.result.as_raw()),
+        ),
+    );
+    let retry = store.adopt_result(claim(x.result, &[a1])).await;
+    assert!(
+        matches!(retry, Err(TaskTechnicalError::StorageUnavailable { .. })),
+        "two adopted results must fail the retry, got {retry:?}"
+    );
+    assert!(matches!(
+        store.load_task(task.task).await,
+        Err(TaskTechnicalError::StorageUnavailable { .. })
+    ));
+}
+
+// --- debug / leakage ---
+
+#[tokio::test]
+async fn result_debug_renderings_redact_the_body() {
+    let probe = "probe result body text";
+    let arrival = TaskAgentResultArrival {
+        delegation: DelegationId::generate(),
+        result: TaskResultId::generate(),
+        body: scrubbed_result_at(CredentialSetRevision::initial(), probe).await,
+    };
+    assert!(
+        !format!("{arrival:?}").contains(probe),
+        "the arrival Debug must redact the body"
+    );
+    let record = TaskResultRecord {
+        result: TaskResultId::generate(),
+        task: TaskRef {
+            task: TaskId::generate(),
+            revision: TaskRevision::initial(),
+        },
+        delegation: DelegationId::generate(),
+        body: TaskAgentOutput::new(probe.to_owned()),
+        attempt_refs: Vec::new(),
+        adopted_revision: None,
+        recorded_at: fixture_clock(),
+    };
+    assert!(
+        !format!("{record:?}").contains(probe),
+        "the result record Debug must redact the body"
+    );
+}
+
+// --- credential currentness premise (Stage 6 C3) ---
+
+/// Mechanical exact-text remainder count over the system-wide canonical
+/// surface. The Store's test-support probe is behind a feature its own test
+/// target does not enable, so the same closed walk is invoked directly.
+fn exact_remainder(store: &Store, text: &str) -> u64 {
+    let guard = crate::codec::lock_shared(&store.conn);
+    crate::erasure::exact_remainder_probe(&guard, text).expect("the remainder probe must answer")
+}
+
+/// The durable commit reads the credential-set revision in the same short
+/// transaction as the insert: a set that advanced after the scrub refuses
+/// with a domain outcome and zero writes, and only a re-scrub under the new
+/// revision records. Idempotent same-identity retries work only under a
+/// current premise, and no diagnostic carries the body.
+#[tokio::test]
+async fn stale_result_scrub_premise_refuses_and_a_rescrub_records() {
+    use ene_credential::SecretScrubber as _;
+
+    let secret = "sk-store-c3-secret-marker";
+    let store = open_store().await;
+    let (_task, delegation, _assoc) = seed_workspace_execution(&store).await;
+
+    // Scrub under the current set while the value is still ordinary text.
+    let stale_revision = store.current_set_revision().await.unwrap();
+    let stale = scrubbed_result_at(stale_revision, &format!("the report quotes {secret}")).await;
+    assert_eq!(stale.credential_set(), stale_revision);
+
+    // The set advances (with the value now registered) before the commit.
+    approve_pair(&store, "acme", "main", secret, "reg-c3-store").await;
+    let current = store.current_set_revision().await.unwrap();
+    assert!(current > stale_revision);
+
+    let stale_arrival = TaskAgentResultArrival {
+        delegation,
+        result: TaskResultId::generate(),
+        body: stale,
+    };
+    let refused = store
+        .record_task_result_arrival(stale_arrival.clone())
+        .await
+        .expect("a stale premise is a domain outcome");
+    assert_eq!(
+        refused,
+        TaskResultArrivalOutcome::StaleCredentialSet { current }
+    );
+    assert!(
+        !format!("{refused:?}").contains(secret),
+        "the stale refusal carries no body or secret"
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 0);
+    assert!(
+        store
+            .load_delegation_result(delegation)
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused arrival never seals the delegation"
+    );
+    assert_eq!(
+        exact_remainder(&store, secret),
+        0,
+        "no raw occurrence lands from the stale body"
+    );
+
+    // The same identity is still refused after the set moved: an idempotent
+    // replay is only current under the premise it was scrubbed with.
+    assert_eq!(
+        store.record_task_result_arrival(stale_arrival).await,
+        Ok(TaskResultArrivalOutcome::StaleCredentialSet { current })
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 0);
+
+    // Re-scrub the original answer under the new revision: the bearer is now
+    // registered, so only the redacted body commits.
+    let values = MemoryCredentialStore::new();
+    values.insert(
+        CredentialRef::new("acme", "main").expect("valid fixture ref"),
+        secret,
+    );
+    let fresh_proof = CredentialScrubber {
+        refs: &store,
+        store: &values,
+    }
+    .scrub(&format!("the report quotes {secret}"))
+    .await
+    .expect("the registered value is readable");
+    let fresh = TaskAgentResultArrival {
+        delegation,
+        result: TaskResultId::generate(),
+        body: TaskResultScrubPremise::from_scrubbed(fresh_proof),
+    };
+    let recorded = match store
+        .record_task_result_arrival(fresh.clone())
+        .await
+        .expect("the fresh premise is current")
+    {
+        TaskResultArrivalOutcome::Recorded(record) => record,
+        TaskResultArrivalOutcome::StaleCredentialSet { .. } => {
+            panic!("the fresh premise must commit")
+        }
+    };
+    let redacted = format!("the report quotes {}", ene_credential::REDACTED_CREDENTIAL);
+    assert_eq!(recorded.body.text(), redacted);
+    assert_eq!(task_table_count(&store, "task_result"), 1);
+    assert_eq!(exact_remainder(&store, secret), 0);
+
+    // A same-identity retry is idempotent while the premise is still current.
+    assert_eq!(
+        store.record_task_result_arrival(fresh.clone()).await,
+        Ok(TaskResultArrivalOutcome::Recorded(recorded.clone()))
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 1);
+
+    // Once the set moves again the same retry refuses without a second row or
+    // a body rewrite; the stored redacted body stays the durable one. A
+    // re-approval of the usable pair advances the revision in place.
+    assert!(
+        store
+            .approve_credential_with_sweep("acme", "main", "sk-rotated-value")
+            .expect("the re-approval must commit")
+    );
+    let advanced = store.current_set_revision().await.unwrap();
+    assert_eq!(
+        store.record_task_result_arrival(fresh).await,
+        Ok(TaskResultArrivalOutcome::StaleCredentialSet { current: advanced })
+    );
+    assert_eq!(task_table_count(&store, "task_result"), 1);
+    let stored = store
+        .load_task_result(recorded.result)
+        .await
+        .unwrap()
+        .expect("the recorded result stays readable");
+    assert_eq!(stored.body.text(), redacted);
+    assert!(
+        !format!("{stored:?}").contains(secret),
+        "the stored record diagnostics carry no secret"
+    );
 }

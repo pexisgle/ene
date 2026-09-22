@@ -20,14 +20,6 @@ pub const ERASURE_SCAN_ROWS: u32 = 64;
 const COMPANION_CONTENT: &[(&str, &str)] =
     &[("history_message", "body"), ("activity_record", "body")];
 
-/// Content columns of the Learning owner, plus the derived token index whose
-/// membership is matched by token equality (not substring).
-const LEARNING_CONTENT: &[(&str, &str)] = &[
-    ("learning_summary", "content"),
-    ("learning_memory", "content"),
-    ("learning_memory_revision", "content"),
-];
-
 const HISTORY_MESSAGE_KEY: &str = "message_id";
 const ACTIVITY_RECORD_KEY: &str = "activity_id";
 const UNDELIVERED_KEY: &str = "undelivered_id";
@@ -114,8 +106,10 @@ struct PageRequest<'a> {
 type LocalStep =
     fn(tx: &Transaction<'_>, cursor: &mut SweepCursor, target: &str) -> Result<(), rusqlite::Error>;
 
-fn lock_cursor(slot: &Mutex<Option<SweepCursor>>) -> MutexGuard<'_, Option<SweepCursor>> {
-    match slot.lock() {
+fn lock_cursors(
+    cursors: &Mutex<HashMap<ErasureConditionRef, SweepCursor>>,
+) -> MutexGuard<'_, HashMap<ErasureConditionRef, SweepCursor>> {
+    match cursors.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
@@ -133,7 +127,7 @@ fn exact_text(command: &DemandLocalErasureCommand) -> Option<String> {
 
 fn run_local_demand(
     store: &Store,
-    sweep: &Mutex<Option<SweepCursor>>,
+    cursors: &Mutex<HashMap<ErasureConditionRef, SweepCursor>>,
     condition: ErasureConditionRef,
     owner: ParticipantOwnerRef,
     target: &str,
@@ -143,21 +137,29 @@ fn run_local_demand(
     let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let at = WallClockWithTz::now();
     if !crate::preservation::condition_is_current(&tx, condition)? {
+        // The sweep is not finishing; drop its continuation so a later demand
+        // for the same condition starts from a clean head.
+        lock_cursors(cursors).remove(&condition);
         return Ok(ParticipantCompletionFact::local_complete(
             condition, owner, 0, 0, at,
         ));
     }
-    let mut cursor = {
-        let slot = lock_cursor(sweep);
-        match slot.as_ref() {
-            Some(existing) if existing.condition == condition => existing.clone(),
-            _ => SweepCursor::fresh(condition),
-        }
-    };
+    let mut cursor = lock_cursors(cursors)
+        .get(&condition)
+        .cloned()
+        .unwrap_or_else(|| SweepCursor::fresh(condition));
     step(&tx, &mut cursor, target)?;
     tx.commit()?;
     let fact = cursor.fact(owner, at);
-    *lock_cursor(sweep) = Some(cursor);
+    // One continuation per unfinished condition: a verified sweep is finished
+    // and leaves no entry, and a demand for condition B never overwrites the
+    // position of an unfinished condition A.
+    let mut cursors = lock_cursors(cursors);
+    if cursor.verified {
+        cursors.remove(&condition);
+    } else {
+        cursors.insert(condition, cursor);
+    }
     Ok(fact)
 }
 
@@ -378,7 +380,9 @@ fn companion_step(
 
 pub struct CompanionErasureParticipant {
     store: Store,
-    sweep: Arc<Mutex<Option<SweepCursor>>>,
+    /// One continuation per unfinished condition, so concurrent operations do
+    /// not restart each other's in-progress sweep from the head.
+    sweep: Arc<Mutex<HashMap<ErasureConditionRef, SweepCursor>>>,
 }
 
 impl CompanionErasureParticipant {
@@ -386,7 +390,7 @@ impl CompanionErasureParticipant {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            sweep: Arc::new(Mutex::new(None)),
+            sweep: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -607,7 +611,7 @@ fn memory_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
 ) -> Result<PageOutcome, rusqlite::Error> {
-    let (table, content_column) = LEARNING_CONTENT[1];
+    let (table, content_column) = ("learning_memory", "content");
     let (keys, scanned, last) = {
         let mut statement = tx.prepare(&format!(
             "SELECT {MEMORY_KEY}, instr({content_column}, ?2) > 0 FROM {table} \
@@ -754,7 +758,9 @@ fn learning_step(
 
 pub struct LearningErasureParticipant {
     store: Store,
-    sweep: Arc<Mutex<Option<SweepCursor>>>,
+    /// One continuation per unfinished condition, so concurrent operations do
+    /// not restart each other's in-progress sweep from the head.
+    sweep: Arc<Mutex<HashMap<ErasureConditionRef, SweepCursor>>>,
 }
 
 impl LearningErasureParticipant {
@@ -762,7 +768,7 @@ impl LearningErasureParticipant {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            sweep: Arc::new(Mutex::new(None)),
+            sweep: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

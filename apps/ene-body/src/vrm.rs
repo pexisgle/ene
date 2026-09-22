@@ -1,6 +1,6 @@
 use crate::ipc::{
-    AssetFailInfo, AssetFailReason, AssetRef, FeatureSupport, MotionFailInfo, MotionFailReason,
-    MotionSetInfo, PoseHint,
+    AssetFailInfo, AssetFailReason, AssetReadyInfo, AssetRef, FeatureSupport, MotionFailInfo,
+    MotionFailReason, MotionSetInfo, PoseHint,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -20,13 +20,6 @@ const MOTION_PLAYBACK: PlaybackOptions = PlaybackOptions {
     mode: PlaybackMode::Loop,
     scale_hips_translation: true,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct AssetStats {
-    pub primitives: usize,
-    pub expressions: usize,
-    pub spring_chains: usize,
-}
 
 /// One CPU-deformed primitive plus its expression-evaluated PBR base color.
 /// Base-color texture sampling and the evaluated base-color factor are
@@ -63,7 +56,7 @@ pub struct VrmSession {
     playing: Option<PoseHint>,
     pose: PoseHint,
     elapsed_secs: f32,
-    stats: Option<AssetStats>,
+    stats: Option<AssetReadyInfo>,
     material_textures: Vec<Option<MaterialTexture>>,
     asset_generation: u32,
 }
@@ -125,7 +118,7 @@ impl VrmSession {
     }
 
     #[must_use]
-    pub fn stats(&self) -> Option<AssetStats> {
+    pub fn stats(&self) -> Option<AssetReadyInfo> {
         self.stats
     }
 
@@ -178,12 +171,6 @@ impl VrmSession {
                 MotionFailInfo::new(
                     MotionFailReason::InvalidVrma,
                     std::format!("VRMA validation failed: {error}"),
-                )
-            })?;
-            animation.validate().map_err(|error| {
-                MotionFailInfo::new(
-                    MotionFailReason::InvalidVrma,
-                    std::format!("VRMA clip is not playable: {error}"),
                 )
             })?;
             loaded.push((clip.pose, Arc::new(animation)));
@@ -243,7 +230,7 @@ impl VrmSession {
                 "VRM has no SpringBone chains",
             ));
         }
-        let stats = AssetStats {
+        let stats = AssetReadyInfo {
             primitives: avatar.primitives().len(),
             expressions: avatar.expressions().len(),
             spring_chains: avatar.spring_bone().springs.len(),

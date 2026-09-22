@@ -469,10 +469,10 @@ pub(crate) fn decode_intent_outcome(
 ) -> Result<IntentOutcome, String> {
     match (outcome_text, mark) {
         ("stored", Some(revision)) => Ok(IntentOutcome::StoredAsRuleView { revision }),
-        ("applied", _) => Ok(IntentOutcome::AppliedAsOneTime),
-        ("held", _) => Ok(IntentOutcome::HeldByOperation),
-        ("clarify", _) => Ok(IntentOutcome::NeedsClarification),
-        ("exhausted", _) => Ok(IntentOutcome::RevisionExhausted),
+        ("applied", None) => Ok(IntentOutcome::AppliedAsOneTime),
+        ("held", None) => Ok(IntentOutcome::HeldByOperation),
+        ("clarify", None) => Ok(IntentOutcome::NeedsClarification),
+        ("exhausted", None) => Ok(IntentOutcome::RevisionExhausted),
         ("stale", Some(current)) => Ok(IntentOutcome::StaleBaseView { current }),
         _ => Err(String::from("malformed intent outcome")),
     }
@@ -497,11 +497,15 @@ pub(crate) fn replay_or_conflict<T>(
     }
 }
 
+/// Stores the decided row for an intent whose write-once claim already ran in
+/// the same `BEGIN IMMEDIATE` transaction. A constraint violation here is torn
+/// state, never a lost race: the write lock is held from the claim through
+/// this insert, so no other writer can commit the key in between.
 pub(crate) fn insert_decided_row_tx(
     tx: &Transaction<'_>,
     fingerprint: &IntentFingerprint,
     outcome: &IntentOutcome,
-) -> Result<Option<IntentOutcomeRecord>, String> {
+) -> Result<(), String> {
     let (outcome_text, mark) = encode_intent_outcome(outcome);
     match tx.execute(
         SQL_INSERT_INTENT_OUTCOME,
@@ -516,14 +520,11 @@ pub(crate) fn insert_decided_row_tx(
             mark,
         ],
     ) {
-        Ok(_) => Ok(None),
+        Ok(_) => Ok(()),
         Err(error)
             if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
         {
-            select_intent_row_tx(tx, &fingerprint.intent_id)?.map_or_else(
-                || Err(String::from("intent row vanished after write conflict")),
-                |winner| Ok(Some(winner)),
-            )
+            Err(String::from("intent row appeared after write-once claim"))
         }
         Err(error) => Err(error.to_string()),
     }
@@ -747,6 +748,10 @@ pub(crate) fn decode_hint(
     })
 }
 
+/// Named fields keep column order in exactly one place:
+/// [`HistoryRow::from_row`]. The readers (`lookup_command`, `load_message`,
+/// `load_timeline`, `load_recent_timeline`, and `append_history`'s command
+/// lookup) share the column order through that constructor.
 pub(crate) struct HistoryRow {
     message_text: String,
     round_text: String,

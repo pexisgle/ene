@@ -31,12 +31,16 @@ const SQL_SELECT_ALL_CAPS: &str = "SELECT scope, provider, window, revision, cur
 
 const SQL_SELECT_CAPS_FOR_PROVIDER: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1) ORDER BY scope, provider, window";
 
-const SQL_SELECT_WINDOW_CONSUMPTION: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE state != 'released' AND opened_at >= ?1 AND opened_at < ?2";
+/// Reservations opened inside `[?1, ?2)`; the provider-scoped sum additionally
+/// filters `provider = ?3`. The decode loop owns the rule that `released` rows
+/// do not count, so this read and the summary read share one authority.
+const SQL_SELECT_WINDOW_CONSUMPTION: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE opened_at >= ?1 AND opened_at < ?2";
 
-const SQL_SELECT_WINDOW_CONSUMPTION_PROVIDER: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE state != 'released' AND opened_at >= ?1 AND opened_at < ?2 AND provider = ?3";
+const SQL_SELECT_WINDOW_CONSUMPTION_PROVIDER: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE opened_at >= ?1 AND opened_at < ?2 AND provider = ?3";
 
 pub(crate) const SQL_SELECT_RESERVATION_BY_TICKET: &str = "SELECT ticket, reservation_id, provider, model, pricing_snapshot, currency, upper_bound_micros, state, committed_currency, committed_micros, opened_at FROM usage_reservation WHERE ticket = ?1";
 
+/// Every reservation still `reserved`, for Host-startup reconciliation.
 pub(crate) const SQL_SELECT_ORPHANED_RESERVATIONS: &str = "SELECT ticket, reservation_id, provider, model, pricing_snapshot, currency, upper_bound_micros, state, committed_currency, committed_micros, opened_at FROM usage_reservation WHERE state = 'reserved'";
 
 const SQL_INSERT_RESERVATION: &str = "INSERT INTO usage_reservation (reservation_id, ticket, provider, model, pricing_snapshot, currency, upper_bound_micros, state, opened_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved', ?8)";
@@ -190,9 +194,9 @@ pub(crate) struct WindowConsumption {
 /// Sums one scope's consumption breakdown over the UTC period containing
 /// `at`.
 ///
-/// Only rows whose state is not `released` count. `committed_reported`
-/// contributes the actual committed cost (the reserved upper bound is
-/// released); `reserved` and `committed_unknown` contribute the reserved
+/// The decode loop drops `released` rows; every other state counts.
+/// `committed_reported` contributes the actual committed cost (the reserved
+/// upper bound is released); `reserved` and `committed_unknown` contribute the reserved
 /// upper bound, so an unknown external consumption can never free a cap slot.
 /// `Ok(None)` is indeterminate: an unrepresentable period, a currency the cap
 /// cannot be compared in, or a sum that does not fit the money representation.

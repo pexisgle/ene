@@ -108,6 +108,24 @@ impl Store {
     }
 }
 
+/// Table and column pairs holding quarantined plaintext content.
+///
+/// The derived recall token index is deliberately absent: a registered value
+/// is replaced as a whole string, while tokens hold its fragments, so a
+/// replace would leave credential-derived pieces behind. Token rows are
+/// rebuilt from the swept canonical text instead (see below).
+///
+/// Task and activity bodies are included because they are canonical sources
+/// for the Task report, the management view, and undelivered excerpts: a
+/// purpose, instruction activity, or final result recorded while the value
+/// was still ordinary text must be redacted by the same boundary, or the
+/// report/presentation would keep reading the raw value out of the owner row
+/// after the value became a registered credential.
+/// Marker-language passes bounded before the fallback removal. A replacement
+/// can re-form the bearer across the marker, and a bearer that is a substring
+/// of the marker keeps re-matching, so the sweep repeats and then removes.
+const SWEEP_PASS_BOUND: usize = 8;
+
 const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("activity_record", "body"),
     ("history_message", "body"),
@@ -139,13 +157,54 @@ pub(crate) fn sweep_registered_secret(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| credential_unavailable(error.to_string()))?
     };
+    // Table and column names are compile-time constants; the bearer travels
+    // only as a bound parameter. The bounded marker passes and the removal
+    // fallback mirror `erasure::redact_exact`: a single `replace` can re-form
+    // the bearer across the marker (or reproduce a bearer that is a substring
+    // of it), and removal strictly shortens the value so it reaches a clean
+    // fixpoint. The final probe makes any residual match a technical error
+    // that rolls the enclosing transaction back instead of advancing the
+    // revision on an unprovable sweep.
     for (table, column) in SWEEP_TARGETS {
-        let sql = format!(
+        let replace = format!(
             "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
              WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
         );
-        tx.execute(&sql, params![bearer, REDACTED_CREDENTIAL])
+        for _ in 0..SWEEP_PASS_BOUND {
+            let changed = tx
+                .execute(&replace, params![bearer, REDACTED_CREDENTIAL])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if changed == 0 {
+                break;
+            }
+        }
+        let remove = format!(
+            "UPDATE {table} SET {column} = replace({column}, ?1, '') \
+             WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
+        );
+        loop {
+            let changed = tx
+                .execute(&remove, params![bearer])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if changed == 0 {
+                break;
+            }
+        }
+        let residual: i64 = tx
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} \
+                     WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0)"
+                ),
+                params![bearer],
+                |row| row.get(0),
+            )
             .map_err(|error| credential_unavailable(error.to_string()))?;
+        if residual != 0 {
+            return Err(credential_unavailable(
+                "credential sweep left the bearer in stored content",
+            ));
+        }
     }
     for (memory, companion) in &affected {
         let content: String = tx
@@ -549,14 +608,10 @@ impl CredentialIntentRepository for Store {
                     IntentOutcome::HeldByOperation,
                 )
             };
-            match insert_decided_row_tx(&tx, &journal, &outcome).map_err(credential_unavailable)? {
-                None => {
-                    tx.commit()
-                        .map_err(|error| credential_unavailable(error.to_string()))?;
-                    Ok(RegistrationApply::Decided(state))
-                }
-                Some(_winner) => Ok(RegistrationApply::AlreadyDecided),
-            }
+            insert_decided_row_tx(&tx, &journal, &outcome).map_err(credential_unavailable)?;
+            tx.commit()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(RegistrationApply::Decided(state))
         })
         .await
     }

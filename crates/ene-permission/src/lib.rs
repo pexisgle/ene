@@ -318,10 +318,12 @@ pub fn consent_view_mark(dialogue_rev: Option<u64>, learning_rev: Option<u64>) -
 
 /// Parses the state one base-view mark names for `capability`.
 ///
-/// Accepts the combined view mark and a single-capability segment. An
-/// unparseable or differently-qualified segment is skipped, never treated as
-/// the answer, so a later well-formed segment can still match. Returns `None`
-/// when no segment for `capability` parses.
+/// Accepts the combined view mark and a single-capability segment. Segments
+/// that do not carry `capability`'s qualifier are skipped, but the first
+/// capability-qualified segment decides: if its state does not parse (unknown
+/// token or revision syntax) the function returns `None` and never falls
+/// through to a later qualified segment. Returns `None` when no segment for
+/// `capability` parses.
 #[must_use]
 pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Option<u64>> {
     let qualified = format!("consent-{}-", capability.as_str());

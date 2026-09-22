@@ -90,6 +90,17 @@ fn candidate_page(
         .map_err(storage)
 }
 
+/// Structural integrity of one operation's reconciliation cursor rows,
+/// scoped to the operation a query actually touches.
+///
+/// Invariant: an unfinished operation carries exactly one row per known
+/// identity table for its current sweep; a `Finalizing` operation has every
+/// row complete (the completion premise was re-read before the marker was
+/// taken); a completed operation keeps zero rows. Any other shape — a missing
+/// table, a foreign sweep, an unknown table name, or leftover rows after
+/// completion — is torn canonical state that fails closed, never a silently
+/// incomplete walk. Rows for an operation that does not exist are torn state
+/// for the same reason a condition without its operation is.
 fn validate_reconciliation(
     conn: &Connection,
     operation: &str,
@@ -150,6 +161,42 @@ fn validate_reconciliation(
     Ok(())
 }
 
+/// Structural integrity of one operation's canonical rows, scoped to the
+/// operation a query actually touches: an inner join must never silently hide
+/// an orphan correlation, an unfinished operation whose condition was closed
+/// early, or a completed operation that still holds protected material.
+///
+/// Source-correlation invariant (current-sweep canonical): an unfinished
+/// operation keeps `erasure_condition_source` rows only in its current sweep
+/// (`NextSweep` copies forward then deletes the old sweep atomically);
+/// historical `erasure_condition` rows remain but carry no source rows; a
+/// completed operation keeps zero source rows (the A5 completion boundary
+/// must delete them — A1 exposes no completion authority — and any remaining
+/// row fails closed). No second copy exists for audit/history.
+///
+/// Participant invariant: every operation carries a non-empty required
+/// participant snapshot from admission; every row tracks the operation's
+/// current sweep (`NextSweep` resets all progress to pending atomically); a
+/// `Finalizing` operation has every row `verified` (verification is terminal
+/// for its sweep) and a completed operation has every row `verified` for that
+/// sweep. A participant row for an unknown owner, a foreign sweep, or a
+/// missing snapshot is torn canonical state and fails closed, never a silently
+/// incomplete set.
+///
+/// Completion invariant: the audit row exists exactly when the operation is
+/// `completed`, matches the operation's purpose, start time, and final sweep,
+/// names every required participant exactly once with `verified` as its final
+/// status and the participant row's erased count, and a completed request's
+/// staged `exact_text` is wiped. Because the wipe, the audit, the condition
+/// closure, and the phase change share one commit, no partial shape (closed
+/// condition without completion, audit without closure, wiped material without
+/// audit) is ever readable.
+///
+/// Request provenance (A1b): an operation admitted from a staged request keeps
+/// that request's purpose for its whole life, and — while its protected
+/// material exists — the same exact mechanical text. A completed operation's
+/// material is gone by design, so only the purpose link is checked there.
+/// Bounded by the touching query's page, never a whole-store scan.
 fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechnicalError> {
     let broken: bool = conn
         .query_row(
@@ -469,6 +516,18 @@ pub(crate) fn covering_sources(
     Ok(None)
 }
 
+/// Collects one covered body instead of persisting it: redacts every current
+/// condition's mechanical target out of the text and returns the body-free
+/// result, or [`crate::erasure::ERASED_MARKER`] when a current condition's
+/// protected target is no longer readable (a finalizing wipe) so no
+/// mechanical comparison is possible at all.
+///
+/// This is the "erase collection" side of the A4 boundary contract for bodies
+/// whose objective fact must survive (a Task result arrival seals its
+/// delegation): the fact is committed, the body is not. Each pass makes the
+/// selected target absent from `current` (the redaction guarantees this,
+/// falling back to outright removal when the target overlaps the marker); the
+/// loop exits when no current condition's target occurs.
 pub(crate) fn redact_covered_text(
     conn: &Connection,
     text: &str,

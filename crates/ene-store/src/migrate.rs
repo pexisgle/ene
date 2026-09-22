@@ -523,12 +523,20 @@ CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
 CREATE INDEX idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_term_memory ON learning_memory_term (memory_id);
+-- The system-wide remainder probe tests `term = ?1` inside the completion
+-- transaction; the composite primary key cannot seek on `term` alone, so this
+-- index keeps that probe a bounded lookup instead of a whole-table walk.
+CREATE INDEX idx_learning_memory_term_term ON learning_memory_term (term);
 CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
 CREATE UNIQUE INDEX idx_paired_device_wire ON paired_device (wire);
 CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
 CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
 CREATE INDEX idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status, row_seq);
+-- The system-wide remainder probe tests `NOT EXISTS ... (source_kind,
+-- source_id)` inside the completion transaction; no other index leads with
+-- those columns, so this keeps the probe bounded.
+CREATE INDEX idx_undelivered_source ON undelivered (source_kind, source_id);
 CREATE INDEX idx_usage_reservation_opened ON usage_reservation (opened_at);
 CREATE INDEX idx_usage_reservation_provider_opened ON usage_reservation (provider, opened_at);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);

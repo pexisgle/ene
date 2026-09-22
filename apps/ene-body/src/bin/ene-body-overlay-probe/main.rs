@@ -1,3 +1,17 @@
+//! Real-compositor overlay probe for `ene-body`.
+//!
+//! Runs the Body runtime in-process with the same projection IPC contract as
+//! the product parent (`--ipc-stdio` framing), prints every Body event as one
+//! JSON line, and accepts projection commands on stdin:
+//!
+//! ```text
+//! show | hide | pose idle|listening|speaking|working|attention
+//! placement X Y W H SCALE | asset PATH | motions DIR | help | quit
+//! ```
+//!
+//! This is a probe tool, not product acceptance: a successful run here does
+//! not stand in for the official `ene` asset or for slice F.
+
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -116,9 +130,25 @@ async fn run() -> Result<(), ProbeError> {
         eprintln!("probe: shutdown send failed: {error}");
     }
     drop(to_body);
-    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut body_future).await {
+    // The runtime future ends only after it has written `CleanExit`; drain the
+    // event stream until EOF so that final event is printed too.
+    let drain = async {
+        loop {
+            let read = from_body.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            frame.extend_from_slice(&chunk[..read]);
+            while let Ok((event, used)) = decode_body(&frame) {
+                frame.drain(..used);
+                emit(&event)?;
+            }
+        }
+        (&mut body_future).await.map_err(ProbeError::Body)
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), drain).await {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(ProbeError::Body(error)),
+        Ok(Err(error)) => return Err(error),
         Err(_) => eprintln!("probe: body did not exit within 5s"),
     }
     Ok(())

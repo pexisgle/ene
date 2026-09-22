@@ -74,17 +74,20 @@ pub struct UndeliveredSummary {
     pub items: Vec<UndeliveredItemView>,
     pub reports: Vec<TaskReportView>,
     pub has_more: bool,
-    #[serde(default)]
+    /// Continuation of this pass; [`None`] means the pass reached its
+    /// captured bound. Bound to this companion's pass: reuse elsewhere
+    /// answers `StaleBaseView`.
     pub next_cursor: Option<PageCursorWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UndeliveredRequest {
-    #[serde(default)]
+    /// Which companion's backlog; [`None`] means the running companion.
     pub companion: Option<CompanionWireRef>,
-    #[serde(default)]
+    /// Continue this pass, else catch up.
     pub cursor: Option<PageCursorWire>,
-    #[serde(default)]
+    /// Page bound (`1..=50`, default 50). Out of range answers
+    /// `UnsupportedFieldValue`.
     pub limit: Option<u32>,
     #[serde(default)]
     pub redisplay: bool,
@@ -93,6 +96,10 @@ pub struct UndeliveredRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UndeliveredResponse {
     Summary(UndeliveredSummary),
+    /// The store could not answer; nothing was read or changed.
+    Unavailable,
+    /// Not even one item fits the agreed frame cap. Nothing was mutated:
+    /// no rows, no cursor, no receipt.
     FrameTooLarge,
     NoCurrentPresence,
     UnknownCompanion,
@@ -115,13 +122,13 @@ pub enum UndeliveredAckOutcome {
     StalePresentation,
     StaleConnection,
     HeldForErasure,
+    /// The store could not answer; no status was written for the carried ids.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ListTasks {
-    #[serde(default)]
     pub cursor: Option<PageCursorWire>,
-    #[serde(default)]
     pub limit: Option<u32>,
 }
 
@@ -153,9 +160,7 @@ pub enum TaskListResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GetTaskReport {
     pub task: TaskWireRef,
-    #[serde(default)]
     pub cursor: Option<PageCursorWire>,
-    #[serde(default)]
     pub limit: Option<u32>,
 }
 
@@ -192,9 +197,10 @@ pub enum TaskReportResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GetReportSource {
     pub source: ReportSourceWireRef,
-    #[serde(default)]
+    /// Byte cursor into the body; [`None`] starts at zero.
     pub cursor: Option<u64>,
-    #[serde(default)]
+    /// `4..=16384`, default 4096. Out of range answers
+    /// `UnsupportedFieldValue`.
     pub limit_bytes: Option<u32>,
 }
 
@@ -291,4 +297,79 @@ pub enum ResumeTaskOutcomeWire {
     UnknownRef,
     StaleConnection,
     Unavailable,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, ReportSourcePageView, ResumeTask, TaskWireRef,
+        UndeliveredItemView, UndeliveredSourceView,
+    };
+
+    #[test]
+    fn page_bounds_match_the_wire_contract() {
+        assert_eq!(DEFAULT_PAGE_LIMIT, 50);
+        assert_eq!(MAX_PAGE_LIMIT, 50);
+        assert_eq!(super::EXCERPT_MAX_BYTES, 2048);
+        assert_eq!(super::MIN_SOURCE_LIMIT_BYTES, 4);
+        assert_eq!(super::MAX_SOURCE_LIMIT_BYTES, 16384);
+        assert_eq!(super::DEFAULT_SOURCE_LIMIT_BYTES, 4096);
+    }
+
+    #[test]
+    fn item_debug_redacts_the_excerpt_but_keeps_refs() {
+        let item = UndeliveredItemView {
+            reference: super::UndeliveredWireRef(String::from("und-1")),
+            source: UndeliveredSourceView {
+                kind: String::from("task_revision"),
+                subject: String::from("subject-9"),
+                certainty: None,
+            },
+            excerpt: String::from("private managed words"),
+            truncated: true,
+        };
+        let rendered = format!("{item:?}");
+        assert!(
+            !rendered.contains("private managed words"),
+            "excerpt redacted: {rendered}"
+        );
+        assert!(
+            rendered.contains("und-1") && rendered.contains("subject-9"),
+            "refs stay visible: {rendered}"
+        );
+    }
+
+    #[test]
+    fn source_page_debug_redacts_text_but_keeps_accounting() {
+        let page = ReportSourcePageView {
+            text: String::from("private body bytes"),
+            total_bytes: 9000,
+            next: Some(4096),
+        };
+        let rendered = format!("{page:?}");
+        assert!(
+            !rendered.contains("private body bytes"),
+            "body redacted: {rendered}"
+        );
+        assert!(
+            rendered.contains("9000"),
+            "accounting stays visible: {rendered}"
+        );
+    }
+
+    #[test]
+    fn resume_debug_redacts_the_instruction() {
+        let command = ResumeTask {
+            task: TaskWireRef(String::from("task-1")),
+            expected_revision: 3,
+            expected_purpose: String::from("task-1:3"),
+            instruction: String::from("continue the remaining work please"),
+        };
+        let rendered = format!("{command:?}");
+        assert!(
+            !rendered.contains("continue the remaining work"),
+            "instruction redacted: {rendered}"
+        );
+        assert!(rendered.contains("task-1"), "refs stay visible: {rendered}");
+    }
 }

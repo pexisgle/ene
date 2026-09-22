@@ -33,11 +33,13 @@ use crate::secret::SecretValue;
 /// ```
 ///
 /// Secret custody: generation stays with the caller (the pairing repository
-/// approve path mints the secret); this store only persists and returns
-/// custody via [`load_secret`](FileDeviceAuthStore::load_secret), which hands
-/// back an owned [`SecretValue`]. Secrets and descriptors are never logged and
-/// never appear in this type's `Debug` output, which shows the path and the
-/// entry count only.
+/// approve path mints the secret); this store only persists it, and the owned
+/// [`SecretValue`] never leaves this crate. Callers outside the crate verify a
+/// device with [`verify_device_proof`](FileDeviceAuthStore::verify_device_proof)
+/// and probe existence with [`has_secret`](FileDeviceAuthStore::has_secret);
+/// there is no public accessor that returns the value. Secrets and descriptors
+/// are never logged and never appear in this type's `Debug` output, which shows
+/// the path and the entry count only.
 ///
 /// File protection: on Unix the file at rest must be mode `0600`. Opening an
 /// existing file with any other mode attempts to tighten it to `0600` and
@@ -188,7 +190,20 @@ impl FileDeviceAuthStore {
         result
     }
 
-    pub fn load_secret(
+    /// Loads the persisted secret for `device`, if any.
+    ///
+    /// Crate-private: the owned [`SecretValue`] must not cross the crate
+    /// boundary, so external callers use [`Self::verify_device_proof`] or the
+    /// non-secret [`Self::has_secret`] probe instead.
+    ///
+    /// An unknown device (or a missing file) yields `Ok(None)`; only an
+    /// unreadable or malformed file yields an error, never a silent default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// file cannot be read or fails validation.
+    pub(crate) fn load_secret(
         &self,
         device: &DeviceId,
     ) -> Result<Option<SecretValue>, CredentialTechnicalError> {
@@ -205,6 +220,38 @@ impl FileDeviceAuthStore {
         Ok(Some(SecretValue::new(bytes)))
     }
 
+    /// Reports whether a persisted secret exists for `device` without
+    /// returning any of its material.
+    ///
+    /// This is the non-secret existence probe for callers outside the crate;
+    /// the value itself stays confined to [`load_secret`](Self::load_secret)
+    /// and [`verify_device_proof`](Self::verify_device_proof).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// file cannot be read or fails validation, so an unreadable file is never
+    /// reported as absent.
+    pub fn has_secret(&self, device: &DeviceId) -> Result<bool, CredentialTechnicalError> {
+        let entries = self.read_entries()?;
+        Ok(entries
+            .get(&device_key(device))
+            .is_some_and(|entry| decode_hex_lower(&entry.secret_hex).is_some()))
+    }
+
+    /// Verifies one pairing ownership proof against the persisted secret.
+    ///
+    /// The secret bytes never leave this crate: they are borrowed into the
+    /// constant-time comparison inside [`verify_pairing_proof`] and zeroized
+    /// on drop with the `SecretValue`. An unknown device yields `Ok(false)`;
+    /// a stored secret that is not valid UTF-8 (never minted by the approve
+    /// path, which stores UUID text) likewise yields `Ok(false)`. Both are
+    /// fail-closed without distinguishing the reason to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// file cannot be read or fails validation.
     pub fn verify_device_proof(
         &self,
         device: &DeviceId,

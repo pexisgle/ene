@@ -1657,15 +1657,13 @@ fn observation_correlation(
     premise: &TaskAgentObservationPremise,
 ) -> Result<ObservationCorrelation, TaskTechnicalError> {
     let delegation_text = encode_id(premise.delegation.as_raw());
-    let correspondence: Option<(String, i64)> = tx
-        .query_row(
-            SQL_SELECT_DELEGATION_CORRESPONDENCE,
-            params![delegation_text],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    let correspondence: Option<(String, i64, Option<String>)> = tx
+        .query_row(SQL_SELECT_DELEGATION, params![delegation_text], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(4)?))
+        })
         .optional()
         .map_err(task_unavailable)?;
-    let Some((task, task_revision)) = correspondence else {
+    let Some((task, task_revision, scope_assoc)) = correspondence else {
         return Err(task_unavailable(
             "delegation correspondence missing for observation record",
         ));
@@ -1713,6 +1711,18 @@ fn observation_correlation(
     if delegation != delegation_text || stored_task != task || stored_revision != task_revision {
         return Err(task_unavailable(
             "producing action attempt disagrees with the delegation correspondence",
+        ));
+    }
+    // A valid attempt can never carry a NULL delegation scope: the start path
+    // refuses it, so a missing or diverging scope is torn state, not a
+    // reason to copy a foreign workspace into the observation.
+    let scope = scope_assoc
+        .ok_or_else(|| task_unavailable("delegation scope missing for observation record"))?;
+    if decode_id(&scope).map_err(task_unavailable)?
+        != decode_id(&workspace).map_err(task_unavailable)?
+    {
+        return Err(task_unavailable(
+            "producing action attempt workspace disagrees with the delegation scope",
         ));
     }
     let body_observed = premise.observed.is_some();
@@ -2310,6 +2320,14 @@ fn adopt_result_sync(
         ));
     };
     let relied_purpose = decode_revision(snapshot.purpose_adopted_revision)?;
+    // The relied revision's purpose snapshot and the current Task's purpose
+    // identity are two halves of one D1/D2 unit. A same-revision disagreement
+    // is a corrupted unit, not a reason to record the result as original-only.
+    if current_revision == relied_revision && relied_purpose != current_purpose {
+        return Err(task_unavailable(
+            "task revision purpose does not match the current purpose",
+        ));
+    }
     if let Some(adopted_raw) = raw.adopted_revision {
         if decode_revision(adopted_raw)? != relied_revision {
             return Err(task_unavailable(

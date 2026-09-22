@@ -15,15 +15,18 @@
 //! without opening a turn, while a conflicting reuse rejects just as
 //! early.
 //!
-//! Task control follows the same caller-proposes split: [`propose_task`] and
-//! [`propose_steering`] map accepted conversation commands onto the Task
-//! owner's value premises and return the owner's outcomes unchanged. Adoption
-//! decisions and identities stay with `ene-task`, and [`TaskReport`] renders
-//! user-facing facts the composition root read from the durable owners.
+//! Task control follows the same caller-proposes split:
+//! [`propose_task_current`] and [`propose_steering_current`] map accepted
+//! conversation commands onto the Task owner's value premises, compare the
+//! relied Owner input in the owner's commit, and return the owner's outcomes
+//! unchanged. Adoption decisions and identities stay with `ene-task`, and
+//! [`TaskReport`] renders user-facing facts the composition root read from
+//! the durable owners.
 //!
 //! [`finish_turn`] also interprets the companion's own provider output for
-//! one closed-world [`DialogueTaskCommand`] (`[task-control] {json}`, final
-//! line): the companion-owned interpretation reaches the Task owner only
+//! one closed-world [`DialogueTaskCommand`] (`[task-control] {json}`, its
+//! first and only non-empty line): the companion-owned interpretation reaches
+//! the Task owner only
 //! through the composition root's [`DialogueTaskControlPort`], the directive
 //! line is never stored, and the stored reply is the owner-derived text. A
 //! malformed directive closes the stream interrupted without storing a reply,
@@ -33,7 +36,7 @@
 use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
     Admission, AuthorizedInference, DeltaFlow, DeltaSink, DiscardSink, InferenceDispatchOutcome,
-    InferenceExecutor, NotSentReason,
+    InferenceExecutor,
 };
 use ene_learning::{
     ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn, FormationDecision,
@@ -44,16 +47,15 @@ use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_task::{
     AssigneeRef, ConversationTaskRepository, OwnerMessageCurrentness, SteeringPremiseRef,
-    SteeringProposalPremise, TaskContextOrigin, TaskCreationOutcome, TaskProgress,
-    TaskProposalOutcome, TaskProposalPremise, TaskPurpose, TaskRepository, TaskTechnicalError,
-    WorkspaceNeedRef, orchestrate_steering_current, orchestrate_task_creation,
-    orchestrate_task_creation_current,
+    SteeringProposalPremise, TaskContextOrigin, TaskProgress, TaskProposalOutcome,
+    TaskProposalPremise, TaskPurpose, TaskTechnicalError, WorkspaceNeedRef,
+    orchestrate_steering_current, orchestrate_task_creation_current,
 };
 
 use crate::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
-    HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole, RequestFingerprint,
-    RoundIntentMark,
+    ActionCertaintyWire, AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle,
+    CompanionTechnicalError, HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole,
+    RequestFingerprint, RoundIntentMark,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -123,7 +125,6 @@ impl core::fmt::Debug for DialogueTurn {
 pub enum DialogueBegin {
     Ready(Box<DialogueTurn>),
     Replayed {
-        round: RawId,
         round_wire: Option<String>,
     },
     StaleExpected {
@@ -135,13 +136,14 @@ pub enum DialogueBegin {
     Held,
     HeldForErasure,
     HeldByLifecycle(CompanionLifecycle),
-    Declined(NotSentReason),
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum DialogueOutcome {
+    /// The reply committed.
     Completed {
-        text: String,
+        /// Accepted input of this turn, so the caller can occupy the pin
+        /// window and then [`pin_experience`] after the durable reply.
         input: Box<AcceptedDialogueInput>,
     },
     Interrupted,
@@ -152,7 +154,6 @@ impl core::fmt::Debug for DialogueOutcome {
         match self {
             Self::Completed { .. } => formatter
                 .debug_struct("Completed")
-                .field("text", &"<redacted>")
                 .field("input", &"<accepted>")
                 .finish(),
             Self::Interrupted => formatter.write_str("Interrupted"),
@@ -162,10 +163,9 @@ impl core::fmt::Debug for DialogueOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayClassification {
-    Replay {
-        round: RawId,
-        round_wire: Option<String>,
-    },
+    /// The stored row proves an exact retry: answer its original accept.
+    Replay { round_wire: Option<String> },
+    /// The stored row proves a different request under the same key.
     Conflict,
     None,
     Held,
@@ -186,7 +186,6 @@ pub async fn classify_replay(
                 .is_some_and(|stored| stored == incoming);
             if replays {
                 ReplayClassification::Replay {
-                    round: found.round,
                     round_wire: found.round_wire,
                 }
             } else {
@@ -196,7 +195,8 @@ pub async fn classify_replay(
     }
 }
 
-/// [`begin_turn_committed`] with the durable Owner append supplied by the caller.
+/// Commits the Owner row for one accepted input inside the caller's
+/// connection-ownership section.
 ///
 /// The Host runs the Client-dependent admission (CCT §10.4) as a guarded
 /// synchronous section: `commit` executes inside the connection-ownership
@@ -249,7 +249,6 @@ where
         Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. }) => {
             match lookup(input.companion, &input.command) {
                 Ok(Some(found)) => DialogueBegin::Replayed {
-                    round: found.round,
                     round_wire: found.round_wire,
                 },
                 _ => DialogueBegin::Held,
@@ -343,13 +342,23 @@ impl<'a> ControlHoldingSink<'a> {
             return DeltaFlow::Continue;
         };
         if let Some(position) = self.buffer.find(TASK_CONTROL_MARKER) {
+            // The marker is reserved: at the first position it is a directive
+            // candidate, anywhere else it is a fail-closed violation. The
+            // ordinary prefix before a late marker is still presented, exactly
+            // as flush_ordinary does, so what the user sees never depends on
+            // how the provider chunked the reply.
             if position == start {
                 self.mode = ControlMode::Directive;
-            } else {
-                self.mode = ControlMode::LateMarker;
+                self.buffer.clear();
+                return DeltaFlow::Continue;
             }
+            self.mode = ControlMode::LateMarker;
+            let prefix = self.buffer[..position].to_owned();
             self.buffer.clear();
-            return DeltaFlow::Continue;
+            if prefix.is_empty() {
+                return DeltaFlow::Continue;
+            }
+            return self.push_raw(&prefix).await;
         }
         let candidate = &self.buffer[start..];
         if candidate.len() < TASK_CONTROL_MARKER.len() && TASK_CONTROL_MARKER.starts_with(candidate)
@@ -489,7 +498,10 @@ pub async fn finish_turn(
                         DialogueTaskInterpretation::Invalid => {
                             return DialogueOutcome::Interrupted;
                         }
-                        DialogueTaskInterpretation::Conversation { .. } => {
+                        // The sink saw a directive the scrubbed text does not
+                        // carry; fail closed instead of presenting unproven
+                        // text.
+                        DialogueTaskInterpretation::Conversation => {
                             return DialogueOutcome::Interrupted;
                         }
                     };
@@ -506,7 +518,7 @@ pub async fn finish_turn(
                 companion: input.companion,
                 round: input.round,
                 role: HistoryRole::Companion,
-                text: reply_text.clone(),
+                text: reply_text,
                 lang: input.lang.clone(),
                 at: WallClockWithTz::now(),
                 expected_generation: input.generation,
@@ -520,13 +532,17 @@ pub async fn finish_turn(
                 incarnation: None,
             };
             match history
-                .append_reply_with_undelivered(reply, true, Some(arrival.ticket.0))
+                .append_reply_with_undelivered(reply, Some(arrival.ticket.0))
                 .await
             {
-                Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => DialogueOutcome::Completed {
-                    text: reply_text,
-                    input: Box::new(input),
-                },
+                Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => {
+                    // The Experience premise is pinned by the caller after
+                    // occupancy is registered; this outcome only proves the
+                    // reply is durable.
+                    DialogueOutcome::Completed {
+                        input: Box::new(input),
+                    }
+                }
                 _ => DialogueOutcome::Interrupted,
             }
         }
@@ -560,7 +576,7 @@ fn fixed_prompt_chars(current_time: &str) -> usize {
 
 #[must_use]
 pub fn dialogue_input_fits(input_text: &str) -> bool {
-    let current_time = WallClockWithTz::now().to_rfc3339();
+    let current_time = WallClockWithTz::now().to_rfc3339_secs();
     fixed_prompt_chars(&current_time).saturating_add(input_text.chars().count())
         <= ene_inference::MAX_INPUT_CHARS
 }
@@ -572,11 +588,7 @@ pub struct DialogueInput {
 }
 
 impl DialogueInput {
-    #[must_use]
-    pub fn prompt(&self) -> &ScrubbedText {
-        &self.prompt
-    }
-
+    /// Consumes the input, yielding the scrubbed prompt for dispatch.
     #[must_use]
     pub fn into_prompt(self) -> ScrubbedText {
         self.prompt
@@ -598,6 +610,57 @@ impl core::fmt::Debug for DialogueInput {
     }
 }
 
+/// Selects whole lines that fit the remaining prompt budget.
+///
+/// The section header is charged once, to the first line that fits. Every
+/// selected line is charged against the shared `budget` at selection time, so
+/// a caller can fill sections in priority order and the assembled prompt never
+/// exceeds the budget. A line that does not fit is skipped, never truncated.
+fn fit_within_budget(
+    lines: Vec<(RawId, String)>,
+    header: &str,
+    budget: &mut usize,
+) -> Vec<(RawId, String)> {
+    let mut header_charged = false;
+    let mut chosen = Vec::new();
+    for (id, line) in lines {
+        let header_cost = if header_charged {
+            0
+        } else {
+            header.chars().count()
+        };
+        let line_chars = line.chars().count();
+        if line_chars + header_cost > *budget {
+            continue;
+        }
+        *budget -= line_chars + header_cost;
+        header_charged = true;
+        chosen.push((id, line));
+    }
+    chosen
+}
+
+/// Builds the dialogue input within the final request budget.
+///
+/// Priority order: the current input and the fixed labels are secured first;
+/// remaining characters go to recent History (newest first) and then to
+/// recalled Memory, each selected as whole meaning units. An item that does
+/// not fit is skipped rather than truncated, and selection stops at the
+/// budget, so the assembled prompt never exceeds
+/// [`ene_inference::MAX_INPUT_CHARS`] no matter how large old context grows.
+///
+/// The current owner input is carried once, after the context sections; it is
+/// not yet a durable History identity and is therefore not part of the
+/// read-set correlation (the reply append compares it separately as the
+/// relied Owner message). The read-set names exactly the Memory and History
+/// rows the prompt consumed. Memory content, History text, and the input
+/// itself pass through the scrubber before they enter the prompt; a scrub
+/// failure is returned so the caller can close the stream without sending or
+/// storing raw text. The returned premise is the oldest of every scrubbed
+/// piece, so the send claim accepts the prompt only when all pieces were
+/// scrubbed under the same current credential set. The memory and history
+/// reads stay best-effort: retrieval is derived, so a read failure degrades
+/// the context rather than turning a follow-up into an error.
 pub async fn assemble_dialogue_input(
     companion: CompanionId,
     input_text: &str,
@@ -621,13 +684,15 @@ pub async fn assemble_dialogue_input(
     .unwrap_or_default();
     let input = scrubber.scrub(input_text).await?;
     let mut credential_set = input.credential_set();
-    let current_time = WallClockWithTz::now().to_rfc3339();
+    let current_time = WallClockWithTz::now().to_rfc3339_secs();
     let mut budget = ene_inference::MAX_INPUT_CHARS.saturating_sub(
         fixed_prompt_chars(&current_time).saturating_add(input.text().chars().count()),
     );
 
-    let mut chosen_history: Vec<(RawId, String)> = Vec::new();
-    let mut history_header = false;
+    // Recent History first, newest to oldest: a fitting older message is
+    // still useful when the newest one is too large, and whole messages are
+    // never cut. Selection order is reversed for the oldest-first rendering.
+    let mut history_lines: Vec<(RawId, String)> = Vec::new();
     for item in recent.iter().rev() {
         let text = scrubber.scrub(&item.text).await?;
         credential_set = credential_set.min(text.credential_set());
@@ -636,40 +701,19 @@ pub async fn assemble_dialogue_input(
             HistoryRole::Companion => "Companion",
         };
         let line = format!("{role} [{}]: {}\n", item.at.to_rfc3339(), text.text());
-        let header_cost = if history_header {
-            0
-        } else {
-            RECENT_HEADER.chars().count()
-        };
-        let line_chars = line.chars().count();
-        if line_chars + header_cost > budget {
-            continue;
-        }
-        budget -= line_chars + header_cost;
-        history_header = true;
-        chosen_history.push((item.id, line));
+        history_lines.push((item.id, line));
     }
+    let mut chosen_history = fit_within_budget(history_lines, RECENT_HEADER, &mut budget);
     chosen_history.reverse();
 
-    let mut chosen_memories: Vec<(RawId, String)> = Vec::new();
-    let mut memories_header = false;
+    // Recalled Memory fills what remains, in recall rank order.
+    let mut memory_lines: Vec<(RawId, String)> = Vec::new();
     for memory in &recalled {
         let content = scrubber.scrub(&memory.content).await?;
         credential_set = credential_set.min(content.credential_set());
-        let line = format!("- {}\n", content.text());
-        let header_cost = if memories_header {
-            0
-        } else {
-            MEMORIES_HEADER.chars().count()
-        };
-        let line_chars = line.chars().count();
-        if line_chars + header_cost > budget {
-            continue;
-        }
-        budget -= line_chars + header_cost;
-        memories_header = true;
-        chosen_memories.push((memory.id.as_raw(), line));
+        memory_lines.push((memory.id.as_raw(), format!("- {}\n", content.text())));
     }
+    let chosen_memories = fit_within_budget(memory_lines, MEMORIES_HEADER, &mut budget);
 
     let mut prompt = String::new();
     prompt.push_str(DIALOGUE_PREAMBLE);
@@ -755,7 +799,7 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
     ) -> Result<ene_learning::LearningInferenceAnswer, LearningInferenceError> {
         match self
             .inference
-            .admit_learning(premise.data_use().to_vec())
+            .admit_learning(premise.data_use.clone())
             .await
         {
             Ok(Admission::Admitted(authorized)) => {
@@ -796,21 +840,16 @@ pub struct ProposeSteeringCommand {
     pub instruction_source: RawId,
 }
 
-pub async fn propose_steering(
-    command: ProposeSteeringCommand,
-    repository: &impl TaskRepository,
-) -> Result<TaskProposalOutcome, TaskTechnicalError> {
-    ene_task::orchestrate_steering(
-        repository,
-        SteeringProposalPremise {
-            premise: command.premise,
-            new_purpose: command.new_purpose,
-            instruction_source: command.instruction_source,
-        },
-    )
-    .await
-}
-
+/// Proposes one conversation-sourced steering change, conditional on the
+/// relied Owner input still being current.
+///
+/// The Task owner compares the Owner-message currentness premise inside the
+/// revision commit: a newer accepted Owner input supersedes the turn and
+/// answers [`TaskProposalOutcome::Superseded`] with zero writes. The caller
+/// only proposes: this maps the command onto the Task owner's value premise
+/// and returns the owner's outcome unchanged (accepted, stale, superseded,
+/// missing, terminal, or exhausted), never reinterpreted here. A caller never
+/// mints entry identities and never names `expected.revision + 1`.
 pub async fn propose_steering_current(
     command: ProposeSteeringCommand,
     repository: &impl ConversationTaskRepository,
@@ -836,29 +875,23 @@ pub struct ProposeTaskCommand {
     pub workspace_need: Option<WorkspaceNeedRef>,
 }
 
-pub async fn propose_task(
-    command: ProposeTaskCommand,
-    repository: &impl TaskRepository,
-) -> Result<TaskProposalOutcome, TaskTechnicalError> {
-    orchestrate_task_creation(
-        repository,
-        TaskProposalPremise {
-            requester: AssigneeRef {
-                companion: command.requester.as_raw(),
-            },
-            purpose: command.purpose,
-            origin: command.origin,
-            workspace_need: command.workspace_need,
-        },
-    )
-    .await
-}
-
+/// Proposes one conversation-sourced Task, conditional on the relied Owner
+/// input still being current.
+///
+/// The Task owner compares the Owner-message currentness premise inside the
+/// creation transaction: a newer accepted Owner input supersedes the turn and
+/// answers [`TaskProposalOutcome::Superseded`] with zero writes. The owner
+/// mints every identity and commits the creation unit, and the returned
+/// [`TaskProposalOutcome`] is the owner's outcome unchanged
+/// ([`TaskProposalOutcome::AcceptedAsTask`] on success). Creating a delegation
+/// is a separate owner request issued by the composition root that received
+/// the accepted reference; this function never mints a
+/// [`DelegationId`](ene_task::DelegationId) and never starts an execution.
 pub async fn propose_task_current(
     command: ProposeTaskCommand,
     repository: &impl ConversationTaskRepository,
     currentness: OwnerMessageCurrentness,
-) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
     orchestrate_task_creation_current(
         repository,
         TaskProposalPremise {
@@ -874,6 +907,12 @@ pub async fn propose_task_current(
     .await
 }
 
+/// Marker introducing one companion-emitted Task control directive.
+///
+/// The companion's reply may carry at most one line beginning with this
+/// marker, and only as the reply's first non-empty line. A control turn stores
+/// the scrubbed owner-derived outcome, not the provider text with a line
+/// removed.
 pub const TASK_CONTROL_MARKER: &str = "[task-control]";
 
 #[derive(Clone, PartialEq, Eq, serde::Deserialize)]
@@ -917,7 +956,10 @@ impl core::fmt::Debug for DialogueTaskCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogueTaskInterpretation {
-    Conversation { text: String },
+    /// No control marker: ordinary conversation text, unchanged.
+    Conversation,
+    /// The reply is exactly one valid control command line. Provider prose is
+    /// deliberately not part of a control reply.
     Command { command: DialogueTaskCommand },
     /// The reply begins with the marker but is not exactly one well-formed
     /// command line; nothing may be executed and the caller fails closed by
@@ -928,9 +970,7 @@ pub enum DialogueTaskInterpretation {
 #[must_use]
 pub fn interpret_task_control(text: &str) -> DialogueTaskInterpretation {
     if !text.contains(TASK_CONTROL_MARKER) {
-        return DialogueTaskInterpretation::Conversation {
-            text: text.to_owned(),
-        };
+        return DialogueTaskInterpretation::Conversation;
     }
     let lines: Vec<&str> = text.lines().collect();
     let Some(first_non_empty) = lines.iter().position(|line| !line.trim().is_empty()) else {
@@ -984,18 +1024,13 @@ pub trait DialogueTaskControlPort: Send + Sync {
     async fn apply(&self, command: DialogueTaskCommand, origin: RawId) -> DialogueTaskControlReply;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TaskReportCertainty {
-    ConfirmedSuccess,
-    ConfirmedFailure,
-    Unknown,
-}
-
+/// One Action attempt as shown in a Task report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskReportAttempt {
     pub operation: String,
     pub target: String,
-    pub certainty: TaskReportCertainty,
+    /// The Action owner's certainty, projected verbatim.
+    pub certainty: ActionCertaintyWire,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1028,6 +1063,12 @@ impl core::fmt::Debug for TaskReport {
 }
 
 impl TaskReport {
+    /// Renders the user-facing report from the canonical facts.
+    ///
+    /// Confirmed create/edit targets are the completed changes, the workspace
+    /// folder is the save location, and attempts that are not
+    /// [`ActionCertaintyWire::ConfirmedSuccess`] are listed as remaining or
+    /// unconfirmed effects instead of being folded into success.
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = format!("task status: {}", progress_label(self.progress));
@@ -1073,7 +1114,7 @@ impl TaskReport {
             .correlated_attempts
             .iter()
             .chain(self.other_attempts.iter())
-            .filter(|attempt| attempt.certainty != TaskReportCertainty::ConfirmedSuccess)
+            .filter(|attempt| attempt.certainty != ActionCertaintyWire::ConfirmedSuccess)
             .collect();
         text.push_str("\nremaining/unconfirmed effects:");
         if remaining.is_empty() {
@@ -1098,24 +1139,24 @@ fn progress_label(progress: TaskProgress) -> &'static str {
 }
 
 fn is_completed_change(attempt: &TaskReportAttempt) -> bool {
-    attempt.certainty == TaskReportCertainty::ConfirmedSuccess
+    attempt.certainty == ActionCertaintyWire::ConfirmedSuccess
         && matches!(attempt.operation.as_str(), "create" | "edit")
 }
 
 fn attempt_label(attempt: &TaskReportAttempt) -> String {
     let certainty = match attempt.certainty {
-        TaskReportCertainty::ConfirmedSuccess => "confirmed success",
-        TaskReportCertainty::ConfirmedFailure => "confirmed failure",
-        TaskReportCertainty::Unknown => "unknown",
+        ActionCertaintyWire::ConfirmedSuccess => "confirmed success",
+        ActionCertaintyWire::ConfirmedFailure => "confirmed failure",
+        ActionCertaintyWire::Unknown => "unknown",
     };
     format!("{} {} ({certainty})", attempt.operation, attempt.target)
 }
 
 #[cfg(test)]
 mod report_tests {
-    use super::{TaskProgress, TaskReport, TaskReportAttempt, TaskReportCertainty};
+    use super::{ActionCertaintyWire, TaskProgress, TaskReport, TaskReportAttempt};
 
-    fn attempt(operation: &str, target: &str, certainty: TaskReportCertainty) -> TaskReportAttempt {
+    fn attempt(operation: &str, target: &str, certainty: ActionCertaintyWire) -> TaskReportAttempt {
         TaskReportAttempt {
             operation: operation.to_owned(),
             target: target.to_owned(),
@@ -1134,7 +1175,7 @@ mod report_tests {
             correlated_attempts: vec![attempt(
                 "create",
                 "/srv/workspace/ene/report.md",
-                TaskReportCertainty::ConfirmedSuccess,
+                ActionCertaintyWire::ConfirmedSuccess,
             )],
             other_attempts: Vec::new(),
         };
@@ -1168,12 +1209,12 @@ mod report_tests {
                 attempt(
                     "create",
                     "/srv/workspace/ene/half.md",
-                    TaskReportCertainty::Unknown,
+                    ActionCertaintyWire::Unknown,
                 ),
                 attempt(
                     "edit",
                     "/srv/workspace/ene/notes.md",
-                    TaskReportCertainty::ConfirmedFailure,
+                    ActionCertaintyWire::ConfirmedFailure,
                 ),
             ],
         };
@@ -1223,12 +1264,10 @@ mod task_control_tests {
 
     #[test]
     fn an_ordinary_reply_is_conversation_unchanged() {
-        match interpret_task_control("hello there\nsecond line") {
-            DialogueTaskInterpretation::Conversation { text } => {
-                assert_eq!(text, "hello there\nsecond line");
-            }
-            other => panic!("expected conversation, got {other:?}"),
-        }
+        assert!(matches!(
+            interpret_task_control("hello there\nsecond line"),
+            DialogueTaskInterpretation::Conversation
+        ));
     }
 
     #[test]
@@ -1337,3 +1376,60 @@ mod task_control_tests {
         assert!(!rendered.contains("private instruction"), "{rendered}");
     }
 }
+
+#[cfg(test)]
+mod control_sink_tests {
+    use super::{ControlHoldingSink, ControlPresentation};
+    use ene_inference::{DeltaFlow, DeltaSink};
+
+    /// Collects every delta the holding sink publishes.
+    #[derive(Default)]
+    struct RecordingSink {
+        published: String,
+    }
+
+    impl DeltaSink for RecordingSink {
+        fn push_delta<'a>(
+            &'a mut self,
+            delta: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
+            Box::pin(async move {
+                self.published.push_str(delta);
+                DeltaFlow::Continue
+            })
+        }
+    }
+
+    /// Runs the holding sink over one chunking and returns what was published
+    /// plus the final classification.
+    async fn run(deltas: &[&str]) -> (String, ControlPresentation) {
+        let mut recorder = RecordingSink::default();
+        let mut holder = ControlHoldingSink::new(&mut recorder);
+        for delta in deltas {
+            assert_eq!(holder.push(delta).await, DeltaFlow::Continue);
+        }
+        let presentation = holder.finalize().await;
+        (recorder.published, presentation)
+    }
+
+    #[tokio::test]
+    async fn a_late_marker_in_one_delta_publishes_the_ordinary_prefix() {
+        let (published, presentation) = run(&["hello\n[task-control] {\"kind\":\"cancel\"}"]).await;
+        assert_eq!(published, "hello\n");
+        assert_eq!(presentation, ControlPresentation::LateMarker);
+    }
+
+    #[tokio::test]
+    async fn a_split_late_marker_publishes_the_same_visible_prefix() {
+        let (published, presentation) =
+            run(&["hello\n[task-", "control] {\"kind\":\"cancel\"}"]).await;
+        assert_eq!(published, "hello\n");
+        assert_eq!(presentation, ControlPresentation::LateMarker);
+    }
+}
+
+/// The recalled-memory fixture resolves through the real `recall` ranking
+/// path via `recall_candidates`, so the final boundary pass actually covers
+/// memory content instead of a fixture that swallowed it.
+#[cfg(test)]
+mod assembly_tests;

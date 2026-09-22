@@ -247,55 +247,45 @@ pub fn wayland_presentation_record(
     let surface_id = surface_id.to_string();
     let mut correlated = BTreeMap::<u64, Option<PresentationEvent>>::new();
     for feedback in feedback {
-        match feedback.outcome {
+        let terminal = match feedback.outcome {
             ene_body::ipc::PresentationOutcome::Submitted => {
                 if correlated.insert(feedback.correlation_id, None).is_some() {
                     return Err(MeasurementError::DuplicatePresentation(
                         feedback.correlation_id,
                     ));
                 }
+                continue;
             }
-            outcome => {
-                let terminal = match outcome {
-                    ene_body::ipc::PresentationOutcome::Presented {
-                        timestamp_ns,
-                        clock_id,
-                        output,
-                    } => PresentationEvent::Presented {
-                        correlation_id: feedback.correlation_id,
-                        timestamp_ns,
-                        clock_id,
-                        output,
-                    },
-                    ene_body::ipc::PresentationOutcome::Discarded => PresentationEvent::Discarded {
-                        correlation_id: feedback.correlation_id,
-                    },
-                    ene_body::ipc::PresentationOutcome::Missing { reason } => {
-                        PresentationEvent::Missing {
-                            correlation_id: feedback.correlation_id,
-                            reason,
-                        }
-                    }
-                    ene_body::ipc::PresentationOutcome::Submitted => {
-                        return Err(MeasurementError::DuplicatePresentation(
-                            feedback.correlation_id,
-                        ));
-                    }
-                };
-                let slot = correlated
-                    .get_mut(&feedback.correlation_id)
-                    .ok_or_else(|| {
-                        MeasurementError::PresentationTrace(format!(
-                            "terminal feedback {} has no correlated submission",
-                            feedback.correlation_id
-                        ))
-                    })?;
-                if slot.replace(terminal).is_some() {
-                    return Err(MeasurementError::DuplicatePresentation(
-                        feedback.correlation_id,
-                    ));
-                }
-            }
+            ene_body::ipc::PresentationOutcome::Presented {
+                timestamp_ns,
+                clock_id,
+                output,
+            } => PresentationEvent::Presented {
+                correlation_id: feedback.correlation_id,
+                timestamp_ns,
+                clock_id,
+                output,
+            },
+            ene_body::ipc::PresentationOutcome::Discarded => PresentationEvent::Discarded {
+                correlation_id: feedback.correlation_id,
+            },
+            ene_body::ipc::PresentationOutcome::Missing { reason } => PresentationEvent::Missing {
+                correlation_id: feedback.correlation_id,
+                reason,
+            },
+        };
+        let slot = correlated
+            .get_mut(&feedback.correlation_id)
+            .ok_or_else(|| {
+                MeasurementError::PresentationTrace(format!(
+                    "terminal feedback {} has no correlated submission",
+                    feedback.correlation_id
+                ))
+            })?;
+        if slot.replace(terminal).is_some() {
+            return Err(MeasurementError::DuplicatePresentation(
+                feedback.correlation_id,
+            ));
         }
     }
     let events = correlated
@@ -722,8 +712,8 @@ impl MeasurementRecord {
             }
             if !fps.passes() {
                 self.failures.push(format!(
-                    "presented FPS {:.3}, missing {}",
-                    fps.actual_fps, fps.missing
+                    "presented FPS {:.3}, discarded {}, missing {}",
+                    fps.actual_fps, fps.discarded, fps.missing
                 ));
             }
         } else {

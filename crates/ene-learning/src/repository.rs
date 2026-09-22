@@ -30,10 +30,14 @@ pub enum MemoryTarget {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One prospective Memory change: the content, its meaning, and the change
+/// kind relative to the target's previous revision.
+#[derive(Clone, PartialEq, Eq)]
 pub struct MemoryChange {
     pub target: MemoryTarget,
     pub scope: LearningScope,
+    /// Proposed recognition text; redacted from `core::fmt::Debug` because it
+    /// may quote owner speech or secret-bearing material before scrubbing.
     pub content: String,
     pub importance: Importance,
     pub temporal: TemporalMeaning,
@@ -42,6 +46,23 @@ pub struct MemoryChange {
     pub at: WallClockWithTz,
 }
 
+impl core::fmt::Debug for MemoryChange {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("MemoryChange")
+            .field("target", &self.target)
+            .field("scope", &self.scope)
+            .field("content", &"[redacted]")
+            .field("importance", &self.importance)
+            .field("temporal", &self.temporal)
+            .field("change", &self.change)
+            .field("recall_suppressed", &self.recall_suppressed)
+            .field("at", &self.at)
+            .finish()
+    }
+}
+
+/// One atomic commit: evidence Summary (when present) plus one Memory change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryChangeCommit {
     pub summary: Option<SummaryRecord>,

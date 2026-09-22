@@ -6,6 +6,28 @@ pub use headless::HeadlessOverlay;
 
 use crate::ipc::{LocalUiFact, OverlayKind, PlacementBox};
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::render::RenderFailure;
+
+/// Scales a logical extent to physical pixels, never below one pixel.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn physical(logical: u32, scale: f32) -> u32 {
+    ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn gpu_info(failure: RenderFailure) -> crate::ipc::GpuFailInfo {
+    crate::ipc::GpuFailInfo {
+        reason: match failure {
+            RenderFailure::Adapter => crate::ipc::GpuFailReason::NoAdapter,
+            RenderFailure::Device => crate::ipc::GpuFailReason::RequestDevice,
+            RenderFailure::Surface => crate::ipc::GpuFailReason::Surface,
+            RenderFailure::DeviceLost => crate::ipc::GpuFailReason::DeviceLost,
+            RenderFailure::OutOfMemory => crate::ipc::GpuFailReason::OutOfMemory,
+        },
+    }
+}
+
 /// Overlay in this process. Production attempts the native backend and reports
 /// an explicit unavailable outcome before using Headless.
 #[derive(Debug)]

@@ -142,6 +142,12 @@ fn commit_change_sync(
             let Some(next) = current.checked_next() else {
                 return Ok(MemoryChangeOutcome::RevisionExhausted { memory: id });
             };
+            // The durable column is signed: a revision at the representable
+            // bound is exhausted for storage even though `checked_next`
+            // succeeded, and nothing may be written.
+            if encode_revision(next).is_err() {
+                return Ok(MemoryChangeOutcome::RevisionExhausted { memory: id });
+            }
             update_current(&tx, id, next, change)?;
             insert_revision(&tx, id, next, change, commit.summary.as_ref())?;
             MemoryChangeOutcome::Committed {

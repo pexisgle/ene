@@ -7,8 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::error::BodyError;
 use crate::ipc::{
-    AssetReadyInfo, AssetRef, BodyToParent, HEALTH_INTERVAL, MotionSetInfo, ParentToBody,
-    ReadyInfo, decode_parent, encode_body,
+    AssetRef, BodyToParent, HEALTH_INTERVAL, MotionSetInfo, ParentToBody, ReadyInfo, decode_parent,
+    encode_body,
 };
 use crate::vrm::VrmSession;
 use crate::window::Overlay;
@@ -299,16 +299,16 @@ where
             Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
             Err(_) => {
                 // Unknown / corrupt body: drop the framed bytes whole if the
-                // length is readable, otherwise drop the prefix so we do not
-                // spin. Never decode leftover bytes as conversation text.
+                // length is readable. An oversize claim leaves no boundary and
+                // is unrecoverable: aborting beats desynchronizing the stream
+                // or buffering up to 4 GiB. Never decode leftover bytes as
+                // conversation text.
                 match crate::ipc::frame_len(buf) {
                     Ok(need) => {
                         buf.drain(..need);
                     }
                     Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
-                    Err(_) => {
-                        buf.drain(..4);
-                    }
+                    Err(error) => return Err(BodyError::Ipc(error)),
                 }
             }
         }
@@ -356,15 +356,7 @@ where
             let stats = vrm.stats().ok_or_else(|| {
                 BodyError::Runtime(String::from("loaded VRM has no retained statistics"))
             })?;
-            send(
-                writer,
-                &BodyToParent::AssetReady(AssetReadyInfo {
-                    primitives: stats.primitives,
-                    expressions: stats.expressions,
-                    spring_chains: stats.spring_chains,
-                }),
-            )
-            .await
+            send(writer, &BodyToParent::AssetReady(stats)).await
         }
         Err(info) => send(writer, &BodyToParent::AssetFail(info)).await,
     }

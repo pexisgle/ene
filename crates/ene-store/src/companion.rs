@@ -93,6 +93,14 @@ const SQL_EXCERPT_RESULT: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST
 
 const SQL_EXCERPT_ATTEMPT: &str = "SELECT length(CAST(real_target AS BLOB)), substr(CAST(real_target AS BLOB), 1, ?2) FROM action_attempt WHERE attempt_id = ?1";
 
+const SQL_EXCERPT_ACTIVITY: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST(body AS BLOB), 1, ?2) FROM activity_record WHERE activity_id = ?1";
+
+/// Byte-bounded excerpt of one undelivered source's canonical body.
+///
+/// This is the source owner's bounded projection, never a copy stored on the
+/// `undelivered` row. `total_bytes` is the full body length so a caller can
+/// report truncation and page the rest; `text` is cut on a UTF-8 character
+/// boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndeliveredExcerpt {
     pub text: String,
@@ -879,6 +887,15 @@ impl UndeliveredRepository for Store {
 }
 
 impl Store {
+    /// Loads a byte-bounded excerpt of one undelivered source's canonical
+    /// body.
+    ///
+    /// SELECT-only, and each source kind reads its owner row directly (the
+    /// history message primary key, the Task revision snapshot, the result
+    /// body, the Action attempt's recorded target). Nothing is copied into
+    /// `undelivered`. `None` means this source kind carries no bounded body
+    /// (delegation, terminal) or the addressed row is gone; absence is
+    /// reported, never defaulted to an empty success.
     pub async fn load_undelivered_excerpt(
         &self,
         source: UndeliveredSource,
@@ -932,11 +949,18 @@ impl Store {
                     )
                     .optional()
                     .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                UndeliveredSource::ActivityRecord(activity) => guard
+                    .query_row(
+                        SQL_EXCERPT_ACTIVITY,
+                        params![encode_id(activity), cap],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::Delegation(_) | TaskFact::Terminal { .. },
                     ..
-                }
-                | UndeliveredSource::ActivityRecord(_) => None,
+                } => None,
             };
             let Some((total_raw, bytes)) = found else {
                 return Ok(None);

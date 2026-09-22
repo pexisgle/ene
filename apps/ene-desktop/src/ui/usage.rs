@@ -5,7 +5,7 @@ use ene_api::v1::management::{
     RationaleOrigin, usage_cap_target,
 };
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::{BaseViewMark, CommandWireId, UsageCursorWire};
+use ene_api::v1::refs::{BaseViewMark, CommandWireId, UsageCursorWire, ViewMarkWire};
 use ene_api::v1::usage::{
     UsageCapConsumptionView, UsageCapView, UsageCostView, UsageMoneyView, UsageSummaryPage,
     UsageSummaryRequest, UsageSummaryResponse, UsageSummaryRowView,
@@ -13,6 +13,7 @@ use ene_api::v1::usage::{
 use ene_client::Client;
 
 use crate::ui::DesktopError;
+use crate::ui::request_with_timeout;
 
 const UNKNOWN: &str = "unknown";
 
@@ -268,20 +269,25 @@ impl UsagePanel {
             intent_id: CommandWireId(uuid::Uuid::new_v4()),
             kind: ManagementIntentKind::ManageRuleConsentCap,
             target: usage_cap_target(
-                &self.cap_scope,
                 self.cap_provider.as_deref(),
                 &self.cap_window,
                 &self.cap_currency,
                 self.cap_limit_micros,
             ),
-            base_view: BaseViewMark(mark),
+            base_view: BaseViewMark(mark.0),
             rationale: IntentRationaleWire {
                 origin: RationaleOrigin::ManagementSurface,
                 quote: None,
             },
             confirmed: false,
         };
-        match ask(client, WirePayload::ManagementIntent(intent)).await? {
+        match request_with_timeout(
+            client,
+            WirePayload::ManagementIntent(intent),
+            Duration::from_secs(15),
+        )
+        .await?
+        {
             WirePayload::ManagementOutcome(outcome) => {
                 self.notice = format!("cap-outcome={outcome:?}");
                 Ok(outcome)
@@ -294,9 +300,10 @@ impl UsagePanel {
     }
 
     async fn load(&mut self, client: &mut Client) -> Result<(), DesktopError> {
-        match ask(
+        match request_with_timeout(
             client,
             WirePayload::UsageSummaryRequest(self.request.clone()),
+            Duration::from_secs(15),
         )
         .await?
         {
@@ -318,7 +325,7 @@ impl UsagePanel {
             WirePayload::UsageSummaryResponse(UsageSummaryResponse::Unavailable) => {
                 self.page = None;
                 self.notice = String::from("usage is unavailable; retry later");
-                Err(DesktopError::Protocol(String::from("usage unavailable")))
+                Err(DesktopError::Unavailable(String::from("usage unavailable")))
             }
             other => Err(DesktopError::Protocol(format!(
                 "expected UsageSummaryResponse, got {}",
@@ -333,7 +340,7 @@ fn cap_mark_for(
     scope: &str,
     provider: Option<&str>,
     window: &str,
-) -> Option<String> {
+) -> Option<ViewMarkWire> {
     page?
         .caps
         .iter()
@@ -392,11 +399,11 @@ fn render_cap(cap: &UsageCapView) -> String {
         |provider| format!("provider={provider}"),
     );
     match &cap.stored {
-        None => format!("cap {} {} {} no-cap", cap.mark, scope, cap.window),
+        None => format!("cap {} {} {} no-cap", cap.mark.0, scope, cap.window),
         Some(stored) => match &stored.consumption {
             UsageCapConsumptionView::Indeterminate => format!(
                 "cap {} {} {} limit={} indeterminate",
-                cap.mark,
+                cap.mark.0,
                 scope,
                 cap.window,
                 render_money(&stored.limit)
@@ -410,7 +417,7 @@ fn render_cap(cap: &UsageCapView) -> String {
                 held,
             } => format!(
                 "cap {} {} {} limit={} consumed={} reserved={} reported={} unknown={} remaining={} held={}",
-                cap.mark,
+                cap.mark.0,
                 scope,
                 cap.window,
                 render_money(&stored.limit),
@@ -425,9 +432,41 @@ fn render_cap(cap: &UsageCapView) -> String {
     }
 }
 
-async fn ask(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(Duration::from_secs(15), client.request(payload))
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)
+#[cfg(test)]
+mod tests {
+    use super::{UNKNOWN, render_cost, render_row};
+    use ene_api::v1::usage::{UsageMoneyView, UsageSummaryRowView};
+
+    fn money(micros: u64) -> UsageMoneyView {
+        UsageMoneyView {
+            currency: String::from("USD"),
+            micros,
+        }
+    }
+
+    #[test]
+    fn unknown_cost_is_not_yen_zero() {
+        let row = UsageSummaryRowView {
+            provider: String::from("openai"),
+            model: String::from("gpt-4o-mini"),
+            consumer: String::from("companion_dialogue"),
+            purpose: String::from("dialogue_response"),
+            status: String::from("unknown"),
+            tokens: None,
+            cost: None,
+            reserved: Some(money(100)),
+            started_at: String::from("2026-09-19T00:00:00Z"),
+        };
+        let rendered = render_row(&row);
+        assert!(
+            rendered.contains(UNKNOWN),
+            "unknown must stay visible: {rendered}"
+        );
+        assert!(
+            !rendered.contains("¥0"),
+            "unknown must never display as yen zero: {rendered}"
+        );
+        assert_eq!(render_cost(None), UNKNOWN);
+        assert!(!render_cost(None).contains('¥'));
+    }
 }

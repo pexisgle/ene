@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use ene_body::ipc::{AssetRef, FeatureSupport, MotionSetInfo, PoseHint};
+use ene_body::ipc::{AssetReadyInfo, AssetRef, FeatureSupport, MotionSetInfo, PoseHint};
 use ene_body::motion::pose_clips_in;
-use ene_body::vrm::{AssetStats, VrmSession};
+use ene_body::vrm::VrmSession;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -20,7 +20,7 @@ struct ProbeReport {
     motion_dir: Option<String>,
     vrma_motion_pack: bool,
     pose_motions: Vec<String>,
-    stats: AssetStats,
+    stats: AssetReadyInfo,
     note: &'static str,
 }
 

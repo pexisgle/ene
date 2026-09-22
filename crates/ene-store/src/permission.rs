@@ -103,16 +103,11 @@ impl IntentOutcomeRepository for Store {
             {
                 return Ok(replay_or_conflict(stored, &record.fingerprint));
             }
-            match insert_decided_row_tx(&tx, &record.fingerprint, &record.outcome)
-                .map_err(permission_unavailable)?
-            {
-                None => {
-                    tx.commit()
-                        .map_err(|error| permission_unavailable(error.to_string()))?;
-                    Ok(IntentResolution::Decided(()))
-                }
-                Some(winner) => Ok(replay_or_conflict(winner, &record.fingerprint)),
-            }
+            insert_decided_row_tx(&tx, &record.fingerprint, &record.outcome)
+                .map_err(permission_unavailable)?;
+            tx.commit()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            Ok(IntentResolution::Decided(()))
         })
         .await
     }
@@ -179,16 +174,10 @@ impl IntentOutcomeRepository for Store {
                     current: current_mark(record.capability, current.as_ref()),
                 },
             };
-            match insert_decided_row_tx(&tx, &fingerprint, &snapshot)
-                .map_err(permission_unavailable)?
-            {
-                None => {
-                    tx.commit()
-                        .map_err(|error| permission_unavailable(error.to_string()))?;
-                    Ok(IntentResolution::Decided(outcome))
-                }
-                Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
-            }
+            insert_decided_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
+            tx.commit()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            Ok(IntentResolution::Decided(outcome))
         })
         .await
     }
@@ -227,16 +216,11 @@ impl IntentOutcomeRepository for Store {
                 fingerprint,
                 outcome,
             };
-            match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
-                .map_err(permission_unavailable)?
-            {
-                None => {
-                    tx.commit()
-                        .map_err(|error| permission_unavailable(error.to_string()))?;
-                    Ok(IntentResolution::Decided(decided))
-                }
-                Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
-            }
+            insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
+                .map_err(permission_unavailable)?;
+            tx.commit()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            Ok(IntentResolution::Decided(decided))
         })
         .await
     }
@@ -274,18 +258,12 @@ impl IntentOutcomeRepository for Store {
             let snapshot = IntentOutcome::StoredAsRuleView {
                 revision: consent_mark(capability, Some(record.rev.as_u64())),
             };
-            match insert_decided_row_tx(&tx, &fingerprint, &snapshot)
-                .map_err(permission_unavailable)?
-            {
-                None => {
-                    tx.commit()
-                        .map_err(|error| permission_unavailable(error.to_string()))?;
-                    Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit {
-                        current: record,
-                    }))
-                }
-                Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
-            }
+            insert_decided_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
+            tx.commit()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit {
+                current: record,
+            }))
         })
         .await
     }

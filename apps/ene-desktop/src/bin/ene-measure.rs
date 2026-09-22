@@ -33,7 +33,7 @@ struct Args {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: ene-measure --host PID --desktop PID --body PID --sha SHA --kernel BUILD [--duration-secs 300] [--interval-ms 1000] [--wayland-feedback-jsonl PATH | --presentmon-csv PATH --swap-chain ID [--presentmon-exe PATH] | --presentation-json PATH] [--fps-warmup-secs 5] [--fps-wall-secs 10] [--interaction-json PATH | --interaction-jsonl PATH] [--click-through-json PATH] [--environment-json PATH] --output-json PATH --output-report PATH"
+        "usage: ene-measure --host PID --desktop PID --body PID [--other NAME:PID]... --sha SHA --kernel BUILD [--duration-secs 300] [--interval-ms 1000] [--wayland-feedback-jsonl PATH | --presentmon-csv PATH --swap-chain ID [--presentmon-exe PATH] | --presentation-json PATH] [--fps-warmup-secs 5] [--fps-wall-secs 10] [--interaction-json PATH | --interaction-jsonl PATH] [--click-through-json PATH] [--environment-json PATH] --output-json PATH --output-report PATH"
     )]
     Usage,
     #[error("invalid {name}: {value}")]
@@ -307,6 +307,13 @@ fn read_wayland_feedback(
                 selected.push(trace.feedback);
             }
             ene_body::ipc::PresentationOutcome::Submitted => {}
+            // The window is approximated by the desktop's observation of the
+            // submission: `Submitted` carries no commit timestamp, so commits
+            // within roughly one 250 ms tick before `window_end` are excluded
+            // and commits just before `window_start` observed after it are
+            // included. Terminal lines are selected by correlation id (not
+            // their own observed time) so late-resolving feedback still counts.
+            // A feedback that never resolves stays Missing.
             _ if submitted.contains(&trace.feedback.correlation_id) => {
                 selected.push(trace.feedback);
             }

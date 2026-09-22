@@ -982,7 +982,7 @@ impl HostHandle {
                 {
                     return emit_end(sink, refusal);
                 }
-                for response in self.confirm_presentation(&frame, &live, confirm).await {
+                for response in self.confirm_presentation(&live, confirm).await {
                     if sink.emit(response).is_err() {
                         break;
                     }
@@ -1327,7 +1327,7 @@ impl HostHandle {
     ) -> Result<ene_credential::MutationOutcome, CoreError> {
         use ene_credential::{
             ActivationOutcome, CredentialPublicationRepository as _, MutationKind, MutationOutcome,
-            MutationPhase, SecretVersionId,
+            MutationPhase, SecretVersionId, UncommittedMutationOutcome,
         };
 
         let Ok(credential) = CredentialRef::new(provider, label) else {
@@ -1383,7 +1383,10 @@ impl HostHandle {
         if !self.cred_store.supports_versions() {
             let outcome = MutationOutcome::Refused;
             self.store
-                .record_credential_mutation_outcome(mutation_id, outcome.clone())
+                .record_credential_mutation_outcome(
+                    mutation_id,
+                    UncommittedMutationOutcome::Refused,
+                )
                 .await
                 .map_err(|error| CoreError::Store(error.to_string()))?;
             return Ok(outcome);
@@ -1446,7 +1449,7 @@ impl HostHandle {
                     && os.delete_version(&credential, retired.as_u64()).is_ok()
                 {
                     self.store
-                        .mark_credential_cleaned(provider, label, retired)
+                        .mark_credential_cleaned(mutation_id, provider, label, retired)
                         .await
                         .map_err(|error| CoreError::Store(error.to_string()))?;
                 }

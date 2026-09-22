@@ -16,7 +16,7 @@ use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
 use crate::body_supervise::{BodyStatus, BodySupervisor};
 use crate::control::ConfirmationClient;
 use crate::erasure::{self, GuiOwned};
-use crate::host_launch::{self, DetachedHost};
+use crate::host_launch;
 use crate::i18n::{self, Locale};
 use crate::measure::WaylandFeedbackTraceLine;
 use crate::motion::{self, MotionEnvironment, MotionPlan};
@@ -25,7 +25,10 @@ use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
 use crate::ui::deletion::DeletionPanel;
 use crate::ui::tasks::TaskPanel;
 use crate::ui::usage::UsagePanel;
-use crate::ui::{Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep, history_lines};
+use crate::ui::{
+    Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep, history_lines,
+    request_with_timeout,
+};
 use crate::{BUNDLED_SAMPLE_ASSET, DESKTOP_DESCRIPTOR};
 
 const LOCALE_FILE: &str = "desktop-locale";
@@ -55,7 +58,6 @@ pub struct DesktopRuntime {
     body_pose_deadline: Option<Instant>,
     presentation_trace: Option<std::fs::File>,
     model: String,
-    detached_host: Option<DetachedHost>,
     memory: MemoryPage,
     tasks: TaskPanel,
     usage: UsagePanel,
@@ -110,7 +112,6 @@ impl DesktopRuntime {
                     .ok()
             }),
             model: String::from(DEFAULT_MODEL),
-            detached_host: None,
             memory: MemoryPage::default(),
             tasks: TaskPanel::default(),
             usage: UsagePanel::default(),
@@ -394,7 +395,6 @@ impl DesktopRuntime {
                 "detached host reported pid 0",
             )));
         }
-        self.detached_host = Some(detached);
         Ok(())
     }
 
@@ -643,9 +643,10 @@ impl DesktopRuntime {
                 .client
                 .as_mut()
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
-            request(
+            request_with_timeout(
                 client,
                 session::credential_intent(&mark, SETUP_PROVIDER_OPENAI),
+                Duration::from_secs(15),
             )
             .await?
         };
@@ -673,9 +674,10 @@ impl DesktopRuntime {
                 .client
                 .as_mut()
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
-            request(
+            request_with_timeout(
                 client,
                 session::assignment_intent(&mark, SETUP_PROVIDER_OPENAI, &model),
+                Duration::from_secs(15),
             )
             .await?
         };
@@ -693,7 +695,12 @@ impl DesktopRuntime {
                 let client = self.client.as_mut().ok_or_else(|| {
                     DesktopError::Transport(String::from("client is not connected"))
                 })?;
-                request(client, session::setup_complete_intent(&mark)).await?
+                request_with_timeout(
+                    client,
+                    session::setup_complete_intent(&mark),
+                    Duration::from_secs(15),
+                )
+                .await?
             };
             self.flush_pending_erasure().await;
             match complete_answer {
@@ -732,7 +739,12 @@ impl DesktopRuntime {
                 .client
                 .as_mut()
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
-            request(client, session::confirmed_true_intent(&mark)).await?
+            request_with_timeout(
+                client,
+                session::confirmed_true_intent(&mark),
+                Duration::from_secs(15),
+            )
+            .await?
         };
         self.flush_pending_erasure().await;
         match answer {
@@ -922,9 +934,10 @@ impl DesktopRuntime {
                 .client
                 .as_mut()
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
-            match request(
+            match request_with_timeout(
                 client,
                 WirePayload::ManagementViewRequest(view_request.clone()),
+                Duration::from_secs(15),
             )
             .await?
             {
@@ -1348,13 +1361,6 @@ impl DesktopRuntime {
             )))
         }
     }
-}
-
-async fn request(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(Duration::from_secs(15), client.request(payload))
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)
 }
 
 async fn apply_pending_erasure(

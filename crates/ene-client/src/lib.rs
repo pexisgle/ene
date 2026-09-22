@@ -87,7 +87,7 @@ mod transport;
 
 pub use error::ClientError;
 pub use frames::PreparedRequest;
-pub use pairing::{pairing_proof_hex, verify_pairing_proof};
+pub use pairing::pairing_proof_hex;
 pub use transport::{Client, ConnectProgress, PendingPairingClient};
 
 pub const DEFAULT_COMPANION_REF: &str = "default";

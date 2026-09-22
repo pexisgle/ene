@@ -1,3 +1,32 @@
+//! Host composition for conversation / first-party Task control.
+//!
+//! Every method here is composition only. The Task owner decides Task
+//! creation, revision commits, cancel admission, failure, and result
+//! adoption; the Action owner decides attempt starts and certainty. This
+//! module loads those durable facts, maps owner-defined premises across the
+//! boundary, and renders user-facing reports. It adds no Task lifecycle, no
+//! report master, no adoption queue, and no SQL: reopening a report never
+//! changes a canonical fact.
+//!
+//! The production triggers live here because they compose two owners:
+//!
+//! - `HostTaskControl` is the composition root behind the companion's
+//!   [`DialogueTaskControlPort`]: a companion `[task-control]` directive from
+//!   an ordinary dialogue turn resolves its target through the transient
+//!   conversation projection and maps onto the same owner boundaries below.
+//! - `HostTaskControl::propose` receives the dialogue layer's accepted
+//!   proposal, lets the Task owner commit the creation unit, then issues and
+//!   launches the first delegation through the existing AU3 orchestration.
+//! - [`HostHandle::settle_action_certainty`] is the late-evidence settlement
+//!   entry: it commits the Action owner's certainty CAS and then re-evaluates
+//!   the same execution's sealed-but-unadopted result through the Task
+//!   owner's adoption gate.
+//! - [`HostHandle::reconcile_sealed_results`] is the explicit bounded startup
+//!   reconciliation producer for results sealed after AU15a but not adopted
+//!   before a stop. It never resumes an execution.
+//! - [`HostHandle::task_report`] composes the progress / cancel / completion
+//!   report from canonical Task and Action facts.
+
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 
@@ -36,19 +65,8 @@ pub enum TaskControlError {
     Action(#[from] ActionTechnicalError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskProposalHostOutcome {
-    AcceptedAsTask {
-        task: TaskRef,
-        delegation: DelegationId,
-    },
-    DelegationRefused {
-        task: TaskRef,
-        outcome: DelegationOutcome,
-    },
-    Proposal(TaskProposalOutcome),
-}
-
+/// The Action owner's settled certainty together with the adoption
+/// re-evaluation it may have triggered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSettlementOutcome {
     pub certainty: CertaintyUpdateOutcome,
@@ -242,6 +260,14 @@ impl TestResumeGate {
     }
 }
 
+/// Host composition root implementing the companion's Task control port.
+///
+/// The companion interprets its provider output into a
+/// [`DialogueTaskCommand`]; this adapter maps that command onto the existing
+/// Task owner boundaries ([`HostHandle::cancel_task`],
+/// [`HostHandle::task_report`]) and renders the typed outcome. It never
+/// writes Task state itself and never decides completion, cancellation
+/// meaning, or certainty.
 pub(crate) struct HostTaskControl<'a> {
     handle: &'a HostHandle,
     companion: CompanionId,
@@ -609,35 +635,19 @@ fn delegation_outcome_text(outcome: &DelegationOutcome) -> String {
 pub const RECONCILIATION_PAGE_SIZE: u64 = 64;
 
 impl HostHandle {
-    pub async fn propose_task(
-        &self,
-        requester: CompanionId,
-        purpose: TaskPurpose,
-        origin: TaskContextOrigin,
-        workspace_need: Option<WorkspaceNeedRef>,
-    ) -> Result<TaskProposalHostOutcome, TaskTechnicalError> {
-        let outcome = ene_companion::dialogue::propose_task(
-            ProposeTaskCommand {
-                requester,
-                purpose,
-                origin,
-                workspace_need,
-            },
-            &self.store,
-        )
-        .await?;
-        let TaskProposalOutcome::AcceptedAsTask(task) = outcome else {
-            return Ok(TaskProposalHostOutcome::Proposal(outcome));
-        };
-        Ok(match self.delegate_task(task).await? {
-            DelegationOutcome::Delegated(delegation) => TaskProposalHostOutcome::AcceptedAsTask {
-                task,
-                delegation: delegation.delegation,
-            },
-            outcome => TaskProposalHostOutcome::DelegationRefused { task, outcome },
-        })
-    }
-
+    /// Issues the existing AU3 delegation request for one committed Task.
+    ///
+    /// The committed unit supplies the boundary copy; the Task owner confirms
+    /// the association and revision inside its own commit. This is the shared
+    /// delegation step of the first-party and conversation proposal paths.
+    ///
+    /// The commit and the launch reservation share the registry commit scope
+    /// (CCT §7.4): the scope serializes this producer against every other
+    /// AU3/AU17 producer in the process, so the committed delegation is
+    /// reserved before any concurrent resume can observe the Task as free.
+    /// A lost reservation race is a technical error: the delegation is
+    /// durable but unlaunchable, and a retry is a new explicit delegation,
+    /// never an automatic relaunch.
     async fn delegate_task(&self, task: TaskRef) -> Result<DelegationOutcome, TaskTechnicalError> {
         let _scope = self.task_executions.commit_scope().await;
         let Some(record) = self.store.load_task(task.task).await? else {
@@ -681,13 +691,14 @@ impl HostHandle {
         }
     }
 
-    pub async fn propose_steering(
-        &self,
-        command: ProposeSteeringCommand,
-    ) -> Result<TaskProposalOutcome, TaskTechnicalError> {
-        ene_companion::dialogue::propose_steering(command, &self.store).await
-    }
-
+    /// Host-known readiness for one resume commit.
+    ///
+    /// Read under the launch commit scope: the final permission / cap
+    /// judgement stays with the AU14/AU5 gates (`permission_available` is
+    /// always `true` here), while the Task's reservation/registration state
+    /// and the launcher's presence are read now so the commit orders them
+    /// in its refusal priority. No presence check and no provider call are
+    /// involved: an explicit Owner instruction is sufficient premise.
     fn resume_readiness(&self, task: TaskId) -> TaskResumeReadiness {
         TaskResumeReadiness {
             permission_available: true,

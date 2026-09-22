@@ -1701,9 +1701,8 @@ mod tests {
         assert!(
             handle
                 .auth_store
-                .load_secret(&fresh_device)
-                .expect("the fresh entry must load")
-                .is_some(),
+                .has_secret(&fresh_device)
+                .expect("the fresh entry must load"),
             "the fresh device-auth secret must remain"
         );
     }

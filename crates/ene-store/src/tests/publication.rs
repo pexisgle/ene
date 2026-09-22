@@ -1,6 +1,6 @@
 use ene_credential::{
     ActivationOutcome, CredentialPublicationRepository as _, MutationKind, MutationOutcome,
-    MutationPhase, SecretVersionId,
+    MutationPhase, SecretVersionId, UncommittedMutationOutcome,
 };
 
 use crate::Store;
@@ -62,7 +62,11 @@ async fn activation_commits_the_reference_version_and_revision_together() {
         .await
         .unwrap()
         .expect("the mutation must be readable");
-    assert_eq!(stored.phase, MutationPhase::CleanupPending);
+    assert_eq!(
+        stored.phase,
+        MutationPhase::Activated,
+        "nothing was retired, so activation needs no cleanup"
+    );
     assert_eq!(
         stored.outcome,
         Some(MutationOutcome::Activated { revision }),
@@ -98,10 +102,30 @@ async fn a_rotation_retires_the_previous_version_for_cleanup() {
         .unwrap();
     assert_eq!(active.active, Some(second));
     assert_eq!(active.cleanup, Some(first));
+    let rotated = store
+        .credential_mutation("m-2")
+        .await
+        .unwrap()
+        .expect("the rotation mutation must be readable");
+    assert_eq!(
+        rotated.phase,
+        MutationPhase::CleanupPending,
+        "an active value with a retired version still needs cleanup"
+    );
     store
-        .mark_credential_cleaned("acme", "main", first)
+        .mark_credential_cleaned("m-2", "acme", "main", first)
         .await
         .unwrap();
+    let cleansed = store
+        .credential_mutation("m-2")
+        .await
+        .unwrap()
+        .expect("the rotation mutation must stay readable");
+    assert_eq!(
+        cleansed.phase,
+        MutationPhase::Completed,
+        "a cleaned retirement completes the mutation that recorded it"
+    );
     let cleaned = store
         .active_credential_version("acme", "main")
         .await
@@ -229,7 +253,7 @@ async fn a_refused_mutation_records_its_outcome_without_activating() {
         .await
         .unwrap();
     store
-        .record_credential_mutation_outcome("m-refused", MutationOutcome::Refused)
+        .record_credential_mutation_outcome("m-refused", UncommittedMutationOutcome::Refused)
         .await
         .unwrap();
     let stored = store
@@ -266,4 +290,195 @@ async fn revocation_is_its_own_mutation_kind() {
         mutation.candidate_version, None,
         "revocation stages no value"
     );
+}
+
+/// A revocation clears the active reference, advances the revision, records the
+/// `Revoked` outcome, and leaves the invalidated version addressable until its
+/// item is removed.
+#[tokio::test]
+async fn a_revocation_invalidates_the_reference_and_retires_the_version() {
+    let store = Store::open_in_memory().await.unwrap();
+    let first = staged(&store, "m-1", 1).await;
+    store
+        .activate_credential("m-1", "sk-first", None)
+        .await
+        .unwrap();
+    let current = ene_credential::CredentialSetRepository::current_set_revision(&store)
+        .await
+        .unwrap()
+        .as_u64();
+    store
+        .begin_credential_mutation(
+            String::from("m-revoke"),
+            MutationKind::Revoke,
+            String::from("acme"),
+            String::from("main"),
+            Some(current),
+            None,
+        )
+        .await
+        .unwrap();
+    let outcome = store
+        .revoke_credential("m-revoke", Some("sk-first"))
+        .await
+        .expect("the revocation must run");
+    let ActivationOutcome::Activated { revision, retired } = outcome else {
+        panic!("the revocation must commit, got {outcome:?}");
+    };
+    assert_eq!(
+        retired,
+        Some(first),
+        "the invalidated version stays addressable for cleanup"
+    );
+    let active = store
+        .active_credential_version("acme", "main")
+        .await
+        .unwrap();
+    assert_eq!(
+        active.active, None,
+        "revocation clears the active reference"
+    );
+    assert_eq!(active.cleanup, Some(first));
+    let stored = store
+        .credential_mutation("m-revoke")
+        .await
+        .unwrap()
+        .expect("the revocation mutation must be readable");
+    assert_eq!(stored.phase, MutationPhase::CleanupPending);
+    assert_eq!(stored.outcome, Some(MutationOutcome::Revoked { revision }));
+    assert_eq!(stored.decided_revision, Some(revision));
+    // Cleanup completes the mutation without moving the (cleared) reference.
+    store
+        .mark_credential_cleaned("m-revoke", "acme", "main", first)
+        .await
+        .unwrap();
+    let cleaned = store
+        .active_credential_version("acme", "main")
+        .await
+        .unwrap();
+    assert_eq!(cleaned.active, None);
+    assert_eq!(cleaned.cleanup, None);
+    let completed = store
+        .credential_mutation("m-revoke")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.phase, MutationPhase::Completed);
+    // A retry answers from the stored decision and never invalidates again.
+    assert_eq!(
+        store
+            .revoke_credential("m-revoke", Some("sk-first"))
+            .await
+            .unwrap(),
+        ActivationOutcome::AlreadyDecided(MutationOutcome::Revoked { revision })
+    );
+}
+
+/// A revocation with no active reference still commits its revision and
+/// completes immediately, and a decided revocation is never re-applied.
+#[tokio::test]
+async fn a_revocation_without_an_active_value_completes() {
+    let store = Store::open_in_memory().await.unwrap();
+    store
+        .begin_credential_mutation(
+            String::from("m-revoke"),
+            MutationKind::Revoke,
+            String::from("acme"),
+            String::from("main"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let outcome = store
+        .revoke_credential("m-revoke", None)
+        .await
+        .expect("the revocation must run");
+    let ActivationOutcome::Activated { revision, retired } = outcome else {
+        panic!("the revocation must commit, got {outcome:?}");
+    };
+    assert_eq!(retired, None, "nothing was active to retire");
+    let active = store
+        .active_credential_version("acme", "main")
+        .await
+        .unwrap();
+    assert_eq!(active.active, None);
+    assert_eq!(active.cleanup, None);
+    let stored = store
+        .credential_mutation("m-revoke")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.phase,
+        MutationPhase::Completed,
+        "a revocation with nothing to remove is complete"
+    );
+    assert_eq!(stored.outcome, Some(MutationOutcome::Revoked { revision }));
+    assert_eq!(
+        store.revoke_credential("m-revoke", None).await.unwrap(),
+        ActivationOutcome::AlreadyDecided(MutationOutcome::Revoked { revision })
+    );
+}
+
+/// A moved premise refuses the revocation without invalidating the current
+/// reference, and a registration mutation is never revoked.
+#[tokio::test]
+async fn a_stale_or_non_revoke_mutation_changes_nothing() {
+    let store = Store::open_in_memory().await.unwrap();
+    let first = staged(&store, "m-1", 1).await;
+    store
+        .activate_credential("m-1", "sk-first", None)
+        .await
+        .unwrap();
+    store
+        .begin_credential_mutation(
+            String::from("m-stale"),
+            MutationKind::Revoke,
+            String::from("acme"),
+            String::from("main"),
+            Some(7),
+            None,
+        )
+        .await
+        .unwrap();
+    let stale = store
+        .revoke_credential("m-stale", Some("sk-first"))
+        .await
+        .unwrap();
+    assert!(matches!(stale, ActivationOutcome::Stale { .. }));
+    let active = store
+        .active_credential_version("acme", "main")
+        .await
+        .unwrap();
+    assert_eq!(
+        active.active,
+        Some(first),
+        "a stale revocation never clears the live reference"
+    );
+    let stored = store.credential_mutation("m-stale").await.unwrap().unwrap();
+    assert_eq!(stored.phase, MutationPhase::Abandoned);
+    assert_eq!(stored.outcome, Some(MutationOutcome::Stale));
+    // A registration mutation is refused even before it stages a candidate.
+    store
+        .begin_credential_mutation(
+            String::from("m-register"),
+            MutationKind::Register,
+            String::from("acme"),
+            String::from("main"),
+            None,
+            Some(SecretVersionId::from_u64(9)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.revoke_credential("m-register", None).await.unwrap(),
+        ActivationOutcome::Missing,
+        "a registration mutation is not a revocation"
+    );
+    let active = store
+        .active_credential_version("acme", "main")
+        .await
+        .unwrap();
+    assert_eq!(active.active, Some(first));
 }

@@ -135,8 +135,11 @@ fn read_counter(data_dir: &Path) -> Result<u64, ClientError> {
 }
 
 fn stage_and_replace(data_dir: &Path, next: u64) -> Result<(), ClientError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
     let staged = data_dir.join(format!(
-        ".{}.{}.{}.tmp",
+        ".{}.{}.{nanos}.{}.tmp",
         COUNTER_FILE_NAME,
         std::process::id(),
         STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
